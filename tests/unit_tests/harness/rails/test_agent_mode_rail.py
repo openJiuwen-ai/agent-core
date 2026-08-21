@@ -319,7 +319,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertTrue(ctx.extra.get("_skip_tool"))
         self.assertIn("not available in plan mode", ctx.inputs.tool_result["error"])
 
-    async def test_static_plan_note_uses_whitelist_and_hides_switch_mode(self) -> None:
+    async def test_legacy_static_plan_note_uses_attachment_and_whitelist(self) -> None:
         tools = [
             _ToolInfo("switch_mode"),
             _ToolInfo("todo_create"),
@@ -343,8 +343,10 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertNotIn("todo_create", visible_tool_names)
         self.assertNotIn("non_whitelist_tool", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
-        section = rail.system_prompt_builder.added_sections[-1]
-        self.assertEqual(section.content["en"], "Static plan note")
+        self.assertEqual(rail.system_prompt_builder.added_sections, [])
+        item = await rail.attachment_manager.get_by_id("session.sess1.mode_instructions")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.content, "Static plan note")
 
     async def test_static_plan_attachment_note_uses_whitelist_without_changing_system_prompt(self) -> None:
         tools = [

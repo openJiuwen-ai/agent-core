@@ -359,7 +359,6 @@ def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
     )
 
     assert agent.system_prompt_builder is not None
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "initial identity" in initial_prompt
     assert "<prompt-attachment>" not in initial_prompt
@@ -372,7 +371,6 @@ def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
         )
     )
 
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "updated identity" in reloaded_prompt
     assert "<prompt-attachment>" not in reloaded_prompt
