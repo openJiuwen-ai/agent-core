@@ -12,7 +12,6 @@ the console can preview before real execution.
 The script's primitives are exposed under ``jiuwenswarm.swarmflow`` (and the
 bare ``swarmflow`` the loader always maps), so a script may import either.
 """
-
 from __future__ import annotations
 
 import asyncio

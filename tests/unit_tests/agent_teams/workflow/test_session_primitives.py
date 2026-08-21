@@ -347,7 +347,9 @@ def test_resume_replays_session_turns_without_opening_a_session(tmp_path):
 
     second = _RecordingBackend()
     replay_events: list[WorkflowProgressEvent] = []
-    result = asyncio.run(run_workflow(script, backend=second, resume=journal, progress_sink=replay_events.append))
+    result = asyncio.run(
+        run_workflow(script, backend=second, resume=journal, progress_sink=replay_events.append)
+    )
     # Pure replay: the avatar is never built and no turn reaches the backend.
     assert second.opened == [] and second.turns == []
     # Yet the member identity IS still reserved on the first turn (no avatar, no
@@ -372,10 +374,14 @@ def test_resume_after_upstream_change_reopens_and_reruns(tmp_path):
     v1 = _MULTI_TURN_SCRIPT
     v2 = _MULTI_TURN_SCRIPT.replace('await s.send("second")', 'await s.send("SECOND")')
     journal = str(tmp_path / "run.jsonl")
-    asyncio.run(run_workflow(_write(tmp_path, "v1.py", v1), backend=_RecordingBackend(), journal_path=journal))
+    asyncio.run(
+        run_workflow(_write(tmp_path, "v1.py", v1), backend=_RecordingBackend(), journal_path=journal)
+    )
 
     backend = _RecordingBackend()
-    result = asyncio.run(run_workflow(_write(tmp_path, "v2.py", v2), backend=backend, resume=journal))
+    result = asyncio.run(
+        run_workflow(_write(tmp_path, "v2.py", v2), backend=backend, resume=journal)
+    )
 
     # Turn 1 is a hit (not re-run); turns 2 and 3 re-run (2 changed, 3 depends on it).
     prompts = [t[1] for t in backend.turns]

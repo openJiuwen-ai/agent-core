@@ -77,7 +77,9 @@ class AgentBackend(abc.ABC):
         self._budget = budget
 
     @abc.abstractmethod
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None
+    ) -> AgentResult:
         """Execute one single-shot agent call.
 
         ``schema_json`` is the JSON-Schema dict when structured output was

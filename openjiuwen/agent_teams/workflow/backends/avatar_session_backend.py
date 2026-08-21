@@ -28,21 +28,21 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import cancellation_safe_evict_then_dispose
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.agent_teams.tools.structured_output_tool import (
-    StructuredOutputFinishRail,
-    StructuredOutputTool,
-)
 from openjiuwen.agent_teams.workflow.backends._member_spec import (
     derive_member_build_context,
     derive_member_spec,
 )
 from openjiuwen.agent_teams.workflow.backends._result_text import (
     prefer_natural_or_structured_text,
+)
+from openjiuwen.agent_teams.tools.structured_output_tool import (
+    StructuredOutputFinishRail,
+    StructuredOutputTool,
 )
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult

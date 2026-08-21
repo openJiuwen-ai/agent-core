@@ -40,9 +40,10 @@ import re
 from typing import Any, Callable, Sequence
 
 from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
-from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
+from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
@@ -54,7 +55,6 @@ from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudget
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
-from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.core.common.logging import team_logger
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -351,7 +351,9 @@ class TeamWorkerBackend(AgentBackend):
         )
 
         if self._worker_base_spec is None:
-            raise BackendError("TeamWorkerBackend requires a worker_base_spec to build a worker harness")
+            raise BackendError(
+                "TeamWorkerBackend requires a worker_base_spec to build a worker harness"
+            )
 
         try:
             # Worker = teammate without team tools: per-call model (else inherit),
@@ -363,7 +365,9 @@ class TeamWorkerBackend(AgentBackend):
                 team_name=self._team_name,
                 member_name=member_name,
                 system_prompt=(
-                    self._t("swarmflow_worker", key="schema") if has_schema else self._t("swarmflow_worker", key="free")
+                    self._t("swarmflow_worker", key="schema")
+                    if has_schema
+                    else self._t("swarmflow_worker", key="free")
                 ),
                 model=model,
                 extra_tools=tools,
@@ -371,7 +375,9 @@ class TeamWorkerBackend(AgentBackend):
             )
             # Worker gets its own workspace, not the teammate's.
             worker_workspace, worker_cwd = self._setup_worker_workspace(member_name)
-            worker_spec = worker_spec.model_copy(update={"workspace": worker_workspace, "cwd": worker_cwd})
+            worker_spec = worker_spec.model_copy(
+                update={"workspace": worker_workspace, "cwd": worker_cwd}
+            )
             worker_spec = self._apply_worker_skill_visibility(worker_spec, member_name)
             worker_build_context = derive_member_build_context(
                 self._build_context,

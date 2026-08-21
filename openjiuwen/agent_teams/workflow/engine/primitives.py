@@ -33,7 +33,6 @@ Observability hooks (the one divergence from a pure port): ``phase`` / ``log``
 and ``agent`` start/end emit structured :class:`WorkflowProgressEvent`s to
 ``rt.progress_sink``; internal diagnostics go to ``rt.log_sink``.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -215,7 +214,9 @@ def _check_budget(rt) -> None:
     stop an agent mid-loop; this stops the *next* one from starting.
     """
     if rt.budget.exhausted:
-        raise BudgetExhausted(f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}")
+        raise BudgetExhausted(
+            f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}"
+        )
 
 
 def _branch_disambig(path: tuple) -> str:
@@ -306,13 +307,8 @@ def _emit_agent_started(
 
 
 def _emit_agent_completed(
-    rt,
-    opts: dict,
-    outcome_text: str | None,
-    *,
-    agent_id: str | None = None,
-    tokens: int | None = None,
-    budget_snapshot: dict | None = None,
+    rt, opts: dict, outcome_text: str | None, *, agent_id: str | None = None,
+    tokens: int | None = None, budget_snapshot: dict | None = None,
     nested_phase: str | None = None,
 ) -> None:
     """Emit an AGENT_COMPLETED progress event.
@@ -337,13 +333,8 @@ def _emit_agent_completed(
 
 
 def _emit_agent_failed(
-    rt,
-    opts: dict,
-    message: str,
-    *,
-    agent_id: str | None = None,
-    tokens: int | None = None,
-    budget_snapshot: dict | None = None,
+    rt, opts: dict, message: str, *, agent_id: str | None = None,
+    tokens: int | None = None, budget_snapshot: dict | None = None,
     nested_phase: str | None = None,
 ) -> None:
     rt.progress_sink(
@@ -363,7 +354,9 @@ def _emit_agent_failed(
 # ─────────────────────────── options bag ───────────────────────────
 #: Engine-owned ``options`` keys. A backend may widen this via its
 #: ``KNOWN_OPTIONS``; anything outside the union is a typo and fails fast.
-_ENGINE_OPTIONS = frozenset({"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"})
+_ENGINE_OPTIONS = frozenset(
+    {"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"}
+)
 
 
 def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
@@ -396,7 +389,9 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
     allowed = _ENGINE_OPTIONS | getattr(rt.backend, "KNOWN_OPTIONS", frozenset())
     unknown = sorted(k for k in merged if k not in allowed)
     if unknown:
-        raise WorkflowError(f"unknown option(s) {unknown}; allowed: {sorted(allowed)}")
+        raise WorkflowError(
+            f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
+        )
     return merged
 
 
@@ -416,11 +411,8 @@ def _resolve_agent_gate(rt):
 #   schema=None                -> str | None
 @overload
 async def agent(
-    prompt: str,
-    *,
-    schema: type[M],
-    label: str | None = ...,
-    phase: str | None = ...,
+    prompt: str, *, schema: type[M],
+    label: str | None = ..., phase: str | None = ...,
     options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the result to that model."""
@@ -429,11 +421,8 @@ async def agent(
 
 @overload
 async def agent(
-    prompt: str,
-    *,
-    schema: dict,
-    label: str | None = ...,
-    phase: str | None = ...,
+    prompt: str, *, schema: dict,
+    label: str | None = ..., phase: str | None = ...,
     options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
@@ -442,11 +431,8 @@ async def agent(
 
 @overload
 async def agent(
-    prompt: str,
-    *,
-    schema: None = ...,
-    label: str | None = ...,
-    phase: str | None = ...,
+    prompt: str, *, schema: None = ...,
+    label: str | None = ..., phase: str | None = ...,
     options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the agent's raw text."""
@@ -484,12 +470,8 @@ async def agent(
         # preamble + structured data via _preview()
         outcome_text = _outcome_from_result(cached.get("raw_text"), result)
         _emit_agent_completed(
-            rt,
-            opts,
-            outcome_text,
-            agent_id=ks,
-            tokens=None,
-            budget_snapshot=_budget_snapshot(rt.budget),
+            rt, opts, outcome_text, agent_id=ks,
+            tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
         )
         return result
 
@@ -499,12 +481,8 @@ async def agent(
     if rt.spawn_count >= rt.spawn_limit:
         rt.log_sink(f"[wf] spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}")
         _emit_agent_failed(
-            rt,
-            opts,
-            f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}",
-            agent_id=ks,
-            tokens=None,
-            budget_snapshot=_budget_snapshot(rt.budget),
+            rt, opts, f"spawn limit {rt.spawn_limit} reached; skipping {opts.get('label')!r}",
+            agent_id=ks, tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
         )
         return None
 
@@ -512,7 +490,9 @@ async def agent(
 
     async with gate.acquire():
         rt.spawn_count += 1
-        call_result = await _call_backend(rt, prompt, opts, json_schema, model_cls)
+        call_result = await _call_backend(
+            rt, prompt, opts, json_schema, model_cls
+        )
 
     if not call_result.succeeded:
         attempts = rt.retries + 1
@@ -521,12 +501,8 @@ async def agent(
         if call_result.error_detail:
             msg = f"{msg}: {call_result.error_detail}"
         _emit_agent_failed(
-            rt,
-            opts,
-            msg,
-            agent_id=ks,
-            tokens=call_result.tokens,
-            budget_snapshot=_budget_snapshot(rt.budget),
+            rt, opts, msg, agent_id=ks,
+            tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
         )
         return None
 
@@ -547,12 +523,8 @@ async def agent(
     )
     outcome_text = _outcome_from_result(call_result.raw_text, call_result.result)
     _emit_agent_completed(
-        rt,
-        opts,
-        outcome_text,
-        agent_id=ks,
-        tokens=call_result.tokens,
-        budget_snapshot=_budget_snapshot(rt.budget),
+        rt, opts, outcome_text, agent_id=ks,
+        tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
     )
     return call_result.result
 
@@ -560,10 +532,7 @@ async def agent(
 async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallResult:
     """Run the single-shot ``agent()`` call (``backend.run``) with retries."""
     return await _attempt_calls(
-        rt,
-        opts,
-        json_schema,
-        model,
+        rt, opts, json_schema, model,
         lambda: rt.backend.run(prompt, opts, json_schema),
     )
 
@@ -600,7 +569,9 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             # backend error, etc.). Accumulate so the final failed result can
             # attribute the agent's full cost, not just the last attempt's.
             burned_tokens += getattr(e, "tokens", 0) or 0
-            rt.log_sink(f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}")
+            rt.log_sink(
+                f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
+            )
             continue
         # Token accounting here: the backend already billed this call to the
         # shared ledger as its model calls returned (``AgentBackend.bind_budget``);
@@ -615,18 +586,23 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         if json_schema is not None:
             try:
                 coerced = coerce(res.structured, json_schema, model)
-                return _BackendCallResult(result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens)
+                return _BackendCallResult(
+                    result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens
+                )
             except Exception as e:  # validation failure -> retry
                 last_err = e
-                rt.log_sink(f"[wf] agent {label!r} attempt {attempt}/{attempts} validation failed: {str(e)}")
+                rt.log_sink(
+                    f"[wf] agent {label!r} attempt {attempt}/{attempts} "
+                    f"validation failed: {str(e)}"
+                )
                 continue
-        return _BackendCallResult(result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens)
+        return _BackendCallResult(
+            result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens
+        )
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
     return _BackendCallResult(
-        result=None,
-        succeeded=False,
-        error_detail=detail,
+        result=None, succeeded=False, error_detail=detail,
         tokens=burned_tokens if burned_tokens > 0 else None,
     )
 
@@ -724,17 +700,8 @@ class AgentSession:
     """
 
     __slots__ = (
-        "_label",
-        "_phase",
-        "_instructions",
-        "_options",
-        "_human",
-        "_node_type",
-        "_history",
-        "_sid",
-        "_member_name",
-        "_in_flight",
-        "_fork_data",
+        "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
+        "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
     )
 
     def __init__(
@@ -812,9 +779,7 @@ class AgentSession:
         self._in_flight = True
         try:
             _emit_agent_started(
-                rt,
-                opts,
-                prompt,
+                rt, opts, prompt,
                 node_type=self._node_type,
                 agent_id=ks,
                 correlation_id=correlation_id,
@@ -834,12 +799,8 @@ class AgentSession:
                 self._append_history(prompt, result, model_cls)
                 outcome_text = _outcome_from_result(cached.get("raw_text"), result)
                 _emit_agent_completed(
-                    rt,
-                    opts,
-                    outcome_text,
-                    agent_id=ks,
-                    tokens=None,
-                    budget_snapshot=_budget_snapshot(rt.budget),
+                    rt, opts, outcome_text, agent_id=ks,
+                    tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None if notify else result
 
@@ -862,12 +823,8 @@ class AgentSession:
                 if call_result.error_detail:
                     msg = f"{msg}: {call_result.error_detail}"
                 _emit_agent_failed(
-                    rt,
-                    opts,
-                    msg,
-                    agent_id=ks,
-                    tokens=call_result.tokens,
-                    budget_snapshot=_budget_snapshot(rt.budget),
+                    rt, opts, msg, agent_id=ks,
+                    tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None
 
@@ -889,12 +846,8 @@ class AgentSession:
             self._append_history(prompt, result, model_cls)
             outcome_text = _outcome_from_result(call_result.raw_text, result)
             _emit_agent_completed(
-                rt,
-                opts,
-                outcome_text,
-                agent_id=ks,
-                tokens=call_result.tokens,
-                budget_snapshot=_budget_snapshot(rt.budget),
+                rt, opts, outcome_text, agent_id=ks,
+                tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
             )
             return None if notify else result
         finally:
@@ -989,10 +942,7 @@ class AgentSession:
         hist = list(self._history)
         sid = self._sid
         return await _attempt_calls(
-            rt,
-            req.opts,
-            req.json_schema,
-            req.model_cls,
+            rt, req.opts, req.json_schema, req.model_cls,
             lambda: rt.backend.send_turn(
                 sid,
                 req.prompt,
@@ -1097,12 +1047,8 @@ HumanSession = AgentSession
 
 @overload
 async def human(
-    prompt: str,
-    *,
-    schema: type[M],
-    label: str | None = ...,
-    phase: str | None = ...,
-    options: dict | None = ...,
+    prompt: str, *, schema: type[M],
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
 ) -> "M | None":
     """Overload: ``schema=<pydantic model>`` narrows the answer to that model."""
     ...
@@ -1110,12 +1056,8 @@ async def human(
 
 @overload
 async def human(
-    prompt: str,
-    *,
-    schema: dict,
-    label: str | None = ...,
-    phase: str | None = ...,
-    options: dict | None = ...,
+    prompt: str, *, schema: dict,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
 ) -> "dict | None":
     """Overload: ``schema=<JSON Schema dict>`` returns a plain ``dict``."""
     ...
@@ -1123,12 +1065,8 @@ async def human(
 
 @overload
 async def human(
-    prompt: str,
-    *,
-    schema: None = ...,
-    label: str | None = ...,
-    phase: str | None = ...,
-    options: dict | None = ...,
+    prompt: str, *, schema: None = ...,
+    label: str | None = ..., phase: str | None = ..., options: dict | None = ...,
 ) -> "str | None":
     """Overload: no ``schema`` returns the person's answer as raw text."""
     ...
@@ -1309,15 +1247,13 @@ async def workflow(name_or_path: str, args: Any = None) -> Any:
     # is the script's original phase name; ``nested_phase`` carries the display
     # name; ``parent_phase`` links back to the enclosing author phase.
     rt.log_sink(f"[wf] child phase declared: {display_name}, parent: {parent_phase}, name: {name}")
-    rt.progress_sink(
-        WorkflowProgressEvent(
-            kind=ProgressKind.PHASE,
-            phase=name,
-            phase_type="child",
-            nested_phase=display_name,
-            parent_phase=parent_phase,
-        )
-    )
+    rt.progress_sink(WorkflowProgressEvent(
+        kind=ProgressKind.PHASE,
+        phase=name,
+        phase_type="child",
+        nested_phase=display_name,
+        parent_phase=parent_phase,
+    ))
     tok_d = _wf_depth.set(depth + 1)
     tok_p = _path.set(_path.get() + (("wf", k, name),))
     tok_s = _seq.set(_fresh_holder())
