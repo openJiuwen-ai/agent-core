@@ -601,14 +601,17 @@ class DeepAgent(BaseAgent):
         logger.info("[DeepAgent] System prompt hot reloaded")
 
     def _apply_attachment_placement(self, kv_config: Any) -> None:
-        """Keep legacy tail placement when KV-cache affinity manages the tail.
+        """Sync attachment placement with the KV-cache affinity setting.
 
         The Ascend affinity flow evicts the attachment from the KV cache after
-        each request and its hooks expect it to be the final message; every
-        other path uses the cache-stable placement after the system messages.
+        each request and its hooks expect it to be the final message, so it
+        keeps the legacy tail placement; every other path uses the cache-stable
+        placement after the system messages.  The sync is two-way: applying a
+        config with affinity disabled restores the stable placement rather
+        than leaving the manager stuck on tail after a hot reload.
         """
-        if getattr(kv_config, "enable_kv_cache_affinity", False) is True:
-            self.prompt_attachment_manager.placement = "tail"
+        enabled = getattr(kv_config, "enable_kv_cache_affinity", False) is True
+        self.prompt_attachment_manager.placement = "tail" if enabled else "stable"
 
     def _sync_prompt_builder_references(self) -> None:
         """Push the current system_prompt_builder reference everywhere.

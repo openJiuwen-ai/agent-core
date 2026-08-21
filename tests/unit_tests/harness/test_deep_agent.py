@@ -871,6 +871,44 @@ def test_deep_agent_hot_reload_removes_and_restores_free_search(monkeypatch) -> 
             Runner.resource_mgr.remove_tool(tool.card.id)
 
 
+def test_attachment_placement_defaults_to_stable_without_affinity_config() -> None:
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        auto_create_workspace=False,
+    )
+
+    assert agent.prompt_attachment_manager.placement == "stable"
+
+
+def test_attachment_placement_follows_kv_cache_affinity_across_reconfigure() -> None:
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_affinity=True),
+        auto_create_workspace=False,
+    )
+    assert agent.prompt_attachment_manager.placement == "tail"
+
+    agent.configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            kv_cache_affinity_config=KVCacheAffinityConfig(
+                enable_kv_cache_affinity=False
+            ),
+        )
+    )
+    assert agent.prompt_attachment_manager.placement == "stable"
+
+    agent.configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            kv_cache_affinity_config=KVCacheAffinityConfig(
+                enable_kv_cache_affinity=True
+            ),
+        )
+    )
+    assert agent.prompt_attachment_manager.placement == "tail"
+
+
 def test_create_deep_agent_reuses_same_tool_instance_across_agents() -> None:
     tool = DummyTool("shared_tool_instance", tool_id="shared_tool_instance_id")
 
