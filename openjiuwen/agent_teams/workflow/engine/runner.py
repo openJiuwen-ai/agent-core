@@ -274,6 +274,18 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             description=description,
             message=f"Workflow failed, exception: {exc}"))
         raise
+    except asyncio.CancelledError:
+        # controller.stop/pause cancels the task mid-LLM-call (no abort checkpoint
+        # was reached), so WorkflowAborted never fires and its record is never
+        # written. Seal a stop here so a later re-run forces a fresh run_id
+        # instead of resuming the terminated run. uncancel() lets the await
+        # below run to completion instead of re-raising immediately.
+        if rt.abort_event is not None and rt.abort_event.reason == "stop":
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+            await _write_seal_record(rt, terminal_status="stopped")
+        raise
     finally:
         _seq.reset(tok_s)
         _path.reset(tok_p)
