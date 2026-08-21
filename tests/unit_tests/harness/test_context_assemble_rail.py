@@ -299,6 +299,8 @@ def test_build_tools_content():
     assert "list_skill" in cn
     assert "task_tool" in cn
     assert cn.index("- bash:") < cn.index("## bash")
+    assert "background: true" not in cn
+    assert "增大 `timeout`" in cn
     assert cn.index("- list_skill:") < cn.index("## task_tool")
     assert "cron_list_jobs" not in cn
     assert "t2" not in cn
@@ -315,6 +317,8 @@ def test_build_tools_content():
     assert "- bash: Run shell commands" in en
     assert "- code: Run Python or JavaScript code" in en
     assert "## bash Guidelines" in en
+    assert "background: true" not in en
+    assert "Increase `timeout`" in en
     assert "## task_tool Guidelines" in en
 
 

@@ -543,7 +543,7 @@ def build_tools_content(
                     "- 优先使用专用工具完成文件搜索、内容搜索、读取、编辑和写入，不要用 bash 替代 `glob` / `grep` / "
                     "`read_file` / `edit_file` / `write_file`",
                     "- 独立命令尽量并行调用；多步依赖命令才在单次调用里用 `&&` 串联，仅在不关心前序失败时才用 `;`",
-                    "- 长时间运行命令使用 `background: true`，不要用 `sleep` 轮询等待",
+                    "- 长时间运行命令应根据需要增大 `timeout`，不要用 `sleep` 轮询等待",
                     "- 尽量使用绝对路径并避免频繁 `cd`；路径包含空格时使用双引号",
                     "- 执行破坏性 Git 操作前先考虑更安全的替代方案",
                 ]
@@ -559,7 +559,7 @@ def build_tools_content(
                     "`write_file`",
                     "- Run independent commands in parallel; only chain dependent commands with `&&`, and "
                     "use `;` only when earlier failures do not matter",
-                    "- Use `background: true` for long-running commands instead of polling with `sleep`",
+                    "- Increase `timeout` as needed for long-running commands instead of polling with `sleep`",
                     "- Prefer absolute paths and avoid frequent `cd`; quote paths with spaces using double quotes",
                     "- Consider safer alternatives before destructive Git operations",
                 ]

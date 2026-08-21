@@ -190,11 +190,10 @@ def test_resolve_call_timeout_honors_declared_timeout_s() -> None:
     card = _real_tool_card("write_file", timeout_s=10.0)
     assert AbilityManager._resolve_call_timeout(card) == 10.0
 
-    # Real BashTool card with no resilience block → default timeout.
-    assert (
-        AbilityManager._resolve_call_timeout(_real_tool_card("bash"))
-        == am_mod.DEFAULT_TOOL_CALL_TIMEOUT
-    )
+    # Bash owns its input-dependent timeout (30 minutes by default, up to
+    # 60 minutes when explicitly requested), so its real card is exempt from
+    # the generic per-tool deadline.
+    assert AbilityManager._resolve_call_timeout(_real_tool_card("bash")) is None
 
 
 def test_resolve_call_timeout_ignores_idempotent_field() -> None:
