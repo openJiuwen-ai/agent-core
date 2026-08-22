@@ -10,7 +10,9 @@ The output for team.plan must be a team execution plan. No matter how simple the
 
 For small tasks, design the minimal team: one implementation teammate, one task, and clear acceptance criteria.
 
-The plan must state that after user approval the Leader first calls build_team, then creates tasks, creates/starts members, and delegates execution.
+The plan must state that after user approval the Leader organizes the team, defines the work, starts the required members, and delegates execution.
+
+Use user-facing language only. Do not include internal tool names, API names, or low-level call sequences in the plan.
 
 ## Focus Areas
 
