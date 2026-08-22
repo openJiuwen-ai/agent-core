@@ -101,6 +101,75 @@ class TeamSessionReleaseInfo:
     db_config: DatabaseConfig
 
 
+# Per-member abort timeout for reset_session's in-flight round teardown.
+# abort() is a put + await ack with no internal timeout; a member supervisor
+# wedged in a non-cancellable await would otherwise hang the whole reset.
+_RESET_ABORT_TIMEOUT_SECONDS: float = 5.0
+
+
+async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
+    """Abort each in-process member's in-flight round before ``stop_team``.
+
+    ``force_kill`` (the stop-team teardown path) is a bare ``task.cancel`` that
+    bypasses ``harness.abort``, so without an explicit abort the interrupted
+    round's incomplete ``tool_call`` would survive in the member's checkpoint
+    and be restored by COLD_RECOVER ``pre_run`` -> the member resumes the old
+    task instead of the leader's new dispatch. This runs
+    ``stream_controller.cancel_agent`` (``= harness.abort(immediate=True)``)
+    per in-process member before the ``stop_team`` fallback. The abort drives
+    ``ReActAgent``'s ``CancelledError`` path -> ``_cleanup_context_on_cancel``,
+    which drops the incomplete tool debris (so the member does not re-execute
+    it) while keeping the UserMessage + completed tool pairs + history, then
+    ``_save_contexts_on_cancel`` persists that sanitized state.
+
+    Only in-process members expose ``agent_ref`` (the member TeamAgent);
+    subprocess members (``SpawnedProcessHandle`` without ``agent_ref``) are
+    skipped — cross-process abort is a separate workstream. Best-effort:
+    per-member failures are logged and do not abort the reset (the
+    ``stop_team``/``force_kill`` fallback still runs afterward).
+    """
+    spawn_mgr = getattr(getattr(entry, "agent", None), "spawn_manager", None)
+    handles = getattr(spawn_mgr, "spawned_handles", None) or {}
+    for member_name, handle in list(handles.items()):
+        agent_ref = getattr(handle, "agent_ref", None)
+        if agent_ref is None:
+            team_logger.warning(
+                "reset_session: member {} has no agent_ref (subprocess?), skip in-flight clear",
+                member_name,
+            )
+            continue
+        stream_controller = getattr(agent_ref, "stream_controller", None)
+        if stream_controller is None:
+            team_logger.warning(
+                "reset_session: member {} has no stream_controller, skip in-flight clear",
+                member_name,
+            )
+            continue
+        try:
+            await asyncio.wait_for(
+                stream_controller.cancel_agent(),
+                timeout=_RESET_ABORT_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError as e:
+            team_logger.warning(
+                "reset_session: member {} abort cancelled: {}",
+                member_name,
+                e,
+            )
+        except asyncio.TimeoutError:
+            team_logger.warning(
+                "reset_session: member {} abort timed out after {}s",
+                member_name,
+                _RESET_ABORT_TIMEOUT_SECONDS,
+            )
+        except Exception as e:  # noqa: BLE001 - best-effort, keep resetting other members
+            team_logger.warning(
+                "reset_session: member {} abort failed: {}",
+                member_name,
+                e,
+            )
+
+
 class TeamRuntimeManager:
     """Owns the in-process ``TeamRuntimePool`` and runs the dispatch + side-effect cycle."""
 
@@ -870,6 +939,15 @@ class TeamRuntimeManager:
                     team_name,
                     entry.current_session_id,
                 )
+                # Abort each in-process member's in-flight round BEFORE the
+                # stop_team/force_kill fallback. force_kill is a bare task.cancel
+                # that bypasses harness.abort, so without this the interrupted
+                # round's incomplete tool_call survives in the member's checkpoint
+                # and is restored by COLD_RECOVER pre_run -> the member resumes the
+                # old task instead of the leader's new dispatch. The abort's
+                # _cleanup_context_on_cancel drops the incomplete tool debris and
+                # keeps the UserMessage + completed tool pairs + history.
+                await _clear_inprocess_members_inflight(entry)
                 await self.stop_team(
                     team_name=team_name,
                     session_id=entry.current_session_id,
@@ -910,6 +988,29 @@ class TeamRuntimeManager:
         # through COLD_RECOVER (recover_from_session) with full team memory,
         # not NEW_TEAM_IN_SESSION (spec.build, fresh, no history).
         cleared = await db.clear_session_task_board_by_id(session_id)
+
+        # Also drop the leader's cold-resume marker (pending_resume) from the
+        # team checkpoint bucket. reset_session is the explicit "fresh start"
+        # operator (the host calls it when the new query is NOT a continuation);
+        # the bucket is kept for COLD_RECOVER, so without this the marker
+        # survives and kernel.resume_paused_round resumes the paused round on
+        # the next cold start instead of letting the leader re-plan on the new
+        # query.
+        try:
+            from openjiuwen.agent_teams.runtime.metadata import clear_pending_resume
+
+            resume_session = TeamRuntimeManager._build_session(session_id)
+            await resume_session.pre_run()
+            cleared_resume = clear_pending_resume(resume_session, team_name)
+            if cleared_resume:
+                await resume_session.flush_checkpoint()
+        except Exception as e:  # noqa: BLE001
+            team_logger.warning(
+                "reset_session: failed to clear pending_resume team={} session={}: {}",
+                team_name,
+                session_id,
+                e,
+            )
 
         team_logger.info(
             "reset_session: cleared task board rows (deleted {}) team={} session={} "
@@ -972,6 +1073,32 @@ class TeamRuntimeManager:
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):
                 team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
+
+        # Clear the leader's cold-resume marker for every team on this session.
+        # release_session keeps the checkpoint bucket (no checkpointer.release),
+        # so without this pending_resume survives and a later cold-recover on
+        # the same session_id would resume a stale paused round. Order is
+        # irrelevant here -- drop_session_tables_by_id only touches the team DB
+        # tables, not the checkpointer bucket -- so this runs after the worktree
+        # loop purely for readability (no stop_team-after-clear race to avoid,
+        # unlike reset_session: force stop_team already awaited at :1030-1036,
+        # well before this point).
+        try:
+            from openjiuwen.agent_teams.runtime.metadata import clear_pending_resume
+
+            resume_session = TeamRuntimeManager._build_session(session_id)
+            await resume_session.pre_run()
+            cleared_any = False
+            for team_name in release_info.team_names:
+                cleared_any |= clear_pending_resume(resume_session, team_name)
+            if cleared_any:
+                await resume_session.flush_checkpoint()
+        except Exception as e:  # noqa: BLE001
+            team_logger.warning(
+                "release_session: failed to clear pending_resume session={}: {}",
+                session_id,
+                e,
+            )
 
     @staticmethod
     async def _resolve_any_team_session_release_info(

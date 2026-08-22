@@ -22,14 +22,24 @@ from openjiuwen.agent_teams.runtime.metadata import (
 )
 
 
+from openjiuwen.core.session.utils import update_dict
+
+
 class _StubSession:
-    """Minimal session that mimics agent_team session's state API."""
+    """Minimal session that mimics agent_team session's state API.
+
+    ``update_state`` mirrors the real ``AgentTeamSession`` (``StateCollection``
+    -> ``InMemoryStateLike.update`` -> ``update_dict``): a deep merge that
+    only removes a key when the incoming value is ``None``. A plain
+    ``dict.update`` here would mask remove-class bugs (the metadata helpers
+    rely on the ``None``-delete path; a shallow replace would let them lie).
+    """
 
     def __init__(self) -> None:
         self.state: dict = {}
 
     def update_state(self, data: dict) -> None:
-        self.state.update(data)
+        update_dict(data, self.state)
 
     def get_state(self, key=None):
         if key is None:
