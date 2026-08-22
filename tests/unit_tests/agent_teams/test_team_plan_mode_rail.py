@@ -24,6 +24,15 @@ from openjiuwen.harness.subagents.plan_agent import (
 )
 
 
+_INTERNAL_TEAM_TOOL_NAMES = (
+    "build_team",
+    "list_members",
+    "create_task",
+    "spawn_teammate",
+    "send_message",
+)
+
+
 class _PromptBuilder:
     def __init__(self, language: str = "en") -> None:
         self.language = language
@@ -62,7 +71,8 @@ async def test_team_plan_mode_rail_injects_team_plan_instructions() -> None:
     content = attachment.content
     assert "Team.plan mode is active" in content
     assert "Mandatory Team Execution Semantics" in content
-    assert "build_team" in content
+    assert "after user approval the Leader will organize the team" in content
+    assert all(tool_name not in content for tool_name in _INTERNAL_TEAM_TOOL_NAMES)
     assert "Leader can implement directly" in content
 
 
