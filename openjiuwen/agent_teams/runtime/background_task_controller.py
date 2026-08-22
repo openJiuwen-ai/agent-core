@@ -29,24 +29,35 @@ from openjiuwen.core.common.logging import team_logger
 
 @dataclass
 class SwarmflowRunHandle:
+    """Control handles for one live swarmflow run (registered at launch)."""
+
     task_id: str
-    run_id: str          # NEW
-    abort_event: AbortSignal
-    backend: Any
-    native: Any
-    relaunch: Callable[[], None]
+    run_id: str  # workflow run_id — registry key for per-run pause/resume/stop
+    abort_event: AbortSignal  # engine Runtime.abort_event for THIS run
+    backend: Any  # TeamWorkerBackend → abort_sessions()
+    native: Any  # leader NativeHarness → async_tool_runtime.cancel
+    relaunch: Callable[[], None]  # re-launch run_background with the SAME inputs
 
 
 class BackgroundTaskController:
+    """Unified pause/resume/stop control surface threaded through streaming.
+
+    Lifecycle-neutral: created by the embedder, attached to the leader harness,
+    and self-populated by ``SwarmflowTool`` as runs launch. Control with no
+    matching run is a no-op (returns ``False``).
+    """
+
     def __init__(self) -> None:
         self._active: dict[str, SwarmflowRunHandle] = {}   # keyed by run_id
         self._paused: dict[str, SwarmflowRunHandle] = {}  # keyed by run_id
         self._lock = asyncio.Lock()
 
     def register(self, handle: SwarmflowRunHandle) -> None:
+        """Register a live run's control handles (called at launch)."""
         self._active[handle.run_id] = handle
 
     def deregister(self, run_id: str) -> None:
+        """Drop a run's handles (called in the launcher's finally; idempotent)."""
         # Only drop the active handle. A paused run lives in _paused awaiting
         # resume; deregister (called from run_background's finally on unwind)
         # must NOT clear it, or resume(run_id) would report not_found and the
@@ -54,6 +65,18 @@ class BackgroundTaskController:
         self._active.pop(run_id, None)
 
     async def _abort_one(self, h: SwarmflowRunHandle, reason: str) -> None:
+        """Abort one run in three steps, in this order (correctness-critical).
+
+        1. set the engine ``abort_event`` — queued ``agent()`` / session turns
+           are gated, and an in-flight call reaching the pre-journal guard does
+           NOT persist to the WAL;
+        2. abort live avatar sessions — their supervisor is a separate asyncio
+           task the top-level cancel cannot reach, so abort them here where the
+           coroutine runs to completion (else the supervisor leaks);
+        3. cancel the top-level swarmflow task — stops the in-flight
+           ``run_once`` worker (not abortable) and unwinds the engine; the WAL
+           is preserved for resume.
+        """
         h.abort_event.set(reason)
         try:
             await h.backend.abort_sessions()
@@ -65,6 +88,7 @@ class BackgroundTaskController:
             team_logger.debug("[bg-ctl] cancel failed for %s", h.run_id, exc_info=True)
 
     async def pause(self, run_id: str | None = None) -> bool:
+        """Pause active run(s) — all when ``run_id`` is None, else just that one."""
         async with self._lock:
             if run_id is None:
                 targets = dict(self._active)
@@ -80,6 +104,12 @@ class BackgroundTaskController:
             return bool(targets)
 
     async def resume(self, run_id: str | None = None) -> bool:
+        """Resume paused run(s) — all when ``run_id`` is None, else just that one.
+
+        The relaunch closure re-invokes ``run_background`` with the SAME inputs;
+        the journal path is unchanged, so the completed prefix is a cache hit and
+        only the interrupted call reruns live.
+        """
         async with self._lock:
             if run_id is None:
                 targets = dict(self._paused)
@@ -97,6 +127,7 @@ class BackgroundTaskController:
             return bool(targets)
 
     async def stop(self, run_id: str) -> bool:
+        """Terminal stop of one run — dropped, not parked for resume."""
         async with self._lock:
             h = self._active.get(run_id)
             if h is not None:
@@ -111,6 +142,7 @@ class BackgroundTaskController:
             return False
 
     def is_paused(self, run_id: str | None = None) -> bool:
+        """Whether ``run_id`` (any run when None) is currently paused."""
         if run_id is None:
             return bool(self._paused)
         return run_id in self._paused

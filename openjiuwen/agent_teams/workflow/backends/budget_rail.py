@@ -25,16 +25,13 @@ from openjiuwen.core.single_agent.rail.base import (
 
 
 class SwarmflowBudgetRail(AgentRail):
-    """Bill one agent's model calls to the run's ledgers; stop it when one runs dry.
+    """Bill one agent's model calls to both ledgers; stop it when either runs dry.
 
-    Bills **both** the session-wide ledger (``budget``, per-leader, monotonic,
-    never resets) and the per-run ledger (``workflow_budget``, resets to
-    ``spent=0`` on each new ``swarmflow`` invocation). The same token is added
-    to each — they are independent counters, not a sum (nested double-count:
-    the workflow ledger is a sub-view of the session total). Force-finishes the
-    agent's round when **either** ledger runs dry; the engine's entry gates
-    distinguish the two by ``BudgetExhausted.scope`` (``"workflow"`` retryable,
-    ``"session"`` not).
+    The session-wide ``budget`` never resets; the per-run ``workflow_budget``
+    resets on each ``swarmflow`` invocation. The same tokens go to each —
+    independent counters, not a sum. The engine's entry gates tell the two
+    apart by ``BudgetExhausted.scope`` (``"workflow"`` retryable, ``"session"``
+    not).
 
     Attributes:
         call_tokens: Tokens this agent has reported so far — the backend reads
@@ -79,11 +76,7 @@ class SwarmflowBudgetRail(AgentRail):
         A force-finish rather than an exception: the run is over budget, not
         broken, so the work done so far is kept and returned normally. The
         engine's own gate then stops the *next* ``agent()`` from starting.
-
-        Session-wide exhaustion takes priority over per-run: if both are dry,
-        the more severe (terminal, not retryable) session reason wins. Each rail
-        only force-finishes its own agent — A's workflow_budget draining does
-        not touch B's agent.
+        Session wins over workflow when both are dry (terminal, not retryable).
         """
         if self._budget.exhausted:
             team_logger.warning(

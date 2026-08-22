@@ -130,9 +130,6 @@ class AvatarSessionManager:
         language: Prompt language hint (drives the structured-output tool i18n).
         model_resolver: Optional ``agent(model=...)`` name → ``TeamModelConfig``
             resolver (same contract as the worker backend).
-        leader_model_name: Optional model name for the intent-classifier tiny
-            agent (resolved through ``model_resolver``). ``None`` disables
-            classification so a human turn always continues.
         build_context: Optional leader ``BuildContext`` forwarded to each avatar.
         budget: The run's shared token ledger — every avatar bills its model
             calls to it and is cut short once it is dry, so sessions draw down
@@ -147,7 +144,6 @@ class AvatarSessionManager:
         team_name: str = "swarmflow",
         language: str = "cn",
         model_resolver: Any = None,
-        leader_model_name: str | None = None,
         build_context: Any = None,
         t: Translator | None = None,
         messager: Any = None,
@@ -166,7 +162,6 @@ class AvatarSessionManager:
         self._team_name = team_name
         self._language = language
         self._model_resolver = model_resolver
-        self._leader_model_name = leader_model_name
         self._build_context = build_context
         self._t = t if t is not None else make_translator(language if language in ("cn", "en") else "cn")
         self._sessions: dict[str, _SessionState] = {}
@@ -564,38 +559,21 @@ class AvatarSessionManager:
     async def _classify_intent(self, raw: str, prompt: str) -> dict | None:
         """One-shot TinyAgent classification: is this reply 'edit & rerun' or 'continue'?
 
-        Reuses the leader's own model. Two resolution paths, first match wins:
-        ``leader_model_name`` + ``model_resolver`` (name → ``TeamModelConfig``), or
-        the ``worker_base_spec.model`` already resolved on the base spec (the path
-        ``TeamWorkerBackend._sessions()`` actually takes — it never threads a name
-        through). Ephemeral: async with auto-dispose. Returns None on any failure
+        Reuses the ``worker_base_spec.model`` already resolved on the base spec (the
+        path ``TeamWorkerBackend._sessions()`` takes). Ephemeral: async with
+        auto-dispose. Returns None when there is no base model or on any failure
         (degrades to existing formatting path).
         """
-        from openjiuwen.agent_teams.tiny_agent import TinyAgent, create_tiny_agent
+        from openjiuwen.agent_teams.tiny_agent import TinyAgent
         from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness.prompts import PromptMode
 
-        model_name = self._leader_model_name
+        base_model = self._worker_base_spec.model if self._worker_base_spec else None
+        if base_model is None:
+            return None
         user_prompt = f"Question:\n{prompt}\n\nReply:\n{raw}"
         try:
-            if model_name and self._model_resolver is not None:
-                async with create_tiny_agent(
-                    system_prompt=_INTENT_CLASSIFY_PROMPT,
-                    model_name=model_name,
-                    model_resolver=self._model_resolver,
-                    default_schema=_INTENT_SCHEMA,
-                    language=self._language,
-                    max_iterations=3,
-                    budget=self._budget,
-                ) as classifier:
-                    return await classifier.run(
-                        user_prompt,
-                        schema=_INTENT_SCHEMA,
-                    )
-            base_model = self._worker_base_spec.model if self._worker_base_spec else None
-            if base_model is None:
-                return None
             # Build a TinyAgent straight from the already-resolved TeamModelConfig,
             # skipping the name → resolver hop entirely.
             spec = DeepAgentSpec(

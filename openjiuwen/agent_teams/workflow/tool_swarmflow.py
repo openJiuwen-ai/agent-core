@@ -30,14 +30,13 @@ from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
-from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted, BackendError
+    from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 
 # Resolve an ``agent(model=...)`` name hint to a worker ``TeamModelConfig`` (or
 # None to fall back to the worker base spec's model). Built by the configurator.
@@ -159,39 +158,30 @@ class SwarmflowTool(AsyncTool):
     ) -> str:
         """Terminal completion text injected after the background run succeeds.
 
-        A completed run may still have finished OVER budget: the rail
-        force-finishes in-flight agents past the ceiling, their settled calls
-        land after the limit, and — unlike the engine gate — nothing fails the
-        run. In that case an overrun block is appended (snapshot tallies +
-        per-phase cost ranking + redesign guidance) so the leader can rewrite
-        the script to fit the user's budget before relaunching on the fresh
-        per-run ceiling.
+        A completed run may still have finished OVER budget (the rail
+        force-finishes in-flight agents past the ceiling), in which case an
+        overrun block (tallies + top phases + guidance) is appended.
         """
         from openjiuwen.agent_teams.workflow.observer import summarize_run
 
+        observer = (completion_ctx or {}).get(_OBSERVER_CTX_KEY)
         parts: list[str] = []
-        observer = None
-        if completion_ctx is not None:
-            observer = completion_ctx.get(_OBSERVER_CTX_KEY)
         if observer is not None:
             parts.append(summarize_run(observer.run))
         body = render_result_text(result)
         if body:
             parts.append(body)
-        summary = "\n".join(parts)
         message = self._local_t(
             "swarmflow.completed",
             run_id=run_id,
-            result=summary,
+            result="\n".join(parts),
         )
         overrun_fields = _budget_overrun_fields(
-            getattr(observer, "events", None) if observer is not None else None,
-            self._language,
+            getattr(observer, "events", None), self._language
         )
         if overrun_fields is not None:
-            message = (
-                f"{message}\n"
-                + self._local_t("swarmflow.budget_overrun", run_id=run_id, **overrun_fields)
+            message += "\n" + self._local_t(
+                "swarmflow.budget_overrun", run_id=run_id, **overrun_fields
             )
         return message
 
@@ -292,50 +282,22 @@ class SwarmflowTool(AsyncTool):
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         """Validate the script source, admit via governor, launch background run.
 
-        Runs a script from ``script_path`` (disk) or inline ``script`` source.
-        An inline ``script`` is materialised to disk **here** (synchronously in
-        the launch round) so the launched receipt can report the resolved
-        absolute ``script_path``; the resolved path is threaded into the
-        background inputs, so ``run_background`` and any resume relaunch load
-        from disk uniformly. ``resume_id`` + ``action`` routes to the
-        background-task controller (pause / resume / stop) instead of the
-        launch path; ``resume_id`` alone, and ``name``, are rejected with an
-        explicit message (never a silent no-op), so the surface is honest about
-        what is wired.
+        ``resume_id`` + ``action`` routes to the background-task controller
+        (pause / resume / stop); everything else is the launch path.
         """
         script_path = (inputs.get("script_path") or "").strip()
         script = (inputs.get("script") or "").strip()
         name = (inputs.get("name") or "").strip()
         resume_id = (inputs.get("resume_id") or "").strip()
         action = (inputs.get("action") or "").strip()
+
         if resume_id and action:
-            controller = getattr(self._parent_agent, "background_task_controller", None)
-            if controller is None:
-                return ToolOutput(success=False, error="Runtime controller not configured")
-            if action == "pause":
-                ok = await controller.pause(resume_id)
-            elif action == "resume":
-                ok = await controller.resume(resume_id)
-            elif action == "stop":
-                ok = await controller.stop(resume_id)
-            else:
-                return ToolOutput(success=False, error=f"unknown action {action!r}")
-            return ToolOutput(success=ok, data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"})
-        # resume_id WITHOUT action is a re-launch of an interrupted run (pause /
-        # early_return / workflow-budget hit): fall through to the launch path and
-        # reuse resume_id as the run_id so cache hits replay and the per-run
-        # ledger re-bills by cache hits.
-        if not any((script_path, script, name, resume_id)):
-            return ToolOutput(
-                success=False,
-                error="one of 'script_path' / 'script' / 'name' / 'resume_id' is required",
-            )
-        if not script_path and not script:
-            pending = [n for n, v in (("name", name), ("resume_id", resume_id)) if v]
-            return ToolOutput(
-                success=False,
-                error=f"{pending[0]!r} is not supported yet; provide 'script_path' or inline 'script'",
-            )
+            return await self._control_run(resume_id, action)
+        # resume_id WITHOUT action = re-launch of an interrupted run: fall
+        # through and reuse it as run_id so journal cache hits replay.
+        error = self._launch_input_error(script_path, script, name, resume_id)
+        if error is not None:
+            return ToolOutput(success=False, error=error)
         if self._governor is None:
             return ToolOutput(success=False, error="Swarmflow concurrency governor is not configured")
 
@@ -344,98 +306,38 @@ class SwarmflowTool(AsyncTool):
             snap = self._governor.snapshot()
             return ToolOutput(
                 success=False,
-                error=(
-                    f"Swarmflow concurrent limit reached "
-                    f"({snap.active_workflows}/{snap.max_workflows})"
-                ),
+                error=f"Swarmflow concurrent limit reached ({snap.active_workflows}/{snap.max_workflows})",
             )
-
         ticket = admission.ticket
-        agent_gate = admission.agent_gate
 
-        # Inline `script`: materialise to disk now so the launched receipt can
-        # report the absolute script_path (a later re-run passes that path
-        # instead of resending the source). Release the ticket if it fails.
+        # Steps below hold the governor ticket: every failure path releases it.
         if not script_path and script:
-            from openjiuwen.agent_teams.context import get_session_id
-            from openjiuwen.agent_teams.workflow.runner import materialize_swarmflow_script
-
+            # Materialise inline source now so the receipt reports the absolute
+            # path (a later re-run passes it instead of resending the source).
             try:
-                script_path = await materialize_swarmflow_script(
-                    script,
-                    team_name=self._team_name,
-                    session_id=get_session_id(),
-                )
+                script_path = await self._materialise_script(script)
             except Exception as exc:  # noqa: BLE001 - never escape as an exception
                 await self._governor.release_workflow(ticket)
                 return ToolOutput(success=False, error=f"Failed to materialise inline script: {exc}")
 
-        # Re-run lint: only bites when a disk script already exists AND an
-        # inline edit is being applied (a plain script_path, or a freshly
-        # materialised inline script, has old == new and trivially passes).
-        # Hard-blocks META.name changes (they would orphan the journal and
-        # invalidate the whole cache prefix) and logs a structural-impact
-        # preview otherwise. Release the ticket on any failure so a rejected
-        # re-run does not leak a governor slot.
-        if script_path and Path(script_path).exists():
-            try:
-                old_source = Path(script_path).read_text(encoding="utf-8")
-                new_source = script if script else old_source
-                self._lint_rerun(old_source=old_source, new_source=new_source)
-                diff = self._compute_structural_diff(old_source, new_source)
-                if diff.changed_nodes:
-                    team_logger.info(
-                        "[swarmflow] re-run impact: structural changes at %s",
-                        diff.changed_nodes,
-                    )
-            except Exception as exc:  # noqa: BLE001 - never escape as an exception
-                await self._governor.release_workflow(ticket)
-                return ToolOutput(success=False, error=f"Re-run lint failed: {exc}")
+        try:
+            self._check_rerun(script_path, script)
+        except Exception as exc:  # noqa: BLE001 - never escape as an exception
+            await self._governor.release_workflow(ticket)
+            return ToolOutput(success=False, error=f"Re-run lint failed: {exc}")
 
-        # Seal guard (方案 C 兜底): a resume_id pointing at a TERMINAL run
-        # (completed / session-budget stop) must not be reused — the prior run
-        # already ended, so relaunching under the same id would wrongly replay
-        # its sealed cache. Force a fresh run_id in that case.
-        if resume_id and script_path:
-            try:
-                from openjiuwen.agent_teams.context import get_session_id
-                from openjiuwen.agent_teams.workflow.engine.journal import Journal
-                from openjiuwen.agent_teams.workflow.runner import _resolve_journal_path
+        resume_id = await self._seal_guard(script_path, resume_id)
 
-                journal_path = _resolve_journal_path(script_path, self._team_name, get_session_id())
-                journal = await Journal.load(journal_path, wal_path=f"{journal_path}.wal")
-                if journal.find_run_record(resume_id, "seal") is not None:
-                    team_logger.warning(
-                        "[swarmflow] resume_id %s is terminal (sealed); forcing a fresh run_id", resume_id
-                    )
-                    resume_id = ""
-            except Exception as exc:  # noqa: BLE001 - guard is best-effort
-                team_logger.debug("[swarmflow] seal guard skipped: %s", exc)
-
-        run_id = resume_id or new_swarmflow_run_id()
+        enriched = self._enriched_inputs(
+            inputs,
+            script_path=script_path,
+            resume_id=resume_id,
+            ticket=ticket,
+            agent_gate=admission.agent_gate,
+        )
+        run_id = enriched[_RUN_ID_INPUT_KEY]
+        completion_ctx = enriched[_COMPLETION_CTX_KEY]
         task_id = generate_id(self.card.name)
-
-        enriched = dict(inputs)
-        enriched["script_path"] = script_path
-        enriched[_RUN_ID_INPUT_KEY] = run_id
-        if resume_id:
-            # resume_id without action = script-edit relaunch (same run_id): the
-            # frontend resets the phase/agent tree, unlike a fresh launch.
-            enriched[_RELAUNCH_KIND_KEY] = "relaunch"
-        enriched[_WORKFLOW_TICKET_KEY] = ticket
-        enriched[_AGENT_GATE_KEY] = agent_gate
-        completion_ctx: dict[str, Any] = {}
-        enriched[_COMPLETION_CTX_KEY] = completion_ctx
-
-        def _format_completed(result: Any) -> str:
-            return self.format_completed_injection(
-                result,
-                run_id=run_id,
-                completion_ctx=completion_ctx,
-            )
-
-        def _format_failed(error: Any) -> str:
-            return self.format_failed_injection(error, run_id=run_id)
 
         try:
             self._parent_agent.launch_async_tool(
@@ -443,8 +345,10 @@ class SwarmflowTool(AsyncTool):
                 lambda: self.run_background(task_id, enriched),
                 tool_name=self.card.name,
                 description=self.launched_description(enriched),
-                format_completed=_format_completed,
-                format_failed=_format_failed,
+                format_completed=lambda result: self.format_completed_injection(
+                    result, run_id=run_id, completion_ctx=completion_ctx
+                ),
+                format_failed=lambda error: self.format_failed_injection(error, run_id=run_id),
             )
         except Exception as exc:  # noqa: BLE001 - never escape as an exception
             await self._governor.release_workflow(ticket)
@@ -454,6 +358,105 @@ class SwarmflowTool(AsyncTool):
             success=True,
             data={"status": "launched", "task_id": task_id, "run_id": run_id, "script_path": script_path},
         )
+
+    async def _control_run(self, resume_id: str, action: str) -> ToolOutput:
+        """Route ``resume_id`` + ``action`` into the background-task controller."""
+        controller = getattr(self._parent_agent, "background_task_controller", None)
+        if controller is None:
+            return ToolOutput(success=False, error="Runtime controller not configured")
+        ops = {"pause": controller.pause, "resume": controller.resume, "stop": controller.stop}
+        op = ops.get(action)
+        if op is None:
+            return ToolOutput(success=False, error=f"unknown action {action!r}")
+        ok = await op(resume_id)
+        return ToolOutput(
+            success=ok,
+            data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"},
+        )
+
+    @staticmethod
+    def _launch_input_error(script_path: str, script: str, name: str, resume_id: str) -> str | None:
+        """Source validation: one of the four keys required, only scripts wired."""
+        if not any((script_path, script, name, resume_id)):
+            return "one of 'script_path' / 'script' / 'name' / 'resume_id' is required"
+        if not script_path and not script:
+            pending = [n for n, v in (("name", name), ("resume_id", resume_id)) if v]
+            return f"{pending[0]!r} is not supported yet; provide 'script_path' or inline 'script'"
+        return None
+
+    async def _materialise_script(self, script: str) -> str:
+        """Write an inline ``script`` to disk; returns the absolute path."""
+        from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.workflow.runner import materialize_swarmflow_script
+
+        return await materialize_swarmflow_script(
+            script, team_name=self._team_name, session_id=get_session_id()
+        )
+
+    def _check_rerun(self, script_path: str, script: str) -> None:
+        """Re-run gate on an existing disk script.
+
+        Only bites when a disk script exists AND an inline edit is applied (a
+        plain re-pass has old == new and trivially passes): hard-blocks
+        ``META.name`` changes, logs a structural-impact preview otherwise.
+        """
+        if not (script_path and Path(script_path).exists()):
+            return
+        old_source = Path(script_path).read_text(encoding="utf-8")
+        new_source = script or old_source
+        self._lint_rerun(old_source=old_source, new_source=new_source)
+        diff = self._compute_structural_diff(old_source, new_source)
+        if diff.changed_nodes:
+            team_logger.info(
+                "[swarmflow] re-run impact: structural changes at %s", diff.changed_nodes
+            )
+
+    async def _seal_guard(self, script_path: str, resume_id: str) -> str:
+        """Blank out a resume_id that points at a TERMINAL (sealed) run.
+
+        Relaunching under it would wrongly replay the sealed cache. Best-effort:
+        failures only debug-log, never block the launch.
+        """
+        if not (resume_id and script_path):
+            return resume_id
+        try:
+            from openjiuwen.agent_teams.context import get_session_id
+            from openjiuwen.agent_teams.workflow.engine.journal import Journal
+            from openjiuwen.agent_teams.workflow.runner import _resolve_journal_path
+
+            journal_path = _resolve_journal_path(script_path, self._team_name, get_session_id())
+            journal = await Journal.load(journal_path, wal_path=f"{journal_path}.wal")
+            if journal.find_run_record(resume_id, "seal") is not None:
+                team_logger.warning(
+                    "[swarmflow] resume_id %s is terminal (sealed); forcing a fresh run_id", resume_id
+                )
+                return ""
+        except Exception as exc:  # noqa: BLE001 - guard is best-effort
+            team_logger.debug("[swarmflow] seal guard skipped: %s", exc)
+        return resume_id
+
+    def _enriched_inputs(
+        self,
+        inputs: dict[str, Any],
+        *,
+        script_path: str,
+        resume_id: str,
+        ticket: Any,
+        agent_gate: Any,
+    ) -> dict[str, Any]:
+        """Launch inputs: resolved path, run_id, relaunch flag, governor
+        ticket/gate, and the completion ctx the finished-run injection reads."""
+        enriched = dict(inputs)
+        enriched["script_path"] = script_path
+        enriched[_RUN_ID_INPUT_KEY] = resume_id or new_swarmflow_run_id()
+        # resume_id without action = script-edit relaunch (same run_id): the
+        # frontend resets the phase/agent tree, unlike a fresh launch.
+        if resume_id:
+            enriched[_RELAUNCH_KIND_KEY] = "relaunch"
+        enriched[_WORKFLOW_TICKET_KEY] = ticket
+        enriched[_AGENT_GATE_KEY] = agent_gate
+        enriched[_COMPLETION_CTX_KEY] = {}
+        return enriched
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
@@ -475,7 +478,7 @@ class SwarmflowTool(AsyncTool):
             TeamTopic,
             WorkflowProgressTeamEvent,
         )
-        from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
+        from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
         from openjiuwen.agent_teams.workflow.engine.progress import (
             ProgressKind,
             WorkflowProgressEvent,
@@ -587,21 +590,14 @@ class SwarmflowTool(AsyncTool):
                 agent_gate=agent_gate,
                 budget=self._budget,
             )
-        # BudgetExhausted is a BaseException (not Exception): it deliberately has
-        # no ``except`` here. Catching it only to re-raise is a no-op, and wrapping
-        # it (e.g. into BackendError) would discard the structured fields
-        # (scope / spent / total / top_phases / workflow_spent / workflow_total).
-        # Letting it propagate untouched lets the async-tool runtime's
-        # ``except BudgetExhausted`` branch in async_tools._run render the
-        # leader-facing message from those fields directly.
+        # BudgetExhausted is a BaseException: no ``except`` here on purpose —
+        # wrapping it would discard its structured fields, and the async-tool
+        # runtime renders the leader-facing message from them directly.
         except WorkflowAborted as exc:
             if exc.reason == "early_return":
                 msg = self._format_early_return(exc.reply, exc.edit_hints, run_id=run_id)
-                # Early-return is a PAUSE (resumable), not a terminal stop: the
-                # run is paused so the leader can edit the script and re-run under
-                # the same run_id. Publish WORKFLOW_PAUSED (not STOPPED) so the
-                # Monitor flips the card to paused instead of leaving it running,
-                # then surface the edit guidance to the leader.
+                # Resumable pause (edit & re-run under the same run_id): flip
+                # the Monitor card to paused, then surface the edit guidance.
                 _publish(
                     WorkflowProgressEvent(
                         kind=ProgressKind.WORKFLOW_PAUSED,
@@ -634,14 +630,10 @@ class SwarmflowTool(AsyncTool):
                 )
             )
             raise asyncio.CancelledError() from exc
-        except asyncio.CancelledError:
-            # The controller's pause/stop third step cancels the top-level task
-            # (``async_tool_runtime.cancel``), so when the in-flight agent is
-            # mid-LLM-call and never reaches an abort checkpoint the engine
-            # raises CancelledError instead of WorkflowAborted. Emit the same
-            # status event from the AbortSignal reason so the Monitor still flips
-            # the card. External (non-controller) cancels leave the signal unset
-            # and stay silent — the bare ``raise`` re-raises unchanged.
+        except asyncio.CancelledError as exc:
+            # Controller-cancel path: the task died mid-call before reaching an
+            # abort checkpoint, so emit the status event from the AbortSignal
+            # reason. External cancels (signal unset) stay silent.
             if abort_event.is_set():
                 if abort_event.reason == "stop":
                     _publish(
@@ -650,7 +642,7 @@ class SwarmflowTool(AsyncTool):
                             message="workflow stopped",
                         )
                     )
-                    raise BackendError(self._format_stopped(run_id=run_id))
+                    raise BackendError(self._format_stopped(run_id=run_id)) from exc
                 # pause (default reason): silent cancel, controller relaunches on resume.
                 _publish(
                     WorkflowProgressEvent(
@@ -706,11 +698,8 @@ class SwarmflowTool(AsyncTool):
 def _final_budget_snapshots(events: Any) -> tuple[dict | None, dict | None]:
     """Last session / workflow ledger snapshots carried on the event stream.
 
-    Budget snapshots ride ``AGENT_COMPLETED`` / ``AGENT_FAILED`` / terminal
-    events only, so a backward scan for the last non-``None`` payload of each
-    ledger yields the final tally of the run. Returns ``(session, workflow)``;
-    either side is ``None`` when no event ever carried it (e.g. no per-run
-    ceiling declared, or a backend that never snapshots).
+    Snapshots ride agent / terminal events only, so a backward scan for the
+    last non-``None`` payload of each ledger yields the final tally.
     """
     budget: dict | None = None
     wf_budget: dict | None = None
@@ -725,12 +714,10 @@ def _final_budget_snapshots(events: Any) -> tuple[dict | None, dict | None]:
 
 
 def _phase_token_ranking(events: Any) -> list[tuple[str, int]] | None:
-    """Top-3 phases by per-agent token consumption, folded from the events.
+    """Top-3 phases by token consumption, folded from agent events.
 
-    Sums ``tokens`` off ``AGENT_COMPLETED`` / ``AGENT_FAILED`` events grouped
-    by ``phase`` — the observer-side twin of the ledger's ``phase_tokens``
-    tally, available to the completion path without reaching into the engine
-    runtime. ``None`` when no agent reported a token count.
+    The observer-side twin of the ledger's ``phase_tokens`` tally; ``None``
+    when no agent reported a token count.
     """
     from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 
@@ -751,63 +738,33 @@ def _phase_token_ranking(events: Any) -> list[tuple[str, int]] | None:
 def _budget_overrun_fields(events: Any, language: str) -> dict | None:
     """Placeholder dict for ``swarmflow.budget_overrun``, or ``None`` when within budget.
 
-    A run that COMPLETED over budget (rail force-finish settles in-flight
-    calls past the ceiling) never raises, so the failed-path
-    ``BudgetExhausted`` feedback stays silent for it. This closes that gap:
-    derive the overrun from the final ledger snapshots on the event stream and
-    hand the leader the same redesign inputs the failed path provides —
-    scope / spent / total / top phases / guidance. Session wins over workflow
-    when both overran (matches the engine gate's reporting order).
+    A completed run never raises, so the failed-path feedback stays silent for
+    it; this derives the overrun from the final ledger snapshots instead.
+    Session wins over workflow when both overran (matches the engine gate).
     """
     if not events:
         return None
     budget, wf_budget = _final_budget_snapshots(events)
-    scope: str | None = None
     if budget is not None and budget.get("total") is not None and budget.get("exhausted"):
-        scope = "session"
+        scope, snap = "session", budget
     elif (
         wf_budget is not None
         and wf_budget.get("total") is not None
         and wf_budget.get("exhausted")
     ):
-        scope = "workflow"
-    if scope is None:
+        scope, snap = "workflow", wf_budget
+    else:
         return None
-    snap = budget if scope == "session" else wf_budget
-    lang = language if language in ("cn", "en") else "cn"
-    guidance = STRINGS[lang][
-        "swarmflow.budget_overrun.workflow_guidance"
-        if scope == "workflow"
-        else "swarmflow.budget_overrun.session_guidance"
-    ]
-    # When the session layer overran, surface the per-run contrast so the
-    # leader sees the run-level tally alongside the session total; when the
-    # workflow layer overran, spent/total already IS the per-run tally.
-    if (
-        scope == "session"
-        and wf_budget is not None
-        and wf_budget.get("total") is not None
-    ):
-        workflow_contrast = (
-            f"Run 级对照：spent={wf_budget.get('spent')}/{wf_budget.get('total')}。"
-            if lang == "cn"
-            else f"Run-level tally: spent={wf_budget.get('spent')}/{wf_budget.get('total')}. "
-        )
-    else:
-        workflow_contrast = ""
-    if lang == "cn":
-        trigger_layer = "workflow（单次额度）" if scope == "workflow" else "session（会话总额）"
-    else:
-        trigger_layer = "workflow (per-run)" if scope == "workflow" else "session (shared)"
-    return {
-        "spent": snap.get("spent") if snap.get("spent") is not None else "?",
-        "total": snap.get("total") if snap.get("total") is not None else "?",
-        "trigger_layer": trigger_layer,
-        "workflow_contrast": workflow_contrast,
-        "top_phases": _format_top_phases(_phase_token_ranking(events))
-        or ("（无）" if lang == "cn" else "(none)"),
-        "guidance": guidance,
-    }
+    return _budget_feedback_fields(
+        scope=scope,
+        spent=snap.get("spent"),
+        total=snap.get("total"),
+        workflow_spent=wf_budget.get("spent") if scope == "session" else None,
+        workflow_total=wf_budget.get("total") if scope == "session" else None,
+        top_phases=_phase_token_ranking(events),
+        language=language,
+        guidance_key="swarmflow.budget_overrun",
+    )
 
 
 def _format_top_phases(top_phases: list[tuple[str, int]] | None) -> str:
@@ -817,50 +774,64 @@ def _format_top_phases(top_phases: list[tuple[str, int]] | None) -> str:
     return ", ".join(f"{name}({tokens})" for name, tokens in top_phases)
 
 
-def _budget_exhausted_fields(exc: "BudgetExhausted", language: str) -> dict:
-    """Render the structured fields of a ``BudgetExhausted`` for the i18n template.
+_TRIGGER_LAYER_LABELS = {
+    ("workflow", "cn"): "workflow（单次额度）",
+    ("workflow", "en"): "workflow (per-run)",
+    ("session", "cn"): "session（会话总额）",
+    ("session", "en"): "session (shared)",
+}
 
-    Pulls every field off the exception (scope / spent / total / top_phases /
-    workflow_spent / workflow_total) and returns the placeholder dict for
-    ``swarmflow.budget_exhausted``. ``guidance`` is the localized two-branch
-    advice text (workflow: redesign; session: raise the ceiling), resolved
-    here against ``language`` so the caller's ``_local_t`` stays a thin lookup.
+
+def _budget_feedback_fields(
+    *,
+    scope: str,
+    spent: int | None,
+    total: int | None,
+    workflow_spent: int | None,
+    workflow_total: int | None,
+    top_phases: list[tuple[str, int]] | None,
+    language: str,
+    guidance_key: str,
+) -> dict:
+    """Shared i18n placeholders for the budget overrun / exhausted templates.
+
+    ``workflow_contrast`` pairs the per-run tally with a session-scope trigger
+    (a workflow-scope trigger's spent/total already IS the per-run tally);
+    ``guidance`` resolves the scope-paired advice text.
     """
-    scope = getattr(exc, "scope", "session") or "session"
-    spent = getattr(exc, "spent", None)
-    total = getattr(exc, "total", None)
-    wf_spent = getattr(exc, "workflow_spent", None)
-    wf_total = getattr(exc, "workflow_total", None)
     lang = language if language in ("cn", "en") else "cn"
-    guidance_key = (
-        "swarmflow.budget_exhausted.workflow_guidance"
-        if scope == "workflow"
-        else "swarmflow.budget_exhausted.session_guidance"
-    )
-    guidance = STRINGS[lang][guidance_key]
-    # When the session layer tripped, surface the per-run contrast so the
-    # leader sees the run-level tally alongside the session total; when the
-    # workflow layer tripped, spent/total already IS the per-run tally.
-    if scope == "session" and wf_spent is not None and wf_total is not None:
-        workflow_contrast = f"Run 级对照：spent={wf_spent}/{wf_total}。"
+    if scope == "session" and workflow_spent is not None and workflow_total is not None:
+        workflow_contrast = (
+            f"Run 级对照：spent={workflow_spent}/{workflow_total}。"
+            if lang == "cn"
+            else f"Run-level tally: spent={workflow_spent}/{workflow_total}. "
+        )
     else:
         workflow_contrast = ""
-    trigger_layer = "workflow（单次额度）" if scope == "workflow" and lang == "cn" else (
-        "workflow (per-run)" if scope == "workflow" else (
-            "session（会话总额）" if lang == "cn" else "session (shared)"
-        )
-    )
     return {
-        "detail": str(exc),
         "spent": spent if spent is not None else "?",
         "total": total if total is not None else "?",
-        "trigger_layer": trigger_layer,
+        "trigger_layer": _TRIGGER_LAYER_LABELS[(scope, lang)],
         "workflow_contrast": workflow_contrast,
-        "top_phases": _format_top_phases(getattr(exc, "top_phases", None)) or (
-            "（无）" if lang == "cn" else "(none)"
-        ),
-        "guidance": guidance,
+        "top_phases": _format_top_phases(top_phases) or ("（无）" if lang == "cn" else "(none)"),
+        "guidance": STRINGS[lang][f"{guidance_key}.{scope}_guidance"],
     }
+
+
+def _budget_exhausted_fields(exc: "BudgetExhausted", language: str) -> dict:
+    """Placeholder dict for ``swarmflow.budget_exhausted``, from the exception's fields."""
+    fields = _budget_feedback_fields(
+        scope=getattr(exc, "scope", "session") or "session",
+        spent=getattr(exc, "spent", None),
+        total=getattr(exc, "total", None),
+        workflow_spent=getattr(exc, "workflow_spent", None),
+        workflow_total=getattr(exc, "workflow_total", None),
+        top_phases=getattr(exc, "top_phases", None),
+        language=language,
+        guidance_key="swarmflow.budget_exhausted",
+    )
+    fields["detail"] = str(exc)
+    return fields
 
 
 __all__ = ["SwarmflowTool", "WorkerModelResolver"]
