@@ -134,8 +134,10 @@ class AvatarSessionManager:
         on_human_replied: Callable[[str, str, str | None], None] | None = None,
         human_timeout: float | None = None,
         budget: BudgetLedger | None = None,
+        workflow_budget: BudgetLedger | None = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
+        self._workflow_budget = workflow_budget
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._team_name = team_name
@@ -176,7 +178,7 @@ class AvatarSessionManager:
             spec_base=base,
             instructions=instructions,
             member_name=member_name,
-            budget_rail=SwarmflowBudgetRail(self._budget),
+            budget_rail=SwarmflowBudgetRail(self._budget, workflow_budget=self._workflow_budget),
         )
         self._sessions[member_name] = state
         if kind == "human":

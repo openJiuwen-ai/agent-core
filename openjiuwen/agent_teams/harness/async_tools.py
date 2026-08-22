@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -239,6 +240,32 @@ class AsyncToolRuntime:
                 record.error = "cancelled"
             self._signal(task_id)
             raise
+        except BudgetExhausted as exc:
+            # A budget ceiling is a BaseException (not Exception): without this
+            # branch it would escape the tool's ``except Exception`` and kill the
+            # task silently — the leader would see ``launched`` and then nothing.
+            # Catch it here so the run reports a terminal failure the leader can
+            # act on: ``format_failed`` (if any) renders the message from the
+            # exception's structured fields (scope / spent / total / top_phases /
+            # workflow_spent / workflow_total); otherwise ``str(exc)`` carries
+            # the detail and the generic ``async_tool.failed`` template wraps it.
+            team_logger.warning(
+                "[AsyncToolRuntime] task %s (%s) hit budget ceiling: %s",
+                task_id,
+                tool_name,
+                exc,
+            )
+            if record is not None:
+                record.status = "error"
+                record.error = str(exc)
+            self._signal(task_id)
+            failure_text = None
+            if record is not None and record.format_failed is not None:
+                failure_text = record.format_failed(exc)
+            if failure_text is None:
+                failure_text = t("async_tool.failed", tool=tool_name, error=str(exc))
+            await self._inject(failure_text)
+            return
         except Exception as exc:  # noqa: BLE001 - report any tool failure back
             team_logger.error(
                 "[AsyncToolRuntime] task %s (%s) failed: %s",

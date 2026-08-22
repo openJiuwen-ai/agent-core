@@ -288,6 +288,22 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "swarmflow.completed": "[Swarmflow 完成] run_id={run_id}\n{result}",
         "swarmflow.failed": "[Swarmflow 失败] run_id={run_id}，错误={error}",
+        "swarmflow.budget_exhausted": (
+            "[Swarmflow 撞顶] run_id={run_id}\n"
+            "{detail}\n"
+            "触发层：{trigger_layer}（spent={spent}/{total}）。{workflow_contrast}"
+            "消耗最高的 phase：{top_phases}。{guidance}"
+        ),
+        "swarmflow.budget_exhausted.workflow_guidance": (
+            "该上限为本次工作流的单次额度（与会话总额独立），由用户设定不可改；"
+            "必须重新设计工作流以降低 token 消耗（简化流程、减少 agent、更换更省 token 的模型等），"
+            "新 run 的额度会重置。请重新设计工作流后再重试 swarmflow。"
+        ),
+        "swarmflow.budget_exhausted.session_guidance": (
+            "该预算为团队共享总额（会话级），当前已耗尽。"
+            "在未上调预算上限前，重启或新建工作流均会立即再次撞顶，"
+            "请先上调预算上限并新开会话后再重试 swarmflow。"
+        ),
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[后台任务] {tool} 已启动（task_id={task_id}）。完成后结果会自动回灌给你，"
@@ -595,6 +611,25 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "swarmflow.completed": "[Swarmflow completed] run_id={run_id}\n{result}",
         "swarmflow.failed": "[Swarmflow failed] run_id={run_id}, error={error}",
+        "swarmflow.budget_exhausted": (
+            "[Swarmflow budget exhausted] run_id={run_id}\n"
+            "{detail}\n"
+            "Triggered layer: {trigger_layer} (spent={spent}/{total}). {workflow_contrast}"
+            "Heaviest phases: {top_phases}. {guidance}"
+        ),
+        "swarmflow.budget_exhausted.workflow_guidance": (
+            "This ceiling is the run's per-run token budget (independent of the session "
+            "total), set by the user and must NOT be changed; you must redesign the "
+            "workflow to consume fewer tokens (simplify / fewer agents / cheaper model) "
+            "and relaunch — the new run's ceiling resets. Redesign the workflow before "
+            "retrying swarmflow."
+        ),
+        "swarmflow.budget_exhausted.session_guidance": (
+            "This is the team's shared (session-wide) token ceiling and is currently "
+            "exhausted. Until the ceiling is raised, relaunching or starting a new "
+            "workflow will hit the same gate immediately — raise the ceiling and open a "
+            "new session before retrying swarmflow."
+        ),
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[Background task] {tool} started (task_id={task_id}). The result will be "

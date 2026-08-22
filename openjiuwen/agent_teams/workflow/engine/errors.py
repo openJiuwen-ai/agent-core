@@ -53,7 +53,16 @@ class WorkflowAborted(BaseException):
 
 
 class BudgetExhausted(BaseException):
-    """The run hit its token ceiling at an ``agent()`` / ``send()`` budget gate.
+    """The run hit a token ceiling at an ``agent()`` / ``send()`` budget gate.
+
+    Two distinct ceilings share this type, distinguished by ``scope``:
+
+    - ``scope="workflow"``: the **per-run** ledger (``rt.workflow_budget``) is
+      exhausted. It resets to ``spent=0`` on each new ``swarmflow`` invocation,
+      so this is **retryable by revising the workflow** and relaunching.
+    - ``scope="session"``: the **team-wide** ledger (``rt.budget``) is
+      exhausted. It is shared across every run and never resets, so relaunching
+      only hits the same gate.
 
     A ``BaseException`` for the same reason as :class:`WorkflowAborted`: a
     ceiling a script can swallow with ``except Exception`` (and keep spawning
@@ -65,3 +74,16 @@ class BudgetExhausted(BaseException):
     reruns the blocked call, so the run's completed prefix stays journalled and
     the exception surfaces as a run failure.
     """
+
+    def __init__(self, message: str, *, scope: str = "session",
+                 spent: int | None = None, total: int | None = None,
+                 top_phases: list[tuple[str, int]] | None = None,
+                 workflow_spent: int | None = None,
+                 workflow_total: int | None = None) -> None:
+        super().__init__(message)
+        self.scope = scope   # "workflow" | "session"
+        self.spent = spent
+        self.total = total
+        self.top_phases = top_phases             # top-3 phases by consumption: list[(phase, tokens)]
+        self.workflow_spent = workflow_spent     # workflow-level spent at exhaustion (contrast for session)
+        self.workflow_total = workflow_total     # workflow-level total at exhaustion

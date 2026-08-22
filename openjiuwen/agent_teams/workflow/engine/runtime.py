@@ -43,15 +43,31 @@ class Runtime:
     strict: bool = False
     spawn_limit: int = 1000
     budget: BudgetLedger = field(default_factory=BudgetLedger)
-    """The run's token ledger, shared by reference with the backend (which
-    reports real usage into it). Default: an unbounded ledger. The engine only
-    reads it — at the ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
+    """The **session-wide** (team/leader) token ledger, shared by reference with
+    the backend (which reports real usage into it). Monotonic across runs — never
+    resets. Default: an unbounded ledger. The engine only reads it — at the
+    ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
+    workflow_budget: BudgetLedger = field(default_factory=BudgetLedger)
+    """The **per-run** token ledger, shared by reference with the backend like
+    ``budget`` but reset to ``spent=0`` on each new ``swarmflow`` invocation.
+    Its ``total`` is the script-declared ``workflow_token_limit`` (a per-run
+    ceiling independent of the session budget). The engine reads it at the
+    per-run ``_check_budget`` gate (``scope="workflow"``). Hitting it is
+    retryable by revising the workflow, unlike the session ceiling."""
     cap_override: int | None = None  # force the concurrency cap (tests)
     abort_event: asyncio.Event | None = field(default=None, repr=False)
     """External cooperative pause signal. When set, the ``agent()`` /
     ``AgentSession.send()`` abort checkpoints raise ``WorkflowAborted`` — the
     in-flight call does not journal and the run unwinds (resume reruns it).
     ``None`` disables the checkpoints (default; full back-compat)."""
+    persist_workflow_budget: "Callable[[BudgetLedger], None] | None" = field(default=None, repr=False)
+    """Optional sync callback to durably snapshot ``workflow_budget`` to disk
+    (the ``<journal>.budget`` sidecar). Fired by the emit hooks at agent
+    boundaries (best-effort: a soft ceiling tolerates losing the in-flight
+    agent's count) and awaited once at ``finalize`` (durable terminal snapshot).
+    Kept on ``Runtime`` (not ``BudgetLedger``) so the ledger stays
+    business-agnostic — only the engine layer does I/O, mirroring
+    ``progress_sink`` / ``log_sink``."""
 
     # Mutable run state (created/advanced inside the running loop).
     agent_gate: AgentAdmission | None = field(default=None, repr=False)
