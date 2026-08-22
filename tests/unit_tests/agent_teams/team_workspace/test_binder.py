@@ -170,3 +170,29 @@ def test_cleanup_team_releases_dynamic_preserves_predefined() -> None:
     assert not is_dir_link(apaths.team_member_workspace_dir("teamA", "worker"))
     assert shared_real.is_dir(), "predefined shared dir preserved"
     assert not is_dir_link(apaths.team_member_workspace_dir("teamA", "shared"))
+    # The disbanded team must drop its name from the predefined ref list too;
+    # leaving it would leak a reference to a team that no longer exists.
+    assert MemberRefStore().get_ref_teams("teamA", "shared", mode=MEMBER_MODE_PREDEFINED) == [], (
+        "predefined ref list must drop the disbanded team"
+    )
+
+
+@pytest.mark.level0
+def test_cleanup_team_drops_only_the_disbanded_team_from_shared_predefined() -> None:
+    """A second team's reference survives; only the disbanded one is dropped."""
+    binder = MemberWorkspaceBinder()
+    # Same predefined member shared across two teams.
+    binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
+    binder.setup(_binding("teamB", "shared", MEMBER_MODE_PREDEFINED))
+    shared_real = apaths.get_agent_teams_home() / "shared"
+
+    binder.cleanup_team("teamA")
+
+    assert shared_real.is_dir(), "predefined shared dir preserved across teams"
+    # A predefined ref list is per-member (one .refs.json under the shared dir),
+    # so either team_name resolves the same file: after disbanding teamA only
+    # teamB's reference may remain.
+    refs_after = MemberRefStore().get_ref_teams("teamA", "shared", mode=MEMBER_MODE_PREDEFINED)
+    assert refs_after == ["teamB"], (
+        f"disbanded teamA dropped, surviving teamB kept; got {refs_after}"
+    )

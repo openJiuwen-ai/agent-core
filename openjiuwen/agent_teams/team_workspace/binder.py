@@ -253,8 +253,15 @@ class MemberWorkspaceBinder:
         dynamic member's refcount and delete its real directory when the count
         reaches zero. Predefined (shared) and leader (in-team) directories are
         never removed on zero — the store enforces that from ``mode``.
+
+        Predefined ref lists are also released: a disbanded team must drop its
+        name from each predefined member's ``.refs.json`` so the list does not
+        leak it (``cleanup_team_dynamic_members`` only sees ``<team>#`` dirs).
+        The predefined real directory is kept either way (shared-asset
+        semantics).
         """
         self.cleanup_team_links(team_name)
+        self._ref_store.release_predefined_refs(team_name)
         for member_name in self.cleanup_team_dynamic_members(team_name):
             self.delete_if_zero(team_name, member_name)
 
