@@ -17,7 +17,7 @@ the engine when it emits one.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +47,8 @@ class ProgressKind:
     LOG = "log"
     WORKFLOW_COMPLETED = "workflow_completed"
     WORKFLOW_FAILED = "workflow_failed"
+    WORKFLOW_PAUSED = "workflow_paused"
+    WORKFLOW_STOPPED = "workflow_stopped"
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +118,8 @@ class WorkflowProgressEvent:
     answer: str | None = None
     tokens: int | None = None
     budget: dict | None = None
+    workflow_budget: dict | None = None
+    budget_exhausted_scope: str | None = None
     phase_type: str | None = None
     nested_phase: str | None = None
     parent_phase: str | None = None

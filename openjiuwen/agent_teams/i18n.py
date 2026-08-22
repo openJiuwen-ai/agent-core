@@ -288,6 +288,50 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "swarmflow.completed": "[Swarmflow 完成] run_id={run_id}\n{result}",
         "swarmflow.failed": "[Swarmflow 失败] run_id={run_id}，错误={error}",
+        "swarmflow.budget_exhausted": (
+            "[Swarmflow 撞顶] run_id={run_id}\n"
+            "{detail}\n"
+            "触发层：{trigger_layer}（spent={spent}/{total}）。{workflow_contrast}"
+            "消耗最高的 phase：{top_phases}。{guidance}"
+        ),
+        "swarmflow.budget_exhausted.workflow_guidance": (
+            "该上限为本次工作流的单次额度（与会话总额独立），由用户设定不可改；"
+            "必须重新设计工作流以降低 token 消耗（简化流程、减少 agent、更换更省 token 的模型等）后重跑。"
+            "重跑方式：以上面的 run_id 作为 resume_id、连同改后的 script_path 一起传给 swarmflow——"
+            "未改动的 agent 调用直接复用上次的结果缓存（按其记录的 token 重新计入，不重新调用模型），"
+            "只有改动的部分重新计费，因此可原位修改脚本、保持 META name 不变，"
+            "把改动的预期消耗压回额度内即可。请重新设计工作流后，"
+            "以上面的 run_id 作为 resume_id 重试 swarmflow。"
+        ),
+        "swarmflow.budget_exhausted.session_guidance": (
+            "该预算为团队共享总额（会话级），当前已耗尽。"
+            "在未上调预算上限前，重启或新建工作流均会立即再次撞顶，"
+            "请先上调预算上限并新开会话后再重试 swarmflow。"
+        ),
+        # tool_swarmflow.py — completed-but-over-budget feedback (rail force-finish)
+        "swarmflow.budget_overrun": (
+            "[Swarmflow 超预算完成] run_id={run_id}\n"
+            "本次 run 已完成并交付结果，但消耗超出了用户设定的上限："
+            "{trigger_layer}（spent={spent}/{total}）。{workflow_contrast}"
+            "消耗最高的 phase：{top_phases}。\n"
+            "{guidance}"
+        ),
+        "swarmflow.budget_overrun.workflow_guidance": (
+            "该上限为本次工作流的单次额度（用户设定，不可改），本次 run 已违反。"
+            "若需重跑，请重新设计工作流，把预期消耗压回该额度内"
+            "（精简高消耗 phase、减少 agent 数、限制输出长度、更换更省 token 的模型）。"
+            "重跑额度规则：同名重跑=额度全新重置（已终结的 run 不结转已花额度），"
+            "且未改动的 agent 调用直接复用上次的结果缓存（不重新调用模型、不计 token），"
+            "只有改动的部分重新计费——因此可直接原位修改脚本、保持 META name 不变重跑，"
+            "把改动的预期消耗压回额度内即可；仅中断未终结的 run（崩溃/暂停/停止）"
+            "才续算剩余额度（剩余额度=上限−上次已花）。"
+            "改完后以相同 META name 再次调用 swarmflow。"
+        ),
+        "swarmflow.budget_overrun.session_guidance": (
+            "该预算为团队共享总额（会话级），当前已超限。结果已照常交付，"
+            "但在用户上调预算上限前，任何新的 swarmflow 调用都会立即撞顶——"
+            "请先向用户说明超限情况并请求上调预算（或新开会话），不要盲目重跑。"
+        ),
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[后台任务] {tool} 已启动（task_id={task_id}）。完成后结果会自动回灌给你，"
@@ -595,6 +639,60 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "swarmflow.completed": "[Swarmflow completed] run_id={run_id}\n{result}",
         "swarmflow.failed": "[Swarmflow failed] run_id={run_id}, error={error}",
+        "swarmflow.budget_exhausted": (
+            "[Swarmflow budget exhausted] run_id={run_id}\n"
+            "{detail}\n"
+            "Triggered layer: {trigger_layer} (spent={spent}/{total}). {workflow_contrast}"
+            "Heaviest phases: {top_phases}. {guidance}"
+        ),
+        "swarmflow.budget_exhausted.workflow_guidance": (
+            "This ceiling is the run's per-run token budget (independent of the session "
+            "total), set by the user and must NOT be changed; you must redesign the "
+            "workflow to consume fewer tokens (simplify / fewer agents / cheaper "
+            "model) and relaunch. Relaunch by passing resume_id=<the run_id above> "
+            "together with the edited script_path: unchanged agent calls replay from "
+            "the prior run's result cache (re-billed from their stored tokens, no "
+            "model call) and only the changed parts bill afresh, so edit the script "
+            "in place, keep the META name, and fit the CHANGED parts' expected spend "
+            "under the ceiling. Redesign and retry swarmflow with "
+            "resume_id=<the run_id above>."
+        ),
+        "swarmflow.budget_exhausted.session_guidance": (
+            "This is the team's shared (session-wide) token ceiling and is currently "
+            "exhausted. Until the ceiling is raised, relaunching or starting a new "
+            "workflow will hit the same gate immediately — raise the ceiling and open a "
+            "new session before retrying swarmflow."
+        ),
+        # tool_swarmflow.py — completed-but-over-budget feedback (rail force-finish)
+        "swarmflow.budget_overrun": (
+            "[Swarmflow finished over budget] run_id={run_id}\n"
+            "The run completed and delivered its result, but the spend passed the "
+            "user-set ceiling: {trigger_layer} (spent={spent}/{total}). {workflow_contrast}"
+            "Heaviest phases: {top_phases}.\n"
+            "{guidance}"
+        ),
+        "swarmflow.budget_overrun.workflow_guidance": (
+            "This ceiling is the run's per-run token budget (independent of the "
+            "session total), set by the user and must NOT be changed — this run "
+            "violated it. Before relaunching, redesign the workflow so its expected "
+            "spend fits within it (trim the heaviest phases, fewer agents, shorter "
+            "outputs, a cheaper model). Relaunch budget rules: relaunching under the "
+            "SAME META name resets the ceiling (a terminal prior run carries no "
+            "spent forward) and unchanged agent calls replay from the prior run's "
+            "result cache (no model call, zero tokens) — only the changed parts are "
+            "billed again, so edit the script in place, keep the META name, and fit "
+            "the CHANGED parts' expected spend under the ceiling; only an "
+            "interrupted (non-terminal) run continues its ledger on relaunch "
+            "(remaining = ceiling − prior spent). Call swarmflow again under the "
+            "same META name once redesigned."
+        ),
+        "swarmflow.budget_overrun.session_guidance": (
+            "This is the team's shared (session-wide) token ceiling and it is now "
+            "overrun. The result was delivered as usual, but until the user raises "
+            "the ceiling, any new swarmflow call hits the same gate immediately — "
+            "explain the overrun to the user and ask for a raise (or a new session) "
+            "instead of blindly retrying."
+        ),
         # harness/async_tools.py — async background-tool framework feedback
         "async_tool.launched": (
             "[Background task] {tool} started (task_id={task_id}). The result will be "

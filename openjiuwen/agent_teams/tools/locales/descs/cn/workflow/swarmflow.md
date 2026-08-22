@@ -33,7 +33,7 @@
 - `script`（**当前可用**）：内联脚本源码，无需落盘。**简单场景优先用它**——直接把源码传进来跑，省去写文件、迭代最快。
 - `script_path`（**当前可用**）：磁盘上的脚本文件路径。适合已落盘的脚本（`swarmskill-creator` 产出、或需反复迭代 / resume 的脚本）。
 - `name`（接口就位、执行推进中）：已保存 / 具名工作流，解析为一个自包含脚本。
-- `resume_id`（接口就位、执行推进中）：上次运行的 run_id，断点续跑。
+- `resume_id`：上次运行的 run_id；单独传=断点续跑，配合 `action`=运行态控制（暂停/恢复/停止）。
 - `args`：传给脚本 `run(args)` 的**字符串**参数（如研究问题、目标路径）。脚本内若要结构化入参，自行 `json.loads(args)`。
 
 > **按复杂度选来源**：编排结构一眼看清的简单任务，**优先内联 `script`** 直接跑，或自己手写一个极简脚本文件走 `script_path`——不必惊动 `swarmskill-creator`。任务复杂（多阶段 / 多角色 / 需重试·降级·预算等可执行约束 / 要沉淀成可复用技能）才用 `swarmskill-creator` skill 走完整开发 + 验证流程产出脚本——**它产出的是磁盘脚本文件，随后用 `swarmflow(script_path=...)` 运行**（不要把整段源码再内联进 `script`）。
@@ -44,7 +44,7 @@
 >
 > **迭代脚本**：编辑磁盘脚本后用同一个 `script_path` 重新调用即可，无需重发整段源码。`swarmskill-creator` 不可用时如实告知用户、不要硬调或手搓。
 >
-> `name`（已保存 / 具名工作流）与 `resume_id`（断点续跑）接口就位、执行推进中，当前调用会以**明确错误**提示拒绝（绝不静默无操作）。
+> `name`（已保存 / 具名工作流）仍不支持，当前调用会以**明确错误**提示拒绝（绝不静默无操作）；`resume_id` 已支持（可配合 `action` 做运行态控制）。
 
 ## 脚本结构（Python）
 脚本是一个 Python 模块：顶层 `META`（纯字面量）+ `async def run(args)`，从 `swarmflow` 导入原语。
@@ -57,6 +57,7 @@ META = {
     "description": "一行描述，权限对话框里展示",
     "whenToUse": "适合做什么（可选，工作流列表里展示）",
     "phases": [{"title": "Search", "detail": "并行检索"}, {"title": "Verify", "model": "..."}],  # title 也可为纯字符串
+    "workflow_token_limit": 200000,  # 本次 run 独立 token 额度；用户给出预算时必填（见「预算」节）
 }
 
 async def run(args):
@@ -66,7 +67,7 @@ async def run(args):
 ```
 
 - `META` 必须是**纯字面量**——不能有变量、函数调用、f-string、字符串拼接（加载期静态提取）。
-- 必填 `name` / `description`；可选 `whenToUse`（工作流列表展示）、`phases`。
+- 必填 `name` / `description`；可选 `whenToUse`（工作流列表展示）、`phases`、`workflow_token_limit`（本次 run 的独立 token 额度，纯整数；见「预算 budget」节）。
 - `phases[].title` 与脚本里 `phase()` 调用的标题**精确匹配**；没有对应 `phase()` 的项自成一个进度组。某阶段项可带 `model` 覆盖该阶段默认模型（`{"title": "Verify", "model": "..."}`）。
 - **返回值语义**：worker 被告知"它的最终文本**就是**返回值"（不是给人看的消息），所以它返回**原始数据**。`run(args)` 的返回值（通常是 dict）即工作流最终结果，自动回灌给调用者。
 
@@ -129,13 +130,21 @@ c = await parallel([... for x in b])
 - 校验失败由模型自动重试；耗尽返回 `None`。用 `compact()` / `.filter` 过滤 `None` 再用。
 
 ## 预算 budget（硬天花板）
+- **两层预算**：`budget.*` 是**会话共享总额**（由部署方配置）；`META["workflow_token_limit"]` 是**本次 run 的独立额度**。用户在请求里给出 token / 预算数字（如"预算 90K""控制在 20 万 token 内"）时，**必须**把它换算成整数写进 `META["workflow_token_limit"]`——引擎按 run 计账、UI 显示为 run 预算徽标，超限时你会收到反馈并需重设脚本；不写则该 run 无独立上限（只受会话总额约束，UI 也无 run 徽标）。
 - `budget.total`（用户本轮 token 目标，由部署方配置，未设为 `None`）、`budget.spent()`（已花 token，**取自模型返回的真实用量**、含输入+输出；跨主循环 + 所有工作流共享，非按工作流独立）、`budget.remaining()`（`max(0, total - spent())`，无目标时为 `None`）。
 - **硬天花板**：`spent()` 达到 `total` 后，在跑的 agent 会在它下一次模型调用处被就地终止，后续 `agent()` 直接报错终止整个运行（该错误 `except Exception` 拦不住）。据此动态决定深度（`while budget.total and budget.remaining() > N`）或静态伸缩扇出（`FLEET = budget.total // 100_000 if budget.total else 5`）。没设 `total` 时 `remaining()` 是 `None`——动态循环必须 `guard budget.total`，否则会一直跑到 1000 上限。
 - `spent()` 是**实时**的：并发 agent 的消耗一返回就入账，所以轮询到的是全局真账，不是上一轮的旧值。天花板是兜底——**脚本自己按 `remaining()` 收尾**才能干净结束；撞上天花板则整个运行判失败。单次调用的用量只有返回后才入账，故 `spent()` 允许小幅越过 `total`。
 
 ## 断点续跑（resume）
 - `resume_id` = 上次运行的 **run_id**（即本工具调用返回的句柄）。续跑时**内容寻址**：未变的 `agent()` 调用瞬时复用缓存结果；**上游 prompt 改 → 下游签名变 → 自动重跑**（无需手动标记）。**同脚本 + 同 args → 100% 缓存命中**。
-- 由异步工具执行框架维护内容寻址 journal（与参考工具的 runId 机制一致）。（执行推进中。）
+- 由异步工具执行框架维护内容寻址 journal（与参考工具的 runId 机制一致）。
+
+## 运行态控制（pause / resume / stop）
+工作流正在后台跑时，用户若要控制它，用本工具 `resume_id` + `action` 组合——`run_id` 取本工具之前调用返回的句柄。按用户措辞选择动作：
+- 用户说"停一下 / 暂停 workflow"→ `swarmflow(resume_id=<run_id>, action='pause')`：暂停执行，**保留已完成的进度前缀**，之后可用 `action='resume'` 从暂停处续跑。
+- 用户说"接着跑 / 恢复"→ `action='resume'`。
+- 用户说"别跑了 / 停止"→ `action='stop'`：**终结性**动作（不可再 resume），但只停 workflow、**不停 session**。
+- 例：`swarmflow(resume_id='wf_xxx', action='stop')`。
 
 ## 编排模式库（按任务规模组合）
 - **对抗验证**：每个发现派 N 个独立怀疑者去**反驳**，多数反驳则淘汰——防"看似合理实则错"。

@@ -432,6 +432,15 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     run_id: Optional[str] = Field(
         default=None, description="Unique run identifier, set by SwarmflowTool for all events of one run"
     )
+    relaunch_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "How this run's launch differs from a fresh one: 'resume' (normal "
+            "pause→resume, the tree continues) or 'relaunch' (script-edit re-run "
+            "under the same run_id, the phase/agent structure is reset). None on "
+            "a fresh launch."
+        ),
+    )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
     description: Optional[str] = Field(default=None, description="The swarmflow script's META description")
     phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
@@ -465,6 +474,21 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     tokens: Optional[int] = Field(default=None, description="Per-agent token usage from the result loop.")
     budget: Optional[dict] = Field(
         default=None, description="Leader shared-pool snapshot {total,spent,remaining,scope,exhausted}."
+    )
+    workflow_budget: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Per-run ledger snapshot (same shape as budget, scope=workflow); "
+            "None when the script declares no workflow_token_limit."
+        ),
+    )
+    budget_exhausted_scope: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which ledger actually triggered the workflow_failed: 'session' "
+            "or 'workflow'; None on non-budget failures. Frontend uses this "
+            "(not error-text matching) to decide the exhausted layer."
+        ),
     )
     phase_type: Optional[str] = Field(default=None, description='"child" for nested-workflow child phase declarations.')
     nested_phase: Optional[str] = Field(

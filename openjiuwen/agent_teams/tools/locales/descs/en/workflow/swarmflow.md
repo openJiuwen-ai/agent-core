@@ -33,7 +33,7 @@ Larger work can be **split into several scripts run in sequence** (start the nex
 - `script` (**available today**): inline script source, no disk write needed. **Prefer it for simple cases** — pass the source straight in to run, skipping the file and iterating fastest.
 - `script_path` (**available today**): path to a script file on disk. Best for scripts already on disk (`swarmskill-creator` output, or ones you iterate / resume repeatedly).
 - `name` (interface in place, execution coming): a saved / named workflow, resolved to a self-contained script.
-- `resume_id` (interface in place, execution coming): a prior run's run_id, to resume.
+- `resume_id`: a prior run's run_id; on its own = resume, combined with `action` = runtime control (pause/resume/stop).
 - `args`: a **string** argument passed to the script's `run(args)` (e.g. a question, a target path). For structured input, `json.loads(args)` inside the script.
 
 > **Pick a source by complexity**: for a simple task whose orchestration is obvious at a glance, **prefer inline `script`** and run it directly, or hand-write a minimal script file and use `script_path` — no need to involve `swarmskill-creator`. Only for complex work (multi-phase / multi-role / needing executable retry·degrade·budget constraints / meant to become a reusable skill) use the `swarmskill-creator` skill to author a script through its full develop-and-validate flow — **it produces a script file on disk, which you then run with `swarmflow(script_path=...)`** (don't re-inline the whole source into `script`).
@@ -44,7 +44,7 @@ Larger work can be **split into several scripts run in sequence** (start the nex
 >
 > **To iterate**: edit the script file on disk and re-invoke with the same `script_path` — no need to resend the source. If `swarmskill-creator` is unavailable, tell the user honestly rather than forcing the call or hand-writing one.
 >
-> `name` (saved / named workflow) and `resume_id` (resume) have their interface in place but execution is still coming; a call today is rejected with an **explicit error** (never a silent no-op).
+> `name` (saved / named workflow) is still not supported; a call today is rejected with an **explicit error** (never a silent no-op). `resume_id` is now supported (optionally combined with `action` for runtime control).
 
 ## Script structure (Python)
 A script is a Python module: a top-level `META` (pure literal) plus `async def run(args)`, importing the primitives from `swarmflow`.
@@ -57,6 +57,7 @@ META = {
     "description": "one line, shown in the permission dialog",
     "whenToUse": "what it's for (optional, shown in the workflow list)",
     "phases": [{"title": "Search", "detail": "parallel retrieval"}, {"title": "Verify", "model": "..."}],  # title may be a plain string
+    "workflow_token_limit": 200000,  # per-run token ceiling; required when the user gives a budget (see Budget)
 }
 
 async def run(args):
@@ -66,7 +67,7 @@ async def run(args):
 ```
 
 - `META` must be a **pure literal** — no variables, function calls, f-strings, or string concatenation (extracted statically at load time).
-- Required `name` / `description`; optional `whenToUse` (shown in the workflow list), `phases`.
+- Required `name` / `description`; optional `whenToUse` (shown in the workflow list), `phases`, `workflow_token_limit` (the run's own token ceiling, a plain integer; see Budget).
 - `phases[].title` must match the `phase()` calls exactly; a phase with no matching call forms its own progress group. A phase entry may carry `model` to override that phase's default model (`{"title": "Verify", "model": "..."}`).
 - **Return-value semantics**: a worker is told its final text **IS** the return value (not a human-facing message), so it returns **raw data**. The value `run(args)` returns (usually a dict) is the workflow's final result, fed back to the caller automatically.
 
@@ -129,13 +130,21 @@ that middle `transform` needs no barrier — rewrite as a pipeline with the tran
 - Validation failure is retried by the model; on exhaustion it returns `None`. Filter `None` with `compact()` / `.filter` before use.
 
 ## Budget (hard ceiling)
+- **Two budget layers**: `budget.*` is the **session-wide shared total** (set by the deployment); `META["workflow_token_limit"]` is the run's **own ceiling**. When the user's request states a token/budget figure ("budget 90K", "keep it under 200k tokens"), you MUST convert it to an integer and write it into `META["workflow_token_limit"]` — the engine bills per run, the UI shows it as the run budget badge, and an overrun feeds back to you to redesign the script; omit it and the run has no ceiling of its own (only the session total binds, and no run badge shows).
 - `budget.total` (the turn's token target, set by the deployment, `None` if unset), `budget.spent()` (tokens spent, **taken from the usage the model itself reports**, input + output; shared across the main loop and all workflows — not per-workflow), `budget.remaining()` (`max(0, total - spent())`, `None` when no target).
 - **Hard ceiling**: once `spent()` reaches `total`, agents already running are stopped where they stand at their next model call, and a further `agent()` raises and ends the whole run (that error is not catchable with `except Exception`). Drive depth dynamically (`while budget.total and budget.remaining() > N`) or scale fan-out statically (`FLEET = budget.total // 100_000 if budget.total else 5`). With no `total` set, `remaining()` is `None` — a dynamic loop MUST guard on `budget.total`, else it runs to the 1000 cap.
 - `spent()` is **live**: concurrent agents are billed the moment each model call returns, so polling it sees the real global figure, not a stale one. The ceiling is a backstop — **wind down on `remaining()` yourself** to finish cleanly; hitting the ceiling fails the run. A single call is only billed once it returns, so `spent()` may overshoot `total` slightly.
 
 ## Resume
 - `resume_id` = a prior run's **run_id** (the handle this tool returns). On resume it is **content-addressed**: unchanged `agent()` calls reuse cached results instantly; an upstream prompt change flips the downstream signature and re-runs it automatically (no manual marking). **Same script + same args → 100% cache hit.**
-- Maintained by the async-tool execution framework via a content-addressed journal (same model as the reference tool's runId). (Execution coming.)
+- Maintained by the async-tool execution framework via a content-addressed journal (same model as the reference tool's runId).
+
+## Runtime control (pause / resume / stop)
+When a workflow is still running in the background and the user wants to control it, combine `resume_id` + `action` on this tool — `run_id` is the handle this tool returned on the earlier launch. Pick the action from the user's wording:
+- User says "hold on / pause the workflow" → `swarmflow(resume_id=<run_id>, action='pause')`: pauses execution, **preserving the completed prefix**, which `action='resume'` later continues from.
+- User says "carry on / resume" → `action='resume'`.
+- User says "never mind / stop" → `action='stop'`: **terminal** (cannot be resumed), but it only stops the workflow — it does **not** stop the session.
+- Example: `swarmflow(resume_id='wf_xxx', action='stop')`.
 
 ## Orchestration pattern library (compose by scale)
 - **Adversarial verify**: spawn N independent skeptics per finding, each told to **refute**; kill it if a majority refute — stops plausible-but-wrong findings.
