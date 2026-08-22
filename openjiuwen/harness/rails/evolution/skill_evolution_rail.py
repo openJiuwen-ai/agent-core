@@ -814,13 +814,20 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         ctx: Optional[AgentCallbackContext] = None,
         *,
         snapshot: Optional[dict] = None,
+        trigger_point: Optional[str] = None,
     ) -> None:
         """Run skill evolution based on the collected trajectory.
 
         In async mode: ctx=None, snapshot contains data captured by _snapshot_for_evolution.
         In sync mode: ctx is active, snapshot=None (backward-compatible).
         """
-        logger.info("[SkillEvolutionRail] run_evolution called")
+        resolved_trigger = trigger_point
+        if resolved_trigger is None and snapshot is not None:
+            resolved_trigger = snapshot.get("trigger_point")
+        logger.info(
+            "[SkillEvolutionRail] run_evolution called (trigger=%s)",
+            resolved_trigger or "unknown",
+        )
 
         try:
             # Async path: read from snapshot
