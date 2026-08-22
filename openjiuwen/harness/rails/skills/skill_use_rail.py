@@ -491,7 +491,7 @@ class SkillUseRail(DeepAgentRail):
                         skill_name=skill.name,
                         description=skill.description,
                         language=self.system_prompt_builder.language,
-                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
+                        skill_directory=str(self._skill_directory(skill)),
                     )
                 )
             return build_skills_section(
@@ -695,7 +695,7 @@ class SkillUseRail(DeepAgentRail):
                     skill_name=skill.name,
                     description=self._get_skill_description(skill),
                     language=self.system_prompt_builder.language,
-                    # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
+                    skill_directory=str(self._skill_directory(skill)),
                 )
             )
 
@@ -850,9 +850,9 @@ class SkillUseRail(DeepAgentRail):
         return str(description).strip()
 
     @staticmethod
-    def _skill_md_path(skill: Skill) -> Path:
-        """Return SKILL.md path for a skill."""
-        return skill.directory / "SKILL.md"
+    def _skill_directory(skill: Skill) -> Path:
+        """Return the absolute directory a skill and its bundled files live in."""
+        return Path(skill.directory).resolve()
 
     @staticmethod
     def _parse_skill_dirs(raw: str) -> List[str]:
