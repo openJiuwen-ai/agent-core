@@ -1,0 +1,24 @@
+# Raw prompts/responses and resumable call caches
+artifacts/real/cache/
+artifacts/mock/cache/
+
+# Learned parameters
+artifacts/real/checkpoints/
+artifacts/mock/checkpoints/
+
+# Local temporary material and partial downloads
+tmp/
+*.partial
+*.download
+
+# Python/test caches
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Never store local environment or credential files here
+.env
+.env.*
+
+# The repository root ignores *.txt broadly; this example's dependency list is source.
+!requirements.txt
