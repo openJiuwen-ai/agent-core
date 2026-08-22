@@ -426,11 +426,21 @@ class _AttachmentStubAgent(_StubAgent):
 class _StubMember:
     """Lightweight stand-in for the SQLModel TeamMember row."""
 
-    def __init__(self, member_name: str, display_name: str, desc: str = "", role: str = "teammate") -> None:
+    def __init__(
+        self,
+        member_name: str,
+        display_name: str,
+        desc: str = "",
+        role: str = "teammate",
+        prompt: str = "",
+    ) -> None:
         self.member_name = member_name
         self.display_name = display_name
         self.desc = desc
         self.role = role
+        # Mirrors the overlay-merged ``prompt`` on the real row; empty falls
+        # back to the constructor snapshot in ``_identity_body``.
+        self.prompt = prompt
 
 
 class _StubTeam:

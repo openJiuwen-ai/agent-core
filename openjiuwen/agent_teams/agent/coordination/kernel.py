@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness.prompts import resolve_language as _resolve_language
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 if TYPE_CHECKING:
@@ -194,6 +195,27 @@ class CoordinationKernel:
             remote_url = spec.workspace.remote_url if spec and spec.workspace else None
             await infra.workspace_manager.initialize(remote_url=remote_url)
             infra.workspace_initialized = True
+
+        # Seed the team-workspace framework baselines (system prompt templates
+        # + tool descriptions). These are static framework-source copies that
+        # do not depend on the team DB row or on the workspace manager, so they
+        # are written here on start — idempotently (evolved files are never
+        # overwritten; missing ones are seeded; framework upgrades land).
+        # Writing at ``coordination.start`` (before the first tool call) lets
+        # the read-side cache serve every member that runs in this process.
+        # Skipped when the evolution mechanism is off — no file, no cache prime.
+        team_name = host.team_name
+        evolution_enabled = blueprint.spec.evolution_enabled if blueprint and blueprint.spec else True
+        if team_name and evolution_enabled:
+            config_language = blueprint.spec.language if blueprint and blueprint.spec else None
+            resolved_language = _resolve_language(config_language)
+            from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+            cache = infra.workspace_manager.workspace_cache if infra.workspace_manager else None
+            WorkspaceAssembler(cache=cache).write_system_and_tool_prompts(
+                team_name=team_name,
+                language=resolved_language,
+            )
 
         # Wire up the team memory toolkit once the harness and workspace
         # are ready. init_toolkit is idempotent; calling it on every start

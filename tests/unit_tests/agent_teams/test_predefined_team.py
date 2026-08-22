@@ -200,6 +200,7 @@ class TestToolExclusion:
     @pytest.mark.level0
     def test_exclude_spawn_teammate_when_predefined(self, predefined_members):
         agent_team = AsyncMock()
+        agent_team.workspace_cache = None  # no evolvable-workspace cache in unit scope
         agent_team.hitt_enabled = MagicMock(return_value=False)
         agent_team.bridge_enabled = MagicMock(return_value=False)
         agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
@@ -221,6 +222,7 @@ class TestToolExclusion:
     @pytest.mark.level1
     def test_no_exclusion_without_predefined(self):
         agent_team = AsyncMock()
+        agent_team.workspace_cache = None  # no evolvable-workspace cache in unit scope
         agent_team.hitt_enabled = MagicMock(return_value=False)
         agent_team.bridge_enabled = MagicMock(return_value=False)
         agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
@@ -238,6 +240,7 @@ class TestToolExclusion:
     @pytest.mark.level1
     def test_exclude_does_not_affect_teammate_tools(self):
         agent_team = AsyncMock()
+        agent_team.workspace_cache = None  # no evolvable-workspace cache in unit scope
         agent_team.hitt_enabled = MagicMock(return_value=False)
         agent_team.bridge_enabled = MagicMock(return_value=False)
         agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
@@ -256,6 +259,7 @@ class TestToolExclusion:
     def test_leader_has_approval_tools_in_plan_mode(self):
         """Leader must get approve_plan and approve_tool in plan_mode — required for plan review."""
         agent_team = AsyncMock()
+        agent_team.workspace_cache = None  # no evolvable-workspace cache in unit scope
         agent_team.hitt_enabled = MagicMock(return_value=False)
         agent_team.bridge_enabled = MagicMock(return_value=False)
         agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
@@ -276,6 +280,7 @@ class TestToolExclusion:
     def test_leader_no_approval_tools_in_build_mode(self):
         """build_mode has no plan workflow — approval tools must be excluded from the leader."""
         agent_team = AsyncMock()
+        agent_team.workspace_cache = None  # no evolvable-workspace cache in unit scope
         agent_team.hitt_enabled = MagicMock(return_value=False)
         agent_team.bridge_enabled = MagicMock(return_value=False)
         agent_team.external_cli_kinds = MagicMock(return_value=frozenset())
@@ -296,6 +301,7 @@ class TestToolExclusion:
     def test_teammate_does_not_have_approval_tools(self):
         """approve_plan / approve_tool are leader-only, regardless of mode."""
         agent_team = AsyncMock()
+        agent_team.workspace_cache = None  # no evolvable-workspace cache in unit scope
         agent_team.hitt_enabled = MagicMock(return_value=False)
         agent_team.bridge_enabled = MagicMock(return_value=False)
         agent_team.external_cli_kinds = MagicMock(return_value=frozenset())

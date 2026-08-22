@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -105,6 +106,7 @@ async def test_external_cli_spawn_stops_runtime_on_cancel(monkeypatch):
         team_spec=team_spec,
     )
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -157,6 +159,7 @@ async def test_external_cli_spawn_without_initial_message_uses_empty_query(monke
     )
 
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -203,6 +206,7 @@ async def test_external_cli_spawn_binds_tracker_to_external_member_backend(monke
     )
 
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -255,6 +259,7 @@ async def test_external_cli_spawn_resume_passes_backend_flag(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -313,6 +318,7 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -376,6 +382,7 @@ async def test_external_cli_spawn_resolves_worktree_cwd_and_add_dirs(monkeypatch
     )
 
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -435,6 +442,7 @@ async def test_external_cli_spawn_explicit_cwd_wins_and_others_become_add_dirs(m
     )
 
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -484,6 +492,7 @@ async def test_external_cli_spawn_keeps_explicit_initial_message(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
+        team_agent=Mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,

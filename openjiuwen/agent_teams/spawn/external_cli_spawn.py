@@ -20,12 +20,13 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import TeamAgentSpec, TeamRuntimeContext
     from openjiuwen.agent_teams.team_context import TeamContextTracker
     from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -144,7 +145,7 @@ def _team_workspace_path(spec: "TeamAgentSpec", team_name: str) -> str:
     workspace = spec.workspace
     if workspace is not None and workspace.root_path:
         return workspace.root_path
-    return str(team_home(team_name) / "team-workspace")
+    return str(team_workspace_dir(team_name))
 
 
 def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
@@ -176,6 +177,7 @@ def _resolve_external_paths(
 
 async def external_cli_spawn(
     *,
+    team_agent: "TeamAgent",
     spec: "TeamAgentSpec",
     ctx: "TeamRuntimeContext",
     hitt_enabled: bool,
@@ -186,6 +188,7 @@ async def external_cli_spawn(
     """Launch the CLI for ``ctx.cli_agent`` and run it as a team member.
 
     Args:
+        team_agent: The leader TeamAgent that owns the team spec.
         spec: Team spec used to configure this external member shell.
         ctx: Runtime context for the external CLI member.
         hitt_enabled: Effective HITT flag from the caller's team instance.
@@ -275,6 +278,12 @@ async def external_cli_spawn(
         )
 
     teammate = _TeamAgent(card)
+    # Same team-level cache sharing as inprocess_spawn: the CLI
+    # member's TeamAgent runs in-process, so it must reuse the leader's built
+    # workspace cache instead of re-scanning the team-workspace md files.
+    # Injection must precede configure (see inprocess_spawn for the ordering
+    # rationale).
+    team_agent.share_workspace_cache_with(teammate)
     teammate.configure(spec, ctx, member_runtime=runtime)
     teammate_backend = teammate.team_backend
     runtime.bind_team_context_tracker(

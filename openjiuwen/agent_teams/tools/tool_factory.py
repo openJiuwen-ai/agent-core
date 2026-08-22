@@ -126,7 +126,10 @@ def create_team_tools(
             select the spawn tools, and ``fork_enabled``
             (``TeamAgentSpec.enable_fork``) drops the ``checkpoint`` tool
             plus ``spawn_teammate``'s fork properties and the description
-            section documenting them.
+            section documenting them. The team's resident
+            ``WorkspaceCache`` is read off ``agent_team.workspace_cache``
+            — it delegates to the workspace manager the way every other
+            consumer does, so no separate cache argument is threaded here.
         teammate_mode: Execution mode for teammates — "build_mode" or
             "plan_mode". Leader's approval tools (approve_plan / approve_tool)
             are only wired when teammate_mode == "plan_mode", since that's the
@@ -165,10 +168,20 @@ def create_team_tools(
         swarmflow_budget: The leader's shared ``BudgetLedger`` capping the tokens
             its swarmflow runs may burn. Non-None only for a swarmflow leader.
     """
+    from openjiuwen.agent_teams.prompts.loader import make_template_loader
     from openjiuwen.agent_teams.tools.locales import make_translator
     from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 
-    t = make_translator(lang)
+    # One translator closure bound to the team's resident WorkspaceCache —
+    # tool descriptions consult the evolved ``prompts/tool/`` files first,
+    # framework defaults otherwise. The cache is taken from the backend
+    # (which delegates to the workspace manager) — the single source every
+    # other consumer uses.
+    # ``None`` (no manager attached yet / evolution disabled / unit tests)
+    # → identical to the pre-evolvable ``make_translator`` closure.
+    cache = agent_team.workspace_cache
+    t = make_translator(lang, ws_cache=cache)
+    loader = make_template_loader(cache)
     task_mgr = agent_team.task_manager
     msg_mgr = agent_team.message_manager
     # Variant selection is a construction-time table lookup: every tool below
@@ -188,6 +201,7 @@ def create_team_tools(
             teammate_mode=teammate_mode,
             team_mode=team_mode,
             dispatch_mode=dispatch_mode,
+            loader=loader,
         ),
         "clean_team": CleanTeamTool(agent_team, t),
         # Member management — one tool per role_type (flat schema, no role branching)
@@ -212,9 +226,7 @@ def create_team_tools(
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),
         "verify_task": VerifyTaskTool(task_mgr, t, desc_key=_VERIFY_TASK_DESC_KEY[dispatch_mode]),
-        "member_complete_task": MemberCompleteTaskTool(
-            task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]
-        ),
+        "member_complete_task": MemberCompleteTaskTool(task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]),
         # Messaging
         "send_message": send_message_cls(
             msg_mgr,

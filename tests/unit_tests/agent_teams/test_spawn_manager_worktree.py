@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -77,6 +78,11 @@ class _FakeTeamBackend:
 
     async def get_member(self, member_name: str) -> SimpleNamespace | None:
         return await self.db.member.get_member(member_name, self.team_name)
+
+    async def get_team_info(self) -> None:
+        # Design-v5 U11: team-level B-class values come from ``team_info``;
+        # no team row in these worktree tests → None (ctx carries no values).
+        return None
 
     def get_external_cli_agent(self, member_name: str) -> None:
         return None
@@ -384,7 +390,7 @@ async def test_active_cleanup_removes_clean_non_contributing_worktree(tmp_path, 
     worktree = get_member_worktree(member)
     assert worktree is not None
     assert worktree.path is None
-    assert managed_root.endswith("/worktrees")
+    assert Path(managed_root).name == "worktrees"  # cross-platform (no "/" join)
 
 
 @pytest.mark.asyncio

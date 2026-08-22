@@ -258,17 +258,26 @@ class TeamContextTracker:
         if baseline.get(_IDENTITY_EMITTED):
             return None
         display_name = self._display_name
+        # The constructor snapshot is the spec-time DB baseline (pre-evolution).
+        # ``get_member`` returns the overlay-merged row, whose ``prompt`` may
+        # carry an evolved value (``member_prompt.md`` with ``evolved: true``).
+        # Prefer that over the snapshot so an evolved prompt reaches the
+        # identity body instead of being dropped at the last step (F_84 gap #1).
+        # ``display_name`` is read from the same row one line up.
+        member_prompt = self._member_prompt
         if self._team_backend is not None and self._member_name:
             member = await self._team_backend.get_member(self._member_name)
             if member is None:
                 return None
             display_name = member.display_name or ""
+            if member.prompt:
+                member_prompt = member.prompt
         updated[_IDENTITY_EMITTED] = True
         return build_identity_text(
             member_name=self._member_name,
             display_name=display_name,
             member_workspace_path=self._member_workspace_path,
-            member_prompt=self._member_prompt,
+            member_prompt=member_prompt,
             language=self._language,
             fork_capable=self._fork_capable,
         )
