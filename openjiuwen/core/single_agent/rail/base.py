@@ -650,6 +650,18 @@ class AgentRail(ABC):
 
     priority: int = 50
 
+    # Whether a rail instance is inherited by reference into a general-purpose
+    # subagent (see factory._inject_general_purpose_subagent). Rails that bind
+    # parent-specific state in ``init(self._deep_agent = agent)`` and resolve
+    # paths/config against the bound agent must opt out: the subagent's
+    # _ensure_initialized re-runs init_rail with the subagent, rebinding the
+    # shared instance to the child and silently breaking the parent (e.g.
+    # TaskExecutionRail resolving todo.json under the child's empty workspace,
+    # which drops task.start emission for all later parent stages). Default
+    # True preserves existing behaviour; opt-out rails are filtered out so the
+    # child simply does not run them.
+    inherit_to_subagents: bool = True
+
     def init(self, agent):
         pass
 
