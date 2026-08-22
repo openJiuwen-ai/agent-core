@@ -7,6 +7,8 @@ so it can be driven by the core TaskScheduler.
 """
 from __future__ import annotations
 
+import os
+import time
 from typing import (
     Any,
     AsyncIterator,
@@ -79,6 +81,7 @@ class TaskLoopEventExecutor(TaskExecutor):
         Yields:
             ControllerOutputChunk for each output.
         """
+        stage_started_at = time.monotonic()
         agent = self._deep_agent
         if agent.react_agent is None:
             logger.warning(
@@ -90,6 +93,7 @@ class TaskLoopEventExecutor(TaskExecutor):
         tasks = await self._task_manager.get_task(
             task_filter=self._make_filter(task_id)
         )
+        task_loaded_at = time.monotonic()
 
         query: Any = task_id
         raw_input: Any = None
@@ -138,17 +142,17 @@ class TaskLoopEventExecutor(TaskExecutor):
             else 1
         )
 
-        query_preview = str(query)[:120]
+        query_chars = len(str(query))
         if UserConfig.is_sensitive():
-            logger.info(
+            logger.debug(
                 f"[OuterLoop] iteration={iteration} "
                 f"task_id={task_id}"
             )
         else:
-            logger.info(
+            logger.debug(
                 f"[OuterLoop] iteration={iteration} "
                 f"task_id={task_id}, "
-                f"query={query_preview}"
+                f"query_chars={query_chars}"
             )
 
         # Build iteration context for lifecycle.
@@ -179,6 +183,7 @@ class TaskLoopEventExecutor(TaskExecutor):
         await ctx.fire(
             AgentCallbackEvent.BEFORE_TASK_ITERATION
         )
+        iteration_rail_ready_at = time.monotonic()
 
         # Use raw_input (InteractiveInput) if present, otherwise use query.
         effective_query = raw_input or iter_inputs.query or query
@@ -219,6 +224,20 @@ class TaskLoopEventExecutor(TaskExecutor):
         # (snapshot, otel span close, ...) must run even when the round fails.
         after_fired = False
         try:
+            if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                "1", "true", "yes", "on",
+            }:
+                logger.debug(
+                    "[TTFT] task executor entering react agent: session_id=%s task_id=%s "
+                    "epoch_ms=%.3f executor_prepare_ms=%.1f task_load_ms=%.1f "
+                    "iteration_rail_ms=%.1f",
+                    cid,
+                    task_id,
+                    time.time_ns() / 1_000_000,
+                    (time.monotonic() - stage_started_at) * 1000,
+                    (task_loaded_at - stage_started_at) * 1000,
+                    (iteration_rail_ready_at - task_loaded_at) * 1000,
+                )
             result = await agent.react_agent.invoke(
                 effective, session, _streaming=True
             )

@@ -279,7 +279,7 @@ class BaseSecurityRail(AgentRail):
         subject_id: str,
     ) -> Optional[Any]:
         raw_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
-        logger.info(
+        logger.debug(
             "[BaseSecurityRail] get_user_input subject_id=%r raw_input_type=%s",
             subject_id,
             type(raw_input).__name__ if raw_input is not None else "None",
