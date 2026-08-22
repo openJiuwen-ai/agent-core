@@ -92,8 +92,16 @@ class ContextAssembleRail(DeepAgentRail):
         except ValueError as exc:
             logger.warning("[ContextAssembleRail] skip clearing prompt attachment section=%s: %s", section, exc)
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Stage context-file attachments before the first user message."""
+        await self._refresh_context(ctx)
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject selected context files into messages before model call."""
+        """Refresh context files that may have changed during the tool loop."""
+        await self._refresh_context(ctx)
+
+    async def _refresh_context(self, ctx: AgentCallbackContext) -> None:
+        """Refresh stable prompt sections and dynamic context-file attachments."""
         if self.system_prompt_builder is None:
             return
         writer = None

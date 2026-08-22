@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import html
 import json
 import re
 from datetime import datetime, timezone
@@ -16,13 +15,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.foundation.kv_cache import (
-    KV_CACHE_EPHEMERAL_TAIL_METADATA,
-)
-from openjiuwen.core.foundation.llm import BaseMessage, UserMessage
-from openjiuwen.harness.prompts.sections.prompt_attachments import (
-    get_prompt_attachment_guidance,
-)
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 
 
 class PromptAttachmentKind(str, Enum):
@@ -41,7 +34,7 @@ class PromptAttachmentKind(str, Enum):
 
 
 class PromptAttachment(BaseModel):
-    """Structured dynamic prompt fragment injected into one model call."""
+    """Structured dynamic prompt fragment managed for a session."""
 
     id: str
     section: str
@@ -71,11 +64,16 @@ class PromptAttachmentUpdate(BaseModel):
     content_kind: str | None = None
 
 
-WindowMutator = Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
-
 _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS = 12000
 _DEFAULT_MAX_RENDERED_CHARS = 48000
 PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY = "prompt_attachment_preserve_tail"
+PROMPT_ATTACHMENT_HISTORY_METADATA_KEY = "_openjiuwen_prompt_attachment_history"
+PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY = "_openjiuwen_prompt_attachment_commit_callbacks"
+_PROMPT_ATTACHMENT_HISTORY_MODE_KEY = "mode"
+_PROMPT_ATTACHMENT_HISTORY_STATE_KEY = "state"
+_PROMPT_ATTACHMENT_HISTORY_SESSION_KEY = "session_id"
+_PROMPT_ATTACHMENT_HISTORY_SNAPSHOT = "snapshot"
+_PROMPT_ATTACHMENT_HISTORY_DELTA = "delta"
 
 
 def _utc_now() -> str:
@@ -92,14 +90,6 @@ def _kind_value(kind: PromptAttachmentKind | str) -> str:
     return kind.value if isinstance(kind, PromptAttachmentKind) else str(kind)
 
 
-def _xml_text(text: str) -> str:
-    return html.escape(text, quote=False)
-
-
-def _xml_attr(text: str | None) -> str:
-    return html.escape("" if text is None else str(text), quote=True).replace("'", "&apos;")
-
-
 def _content_sha256(content: str | None) -> str:
     return hashlib.sha256((content or "").encode("utf-8")).hexdigest()
 
@@ -111,11 +101,21 @@ def hash_rendered(rendered: str) -> str:
 
 
 def hash_prompt_attachment(prompt_attachment: PromptAttachment) -> str:
-    """Return a stable semantic hash for one prompt attachment."""
+    """Return a stable hash for the content visible to the model.
 
-    payload = prompt_attachment.model_dump(mode="json")
-    for key in ("content_sha256", "created_at", "updated_at"):
-        payload.pop(key, None)
+    Internal bookkeeping (timestamps, identifiers, source metadata and
+    priority) must not create a new history message when the rendered prompt
+    is unchanged.  Keep this payload aligned with ``_render_attachment_payload``
+    so change detection answers the user-visible question: did this section's
+    prompt content change?
+    """
+
+    payload = {
+        "section": prompt_attachment.section,
+        "kind": _kind_value(prompt_attachment.kind),
+        "content": prompt_attachment.content or "",
+        "content_kind": prompt_attachment.content_kind,
+    }
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
@@ -236,6 +236,7 @@ class PromptAttachmentManager:
     def __init__(self, language: str = "en") -> None:
         self._items: dict[str, dict[str, PromptAttachment]] = {}
         self._lock = asyncio.Lock()
+        self._history_lock = asyncio.Lock()
         self.language = language
 
     def bind_context(self, ctx: Any) -> PromptAttachmentContextWriter:
@@ -484,6 +485,168 @@ class PromptAttachmentManager:
                         self._items.pop(expired_session_id, None)
         return self._stable_sort(result)
 
+    async def sync_to_context(
+        self,
+        context: ModelContext,
+        session_id: str,
+    ) -> SystemMessage | None:
+        """Persist an attachment snapshot or delta into the context history.
+
+        The first non-empty attachment state is written as a full snapshot.
+        Later calls append only changed sections and explicit removals.  The
+        system message metadata carries the materialized section hashes so the
+        state can be recovered after the manager is recreated from a session.
+        """
+
+        async with self._history_lock:
+            prompt_attachments = await self.collect_for_session(session_id)
+            current_state = self._state_by_section(prompt_attachments)
+            previous_state, has_snapshot = self._read_history_state(context, session_id)
+
+            if not has_snapshot:
+                if not prompt_attachments:
+                    return None
+                rendered = self.render_history_snapshot(prompt_attachments)
+                mode = _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT
+            else:
+                changed = [
+                    item
+                    for item in prompt_attachments
+                    if previous_state.get(item.section) != current_state[item.section]
+                ]
+                removed = sorted(set(previous_state) - set(current_state))
+                if not changed and not removed:
+                    return None
+                rendered = self.render_delta(changed, removed)
+                mode = _PROMPT_ATTACHMENT_HISTORY_DELTA
+
+            message = SystemMessage(
+                content=rendered,
+                metadata={
+                    PROMPT_ATTACHMENT_HISTORY_METADATA_KEY: True,
+                    _PROMPT_ATTACHMENT_HISTORY_MODE_KEY: mode,
+                    _PROMPT_ATTACHMENT_HISTORY_SESSION_KEY: session_id,
+                    _PROMPT_ATTACHMENT_HISTORY_STATE_KEY: current_state,
+                },
+            )
+            await context.add_messages(message)
+            logger.info(
+                "[PromptAttachmentManager] persisted prompt attachment %s: session_id=%s, sections=%s",
+                mode,
+                session_id,
+                sorted(current_state),
+            )
+            return message
+
+    def make_window_mutator(
+        self,
+        session_id: str,
+    ) -> Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]:
+        """Build the final-window mutator for prompt attachment history.
+
+        ``sync_to_context`` persists attachment messages in append-only
+        context history.  The first full snapshot is the baseline for all
+        later deltas, so it must be placed immediately after the fixed system
+        prompt in the final model window.  Later delta messages stay in their
+        historical position, which keeps changes at the end of the
+        conversation (and after browser state/tool messages when applicable).
+        """
+
+        async def mutator(context: ModelContext, window: ContextWindow) -> ContextWindow:
+            context_history_messages = []
+            for message in context.get_messages(with_history=True):
+                if self._is_history_message(message):
+                    context_history_messages.append(message)
+
+            snapshot_message = None
+            candidate_message_groups = (
+                window.system_messages,
+                window.context_messages,
+                context_history_messages,
+            )
+            for messages in candidate_message_groups:
+                for message in messages:
+                    if self._is_snapshot_history_message(message):
+                        snapshot_message = message
+                        break
+                if snapshot_message is not None:
+                    break
+
+            if snapshot_message is not None:
+                context_messages = []
+                for message in window.context_messages:
+                    if not self._is_snapshot_history_message(message):
+                        context_messages.append(message)
+
+                system_messages = []
+                for message in window.system_messages:
+                    if not self._is_snapshot_history_message(message):
+                        system_messages.append(message)
+
+                logger.info(
+                    "[PromptAttachmentManager] promoted prompt attachment snapshot "
+                    "after fixed system: session_id=%s",
+                    session_id,
+                )
+                return window.model_copy(
+                    update={
+                        "system_messages": [*system_messages, snapshot_message],
+                        "context_messages": context_messages,
+                    }
+                )
+
+            if context_history_messages:
+                logger.info(
+                    "[PromptAttachmentManager] retained prompt attachment history order: "
+                    "session_id=%s, messages=%s",
+                    session_id,
+                    len(context_history_messages),
+                )
+            return window
+
+        return mutator
+
+    @staticmethod
+    def _state_by_section(prompt_attachments: Iterable[PromptAttachment]) -> dict[str, str]:
+        return {item.section: hash_prompt_attachment(item) for item in prompt_attachments}
+
+    @staticmethod
+    def _is_history_message(message: BaseMessage) -> bool:
+        metadata = getattr(message, "metadata", {}) or {}
+        return isinstance(message, SystemMessage) and bool(
+            metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY)
+        )
+
+    @staticmethod
+    def _is_snapshot_history_message(message: BaseMessage) -> bool:
+        metadata = getattr(message, "metadata", {}) or {}
+        return (
+            PromptAttachmentManager._is_history_message(message)
+            and metadata.get(_PROMPT_ATTACHMENT_HISTORY_MODE_KEY)
+            == _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT
+        )
+
+    @staticmethod
+    def _read_history_state(context: ModelContext, session_id: str) -> tuple[dict[str, str], bool]:
+        state: dict[str, str] = {}
+        has_snapshot = False
+        for message in context.get_messages(with_history=True):
+            if not isinstance(message, SystemMessage):
+                continue
+            metadata = getattr(message, "metadata", {}) or {}
+            if not metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY):
+                continue
+            history_session_id = metadata.get(_PROMPT_ATTACHMENT_HISTORY_SESSION_KEY)
+            if history_session_id is not None and str(history_session_id) != str(session_id):
+                continue
+            raw_state = metadata.get(_PROMPT_ATTACHMENT_HISTORY_STATE_KEY)
+            if not isinstance(raw_state, dict):
+                continue
+            state = {str(section): str(value) for section, value in raw_state.items()}
+            if metadata.get(_PROMPT_ATTACHMENT_HISTORY_MODE_KEY) == _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT:
+                has_snapshot = True
+        return state, has_snapshot
+
     def render(
         self,
         prompt_attachments: Iterable[PromptAttachment],
@@ -491,17 +654,87 @@ class PromptAttachmentManager:
         max_prompt_attachment_chars: int = _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS,
         max_rendered_chars: int = _DEFAULT_MAX_RENDERED_CHARS,
     ) -> str:
-        """Render prompt attachments as a user-role system-reminder block."""
+        """Render a full attachment snapshot as plain system text."""
+
+        return self._render_history_payload(
+            prompt_attachments,
+            snapshot=True,
+            max_prompt_attachment_chars=max_prompt_attachment_chars,
+            max_rendered_chars=max_rendered_chars,
+        )
+
+    def render_history_snapshot(
+        self,
+        prompt_attachments: Iterable[PromptAttachment],
+        *,
+        max_prompt_attachment_chars: int = _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS,
+        max_rendered_chars: int = _DEFAULT_MAX_RENDERED_CHARS,
+    ) -> str:
+        """Render the first dynamic history snapshot as plain system text."""
+
+        return self._render_history_payload(
+            prompt_attachments,
+            snapshot=True,
+            max_prompt_attachment_chars=max_prompt_attachment_chars,
+            max_rendered_chars=max_rendered_chars,
+        )
+
+    def render_delta(
+        self,
+        changed: Iterable[PromptAttachment],
+        removed_sections: Iterable[str],
+        *,
+        max_prompt_attachment_chars: int = _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS,
+        max_rendered_chars: int = _DEFAULT_MAX_RENDERED_CHARS,
+    ) -> str:
+        """Render changed dynamic context and removed-section notices."""
+
+        return self._render_history_payload(
+            changed,
+            removed_sections=removed_sections,
+            snapshot=False,
+            max_prompt_attachment_chars=max_prompt_attachment_chars,
+            max_rendered_chars=max_rendered_chars,
+        )
+
+    def _render_history_payload(
+        self,
+        prompt_attachments: Iterable[PromptAttachment],
+        *,
+        removed_sections: Iterable[str] = (),
+        snapshot: bool,
+        max_prompt_attachment_chars: int,
+        max_rendered_chars: int,
+    ) -> str:
+        """Render persisted attachment history without exposing internal wrappers."""
 
         items = self._stable_sort(prompt_attachments)
-        if not items:
+        removed = sorted({_section_value(section) for section in removed_sections})
+        if not items and not removed:
             return ""
 
+        if self.language == "en":
+            intro = (
+                "The following dynamic context is currently active. Use it together with the stable system "
+                "instructions."
+                if snapshot
+                else "The following dynamic context has changed. Use the latest content below instead of earlier "
+                "conflicting context."
+            )
+            removed_intro = (
+                "The following previously supplied dynamic context is no longer active. Do not rely on its "
+                "earlier content:"
+            )
+        else:
+            intro = (
+                "以下动态上下文当前有效，请与稳定的系统指令一同使用。"
+                if snapshot
+                else "以下动态上下文已经变化；如与历史内容冲突，请以本消息中的最新内容为准。"
+            )
+            removed_intro = "以下先前提供的动态上下文已不再生效，请勿继续依赖其历史内容："
+
         truncated_ids: list[str] = []
-        blocks = [
-            get_prompt_attachment_guidance(self.language),
-            "",
-        ]
+        content_blocks: list[str] = []
         for item in items:
             content = item.content or ""
             if max_prompt_attachment_chars > 0 and len(content) > max_prompt_attachment_chars:
@@ -510,18 +743,19 @@ class PromptAttachmentManager:
                     + "\n\n[Prompt attachment truncated: content exceeded max_prompt_attachment_chars.]"
                 )
                 truncated_ids.append(item.id)
-            blocks.append(f'<prompt-attachment type="{_xml_attr(_kind_value(item.kind))}">')
-            blocks.append(_xml_text(content))
-            blocks.append("</prompt-attachment>")
-            blocks.append("")
+            content_blocks.append(content)
 
-        body = "\n".join(blocks).rstrip()
-        rendered = f"<system-reminder>\n{body}\n</system-reminder>"
+        blocks = [intro]
+        if content_blocks:
+            blocks.append("\n\n---\n\n".join(content_blocks))
+        if removed:
+            blocks.append(removed_intro + "\n" + "\n".join(f"- `{section}`" for section in removed))
+
+        rendered = "\n\n".join(blocks).rstrip()
         if max_rendered_chars > 0 and len(rendered) > max_rendered_chars:
             rendered = (
                 rendered[:max_rendered_chars]
-                + "\n\n[Prompt attachments truncated: rendered content exceeded max_rendered_chars.]\n"
-                + "</system-reminder>"
+                + "\n\n[Prompt attachments truncated: rendered content exceeded max_rendered_chars.]"
             )
             truncated_ids = [item.id for item in items]
 
@@ -531,56 +765,6 @@ class PromptAttachmentManager:
                 f"ids={truncated_ids}, rendered_chars={len(rendered)}"
             )
         return rendered
-
-    @staticmethod
-    def inject_messages(
-        messages: list[BaseMessage],
-        rendered_prompt_attachments: str,
-    ) -> list[BaseMessage]:
-        """Insert attachments before any explicitly preserved trailing messages."""
-
-        if not rendered_prompt_attachments:
-            return list(messages)
-
-        tail_start = len(messages)
-        while tail_start > 0:
-            metadata = getattr(messages[tail_start - 1], "metadata", {}) or {}
-            if not bool(metadata.get(PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY)):
-                break
-            tail_start -= 1
-
-        # An attachment is request-scoped and not persisted in conversation
-        # history.  Preserve the marker even when upstream requires the
-        # attachment to be inserted before browser-state tail messages.
-        attachment_message = UserMessage(
-            content=rendered_prompt_attachments,
-            metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
-        )
-        return [*messages[:tail_start], attachment_message, *messages[tail_start:]]
-
-    def make_window_mutator(self, session_id: str) -> WindowMutator:
-        """Build the ContextEngine final-window mutator."""
-
-        async def mutator(context: ModelContext, window: ContextWindow) -> ContextWindow:
-            del context
-            prompt_attachments = await self.collect_for_session(session_id)
-            logger.info(
-                "[PromptAttachmentManager] collect prompt attachments: "
-                f"session_id={session_id}, collected_ids={[item.id for item in prompt_attachments]}"
-            )
-            rendered = self.render(prompt_attachments)
-            if not rendered:
-                return window
-            messages = self.inject_messages(window.context_messages, rendered)
-            logger.info(
-                "[PromptAttachmentManager] injected prompt attachments: "
-                f"session_id={session_id}, "
-                f"prompt_attachment_ids={[item.id for item in prompt_attachments]}, "
-                f"rendered_prompt_attachment_hash={hash_rendered(rendered)}"
-            )
-            return window.model_copy(update={"context_messages": messages})
-
-        return mutator
 
     async def _add(self, prompt_attachment: PromptAttachment) -> PromptAttachment:
         async with self._lock:
@@ -679,6 +863,7 @@ class PromptAttachmentManager:
             raise ValueError("destructive prompt attachment operation requires at least one filter")
 
 __all__ = [
+    "PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY",
     "PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY",
     "PromptAttachment",
     "PromptAttachmentContextWriter",

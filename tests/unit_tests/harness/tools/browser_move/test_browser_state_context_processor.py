@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openjiuwen.core.context_engine import ContextEngine, ContextWindow
-from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
     PromptAttachmentManager,
@@ -278,10 +284,11 @@ async def test_context_engine_injects_new_capture_after_evaluate_and_reports_unc
 
 
 @pytest.mark.asyncio
-async def test_prompt_attachments_remain_before_browser_state_and_progress_tail() -> None:
+async def test_persisted_prompt_attachments_remain_before_browser_state_and_progress_tail() -> None:
     provider = AsyncMock()
     provider.capture_browser_state.return_value = _state("https://tail.example")
     manager = PromptAttachmentManager()
+    manager_mutator = manager.make_window_mutator("browser-state-tail-test")
     await manager.add_section(
         session_id="browser-state-tail-test",
         section="runtime",
@@ -290,7 +297,6 @@ async def test_prompt_attachments_remain_before_browser_state_and_progress_tail(
         content="runtime attachment",
     )
     engine = ContextEngine()
-    engine.register_window_mutator(manager.make_window_mutator("browser-state-tail-test"))
     context = await engine.create_context(
         "browser-state-tail-test",
         processors=[
@@ -300,15 +306,18 @@ async def test_prompt_attachments_remain_before_browser_state_and_progress_tail(
             )
         ],
     )
+    engine.register_window_mutator(manager_mutator)
     await context.add_messages(UserMessage(content="original request"))
+    await manager.sync_to_context(context, "browser-state-tail-test")
 
     window = await context.get_context_window()
-    messages = window.context_messages
 
-    assert "<system-reminder>" in messages[-3].content
-    assert "runtime attachment" in messages[-3].content
-    assert messages[-2].name == "current_browser_state"
-    assert messages[-1].name == "browser_state_progress"
+    attachment = window.system_messages[-1]
+    assert isinstance(attachment, SystemMessage)
+    assert "The following dynamic context" in attachment.content
+    assert "runtime attachment" in attachment.content
+    assert window.context_messages[-2].name == "current_browser_state"
+    assert window.context_messages[-1].name == "browser_state_progress"
 
 
 @pytest.mark.asyncio
