@@ -34,6 +34,7 @@ from openjiuwen.harness.tools.web._common import (
     _FREE_SEARCH_DDG_ENABLED_ENV,
     _FREE_SEARCH_DEBUG_DIR_ENV,
     _FREE_SEARCH_DEBUG_ENV,
+    _JINA_READER_HEADERS,
     _contains_cjk,
     _decode_ddg_redirect,
     _decode_bing_redirect,
@@ -474,6 +475,21 @@ class WebFreeSearchTool(Tool):
         return any(marker in text for marker in markers)
 
     @staticmethod
+    def _is_bing_challenge_page(status_code: int, html: str) -> bool:
+        """Check if the response is a Bing CAPTCHA page, which is served with HTTP 200."""
+        if status_code in {202, 418, 429, 503}:
+            return True
+        text = (html or "").lower()
+        # Markup from the interstitial, not the bare words: a genuine result page contains those
+        # whenever the query is about them.
+        markers = [
+            'class="captcha"',
+            "captcha_header",
+            "/challenge/verify",
+        ]
+        return any(marker in text for marker in markers)
+
+    @staticmethod
     async def _search_duckduckgo(
         session: aiohttp.ClientSession,
         query: str,
@@ -517,7 +533,7 @@ class WebFreeSearchTool(Tool):
             session,
             "GET",
             url,
-            headers=_search_request_headers(query),
+            headers=_JINA_READER_HEADERS,
             timeout_seconds=timeout_seconds,
         )
         _http.raise_for_status_with_body(status, body, engine="duckduckgo-jina")
@@ -569,6 +585,12 @@ class WebFreeSearchTool(Tool):
         )
         _http.raise_for_status_with_body(status, body, engine="bing")
         html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
+        if WebFreeSearchTool._is_bing_challenge_page(status, html):
+            raise build_error(
+                StatusCode.TOOL_WEB_SEARCH_ENGINE_ERROR,
+                engine="bing",
+                reason="anti-bot challenge page returned",
+            )
         soup = _parse_html(html)
         results_area = _extract_bing_results_area(soup)
 
