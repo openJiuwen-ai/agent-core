@@ -784,7 +784,21 @@ class CoordinationKernel:
                 self._host.member_name or "?",
             )
             await self._host.stream_controller.resume_agent()
-            self._clear_pending_resume()
+            # ``pending_resume`` is a team-scoped cold-resume marker owned by
+            # the leader. A teammate may still have a valid in-process warm
+            # round, but it must not consume or clear the leader's marker.
+            if self._host.role == TeamRole.LEADER:
+                self._clear_pending_resume()
+            return
+
+        # Cold recovery creates the leader first; the leader then respawns
+        # teammates from the roster. Teammates must wait for mailbox work and
+        # never replay the leader's team-scoped user query.
+        if self._host.role != TeamRole.LEADER:
+            team_logger.info(
+                "[{}] waiting for leader to consume pending_resume",
+                self._host.member_name or "?",
+            )
             return
 
         pending = self._read_pending_resume()

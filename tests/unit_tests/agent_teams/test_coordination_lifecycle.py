@@ -399,6 +399,25 @@ async def test_resume_paused_round_cold_path_consumes_the_marker():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_teammate_does_not_consume_team_pending_resume_marker():
+    """A teammate waits for the leader instead of replaying its query."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.role = TeamRole.TEAMMATE
+    host.member_name = "teammate-1"
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    merge_pending_resume(session, "test-team", {"query": "the leader task"})
+    kernel = CoordinationKernel(host)
+
+    await kernel.resume_paused_round()
+
+    host.stream_controller.resume_agent.assert_not_awaited()
+    assert read_pending_resume(session, "test-team") == {"query": "the leader task"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_resume_paused_round_warm_path_ignores_the_marker():
     """A still-PAUSED harness resumes from memory, then drops the marker."""
     session = _StubSession()
@@ -412,6 +431,25 @@ async def test_resume_paused_round_warm_path_ignores_the_marker():
 
     host.stream_controller.resume_agent.assert_awaited_once_with()
     assert read_pending_resume(session, "test-team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_warm_resume_does_not_clear_team_marker():
+    """A teammate warm resume cannot consume the leader's marker."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.role = TeamRole.TEAMMATE
+    host.member_name = "teammate-1"
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.PAUSED
+    merge_pending_resume(session, "test-team", {"query": "the leader task"})
+    kernel = CoordinationKernel(host)
+
+    await kernel.resume_paused_round()
+
+    host.stream_controller.resume_agent.assert_awaited_once_with()
+    assert read_pending_resume(session, "test-team") == {"query": "the leader task"}
 
 
 @pytest.mark.asyncio
@@ -492,6 +530,25 @@ async def test_start_resumes_a_round_left_paused():
     host.stream_controller.resume_agent.assert_awaited_once_with()
     debate_state.resume_terminal_grace.assert_awaited_once_with()
     kernel._dispatcher.activate_and_flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_teammate_waits_for_leader_pending_resume():
+    """A teammate start must not replay the leader's cold-resume query."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.role = TeamRole.TEAMMATE
+    host.member_name = "teammate-1"
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    merge_pending_resume(session, "test-team", {"query": "the leader task"})
+    kernel = _arm_kernel_for_start(host)
+
+    await kernel.start(session)
+
+    host.stream_controller.resume_agent.assert_not_awaited()
+    assert read_pending_resume(session, "test-team") == {"query": "the leader task"}
 
 
 @pytest.mark.asyncio
