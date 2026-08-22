@@ -1,0 +1,17 @@
+# Replace only the `models` section in ~/.jiuwenswarm/config/config.yaml.
+# Use the same workload, tools, and sampling settings as the router run.
+models:
+  defaults:
+    - alias: baseline
+      model_client_config:
+        api_base: ${BASELINE_API_BASE:-https://openrouter.ai/api/v1}
+        api_key: ${BASELINE_API_KEY}
+        model_name: ${BASELINE_MODEL:-moonshotai/kimi-k2}
+        client_provider: ${BASELINE_PROVIDER:-OpenRouter}
+        timeout: 360
+        stream_first_chunk_timeout: 300
+        stream_idle_timeout: 60
+        verify_ssl: true
+      model_config_obj:
+        temperature: 0
+      is_default: true

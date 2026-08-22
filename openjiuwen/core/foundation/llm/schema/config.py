@@ -22,6 +22,7 @@ class ProviderType(str, Enum):
     InferenceAffinity = "InferenceAffinity"
     AscendAffinity = "AscendAffinity"
     IntelliRouter = "intelli_router"
+    EdgeCloudRouter = "EdgeCloudRouter"
 
 
 class LLMApiMode(str, Enum):
