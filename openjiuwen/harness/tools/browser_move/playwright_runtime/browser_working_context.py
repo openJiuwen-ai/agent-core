@@ -29,8 +29,9 @@ _ERROR_PREFIXES = (
 )
 _WORKING_CONTEXT_INSTRUCTIONS = {
     "en": (
-        "This is durable browser-agent working context, separate from the replaceable "
-        "<browser_state> observation. When an assistant response does not call tools, append "
+        "This is browser-agent working context for the current invocation, separate from the "
+        "replaceable <browser_state> observation. The framework resets it before the next browser-agent "
+        "invocation. When an assistant response does not call tools, append "
         "exactly one plain-text working-memory record delimited by "
         "---BEGIN WORKING MEMORY RECORD V1--- and ---END WORKING MEMORY RECORD V1---. "
         "When a response calls tools, do not emit the record; the framework carries the previous "
@@ -39,8 +40,8 @@ _WORKING_CONTEXT_INSTRUCTIONS = {
         "only tools explicitly supplied by the runtime. In the first record for a request, create "
         'the task_list yourself. Every task must use status "pending" or "completed". In every '
         "later record, review and replace the complete object: task_list, errors, failures, blockers, "
-        "key_facts, and important_information. Preserve relevant completed work across follow-ups "
-        "and reconcile the list with the new request. Never put credentials, screenshots, image "
+        "key_facts, and important_information. Preserve relevant completed work across later steps "
+        "of this invocation and keep the list aligned with the active request. Never put credentials, screenshots, image "
         "data, complete DOM snapshots, or large raw tool output in this record.\n"
         "Field meanings:\n"
         "- task_list: the complete ordered plan for the active request; keep completed tasks and "
@@ -57,7 +58,8 @@ _WORKING_CONTEXT_INSTRUCTIONS = {
         "Required record JSON shape: "
     ),
     "cn": (
-        "这是浏览器子代理的持久工作上下文，与每次替换的 <browser_state> 观察结果相互独立。"
+        "这是浏览器子代理当前调用期间的工作上下文，与每次替换的 <browser_state> 观察结果相互独立。"
+        "框架会在下一次浏览器子代理调用前重置此上下文。"
         "当助理响应不调用工具时，必须在末尾追加且只能追加一个纯文本工作记忆记录，并使用 "
         "---BEGIN WORKING MEMORY RECORD V1--- 和 ---END WORKING MEMORY RECORD V1--- 作为分隔符。"
         "当响应调用工具时，不要输出该记录；框架会沿用上一份记录并加入工具结果。"
@@ -66,7 +68,7 @@ _WORKING_CONTEXT_INSTRUCTIONS = {
         "每项任务的 status 必须为 "
         '"pending" 或 "completed"。之后每份记录都必须检查并完整替换以下字段：'
         "task_list、errors、failures、blockers、key_facts 和 important_information。"
-        "后续请求应保留相关的已完成工作，并根据新请求调整任务列表。"
+        "在本次调用的后续步骤中保留相关的已完成工作，并使任务列表与当前请求保持一致。"
         "不要在此记录中写入凭据、截图、图像数据、完整 DOM 快照或大段原始工具输出。\n"
         "字段含义：\n"
         "- task_list：当前请求的完整有序计划；保留已完成任务，并将每项任务标记为 pending 或 completed。\n"
@@ -215,8 +217,21 @@ class BrowserWorkingContextStore:
             }
         )
 
+    def reset(self, session: Any) -> BrowserWorkingContextState:
+        """Start an empty working context without disturbing other session state."""
+
+        state = BrowserWorkingContextState()
+        if session is None:
+            return state
+        self.save(session, state)
+        browser_agent_log_info(
+            "[BrowserWorkingContext] reset working context for session %s",
+            getattr(session, "get_session_id", lambda: "")(),
+        )
+        return state
+
     def begin_request(self, session: Any, query: Any) -> BrowserWorkingContextState:
-        """Restore, classify, and reconcile a request without clearing memory."""
+        """Record the active request in the current invocation's context."""
 
         state = self.load(session)
         request_text = _bounded_text(query, self.config.max_item_chars)

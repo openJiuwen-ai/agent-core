@@ -558,7 +558,8 @@ def test_processor_renders_chinese_guidance_with_stable_schema_keys() -> None:
 
     prompt = _inject(processor, context).context_messages[-1].content
 
-    assert "这是浏览器子代理的持久工作上下文" in prompt
+    assert "这是浏览器子代理当前调用期间的工作上下文" in prompt
+    assert "框架会在下一次浏览器子代理调用前重置此上下文" in prompt
     assert "当助理响应不调用工具时" in prompt
     assert "不是工具、函数或能力" in prompt
     assert "不得将其放入 tool_calls" in prompt
@@ -608,7 +609,7 @@ def test_history_limit_discards_old_steps_without_local_compaction() -> None:
     assert "unverified_compacted_history" not in prompt
 
 
-def test_follow_up_and_new_agent_instance_reuse_completed_session_memory() -> None:
+def test_new_agent_invocation_resets_completed_session_memory() -> None:
     config = BrowserWorkingContextProcessorConfig()
     first_rail = BrowserWorkingContextRail(config)
     session = _FakeSession("shared-external-session")
@@ -645,10 +646,13 @@ def test_follow_up_and_new_agent_instance_reuse_completed_session_memory() -> No
     )
 
     state = BrowserWorkingContextStore(config).load(session)
-    assert state.request_sequence == 2
-    assert state.request_kind == "follow_up"
-    assert state.current.task_list[0].status == "completed"
-    assert state.current.important_information == ["Order 123 is shipped."]
+    assert state.request_sequence == 1
+    assert state.request_kind == "initial"
+    assert [item.model_dump() for item in state.current.task_list] == [
+        {"task": "Now check its tracking link", "status": "pending"},
+    ]
+    assert state.current.important_information == []
+    assert state.recent_steps == []
     assert context.messages[-1].content == "Order 123 is shipped."
 
     prompt = (
@@ -660,11 +664,11 @@ def test_follow_up_and_new_agent_instance_reuse_completed_session_memory() -> No
         .content
     )
     assert "Now check its tracking link" in prompt
-    assert "Order 123 is shipped." in prompt
-    assert "reconcile the list with the new request" in prompt
+    assert "Order 123 is shipped." not in prompt
+    assert "resets it before the next browser-agent invocation" in prompt
 
 
-def test_inner_model_boundary_restores_and_reconciles_follow_up_when_outer_session_is_absent() -> None:
+def test_inner_model_boundary_resets_memory_when_outer_session_is_absent() -> None:
     config = BrowserWorkingContextProcessorConfig()
     first_rail = BrowserWorkingContextRail(config)
     session = _FakeSession("shared-inner-session")
@@ -707,27 +711,54 @@ def test_inner_model_boundary_restores_and_reconciles_follow_up_when_outer_sessi
     _run(second_rail.before_model_call(inner_ctx))
 
     state = BrowserWorkingContextStore(config).load(session)
-    assert state.request_sequence == 2
-    assert state.request_kind == "follow_up"
+    assert state.request_sequence == 1
+    assert state.request_kind == "initial"
     assert state.active_request == "Now check its tracking link"
     assert [item.model_dump() for item in state.current.task_list] == [
-        {"task": "Check the order", "status": "completed"},
         {"task": "Now check its tracking link", "status": "pending"},
     ]
-    assert state.current.key_facts == ["Order 123 belongs to Alice."]
+    assert state.current.key_facts == []
+    assert state.recent_steps == []
 
 
 def test_explicit_deep_agent_session_begins_request_once_at_inner_model_boundary() -> None:
     config = BrowserWorkingContextProcessorConfig()
     rail = BrowserWorkingContextRail(config)
     session = _FakeSession("explicit-deep-agent-session")
+    seed_context = _FakeContext(session)
+    _run(
+        rail.before_invoke(
+            AgentCallbackContext(
+                agent=None,
+                inputs=InvokeInputs(query="Previous browser request"),
+                session=session,
+            )
+        )
+    )
+    seed_response = _response(
+        _memory(
+            "Previous browser request",
+            status="completed",
+            key_facts=["This fact must not cross the invocation boundary."],
+        )
+    )
+    _run(rail.after_model_call(_model_ctx(rail, session, seed_context, seed_response)))
+    session.update_state({"unrelated_session_state": {"keep": True}})
+
     outer_ctx = AgentCallbackContext(
         agent=SimpleNamespace(react_agent=object()),
         inputs=InvokeInputs(query="Inspect the page"),
         session=session,
     )
     _run(rail.before_invoke(outer_ctx))
-    assert BrowserWorkingContextStore(config).load(session).request_sequence == 0
+    reset_state = BrowserWorkingContextStore(config).load(session)
+    assert reset_state.request_sequence == 0
+    assert reset_state.active_request == ""
+    assert reset_state.current.task_list == []
+    assert reset_state.current.key_facts == []
+    assert reset_state.recent_steps == []
+    assert reset_state.pending_step is None
+    assert session.get_state("unrelated_session_state") == {"keep": True}
 
     context = _FakeContext(session)
     context.messages.append(UserMessage(content="Inspect the page"))
@@ -742,6 +773,12 @@ def test_explicit_deep_agent_session_begins_request_once_at_inner_model_boundary
     state = BrowserWorkingContextStore(config).load(session)
     assert state.request_sequence == 1
     assert state.request_kind == "initial"
+    assert state.active_request == "Inspect the page"
+    assert [item.model_dump() for item in state.current.task_list] == [
+        {"task": "Inspect the page", "status": "pending"},
+    ]
+    assert state.current.key_facts == []
+    assert session.get_state("unrelated_session_state") == {"keep": True}
 
 
 def test_missing_model_update_carries_forward_reconciled_state_with_an_explicit_error() -> None:
@@ -770,7 +807,7 @@ def test_missing_model_update_carries_forward_reconciled_state_with_an_explicit_
     assert state.recent_steps[-1].model_update_error == "Model omitted the required working-memory record."
 
 
-def test_checkpointed_state_is_restored_by_a_reconstructed_agent_session() -> None:
+def test_checkpointed_state_is_reset_by_a_reconstructed_agent_invocation() -> None:
     config = BrowserWorkingContextProcessorConfig()
     session_id = f"browser-working-context-{uuid.uuid4().hex}"
     card = AgentCard(id="openjiuwen.browser_agent", name="browser_agent")
@@ -813,15 +850,14 @@ def test_checkpointed_state_is_restored_by_a_reconstructed_agent_session() -> No
     )
     _run(second_rail.before_model_call(inner_ctx))
 
-    restored = BrowserWorkingContextStore(config).load(second_session)
-    assert restored.request_sequence == 2
-    assert restored.request_kind == "follow_up"
-    assert restored.current.key_facts == ["Order 123 was found."]
-    assert [item.model_dump() for item in restored.current.task_list] == [
-        {"task": "Find the order", "status": "completed"},
+    reset = BrowserWorkingContextStore(config).load(second_session)
+    assert reset.request_sequence == 1
+    assert reset.request_kind == "initial"
+    assert reset.current.key_facts == []
+    assert [item.model_dump() for item in reset.current.task_list] == [
         {"task": "Track it", "status": "pending"},
     ]
-    assert len(restored.recent_steps) == 1
+    assert reset.recent_steps == []
     prompt = (
         _inject(
             BrowserWorkingContextProcessor(config),
@@ -830,9 +866,9 @@ def test_checkpointed_state_is_restored_by_a_reconstructed_agent_session() -> No
         .context_messages[-1]
         .content
     )
-    assert '"kind": "follow_up"' in prompt
-    assert "Order 123 was found." in prompt
-    assert '"recent_durable_steps": [' in prompt
+    assert '"kind": "initial"' in prompt
+    assert "Order 123 was found." not in prompt
+    assert '"recent_durable_steps": []' in prompt
 
 
 def test_retained_values_are_length_bounded() -> None:

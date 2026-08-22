@@ -71,20 +71,22 @@ class BrowserWorkingContextRail(AgentRail):
         self._store = BrowserWorkingContextStore(self.config)
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        # DeepAgent owns the outer invoke callback but creates a separate inner
-        # ReAct callback context. Let before_model_call handle that topology so
-        # an explicitly supplied Session is not counted twice.
+        # DeepAgent's outer callback is the invocation boundary. Reset there
+        # when a Session is available, but let the inner model boundary record
+        # the request so it is not counted twice.
         if getattr(ctx.agent, "react_agent", None) is not None:
+            self._store.reset(ctx.session)
             return
         inputs = ctx.inputs
         query = inputs.query if isinstance(inputs, InvokeInputs) else ""
         if ctx.session is None:
             return
+        self._store.reset(ctx.session)
         self._store.begin_request(ctx.session, query)
         ctx.extra[_REQUEST_STARTED_EXTRA_KEY] = True
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Begin the request where the inner ReAct Session actually exists.
+        """Reset and begin the request where the inner ReAct Session exists.
 
         DeepAgent routes ``before_invoke`` to its outer lifecycle. Subagents
         invoked by conversation id have no Session there; the restorable
@@ -99,6 +101,7 @@ class BrowserWorkingContextRail(AgentRail):
             return
         query = self._latest_user_request(ctx)
         if query:
+            self._store.reset(ctx.session)
             self._store.begin_request(ctx.session, query)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
