@@ -19,6 +19,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools impo
     BrowserProbeCardsTool,
     BrowserProbeInteractivesTool,
     BrowserRuntimeHealthTool,
+    BrowserVisionTool,
     build_browser_runtime_tools,
 )
 
@@ -47,7 +48,7 @@ def _make_runtime() -> BrowserAgentRuntime:
 
 def test_build_browser_runtime_tools_returns_helper_tools_by_default() -> None:
     tools = build_browser_runtime_tools(_make_runtime())
-    assert len(tools) == 8
+    assert len(tools) == 9
 
 
 def test_each_tool_is_tool_subclass() -> None:
@@ -67,6 +68,7 @@ def test_default_helper_tool_names() -> None:
         "browser_clear_cancel",
         "browser_probe_interactives",
         "browser_probe_cards",
+        "browser_vision",
         "browser_batch_interact",
         "browser_custom_action",
         "browser_list_custom_actions",
@@ -80,6 +82,7 @@ def test_helper_tool_classes() -> None:
         clear_cancel,
         probe_interactives,
         probe_cards,
+        vision,
         batch_interact,
         custom_action,
         list_actions,
@@ -89,6 +92,7 @@ def test_helper_tool_classes() -> None:
     assert isinstance(clear_cancel, BrowserClearCancelTool)
     assert isinstance(probe_interactives, BrowserProbeInteractivesTool)
     assert isinstance(probe_cards, BrowserProbeCardsTool)
+    assert isinstance(vision, BrowserVisionTool)
     assert isinstance(batch_interact, BrowserBatchInteractTool)
     assert isinstance(custom_action, BrowserCustomActionTool)
     assert isinstance(list_actions, BrowserListActionsTool)

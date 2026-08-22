@@ -123,6 +123,38 @@ _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
     "required": [],
 }
 
+_VISION_DESC = (
+    "Look at the rendered page as an image when the DOM cannot express what you need. "
+    "Use this for charts, graphs, canvas elements, images without alt text, tables whose "
+    "values are drawn rather than written, CAPTCHAs, and for verifying layout or whether a "
+    "modal visually covers the page. The probes flag these regions as visual_content in "
+    "their result — when they do, call this instead of guessing from surrounding text. "
+    "Do NOT use this for text or structured data the probes can already extract: "
+    "browser_probe_cards and browser_probe_interactives stay the default and are cheaper. "
+    "The screenshot is attached to the conversation for the next model step only; take a "
+    "fresh one after the page changes."
+)
+_VISION_PARAMS: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "reason": {
+            "type": "string",
+            "description": (
+                "What you need to read from the pixels, e.g. 'peak value of the revenue chart'. "
+                "Keep it short; it is echoed back with the capture."
+            ),
+        },
+        "full_page": {
+            "type": "boolean",
+            "description": (
+                "Capture the whole scrollable page instead of the viewport. Default false. "
+                "Use sparingly: a full-page capture of a long page loses detail once downscaled."
+            ),
+        },
+    },
+    "required": [],
+}
+
 _PROBE_CARDS_DESC = (
     "Return compact repeated card/listing structures from the current page. "
     "Use this first on product pages, marketplace pages, search-result pages, catalog pages, "
@@ -827,6 +859,104 @@ class BrowserRuntimeHealthTool(Tool):
             yield None
 
 
+class BrowserVisionTool(Tool):
+    """On-demand screenshot for content the DOM cannot express."""
+
+    def __init__(self, runtime: "BrowserAgentRuntime", language: str = "cn") -> None:
+        del language
+        super().__init__(
+            ToolCard(
+                name="browser_vision",
+                description=_VISION_DESC,
+                input_params=_VISION_PARAMS,
+            )
+        )
+        self._runtime = runtime
+
+    async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+
+        full_page_raw = inputs.get("full_page", False)
+        if isinstance(full_page_raw, str):
+            full_page = full_page_raw.strip().lower() in {"1", "true", "yes"}
+        else:
+            full_page = bool(full_page_raw)
+
+        reason = str(inputs.get("reason") or "").strip()
+
+        try:
+            data = await self._runtime.capture_screenshot(full_page=full_page)
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc))
+
+        if not data.get("ok"):
+            return ToolOutput(success=False, error=str(data.get("error") or "browser_vision failed"))
+
+        return ToolOutput(success=True, data=_build_vision_tool_data(data, reason=reason))
+
+    async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+        del inputs, kwargs
+        if False:
+            yield None
+
+
+def _build_vision_tool_data(capture: Dict[str, Any], *, reason: str) -> Dict[str, Any]:
+    """Split a capture into model-visible text and an attached image block.
+
+    ``ability_manager._build_tool_message_content`` renders only ``content`` into
+    the ToolMessage, and ``ReActAgent._build_multimodal_tool_results_message``
+    turns ``multimodal`` into a following UserMessage. Keeping the base64 out of
+    ``content`` is what stops the payload being sent twice — once as text.
+    """
+    url = str(capture.get("url") or "")
+    viewport = capture.get("viewport") if isinstance(capture.get("viewport"), dict) else {}
+    width = capture.get("image_width")
+    height = capture.get("image_height")
+
+    parts = [f"Screenshot attached for: {url or 'the current page'}"]
+    title = str(capture.get("title") or "")
+    if title:
+        parts.append(f"title: {title}")
+    if reason:
+        parts.append(f"looking for: {reason}")
+    if width and height:
+        parts.append(f"attached image: {width}x{height} jpeg")
+    if capture.get("full_page"):
+        parts.append("scope: full scrollable page")
+    else:
+        scroll_y = viewport.get("scroll_y")
+        scope = "scope: current viewport only"
+        if scroll_y:
+            scope += f" (scrolled {int(scroll_y)}px down; scroll and re-capture to see the rest)"
+        parts.append(scope)
+    parts.append("Image bytes are attached as multimodal input and omitted from this tool result.")
+    parts.append(
+        "This capture reflects the page at capture time and is not refreshed by later actions; "
+        "take a new one after the page changes."
+    )
+
+    return {
+        "content": "\n".join(parts),
+        "multimodal": [
+            {
+                "type": "image",
+                "source": "browser_vision",
+                "source_path": f"browser_vision:{url}" if url else "browser_vision",
+                "mime_type": "image/jpeg",
+                "data_url": str(capture.get("data_url") or ""),
+            }
+        ],
+        "url": url,
+        "title": title,
+        "viewport": viewport,
+        "full_page": bool(capture.get("full_page")),
+        "image_width": width,
+        "image_height": height,
+        "downscaled": bool(capture.get("downscaled")),
+        "approx_bytes": capture.get("approx_bytes"),
+    }
+
+
 def build_browser_runtime_tools(
     runtime: "BrowserAgentRuntime",
     language: str = "cn",
@@ -843,6 +973,7 @@ def build_browser_runtime_tools(
         BrowserClearCancelTool(runtime, language),
         BrowserProbeInteractivesTool(runtime, language),
         BrowserProbeCardsTool(runtime, language),
+        BrowserVisionTool(runtime, language),
         BrowserBatchInteractTool(runtime, language),
         BrowserCustomActionTool(runtime, language),
         BrowserListActionsTool(runtime, language),

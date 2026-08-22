@@ -44,9 +44,11 @@ from .probes import (
     build_interactive_probe_js,
 )
 from .page_state import BrowserPageState, BrowserTarget
+from .probes import build_card_probe_js, build_interactive_probe_js, build_screenshot_js
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import builtin_site_profiles, get_selector_cache
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
+from .vision_image import DEFAULT_MAX_DIMENSION, prepare_screenshot
 
 
 _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
@@ -1363,6 +1365,70 @@ class BrowserAgentRuntime:
         page_state.register_interactives(parsed)
         parsed["page_state"] = page_state.export()
         return parsed
+
+    async def capture_screenshot(
+        self,
+        *,
+        full_page: bool = False,
+        quality: int = 60,
+        max_dimension: int = DEFAULT_MAX_DIMENSION,
+    ) -> Dict[str, Any]:
+        """Capture the rendered page as a base64 JPEG for multimodal delivery."""
+        await self.ensure_runtime_ready()
+
+        if self._code_executor is None:
+            return {
+                "ok": False,
+                "error": "browser_code_executor_not_ready",
+                "image_base64": "",
+            }
+
+        js_code = build_screenshot_js(full_page=full_page, quality=quality)
+
+        try:
+            raw = await self._code_executor(js_code)
+            raw = self._unwrap_mcp_text_result(raw)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"browser_vision capture failed: {exc}",
+                "image_base64": "",
+            }
+
+        parsed = extract_json_object(raw)
+        if not parsed:
+            return {
+                "ok": False,
+                "error": "Could not parse browser_vision result JSON",
+                "raw_preview": str(raw)[:400],
+                "image_base64": "",
+            }
+
+        image_base64 = str(parsed.get("image_base64") or "")
+        if not image_base64:
+            return {
+                "ok": False,
+                "error": str(parsed.get("error") or "browser_vision returned no image data"),
+                "image_base64": "",
+            }
+
+        prepared = prepare_screenshot(image_base64, max_dimension=max_dimension)
+        viewport = parsed.get("viewport") if isinstance(parsed.get("viewport"), dict) else {}
+
+        return {
+            "ok": True,
+            "error": None,
+            "url": str(parsed.get("url") or ""),
+            "title": str(parsed.get("title") or ""),
+            "viewport": viewport,
+            "full_page": bool(parsed.get("full_page")),
+            "image_base64": prepared.base64_jpeg,
+            "data_url": prepared.data_url,
+            "image_width": prepared.width,
+            "image_height": prepared.height,
+            "downscaled": prepared.downscaled,
+            "approx_bytes": prepared.approx_bytes,
+        }
 
     async def probe_cards(
         self,

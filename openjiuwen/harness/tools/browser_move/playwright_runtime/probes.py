@@ -89,6 +89,175 @@ async (page) => {
 """.strip()
 
 
+VISUAL_CONTENT_HINT = (
+    "This page contains content that exists only as pixels and cannot be read from the DOM. "
+    "Call browser_vision to look at it before answering."
+)
+
+# Shared page-scan for content the DOM cannot express. Injected verbatim into both
+# probe templates so a probe that returns little still tells the model *why*, and
+# what to call next. Without this the model has no evidence that a chart exists at
+# all and tends to confabulate from surrounding text.
+_VISUAL_SCAN_JS = """
+    const __visualRegions = () => {
+      const MAX_REGIONS = 8;
+      const out = [];
+      const seen = new Set();
+
+      const hintFor = (el) => {
+        const id = el.getAttribute('id');
+        if (id) return '#' + id;
+        const testid = el.getAttribute('data-testid') || el.getAttribute('data-test');
+        if (testid) return '[data-testid="' + testid + '"]';
+        const cls = String(el.getAttribute('class') || '').split(' ').filter(Boolean)[0];
+        const tag = el.tagName.toLowerCase();
+        return cls ? tag + '.' + cls : tag;
+      };
+
+      const usableRect = (el) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 48 || rect.height < 48) return null;
+        if (rect.bottom <= 0 || rect.right <= 0) return null;
+        if (rect.top >= window.innerHeight || rect.left >= window.innerWidth) return null;
+        let style = null;
+        try {
+          style = window.getComputedStyle(el);
+        } catch (_) {
+          style = null;
+        }
+        if (style) {
+          if (style.visibility === 'hidden' || style.display === 'none') return null;
+          if (Number(style.opacity || '1') < 0.05) return null;
+        }
+        return rect;
+      };
+
+      const add = (el, kind, note) => {
+        if (out.length >= MAX_REGIONS || !el || seen.has(el)) return;
+        const rect = usableRect(el);
+        if (!rect) return;
+        seen.add(el);
+        out.push({
+          kind,
+          note,
+          selector_hint: hintFor(el),
+          bbox: [
+            Math.round(rect.x),
+            Math.round(rect.y),
+            Math.round(rect.width),
+            Math.round(rect.height)
+          ]
+        });
+      };
+
+      const textOf = (el) => String(el.textContent || '').trim();
+
+      try {
+        for (const el of Array.from(document.querySelectorAll('canvas'))) {
+          add(el, 'canvas', 'Canvas pixels have no DOM representation.');
+        }
+
+        for (const el of Array.from(document.querySelectorAll('svg'))) {
+          // Icons carry few marks; a chart carries many. Heavily labelled SVG is
+          // already readable as text, so only flag the geometry-encoded ones.
+          const marks = el.querySelectorAll('path, rect, circle, polyline, line').length;
+          if (marks < 5) continue;
+          if (textOf(el).length > 200) continue;
+          add(el, 'svg_graphic', 'SVG encodes values in geometry, not text.');
+        }
+
+        for (const el of Array.from(document.querySelectorAll('img'))) {
+          if (String(el.getAttribute('alt') || '').trim()) continue;
+          if (String(el.getAttribute('aria-label') || '').trim()) continue;
+          if (el.getAttribute('aria-hidden') === 'true') continue;
+          add(el, 'image_without_alt', 'Image carries no alt text.');
+        }
+
+        for (const el of Array.from(document.querySelectorAll('table'))) {
+          const cells = Array.from(el.querySelectorAll('td, th')).slice(0, 60);
+          if (cells.length < 3) continue;
+          const visualCells = cells.filter((cell) => {
+            return !textOf(cell) && cell.querySelector('svg, canvas, img');
+          });
+          if (visualCells.length < 3) continue;
+          add(el, 'visual_table', visualCells.length + ' cells render values visually with no text.');
+        }
+      } catch (_) {
+        // Best-effort only: never fail the surrounding probe over this.
+      }
+
+      return out;
+    };
+
+    const __visualContent = () => {
+      const regions = __visualRegions();
+      return {
+        has_visual_only: regions.length > 0,
+        regions,
+        hint: regions.length > 0 ? __VISUAL_CONTENT_HINT__ : null
+      };
+    };
+""".strip("\n")
+
+
+def _visual_scan_js() -> str:
+    """Return the visual-content scan with the hint text baked in as a JS literal."""
+    return _VISUAL_SCAN_JS.replace(
+        "__VISUAL_CONTENT_HINT__",
+        json.dumps(VISUAL_CONTENT_HINT, ensure_ascii=False),
+    )
+
+
+def build_screenshot_js(*, full_page: bool = False, quality: int = 60) -> str:
+    """Build JavaScript that returns the current page as a base64 JPEG.
+
+    ``page.screenshot()`` returns a Node Buffer, so encoding it here sends the
+    capture back over the ordinary text channel. That sidesteps
+    ``extract_mcp_tool_result_content``, which collapses MCP image blocks to a
+    placeholder string.
+    """
+    params: Dict[str, Any] = {
+        "full_page": bool(full_page),
+        "quality": _clamp_int(quality, default=60, minimum=20, maximum=90),
+    }
+    params_json = json.dumps(params, ensure_ascii=False)
+
+    return f"""
+async (page) => {{
+  const params = {params_json};
+
+  const buffer = await page.screenshot({{
+    type: 'jpeg',
+    quality: params.quality,
+    fullPage: params.full_page === true
+  }});
+
+  const meta = await page.evaluate(() => ({{
+    url: window.location.href,
+    title: document.title,
+    viewport: {{
+      width: window.innerWidth,
+      height: window.innerHeight,
+      scroll_x: window.scrollX,
+      scroll_y: window.scrollY,
+      device_pixel_ratio: window.devicePixelRatio || 1
+    }}
+  }}));
+
+  return {{
+    ok: true,
+    url: meta.url,
+    title: meta.title,
+    viewport: meta.viewport,
+    full_page: params.full_page === true,
+    quality: params.quality,
+    image_base64: buffer.toString('base64'),
+    error: null
+  }};
+}}
+""".strip()
+
+
 def build_interactive_probe_js(
     *,
     max_items: int = 50,
@@ -105,12 +274,15 @@ def build_interactive_probe_js(
         "generation_id": str(generation_id or "g0"),
     }
     params_json = json.dumps(params, ensure_ascii=False)
+    visual_scan_js = _visual_scan_js()
 
     return f"""
 async (page) => {{
   const params = {params_json};
 
   return await page.evaluate((params) => {{
+{visual_scan_js}
+
     const maxItems = Math.max(1, Math.min(Number(params.max_items || 50), 100));
     const viewportOnly = params.viewport_only !== false;
     const query = String(params.query || '').trim().toLowerCase();
@@ -499,6 +671,7 @@ async (page) => {{
       total_candidates: candidates.length,
       returned: elements.length,
       elements,
+      visual_content: __visualContent(),
       error: null
     }};
   }}, params);
@@ -534,6 +707,8 @@ async (page) => {
   const params = __PARAMS__;
 
   return await page.evaluate((params) => {
+__VISUAL_SCAN_JS__
+
     const maxCards = Math.max(1, Math.min(Number(params.max_cards || 20), 50));
     const viewportOnly = params.viewport_only !== false;
     const includeButtons = params.include_buttons !== false;
@@ -1578,6 +1753,32 @@ async (page) => {
       return Boolean(root.querySelector('img, picture, source[srcset]'));
     };
 
+    // A card whose payload is pixels: chart/canvas/SVG geometry, or an image with
+    // no alt text. Text extraction returns nothing useful for these, so the card
+    // carries the reason and browser_vision is the resolution.
+    const visualOnlyKind = (root) => {
+      if (root.querySelector('canvas')) return 'canvas';
+
+      const svg = root.querySelector('svg');
+      if (svg) {
+        const marks = svg.querySelectorAll('path, rect, circle, polyline, line').length;
+        const labelLength = String(svg.textContent || '').trim().length;
+        if (marks >= 5 && labelLength <= 200) return 'svg_graphic';
+      }
+
+      const images = Array.from(root.querySelectorAll('img'));
+      const unlabelled = images.filter((img) => {
+        if (String(img.getAttribute('alt') || '').trim()) return false;
+        if (String(img.getAttribute('aria-label') || '').trim()) return false;
+        return img.getAttribute('aria-hidden') !== 'true';
+      });
+      if (unlabelled.length > 0 && unlabelled.length === images.length) {
+        return 'image_without_alt';
+      }
+
+      return '';
+    };
+
     const structuralSignature = (el, fields) => {
       const tag = el.tagName.toLowerCase();
       const classTokens = normalize(el.getAttribute('class') || '', 160)
@@ -1682,6 +1883,7 @@ async (page) => {
         const reviewCount = extractReviewCount(rootText);
         const availability = extractAvailability(rootText);
         const imagePresent = hasImage(el);
+        const visualOnly = visualOnlyKind(el);
 
         const fields = {
           title: title.value,
@@ -1780,6 +1982,7 @@ async (page) => {
             ? 'navigate_primary_link'
             : (cardClickable ? 'use_validated_selector' : 'use_actionable_child_control'),
           has_image: imagePresent,
+          visual_only: visualOnly || null,
           buttons,
           text_preview: normalize(rootText, 280),
           bbox: [
@@ -2054,10 +2257,11 @@ async (page) => {
       returned: cards.length,
       recurring_signatures: recurringSignatures,
       cards,
+      visual_content: __visualContent(),
       error: null
     };
   }, params);
 }
 """.strip()
 
-    return template.replace("__PARAMS__", params_json)
+    return template.replace("__PARAMS__", params_json).replace("__VISUAL_SCAN_JS__", _visual_scan_js())
