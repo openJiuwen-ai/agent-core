@@ -78,6 +78,7 @@ class SessionModelContext(ModelContext):
         self._compression_recall_config = config.compression_recall_config.model_copy(deep=True)
         self._token_counter = token_counter
         self._processors = processors
+        self._empty_processors_logged = False
         self._processor_state_recorder = ContextProcessorStateRecorder(
             session_id=session_id,
             context_id=context_id,
@@ -106,6 +107,15 @@ class SessionModelContext(ModelContext):
 
     def context_id(self) -> str:
         return self._context_id
+
+    def replace_processors(self, processors: List) -> None:
+        """Replace the live processor instances without rebuilding this context."""
+        self._processors = list(processors or [])
+        self._empty_processors_logged = False
+
+    def get_processors(self) -> List:
+        """Return a copy of the live processor instances."""
+        return list(self._processors or [])
 
     def compression_recall_config(self) -> CompressionRecallConfig:
         return self._compression_recall_config
@@ -441,6 +451,16 @@ class SessionModelContext(ModelContext):
             call_window_mutators = kwargs.pop("window_mutators", None) or []
             kwargs.update({"window_size": window_size})
             kwargs.setdefault("sys_operation", self._sys_operation)
+            if not self._processors:
+                if not self._empty_processors_logged:
+                    self._empty_processors_logged = True
+                    logger.warning(
+                        "get_context_window has no processors session_id=%s context_id=%s "
+                        "msg_count=%s; compressors will not run",
+                        self._session_id,
+                        self._context_id,
+                        len(window.context_messages),
+                    )
             for processor in self._processors:
                 operation_id = None
                 started_at = None
