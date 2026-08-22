@@ -234,18 +234,33 @@ class TestContextEngine:
         )
 
     @pytest.mark.asyncio
-    async def test_recover_from_model_exception_does_not_retry_partial_stream(self, engine):
+    async def test_recover_from_model_exception_compresses_partial_stream(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[STREAM_RECOVERED]"),
+            )],
+            history_messages=[UserMessage(content="large historical context")],
+        )
+        session.commit = AsyncMock()
         provider_error = RuntimeError(
             "This model's maximum context length is 1048576 tokens."
         )
 
         recovered = await engine.recover_from_model_exception(
+            context_id="ctx",
+            session=session,
+            context=context,
             exception=provider_error,
             streaming=True,
             stream_chunks_emitted=1,
         )
 
-        assert recovered is False
+        assert recovered is True
+        assert context.get_messages()[0].content == "[STREAM_RECOVERED]"
+        session.commit.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_compress_context_preserves_explicit_empty_trigger(self, engine, session):

@@ -310,18 +310,12 @@ class ContextEngine:
         """Recover from a model context-window rejection by compressing once.
 
         ReAct agents call this hook after model-call rail retries are
-        exhausted. A retry is requested only when the provider error clearly
-        describes an input/context limit and no partial stream output has
-        already been emitted. ``compress_context`` returns ``"compressed"``
-        only when a registered processor changed the context, so a missing or
-        ineffective processor preserves the original model exception.
+        exhausted. A retry is requested when the provider error clearly
+        describes an input/context limit and ``compress_context`` returns
+        ``"compressed"``. A missing or ineffective processor preserves the
+        original model exception.
         """
-        del context
-        if streaming and int(stream_chunks_emitted or 0) > 0:
-            context_engine_logger.info(
-                "skip model context recovery after partial stream output"
-            )
-            return False
+        del context, streaming, stream_chunks_emitted
 
         if not self.is_context_overflow_error(exception):
             return False
