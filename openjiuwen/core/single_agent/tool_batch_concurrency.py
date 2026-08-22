@@ -220,7 +220,7 @@ class ToolBatchConcurrencyController:
             yield
             return
 
-        logger.info(
+        logger.debug(
             "%s batch enter session=%s policy=%s",
             _LOG_PREFIX,
             _redact_session_label(session_id),
@@ -231,7 +231,7 @@ class ToolBatchConcurrencyController:
         try:
             yield
         finally:
-            logger.info(
+            logger.debug(
                 "%s batch done session=%s elapsed=%.2fs policy=%s",
                 _LOG_PREFIX,
                 _redact_session_label(session_id),

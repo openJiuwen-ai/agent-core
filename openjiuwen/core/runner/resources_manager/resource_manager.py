@@ -1297,10 +1297,10 @@ class ResourceMgr:
                                                            skip_if_not_exists=skip_if_tag_not_exists)
             for resource_id in resource_to_removal:
                 self._resource_registry.remove_by_id(resource_id)
-            logger.info("remove tag succeed",
-                        event_type=LogEventType.RESOURCE_MGR_REMOVE_TAG,
-                        tag=single_tag,
-                        metadata={"removal_resource_ids": resource_to_removal})
+            logger.debug("remove tag succeed",
+                         event_type=LogEventType.RESOURCE_MGR_REMOVE_TAG,
+                         tag=single_tag,
+                         metadata={"removal_resource_ids": resource_to_removal})
             results.append(Ok(single_tag))
         return results[0] if results and isinstance(tag, Tag) else results
 
@@ -1439,12 +1439,12 @@ class ResourceMgr:
             if resource_card:
                 self._id_to_card[resource_id] = resource_card
             self._tag_mgr.tag_resource(resource_id, tag if tag else GLOBAL)
-            logger.info("add resource succeed",
-                        event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE,
-                        resource_id=resource_id,
-                        resource_type=resource_type,
-                        tag=tag if tag else GLOBAL,
-                        card=resource_card.to_str() if resource_card else None)
+            logger.debug("add resource succeed",
+                         event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE,
+                         resource_id=resource_id,
+                         resource_type=resource_type,
+                         tag=tag if tag else GLOBAL,
+                         card=resource_card.to_str() if resource_card else None)
             return Ok(resource_card if resource_card else resource_id)
         except Exception as e:
             logger.error("add resource failed",
@@ -1511,12 +1511,12 @@ class ResourceMgr:
                 if removed_card or not remove_by_tag:
                     results.append(Ok(removed_card))
             if not error:
-                logger.info("remove resource succeed",
-                            event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
-                            resource_id=remove_id,
-                            resource_type=resource_type,
-                            tag=tag if tag else GLOBAL,
-                            card=removed_card.to_str() if removed_card else None)
+                logger.debug("remove resource succeed",
+                             event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
+                             resource_id=remove_id,
+                             resource_type=resource_type,
+                             tag=tag if tag else GLOBAL,
+                             card=removed_card.to_str() if removed_card else None)
         return results if not isinstance(resource_id, str) else results[0]
 
     def _inner_find_resource_ids(self, *, resource_id: Optional[str | list[str]], tag: Tag | list[Tag],

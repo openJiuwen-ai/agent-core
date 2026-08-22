@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -420,19 +421,33 @@ class SkillUseRail(DeepAgentRail):
             return
         skills = self.skills if skills is None else skills
         seen_names: Set[str] = set()
+        unique_skills: List[Skill] = []
         for skill in skills:
             if skill.name in seen_names:
                 continue
             seen_names.add(skill.name)
+            unique_skills.append(skill)
+
+        async def _fetch_one(skill: Skill) -> tuple[str, str | Exception]:
             try:
                 text = await self.evolution_store.format_desc_experience_text(skill.name)
-                self._evolution_texts[skill.name] = text
+                return skill.name, text
             except Exception as exc:
+                return skill.name, exc
+
+        # The store reads one independent per-skill file. Run those reads
+        # concurrently, then apply results in the original skill order so the
+        # generated prompt and failure semantics stay identical.
+        results = await asyncio.gather(*(_fetch_one(skill) for skill in unique_skills))
+        for skill_name, result in results:
+            if isinstance(result, Exception):
                 logger.warning(
                     "[SkillUseRail] failed to fetch evolution text for '%s': %s",
-                    skill.name,
-                    exc,
+                    skill_name,
+                    result,
                 )
+                continue
+            self._evolution_texts[skill_name] = result
 
     def _get_skill_description(self, skill: Skill) -> str:
         """Return description with evolution experience text appended if available."""

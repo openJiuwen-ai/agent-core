@@ -545,7 +545,7 @@ class PromptAttachmentManager:
         async def mutator(context: ModelContext, window: ContextWindow) -> ContextWindow:
             del context
             prompt_attachments = await self.collect_for_session(session_id)
-            logger.info(
+            logger.debug(
                 "[PromptAttachmentManager] collect prompt attachments: "
                 f"session_id={session_id}, collected_ids={[item.id for item in prompt_attachments]}"
             )
@@ -553,7 +553,7 @@ class PromptAttachmentManager:
             if not rendered:
                 return window
             messages = self.inject_messages(window.context_messages, rendered)
-            logger.info(
+            logger.debug(
                 "[PromptAttachmentManager] injected prompt attachments: "
                 f"session_id={session_id}, "
                 f"prompt_attachment_ids={[item.id for item in prompt_attachments]}, "

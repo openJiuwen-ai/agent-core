@@ -39,7 +39,7 @@ class TagMgr:
         # Check if GLOBAL tag is included
         if GLOBAL in tags_to_add:
             old_tags = self._set_global_resource(resource_id)
-            logger.info(
+            logger.debug(
                 f"Added GLOBAL tag to resource. resource_id={resource_id}, "
                 f"changed from {old_tags} to [GLOBAL]"
             )
@@ -48,7 +48,7 @@ class TagMgr:
         # Add tags
         current_tags = self._add_resource_tags(resource_id, tags_to_add)
 
-        logger.info(
+        logger.debug(
             f"Added tags to resource. resource_id={resource_id}, "
             f"added_tags={tags_to_add}, current_tags={current_tags}"
         )
@@ -63,7 +63,7 @@ class TagMgr:
 
         removed_tags = self._remove_resource(resource_id)
 
-        logger.info(
+        logger.debug(
             f"Removed resource. resource_id={resource_id}, "
             f"removed_tags={removed_tags}"
         )
@@ -99,7 +99,7 @@ class TagMgr:
 
         remaining_tags = self._remove_resource_tags(resource_id, tags_to_remove)
 
-        logger.info(
+        logger.debug(
             f"Removed tags from resource. resource_id={resource_id}, "
             f"removed_tags={tags_to_remove}, remaining_tags={remaining_tags}"
         )
@@ -123,7 +123,7 @@ class TagMgr:
         # Check if GLOBAL tag is included
         if GLOBAL in new_tags:
             old_tags = self._set_global_resource(resource_id)
-            logger.info(
+            logger.debug(
                 f"Updated resource to GLOBAL. resource_id={resource_id}, "
                 f"strategy={tag_update_strategy}, old_tags={old_tags}"
             )
@@ -132,13 +132,13 @@ class TagMgr:
         # Execute operation based on strategy
         if tag_update_strategy == TagUpdateStrategy.REPLACE:
             current_tags = self._replace_resource_tags(resource_id, new_tags)
-            logger.info(
+            logger.debug(
                 f"Replaced resource tags. resource_id={resource_id}, "
                 f"new_tags={new_tags}"
             )
         elif tag_update_strategy == TagUpdateStrategy.MERGE:
             current_tags = self._add_resource_tags(resource_id, new_tags)
-            logger.info(
+            logger.debug(
                 f"Merged resource tags. resource_id={resource_id}, "
                 f"added_tags={new_tags}, current_tags={current_tags}"
             )
@@ -167,7 +167,7 @@ class TagMgr:
 
         affected_resources = self._remove_tag(tag)
 
-        logger.info(
+        logger.debug(
             f"Removed tag. tag='{tag}', affected_resources={affected_resources}"
         )
         return affected_resources
