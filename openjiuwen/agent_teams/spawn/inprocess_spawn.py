@@ -62,6 +62,12 @@ async def inprocess_spawn(
     )
 
     teammate = _TeamAgent(card)
+    # Share the leader's team-level workspace manager BEFORE configure: the
+    # teammate's setup_infra must not create its own manager, and its
+    # _assemble_member_workspace reuse check then hits the leader's already
+    # built cache — no re-scan of the team-workspace md files.
+    # Injected at TeamAgent construction time so it cannot race configure.
+    team_agent.share_workspace_cache_with(teammate)
     teammate.configure(spec, ctx)
     kv_cache_hooks.share_registry_with_teammate(team_agent, teammate)
 

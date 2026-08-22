@@ -6,6 +6,7 @@
 from typing import Any
 
 from openjiuwen.agent_teams.prompts import build_leader_policy_disclosure
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import CapabilityOverrides, TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
@@ -58,6 +59,7 @@ class BuildTeamTool(TeamTool):
         teammate_mode: str = "build_mode",
         team_mode: str = "default",
         dispatch_mode: str = "autonomous",
+        loader: TemplateLoader = load_template,
     ):
         verify_gate_enabled = dispatch_mode == "scheduled"
         super().__init__(
@@ -79,6 +81,11 @@ class BuildTeamTool(TeamTool):
         self._team_mode = team_mode
         self._dispatch_mode = dispatch_mode
         self._verify_gate_enabled = verify_gate_enabled
+        # The progressive-disclosure policy text reads evolved workspace
+        # sections through this loader.
+        # The default is the framework read-only loader — the tool factory
+        # (tool_factory.py) owns the cache wiring and passes a bound loader.
+        self._loader = loader
         properties: dict[str, Any] = {
             "display_name": {"type": "string", "description": t("build_team", "display_name")},
             "team_desc": {"type": "string", "description": t("build_team", "team_desc")},
@@ -208,6 +215,7 @@ class BuildTeamTool(TeamTool):
             dispatch_mode=self._dispatch_mode,
             language=self._language,
             hitt_enabled=bool(d.get("enable_hitt")),
+            loader=self._loader,
         )
         if not policy:
             return facts

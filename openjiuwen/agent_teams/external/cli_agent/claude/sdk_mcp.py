@@ -94,6 +94,11 @@ def build_claude_sdk_mcp_tool_set(
     Returns:
         SDK MCP tool set containing the server config and wrapped tools.
     """
+    # external-CLI tool descriptions resolve evolved values through the
+    # backend's cache (it delegates to the workspace manager — the single
+    # source every consumer uses). ``None`` (no manager attached /
+    # evolution disabled) keeps the framework default.
+    workspace_cache = team_backend.workspace_cache
     tools = create_team_tools(
         role=role,
         agent_team=team_backend,
@@ -115,7 +120,7 @@ def build_claude_sdk_mcp_tool_set(
         team_permissions_enabled=team_permissions_enabled,
     )
     if workspace_manager is not None:
-        tools.append(WorkspaceMetaTool(workspace_manager, make_translator(language)))
+        tools.append(WorkspaceMetaTool(workspace_manager, make_translator(language, ws_cache=workspace_cache)))
 
     tools_by_name = {tool.card.name: tool for tool in tools}
     sdk = load_claude_sdk()

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         PollController,
         TeamLifecycleController,
     )
+    from openjiuwen.agent_teams.prompts.loader import TemplateLoader
 
 EventCallback = Callable[[CoordinationEvent], Awaitable[None]]
 
@@ -65,6 +66,9 @@ class BaseCoordinationHandler:
         self._poll = poll_ctrl
         self._blueprint = blueprint
         self._infra = infra
+        # Lazily-bound per-team A-class loader (MessageHandler): the first
+        # property access binds it from the infra's backend cache.
+        self._template_loader_cache: "TemplateLoader | None" = None
 
     def get_callbacks(self) -> dict[str, EventCallback]:
         """Return ``event_key -> bound method`` for framework registration."""

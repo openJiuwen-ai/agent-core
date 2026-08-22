@@ -20,7 +20,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TaskCancelledEvent,
@@ -138,7 +138,7 @@ class TeamTaskManager:
         self.team_name = team_name
         self.member_name = member_name
         self.messager = messager
-        self.plans_dir = Path(plans_dir) if plans_dir else team_home(team_name) / "team-workspace" / "plans"
+        self.plans_dir = Path(plans_dir) if plans_dir else team_workspace_dir(team_name) / "plans"
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
