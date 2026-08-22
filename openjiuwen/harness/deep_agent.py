@@ -1248,6 +1248,13 @@ class DeepAgent(BaseAgent):
                 if spec.prompt_mode is not None
                 else self._deep_config.prompt_mode
             ),
+            # Preserve the parent's explicit decision by default. A child
+            # using a model with different image capabilities may override it.
+            "enable_read_image_multimodal": (
+                spec.enable_read_image_multimodal
+                if spec.enable_read_image_multimodal is not None
+                else self._deep_config.enable_read_image_multimodal
+            ),
             "subagents": None,
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
