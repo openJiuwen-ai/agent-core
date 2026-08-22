@@ -42,6 +42,7 @@
     - [Swarm Skills: Turn a Successful Collaboration into Team Capability](2.Development%20Guide/Self%20Evolution/Swarm-Skills-Turn-a-Successful-Collaboration-into-Team-Capability.md)
     - [Swarm Skills Technical Specification](2.Development%20Guide/Self%20Evolution/Swarm-Skills-Technical-Specification.md)
     - [Skill Online Self-Evolution: Keep Capabilities Improving in Real Use](2.Development%20Guide/Self%20Evolution/Skill-Online-Self-Evolution.md)
+    - [Metis Task Memory](2.Development%20Guide/Self%20Evolution/Metis-Task-Memory.md)
   - [Advanced Usage](2.Development%20Guide/Advanced%20Usage/README.md)
     - [Session](2.Development%20Guide/Advanced%20Usage/Session/README.md)
       - [Overview](2.Development%20Guide/Advanced%20Usage/Session/Overview.md)

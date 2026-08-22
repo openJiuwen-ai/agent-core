@@ -8,3 +8,4 @@ We recommend reading these pages in order:
 - [Swarm Skills: Turn a Successful Collaboration into Team Capability](./Swarm-Skills-Turn-a-Successful-Collaboration-into-Team-Capability.md)
 - [Swarm Skills Technical Specification](./Swarm-Skills-Technical-Specification.md)
 - [Skill Online Self-Evolution: Keep Capabilities Improving in Real Use](./Skill-Online-Self-Evolution.md)
+- [Metis Task Memory](./Metis-Task-Memory.md)

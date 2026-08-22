@@ -20,6 +20,9 @@ REPLACE_MODE: Final[Literal["replace"]] = "replace"
 RETRY_ACTION: Final[Literal["retry"]] = "retry"
 SKILL_EXPERIENCE_ENTRY: Final[Literal["skill_experience_entry"]] = "skill_experience_entry"
 STATE_EFFECT: Final[Literal["state"]] = "state"
+TASK_COMPLETED_SIGNAL: Final[Literal["task_completed"]] = "task_completed"
+TASK_MEMORY_ENTRY: Final[Literal["task_memory_entry"]] = "task_memory_entry"
+TASK_MEMORY_TARGET: Final[Literal["task_memory"]] = "task_memory"
 TOOL_FAILURE_SIGNAL: Final[Literal["tool_failure"]] = "tool_failure"
 TRAJECTORY_ISSUE_SIGNAL: Final[Literal["trajectory_issue"]] = "trajectory_issue"
 USER_INTENT_SIGNAL: Final[Literal["user_intent"]] = "user_intent"
@@ -59,6 +62,9 @@ __all__ = [
     "SKILL_EXPERIENCE_ENTRY",
     "SIMPLIFY_ACTION_VALUES",
     "STATE_EFFECT",
+    "TASK_COMPLETED_SIGNAL",
+    "TASK_MEMORY_ENTRY",
+    "TASK_MEMORY_TARGET",
     "TOOL_FAILURE_SIGNAL",
     "TRAJECTORY_ISSUE_SIGNAL",
     "USER_INTENT_SIGNAL",

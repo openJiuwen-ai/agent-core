@@ -8,3 +8,4 @@
 - [Swarm Skills：把一次成功协作沉淀成团队能力](./Swarm-Skills-把一次成功协作沉淀成团队能力.md)
 - [Swarm Skills 技术标准说明](./Swarm-Skills-技术标准说明.md)
 - [Skill 在线自演进：让能力在真实使用中持续变好](./Skill-在线自演进-让能力在真实使用中持续变好.md)
+- [Metis 任务记忆](./Metis-任务记忆.md)
