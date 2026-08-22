@@ -69,7 +69,6 @@ def ensure_workspace(
         'EMBED_API_KEY': 'EMPTY',
         'EMBED_MODEL': model_name,
         'BROWSER_RUNTIME_MCP_ENABLED': '0',
-        'EVOLUTION_AUTO_SCAN': 'false',
     }
     updates.update(
         build_trajectory_env_updates(

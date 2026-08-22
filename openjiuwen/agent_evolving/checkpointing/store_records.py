@@ -146,7 +146,7 @@ class StoreRecordsHelper:
         skill_dir: Optional[Path] = None,
         subject_kind: Optional[str] = None,
         update_skill_md: bool = True,
-    ) -> Optional[EvolutionLog]:
+    ) -> EvolutionLog:
         """Append or merge one record and roll back all related files on failure.
 
         When ``update_skill_md`` is False (suggest mode), the record is persisted to
@@ -155,7 +155,10 @@ class StoreRecordsHelper:
         """
         target_dir = skill_dir or self._store.resolve_skill_dir(name, create=True, subject_kind=subject_kind)
         if target_dir is None:
-            return None
+            raise_error(
+                StatusCode.TOOLCHAIN_EVOLVING_SKILL_STORE_EXECUTION_ERROR,
+                error_msg=f"no safe evolution storage directory found for skill '{name}'",
+            )
 
         target_dir.mkdir(parents=True, exist_ok=True)
         evo_path = target_dir / _EVOLUTION_FILENAME

@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Prompt sections for automatic skill creation suggestions."""
+"""Explicit standing protocols for Skill creation."""
 
 from __future__ import annotations
 
@@ -9,250 +9,184 @@ from openjiuwen.harness.prompts.sections import SectionName
 
 SKILL_CREATION_GUIDANCE_CN = """## 技能沉淀自检
 
-Skill creation 只沉淀未来同类任务可复用的类别级经验，不沉淀当前 session、具体 PR、临时错误或一次性材料。自检不能打断当前任务；不需要创建时保持静默并正常回复，不提及自检、沉淀或无需创建。
+### 目标与边界
 
-### 判断场景
+只沉淀未来同类任务可复用的新方法；不记录当前 session、PR、一次性事实或临时故障。
+自检不得打断任务；不创建时自然回复，不提自检、无需创建或内部判断。
 
-#### 应考虑创建
+### 决策顺序
 
-- 用户明确要求记住、固化或下次复用某个流程。
-- 本轮形成了未来同类任务可复用的多步骤工作流、检查清单或命令组合。
-- 本轮沉淀出稳定验证方式、环境注意事项、集成方式或质量标准。
-- 用户纠正了输出、流程、格式、风格或判断标准，并形成可复用偏好。
-- 本轮通过错误、重试、替代路径或排查恢复，修复了未来同类任务可复用的踩坑路径。
+1. 先查已有能力：已有 Skill 已覆盖，或可通过演进承接时，不创建新 Skill。
+2. 再查可迁移性：若只有当前产物、任务参数、session 或 PR 事实，没有未来可复用的方法，保持静默。
+3. 区分临时故障：单次权限、网络、环境或第三方异常不触发创建；形成稳定排障方法时才继续判断。
+4. 高优先级用户意图：用户明确要求未来记住、固化或复用流程、检查、标准、偏好或排障方法时，
+   在确认没有已有能力承接、内容可迁移且不是单次故障后，优先建议创建；不要求同时存在复杂执行轨迹。
+   等价语义如“以后遇到 xxx 按这个流程处理”或“下次做 xxx 时也这样检查”，不要按关键词机械匹配。
+5. 执行信号：没有明确用户意图时，只有本轮形成稳定流程、检查清单、验证标准或可复用排障路径，才建议创建。
 
-#### 不应创建
+### 用户可见输出
 
-- 当前过程已被已加载或已使用的 Skill 覆盖；这属于使用或演进已有 Skill，不属于新技能沉淀。
-- 内容只适用于当前 session、具体 PR、具体错误字符串、临时 feature 或一次性上下文。
-- 只是完成了具体产物，但没有抽象出可复用方法、检查清单或质量标准。
-- 任务是简单一次性任务，且没有用户纠正、复用信号、错误恢复或可迁移流程。
+- 需要建议时，只在普通最终回复末尾追加一至两句。无论使用一句还是两句，都必须同时包含具体、简短的
+  可复用方法，以及是否创建 Skill 的明确问题。
+- 不要复述任务结果、完整步骤、长证据或判断过程。不建议时自然结束，不暴露自检状态。
 
-### 用户意图信号
+### 用户确认
 
-- 记住流程：`以后遇到 xxx 按这个流程处理。`
-- 下次复用：`下次做 xxx 时也这样检查 / 处理。`
-- 格式或标准偏好：`以后输出 xxx 时保持这种格式 / 判断标准。`
-- 踩坑排查路径：`刚才 xxx 出错后用 yyy 修好了，以后同类问题也这样排查。`
+只有上一条普通回复已经明确询问创建当前 Skill 后，用户的明确肯定才构成确认。
+拒绝则结束；含糊或意图冲突时，用普通文本最小澄清。不要自动创建或使用交互式确认。
+创建确认不等于 Skill 演进确认。
 
-### 回复与确认规则
+### 能力交接
 
-#### 最终回复
-
-只有明确存在类别级、未来同类任务可复用的价值，且没有被现有 Skill 覆盖时，才在普通最终回复末尾追加创建询问。最多追加两句：一句简短说明发现的可复用流程，一句询问用户是否创建 Skill。
-不要重新总结任务结果、产物内容、完整执行步骤、长证据列表或判断过程。
-
-#### 用户确认
-
-必须通过普通回复文本询问，不要自动创建，不要调用弹窗、审批、中断、`ask_user` 或任何交互式确认工具。如果上一条普通回复询问是否创建 Skill，用户随后用肯定表达回复，例如“是”“创建”“需要”“可以”“好的”
-“行”“确认”“帮我建”“就这么做”，应泛化理解为确认创建。用户回复“跳过”“不用”“暂不”“不要”等表达时，视为拒绝。只有回复含义不清或互相冲突时，才继续用普通回复文本澄清。
-
-#### 创建执行
-
-用户确认创建后，使用 `skill-creator` 或兼容的技能创建能力，基于当前对话上下文和执行过程创建新 Skill。创建前检查当前是否具备该能力；如果不可用，用普通回复文本提醒用户当前缺少创建技能所需能力。
-用户确认创建新 Skill 不是确认 Skill 演进；不要调用 `prepare_skill_evolution`、`evolve_review_task` 或 `evolve_skill_experiences`。
-"""
+确认后交给技能创建能力并遵循其契约；不写入一次性内容，也不把创建需求当作 Skill 演进。"""
 
 SKILL_CREATION_GUIDANCE_EN = """## Skill Capture Self-Check
 
-Skill creation only captures category-level experience reusable by future similar tasks. It does not
-capture the current session, a specific PR, a temporary error, or one-off material. The self-check must
-not interrupt the current task; when no skill should be created, stay silent and reply normally without
-mentioning the self-check, capture, or that no creation is needed.
+### Purpose And Boundaries
 
-### Decision Scenarios
+Capture only a new method reusable in future similar tasks. Do not capture this session, a PR,
+one-off facts, or temporary failures. Never interrupt work. Otherwise reply naturally without mentioning the check
+or internal judgment.
 
-#### Consider Creating
+### Decision Order
 
-- The user explicitly asks you to remember, formalize, or reuse a process next time.
-- This round produced a multi-step workflow, checklist, or command combination reusable by future similar tasks.
-- This round produced a stable validation method, environment note, integration pattern, or quality standard.
-- The user corrected the output, process, format, style, or judgment criteria, forming a reusable preference.
-- Errors, retries, alternative paths, or investigation produced a reusable troubleshooting path for future
-  similar tasks.
+1. Check existing capabilities: do not create a new Skill when an existing Skill covers the method or can be evolved
+   to cover it.
+2. Check transferability: stay silent when there is only a current artifact, task parameter, session fact, or PR fact
+   without a method reusable by future similar tasks.
+3. Separate transient failures: a one-time permission, network, environment, or third-party failure is not enough;
+   continue only when it yields a stable troubleshooting method.
+4. High-priority user intent: when the user explicitly asks to remember, formalize, or reuse a workflow, check,
+   standard, preference, or troubleshooting method, prefer suggesting creation after confirming that no existing
+   capability can take it, the method is transferable, and it is not a one-time failure. Do not require a complex
+   execution trace as additional evidence. Equivalent requests include "use this process for future xxx" and
+   "check xxx this way next time"; do not keyword-match them.
+5. Execution evidence: without explicit user intent, suggest creation only when this round actually produced a stable
+   workflow, checklist, validation standard, or reusable troubleshooting path.
 
-#### Do Not Create
+### User-Visible Output
 
-- The current process is already covered by a loaded or used Skill; this belongs to using or evolving the
-  existing Skill, not new skill capture.
-- The content only applies to the current session, a specific PR, a specific error string, a temporary feature,
-  or one-off context.
-- You only completed a specific artifact without abstracting a reusable method, checklist, or quality standard.
-- The task is a simple one-off with no user correction, reuse signal, error recovery, or transferable workflow.
+- When suggesting creation, append only one or two sentences to the end of the normal final reply.
+  Whether using one sentence or two, include both a specific concise reusable method and a direct question asking
+  whether to create a Skill.
+- Do not recap the task result, artifact, full steps, long evidence, or reasoning. Otherwise finish naturally without
+  exposing the self-check.
 
-### User Intent Signals
+### User Confirmation
 
-- Remember process: `When xxx happens in the future, follow this process.`
-- Reuse next time: `Next time you do xxx, check / handle it this way too.`
-- Format or standard preference: `When outputting xxx in the future, keep this format / judgment standard.`
-- Troubleshooting path: `When xxx failed just now, yyy fixed it; troubleshoot similar issues this way in the future.`
+A clear affirmative confirms creation only when the previous normal reply explicitly asked about creating this Skill.
+Refusal ends the suggestion; ambiguity or conflicting intent gets a minimal clarification in normal text. Do not create
+automatically or use interactive confirmation. Creation confirmation is not Skill evolution confirmation.
 
-### Reply And Confirmation Rules
+### Capability Handoff
 
-#### Final Reply
-
-Only append a creation question to the end of a normal final reply when there is clear category-level reusable
-value for future similar tasks and it is not already covered by an existing Skill. Append at most two short
-sentences: one sentence stating the reusable workflow found, and one sentence asking whether to create a Skill.
-Do not recap the task result, artifact content, full execution steps, a long evidence list, or your reasoning
-process.
-
-#### User Confirmation
-
-Ask through normal reply text only. Do not create automatically, and do not use popup, approval, interrupt,
-`ask_user`, or any interactive confirmation tool. If the previous normal reply asked whether to create a Skill,
-treat later affirmative replies such as "yes", "create", "need it", "please do", "go ahead", "okay", "confirm",
-or "build it" as confirmation to create. Treat replies such as "skip", "no", "not now", or "don't" as refusal.
-Ask a normal text clarification only when the reply is unclear or contains conflicting intent.
-
-#### Creation Execution
-
-After the user confirms creation, use `skill-creator` or a compatible skill creation capability to create a new
-Skill from the current conversation context and execution process. Before creating, check whether that capability
-is available; if it is unavailable, tell the user in normal reply text that the required creation capability is
-missing. User confirmation to create a new Skill is not consent for Skill evolution; do not call
-`prepare_skill_evolution`, `evolve_review_task`, or `evolve_skill_experiences`.
-"""
+After confirmation, hand the context to the Skill creation capability and follow its contract. Do not persist one-off
+material in the new Skill or treat a creation request as Skill evolution."""
 
 TEAM_SKILL_CREATION_GUIDANCE_CN = """## 团队技能沉淀自检
 
-Team/Swarm Skill creation 只沉淀未来同类团队任务可复用的协作方法，不沉淀单个成员的个人工具、代码、调研或调试经验，也不沉淀一次性团队安排。自检不能打断当前团队任务；
-不需要创建时保持静默并正常回复，不提及自检、沉淀或无需创建。
+### 目标与边界
 
-### 判断场景
+只沉淀未来同类团队任务可复用的新协作方法；不记录成员个人经验或一次性安排。
+自检不得打断团队任务；不创建时自然回复，不提自检、无需创建或内部判断。
 
-#### 应考虑创建
+### 决策顺序
 
-- 团队形成了未来同类任务可复用的任务拆解、角色分工、成员路由或职责边界。
-- 团队沉淀出稳定的并行推进、交接同步、汇总整合、质量验收或交叉检查方式。
-- 用户纠正了团队产出、角色安排、协作流程、交付格式或验收标准，并形成可复用团队偏好。
-- 团队通过调整分工、同步方式、汇总方式或验收流程，解决了职责不清、信息缺失、重复工作、格式不一致或返工问题。
-- 团队形成了可复用的用户反馈分派、修订整合和最终验收流程。
+1. 先查协作事实：没有实质分工、并行、交接、汇总或团队验收时，不创建团队 Skill。
+2. 再查经验归属：成员个人工具、代码、调研、调试方法或具体产物，不沉淀为团队 Skill。
+3. 排除一次性内容：仅适用于本轮的安排或临时故障，保持静默。
+4. 检查已有能力：已有 Team/Swarm Skill 覆盖时，改用或演进已有能力。
+5. 高优先级用户意图：用户明确要求未来沿用团队流程、角色分工、交接、汇总、验收或反馈分派规则时，
+   在确认存在实质协作、内容属于团队且可复用、并无已有能力覆盖后，优先建议创建；
+   不要求同时存在复杂团队轨迹。等价语义如“以后做 xxx 团队任务时按这次分工推进”或
+   “下次沿用这套交接和验收流程”，不要按关键词机械匹配。
+6. 执行信号：没有明确用户意图时，只有团队形成可复用的任务拆解、成员路由、并行协作、交接、汇总或验收方法，
+   才建议创建。
 
-#### 不应创建
+### 用户可见输出
 
-- 当前团队协作过程已被已加载或已使用的 Team/Swarm Skill 覆盖；这属于使用或演进已有 Team/Swarm Skill，不属于新团队技能沉淀。
-- 任务虽调用团队能力，但没有实质分工、交接、并行协作、汇总整合、团队验收或用户反馈传导。
-- 可复用经验主要来自某个成员的个人工具调用、代码执行、调研步骤、调试路径或具体产物写法，而没有形成团队协作方法。
-- 内容只适用于当前 session、具体 PR、具体错误字符串、临时 feature、一次性资料或一次性团队安排。
+- 需要建议时，只在普通最终回复末尾追加一至两句。无论使用一句还是两句，都必须同时包含具体、简短的
+  可复用团队方法，以及是否创建 Team/Swarm Skill 的明确问题。
+- 不要复述任务结果、完整团队过程、成员明细、长证据或判断过程。不建议时自然结束，不暴露自检状态。
 
-### 用户意图信号
+### 用户确认
 
-- 团队流程：`以后做 xxx 团队任务时按这次分工推进。`
-- 角色分工：`下次 xxx 仍按这种角色 / 成员职责安排。`
-- 交接与汇总：`以后 xxx 的交接、汇总和验收沿用这个流程。`
-- 反馈分派：`类似 xxx 的用户反馈以后也这样分派给成员处理。`
+只有上一条普通回复已经明确询问创建当前 Team/Swarm Skill 后，用户的明确肯定才构成确认。
+拒绝则结束；含糊或意图冲突时，用普通文本最小澄清。不要自动创建或使用交互式确认。
+创建确认不等于 Swarm Skill 演进确认。
 
-### 回复与确认规则
+### 能力交接
 
-#### 最终回复
-
-只有明确存在类别级、未来同类团队任务可复用的协作价值，且没有被现有 Team/Swarm Skill 覆盖时，才在普通最终回复末尾追加创建询问。最多追加两句：一句简短说明发现的可复用团队流程，
-一句询问用户是否创建 Team/Swarm Skill。不要重新总结任务结果、产物内容、完整团队过程、成员明细、长证据列表或判断过程。
-
-#### 用户确认
-
-必须通过普通回复文本询问，不要自动创建，不要调用弹窗、审批、中断、`ask_user` 或任何交互式确认工具。如果上一条普通回复询问是否创建团队技能，用户随后用肯定表达回复，例如“是”“创建”“需要”“可以”“好的”
-“行”“确认”“帮我建”“就这么做”，应泛化理解为确认创建。用户回复“跳过”“不用”“暂不”“不要”等表达时，视为拒绝。只有回复含义不清或互相冲突时，才继续用普通回复文本澄清。
-
-#### 创建执行
-
-用户确认创建后，使用 `swarmskill-creator` 或兼容的团队技能创建能力，基于当前团队上下文和协作过程创建新 Team/Swarm Skill。创建前检查当前是否具备该能力；
-如果不可用，用普通回复文本提醒用户当前缺少创建团队技能所需能力。
-用户确认创建新团队技能不是确认 Swarm Skill 演进；不要调用 `prepare_skill_evolution`、`evolve_review_task` 或 `evolve_skill_experiences`。
-"""
+确认后交给团队技能创建能力并遵循其契约；不写入成员个人经验或一次性内容，
+也不把创建需求当作 Swarm Skill 演进。"""
 
 TEAM_SKILL_CREATION_GUIDANCE_EN = """## Team Skill Capture Self-Check
 
-Team/Swarm Skill creation only captures collaboration methods reusable by future similar team tasks. It does not
-capture one member's personal tool use, coding, research, or debugging experience, and it does not capture one-off
-team arrangements. The self-check must not interrupt the current team task; when no team skill should be created,
-stay silent and reply normally without mentioning the self-check, capture, or that no creation is needed.
+### Purpose And Boundaries
 
-### Decision Scenarios
+Capture only collaboration methods reusable by future similar team tasks. Do not capture member-local tools, code,
+research, debugging experience, or one-off arrangements. Never interrupt the current team task. When creation is not
+appropriate, reply naturally without mentioning the self-check, no creation needed, or internal judgment.
 
-#### Consider Creating
+### Decision Order
 
-- The team formed reusable task decomposition, role split, member routing, or responsibility boundaries for
-  future similar tasks.
-- The team produced stable parallel work, handoff and synchronization, aggregation, quality review, or
-  cross-checking methods.
-- The user corrected team output, role arrangement, collaboration flow, delivery format, or acceptance criteria,
-  forming a reusable team preference.
-- The team resolved unclear responsibilities, missing information, duplicated work, inconsistent formats, or
-  rework by adjusting role split, synchronization, aggregation, or review flow.
-- The team formed a reusable process for routing user feedback, integrating revisions, and performing final
-  acceptance.
+1. Check collaboration: do not create a team Skill without substantive task splitting, parallel work, handoff,
+   synthesis, or team acceptance.
+2. Check ownership: member-local tools, code, research, debugging methods, or concrete artifacts do not become a
+   team Skill.
+3. Exclude one-off content: stay silent for arrangements or failures limited to this round.
+4. Check existing capabilities: use or evolve an existing Team/Swarm Skill when it already covers the method.
+5. High-priority user intent: when the user explicitly asks to reuse a team process, role split, handoff, synthesis,
+   acceptance, or feedback-routing rule, prefer suggesting creation after confirming substantive collaboration,
+   team ownership, transferability, and no existing coverage. Do not require a complex team trace as additional
+   evidence.
+   Equivalent requests include
+   "use this role split for future xxx team tasks" and "reuse this handoff and acceptance flow next time".
+   Do not keyword-match them.
+6. Execution evidence: without explicit user intent, suggest creation only when the team actually formed reusable
+   task decomposition, member routing, parallel work, handoff, synthesis, or acceptance methods.
 
-#### Do Not Create
+### User-Visible Output
 
-- The current collaboration process is already covered by a loaded or used Team/Swarm Skill; this belongs to
-  using or evolving the existing Team/Swarm Skill, not new team skill capture.
-- The task used team capabilities but had no substantive role split, handoff, parallel collaboration, aggregation,
-  team review, or user feedback routing.
-- The reusable experience mainly comes from one member's personal tool calls, code execution, research steps,
-  debugging path, or concrete artifact writing, without forming a team collaboration method.
-- The content only applies to the current session, a specific PR, a specific error string, a temporary feature,
-  one-off source material, or one-off team arrangement.
+- When suggesting creation, append only one or two sentences to the end of the normal final reply.
+  Whether using one sentence or two, include both a specific concise team method and a direct question asking whether
+  to create a Team/Swarm Skill.
+- Do not recap the task result, full team process, member details, long evidence, or reasoning. Otherwise finish
+  naturally without exposing the self-check.
 
-### User Intent Signals
+### User Confirmation
 
-- Team process: `For future xxx team tasks, proceed with this role split.`
-- Role split: `Next time for xxx, keep this role / member responsibility arrangement.`
-- Handoff and synthesis: `For future xxx, reuse this handoff, synthesis, and acceptance flow.`
-- Feedback routing: `Handle similar xxx user feedback by routing it to members this way too.`
+A clear affirmative confirms creation only when the previous normal reply explicitly asked about creating this
+Team/Swarm Skill. Refusal ends the suggestion; ambiguity or conflicting intent gets a minimal clarification in normal
+text. Do not create automatically or use interactive confirmation.
+Creation confirmation is not Swarm Skill evolution confirmation.
 
-### Reply And Confirmation Rules
+### Capability Handoff
 
-#### Final Reply
+After confirmation, hand the team context to the team Skill creation capability and follow its contract. Do not persist
+member-local or one-off material in the team Skill or treat a creation request as Swarm Skill evolution."""
 
-Only append a creation question to the end of a normal final reply when there is clear category-level collaboration
-value reusable by future similar team tasks and it is not already covered by an existing Team/Swarm Skill. Append
-at most two short sentences: one sentence stating the reusable team workflow found, and one sentence asking whether
-to create a Team/Swarm Skill. Do not recap the task result, artifact content, full team process, member details,
-a long evidence list, or your reasoning process.
-
-#### User Confirmation
-
-Ask through normal reply text only. Do not create automatically, and do not use popup, approval, interrupt,
-`ask_user`, or any interactive confirmation tool. If the previous normal reply asked whether to create a team
-skill, treat later affirmative replies such as "yes", "create", "need it", "please do", "go ahead", "okay",
-"confirm", or "build it" as confirmation to create. Treat replies such as "skip", "no", "not now", or "don't"
-as refusal. Ask a normal text clarification only when the reply is unclear or contains conflicting intent.
-
-#### Creation Execution
-
-After the user confirms creation, use `swarmskill-creator` or a compatible team skill creation capability to
-create a new Team/Swarm Skill from the current team context and collaboration process. Before creating, check
-whether that capability is available; if it is unavailable, tell the user in normal reply text that the required
-team skill creation capability is missing. User confirmation to create a new team skill is not consent for
-Swarm Skill evolution; do not call `prepare_skill_evolution`, `evolve_review_task`, or
-`evolve_skill_experiences`.
-"""
-
-TEAM_SKILL_CREATION_NUDGE_CN = """## 本轮团队技能沉淀检查
-
-系统检测到团队任务已完成，且本次任务涉及多个团队成员，可能需要进行一次团队技能沉淀自检。请按系统提示词中的“团队技能沉淀自检”规则判断是否需要向用户提议创建 Team/Swarm Skill。
-如果确需创建，新技能应保存到技能目录：{skills_dir}
-"""
-
-TEAM_SKILL_CREATION_NUDGE_EN = """## Team Skill Capture Check For This Round
-
-The system detected that the team task is complete and involved multiple team members, so a team skill capture
-self-check may be useful.
-Follow the "Team Skill Capture Self-Check" rules in the system prompt to decide whether to suggest creating a
-Team/Swarm Skill.
-If a skill should be created, save it to: {skills_dir}
-"""
+# Runtime nudge remains deliberately generic; the active creation capability owns destination details.
+TEAM_SKILL_CREATION_NUDGE_CN = (
+    "## 本轮团队技能沉淀检查\n"
+    "团队任务已完成且存在协作信号；请依据“团队技能沉淀自检”规则"
+    "判断是否提出创建询问。\n"
+    "如需建议，只在普通最终回复末尾追加一至两句，并同时包含可复用团队方法和创建确认问题；"
+    "否则自然回复。"
+)
+TEAM_SKILL_CREATION_NUDGE_EN = (
+    "## Team Skill Capture Check For This Round\n"
+    "The team task completed with collaboration signals; use the Team Skill Capture Self-Check to decide whether "
+    "to suggest creation.\n"
+    "If suggesting, append only one or two sentences to the normal final reply and include both the reusable team "
+    "method and the creation question; otherwise reply naturally."
+)
 
 
 def build_skill_creation_guidance_section(language: str = "cn") -> PromptSection:
     return PromptSection(
         name=SectionName.SKILL_CREATION_GUIDANCE,
-        content={
-            "cn": SKILL_CREATION_GUIDANCE_CN,
-            "en": SKILL_CREATION_GUIDANCE_EN,
-        },
+        content={"cn": SKILL_CREATION_GUIDANCE_CN, "en": SKILL_CREATION_GUIDANCE_EN},
         priority=88,
     )
 
@@ -260,21 +194,16 @@ def build_skill_creation_guidance_section(language: str = "cn") -> PromptSection
 def build_team_skill_creation_guidance_section(language: str = "cn") -> PromptSection:
     return PromptSection(
         name=SectionName.TEAM_SKILL_CREATION_GUIDANCE,
-        content={
-            "cn": TEAM_SKILL_CREATION_GUIDANCE_CN,
-            "en": TEAM_SKILL_CREATION_GUIDANCE_EN,
-        },
+        content={"cn": TEAM_SKILL_CREATION_GUIDANCE_CN, "en": TEAM_SKILL_CREATION_GUIDANCE_EN},
         priority=88,
     )
 
 
 def build_team_skill_creation_nudge_section(skills_dir: str, language: str = "cn") -> PromptSection:
+    del skills_dir
     return PromptSection(
         name=SectionName.TEAM_SKILL_CREATION_NUDGE,
-        content={
-            "cn": TEAM_SKILL_CREATION_NUDGE_CN.format(skills_dir=skills_dir),
-            "en": TEAM_SKILL_CREATION_NUDGE_EN.format(skills_dir=skills_dir),
-        },
+        content={"cn": TEAM_SKILL_CREATION_NUDGE_CN, "en": TEAM_SKILL_CREATION_NUDGE_EN},
         priority=89,
     )
 

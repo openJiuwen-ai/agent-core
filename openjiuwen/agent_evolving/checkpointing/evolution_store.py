@@ -455,8 +455,6 @@ class EvolutionStore:
                 subject_kind=subject_kind,
                 update_skill_md=update_skill_md,
             )
-            if evo_log is None:
-                return
             logger.info(
                 "[EvolutionStore] wrote %s/%s (id=%s, target=%s, update_skill_md=%s)",
                 name,

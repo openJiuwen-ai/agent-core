@@ -7,7 +7,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Callable, Optional
 
-from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
+from openjiuwen.agent_evolving.experience.draft_schema import normalize_simplify_draft, normalize_subject
 from openjiuwen.agent_evolving.prompts.tools import build_evolution_subject_schema, build_evolution_tool_card
 from openjiuwen.agent_evolving.tools.base import BaseEvolutionTool
 from openjiuwen.core.common.exception.errors import ValidationError
@@ -291,7 +291,17 @@ class EvolveSkillExperiencesTool(_EvolutionTool):
             if self._review_runtime is None:
                 raise ValueError("review_runtime is required")
             ref = str(args.get("evolution_review_ref") or "")
-            selected_proposal_ids = list(args.get("selected_proposal_ids") or [])
+            if not ref.strip():
+                raise ValueError("evolution_review_ref is required")
+            selected_proposal_ids = args.get("selected_proposal_ids")
+            if not isinstance(selected_proposal_ids, list) or not selected_proposal_ids:
+                raise ValueError("selected_proposal_ids must be a non-empty list")
+            if any(
+                not isinstance(proposal_id, str) or not proposal_id.strip() for proposal_id in selected_proposal_ids
+            ):
+                raise ValueError("selected_proposal_ids must contain non-empty strings")
+            if len(set(selected_proposal_ids)) != len(selected_proposal_ids):
+                raise ValueError("selected_proposal_ids must not contain duplicates")
             session_id = self._session_id(kwargs)
             try:
                 prepared = self._submission_service.prepare_evolve_submission(
@@ -321,9 +331,15 @@ class SimplifySkillExperiencesTool(_EvolutionTool):
         try:
             args = self.inputs_dict(inputs)
             subject = self._subject_from_inputs(args)
+            actions = args.get("actions")
+            if not isinstance(actions, list) or not actions:
+                raise ValueError("actions must be a non-empty list")
+            # Validate action shape before invoking the submission service so a
+            # direct tool call is safe even when no Interrupt rail is installed.
+            normalize_simplify_draft(self._normalize_subject_kind(subject), actions)
             result = await self._submission_service.apply_simplify_actions(
                 subject,
-                list(args.get("actions") or []),
+                actions,
             )
             return self.to_output(result)
         except Exception as exc:
