@@ -704,13 +704,7 @@ class _JournalRecordInput:
     model: Any
     raw_text: str | None = None
     run_id: str | None = None
-    """Run identifier stamped into the record for cache isolation (see
-    ``Journal.get_cached``'s ``run_id`` check). Fresh records carry the current
-    run's id; cache hits reuse the prior record's id verbatim."""
     tokens: int | None = None
-    """Tokens billed by this call (``AgentResult.tokens``); ``None`` on skip /
-    cache-hit / failure. Persisted so an over-budget relaunch can recover
-    per-agent consumption from the journal."""
 
 
 def _make_record(spec: _JournalRecordInput) -> dict:
@@ -1056,7 +1050,10 @@ class AgentSession:
                 )
                 return None if notify else result
 
-            rt.log_sink(f"[wf] session {opts.get('label') or 'session'!r} key={ks} CACHE_MISS sig={sig[:12]} (live run, history_len={len(self._history)})")
+            rt.log_sink(
+                f"[wf] session {opts.get('label') or 'session'!r} key={ks} CACHE_MISS "
+                f"sig={sig[:12]} (live run, history_len={len(self._history)})"
+            )
             _check_abort(rt)  # entry gate: a paused run starts no new turn
             _check_budget(rt)  # entry gate: a run out of tokens starts no new turn
 

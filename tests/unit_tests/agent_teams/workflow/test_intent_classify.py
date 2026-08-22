@@ -1,6 +1,5 @@
 # coding: utf-8
 from __future__ import annotations
-import asyncio
 import pytest
 from unittest.mock import patch, AsyncMock
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
@@ -77,61 +76,9 @@ class _FakeTinyAgent:
         return self._result
 
 
-def _make_classifying_manager():
-    # leader_model_name set + model_resolver present => _classify_intent does NOT early-return.
-    return AvatarSessionManager(
-        team_name="t",
-        run_id="wf_1",
-        model_resolver=lambda n: object(),
-        leader_model_name="leader-1",
-    )
-
-
-@pytest.mark.asyncio
-async def test_classify_intent_internal_degrade_on_tiny_agent_failure():
-    """create_tiny_agent raising must be caught inside _classify_intent -> None.
-
-    Exercises the internal ``except Exception -> None`` degrade path directly
-    (review gap: prior tests mocked ``_classify_intent`` itself, so this catch was
-    never exercised).
-    """
-    mgr = _make_classifying_manager()
-    with patch(
-        "openjiuwen.agent_teams.tiny_agent.create_tiny_agent",
-        side_effect=Exception("LLM 挂了"),
-    ):
-        result = await mgr._classify_intent("改脚本", "问")
-    assert result is None
-
-
-@pytest.mark.asyncio
-async def test_classify_intent_real_invocation_returns_structured_dict():
-    """The real create_tiny_agent -> async-with -> run path returns the intent dict.
-
-    Proves the actual invocation path works (not just the failure path), so a future
-    behavior change inside the real method cannot slip past this suite.
-    """
-    mgr = _make_classifying_manager()
-    fake = _FakeTinyAgent({"intent": "edit_rerun", "edit_instructions": "改 X"})
-    with patch(
-        "openjiuwen.agent_teams.tiny_agent.create_tiny_agent",
-        return_value=fake,
-    ):
-        result = await mgr._classify_intent("改脚本", "问")
-    assert result == {"intent": "edit_rerun", "edit_instructions": "改 X"}
-
-
-@pytest.mark.asyncio
-async def test_classify_intent_via_worker_base_spec_model_not_none():
-    """Regression: the real TeamWorkerBackend._sessions() path has no leader_model_name
-    (it is never threaded through), so _classify_intent must fall back to
-    worker_base_spec.model instead of early-returning None.
-
-    Before the fix, leader_model_name was always None on this path, so intent
-    classification was silently skipped for every human reply. This test constructs
-    AvatarSessionManager exactly the way _sessions() does (worker_base_spec with a
-    resolved model, no leader_model_name) and asserts _classify_intent actually runs.
-    """
+def _make_base_spec_manager():
+    """Manager built the way ``TeamWorkerBackend._sessions()`` builds it: a
+    worker_base_spec with a resolved model — the only production path."""
     from openjiuwen.agent_teams.schema.deep_agent_spec import (
         DeepAgentSpec,
         TeamModelConfig,
@@ -148,12 +95,49 @@ async def test_classify_intent_via_worker_base_spec_model_not_none():
         model_request_config=ModelRequestConfig(model_name="test-model"),
     )
     base_spec = DeepAgentSpec(model=model_config, tools=[])
-    # Simulate the real TeamWorkerBackend._sessions() path: no leader_model_name.
-    mgr = AvatarSessionManager(
-        worker_base_spec=base_spec,
-        team_name="t",
-        run_id="wf_1",
-    )
+    return AvatarSessionManager(worker_base_spec=base_spec, team_name="t", run_id="wf_1")
+
+
+@pytest.mark.asyncio
+async def test_classify_intent_internal_degrade_on_tiny_agent_failure():
+    """TinyAgent construction raising must be caught inside _classify_intent -> None.
+
+    Exercises the internal ``except Exception -> None`` degrade path directly
+    (review gap: prior tests mocked ``_classify_intent`` itself, so this catch was
+    never exercised).
+    """
+    mgr = _make_base_spec_manager()
+    with patch(
+        "openjiuwen.agent_teams.tiny_agent.TinyAgent",
+        side_effect=Exception("LLM 挂了"),
+    ):
+        result = await mgr._classify_intent("改脚本", "问")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_classify_intent_real_invocation_returns_structured_dict():
+    """The real TinyAgent -> async-with -> run path returns the intent dict.
+
+    Proves the actual invocation path works (not just the failure path), so a future
+    behavior change inside the real method cannot slip past this suite.
+    """
+    mgr = _make_base_spec_manager()
+    fake = _FakeTinyAgent({"intent": "edit_rerun", "edit_instructions": "改 X"})
+    with patch(
+        "openjiuwen.agent_teams.tiny_agent.TinyAgent",
+        return_value=fake,
+    ):
+        result = await mgr._classify_intent("改脚本", "问")
+    assert result == {"intent": "edit_rerun", "edit_instructions": "改 X"}
+
+
+@pytest.mark.asyncio
+async def test_classify_intent_via_worker_base_spec_model_not_none():
+    """Regression: the real TeamWorkerBackend._sessions() construction (worker_base_spec
+    with a resolved model) must actually run classification, not silently skip it.
+    """
+    mgr = _make_base_spec_manager()
     fake = _FakeTinyAgent({"intent": "continue"})
     with patch(
         "openjiuwen.agent_teams.tiny_agent.TinyAgent",
