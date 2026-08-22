@@ -58,6 +58,38 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+def _reinject_runtime_model_fields(
+    spec: TeamAgentSpec,
+    team_spec: Optional[TeamSpec],
+    runtime_spec: TeamAgentSpec,
+) -> None:
+    """Sync model-related fields from a live ``runtime_spec`` into a recovered/paused spec.
+
+    Shared by ``recover_from_session`` (COLD_RECOVER) and
+    ``TeamRuntimeManager._apply_action`` (RESUME_FROM_PAUSE) so a model
+    switch carried by the runtime spec propagates to the leader's
+    ``spec.agents[role].model``, the shared ``spec.model_pool`` /
+    ``predefined_members`` (read by ``build_context_from_db`` to resolve
+    each teammate's model against the pool), and the live
+    ``context.team_spec.model_pool`` (read by ``resolve_member_model``).
+
+    The checkpoint / paused leader's in-memory state holds the pool /
+    predefined_members as of before the switch; without this reinjection
+    the leader would run on the old model and each teammate would
+    re-spawn on the old model.
+    """
+    spec.model_pool = list(runtime_spec.model_pool)
+    spec.model_pool_strategy = runtime_spec.model_pool_strategy
+    for role_key, live_agent_spec in runtime_spec.agents.items():
+        tgt = spec.agents.get(role_key)
+        if tgt is not None and live_agent_spec.model is not None:
+            tgt.model = live_agent_spec.model
+    spec.predefined_members = list(runtime_spec.predefined_members)
+    if team_spec is not None:
+        team_spec.model_pool = list(runtime_spec.model_pool)
+        team_spec.model_pool_strategy = runtime_spec.model_pool_strategy
+
+
 # pylint: disable=too-many-public-methods
 class TeamAgent(BaseAgent):
     """One implementation that can act as leader or teammate.
@@ -1205,8 +1237,14 @@ class TeamAgent(BaseAgent):
         if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:
             if spec.memory:
                 spec.memory.embedding_config = runtime_spec.memory.embedding_config
+        # Reinject model-related fields from the live runtime spec so a
+        # cold-recover triggered with a model switch (e.g. relay-claw "继续执行"
+        # carrying a new model_name) actually applies to the recovered leader
+        # and the re-spawned teammates. See ``_reinject_runtime_model_fields``.
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
+        if runtime_spec is not None:
+            _reinject_runtime_model_fields(spec, context.team_spec, runtime_spec)
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"
