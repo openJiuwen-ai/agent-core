@@ -260,6 +260,14 @@ class SysOperationError(ExecutionError):
     pass
 
 
+class StoreError(ExecutionError):
+    """
+    Persistence-layer failures: memory stores, vector stores,
+    checkpointers, graph stores.
+    """
+    pass
+
+
 class GuardrailError(ValidationError):
     """
     Guardrail security check blocked error.
