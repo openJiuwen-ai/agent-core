@@ -1505,3 +1505,100 @@ async def test_build_team_persists_leader_prompt(db, message_bus):
     assert row is not None
     assert row.prompt == "private working agreement"
     assert row.desc == "public role blurb"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_remove_cleanup_paths_unlinks_dir_link_without_touching_target(db, message_bus, tmp_path):
+    """A registered directory link is unlinked only — never rmtree'd.
+
+    Block C: ``shutil.rmtree`` on a Windows junction would descend and delete
+    the target's shared contents. ``_remove_cleanup_paths`` must detect the
+    link and remove only the link itself.
+    """
+    from openjiuwen.agent_teams.team_workspace.dir_links import (
+        create_dir_link,
+        is_dir_link,
+    )
+
+    backend = TeamBackend(
+        team_name="clean_link_team",
+        member_name="lead",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    target = tmp_path / "shared-asset"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+    link = tmp_path / "member_workspace"
+    create_dir_link(target, link)
+    assert is_dir_link(link)
+
+    backend.register_cleanup_path(str(link))
+    await backend._remove_cleanup_paths()
+
+    assert not link.exists(), "link removed"
+    assert (target / "keep.txt").exists(), "target contents preserved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_remove_cleanup_paths_rmtrees_plain_directory(db, message_bus, tmp_path):
+    """A registered real directory is still rmtree'd."""
+    backend = TeamBackend(
+        team_name="clean_plain_team",
+        member_name="lead",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    plain = tmp_path / "plain-dir"
+    plain.mkdir()
+    (plain / "x.txt").write_text("x", encoding="utf-8")
+    backend.register_cleanup_path(str(plain))
+    await backend._remove_cleanup_paths()
+    assert not plain.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cleanup_member_workspace_links_releases_dynamic_real_dir(db, message_bus, tmp_path):
+    """Team cleanup detaches member links and releases external real dirs.
+
+    Block C P3: without this wiring, dynamic real dirs under ``.agent_teams/``
+    accumulate across team cleanups — only the in-team link would be removed.
+    """
+    from openjiuwen.agent_teams import paths as apaths
+    from openjiuwen.agent_teams.team_workspace.binder import (
+        MEMBER_MODE_DYNAMIC,
+        MemberWorkspaceBinder,
+        TeamMemberBinding,
+    )
+    from openjiuwen.agent_teams.team_workspace.dir_links import is_dir_link
+    from openjiuwen.agent_teams.team_workspace.paths import member_real_dir
+
+    apaths.configure_openjiuwen_home(tmp_path / "oj-home")
+    try:
+        binder = MemberWorkspaceBinder()
+        binder.setup(
+            TeamMemberBinding(team_name="teamA", member_name="memX", mode=MEMBER_MODE_DYNAMIC)
+        )
+        link = apaths.team_member_workspace_dir("teamA", "memX")
+        real = member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC)
+        assert is_dir_link(link)
+        assert real.is_dir()
+
+        backend = TeamBackend(
+            team_name="teamA",
+            member_name="lead",
+            db=db,
+            messager=message_bus,
+            is_leader=True,
+        )
+        backend._cleanup_member_workspace_links()
+
+        assert not is_dir_link(link), "link detached"
+        assert not real.exists(), "dynamic real dir released"
+    finally:
+        apaths.reset_openjiuwen_home()

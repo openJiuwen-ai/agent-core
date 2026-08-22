@@ -465,6 +465,13 @@ class TeamSpec(BaseModel):
     """Transport used by an external CLI member's MCP client."""
     workspace: Optional[dict[str, Any]] = None
     """Shared workspace config mirrored from ``TeamAgentSpec`` for runtime-only paths."""
+    member_workspace_prefix: bool = True
+    """Dynamic-only switch for member workspace isolation (block C).
+
+    Mirrors ``TeamAgentSpec.member_workspace_prefix`` so paths that only see a
+    ``TeamRuntimeContext`` / ``TeamSpec`` resolve the same real-directory
+    shape as in-process members.
+    """
 
 
 class TeamRuntimeContext(BaseModel):
