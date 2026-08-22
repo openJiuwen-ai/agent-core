@@ -16,7 +16,8 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
@@ -242,10 +243,49 @@ class TaskTool(Tool):
             }
             if affinity_enabled:
                 subagent_inputs["parent_session_id"] = parent_session_id
-            result = await subagent.invoke(subagent_inputs)
+
+            # Stream subagent output, forwarding every chunk to the parent
+            # session's stream so the frontend sees subagent progress in real
+            # time (PR 1604).  The child session carries ``source_metadata``
+            # with ``stream_source_id`` (per-invocation unique) so chunks from
+            # parallel subagents can be distinguished by the consumer.
+            child_session = create_agent_session(
+                session_id=sub_session_id,
+                card=subagent.card,
+                source_metadata={
+                    "source_agent_id": subagent.card.id,
+                    "stream_source_id": sub_session_id,
+                    "subagent_type": str(subagent_type),
+                    "parent_session_id": parent_session_id,
+                },
+            )
+
+            final_output = ""
+            async for chunk in subagent.stream(subagent_inputs, session=child_session):
+                # Forward each tagged chunk to the parent stream; the chunk
+                # already carries stream_source_id via the child's
+                # source_metadata, so parallel subagents stay distinguishable.
+                try:
+                    await parent_session.write_stream(chunk)
+                except Exception as forward_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[TaskTool] Failed to forward stream chunk to parent: %s",
+                        forward_exc,
+                    )
+                # Capture the final answer payload.
+                if isinstance(chunk, OutputSchema) and chunk.type == "answer":
+                    payload = chunk.payload
+                    if isinstance(payload, dict):
+                        final_output = payload.get("output", "")
+                    elif isinstance(payload, str):
+                        final_output = payload
+
             succeeded = True
-            output = result.get("output", "")
-            return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
+            return ToolOutput(
+                success=True,
+                data={"output": final_output, "agent_id": subagent.card.id},
+                error=None,
+            )
         except Exception as e:
             logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
             raise build_error(

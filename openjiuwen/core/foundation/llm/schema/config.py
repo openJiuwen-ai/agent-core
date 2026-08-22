@@ -22,6 +22,7 @@ class ProviderType(str, Enum):
     InferenceAffinity = "InferenceAffinity"
     AscendAffinity = "AscendAffinity"
     IntelliRouter = "intelli_router"
+    HuaweiMaas = "HuaweiMaas"
 
 
 _TOP_LEVEL_API_KEY_PROVIDERS = {
@@ -32,6 +33,7 @@ _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.DashScope.value,
     ProviderType.DeepSeek.value,
     ProviderType.InferenceAffinity.value,
+    ProviderType.HuaweiMaas.value,
 }
 _TOP_LEVEL_API_BASE_PROVIDERS = _TOP_LEVEL_API_KEY_PROVIDERS | {ProviderType.OpenAIAccount.value}
 

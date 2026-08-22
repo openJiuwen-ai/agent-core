@@ -63,6 +63,11 @@ _BINARY_EXTENSIONS: frozenset = frozenset({
     ".db", ".sqlite", ".sqlite3",
 })
 
+# Office document extensions (ZIP-based binary containers, need dedicated parsers).
+_OFFICE_DOC_EXTENSIONS: frozenset = frozenset({
+    ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+})
+
 
 @dataclass
 class _FileReadState:
@@ -372,6 +377,7 @@ class ReadFileTool(Tool):
     MAX_TOKENS: int = 25_000
     PDF_MAX_PAGES_PER_READ: int = 20
     PDF_AT_MENTION_INLINE_THRESHOLD: int = 100
+    MAX_OFFICE_DOC_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB - ZIP containers with media
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
     def __init__(
@@ -410,10 +416,20 @@ class ReadFileTool(Tool):
         _, ext = os.path.splitext(file_path.lower())
         return ext in cls._IMAGE_EXTENSIONS
 
+    @staticmethod
+    def _is_office_doc(file_path: str) -> bool:
+        _, ext = os.path.splitext(file_path.lower())
+        return ext in _OFFICE_DOC_EXTENSIONS
+
     @classmethod
     def _is_binary_check_exempt(cls, file_path: str) -> bool:
         """File types handled by dedicated readers, exempt from the binary-file guard."""
-        return cls._is_pdf(file_path) or cls._is_notebook(file_path) or cls._is_image(file_path)
+        return (
+            cls._is_pdf(file_path)
+            or cls._is_notebook(file_path)
+            or cls._is_image(file_path)
+            or cls._is_office_doc(file_path)
+        )
 
     @staticmethod
     def _is_pdf_supported(model_name: str) -> bool:
@@ -655,6 +671,161 @@ class ReadFileTool(Tool):
                 )
 
         return rendered
+
+    # ------------------------------------------------------------------
+    # Office document readers (.docx / .xlsx / .pptx)
+    # ------------------------------------------------------------------
+
+    async def _read_office_doc(self, file_path: str) -> str:
+        """Dispatch Office documents to the appropriate parser and return cat-n text."""
+        ext = os.path.splitext(file_path.lower())[1]
+
+        # Pre-parse size check to avoid loading oversized ZIP containers into memory.
+        if not _is_unc_path(file_path):
+            try:
+                byte_len = os.stat(file_path).st_size
+                if byte_len > self.MAX_OFFICE_DOC_SIZE_BYTES:
+                    raise RuntimeError(
+                        f"Office document '{os.path.basename(file_path)}' ({byte_len // 1024 // 1024} MB) "
+                        f"exceeds the maximum allowed size ({self.MAX_OFFICE_DOC_SIZE_BYTES // 1024 // 1024} MB). "
+                        "Office documents are parsed in their entirety and cannot be read in portions. "
+                        "Consider splitting the document or converting to a smaller format."
+                    )
+            except OSError:
+                pass
+
+        try:
+            if ext == ".docx":
+                content = await asyncio.to_thread(self._read_docx, file_path)
+            elif ext == ".xlsx":
+                content = await asyncio.to_thread(self._read_xlsx, file_path)
+            elif ext == ".pptx":
+                content = await asyncio.to_thread(self._read_pptx, file_path)
+            elif ext in (".doc", ".xls", ".ppt"):
+                raise RuntimeError(
+                    f"Legacy Office format '{ext}' is not supported. "
+                    f"Please convert to the modern format ({ext}x) and try again."
+                )
+            else:
+                raise RuntimeError(f"Unsupported Office document format: {ext}")
+        except ImportError as exc:
+            pkg_map = {".docx": "python-docx", ".xlsx": "openpyxl", ".pptx": "python-pptx"}
+            pkg_name = pkg_map.get(ext, exc.name or "unknown")
+            raise RuntimeError(
+                f"Reading '{ext}' files requires the '{pkg_name}' package. "
+                f"Install with: pip install {pkg_name}"
+            ) from exc
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot read Office document '{os.path.basename(file_path)}': "
+                "the file is not a valid Office (binary) document or is corrupt. "
+                f"Details: {exc}"
+            ) from exc
+
+        tokens = self._estimate_tokens(content)
+        if tokens > self.MAX_TOKENS:
+            raise MaxFileReadTokenExceededError(tokens, self.MAX_TOKENS)
+
+        if not content.strip():
+            return "Warning: the document exists but the contents are empty."
+
+        return self._cat_n(content)
+
+    @staticmethod
+    def _read_docx(file_path: str) -> str:
+        """Extract text and tables from a .docx file as Markdown."""
+        from docx import Document
+
+        doc = Document(file_path)
+        parts: list[str] = []
+
+        for para in doc.paragraphs:
+            text = para.text.strip()
+            if not text:
+                continue
+            style_name = para.style.name if para.style else ""
+            if style_name == "Title":
+                parts.append(f"# {text}")
+            elif style_name.startswith("Heading"):
+                try:
+                    level = int(style_name.split()[-1])
+                except (ValueError, IndexError):
+                    level = 1
+                parts.append(f"{'#' * (level + 1)} {text}")
+            else:
+                parts.append(text)
+
+        for table in doc.tables:
+            if not table.rows:
+                continue
+            table_lines = []
+            header_cells = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
+            table_lines.append("| " + " | ".join(header_cells) + " |")
+            table_lines.append("| " + " | ".join("---" for _ in header_cells) + " |")
+            for row in table.rows[1:]:
+                cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
+                table_lines.append("| " + " | ".join(cells) + " |")
+            parts.append("\n".join(table_lines))
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _read_xlsx(file_path: str) -> str:
+        """Extract data from an .xlsx file as Markdown tables."""
+        from openpyxl import load_workbook
+
+        parts: list[str] = []
+
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            for ws in wb.worksheets:
+                table_lines = [f"## {ws.title}"]
+                first_row = True
+                for row in ws.iter_rows(values_only=True):
+                    cells = [str(c) if c is not None else "" for c in row]
+                    if not any(cells):
+                        continue
+                    escaped = [c.replace("|", "\\|") for c in cells]
+                    table_lines.append("| " + " | ".join(escaped) + " |")
+                    if first_row:
+                        table_lines.append("| " + " | ".join("---" for _ in cells) + " |")
+                        first_row = False
+                parts.append("\n".join(table_lines))
+        finally:
+            wb.close()
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _read_pptx(file_path: str) -> str:
+        """Extract text from a .pptx file as Markdown."""
+        from pptx import Presentation
+
+        prs = Presentation(file_path)
+        parts: list[str] = []
+
+        for i, slide in enumerate(prs.slides, 1):
+            parts.append(f"## Slide {i}\n")
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        text = para.text.strip()
+                        if text:
+                            parts.append(text)
+                if shape.has_table:
+                    table = shape.table
+                    if table.rows:
+                        header = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
+                        parts.append("| " + " | ".join(header) + " |")
+                        parts.append("| " + " | ".join("---" for _ in header) + " |")
+                        for row in table.rows[1:]:
+                            cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
+                            parts.append("| " + " | ".join(cells) + " |")
+            parts.append("")
+
+        return "\n".join(parts)
 
     async def _read_notebook(self, file_path: str) -> str:
         res = await self.operation.fs().read_file(file_path)
@@ -982,6 +1153,8 @@ class ReadFileTool(Tool):
                 rendered = await self._read_notebook(file_path)
             elif self._is_image(file_path):
                 rendered = await self._read_image(file_path, model_name)
+            elif self._is_office_doc(file_path):
+                rendered = await self._read_office_doc(file_path)
             else:
                 # MAX_SIZE_BYTES cap only applies when no explicit limit was given
                 # (mirrors TS: maxSizeBytes passed only when limit is undefined).

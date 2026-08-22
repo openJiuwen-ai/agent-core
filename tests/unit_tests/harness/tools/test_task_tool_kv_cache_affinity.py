@@ -13,6 +13,7 @@ import pytest
 from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
@@ -29,6 +30,12 @@ class _FakeSubAgent:
         if self.error:
             raise self.error
         return {"output": self.output}
+
+    async def stream(self, inputs: dict, **kwargs):
+        self.inputs.append(dict(inputs))
+        if self.error:
+            raise self.error
+        yield OutputSchema(type="answer", index=0, payload={"output": self.output})
 
 
 def _make_tool(*, enabled: bool = True, subagent: _FakeSubAgent | None = None) -> tuple[TaskTool, object]:
