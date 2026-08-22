@@ -18,6 +18,8 @@ from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.agent_ras import AgentRASConfig
+from openjiuwen.harness.agent_ras.factory import build_agent_ras_rail
 from openjiuwen.harness.rails import (
     LLMRetryRail,
     LLMStabilityRail,
@@ -27,6 +29,7 @@ from openjiuwen.harness.rails import (
     SysOperationRail,
     TaskPlanningRail,
 )
+from openjiuwen.harness.rails.agent_ras_rail import AgentRASRail
 from openjiuwen.harness.rails.tool_call_resilience_rail import (
     ToolCallResilienceRail,
 )
@@ -61,6 +64,33 @@ def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
             if isinstance(cfg, dict) and cfg.get("enabled") is False:
                 disabled.add(name)
     return sorted(disabled)
+
+
+def _resolve_agent_ras_config(
+    agent_ras: AgentRASConfig | dict[str, Any] | bool | None,
+) -> AgentRASConfig | None:
+    """Resolve create_deep_agent ``agent_ras`` into a typed config or None.
+
+    - ``None`` / ``True``: default enabled Agent RAS
+    - ``False``: disable
+    - ``dict``: YAML/SDK overrides via ``AgentRASConfig.model_validate``
+    - ``AgentRASConfig``: use as-is when ``enabled``
+    """
+    if agent_ras is False:
+        return None
+    if agent_ras is None or agent_ras is True:
+        return AgentRASConfig(enabled=True)
+    if isinstance(agent_ras, AgentRASConfig):
+        return agent_ras if agent_ras.enabled else None
+    if isinstance(agent_ras, dict):
+        raw = dict(agent_ras)
+        raw.setdefault("enabled", True)
+        config = AgentRASConfig.model_validate(raw)
+        return config if config.enabled else None
+    raise TypeError(
+        "agent_ras must be AgentRASConfig, dict, bool, or None, "
+        f"got {type(agent_ras).__name__}"
+    )
 
 
 def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
@@ -154,12 +184,15 @@ class DeepAgentParts:
         tool_cards: Tool cards to register on the agent's ability manager.
         tool_instances: Concrete tool instances to register on the shared
             resource manager so their cards become executable.
+        agent_ras_setting: Raw ``create_deep_agent(agent_ras=...)`` value for
+            sub-agent passthrough (``False`` must stay ``False``).
     """
 
     config: DeepAgentConfig
     rails: List[AgentRail]
     tool_cards: List[ToolCard]
     tool_instances: List[Tool]
+    agent_ras_setting: Any = None
 
 
 def resolve_deep_agent_parts(
@@ -193,6 +226,7 @@ def resolve_deep_agent_parts(
     enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
     enable_sys_operation: bool = True,
+    agent_ras: AgentRASConfig | dict[str, Any] | bool | None = None,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -200,9 +234,9 @@ def resolve_deep_agent_parts(
     The pure-assembly half of :func:`create_deep_agent`: normalizes tools,
     injects the optional general-purpose sub-agent, resolves workspace /
     sys_operation, builds the ``DeepAgentConfig``, and computes the auto-added
-    default rails (Security / TaskPlanning / SkillUse / Subagent) that the
-    caller did not already provide. Returns a :class:`DeepAgentParts` that
-    :func:`apply_deep_agent_parts` materializes onto a target agent.
+    default rails (Security / TaskPlanning / SkillUse / Subagent / AgentRAS)
+    that the caller did not already provide. Returns a :class:`DeepAgentParts`
+    that :func:`apply_deep_agent_parts` materializes onto a target agent.
 
     Args:
         enable_sys_operation: Whether to resolve a sys_operation for the agent.
@@ -210,6 +244,9 @@ def resolve_deep_agent_parts(
             its ``config.sys_operation`` is then None and no tool resources are
             registered for it. Other arguments are documented on
             :func:`create_deep_agent`.
+        agent_ras: Agent RAS configuration. ``None``/``True`` enables defaults;
+            ``False`` disables; ``dict`` / ``AgentRASConfig`` provide advanced
+            overrides.
     """
     if card is None:
         card = AgentCard(
@@ -311,6 +348,11 @@ def resolve_deep_agent_parts(
         restrict_to_work_dir=restrict_to_work_dir,
     )
 
+    # Raw agent_ras input is stored on DeepAgentParts (and later
+    # DeepAgent._agent_ras_setting) for sub-agent passthrough. False must
+    # survive as False; do not store the resolved config object.
+    agent_ras_config = _resolve_agent_ras_config(agent_ras)
+
     # Forward extra kwargs to config fields
     for key, value in config_kwargs.items():
         if hasattr(config, key):
@@ -358,6 +400,9 @@ def resolve_deep_agent_parts(
     def _make_task_planning_rail() -> TaskPlanningRail:
         return TaskPlanningRail(model_selection=model_selection)
 
+    def _make_agent_ras_rail() -> AgentRASRail:
+        return build_agent_ras_rail(agent_ras_config, card.name, model=model)
+
     default_rails = [
         (SecurityRail, enable_security_rail, lambda: SecurityRail()),
         (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
@@ -367,6 +412,7 @@ def resolve_deep_agent_parts(
          lambda: SubagentRail(enable_async_subagent=enable_async_subagent)),
         (ToolCallResilienceRail, config.enable_tool_resilience_rail, lambda: ToolCallResilienceRail()),
         (LLMStabilityRail, True, lambda: LLMStabilityRail()),
+        (AgentRASRail, agent_ras_config is not None, _make_agent_ras_rail),
     ]
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
@@ -377,6 +423,7 @@ def resolve_deep_agent_parts(
         rails=all_rails,
         tool_cards=normalized_tools,
         tool_instances=tool_instances,
+        agent_ras_setting=agent_ras,
     )
 
 
@@ -391,6 +438,7 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
     (forward construction, no throwaway template).
     """
     agent.configure(parts.config)
+    agent.set_agent_ras_setting(parts.agent_ras_setting)
 
     # Register concrete tool instances through the ability manager so the card
     # id and the resource-manager key stay consistent and get agent-qualified
@@ -447,6 +495,7 @@ def create_deep_agent(
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
     enable_llm_retry_rail: bool = True,
+    agent_ras: AgentRASConfig | dict[str, Any] | bool | None = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
     """Create and configure a DeepAgent instance.
@@ -500,6 +549,10 @@ def create_deep_agent(
         enable_security_rail: Enable the default SecurityRail that injects the
             safety prompt section. Explicitly supplied security rails are kept.
         enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
+        agent_ras: Agent RAS configuration. ``None``/``True`` enables defaults;
+            ``False`` disables; ``dict`` / ``AgentRASConfig`` provide advanced
+            overrides. When enabled, AgentRASRail mounts automatically unless
+            the caller already provided it in ``rails``.
         model_selection: Optional model selection config for TaskPlanningRail.
             Dict mapping Model instance to description string. When provided along with
             enable_task_planning, TaskPlanningRail will be configured with model selection,
@@ -540,6 +593,7 @@ def create_deep_agent(
         parallel_tool_calls=parallel_tool_calls,
         enable_security_rail=enable_security_rail,
         enable_llm_retry_rail=enable_llm_retry_rail,
+        agent_ras=agent_ras,
         **config_kwargs,
     )
     agent = DeepAgent(parts.config.card)

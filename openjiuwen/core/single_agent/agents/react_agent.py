@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Un
 
 from pydantic import Field, BaseModel
 
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, Termination
 from openjiuwen.core.common.logging import logger
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
@@ -1073,21 +1073,15 @@ class ReActAgent(BaseAgent):
                     payload={"content": ai_message.content, "result_type": "answer"},
                 ))
                 return ai_message
+            # Generic soft-stop (control-flow termination): keep partial for steering.
+            # Raised by reliability/other rails; core only knows the type, not the source.
+            if isinstance(exc, Termination):
+                ai_message = self._assistant_message_from_chunk(accumulated_chunk)
+                ctx.inputs.response = ai_message
+                return ai_message
             raise
 
-        if accumulated_chunk is None:
-            ai_message = AssistantMessage(content="", tool_calls=[])
-        else:
-            ai_message = AssistantMessage(
-                content=accumulated_chunk.content or "",
-                tool_calls=accumulated_chunk.tool_calls or [],
-                usage_metadata=accumulated_chunk.usage_metadata,
-                reasoning_content=accumulated_chunk.reasoning_content,
-                finish_reason=accumulated_chunk.finish_reason,
-                prompt_token_ids=accumulated_chunk.prompt_token_ids,
-                completion_token_ids=accumulated_chunk.completion_token_ids,
-                logprobs=accumulated_chunk.logprobs,
-            )
+        ai_message = self._assistant_message_from_chunk(accumulated_chunk)
         ctx.inputs.response = ai_message
         if ai_message.usage_metadata:
 
@@ -1227,6 +1221,22 @@ class ReActAgent(BaseAgent):
                 "请切换到支持视觉输入的主模型，或配置专用视觉模型工具后再读取图片。"
             ),
             tool_calls=[],
+        )
+
+    @staticmethod
+    def _assistant_message_from_chunk(chunk: Any) -> AssistantMessage:
+        """Build an AssistantMessage from an accumulated stream chunk (or None)."""
+        if chunk is None:
+            return AssistantMessage(content="", tool_calls=[])
+        return AssistantMessage(
+            content=chunk.content or "",
+            tool_calls=chunk.tool_calls or [],
+            usage_metadata=chunk.usage_metadata,
+            reasoning_content=chunk.reasoning_content,
+            finish_reason=chunk.finish_reason,
+            prompt_token_ids=chunk.prompt_token_ids,
+            completion_token_ids=chunk.completion_token_ids,
+            logprobs=chunk.logprobs,
         )
 
     # Key consumed once per model call. Rails may write this before invoke/stream;
