@@ -57,16 +57,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "已回退为全量继承（成员 {member}）。可用 checkpoint：{available}。"
             "请用 list_checkpoints 核对名字后再 fork。"
         ),
-        "checkpoint.fork_source_mismatch": (
-            "（创建者 '{creator}' 与 fork_source '{source}' 不匹配）"
-        ),
+        "checkpoint.fork_source_mismatch": ("（创建者 '{creator}' 与 fork_source '{source}' 不匹配）"),
         # agent/coordination/handlers/checkpoint.py — leader announcement body/note
-        "checkpoint.created_body": (
-            "成员 {member} 创建了 checkpoint '{name}'（消息位置 {count}）{description}"
-        ),
-        "checkpoint.created_note": (
-            "这是 checkpoint 创建公告，仅供你 fork 时核对名字使用，不需要回复。"
-        ),
+        "checkpoint.created_body": ("成员 {member} 创建了 checkpoint '{name}'（消息位置 {count}）{description}"),
+        "checkpoint.created_note": ("这是 checkpoint 创建公告，仅供你 fork 时核对名字使用，不需要回复。"),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (
             "⚙️[可靠性] 检测到 {kind}：{summary}。请停止重复无效操作，改换策略或换用其他工具。"
@@ -75,9 +69,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "[可靠性告警] {summary}。请评估该成员状态并决定处理方式"
             "（发消息提醒 / 取消任务 / 停止成员 / 新建成员或任务）。"
         ),
-        "reliability.escalate_user": (
-            "[可靠性·严重] {summary}。已超出自动处理范围，建议立即上报控制者 / 用户决策。"
-        ),
+        "reliability.escalate_user": ("[可靠性·严重] {summary}。已超出自动处理范围，建议立即上报控制者 / 用户决策。"),
         # agent/dispatcher.py — member lifecycle events
         "dispatcher.member_online": "[成员事件] 成员 {target_id} 已上线",
         "dispatcher.member_restarted": "[成员事件] 成员 {target_id} 已重启 (第{restart_count}次)",
@@ -161,12 +153,15 @@ STRINGS: dict[str, dict[str, str]] = {
             "已投票 {voted}；未投票 {pending}。任务停在 in_review。"
             "可用 send_message 催促验证者，或 update_task 调整验证者/处置任务。"
         ),
+        "scheduler.leader_escalation_reviewer_protocol": (
+            "[调度器·评审协议故障] 任务 [{task_id}]「{title}」第 {round} 轮中，验证者 {reviewers} "
+            "各完成 {attempts} 次临时评审但均未持久化 verify_task 投票。任务按 fail-closed 原则停在 "
+            "in_review，且系统没有伪造通过票。请检查验证者指令/工具调用，或用 update_task 更换验证者。"
+        ),
         "scheduler.leader_all_done": (
             "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
         ),
-        "scheduler.inspector_avg_line": (
-            "\n- [检视者平均分] {avg:.2f} / 0.85 ({status})\n"
-        ),
+        "scheduler.inspector_avg_line": ("\n- [检视者平均分] {avg:.2f} / 0.85 ({status})\n"),
         "scheduler.inspector_avg_pass": "达标",
         "scheduler.inspector_avg_fail": "未达标",
         "scheduler.none": "（无）",
@@ -190,7 +185,7 @@ STRINGS: dict[str, dict[str, str]] = {
         # itself out of replying, and a dropped user reply is invisible.
         "dispatcher.reply_hint_user": (
             "这条消息来自 user——委托本团队工作的**团队外部真人**，不是团队成员，不在成员名册里。"
-            "你必须调用 send_message(to=\"user\") 把答复发回用户；"
+            '你必须调用 send_message(to="user") 把答复发回用户；'
             "你写在回复正文里的任何文字都不会送达用户，不调用工具就等于没有回复。"
         ),
         # agent/dispatcher.py — idle-agent nudges
@@ -296,8 +291,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "async_tool.completed": "[后台任务完成] 工具={tool}\n{result}",
         "async_tool.failed": "[后台任务失败] 工具={tool}，错误={error}",
         "async_tool.spilled_notice": (
-            "[完整输出过大，已写入磁盘 {path}。"
-            "调用 async_task_output(task_id='{task_id}') 取回全文。]"
+            "[完整输出过大，已写入磁盘 {path}。调用 async_task_output(task_id='{task_id}') 取回全文。]"
         ),
     },
     "en": {
@@ -327,16 +321,13 @@ STRINGS: dict[str, dict[str, str]] = {
             "(member {member}). Available checkpoints: {available}. "
             "Use list_checkpoints to verify names before forking."
         ),
-        "checkpoint.fork_source_mismatch": (
-            " (creator '{creator}' does not match fork_source '{source}')"
-        ),
+        "checkpoint.fork_source_mismatch": (" (creator '{creator}' does not match fork_source '{source}')"),
         # agent/coordination/handlers/checkpoint.py — leader announcement body/note
         "checkpoint.created_body": (
             "Member {member} created checkpoint '{name}' (message position {count}){description}"
         ),
         "checkpoint.created_note": (
-            "This is a checkpoint-created announcement for your fork coordination; "
-            "no reply is needed."
+            "This is a checkpoint-created announcement for your fork coordination; no reply is needed."
         ),
         # reliability/ — anomaly remediation messages
         "reliability.steer_self_correct": (
@@ -429,13 +420,13 @@ STRINGS: dict[str, dict[str, str]] = {
         # their wording (F_63). Leader digests bypass the mailbox (direct input
         # injection), so they have no meta channel and stay one-line i18n.
         "scheduler.leader_task_done": (
-            "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}). {remaining} unfinished "
+            '[Scheduler] Task [{task_id}] "{title}" completed ({how}). {remaining} unfinished '
             "task(s) remain on the board."
         ),
         "scheduler.leader_task_done_how_verified": "review passed",
         "scheduler.leader_task_done_how_direct": "no review, completed directly",
         "scheduler.leader_escalation_rounds": (
-            "[Scheduler · Action Needed] Task [{task_id}] \"{title}\" failed {rounds} review "
+            '[Scheduler · Action Needed] Task [{task_id}] "{title}" failed {rounds} review '
             "round(s) in a row; automatic rework stopped and the task stays in_review. "
             "The assignee has been asked to send you a rework summary (via your inbox). "
             "Latest round feedback:\n{feedback}\n"
@@ -444,18 +435,22 @@ STRINGS: dict[str, dict[str, str]] = {
             "or rollback+replan (undo file changes before reassigning)."
         ),
         "scheduler.leader_escalation_stall": (
-            "[Scheduler · Action Needed] Task [{task_id}] \"{title}\" review round {round} has "
+            '[Scheduler · Action Needed] Task [{task_id}] "{title}" review round {round} has '
             "stalled for over {minutes} minute(s): voted {voted}; pending {pending}. The task "
             "stays in_review. Nudge the reviewers via send_message, or adjust reviewers / settle "
             "the task via update_task."
+        ),
+        "scheduler.leader_escalation_reviewer_protocol": (
+            '[Scheduler · Review Protocol Failure] For task [{task_id}] "{title}" review round {round}, '
+            "reviewers {reviewers} each completed {attempts} temporary review runs without persisting a "
+            "verify_task vote. The task remains in_review under fail-closed semantics; no pass vote was "
+            "fabricated. Inspect the reviewer instruction/tool call or replace the reviewer with update_task."
         ),
         "scheduler.leader_all_done": (
             "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "
             "the team's results and deliver the final conclusion to the user."
         ),
-        "scheduler.inspector_avg_line": (
-            "\n- [Inspector avg] {avg:.2f} / 0.85 ({status})\n"
-        ),
+        "scheduler.inspector_avg_line": ("\n- [Inspector avg] {avg:.2f} / 0.85 ({status})\n"),
         "scheduler.inspector_avg_pass": "pass",
         "scheduler.inspector_avg_fail": "fail",
         "scheduler.none": "(none)",
@@ -581,8 +576,7 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": (
-            "Orchestration [{run_id}] '{name}' has started; I will "
-            "report progress to you at each phase."
+            "Orchestration [{run_id}] '{name}' has started; I will report progress to you at each phase."
         ),
         "workflow.phase": "Orchestration [{run_id}] entering phase: {phase}",
         "workflow.human_prompt": "Awaiting a human reply [{label}]: {prompt} (correlation_id={corr})",

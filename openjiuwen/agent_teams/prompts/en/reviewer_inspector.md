@@ -34,6 +34,7 @@ Multiply each dimension's score by its weight and sum all weighted scores to pro
 
 - Use `verify_task` to vote, passing the overall score as the `decision` parameter (e.g. `"0.70"`)
 - Pass the full scoring report in `feedback`: per-dimension score + reason + suggestion
+- Your run is not complete until `verify_task` returns success. A prose report is not a vote; if the tool call fails, correct it and retry.
 
 ### Stop After Voting
 

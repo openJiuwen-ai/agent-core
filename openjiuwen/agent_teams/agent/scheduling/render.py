@@ -115,6 +115,23 @@ def render_leader_escalation_stall(task, *, minutes: int, voted: list[str], pend
     )
 
 
+def render_leader_escalation_reviewer_protocol(
+    task,
+    *,
+    reviewers: list[str],
+    attempts: int,
+) -> str:
+    """Escalate when temporary reviewers repeatedly finish without voting."""
+    return t(
+        "scheduler.leader_escalation_reviewer_protocol",
+        task_id=task.task_id,
+        title=task.title,
+        round=task.review_round,
+        reviewers=", ".join(reviewers),
+        attempts=attempts,
+    )
+
+
 def render_leader_all_done(count: int) -> str:
     """Final digest injected into the leader when the board drains."""
     return t("scheduler.leader_all_done", count=count)
@@ -143,7 +160,7 @@ async def render_review_request_for_harness(task: Any, *, language: str = "cn", 
     # Inject per-reviewer instruction from the structured reviewer list.
     instruction = ""
     if reviewer:
-        for detail in (task.reviewer_details() if hasattr(task, 'reviewer_details') else []):
+        for detail in task.reviewer_details() if hasattr(task, "reviewer_details") else []:
             if detail.get("reviewer_id") == reviewer:
                 instruction = detail.get("instruction", "")
                 break

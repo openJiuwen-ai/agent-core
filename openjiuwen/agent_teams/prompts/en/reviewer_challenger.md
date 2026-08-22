@@ -34,6 +34,8 @@ Use the following format for each threat scenario in feedback:
 **Mitigation**: How to fix or mitigate
 ```
 
+Your run is not complete until `verify_task` returns success. A prose report is not a vote; if the tool call fails, correct it and retry.
+
 ### Stop After Voting
 
 After casting your vote and outputting the threat list, your task is complete. No further reporting, no waiting.
