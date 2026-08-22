@@ -32,6 +32,48 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 # matter does not fit within this budget falls back to a full read.
 _FRONT_MATTER_PROBE_LINES = 64
 
+# Catalog path reads only YAML frontmatter from SKILL.md (no markdown body).
+_FRONTMATTER_READ_LIMIT = 65536
+
+
+def _read_local_frontmatter_prefix(
+    path: Path,
+    *,
+    limit: int = _FRONTMATTER_READ_LIMIT,
+) -> str:
+    """Read SKILL.md until the closing frontmatter ``---`` (catalog path; no body)."""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        first = handle.read(3)
+        if first != "---":
+            rest = handle.read(max(0, limit - len(first)))
+            return first + rest
+        parts: List[str] = [first]
+        total = len(first)
+        line = handle.readline()
+        if line:
+            parts.append(line)
+            total += len(line)
+        while total < limit:
+            line = handle.readline()
+            if not line:
+                break
+            parts.append(line)
+            total += len(line)
+            if line.strip() == "---":
+                break
+        return "".join(parts)
+
+
+def _parse_frontmatter_yaml(text: str) -> Optional[dict]:
+    """Parse YAML frontmatter from a SKILL.md prefix; ignore markdown body."""
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    yaml_data = yaml.safe_load(parts[1]) or {}
+    return yaml_data if isinstance(yaml_data, dict) else None
+
 
 class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
@@ -809,7 +851,8 @@ class SkillUseRail(DeepAgentRail):
         """Load only the YAML front matter of a SKILL.md.
 
         A SKILL.md body can be tens of KB while the front matter is a handful of
-        lines, so a bounded head read is tried first and only a file whose front
+        lines. A local short read up to the closing ``---`` fence is tried first;
+        otherwise a bounded SysOp head read is used, and only a file whose front
         matter does not fit falls back to reading the whole file.
 
         Args:
@@ -818,6 +861,14 @@ class SkillUseRail(DeepAgentRail):
         Returns:
             The parsed front matter mapping, or None when the file has none.
         """
+        try:
+            prefix = _read_local_frontmatter_prefix(path)
+            yaml_data = _parse_frontmatter_yaml(prefix)
+            if yaml_data is not None:
+                return yaml_data
+        except OSError:
+            pass
+
         head_text = await self._read_skill_text(path, head=_FRONT_MATTER_PROBE_LINES)
         parsed = self._split_front_matter(head_text)
         if parsed is not None:
