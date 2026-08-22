@@ -448,6 +448,17 @@ class DeepAgentSpec(BaseModel):
     """Project identity anchor. Defaults to ``cwd``."""
     skills: Optional[list[str]] = None
     enable_skill_discovery: bool = False
+    agent_template_spec: Optional[dict[str, Any]] = None
+    """In-memory AgentTemplate snapshot, consumed by the team harness host.
+
+    Carried as a plain ``dict`` (an ``AgentTemplateSpec.model_dump(mode="json")``
+    payload) instead of the model instance, so the spec keeps its JSON
+    round-trip ability and this module stays free of any ``extension_spec``
+    import cycle. ``resolve_parts()`` and ``build()`` ignore this field —
+    the only consumer is the async team harness (``NativeHarness._prepare``),
+    which validates it back into an ``AgentTemplateSpec`` and hot-loads it
+    onto the member's DeepAgent before the first model call.
+    """
     sys_operation: Optional[SysOperationSpec] = None
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
