@@ -1476,6 +1476,7 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
+        review_status="auto",
     )
     rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
@@ -1519,13 +1520,14 @@ async def test_run_evolution_uses_online_updater_path_after_init(tmp_path):
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_events(tmp_path):
+    # Passive run_evolution always stages with requires_approval=False (auto-approve path).
     rail = _make_rail(tmp_path, signal_trigger=True, auto_save=False)
     messages = [
         {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/skill-a/SKILL.md"}]},
         {"role": "tool", "content": "Error: command failed", "name": "bash"},
     ]
     trajectory = _trajectory_with_messages(messages)
-    approval_request = object()
+    approval_request = SimpleNamespace(request_id="skill_evolve_req")
 
     rail._collect_messages = AsyncMock(return_value=messages)
     rail._evolution_store.list_skill_names = Mock(return_value=["skill-a"])
@@ -1541,17 +1543,20 @@ async def test_run_evolution_auto_save_false_emits_events(tmp_path):
         messages=messages,
         trajectory=trajectory,
         user_query="",
-        requires_approval=True,
+        requires_approval=False,
+        review_status="suggest",
     )
-    rail._emit_generated_records.assert_awaited_once_with(None, "skill-a", approval_request)
+    rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
     stages = [event.payload["evolution_meta"]["stage"] for event in events]
     assert "signals_attributed" in stages
     assert "optimizing" in stages
+    assert "auto_approved" in stages
 
 
 @pytest.mark.asyncio
 async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path):
+    # Passive run_evolution does not emit approval prompts; records are auto-approved.
     rail = _make_rail(tmp_path, signal_trigger=True, auto_save=False)
     record = _make_record("skill-a", content="fresh approval record")
     messages = [
@@ -1578,11 +1583,15 @@ async def test_run_evolution_auto_save_false_emits_real_approval_event(tmp_path)
         messages=messages,
         trajectory=trajectory,
         user_query="",
-        requires_approval=True,
+        requires_approval=False,
+        review_status="suggest",
     )
-    events = _approval_events(await rail.drain_pending_approval_events())
-    assert len(events) == 1
-    assert events[0].payload["evolution_meta"]["skill_name"] == "skill-a"
+    drained = await rail.drain_pending_host_events()
+    assert _approval_events(drained) == []
+    events = _progress_events(drained)
+    stages = [event.payload["evolution_meta"]["stage"] for event in events]
+    assert "auto_approved" in stages
+    assert events[-1].payload["evolution_meta"]["skill_name"] == "skill-a"
 
 
 @pytest.mark.asyncio
@@ -1930,7 +1939,9 @@ async def test_on_approve_partial_failure_retains_pending_change(tmp_path):
     # Host retries: now the remaining record succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_2, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "skill-a", record_2, subject_kind="skill", update_skill_md=True
+    )
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -1958,7 +1969,9 @@ async def test_on_approve_full_failure_then_retry_succeeds(tmp_path):
     # Host retries: now append succeeds
     rail._evolution_store.append_record = AsyncMock()
     await rail.on_approve(request_id)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "skill-a", record, subject_kind="skill", update_skill_md=True
+    )
     assert request_id not in rail._pending_approval_snapshots
 
 
@@ -1985,12 +1998,16 @@ async def test_concurrent_approval_batches_are_independent(tmp_path):
 
     # Approving the first prompt should write only record_a
     await rail.on_approve(req1)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_a, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "skill-a", record_a, subject_kind="skill", update_skill_md=True
+    )
     rail._evolution_store.append_record.reset_mock()
 
     # Approving the second prompt should write only record_b
     await rail.on_approve(req2)
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record_b, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "skill-a", record_b, subject_kind="skill", update_skill_md=True
+    )
 
 
 @pytest.mark.asyncio
@@ -2010,7 +2027,9 @@ async def test_on_approve_only_flushes_snapshot_records(tmp_path):
     later_request = _stage_approval_request(rail, "skill-a", [pending_later])
     await rail.on_approve(request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", approved, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "skill-a", approved, subject_kind="skill", update_skill_md=True
+    )
     assert later_request.request_id in rail._pending_approval_snapshots
     assert request_id not in rail._pending_approval_snapshots
 
@@ -3190,7 +3209,9 @@ async def test_on_approve_uses_rebound_pending_snapshot_store(tmp_path):
 
     await rail.on_approve(request.request_id)
 
-    rail._evolution_store.append_record.assert_awaited_once_with("skill-a", record, subject_kind="skill")
+    rail._evolution_store.append_record.assert_awaited_once_with(
+        "skill-a", record, subject_kind="skill", update_skill_md=True
+    )
     assert request.request_id not in rebound_snapshots
 
 
