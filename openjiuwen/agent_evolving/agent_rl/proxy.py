@@ -264,8 +264,10 @@ class BackendProxy:
     async def _wait_for_server_ready(self, max_attempts: int = 30) -> None:
         for attempt in range(max_attempts):
             try:
-                resp = requests.get(
-                    f"http://{self._host}:{self._port}/health", timeout=2
+                resp = await asyncio.to_thread(
+                    requests.get,
+                    f"http://{self._host}:{self._port}/health",
+                    timeout=2,
                 )
                 if resp.status_code == 200 and resp.json().get("status") == "healthy":
                     logger.info(
