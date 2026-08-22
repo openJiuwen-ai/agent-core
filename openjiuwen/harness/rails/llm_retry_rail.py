@@ -10,6 +10,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 _STREAM_CHUNK_INSPECTORS_KEY = "_stream_chunk_inspectors"
@@ -19,6 +20,11 @@ _STREAM_TIMEOUT_MARKERS = (
     "LLM stream timeout",
     "stream frame timeout",
 )
+# Model-call stream errors raised by the model clients as MODEL_CALL_FAILED
+# (code 181001), e.g. "openAI API async stream error: ...". These are
+# transient upstream failures; retrying re-reads the same context window, so
+# the conversation history is preserved.
+_MODEL_CALL_FAILED_MARKER = "async stream error"
 # Whole-call retry backoff (seconds) before the 1st/2nd/... retry attempt.
 # The last value is reused if there are more retries than entries.
 _DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
@@ -27,9 +33,10 @@ _DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 class LLMRetryRail(DeepAgentRail):
     """Retry selected streaming model failures.
 
-    The rail handles two model-call failure modes:
+    The rail handles three model-call failure modes:
       - repeated output suffixes in reasoning/content streams
       - stream frame timeout errors raised by ``Model.stream``
+      - upstream model-call stream errors (code 181001)
 
     Repetition detection is provider-agnostic. It only keeps a bounded tail of
     text and checks whether that tail ends with a short snippet repeated many
@@ -80,6 +87,7 @@ class LLMRetryRail(DeepAgentRail):
         self.backoff_seconds = backoff
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
+        self.model_call_failed_retry_count = 0
 
     def backoff_delay(self, retry_index: int) -> float:
         """Return the sleep (seconds) before the retry at ``retry_index`` (0-based).
@@ -94,6 +102,7 @@ class LLMRetryRail(DeepAgentRail):
         """Reset retry counters at the start of each agent invocation."""
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
+        self.model_call_failed_retry_count = 0
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Install a per-model-call stream chunk inspector."""
@@ -124,11 +133,15 @@ class LLMRetryRail(DeepAgentRail):
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         """Retry only LLM retry rail model-call failures."""
         if self._is_repeat_exception(ctx.exception):
-            self._request_retry_or_reset(ctx, "repeat")
+            await self._request_retry_or_reset(ctx, "repeat")
             return
 
         if self._is_stream_timeout_exception(ctx.exception):
-            self._request_retry_or_reset(ctx, "stream_timeout")
+            await self._request_retry_or_reset(ctx, "stream_timeout")
+            return
+
+        if self._is_model_call_failed_exception(ctx.exception):
+            await self._request_retry_or_reset(ctx, "model_call_failed")
 
     def _append_and_check(self, state: Dict[str, str], field_name: str, text: str) -> None:
         tail = (state.get(field_name, "") + text)[-self.repeat_window_chars:]
@@ -199,11 +212,12 @@ class LLMRetryRail(DeepAgentRail):
             return formatted
         return formatted[:limit] + "..."
 
-    def _request_retry_or_reset(self, ctx: AgentCallbackContext, reason: str) -> None:
+    async def _request_retry_or_reset(self, ctx: AgentCallbackContext, reason: str) -> None:
         if reason == "repeat":
             if self.repeat_retry_count < self.max_retries:
                 delay = self.backoff_delay(self.repeat_retry_count)
                 self.repeat_retry_count += 1
+                await self._emit_retry_notice(ctx, self.repeat_retry_count, reason, delay)
                 logger.warning(
                     "[LLMRetryRail] retrying model call after repeated stream output "
                     f"({self.repeat_retry_count}/{self.max_retries}) after {delay:.2f}s backoff"
@@ -213,16 +227,56 @@ class LLMRetryRail(DeepAgentRail):
                 self.repeat_retry_count = 0
             return
 
-        if self.stream_timeout_retry_count < self.max_retries:
-            delay = self.backoff_delay(self.stream_timeout_retry_count)
-            self.stream_timeout_retry_count += 1
+        if reason == "stream_timeout":
+            if self.stream_timeout_retry_count < self.max_retries:
+                delay = self.backoff_delay(self.stream_timeout_retry_count)
+                self.stream_timeout_retry_count += 1
+                await self._emit_retry_notice(ctx, self.stream_timeout_retry_count, reason, delay)
+                logger.warning(
+                    "[LLMRetryRail] retrying model call after stream frame timeout "
+                    f"({self.stream_timeout_retry_count}/{self.max_retries}) after {delay:.2f}s backoff"
+                )
+                ctx.request_retry(delay_seconds=delay)
+            else:
+                self.stream_timeout_retry_count = 0
+            return
+
+        if self.model_call_failed_retry_count < self.max_retries:
+            delay = self.backoff_delay(self.model_call_failed_retry_count)
+            self.model_call_failed_retry_count += 1
+            await self._emit_retry_notice(ctx, self.model_call_failed_retry_count, reason, delay)
             logger.warning(
-                "[LLMRetryRail] retrying model call after stream frame timeout "
-                f"({self.stream_timeout_retry_count}/{self.max_retries}) after {delay:.2f}s backoff"
+                "[LLMRetryRail] retrying model call after model-call failure "
+                f"({self.model_call_failed_retry_count}/{self.max_retries}) after {delay:.2f}s backoff"
             )
             ctx.request_retry(delay_seconds=delay)
         else:
-            self.stream_timeout_retry_count = 0
+            self.model_call_failed_retry_count = 0
+
+    async def _emit_retry_notice(
+            self,
+            ctx: AgentCallbackContext,
+            retry_count: int,
+            reason: str,
+            delay: float,
+    ) -> None:
+        """向前端发重试通知，复用既有的 chat.error 事件通道."""
+        session = ctx.session
+        if session is None:
+            return
+        try:
+            await session.write_stream(OutputSchema(
+                type="error",
+                index=0,
+                payload={
+                    "error": (
+                        f"⚠️ 模型调用异常 [{reason}]，将在 {delay:.1f} 秒后进行"
+                        f"第 {retry_count}/{self.max_retries} 次重试..."
+                    ),
+                },
+            ))
+        except Exception:
+            logger.debug("Failed to emit retry notice", exc_info=True)
 
     @staticmethod
     def _is_repeat_exception(exc: Optional[BaseException]) -> bool:
@@ -234,6 +288,12 @@ class LLMRetryRail(DeepAgentRail):
             return False
         message = str(exc)
         return any(marker in message for marker in _STREAM_TIMEOUT_MARKERS)
+
+    @staticmethod
+    def _is_model_call_failed_exception(exc: Optional[BaseException]) -> bool:
+        if exc is None:
+            return False
+        return _MODEL_CALL_FAILED_MARKER in str(exc)
 
 
 __all__ = [
