@@ -130,10 +130,14 @@ def decorate_model_with_trace(model, agent_session):
         model_name = type(model).__name__
     instance_info = {"class_name": model_name, "type": "llm"}
     proxy = _TraceProxy(model)
-    proxy.invoke = async_trace(model.invoke, session, InvokeType.LLM, instance_info,
-                               index=0, inputs_field_name="messages")
-    proxy.stream = async_trace_stream(model.stream, session, InvokeType.LLM, instance_info,
-                                      index=0, inputs_field_name="messages")
+    # Only wrap the methods the model actually exposes; anything left unset
+    # falls through to the wrapped object untraced.
+    if hasattr(model, "invoke"):
+        proxy.invoke = async_trace(model.invoke, session, InvokeType.LLM, instance_info,
+                                   index=0, inputs_field_name="messages")
+    if hasattr(model, "stream"):
+        proxy.stream = async_trace_stream(model.stream, session, InvokeType.LLM, instance_info,
+                                          index=0, inputs_field_name="messages")
     return proxy
 
 
