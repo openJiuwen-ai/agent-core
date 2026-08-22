@@ -63,36 +63,26 @@ class Runtime:
     strict: bool = False
     spawn_limit: int = 1000
     budget: BudgetLedger = field(default_factory=BudgetLedger)
-    """The **session-wide** (team/leader) token ledger, shared by reference with
-    the backend (which reports real usage into it). Monotonic across runs — never
-    resets. Default: an unbounded ledger. The engine only reads it — at the
-    ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
+    """Session-wide token ledger, shared with the backend (which reports real
+    usage into it); never resets. The engine only reads it (budget gates,
+    ``budget.*``)."""
     workflow_budget: BudgetLedger = field(default_factory=BudgetLedger)
-    """The **per-run** token ledger, shared by reference with the backend like
-    ``budget`` but reset to ``spent=0`` on each new ``swarmflow`` invocation.
-    Its ``total`` is the script-declared ``workflow_token_limit`` (a per-run
-    ceiling independent of the session budget). The engine reads it at the
-    per-run ``_check_budget`` gate (``scope="workflow"``). Hitting it is
-    retryable by revising the workflow, unlike the session ceiling."""
+    """Per-run token ledger, reset to ``spent=0`` on each ``swarmflow``
+    invocation; ``total`` is the script-declared ``workflow_token_limit``.
+    Hitting it is retryable by revising the workflow, unlike the session
+    ceiling."""
     cap_override: int | None = None  # force the concurrency cap (tests)
     abort_event: AbortSignal | None = field(default=None, repr=False)
-    """External cooperative pause/stop signal. When set, the ``agent()`` /
-    ``AgentSession.send()`` abort checkpoints raise ``WorkflowAborted`` carrying
-    the signal's ``reason`` (``"pause"`` → relaunch on resume; ``"stop"`` →
-    terminal) — the in-flight call does not journal and the run unwinds (a
-    resume reruns it). ``None`` disables the checkpoints (default; full
-    back-compat)."""
+    """External pause/stop signal: when set, the abort checkpoints raise
+    ``WorkflowAborted`` carrying its ``reason``; the in-flight call does not
+    journal (a resume reruns it). ``None`` disables the checkpoints."""
     run_id: str | None = field(default=None, repr=False)
-    """This run's identifier, threaded into journal records as an independent
-    cache-isolation key (``get_cached`` checks ``sig`` AND ``run_id``). A
-    completed/stopped run that relaunches with a fresh ``run_id`` never hits
-    the prior run's cache (no cross-run budget bleed); a resume keeps the same
-    ``run_id`` so the journal's pause record and cache replay carry forward."""
+    """Run identifier threaded into journal records as a cache-isolation key
+    (``get_cached`` checks ``sig`` AND ``run_id``): a fresh run never hits the
+    prior run's cache; a resume keeps the same id."""
     current_agent: "dict | None" = field(default=None, repr=False)
-    """The in-flight agent (``{"agent_id", "label", "started_spent"}``) between
-    ``_emit_agent_started`` and its completed/failed counterpart. A pause/stop
-    that lands mid-agent reads this to record *which* agent was interrupted and
-    how many tokens it had already billed (``spent - started_spent``)."""
+    """The in-flight agent (``{"agent_id", "label", "started_spent"}``); a
+    pause/stop mid-agent reads this to record which agent was interrupted."""
 
     # Mutable run state (created/advanced inside the running loop).
     agent_gate: AgentAdmission | None = field(default=None, repr=False)

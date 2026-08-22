@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import aiofiles
 
@@ -121,6 +121,11 @@ class Journal:
         # loop stays free while one append runs.
         self._wal_lock = asyncio.Lock()
 
+    @property
+    def wal_path(self) -> str | None:
+        """WAL path this journal persists to; ``None`` means durability is off."""
+        return self._wal_path
+
     @staticmethod
     def _parse_records(text: str) -> "list[dict]":
         """Parse JSONL into records, tolerating a torn trailing line.
@@ -184,8 +189,8 @@ class Journal:
             return None
         return rec
 
-    def find_run_record(self, run_id: str, type: str) -> dict | None:
-        """Find the latest record of ``type`` (``"pause"`` / ``"seal"``) for ``run_id``.
+    def find_run_record(self, run_id: str, record_type: str) -> dict | None:
+        """Find the latest record of ``record_type`` (``"pause"`` / ``"seal"``) for ``run_id``.
 
         Used to recover budget state on resume (pause record) or detect a
         terminal prior run (seal record → force a fresh run_id on relaunch).
@@ -195,7 +200,7 @@ class Journal:
         """
         found = None
         for rec in self.prior.values():
-            if rec.get("run_id") == run_id and rec.get("type") == type:
+            if rec.get("run_id") == run_id and rec.get("type") == record_type:
                 found = rec  # last one wins (dict iteration = insertion order)
         return found
 
@@ -211,19 +216,19 @@ class Journal:
             await self._append_wal(record)
         self.used[ks] = record
 
-    async def write_run_record(self, run_id: str, type: str, payload: dict) -> None:
+    async def write_run_record(self, run_id: str, record_type: str, payload: dict) -> None:
         """Write a run-level record (``pause`` / ``seal``) to the journal + WAL.
 
         Unlike call records, these carry no structural call path — they are a
-        run-wide snapshot keyed by a synthetic path ``[["__run__", ord, type,
-        run_id]]``. A high ordinal (``sys.maxsize``) sorts them after every call
+        run-wide snapshot keyed by a synthetic path ``[["__run__", ord,
+        record_type, run_id]]``. A high ordinal (``sys.maxsize``) sorts them after every call
         in program order, so they land at the tail of a saved journal exactly
         where a terminal/mid-run snapshot belongs. ``payload`` is merged onto the
         ``type`` / ``run_id`` envelope before persistence.
         """
         import sys
-        ks = key_str([["__run__", sys.maxsize, type, run_id]])
-        rec = {"key": ks, "type": type, "run_id": run_id, **payload}
+        ks = key_str([["__run__", sys.maxsize, record_type, run_id]])
+        rec = {"key": ks, "type": record_type, "run_id": run_id, **payload}
         await self._append_wal(rec)
         self.used[ks] = rec
         # Also surface in ``prior`` so same-run lookups (find_run_record) see it

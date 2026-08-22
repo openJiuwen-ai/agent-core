@@ -15,10 +15,7 @@ or directly with ``MockBackend`` from tests; library code must not ``print``.
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 from .admission import AgentAdmission
@@ -82,7 +79,7 @@ async def _write_seal_record(rt, *, terminal_status: str) -> None:
     "seal")``) that the prior run ended and force a fresh run_id. No-op when the
     journal has no WAL path (offline preview / no persistence).
     """
-    if rt.journal is None or rt.journal._wal_path is None:
+    if rt.journal is None or rt.journal.wal_path is None:
         return
     await rt.journal.write_run_record(
         rt.run_id or "", "seal",
@@ -99,7 +96,7 @@ async def _write_pause_record(rt, *, pause_reason: str) -> None:
     cache hits). ``pause_reason`` is one of ``"paused"`` / ``"early_return"`` /
     ``"workflow_budget_exhausted"``. No-op without a journal (offline preview).
     """
-    if rt.journal is None or rt.journal._wal_path is None:
+    if rt.journal is None or rt.journal.wal_path is None:
         return
     paused_agent = None
     cur = rt.current_agent
