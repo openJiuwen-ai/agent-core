@@ -95,6 +95,37 @@ class ContextEngine:
         """Clear instance-level final-window mutators."""
         self._window_mutators.clear()
 
+    def update_model_context(
+        self,
+        *,
+        model_name: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+    ) -> None:
+        """Update selected-model metadata for this engine and cached contexts.
+
+        ``ContextEngineConfig.context_window_tokens`` is deliberately not
+        changed here: it is the global override and remains the highest
+        priority source. Only the selected model name and model-level window
+        are refreshed, including on contexts already cached for a session.
+        """
+        self._config = self._config.model_copy(
+            update={
+                "model_name": model_name or None,
+                "model_context_window_tokens_override": (
+                    context_window_tokens
+                    if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                    else None
+                ),
+            }
+        )
+        for context in self._context_pool.values():
+            update_context = getattr(context, "update_model_context", None)
+            if callable(update_context):
+                update_context(
+                    model_name=model_name,
+                    context_window_tokens=context_window_tokens,
+                )
+
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
             self,
@@ -279,16 +310,22 @@ class ContextEngine:
         """Recover from a model context-window rejection by compressing once.
 
         ReAct agents call this hook after model-call rail retries are
-        exhausted. A retry is requested only when the provider error clearly
-        describes an input/context limit and no partial stream output has
-        already been emitted. ``compress_context`` returns ``"compressed"``
-        only when a registered processor changed the context, so a missing or
-        ineffective processor preserves the original model exception.
+        exhausted. A retry is requested when the provider error clearly
+        describes an input/context limit and ``compress_context`` returns
+        ``"compressed"``. A missing or ineffective processor preserves the
+        original model exception.
         """
         del context
-        if streaming and int(stream_chunks_emitted or 0) > 0:
-            context_engine_logger.info(
-                "skip model context recovery after partial stream output"
+
+        # A streaming response may already have been sent to the caller when
+        # the provider reports an overflow. Retrying after compression would
+        # emit the already-sent prefix again, so only recover before the first
+        # stream chunk is visible.
+        if streaming and stream_chunks_emitted > 0:
+            context_engine_logger.warning(
+                "skip model context recovery after streaming output was emitted, "
+                "stream_chunks_emitted=%s",
+                stream_chunks_emitted,
             )
             return False
 

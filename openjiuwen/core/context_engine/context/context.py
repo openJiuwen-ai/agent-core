@@ -60,7 +60,14 @@ class SessionModelContext(ModelContext):
         self._session_id = session_id
         self._message_buffer = ContextMessageBuffer(history_messages or [], config.max_context_message_num)
         self._default_window_size = config.default_window_message_num
-        self._context_window_tokens = config.context_window_tokens
+        self._global_context_window_tokens = config.context_window_tokens
+        self._model_context_window_tokens_override = config.model_context_window_tokens_override
+        self._context_window_tokens = (
+            self._global_context_window_tokens
+            if isinstance(self._global_context_window_tokens, int)
+            and self._global_context_window_tokens > 0
+            else self._model_context_window_tokens_override
+        )
         self._model_name = config.model_name
         self._model_context_window_tokens = ContextUtils.build_model_context_window_tokens(
             config.model_context_window_tokens,
@@ -112,6 +119,31 @@ class SessionModelContext(ModelContext):
 
     def set_last_context_window_access_at(self, timestamp: float) -> None:
         self._last_context_window_access_at = timestamp
+
+    def update_model_context(
+        self,
+        *,
+        model_name: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+    ) -> None:
+        """Update the selected model metadata used by context-window resolution.
+
+        The global context-window value remains untouched and therefore keeps
+        its higher priority. A missing or invalid model value clears the
+        model-specific override so automatic model-name resolution can resume.
+        """
+        self._model_name = model_name or None
+        self._model_context_window_tokens_override = (
+            context_window_tokens
+            if isinstance(context_window_tokens, int) and context_window_tokens > 0
+            else None
+        )
+        self._context_window_tokens = (
+            self._global_context_window_tokens
+            if isinstance(self._global_context_window_tokens, int)
+            and self._global_context_window_tokens > 0
+            else self._model_context_window_tokens_override
+        )
 
     def context_window_tokens(self) -> int:
         return ContextUtils.resolve_context_max(
