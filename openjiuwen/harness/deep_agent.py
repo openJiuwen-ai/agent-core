@@ -799,10 +799,16 @@ class DeepAgent(BaseAgent):
             isinstance(global_context_window, int)
             and global_context_window > 0
         ):
+            model_context_window_override = getattr(
+                config,
+                "model_context_window_tokens_override",
+                None,
+            )
             global_context_window = (
-                model_context_window
-                if isinstance(model_context_window, int) and model_context_window > 0
-                else getattr(config, "model_context_window_tokens_override", None)
+                model_context_window_override
+                if isinstance(model_context_window_override, int)
+                and model_context_window_override > 0
+                else model_context_window
             )
 
         return ContextUtils.resolve_context_max(

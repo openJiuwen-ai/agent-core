@@ -315,7 +315,19 @@ class ContextEngine:
         ``"compressed"``. A missing or ineffective processor preserves the
         original model exception.
         """
-        del context, streaming, stream_chunks_emitted
+        del context
+
+        # A streaming response may already have been sent to the caller when
+        # the provider reports an overflow. Retrying after compression would
+        # emit the already-sent prefix again, so only recover before the first
+        # stream chunk is visible.
+        if streaming and stream_chunks_emitted > 0:
+            context_engine_logger.warning(
+                "skip model context recovery after streaming output was emitted, "
+                "stream_chunks_emitted=%s",
+                stream_chunks_emitted,
+            )
+            return False
 
         if not self.is_context_overflow_error(exception):
             return False

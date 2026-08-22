@@ -558,11 +558,12 @@ class ReActAgent(BaseAgent):
     @classmethod
     def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
         context_config = config.context_engine_config
-        model_name = cls._resolve_context_engine_model_name(config)
-        if not model_name:
+        configured_model_name = getattr(context_config, "model_name", None)
+        if isinstance(configured_model_name, str) and configured_model_name.strip():
             return config
 
-        if getattr(context_config, "model_name", None) == model_name:
+        model_name = cls._resolve_context_engine_model_name(config)
+        if not model_name:
             return config
 
         return config.model_copy(
@@ -583,7 +584,9 @@ class ReActAgent(BaseAgent):
             isinstance(model_context_window, int)
             and model_context_window > 0
         ):
-            model_context_window = None
+            # No model metadata is available. Preserve an explicit context
+            # engine override instead of clearing it during configure().
+            return config
 
         if getattr(context_config, "model_context_window_tokens_override", None) == model_context_window:
             return config

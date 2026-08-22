@@ -234,7 +234,7 @@ class TestContextEngine:
         )
 
     @pytest.mark.asyncio
-    async def test_recover_from_model_exception_compresses_partial_stream(self, engine, session):
+    async def test_recover_from_model_exception_skips_partial_stream(self, engine, session):
         context = await engine.create_context(
             context_id="ctx",
             session=session,
@@ -258,9 +258,9 @@ class TestContextEngine:
             stream_chunks_emitted=1,
         )
 
-        assert recovered is True
-        assert context.get_messages()[0].content == "[STREAM_RECOVERED]"
-        session.commit.assert_awaited_once_with()
+        assert recovered is False
+        assert context.get_messages()[0].content == "large historical context"
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_compress_context_preserves_explicit_empty_trigger(self, engine, session):
