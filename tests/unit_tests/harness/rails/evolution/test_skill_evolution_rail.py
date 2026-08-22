@@ -1435,6 +1435,7 @@ async def test_run_evolution_auto_save_commits_via_manager_lifecycle(tmp_path):
         trajectory=trajectory,
         user_query="",
         requires_approval=False,
+        review_status="auto",
     )
     rail._emit_generated_records.assert_not_awaited()
     events = _progress_events(await rail.drain_pending_host_events())
