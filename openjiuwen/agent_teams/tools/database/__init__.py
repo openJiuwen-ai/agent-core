@@ -96,6 +96,10 @@ class TeamDatabase:
         self.session_local: Optional[async_sessionmaker] = None
         self.read_engine: Optional[AsyncEngine] = None
         self.read_session_local: Optional[async_sessionmaker] = None
+        # One DbSessions (one process-wide write lock) shared by every DAO;
+        # bind-time session-table DDL also runs through it so DDL serialises
+        # with DAO writes instead of bypassing the lock (engine.begin()).
+        self._sessions: Optional[DbSessions] = None
         self._initialized = False
         self._init_lock = asyncio.Lock()
         # Background WAL checkpointer task (file-backed SQLite +
@@ -133,18 +137,28 @@ class TeamDatabase:
             self.read_engine = engines.read_engine
             self.session_local = engines.write_session_local
             self.read_session_local = engines.read_session_local
-            if get_session_id():
-                await _create_cur_session_tables(self.engine)
 
             # One DbSessions (one write lock) shared by every DAO: SQLite's
             # write lock is database-wide, so all four tables must serialise
             # writes through the same lock. Reads go to the reader factory
             # (a separate pool for file-backed SQLite) — see DbSessions.
             sessions = DbSessions(self.session_local, self.read_session_local)
+            self._sessions = sessions
+            # Bind-time session-table DDL runs under the same write lock: the
+            # engine-level variant (``engine.begin()``) bypassed it and could
+            # hold both write-pool connections during concurrent binds.
+            if get_session_id():
+                await _create_cur_session_tables(sessions)
+            # message/task ``content`` spills to session files (DB keeps the
+            # ``#file#`` placeholder, DAOs derive the path from the row and
+            # dereference on read).
+            from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
+
+            file_store = SessionFileStore()
             self.team = TeamDao(sessions)
             self.member = MemberDao(sessions)
-            self.task = TaskDao(sessions)
-            self.message = MessageDao(sessions)
+            self.task = TaskDao(sessions, file_store=file_store)
+            self.message = MessageDao(sessions, file_store=file_store)
 
             self._maybe_start_checkpointer()
 
@@ -190,10 +204,15 @@ class TeamDatabase:
                 team_logger.warning("Background WAL checkpoint failed: %s", e)
 
     async def create_cur_session_tables(self) -> None:
-        """Create dynamic tables for current session."""
-        if self.engine is None:
+        """Create dynamic tables for current session.
+
+        Runs under the ``DbSessions`` write lock (serialised with DAO writes
+        of this instance) rather than on a bare ``engine.begin()`` — see
+        ``engine.create_cur_session_tables``.
+        """
+        if self._sessions is None:
             return
-        await _create_cur_session_tables(self.engine)
+        await _create_cur_session_tables(self._sessions)
 
     async def drop_cur_session_tables(self) -> None:
         """Drop dynamic tables for current session."""

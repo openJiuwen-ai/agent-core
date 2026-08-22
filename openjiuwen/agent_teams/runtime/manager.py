@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.interaction.router import (
     parse_interact_str,
     resolve_targets,
 )
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.monitor import (
     TeamMonitor,
     create_monitor,
@@ -63,7 +64,6 @@ from openjiuwen.agent_teams.runtime.pool import (
     RuntimeState,
     TeamRuntimePool,
 )
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
@@ -795,6 +795,9 @@ class TeamRuntimeManager:
             await db.drop_session_tables_by_id(session_id)
             if not await remove_session_worktrees(team_name, session_id):
                 team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
+            # Reclaim the session's message/task spill files after the dynamic
+            # tables are dropped so on-disk content does not outlive its rows.
+            _remove_session_content_files(team_name, session_id)
 
         for session_id in session_ids:
             await checkpointer.release(session_id)
@@ -869,6 +872,8 @@ class TeamRuntimeManager:
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):
                 team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
+            # Reclaim the session's message/task spill files.
+            _remove_session_content_files(team_name, session_id)
 
     @staticmethod
     async def _resolve_any_team_session_release_info(
@@ -1114,3 +1119,27 @@ _REJECT_KINDS = frozenset(
         RunActionKind.REJECT_INCONSISTENT,
     }
 )
+
+
+def _remove_session_content_files(team_name: str, session_id: str) -> None:
+    """Reclaim a session's spill files.
+
+    Called by ``delete_team`` / ``release_session`` right after
+    ``drop_session_tables_by_id`` so the on-disk ``messages/`` and ``tasks/``
+    directories do not outlive their dynamic tables. Best-effort — an IO
+    failure logs a warning and never blocks session teardown.
+    """
+    try:
+        from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
+
+        SessionFileStore().remove_session(
+            team_name=team_name,
+            session_id=session_id,
+        )
+    except (OSError, ValueError) as exc:  # best-effort cleanup
+        team_logger.warning(
+            "Failed to remove session content files team={} session={}: {}",
+            team_name,
+            session_id,
+            exc,
+        )
