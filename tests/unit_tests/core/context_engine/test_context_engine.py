@@ -973,3 +973,32 @@ class TestContextEngine:
         context1.set_messages(messages=messages1, with_history=False)
         assert context1.get_messages(with_history=False) == messages1
         assert context1.get_messages() == history + messages[:-1] + messages1
+
+    @pytest.mark.asyncio
+    async def test_model_context_window_override_updates_cached_context(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                model_name="model-a",
+                model_context_window_tokens_override=131072,
+            )
+        )
+        context = await engine.create_context(context_id="ctx", session=session)
+        assert context.context_window_tokens() == 131072
+
+        engine.update_model_context(model_name="model-b", context_window_tokens=262144)
+        assert context.context_window_tokens() == 262144
+
+    @pytest.mark.asyncio
+    async def test_global_context_window_stays_above_model_override(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                context_window_tokens=65536,
+                model_name="model-a",
+                model_context_window_tokens_override=131072,
+            )
+        )
+        context = await engine.create_context(context_id="ctx", session=session)
+        assert context.context_window_tokens() == 65536
+
+        engine.update_model_context(model_name="model-b", context_window_tokens=262144)
+        assert context.context_window_tokens() == 65536

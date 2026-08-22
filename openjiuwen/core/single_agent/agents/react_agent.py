@@ -558,17 +558,42 @@ class ReActAgent(BaseAgent):
     @classmethod
     def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
         context_config = config.context_engine_config
-        if getattr(context_config, "model_name", None):
-            return config
-
         model_name = cls._resolve_context_engine_model_name(config)
         if not model_name:
+            return config
+
+        if getattr(context_config, "model_name", None) == model_name:
             return config
 
         return config.model_copy(
             update={
                 "context_engine_config": context_config.model_copy(
                     update={"model_name": model_name}
+                )
+            }
+        )
+
+    @classmethod
+    def _with_context_engine_model_window(cls, config: ReActAgentConfig) -> ReActAgentConfig:
+        """Attach the selected model's window without overriding a global value."""
+        model_config = getattr(config, "model_config_obj", None)
+        model_context_window = getattr(model_config, "context_window", None)
+        context_config = config.context_engine_config
+        if not (
+            isinstance(model_context_window, int)
+            and model_context_window > 0
+        ):
+            model_context_window = None
+
+        if getattr(context_config, "model_context_window_tokens_override", None) == model_context_window:
+            return config
+
+        return config.model_copy(
+            update={
+                "context_engine_config": context_config.model_copy(
+                    update={
+                        "model_context_window_tokens_override": model_context_window,
+                    }
                 )
             }
         )
@@ -587,6 +612,7 @@ class ReActAgent(BaseAgent):
             will be updated accordingly
         """
         config = self._with_context_engine_model_name(config)
+        config = self._with_context_engine_model_window(config)
         old_config = self._config
         self._config = config
         kv_config_changed = old_config.kv_cache_affinity_config != config.kv_cache_affinity_config
@@ -640,6 +666,28 @@ class ReActAgent(BaseAgent):
         )
 
         return self
+
+    def update_model_context(
+        self,
+        *,
+        model_name: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+    ) -> None:
+        """Refresh selected-model context metadata without rebuilding contexts."""
+        self._config.context_engine_config = self._config.context_engine_config.model_copy(
+            update={
+                "model_name": model_name or None,
+                "model_context_window_tokens_override": (
+                    context_window_tokens
+                    if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                    else None
+                ),
+            }
+        )
+        self.context_engine.update_model_context(
+            model_name=model_name,
+            context_window_tokens=context_window_tokens,
+        )
 
     def set_llm(self, llm: Model) -> None:
         """Set LLM model instance directly.

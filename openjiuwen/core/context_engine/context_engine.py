@@ -95,6 +95,37 @@ class ContextEngine:
         """Clear instance-level final-window mutators."""
         self._window_mutators.clear()
 
+    def update_model_context(
+        self,
+        *,
+        model_name: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+    ) -> None:
+        """Update selected-model metadata for this engine and cached contexts.
+
+        ``ContextEngineConfig.context_window_tokens`` is deliberately not
+        changed here: it is the global override and remains the highest
+        priority source. Only the selected model name and model-level window
+        are refreshed, including on contexts already cached for a session.
+        """
+        self._config = self._config.model_copy(
+            update={
+                "model_name": model_name or None,
+                "model_context_window_tokens_override": (
+                    context_window_tokens
+                    if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                    else None
+                ),
+            }
+        )
+        for context in self._context_pool.values():
+            update_context = getattr(context, "update_model_context", None)
+            if callable(update_context):
+                update_context(
+                    model_name=model_name,
+                    context_window_tokens=context_window_tokens,
+                )
+
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
             self,

@@ -338,7 +338,15 @@ class OpenAIAccountModelClient(BaseModelClient):
         include_reasoning = kwargs.pop("include_reasoning_encrypted_content", True)
 
         request_extra = self.model_config.model_dump(
-            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude={
+                "model_name",
+                "model",
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "stop",
+                "context_window",
+            },
             exclude_none=True,
         )
         request_extra.update(kwargs)
