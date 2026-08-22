@@ -119,7 +119,10 @@ def _inject_general_purpose_subagent(
         return effective_subagents
 
     desc = GENERAL_PURPOSE_AGENT_DESC.get(resolved_language, GENERAL_PURPOSE_AGENT_DESC["cn"])
-    gp_rails = [r for r in (rails or []) if not isinstance(r, SubagentRail)]
+    gp_rails = []
+    for r in (rails or []):
+        if not isinstance(r, SubagentRail) and getattr(r, "inherit_to_subagents", True):
+            gp_rails.append(r)
     if not any(isinstance(r, SysOperationRail) for r in gp_rails):
         gp_rails = [SysOperationRail(), *gp_rails]
     gp_rails = gp_rails or None
