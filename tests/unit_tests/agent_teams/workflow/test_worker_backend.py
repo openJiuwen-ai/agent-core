@@ -53,6 +53,9 @@ class _FakeWorkerBackend(TeamWorkerBackend):
         has_schema: bool,
         model: Any,
         budget_rail: Any = None,
+        agent_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
     ) -> str:
         if has_schema and tools:
             tools[0].captured = {"answer": f"done::{member_name}"}
@@ -101,7 +104,7 @@ def test_schema_path_prefers_natural_text_over_json(tmp_path):
     """When schema capture succeeds and invoke also returns narration, prefer narration."""
 
     class _NarratingWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             if has_schema and tools:
                 tools[0].captured = {"answer": f"done::{member_name}"}
                 tools[0].called = True
@@ -126,7 +129,7 @@ def test_missing_submit_makes_agent_return_none(tmp_path):
     """
 
     class _SilentWorker(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             return ""  # never fills structured_output
 
     script = _write(tmp_path, _SCRIPT)
@@ -156,7 +159,7 @@ async def run(args):
     seen: list = []
 
     class _RecordingBackend(TeamWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             seen.append(model)
             return f"ran::{model}"
 
@@ -540,7 +543,7 @@ def test_agent_emits_failed_when_worker_backend_raises(tmp_path):
     from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 
     class _FailingWorkerBackend(_FakeWorkerBackend):
-        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, agent_id=None, phase=None, label=None):
             raise BackendError(
                 "worker 'wf-w-0' failed: [181001] model call failed, reason: ReadError"
             )
@@ -566,3 +569,68 @@ async def run(args):
     failed = next(ev for ev in events if ev.kind == ProgressKind.AGENT_FAILED)
     assert "ReadError" in (failed.message or "")
     assert ProgressKind.AGENT_COMPLETED not in kinds
+
+
+def test_activity_rail_emits_tool_name():
+    """SwarmflowActivityRail forwards a throttled tool name on before_tool_call."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+
+    emitted: list[str] = []
+    rail = SwarmflowActivityRail(emit=emitted.append)
+
+    class _Ctx:
+        inputs = ToolCallInputs(tool_name="write_file")
+
+    asyncio.run(rail.before_tool_call(_Ctx()))
+    assert emitted == ["write_file"]
+
+    # Non-tool inputs / blank tool names are ignored.
+    class _NoInput:
+        inputs = None
+
+    asyncio.run(rail.before_tool_call(_NoInput()))
+    assert emitted == ["write_file"]
+
+
+def test_activity_rail_throttles_bursts():
+    """Multiple tool calls within the min interval emit at most once."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+
+    emitted: list[str] = []
+    rail = SwarmflowActivityRail(emit=emitted.append, min_interval_s=60.0)
+
+    class _Ctx:
+        inputs = ToolCallInputs(tool_name="bash")
+
+    asyncio.run(rail.before_tool_call(_Ctx()))
+    asyncio.run(rail.before_tool_call(_Ctx()))
+    assert emitted == ["bash"]
+
+
+def test_activity_emitter_builds_agent_activity_event():
+    """The backend emitter forwards tool calls as agent_activity progress events."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
+    from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+
+    events: list = []
+    backend = TeamWorkerBackend(model=None)
+    backend.bind_progress_sink(events.append)
+    emit = backend._make_activity_emitter("main/call:7", "review", "coder")
+    emit("write_file")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.kind == ProgressKind.AGENT_ACTIVITY
+    assert ev.agent_id == "main/call:7"
+    assert ev.phase == "review"
+    assert ev.label == "coder"
+    assert ev.message == "tool: write_file"
+
+    # No sink bound -> emitter is a silent no-op.
+    events.clear()
+    backend.bind_progress_sink(None)
+    emit = backend._make_activity_emitter("main/call:8", "review", "coder")
+    emit("bash")
+    assert events == []

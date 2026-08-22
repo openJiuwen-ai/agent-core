@@ -160,6 +160,9 @@ async def run_workflow(
     # Hand the ledger to the backend: it is the only layer that sees what a call
     # really costs, so it does the accounting and the engine only reads.
     rt.backend.bind_budget(rt.budget)
+    # Hand the progress sink to the backend too so it can emit live mid-call
+    # activity (worker tool calls) alongside the engine's start/end hooks.
+    rt.backend.bind_progress_sink(rt.progress_sink)
     try:
         result = await _exec_loaded(loaded, rt)
     finally:

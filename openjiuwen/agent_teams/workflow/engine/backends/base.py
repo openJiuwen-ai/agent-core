@@ -54,6 +54,7 @@ class AgentBackend(abc.ABC):
 
     def __init__(self) -> None:
         self._budget = BudgetLedger()
+        self._progress_sink: Any = None
 
     @property
     def budget(self) -> BudgetLedger:
@@ -74,6 +75,21 @@ class AgentBackend(abc.ABC):
         the backend attaches to the agents it spawns); call ``super()`` first.
         """
         self._budget = budget
+
+    @property
+    def progress_sink(self) -> Any:
+        """The run's progress sink, or ``None`` when not bound (``run_workflow``)."""
+        return self._progress_sink
+
+    def bind_progress_sink(self, progress_sink: Any) -> None:
+        """Adopt the run's progress sink; called once by ``run_workflow``.
+
+        Lets the backend emit ``WorkflowProgressEvent`` mid-call (e.g. live
+        worker activity from rails attached to the agents it spawns) instead of
+        only the engine's start/end hooks. ``None`` means the backend stays
+        silent (a no-op), which is fine for test backends.
+        """
+        self._progress_sink = progress_sink
 
     @abc.abstractmethod
     async def run(

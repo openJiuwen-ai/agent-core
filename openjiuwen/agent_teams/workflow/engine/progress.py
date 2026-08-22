@@ -42,6 +42,10 @@ class ProgressKind:
     AGENT_STARTED = "agent_started"
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
+    #: Live mid-run activity from a single-shot worker (tool calls etc.). Carries
+    #: the node's ``agent_id`` / ``phase`` / ``label`` and a short narration in
+    #: ``message`` so a spectator UI can show what a worker is doing right now.
+    AGENT_ACTIVITY = "agent_activity"
     HUMAN_PROMPT = "human_prompt"
     HUMAN_REPLIED = "human_replied"
     LOG = "log"
@@ -60,17 +64,19 @@ class WorkflowProgressEvent:
     * ``description``         — the workflow script's META ``description``
       (``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED``); ``None`` on all other kinds.
     * ``phase``               — set by ``PHASE`` (the new phase title) and echoed
-      on ``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` so a consumer
-      can group agents under their phase without tracking state.
+      on ``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` /
+      ``AGENT_ACTIVITY`` so a consumer can group agents under their phase
+      without tracking state.
     * ``label``               — the ``agent()`` call's label (``AGENT_*``).
     * ``prompt``              — the agent's rendered prompt (``AGENT_STARTED``).
     * ``model``               — the ``agent(model=...)`` name hint (``AGENT_STARTED``).
     * ``outcome``             — a short preview of the agent's result
       (``AGENT_COMPLETED``); absent on ``AGENT_FAILED`` (use ``message`` instead).
-    * ``message``             — free narration text (``LOG``); a human-readable
-      term on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED`` (e.g. "Workflow started",
-      "Workflow completed"), and the error description on ``WORKFLOW_FAILED`` /
-      ``AGENT_FAILED``.
+    * ``message``             — free narration text (``LOG``); a short "what the
+      worker is doing" line such as ``tool: write_file`` (``AGENT_ACTIVITY``); a
+      human-readable term on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED`` (e.g.
+      "Workflow started", "Workflow completed"), and the error description on
+      ``WORKFLOW_FAILED`` / ``AGENT_FAILED``.
     * ``phases``              — the static phase plan from the script's ``META``
       dict (``WORKFLOW_STARTED``); ``None`` on all other kinds.
     * ``correlation_id``      — a pending human turn's id (``HUMAN_PROMPT`` /
@@ -91,9 +97,9 @@ class WorkflowProgressEvent:
       else ``kind="agent"`` (``None`` defaults to ``"agent"``); no separate
       ``is_human`` flag is emitted.
     * ``agent_id``            — a deterministic, resume-stable per-node id
-      (``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED``), reused from
-      the journal cache key. A consumer matches ``AGENT_COMPLETED`` /
-      ``AGENT_FAILED`` to its node by this id — the only sound way to
+      (``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` /
+      ``AGENT_ACTIVITY``), reused from the journal cache key. A consumer matches
+      terminal / activity events to its node by this id — the only sound way to
       disambiguate same-label nodes in for-loops, multi-turn sessions, and
       ``parallel``.
     * ``answer``              — the person's raw reply text (``HUMAN_REPLIED``).
