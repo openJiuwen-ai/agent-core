@@ -68,7 +68,6 @@ def build_request_body(
         "temperature": temperature,
         "top_p": top_p,
         "max_output_tokens": max_tokens,
-        "stop": stop,
         "reasoning": reasoning,
     }
     for key, value in request_options.items():
