@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-08-04 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md` |
+| 最近一次修订日期 | 2026-08-20 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md` |
 
 ## 范围 / 边界
 
@@ -209,6 +209,12 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
    - 入向：`interact_agent_team(HumanAgentMessage(target="swarmflow:<corr>"))` → `swarmflow_human_reply_topic` → `submit_human_reply`
    - human base spec 经 `SWARMFLOW_HUMAN_BASE_SPEC` 注入。详见 `F_37`。
 10. **run 收口**：`run_workflow` finally 调 `backend.aclose()` 释放本 run 开过的所有会话。
+11. **fork 原语（`F_81`）**：`AgentSession.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` 派生独立分支，五种 `fork_mode`（`full` / `before` / `after` / `keep_before_compact_after` / `keep_after_compact_before`）逐字对齐团队 fork。`keep_rounds` 为**轮数**（每次 `send()` 计一轮）：**`full` 之外必填**（缺省抛 `WorkflowError`）；**越界**（> 实际轮数）告警 + 回退全量。eager 捕获——`fork()` 调用时刻冻结父上下文，之后父自由 `send` 不影响子；子可链式再 `fork`。`human_session` 拒绝。fork turn 的 `node_type="agent_session_fork"`。
+    - 引擎层只做镜像继承 + `backend.capture_fork` 委托 + 存不透明 `fork_data`（铁律 1：engine 不碰业务符号）；backend 负责轮数→消息索引换算、捕获/注入/双向压缩、child session_id 派生。
+    - **`_member_name` + `ensure_member_name`（D9）**：`AgentSession` 在首次 `send`（无论 cache-hit/miss）经 `backend.ensure_member_name(kind, opts)` 预留 member name（不建 avatar / 不调 LLM / 不计 spawn）；`_sid` 保持"已建 avatar"语义（只 miss 时设）。`fork()` 用 `_member_name` 定位父恢复路径（而非 `_sid`），故 fully-hit resume 也能 fork。cache-hit 首轮也命名使 `_counter` 由 session 访问顺序决定、跨 resume 稳定（修复 counter 漂移）。
+    - 后端捕获路径（`AvatarSessionManager.capture_fork`）：父 live → `ForkContext.from_agent`（含 ToolMessage）；父未重建（fully-hit resume）→ 构造一个**独立** Session（`create_agent_session(session_id=固定id, card=AgentCard(id=f"{team_name}_{member_name}"))`，card.id 带 team 前缀以匹配真实 agent_id；非"绑定"父 live session，仅复用其分桶键）+ `pre_run` 从 checkpointer 恢复 `state["context"]`（含 ToolMessage，无需重建父 avatar，见 D6）；两者都无 → 返 `None`，引擎镜像兜底（缺 ToolMessage）。
+    - **链式 fork 约束（D10）**：不要 fork 一个未 send 过的 fork 子会话（其 `_member_name` 为 None，会镜像兜底）；想基于父早期状态派生，直接用父的 `fork_mode` + `keep_rounds`。
+12. **前置底座：avatar 固定 session_id（`F_81` / F_37 决策 3）**：avatar child session 绑定稳定派生 id `{team}/{workflow}/{member}`（`_derive_avatar_session_id`），经 `harness.start(team_session=...)` → `create_agent_session(session_id=...)` 继承。这让已在代码里的 `pre_run` + checkpoint 恢复机制生效——同进程 resume 能按稳定 id 恢复 `state["context"]`（含 ToolMessage），是 fork 捕获完整上下文与部分-hit 续跑的共同底座。**仅同进程恢复（InMemory store）**；跨进程/重启的持久化 checkpointer 装配不做（`set_default_checkpointer` 进程级全局副作用大），列为遗留。
 
 ## 结构化输出工具协议（`StructuredOutputTool`）
 

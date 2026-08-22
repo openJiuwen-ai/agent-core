@@ -11,7 +11,7 @@ workflow/
 │   ├── facade.py        # 脚本 import 的稳定原语面（agent/agent_session/human_session/human/parallel/pipeline/phase/log/...）
 │   ├── seam.py          # Provider 协议 + contextvar（引擎可整体替换的接缝）
 │   ├── provider.py      # EngineProvider（把原语转发到 primitives）
-│   ├── primitives.py    # 原语实现：call-path keys / agent_gate.acquire() 并发 / journal；单轮 agent() + 有状态 AgentSession(send/notify) + options bag；phase/log/agent 起止发 progress 事件
+│   ├── primitives.py    # 原语实现：call-path keys / agent_gate.acquire() 并发 / journal；单轮 agent() + 有状态 AgentSession(send/notify/fork, 含 _member_name 首轮命名) + options bag；phase/log/agent 起止发 progress 事件
 │   ├── journal.py       # content-addressed resume（结构化 call-path 键 + sig；sig 可选折入 session history）
 │   ├── loader.py        # AST 提取 META + 确定性 lint + importlib 导入
 │   ├── schema.py        # agent(schema=) 解析/校验（dict / pydantic / None）
@@ -24,7 +24,7 @@ workflow/
 │   └── backends/{base,mock}.py  # AgentBackend 抽象（run + 可选 open_session/send_turn/close_session/aclose + KNOWN_OPTIONS）+ 离线确定性 MockBackend（含 session 实现）
 ├── backends/
 │   ├── team_worker_backend.py   # TeamWorkerBackend：把每个 agent() 映射成一个 WORKER TeamHarness（核心对接）；委派会话四方法给 AvatarSessionManager
-│   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）
+│   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）+ fork（capture_fork 双来源[live native / checkpointer 恢复] / ensure_member_name 首轮命名 / 稳定 session_id 派生 / fork_data 注入 / 镜像兜底，见 F_81）
 │   ├── budget_rail.py           # SwarmflowBudgetRail：挂在每个 worker/avatar harness 上，after_model_call 读 usage_metadata 记真实 token、超预算 force-finish 就地停 harness（见 F_66）
 │   └── _member_spec.py          # derive_member_spec / derive_member_build_context：worker 与 avatar 共享的 spec / build_context 派生
 │   # StructuredOutputTool 已下沉到 tools/structured_output_tool.py（通用工具，tiny_agent 也复用）；backends/__init__ 仍 re-export

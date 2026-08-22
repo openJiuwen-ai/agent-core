@@ -129,6 +129,5 @@ swarmflow 此前只有一种执行单位：单轮 worker（`agent()` → `TeamWo
 - **CLI `$` 回复语法**：UI 目前需用 `interact_agent_team(HumanAgentMessage(target=
   "swarmflow:<corr>"))` 回复；交互式 CLI 的 `$swarmflow:<corr> <answer>` 解析（`parse_interact_str`
   是否允许 `:`）未验证，作为 UI 侧 follow-up。
-- **resume 部分-hit 续跑**：依赖 avatar session checkpoint 持久化分桶（复用 team 的
-  `session.state["teams"]` 机制）；首期保证"冷启动多轮 + 全-hit 纯重放"。
-- **`fork`**：本期不做。
+- **resume 部分-hit 续跑**：~~依赖 avatar session checkpoint 持久化分桶~~ **已部分解决（F_81）**：固定 session_id 使 F_37 决策 3 生效，同进程 resume 可恢复 `state["context"]`（含 ToolMessage）；跨进程/重启的持久化 checkpointer 装配仍遗留。
+- **`fork`**：~~本期不做~~ **已实现，见 [[F_81_swarmflow-session-fork]]**——`agent_session.fork()` 五种模式，复用团队 fork 引擎。

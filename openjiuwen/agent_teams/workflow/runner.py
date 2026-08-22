@@ -41,6 +41,22 @@ def _team_log_sink(message: str) -> None:
     team_logger.warning("{}", message)
 
 
+def _workflow_name(script_path: str) -> str | None:
+    """Read the workflow name from the script ``META`` (best-effort).
+
+    Used to namespace avatar child session ids (``{team}/{workflow}/{member}``)
+    so avatars of the same-named workflow share a stable session across a
+    same-process resume, while different workflows never collide. Returns
+    ``None`` when the script declares no ``name`` (the backend falls back to a
+    workflow-less namespace).
+    """
+    try:
+        meta = load_workflow_meta(script_path)
+        return meta.get("name")
+    except Exception:  # noqa: BLE001 - best-effort namespace read
+        return None
+
+
 def _resolve_journal_path(script_path: str, team_name: str, session_id: str | None) -> str:
     """Compute the resume-journal path for a swarmflow run.
 
@@ -189,6 +205,7 @@ async def run_swarmflow(
         BudgetExhausted: If the ledger's ceiling is reached and the script keeps
             calling ``agent()`` instead of winding down on ``budget.remaining()``.
     """
+
     def _on_human_prompt(member_name: str, correlation_id: str, prompt: str) -> None:
         """Surface a pending human turn as a progress event (leader narrates it)."""
         observer.emit(
@@ -224,6 +241,7 @@ async def run_swarmflow(
         on_human_prompt=_on_human_prompt,
         on_human_replied=_on_human_replied,
         run_id=run_id,
+        workflow_name=_workflow_name(script_path),
     )
     if on_backend_ready is not None:
         on_backend_ready(backend)

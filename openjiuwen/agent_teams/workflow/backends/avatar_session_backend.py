@@ -20,6 +20,7 @@ This object is owned by :class:`TeamWorkerBackend`, which delegates the engine's
 no process-global state: every session is an instance-scoped row, cleaned up on
 ``close_session`` / ``aclose``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,6 +49,8 @@ from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+from openjiuwen.core.session.vcs.codec import encode_message
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -90,6 +93,13 @@ class _SessionState:
     a turn's own cost is the delta across the round."""
     harness: Any = None  # TeamHarness, built lazily by open_session
     turns_executed: int = 0
+    # The child session id this avatar runs on — a stable derived id (not a
+    # random uuid) so ``pre_run`` recovery / ``_read_persisted_messages`` can
+    # locate the prior run's saved ``state["context"]`` (see _derive_avatar_session_id).
+    session_id: str | None = None
+    # Guards the fork-context / mirror seeding so a resumed child never seeds its
+    # context twice (a second seed would clobber what the avatar already rebuilt).
+    context_seeded: bool = False
     # Per-turn rendezvous: the round driver awaits ``turn_future``; the harness
     # callbacks (running in its supervisor coroutine) fill ``last_finished`` and
     # resolve the future on the RUNNING→IDLE settle.
@@ -130,6 +140,7 @@ class AvatarSessionManager:
         messager: Any = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        workflow_name: str | None = None,
         on_human_prompt: Callable[[str, str, str], None] | None = None,
         on_human_replied: Callable[[str, str, str | None], None] | None = None,
         human_timeout: float | None = None,
@@ -159,30 +170,226 @@ class AvatarSessionManager:
         # Scopes the reply topic so concurrent runs don't cross-resolve.
         # None falls back to the legacy session+team scope.
         self._run_id = run_id
+        self._workflow_name = workflow_name
         self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
     # Engine session-backend surface (delegated from TeamWorkerBackend)
     # ------------------------------------------------------------------
 
-    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
-        """Mint a member identity, build the avatar harness, and start it."""
+    async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
+        """Reserve this session's member identity without building its avatar.
+
+        Pure in-process bookkeeping (a counter increment + name mint) — no
+        harness, no LLM, no spawn/budget slot. Called on a session's first turn
+        regardless of cache hit so a fully-hit resume still knows the member
+        name ``capture_fork`` needs to locate the parent's persisted context.
+        """
+        return self._next_member_name(kind, opts)
+
+    async def open_session(
+        self,
+        *,
+        kind: str,
+        instructions: str | None,
+        opts: dict,
+        fork_data: dict | None = None,
+        member_name: str | None = None,
+    ) -> str:
+        """Build the avatar harness for a session and start it.
+
+        ``member_name`` is the identity already reserved by :meth:`ensure_member_name`
+        on the first turn — reused here so we never re-mint a name (which would
+        drift the counter across a resume). When ``None`` (human sessions, or a
+        backend invoked directly) a fresh name is minted.
+        """
         base = self._human_base_spec if kind == "human" else self._worker_base_spec
         if base is None:
             raise BackendError(f"no base spec available for {kind!r} sessions")
-        member_name = self._next_member_name(kind, opts)
+        if member_name is None:
+            member_name = self._next_member_name(kind, opts)
         state = _SessionState(
             kind=kind,
             spec_base=base,
             instructions=instructions,
             member_name=member_name,
             budget_rail=SwarmflowBudgetRail(self._budget),
+            session_id=self._derive_avatar_session_id(member_name),
         )
         self._sessions[member_name] = state
         if kind == "human":
             await self._ensure_reply_subscription()
-        await self._start_avatar(state, opts)
+        await self._start_avatar(state, opts, fork_data)
         return member_name
+
+    async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
+        """Eagerly snapshot a session's context per ``fork_mode`` / ``keep_rounds``.
+
+        Called at ``AgentSession.fork()`` time so the parent's context is frozen
+        at the fork point. ``session_id`` is the parent's reserved member name.
+
+        Two capture sources, in order of preference:
+        1. a **live** parent avatar (in this run's ``_sessions``) — snapshotted
+           from its native context, which carries ToolMessage;
+        2. the parent's **persisted** ``state["context"]`` (after a fully-hit
+           resume the avatar was never rebuilt, so there is no live native) —
+           recovered from the checkpointer by the reserved member name, also
+           carrying ToolMessage.
+
+        Returns a serializable ``fork_data`` dict for injection into a fresh
+        child session, or ``None`` when neither source is available — the engine
+        then falls back to its history mirror (degraded, no ToolMessage).
+
+        ``keep_rounds`` is the split point in **rounds** (each prior ``send()``
+        is one round). The engine requires it for every mode but ``full``;
+        a value beyond the parent's actual round count is not an error — a
+        warning is logged and the fork silently degrades to full-context,
+        mirroring the team fork's "wrong name → full-context" guard.
+        """
+        state = self._sessions.get(session_id)
+        if state is not None and state.harness is not None:
+            native = state.harness.get_deep_agent()
+            return self._fork_data_from_native(native, session_id, fork_mode, keep_rounds)
+
+        # No live parent avatar (fully-hit resume): recover from the persisted
+        # session context via the reserved member name.
+        persisted = await self._persisted_messages(session_id)
+        if persisted is None:
+            return None
+        fork_ctx = self._fork_ctx_from_messages(persisted, session_id, fork_mode, keep_rounds)
+        if fork_ctx is None:
+            return None
+        return {
+            "messages": fork_ctx.messages,
+            "compact_split": fork_ctx.compact_split,
+            "compact_direction": fork_ctx.compact_direction,
+        }
+
+    def _fork_data_from_native(self, native, member_name: str, fork_mode: str, keep_rounds: int | None) -> dict:
+        """Build fork_data from a live parent avatar's native context."""
+        from openjiuwen.agent_teams.fork import ForkContext
+
+        if fork_mode == "full":
+            fork_ctx = ForkContext.from_agent(native)
+        elif fork_mode in ("before", "after"):
+            idx = _round_boundary_index(
+                native.get_current_context(),
+                keep_rounds,
+                keep_after=(fork_mode == "after"),
+            )
+            if idx is None:
+                self._warn_out_of_range(member_name, fork_mode, keep_rounds)
+                fork_ctx = ForkContext.from_agent(native)  # out-of-range → full
+            else:
+                fork_ctx = ForkContext.from_agent(
+                    native,
+                    checkpoint=idx,
+                    keep="after" if fork_mode == "after" else "before",
+                )
+        else:  # compact modes: full capture + mark split; compaction at inject time
+            fork_ctx = ForkContext.from_agent(native)
+            idx = _round_boundary_index(
+                native.get_current_context(),
+                keep_rounds,
+                keep_after=False,
+            )
+            if idx is None:
+                self._warn_out_of_range(member_name, fork_mode, keep_rounds)
+                fork_ctx.compact_split = len(fork_ctx.messages)
+            else:
+                fork_ctx.compact_split = idx
+            fork_ctx.compact_direction = "after" if fork_mode == "keep_before_compact_after" else "before"
+        return {
+            "messages": fork_ctx.messages,
+            "compact_split": fork_ctx.compact_split,
+            "compact_direction": fork_ctx.compact_direction,
+        }
+
+    def _fork_ctx_from_messages(self, msgs, member_name: str, fork_mode: str, keep_rounds: int | None):
+        """Build fork_data from a persisted message list (no live native)."""
+        from openjiuwen.agent_teams.fork import ForkContext
+
+        fork_ctx = ForkContext(messages=[encode_message(m) for m in msgs])
+        if fork_mode == "full":
+            return fork_ctx
+        idx = _round_boundary_index(msgs, keep_rounds, keep_after=(fork_mode == "after"))
+        if idx is None:
+            self._warn_out_of_range(member_name, fork_mode, keep_rounds)
+            return fork_ctx  # full fallback
+        if fork_mode in ("before", "after"):
+            if fork_mode == "after":
+                fork_ctx.messages = fork_ctx.messages[idx:]
+            else:
+                fork_ctx.messages = fork_ctx.messages[:idx]
+        else:  # compact: mark split on the full capture, compaction at inject time
+            fork_ctx.compact_split = idx
+            fork_ctx.compact_direction = "after" if fork_mode == "keep_before_compact_after" else "before"
+        return fork_ctx
+
+    async def _persisted_messages(self, member_name: str) -> list | None:
+        """Recover a parent avatar's persisted conversation from the checkpointer.
+
+        After a fully-hit resume the parent avatar is never rebuilt, so there is
+        no live native to snapshot. The checkpointer still holds its final
+        ``state["context"]`` (committed at the prior run's teardown). Recover it
+        by constructing a *standalone* session that reuses the parent's stable
+        ``session_id`` and ``{team}_{member}`` card id (so ``pre_agent_execute``
+        hits the same AgentStorage bucket) and running ``pre_run`` — which drives
+        the checkpointer's restore (and also fires ``AGENT_SESSION_CREATED``);
+        no harness, no LLM, no supervisor.
+        """
+        from openjiuwen.agent_teams.fork import ForkContext
+        from openjiuwen.core.session.agent import create_agent_session
+        from openjiuwen.core.single_agent import AgentCard
+
+        member_name = member_name or self._next_member_name("agent", {})
+        fixed_id = self._derive_avatar_session_id(member_name)
+        try:
+            # The real avatar's card.id is ``{team_name}_{member_name}``
+            # (derive_member_spec, _member_spec.py:48) — that is the agent_id
+            # the checkpointer keys AgentStorage by. The recovery card must
+            # match it, or pre_agent_execute cannot locate the persisted state.
+            sess = create_agent_session(
+                session_id=fixed_id,
+                card=AgentCard(id=f"{self._team_name}_{member_name}", name=member_name),
+            )
+            await sess.pre_run()
+            states = sess.get_state("context")
+        except Exception:  # noqa: BLE001 - best-effort persisted recovery
+            team_logger.debug("[swarmflow] fork persisted recovery failed for %s", member_name, exc_info=True)
+            return None
+        if not isinstance(states, dict):
+            return None
+        ctx_state = states.get("default_context_id")
+        if not isinstance(ctx_state, dict):
+            return None
+        messages = ctx_state.get("messages")
+        if not isinstance(messages, list):
+            return None
+        return ForkContext.normalize_messages(messages)
+
+    @staticmethod
+    def _warn_out_of_range(session_id: str, fork_mode: str, keep_rounds: int | None) -> None:
+        """Log when keep_rounds has no matching round (degrades to full-context fork)."""
+        team_logger.warning(
+            "[swarmflow] fork out-of-range: session %s fork_mode=%s keep_rounds=%r has no "
+            "matching round; falling back to a full-context fork",
+            session_id,
+            fork_mode,
+            keep_rounds,
+        )
+
+    def _derive_avatar_session_id(self, member_name: str) -> str:
+        """Stable, unique child session id for an avatar.
+
+        ``{team}/{workflow}/{member}`` — stable across a same-process resume (so
+        ``pre_run`` / ``_read_persisted_messages`` can locate the prior run's
+        saved ``state["context"]``) and unique across sessions (``member_name``
+        is already unique per manager, ``workflow_name`` separates different
+        scripts running under the same session).
+        """
+        wf = self._workflow_name or "workflow"
+        return f"{self._team_name}/{wf}/{member_name}"
 
     async def _ensure_reply_subscription(self) -> None:
         """Subscribe (once) to the dedicated human-reply topic for this run.
@@ -224,18 +431,55 @@ class AvatarSessionManager:
     ) -> AgentResult:
         """Advance one turn on a session (serialised per session by its lock).
 
-        ``history`` is unused on the live (cold-run) path — the avatar harness
-        keeps its own context across rounds. It is the seam a later stage uses to
-        rebuild context after a partial-hit resume. ``correlation_id`` is the
+        ``history`` is the engine-side conversation mirror. On the live
+        (cold-run) path the avatar harness keeps its own context across rounds,
+        so it is unused — except as a **degraded seed** for a fork child whose
+        backend snapshot was unavailable (``fork_data`` was ``None``): the
+        first turn rebuilds a ``(user, assistant)`` conversation from the mirror
+        so the child still has something to work on. ``correlation_id`` is the
         engine's deterministic id for a human turn (matches a person's reply).
         """
         state = self._sessions.get(session_id)
         if state is None:
             raise BackendError(f"unknown session {session_id!r}")
         async with state.lock:
+            await self._seed_mirror_fallback(state, history)
             if state.kind == "human":
                 return await self._human_turn(state, prompt, opts, schema_json, correlation_id)
             return await self._agent_turn(state, prompt, schema_json)
+
+    async def _seed_mirror_fallback(self, state: _SessionState, history: Sequence[dict]) -> None:
+        """Seed a fork child's context from the history mirror (degraded path).
+
+        Only fires when the child was opened with no ``fork_data`` (the backend
+        could not capture the parent's context) **and** no fork context was
+        seeded, and the mirror actually carries prior turns. This is a fallback,
+        not the primary path: a mirror rebuild has no ToolMessage and loses the
+        KV prefix, so it only keeps the fork meaningful when nothing better is
+        available. Seeding happens once (``context_seeded`` guards double-writes
+        — a second seed would clobber what the avatar rebuilt).
+        """
+        if state.turns_executed != 0 or state.context_seeded or not history:
+            return
+        state.context_seeded = True
+        messages: list[Any] = []
+        for entry in history:
+            role = entry.get("role")
+            content = entry.get("content")
+            if role == "user":
+                messages.append(UserMessage(content=content))
+            elif role == "assistant":
+                messages.append(AssistantMessage(content=content))
+        if not messages:
+            return
+        native = state.harness.get_deep_agent()
+        child_sid = native.session_id  # bound child session, set by harness.start
+        await native.create_new_context_engine(session_id=child_sid, messages=messages)
+        team_logger.info(
+            "[swarmflow] session %s seeded context from history mirror (%d messages)",
+            state.member_name,
+            len(messages),
+        )
 
     async def close_session(self, session_id: str) -> None:
         """Dispose one session's avatar and drop its row (idempotent)."""
@@ -319,8 +563,16 @@ class AvatarSessionManager:
     # Avatar lifecycle
     # ------------------------------------------------------------------
 
-    async def _start_avatar(self, state: _SessionState, opts: dict) -> None:
-        """Build the session's ``TeamHarness`` and start its supervisor once."""
+    async def _start_avatar(self, state: _SessionState, opts: dict, fork_data: dict | None = None) -> None:
+        """Build the session's ``TeamHarness`` and start its supervisor once.
+
+        ``fork_data`` (from :meth:`capture_fork`) seeds a fork child's context
+        right after start — the child's context is only lazily materialised on
+        its first model call, so it must be injected into the context engine
+        here (via ``create_new_context_engine`` with the child's bound session
+        id), before that call ever happens. ``compact_split`` / direction then
+        drive ``compact_context`` on the child's own native.
+        """
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
 
         model = self._resolve_model(opts.get("model"))
@@ -353,14 +605,19 @@ class AvatarSessionManager:
             # End each schema turn's round as soon as structured_output is
             # captured (added before start so it registers with the harness).
             harness.add_rail(StructuredOutputFinishRail())
-            # Cold start: the harness creates and owns its child session, so
-            # DeepAgentState / context persist across this session's turns.
+            # Cold start: bind a stable child session (F_37 decision 3) so the
+            # avatar's DeepAgentState / context persist across this session's
+            # turns *and* across a same-process resume (pre_run recovery needs a
+            # deterministic session_id to locate the prior run's state).
+            team_session = self._team_session_for(state)
             kv_cache_hooks.configure_harness_session_hooks(
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=False,
             )
-            await harness.start()
+            await harness.start(team_session=team_session)
+            if fork_data is not None and fork_data.get("messages"):
+                await self._seed_fork_context(harness, state, fork_data)
             await harness.subscribe(
                 on_state=self._make_state_cb(state),
                 on_round=self._make_round_cb(state),
@@ -371,6 +628,53 @@ class AvatarSessionManager:
             team_logger.exception("[swarmflow] session avatar build/start failed for %s", state.member_name)
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness
+
+    def _team_session_for(self, state: _SessionState) -> Any:
+        """Build the team session carrying the avatar's stable child session id."""
+        from openjiuwen.core.session.agent_team import Session as TeamSession
+
+        return TeamSession(session_id=state.session_id, team_id=self._team_name)
+
+    async def _seed_fork_context(self, harness: Any, state: _SessionState, fork_data: dict) -> None:
+        """Inject the fork snapshot into the child avatar's context engine.
+
+        Two writes, so the fork context survives the child's first ``_init_context``:
+        the context engine is seeded with the fork messages, **and** the messages are
+        written back to the child session's ``state["context"]`` (overwriting whatever
+        ``pre_run`` recovered from the checkpointer). Without the second write,
+        ``_init_context`` hits the pool and ``_load_state_from_session`` re-loads the
+        stale prior context, clobbering the injected fork messages.
+        """
+        from openjiuwen.agent_teams.fork import ForkContext
+        from openjiuwen.agent_teams.fork_compact import compact_context
+
+        native = harness.get_deep_agent()
+        child_sid = native.session_id  # bound child session, set by harness.start
+        fork_ctx = ForkContext(messages=fork_data["messages"])
+        await native.create_new_context_engine(
+            session_id=child_sid,
+            messages=fork_ctx.to_messages(),
+        )
+        compact_split = fork_data.get("compact_split")
+        if compact_split is not None:
+            await compact_context(
+                native,
+                split_at=compact_split,
+                session_id=child_sid,
+                direction=fork_data.get("compact_direction") or "before",
+            )
+        # Persist the (possibly compacted) messages back to the child session's
+        # state so the child's first model call loads the fork context, not the
+        # prior run's stale context recovered by pre_run.
+        child = harness.current_session()
+        if child is not None:
+            try:
+                final_msgs = native.get_current_context(session_id=child_sid)
+            except Exception:  # noqa: BLE001 - best-effort; keep the injected pool context
+                final_msgs = None
+            if final_msgs is not None:
+                child.update_state({"context": {"default_context_id": {"messages": final_msgs}}})
+        state.context_seeded = True
 
     @staticmethod
     def _make_state_cb(state: _SessionState):
@@ -484,9 +788,7 @@ class AvatarSessionManager:
                 "human interaction is a future feature",
                 state.member_name,
             )
-            raise BackendError(
-                f"session '{state.member_name}' interrupted (avatar HITL not supported)"
-            )
+            raise BackendError(f"session '{state.member_name}' interrupted (avatar HITL not supported)")
 
     async def _human_turn(
         self,
@@ -604,6 +906,39 @@ def _output_text(result: Any) -> str:
             raise BackendError(msg)
         return str(result.get("output", ""))
     return str(result or "")
+
+
+def _round_boundary_index(msgs: Sequence[Any], keep_rounds: int | None, keep_after: bool) -> int | None:
+    """Map a round-based split to a message index, or ``None`` when out of range.
+
+    ``keep_after=False`` (the "before" family): the boundary is the index just
+    past the ``keep_rounds``-th ``UserMessage`` (its assistant reply and any
+    closing ToolMessage travel with it, so the kept head is not cut mid-call).
+
+    ``keep_after=True`` (the "after" family): the boundary is the index of the
+    ``keep_rounds``-th ``UserMessage`` itself (the tail from that round on is
+    kept, and ``ForkContext``'s ``_trim_leading_orphan_tool_messages`` drops any
+    leading orphan ToolMessages whose assistant is not inherited).
+
+    A ``None`` ``keep_rounds`` or a value larger than the actual round count
+    returns ``None`` — the caller silently falls back to a full-context fork
+    (mirroring the team fork's "wrong name silently falls back to full" guard).
+    """
+    if keep_rounds is None:
+        return None
+    count = 0
+    for i, m in enumerate(msgs):
+        if not isinstance(m, UserMessage):
+            continue
+        count += 1
+        if count == keep_rounds:
+            if keep_after:
+                return i
+            for j in range(i + 1, len(msgs)):
+                if isinstance(msgs[j], UserMessage):
+                    return j
+            return len(msgs)
+    return None
 
 
 __all__ = ["AvatarSessionManager"]

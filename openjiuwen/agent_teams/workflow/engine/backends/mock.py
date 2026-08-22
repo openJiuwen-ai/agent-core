@@ -27,6 +27,7 @@ Two override hooks, both optional:
 A hook may return :data:`SKIP` to make the call behave as a user-skip
 (``agent()`` -> ``None``).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -164,8 +165,25 @@ class MockBackend(AgentBackend):
     # Stateful sessions (deterministic; a "human" session answers like an agent)
     # ------------------------------------------------------------------
 
-    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
-        sid = f"mock-sess-{len(self._sessions)}"  # deterministic by open order
+    async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
+        """Mock sessions have no context to snapshot; forks degrade to the history mirror."""
+        return None
+
+    async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
+        """Deterministic mock member identity (no avatar, no counter drift)."""
+        label = str(opts.get("label") or kind)
+        return f"mock-{label}"
+
+    async def open_session(
+        self,
+        *,
+        kind: str,
+        instructions: str | None,
+        opts: dict,
+        fork_data: dict | None = None,
+        member_name: str | None = None,
+    ) -> str:
+        sid = member_name or f"mock-sess-{len(self._sessions)}"  # deterministic by open order
         self._sessions[sid] = _MockSession(kind=kind, instructions=instructions)
         return sid
 

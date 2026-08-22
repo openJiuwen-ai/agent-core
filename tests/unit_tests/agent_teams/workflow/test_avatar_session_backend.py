@@ -9,9 +9,11 @@ exactly as the real supervisor would when a round settles — so the send-wait-
 settle rendezvous, per-turn schema tool mount/unmount, context reuse across
 turns, and dispose lifecycle are all exercised deterministically.
 """
+
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -19,6 +21,38 @@ from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+
+
+class _FakeNative:
+    """Stands in for the DeepAgent a harness exposes; holds a message list."""
+
+    def __init__(self, messages: list | None = None) -> None:
+        self.messages = list(messages) if messages else []
+        self.seeded: list[tuple[str | None, list]] = []  # (session_id, messages)
+        self.sid = "child-sess"
+
+    def get_current_context(self, session_id: str | None = None) -> list:
+        return list(self.messages)
+
+    async def create_new_context_engine(self, session_id: str | None = None, messages: list | None = None) -> str:
+        self.seeded.append((session_id, list(messages) if messages else []))
+        self.messages = list(messages) if messages else []  # context now holds the injected messages
+        return session_id or "child-sess"
+
+    @property
+    def session_id(self) -> str:
+        return self.sid
+
+
+class _FakeChild:
+    """Stands in for the child ``Session`` a harness binds; records state writes."""
+
+    def __init__(self) -> None:
+        self.state_updates: list[dict] = []
+
+    def update_state(self, data: dict) -> None:
+        self.state_updates.append(data)
 
 
 class _FakeHarness:
@@ -34,9 +68,18 @@ class _FakeHarness:
         self.disposed = False
         self._round = 0
         self.interrupt_next = False
-        self.aborted_immediate = None
+        self.aborted_immediate: bool | None = None
+        self.member_name: str | None = None
+        self.spec: Any = None
+        self.started_with: Any = None  # team_session passed to start
+        self.native = _FakeNative()
+        self.child = _FakeChild()
+
+    def current_session(self) -> _FakeChild:
+        return self.child
 
     async def start(self, *, team_session=None) -> None:
+        self.started_with = team_session
         return None
 
     async def subscribe(self, *, on_state=None, on_round=None) -> None:
@@ -54,7 +97,9 @@ class _FakeHarness:
                 tool.called = True
         result_type = "interrupt" if self.interrupt_next else "answer"
         if self._on_round is not None:
-            await self._on_round(kind="finished", round_id=self._round, result={"output": f"echo:{content}", "result_type": result_type})
+            await self._on_round(
+                kind="finished", round_id=self._round, result={"output": f"echo:{content}", "result_type": result_type}
+            )
         if self._on_state is not None:
             await self._on_state(old=HarnessState.RUNNING, new=HarnessState.IDLE, session_id="sess")
         return "seq"
@@ -68,6 +113,9 @@ class _FakeHarness:
     def remove_tool(self, name: str) -> None:
         self.removed.append(name)
         self.tools = [t for t in self.tools if getattr(t, "card", None) is None or t.card.name != name]
+
+    def get_deep_agent(self) -> _FakeNative:
+        return self.native
 
     async def dispose(self) -> None:
         self.disposed = True
@@ -178,9 +226,7 @@ def test_abort_all_terminates_every_session_and_pending_human(monkeypatch):
     base = DeepAgentSpec(enable_task_loop=True, enable_task_planning=True, tools=[])
 
     async def scenario():
-        mgr = AvatarSessionManager(
-            worker_base_spec=base, human_base_spec=base, team_name="t", language="en"
-        )
+        mgr = AvatarSessionManager(worker_base_spec=base, human_base_spec=base, team_name="t", language="en")
         await mgr.open_session(kind="agent", instructions=None, opts={"label": "chef"})
         await mgr.open_session(kind="human", instructions=None, opts={"label": "guest"})
         # Simulate a human turn parked on a pending reply (as _await_human_reply does).
@@ -230,7 +276,10 @@ def test_human_session_pushes_prompt_waits_then_formats_reply(monkeypatch):
 
     async def scenario():
         mgr = AvatarSessionManager(
-            worker_base_spec=base, human_base_spec=base, team_name="t", language="en",
+            worker_base_spec=base,
+            human_base_spec=base,
+            team_name="t",
+            language="en",
             on_human_prompt=on_prompt,
         )
         sid = await mgr.open_session(kind="human", instructions="confirm", opts={"label": "lead"})
@@ -317,8 +366,12 @@ def test_human_round_trip_via_messager(monkeypatch):
 
     async def scenario():
         mgr = AvatarSessionManager(
-            worker_base_spec=base, human_base_spec=base, team_name="t",
-            session_id="s1", messager=messager, on_human_prompt=on_prompt,
+            worker_base_spec=base,
+            human_base_spec=base,
+            team_name="t",
+            session_id="s1",
+            messager=messager,
+            on_human_prompt=on_prompt,
         )
         sid = await mgr.open_session(kind="human", instructions=None, opts={"label": "lead"})
         topic = swarmflow_human_reply_topic("s1", "t")
@@ -380,3 +433,328 @@ def test_aclose_disposes_all_open_sessions(monkeypatch):
     asyncio.run(scenario())
     assert len(harnesses) == 2
     assert all(h.disposed for h in harnesses)
+
+
+# ----------------------------------------------------------------------
+# Fork: stable session ids, round-boundary mapping, capture_fork, seeding
+# ----------------------------------------------------------------------
+
+
+def test_derive_avatar_session_id_is_stable_and_namespaced():
+    """The derived id is stable per member, and workflow/team-aware."""
+    mgr = _mgr(workflow_name="wf1")
+    a1 = mgr._derive_avatar_session_id("wf-sess-sre-0")
+    a2 = mgr._derive_avatar_session_id("wf-sess-sre-0")
+    other = mgr._derive_avatar_session_id("wf-sess-other-0")
+    assert a1 == a2  # stable across calls (and therefore across a resume)
+    assert a1 != other  # unique per member
+    assert a1.startswith("t/wf1/")  # team + workflow namespacing
+    assert _mgr(workflow_name="wf2")._derive_avatar_session_id("wf-sess-sre-0") != a1
+    assert _mgr()._derive_avatar_session_id("wf-sess-sre-0").endswith("wf-sess-sre-0")
+
+
+def test_round_boundary_index_maps_rounds_to_message_index():
+    """before/after boundaries slice at the Nth UserMessage; out of range -> None."""
+    from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import _round_boundary_index
+
+    msgs = [
+        UserMessage(content="u1"),
+        AssistantMessage(content="a1"),
+        UserMessage(content="u2"),
+        AssistantMessage(content="a2"),
+        UserMessage(content="u3"),
+        AssistantMessage(content="a3"),
+    ]
+    # before: keep through round 2 (index of the 3rd UserMessage = 4)
+    assert _round_boundary_index(msgs, 2, keep_after=False) == 4
+    # before round 1: keep through index 2 (the 2nd UserMessage)
+    assert _round_boundary_index(msgs, 1, keep_after=False) == 2
+    # after round 2: start at index 2 (the 2nd UserMessage)
+    assert _round_boundary_index(msgs, 2, keep_after=True) == 2
+    # after round 1: start at index 0
+    assert _round_boundary_index(msgs, 1, keep_after=True) == 0
+    # out of range / None -> None (caller falls back to full context)
+    assert _round_boundary_index(msgs, 4, keep_after=False) is None
+    assert _round_boundary_index(msgs, 4, keep_after=True) is None
+    assert _round_boundary_index(msgs, None, keep_after=False) is None
+
+
+def _rounds(n: int) -> list[Any]:
+    msgs: list[Any] = []
+    for i in range(n):
+        msgs.append(UserMessage(content=f"q{i}"))
+        msgs.append(AssistantMessage(content=f"a{i}"))
+    return msgs
+
+
+def test_capture_fork_full_captures_live_context(monkeypatch):
+    """full mode returns a fork_data with the parent's messages."""
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=None, fork_mode="full")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert data["compact_split"] is None
+    assert len(data["messages"]) == 6  # 3 rounds, full
+
+
+def test_capture_fork_before_truncates_at_round(monkeypatch):
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert len(data["messages"]) == 4  # rounds 1-2 kept
+    assert data["compact_split"] is None
+
+
+def test_capture_fork_after_truncates_to_round(monkeypatch):
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="after")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert len(data["messages"]) == 4  # rounds 2-3 kept
+    assert data["compact_split"] is None
+
+
+def test_capture_fork_keep_before_compact_after_marks_split(monkeypatch):
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="keep_before_compact_after")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert data["compact_direction"] == "after"  # compress the tail
+    assert data["compact_split"] == 4  # boundary of round 2
+    assert len(data["messages"]) == 6  # full capture, split deferred to injection
+
+
+def test_capture_fork_keep_after_compact_before_marks_split(monkeypatch):
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="keep_after_compact_before")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert data["compact_direction"] == "before"  # compress the head
+    assert data["compact_split"] == 4
+
+
+def test_capture_fork_out_of_range_rounds_falls_back_to_full(monkeypatch, caplog):
+    """An out-of-range keep_rounds silently degrades to a full-context fork (with a warning)."""
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=99, fork_mode="before")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert len(data["messages"]) == 6  # full fallback
+    assert any("out-of-range" in rec.message for rec in caplog.records)
+    assert any("fork" in rec.message for rec in caplog.records)
+
+
+def test_capture_fork_out_of_range_compact_degrades_with_warning(monkeypatch, caplog):
+    """A compact mode with an out-of-range keep_rounds keeps the full capture and
+    skips compaction (split pinned to the end), with a warning."""
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
+        harnesses[0].native.messages = _rounds(3)
+        return await mgr.capture_fork(sid, keep_rounds=99, fork_mode="keep_before_compact_after")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert len(data["messages"]) == 6  # full capture kept
+    assert data["compact_split"] == 6  # pinned to the end -> no-op compaction
+    assert any("out-of-range" in rec.message for rec in caplog.records)
+
+
+def test_capture_fork_unknown_session_returns_none(monkeypatch):
+    """No live session -> None, so the engine degrades to its history mirror."""
+    _patch_build(monkeypatch, [])
+    mgr = _mgr(workflow_name="wf")
+    assert asyncio.run(mgr.capture_fork("nope", keep_rounds=None, fork_mode="full")) is None
+
+
+def test_open_session_with_fork_data_seeds_child_context(monkeypatch):
+    """A fork child's context is injected from fork_data right after start."""
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    from openjiuwen.core.session.vcs.codec import encode_message
+
+    fork_data = {
+        "messages": [encode_message(m) for m in _rounds(2)],
+        "compact_split": None,
+        "compact_direction": "before",
+    }
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "child"}, fork_data=fork_data)
+        return sid, harnesses[0]
+
+    sid, h = asyncio.run(scenario())
+    assert sid == "wf-sess-child-0"
+    # The child context was seeded into the native's context engine (via the
+    # child's bound session id).
+    assert len(h.native.seeded) == 1
+    assert len(h.native.seeded[0][1]) == 4
+    # The fork messages were also written back to the child session's state so
+    # the child's first model call loads the fork context (not a stale prior
+    # context recovered by pre_run).
+    assert len(h.child.state_updates) == 1
+    ctx = h.child.state_updates[0]["context"]
+    assert len(ctx["default_context_id"]["messages"]) == 4
+    # The avatar bound a stable team session (fixed session_id, not random).
+    assert h.started_with is not None
+    assert h.started_with.get_session_id().startswith("t/wf/")
+    assert h.started_with.get_session_id().endswith("wf-sess-child-0")
+    assert harnesses[0].native.sid == "child-sess"
+
+
+def test_mirror_fallback_seeds_history_only_on_first_turn(monkeypatch):
+    """fork_data=None + non-empty history seeds the mirror once, then not again."""
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "m"})
+        history = [
+            {"role": "user", "content": "q0"},
+            {"role": "assistant", "content": "a0"},
+        ]
+        await mgr.send_turn(sid, "second", {"label": "m"}, None, history=history)
+        state = mgr._sessions[sid]
+        # A second turn does not re-seed (context_seeded guard).
+        await mgr.send_turn(sid, "third", {"label": "m"}, None, history=history)
+        state2 = mgr._sessions[sid]
+        return state, state2, harnesses[0]
+
+    state, state2, h = asyncio.run(scenario())
+    assert state.context_seeded is True
+    assert len(h.native.seeded) == 1
+    assert len(h.native.seeded[0][1]) == 2
+    assert state2.context_seeded is True
+    assert len(h.native.seeded) == 1  # still only the first seed
+
+
+def test_mirror_fallback_skipped_without_history(monkeypatch):
+    """No history mirror -> no seeding (a cold-start session stays clean)."""
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+
+    async def scenario():
+        mgr = _mgr(workflow_name="wf")
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "m"})
+        await mgr.send_turn(sid, "first", {"label": "m"}, None)
+        return mgr._sessions[sid], harnesses[0]
+
+    state, h = asyncio.run(scenario())
+    assert state.context_seeded is False  # nothing to seed, marker untouched
+    assert h.native.seeded == []  # nothing was injected
+
+
+def test_persisted_messages_recovers_tool_message_context_from_checkpointer():
+    """A parent's ToolMessage-rich context committed to the checkpointer is
+    recoverable by member name after a fully-hit resume (no live avatar)."""
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+    from openjiuwen.core.session.agent import create_agent_session
+    from openjiuwen.core.single_agent import AgentCard
+
+    mgr = _mgr(workflow_name="wf")
+    member = "wf-sess-parent-0"
+    fixed_id = mgr._derive_avatar_session_id(member)
+    messages = _rounds(2) + [ToolMessage(content="tool-result", tool_call_id="t1")]
+
+    async def write_and_recover():
+        # "Prior run": pre_run creates the agent store, then write a
+        # state["context"] and commit it to the checkpointer. The save card's id
+        # is ``{team}_{member}`` (matching derive_member_spec's agent_id), as the
+        # real avatar would persist — so recovery exercises the true key match.
+        sess = create_agent_session(session_id=fixed_id, card=AgentCard(id=f"t_{member}", name=member))
+        await sess.pre_run()
+        sess.update_state(
+            {
+                "context": {
+                    "default_context_id": {"messages": messages},
+                }
+            }
+        )
+        await sess.commit()
+        # "Fully-hit resume": recover by member name only (no avatar built).
+        return await mgr._persisted_messages(member)
+
+    recovered = asyncio.run(write_and_recover())
+    assert recovered is not None
+    assert len(recovered) == 5  # 2 rounds (4 msgs) + 1 ToolMessage
+    assert any(isinstance(m, ToolMessage) for m in recovered)
+
+
+def test_capture_fork_recovers_from_checkpointer_when_no_live_avatar():
+    """capture_fork on a parent with no live avatar (fully-hit resume) recovers
+    the persisted context (incl. ToolMessage) instead of degrading to None."""
+    from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+    from openjiuwen.core.session.agent import create_agent_session
+    from openjiuwen.core.single_agent import AgentCard
+
+    mgr = _mgr(workflow_name="wf")
+    member = "wf-sess-parent-0"
+    fixed_id = mgr._derive_avatar_session_id(member)
+    messages = _rounds(2) + [ToolMessage(content="tool-result", tool_call_id="t1")]
+
+    async def scenario():
+        # Save with the real team-prefixed card id (agent_id), as the avatar
+        # would persist; recovery goes through capture_fork → _persisted_messages.
+        sess = create_agent_session(session_id=fixed_id, card=AgentCard(id=f"t_{member}", name=member))
+        await sess.pre_run()
+        sess.update_state({"context": {"default_context_id": {"messages": messages}}})
+        await sess.commit()
+        # No live session in the manager's table — the parent was never rebuilt.
+        return await mgr.capture_fork(member, keep_rounds=None, fork_mode="full")
+
+    data = asyncio.run(scenario())
+    assert data is not None
+    assert len(data["messages"]) == 5
+    # The persisted ToolMessage survives the encode/decode round-trip.
+    from openjiuwen.core.session.vcs.codec import decode_message
+
+    decoded = [decode_message(d) for d in data["messages"]]
+    assert any(isinstance(m, ToolMessage) for m in decoded)

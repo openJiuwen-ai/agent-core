@@ -33,6 +33,7 @@ control-flow helper already tolerates).
 The actual harness execution lives in :meth:`_execute_worker` so tests can
 override it without standing up a real LLM.
 """
+
 from __future__ import annotations
 
 import re
@@ -116,6 +117,7 @@ class TeamWorkerBackend(AgentBackend):
         on_human_prompt: Callable[[str, str, str], None] | None = None,
         on_human_replied: Callable[[str, str, str | None], None] | None = None,
         run_id: str | None = None,
+        workflow_name: str | None = None,
     ) -> None:
         super().__init__()
         self._model = model
@@ -131,6 +133,7 @@ class TeamWorkerBackend(AgentBackend):
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._run_id = run_id
+        self._workflow_name = workflow_name
         self._run_prefix = self._run_id_prefix(run_id)
         self._worktrees = SwarmflowWorkerWorktrees(
             team_name=team_name,
@@ -224,14 +227,37 @@ class TeamWorkerBackend(AgentBackend):
                 messager=self._messager,
                 session_id=self._session_id,
                 run_id=self._run_id,
+                workflow_name=self._workflow_name,
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
             )
         return self._session_mgr
 
-    async def open_session(self, *, kind: str, instructions: str | None, opts: dict) -> str:
+    async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
+        """Snapshot a session's context for forking (see :class:`AvatarSessionManager`)."""
+        return await self._sessions().capture_fork(session_id, keep_rounds=keep_rounds, fork_mode=fork_mode)
+
+    async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
+        """Reserve a session's member identity without building its avatar."""
+        return await self._sessions().ensure_member_name(kind=kind, opts=opts)
+
+    async def open_session(
+        self,
+        *,
+        kind: str,
+        instructions: str | None,
+        opts: dict,
+        fork_data: dict | None = None,
+        member_name: str | None = None,
+    ) -> str:
         """Open a stateful session (see :class:`AvatarSessionManager`)."""
-        return await self._sessions().open_session(kind=kind, instructions=instructions, opts=opts)
+        return await self._sessions().open_session(
+            kind=kind,
+            instructions=instructions,
+            opts=opts,
+            fork_data=fork_data,
+            member_name=member_name,
+        )
 
     async def send_turn(
         self,
@@ -451,6 +477,7 @@ class TeamWorkerBackend(AgentBackend):
         # Mount team workspace into worker workspace so it can access shared
         # files via .team/{team_name}/ — mirrors agent_configurator.
         from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
+
         workspace_manager = get_workspace_manager(self._build_context)
         if workspace_manager is not None:
             workspace_manager.mount_into_workspace(ws_root)
