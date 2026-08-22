@@ -115,6 +115,23 @@ def render_leader_escalation_stall(task, *, minutes: int, voted: list[str], pend
     )
 
 
+def render_leader_escalation_reviewer_protocol(
+    task,
+    *,
+    reviewers: list[str],
+    attempts: int,
+) -> str:
+    """Escalate when temporary reviewers repeatedly finish without voting."""
+    return t(
+        "scheduler.leader_escalation_reviewer_protocol",
+        task_id=task.task_id,
+        title=task.title,
+        round=task.review_round,
+        reviewers=", ".join(reviewers),
+        attempts=attempts,
+    )
+
+
 def render_leader_all_done(count: int) -> str:
     """Final digest injected into the leader when the board drains."""
     return t("scheduler.leader_all_done", count=count)

@@ -64,6 +64,13 @@ _REVIEW_RENUDGE_SECONDS = 600
 # extra passes no-ops.
 _MAX_SCAN_PASSES = 4
 
+# A one-shot reviewer that returns prose without persisting ``verify_task``
+# has not completed the protocol. Retry that reviewer once with a fresh
+# harness, then fail closed by escalating to the leader. Keeping this bound
+# in the scheduler prevents a malformed prompt/model pair from creating an
+# unbounded model-call loop.
+_MAX_REVIEWER_RUN_ATTEMPTS = 2
+
 # Map reviewer type to prompt template basename.
 _REVIEWER_TEMPLATE_MAP = {
     "verifier": "reviewer_verifier",
@@ -110,10 +117,14 @@ class TeamScheduler:
         self._default_max_rounds: int = spec.default_max_review_rounds
         self._stall_timeout_seconds: int = spec.review_stall_timeout
         self._active = False
-        # Per-(task_id, review_round) bookkeeping. All in-memory: a leader
-        # restart at worst re-sends one review request / escalation, which a
-        # reader can correlate; the board truth itself lives in the DB.
-        self._review_dispatched: set[tuple[str, int]] = set()
+        # Per-reviewer execution bookkeeping. Persisted votes, rather than a
+        # coarse "round was dispatched" bit, are the completion authority.
+        # This matters when a temporary reviewer finishes without calling
+        # ``verify_task``: the missing reviewer can be retried independently,
+        # including after the leader replaces that reviewer in the same round.
+        self._review_jobs: dict[tuple[str, int, str], asyncio.Task[Any]] = {}
+        self._review_attempts: dict[tuple[str, int, str], int] = {}
+        self._scan_lock = asyncio.Lock()
         self._renudged_at: dict[tuple[str, int], int] = {}
         self._escalated: set[tuple[str, int]] = set()
         self._summary_requested: set[tuple[str, int]] = set()
@@ -147,6 +158,8 @@ class TeamScheduler:
     def deactivate(self) -> None:
         """Disarm the scheduler (kernel pause/stop)."""
         self._active = False
+        for job in tuple(self._review_jobs.values()):
+            job.cancel()
 
     async def on_event(self, event: CoordinationEvent) -> None:
         """Wake hint from the kernel's composed wake callback.
@@ -185,14 +198,15 @@ class TeamScheduler:
 
     async def _scan(self) -> None:
         """Run both reconcile passes to a bounded fixpoint."""
-        task_manager = self._infra.task_manager
-        if task_manager is None:
-            return
-        for _ in range(_MAX_SCAN_PASSES):
-            acted = await self._reconcile_starts(task_manager)
-            acted = await self._reconcile_reviews(task_manager) or acted
-            if not acted:
+        async with self._scan_lock:
+            task_manager = self._infra.task_manager
+            if task_manager is None:
                 return
+            for _ in range(_MAX_SCAN_PASSES):
+                acted = await self._reconcile_starts(task_manager)
+                acted = await self._reconcile_reviews(task_manager) or acted
+                if not acted:
+                    return
 
     async def _reconcile_starts(self, task_manager) -> bool:
         """Start each idle member's earliest assigned PENDING task."""
@@ -241,12 +255,6 @@ class TeamScheduler:
                 team_logger.warning("[scheduler] task %s is in_review without reviewers", task.task_id)
                 continue
 
-            round_key = (task.task_id, task.review_round)
-            if round_key not in self._review_dispatched:
-                self._review_dispatched.add(round_key)
-                for reviewer in reviewers:
-                    await self._dispatch_to_reviewer(reviewer, task)
-
             tally = await task_manager.get_review_tally(task)
             verdict = settle_review_tally(tally)
             if verdict == VERDICT_PASS:
@@ -262,6 +270,28 @@ class TeamScheduler:
                         tally["pass_count"], tally["fail_count"], tally["reviewer_count"])
                     acted = True
             else:
+                exhausted: list[str] = []
+                voted = set(tally["voted"])
+                for reviewer in reviewers:
+                    if reviewer in voted:
+                        continue
+                    review_key = (task.task_id, task.review_round, reviewer)
+                    if review_key in self._review_jobs:
+                        continue
+                    if self._review_attempts.get(review_key, 0) >= _MAX_REVIEWER_RUN_ATTEMPTS:
+                        exhausted.append(reviewer)
+                        continue
+                    self._dispatch_to_reviewer(reviewer, task)
+                    acted = True
+                if exhausted:
+                    await self._escalate(
+                        task,
+                        render.render_leader_escalation_reviewer_protocol(
+                            task,
+                            reviewers=exhausted,
+                            attempts=_MAX_REVIEWER_RUN_ATTEMPTS,
+                        ),
+                    )
                 await self._handle_undecided(task, tally, now_ms)
         return acted
 
@@ -437,26 +467,73 @@ class TeamScheduler:
     # Delivery primitives
     # ------------------------------------------------------------------
 
-    async def _dispatch_to_reviewer(self, reviewer: str, task: Any) -> None:
+    def _dispatch_to_reviewer(self, reviewer: str, task: Any) -> None:
         """Dispatch a review request by spawning a one-shot temp reviewer harness.
 
         The harness inherits the team's base agent spec (model, filesystem
         tools) augmented with ``verify_task`` + ``view_task`` so it can
         inspect the deliverable and cast its vote.  The harness is built,
-        run once, and disposed — a crash is logged and the next scheduler
-        scan retries via ``_review_dispatched.discard()``.
+        run once, and disposed. The job is keyed per reviewer, not merely per
+        round; its terminal outcome is reconciled against persisted votes.
         """
-        team_logger.info("[scheduler] spawning temp harness", reviewer)
-        asyncio.create_task(self._spawn_temp_reviewer(reviewer, task))
+        review_key = (task.task_id, task.review_round, reviewer)
+        if review_key in self._review_jobs:
+            return
+        attempt = self._review_attempts.get(review_key, 0) + 1
+        self._review_attempts[review_key] = attempt
+        team_logger.info(
+            "[scheduler] spawning temp reviewer %s for task %s round %d attempt %d/%d",
+            reviewer,
+            task.task_id,
+            task.review_round,
+            attempt,
+            _MAX_REVIEWER_RUN_ATTEMPTS,
+        )
+        job = asyncio.create_task(
+            self._run_reviewer_job(review_key, reviewer, task),
+            name=f"review-{task.task_id}-{task.review_round}-{reviewer}-{attempt}",
+        )
+        self._review_jobs[review_key] = job
 
-    async def _spawn_temp_reviewer(self, reviewer: str, task: Any) -> None:
+    async def _run_reviewer_job(
+        self,
+        review_key: tuple[str, int, str],
+        reviewer: str,
+        task: Any,
+    ) -> None:
+        """Run one reviewer attempt and reconcile any missing terminal vote."""
+        outcome = "error"
+        try:
+            outcome = await self._spawn_temp_reviewer(reviewer, task)
+        except asyncio.CancelledError:
+            # ``run_once`` can cancel an orphaned inner task while the team and
+            # scheduler remain active.  That is an execution failure, not a
+            # reason to lose the only wake-up for a missing vote.  A scheduler
+            # deactivation, in contrast, intentionally cancels all jobs and
+            # must not start replacement reviewers behind the pause/stop gate.
+            if not self._active:
+                raise
+            outcome = "error"
+        finally:
+            current = asyncio.current_task()
+            if self._review_jobs.get(review_key) is current:
+                self._review_jobs.pop(review_key, None)
+
+        if outcome in {"voted", "no_vote", "error"} and self._active:
+            # A no-vote completion emits no DB event, and a vote event may be
+            # delayed or lost. Reconcile from DB after either outcome so the
+            # team cannot become idle forever with the task IN_REVIEW.
+            await self._scan()
+
+    async def _spawn_temp_reviewer(self, reviewer: str, task: Any) -> str:
         """Build a one-shot reviewer harness and run ``verify_task`` on it.
 
         The reviewer inherits the team's base agent spec (model, filesystem
         tools, etc.) and gets two extra team tools — ``verify_task`` +
         ``view_task`` — so it can inspect the deliverable and cast a vote.
         The harness is disposed immediately after ``run_once``, regardless of
-        outcome; a crash is logged and retried on the next scan.
+        outcome. Returns a protocol outcome so the caller can retry a normal
+        completion that omitted the required persisted vote.
         """
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
         from openjiuwen.agent_teams.tools.locales import make_translator
@@ -469,13 +546,13 @@ class TeamScheduler:
         base_agent_spec = agents.get("teammate") or agents.get("leader")
         if base_agent_spec is None:
             team_logger.error("[scheduler] no base agent spec for temp reviewer")
-            return
+            return "error"
 
         backend = self._infra.team_backend
         task_manager = self._infra.task_manager
         if backend is None or task_manager is None:
             team_logger.error("[scheduler] missing backend/task_manager for temp reviewer")
-            return
+            return "error"
 
         # Build a reviewer-scoped TeamTaskManager so that ``verify_task``'s
         # identity guard (``member_name in task.reviewers()``) passes against
@@ -519,6 +596,12 @@ class TeamScheduler:
                 update={
                     "system_prompt": system_prompt,
                     "tools": list(base_agent_spec.tools or []) + [verify_tool, view_tool],
+                    # Scheduled reviewers are verification workers, not nested
+                    # planners.  In particular, do not inherit a persisted
+                    # code-team browser/task sub-agent from the author spec:
+                    # that can turn a bounded review into a second delegation
+                    # whose cleanup cancels the reviewer before ``verify_task``.
+                    "subagents": [],
                 }
             )
             reviewer_ctx = self._build_context.derive(
@@ -568,9 +651,24 @@ class TeamScheduler:
                 task.task_id,
                 str(result)[:2000] if result else "",
             )
-            # If all retries exhausted, let the next scan re-dispatch.
-            if result is not None and "181001" in str(result):
-                self._review_dispatched.discard((task.task_id, task.review_round))
+            current_task = await task_manager.get(task.task_id)
+            if (
+                current_task is None
+                or current_task.status != TaskStatus.IN_REVIEW.value
+                or current_task.review_round != task.review_round
+                or reviewer not in current_task.reviewers()
+            ):
+                return "superseded"
+            tally = await task_manager.get_review_tally(current_task)
+            if reviewer in tally["voted"]:
+                return "voted"
+            team_logger.warning(
+                "[reviewer_no_vote] reviewer %s finished task=%s round=%d without a persisted vote",
+                reviewer,
+                task.task_id,
+                task.review_round,
+            )
+            return "no_vote"
         except Exception:
             team_logger.error(
                 "[reviewer_fail] temp reviewer %s failed for task %s",
@@ -578,7 +676,7 @@ class TeamScheduler:
                 task.task_id,
                 exc_info=True,
             )
-            self._review_dispatched.discard((task.task_id, task.review_round))
+            return "error"
         finally:
             if harness is not None:
                 try:

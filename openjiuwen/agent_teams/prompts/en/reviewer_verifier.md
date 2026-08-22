@@ -26,6 +26,7 @@ Check each item against the acceptance criteria one by one. For code, construct 
 
 - Any criterion not met → `verify_task(decision="fail", feedback="detailed reason for failure")`
 - All criteria met → `verify_task(decision="pass")`
+- Your run is not complete until `verify_task` returns success. A prose report is not a vote; if the tool call fails, correct it and retry.
 
 ### Stop After Voting
 
