@@ -303,7 +303,7 @@ class _ServerBackend:
             return []
         payload = {
             "query": query,
-            "k": min(int(top_k) or _DEFAULT_TOP_K, _MAX_TOP_K),
+            "k": min(int(top_k or _DEFAULT_TOP_K), _MAX_TOP_K),
             **self._scope_payload(kwargs),
         }
         data = await self._post_verb("search", payload, write=False)
@@ -315,7 +315,7 @@ class _ServerBackend:
     async def prefetch(self, query: str, **kwargs: Any) -> str:
         if not query or self._is_breaker_open():
             return ""
-        top_k = min(int(kwargs.pop("top_k", _DEFAULT_TOP_K)), _MAX_TOP_K)
+        top_k = min(int(kwargs.pop("top_k", _DEFAULT_TOP_K) or _DEFAULT_TOP_K), _MAX_TOP_K)
         hits = await self.search(query, top_k=top_k, **kwargs)
         if not hits:
             return ""
@@ -400,7 +400,7 @@ class _ServerBackend:
                 query = args.get("query", "")
                 if not query:
                     return json.dumps({"error": "Missing required parameter: query"})
-                top_k = min(int(args.get("top_k", _DEFAULT_TOP_K)), _MAX_TOP_K)
+                top_k = min(int(args.get("top_k", _DEFAULT_TOP_K) or _DEFAULT_TOP_K), _MAX_TOP_K)
                 hits = await self.search(query, top_k=top_k)
                 payload = [
                     {
@@ -580,7 +580,7 @@ class _SDKBackend:
         # sync call in a worker thread — its asyncio.run() works there.
         ctx = self._context_cls(scope)
         disclosure = self._disclosure_level_cls.L2  # full content, parity with server mode
-        k = min(int(top_k) or _DEFAULT_TOP_K, _MAX_TOP_K)
+        k = min(int(top_k or _DEFAULT_TOP_K), _MAX_TOP_K)
         try:
             res = await asyncio.to_thread(
                 self._api.search, query, ctx, identity=scope, top_k=k, disclosure=disclosure
@@ -600,7 +600,7 @@ class _SDKBackend:
     async def prefetch(self, query: str, **kwargs: Any) -> str:
         if not query:
             return ""
-        top_k = min(int(kwargs.pop("top_k", _DEFAULT_TOP_K)), _MAX_TOP_K)
+        top_k = min(int(kwargs.pop("top_k", _DEFAULT_TOP_K) or _DEFAULT_TOP_K), _MAX_TOP_K)
         hits = await self.search(query, top_k=top_k, **kwargs)
         if not hits:
             return ""
@@ -686,7 +686,7 @@ class _SDKBackend:
                 query = args.get("query", "")
                 if not query:
                     return json.dumps({"error": "Missing required parameter: query"})
-                top_k = min(int(args.get("top_k", _DEFAULT_TOP_K)), _MAX_TOP_K)
+                top_k = min(int(args.get("top_k", _DEFAULT_TOP_K) or _DEFAULT_TOP_K), _MAX_TOP_K)
                 hits = await self.search(query, top_k=top_k)
                 payload = [
                     {
