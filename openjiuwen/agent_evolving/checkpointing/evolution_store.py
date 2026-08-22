@@ -252,6 +252,25 @@ class EvolutionStore:
             record.change.target.value,
             update_skill_md,
         )
+        if getattr(record, "review_status", None) == "suggest":
+            try:
+                from openjiuwen.agent_evolving.checkpointing.evolution_suggestions_ledger import (
+                    record_generated_suggestion,
+                )
+
+                record_generated_suggestion(
+                    name,
+                    record,
+                    skills_dirs=self.base_dirs,
+                )
+            except Exception as ledger_exc:
+                logger.warning(
+                    "[EvolutionStore] suggestions ledger write failed "
+                    "skill=%s id=%s err=%s",
+                    name,
+                    getattr(record, "id", None),
+                    ledger_exc,
+                )
 
         total = len(evo_log.entries)
         if total >= _TOTAL_WARNING_THRESHOLD:

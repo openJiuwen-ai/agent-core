@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -19,6 +20,7 @@ from openjiuwen.agent_evolving.checkpointing.types import (
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     _assistant_text_from_response,
     _OPTIMIZER_LLM_MAX_TOKENS,
+    ExperienceGenerateIncomplete,
     SkillExperienceOptimizer,
     _build_conversation_snippet,
     _build_context,
@@ -35,6 +37,7 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import 
     build_tool_call_chain,
 )
 import openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer as exp_opt
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.signal.base import (
     EvolutionCategory,
     EvolutionSignal,
@@ -188,7 +191,7 @@ class TestSkillExperienceOptimizerGenerate:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_generate_returns_empty_on_llm_exception():
+    async def test_generate_raises_on_llm_exception():
         llm = MagicMock()
         llm.invoke = AsyncMock(side_effect=RuntimeError("network failed"))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="cn")
@@ -200,7 +203,8 @@ class TestSkillExperienceOptimizerGenerate:
             existing_desc_records=[],
             existing_body_records=[],
         )
-        assert await optimizer.generate_records(ctx) == []
+        with pytest.raises(ExperienceGenerateIncomplete, match="analyzer"):
+            await optimizer.generate_records(ctx)
 
     @staticmethod
     @pytest.mark.asyncio
@@ -435,6 +439,88 @@ class TestSkillExperienceOptimizerGenerate:
         )
         assert await optimizer.generate_records(ctx) == []
         assert llm.invoke.await_count == 1
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_two_stage_timeout_retry_then_records_counts_as_success():
+        candidates = [
+            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "retry-ok"},
+        ]
+        patches = [
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "content": "retry-ok",
+                "merge_target": None,
+            },
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("timed out"),
+                SimpleNamespace(content=_mock_analyzer_json(candidates)),
+                SimpleNamespace(content=_mock_formatter_json(patches)),
+            ]
+        )
+        optimizer = SkillExperienceOptimizer(
+            llm=llm,
+            model="dummy",
+            language="en",
+            generate_records_llm_policy=LLMInvokePolicy(
+                attempt_timeout_secs=5,
+                total_budget_secs=30,
+                max_attempts=2,
+                backoff_base_secs=0,
+            ),
+        )
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+        records = await optimizer.generate_records(ctx)
+        assert len(records) == 1
+        assert records[0].change.content == "retry-ok"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_two_stage_formatter_parse_retry_then_records_counts_as_success():
+        candidates = [
+            {"action": "append", "target": "body", "section": "Troubleshooting", "content": "fixed"},
+        ]
+        patches = [
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "content": "fixed",
+                "merge_target": None,
+            },
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                SimpleNamespace(content=_mock_analyzer_json(candidates)),
+                SimpleNamespace(content="not json at all"),
+                SimpleNamespace(content=_mock_formatter_json(patches)),
+            ]
+        )
+        optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en")
+        ctx = EvolutionContext(
+            skill_name="skill-a",
+            signals=[make_signal()],
+            skill_content="# skill",
+            messages=[{"role": "user", "content": "hello"}],
+            existing_desc_records=[],
+            existing_body_records=[],
+        )
+        records = await optimizer.generate_records(ctx)
+        assert len(records) == 1
+        assert records[0].change.content == "fixed"
 
 
 class TestParsing:

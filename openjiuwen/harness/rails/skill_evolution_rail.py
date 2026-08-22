@@ -407,6 +407,47 @@ class SkillEvolutionRail(EvolutionRail):
                 resolved.append(item)
         return resolved or None
 
+    def _record_suggest_evolution_counts(
+        self,
+        skill_name: str,
+        *,
+        triggered: bool = False,
+        experience_succeeded: bool = False,
+    ) -> None:
+        """Persist Suggest-mode trigger / success counts; never block evolution."""
+        try:
+            from openjiuwen.agent_evolving.checkpointing.evolution_suggestions_ledger import (
+                record_evolution_counts,
+            )
+
+            record_evolution_counts(
+                skill_name,
+                triggered=triggered,
+                experience_succeeded=experience_succeeded,
+                skills_dirs=self._resolve_skills_dirs_for_self_evolution(),
+            )
+        except Exception as ledger_exc:
+            logger.warning(
+                "[SkillEvolutionRail] suggestions ledger counts write failed "
+                "skill=%s triggered=%s succeeded=%s err=%s",
+                skill_name,
+                triggered,
+                experience_succeeded,
+                ledger_exc,
+            )
+
+    @staticmethod
+    def _unpack_generated_experience(result: Any) -> tuple[List[EvolutionRecord], bool]:
+        """Normalize generate result. List mocks count as completed successfully."""
+        if (
+            isinstance(result, tuple)
+            and len(result) == 2
+            and isinstance(result[1], bool)
+        ):
+            records, ok = result
+            return list(records or []), ok
+        return list(result or []), True
+
     def set_sys_operation(self, sys_operation: SysOperation) -> None:
         """Set sys_operation for both EvolutionRail and EvolutionStore."""
         super().set_sys_operation(sys_operation)
@@ -819,12 +860,23 @@ class SkillEvolutionRail(EvolutionRail):
                         skill_name,
                     )
                     continue
+                if action == "suggest":
+                    self._record_suggest_evolution_counts(skill_name, triggered=True)
                 # Persist to evolutions.json for both suggest and auto; never touch SKILL.md here.
-                records = await self._generate_experience_for_skill(
-                    skill_name,
-                    skill_signals,
-                    parsed_messages,
+                records, generated_ok = self._unpack_generated_experience(
+                    await self._generate_experience_for_skill(
+                        skill_name,
+                        skill_signals,
+                        parsed_messages,
+                    )
                 )
+                if action == "suggest" and generated_ok:
+                    # True after generate_records returns, including LLM/parse retries
+                    # that eventually succeeded. False only when generation aborted.
+                    self._record_suggest_evolution_counts(
+                        skill_name,
+                        experience_succeeded=True,
+                    )
                 if records:
                     for record in records:
                         record.review_status = action
@@ -1469,7 +1521,7 @@ class SkillEvolutionRail(EvolutionRail):
         skill_name: str,
         signals: List[EvolutionSignal],
         messages: List[dict],
-    ) -> List[EvolutionRecord]:
+    ) -> tuple[List[EvolutionRecord], bool]:
         context = EvolutionContext(
             skill_name=skill_name,
             signals=signals,
@@ -1493,10 +1545,10 @@ class SkillEvolutionRail(EvolutionRail):
                 skill_name,
                 exc,
             )
-            return []
+            return [], False
         for record in records:
             self._prepare_record_for_evolutions_json(record)
-        return records
+        return records, True
 
     @classmethod
     def _parse_tool_args_dict(cls, tool_args: Any) -> dict:

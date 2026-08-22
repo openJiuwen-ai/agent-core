@@ -45,6 +45,10 @@ EXPERIENCES_TARGET = "experiences"
 # Keep a high default max_tokens for reasoning models; ModelArts may override higher.
 _OPTIMIZER_LLM_MAX_TOKENS = 8192
 
+
+class ExperienceGenerateIncomplete(Exception):
+    """LLM invoke, timeout, or parse failed before generation finished."""
+
 # Initial score mapping by signal type
 INITIAL_SCORE_BY_SIGNAL = {
     "execution_failure": 0.65,
@@ -463,7 +467,15 @@ class SkillExperienceOptimizer(BaseOptimizer):
             if not skill_signals:
                 continue
             ctx = self._build_evolution_context(skill_name, op, skill_signals)
-            records = await self.generate_records(ctx)
+            try:
+                records = await self.generate_records(ctx)
+            except Exception as exc:
+                logger.warning(
+                    "[SkillExperienceOptimizer] generate failed for skill=%s: %s",
+                    skill_name,
+                    exc,
+                )
+                continue
             if not records:
                 logger.info("[SkillExperienceOptimizer] no records generated for skill=%s", skill_name)
                 continue
@@ -662,7 +674,9 @@ class SkillExperienceOptimizer(BaseOptimizer):
         )
         raw = await self._invoke_llm(prompt, retry_prompt=retry_prompt)
         if raw is None:
-            return []
+            raise ExperienceGenerateIncomplete(
+                f"formatter LLM call failed (skill={skill_name})"
+            )
         drafts, last_error = parse_experience_drafts_with_error(raw, _extract_json_with_error)
         if drafts is not None:
             return drafts
@@ -684,7 +698,9 @@ class SkillExperienceOptimizer(BaseOptimizer):
             if retry_raw:
                 last_raw = retry_raw
                 _, last_error = parse_experience_drafts_with_error(retry_raw, _extract_json_with_error)
-        return []
+        raise ExperienceGenerateIncomplete(
+            f"formatter parse failed (skill={skill_name})"
+        )
 
     async def _generate_regular_records(self, ctx: EvolutionContext) -> List[EvolutionRecord]:
         """Generate regular-profile records via two-stage or single-stage pipeline."""
@@ -699,12 +715,16 @@ class SkillExperienceOptimizer(BaseOptimizer):
             )
             try:
                 analyzer_data = await self._run_analyzer(ctx, inputs)
-                if not analyzer_data or not analyzer_data.get("candidates"):
+                if analyzer_data is None:
+                    raise ExperienceGenerateIncomplete(
+                        f"analyzer LLM call or parse failed (skill={ctx.skill_name})"
+                    )
+                if not analyzer_data.get("candidates"):
                     logger.info(
                         "[SkillExperienceOptimizer] two-stage early exit (skill=%s): "
                         "no candidates (root_cause=%r)",
                         ctx.skill_name,
-                        (analyzer_data or {}).get("root_cause"),
+                        analyzer_data.get("root_cause"),
                     )
                     return []
                 candidates = analyzer_data.get("candidates", [])
@@ -752,9 +772,11 @@ class SkillExperienceOptimizer(BaseOptimizer):
             except BaseError as exc:
                 logger.error("[SkillExperienceOptimizer] LLM call failed: %s", exc)
                 raise
-            except ValueError:
-                logger.warning("[SkillExperienceOptimizer] all retries exhausted, returning no records")
-                return []
+            except ValueError as exc:
+                logger.warning("[SkillExperienceOptimizer] all retries exhausted")
+                raise ExperienceGenerateIncomplete(
+                    f"single-stage parse failed (skill={ctx.skill_name})"
+                ) from exc
             default_root_cause = self._root_cause_from_signals(ctx.signals)
 
         if not drafts:
