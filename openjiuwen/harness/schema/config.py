@@ -20,7 +20,7 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 )
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.agent_mode import AgentMode
-from openjiuwen.harness.security.models import PermissionsSection
+from openjiuwen.harness.security.permission_engine.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
@@ -220,7 +220,7 @@ class DeepAgentConfig:
         enable_plan_mode: Whether to enable plan mode.
         permissions: Tool permission policy dict (enabled, tools, rules, …); when
             enabled, DeepAgent mounts PermissionInterruptRail automatically.
-            常见键结构见 :class:`openjiuwen.harness.security.models.PermissionsSection`。
+            常见键结构见 :class:`openjiuwen.harness.security.permission_engine.models.PermissionsSection`。
         permission_host: Optional ToolPermissionHost callbacks (YAML path,
             workspace, hot-reload snapshot, hosted confirmation).
         parallel_tool_calls: Whether or not tool calls are executed in parallel
