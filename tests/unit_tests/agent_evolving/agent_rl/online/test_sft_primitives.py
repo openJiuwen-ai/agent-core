@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import signal
 import subprocess
 import sys
@@ -50,6 +49,70 @@ def test_build_sft_sample_normalizes_messages_and_text():
     assert sample["metadata"]["hint"] == "keep"
 
 
+def test_build_sft_sample_matches_chatml_tool_field_placement():
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import build_sft_sample
+
+    tool_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": {"command": "pytest"}},
+    }
+    tool = {"type": "function", "name": "bash", "description": "run bash", "parameters": {}}
+    sample = build_sft_sample(
+        user_id="u1",
+        session_id="s1",
+        messages=[
+            {"role": "user", "content": "run tests"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "passed"},
+        ],
+        assistant_message={"role": "assistant", "content": None, "tool_calls": [tool_call]},
+        tools=[tool],
+    )
+
+    assert sample["messages"][1]["tool_calls"] == [tool_call]
+    assert sample["messages"][2]["tool_call_id"] == "call-1"
+    assert sample["assistant_message"]["content"] is None
+    assert sample["assistant_message"]["tool_calls"] == [tool_call]
+    assert sample["tools"] == [
+        {"type": "function", "function": {"name": "bash", "description": "run bash", "parameters": {}}}
+    ]
+
+    no_tools = build_sft_sample(
+        user_id="u1",
+        session_id="s1",
+        messages=[{"role": "user", "content": "hello"}],
+        assistant_message={"role": "assistant", "content": "world"},
+    )
+    assert "tools" not in no_tools
+
+
+def test_normalize_tool_calls_converts_flat_call_to_chatml_shape():
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
+        normalize_assistant_message,
+        normalize_tool_calls,
+        normalize_tool_definitions,
+    )
+
+    assert normalize_tool_calls([{"id": "call-1", "name": "bash", "arguments": {"command": "pytest"}}]) == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": {"command": "pytest"}},
+        }
+    ]
+    assert normalize_tool_definitions([{"type": "function", "name": "bash", "parameters": {}}]) == [
+        {"type": "function", "function": {"name": "bash", "parameters": {}}}
+    ]
+    assert normalize_assistant_message(
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "function": {"name": "bash"}}]}
+    ) == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "bash", "arguments": {}}}],
+    }
+
+
 def test_normalize_assistant_message_reads_openai_choice_message():
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import normalize_assistant_message
 
@@ -59,6 +122,84 @@ def test_normalize_assistant_message_reads_openai_choice_message():
 
     assert message["role"] == "assistant"
     assert message["content"] == "choice content"
+
+
+def test_supervisor_client_preserves_json_metadata_values():
+    import json
+
+    import httpx
+
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.supervisor_client import SupervisorClient
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["headers"] = dict(request.headers)
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+
+    async def _run() -> None:
+        supervisor = SupervisorClient(
+            "https://api.minimaxi.com",
+            token="secret",
+            model="MiniMax-M3",
+            http_client=client,
+        )
+        try:
+            message = await supervisor.complete(
+                messages=[{"role": "user", "content": "hello"}],
+                metadata={"step_index": 1, "original_model_id": "MiniMax-M3"},
+            )
+        finally:
+            await supervisor.aclose()
+
+        assert message["role"] == "assistant"
+        assert captured["url"] == "https://api.minimaxi.com/v1/chat/completions"
+        assert captured["headers"]["authorization"] == "Bearer secret"
+        assert captured["body"]["metadata"] == {"step_index": 1, "original_model_id": "MiniMax-M3"}
+
+    asyncio.run(_run())
+
+
+def test_supervisor_client_preserves_openai_tool_messages():
+    import json
+
+    import httpx
+
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.supervisor_client import SupervisorClient
+
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+
+    async def _run() -> None:
+        supervisor = SupervisorClient("https://api.minimaxi.com", http_client=client)
+        try:
+            await supervisor.complete(
+                messages=[
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": ""},
+                    {"role": "tool", "content": "Command output"},
+                    {"role": "user", "content": "next"},
+                ],
+                metadata={"step_index": 1},
+            )
+        finally:
+            await supervisor.aclose()
+
+        assert captured["body"]["messages"][3] == {"role": "tool", "content": "Command output"}
+
+    asyncio.run(_run())
 
 
 def test_build_direct_supervisor_sft_samples_reads_openai_choice_response():
@@ -99,7 +240,7 @@ def test_build_direct_supervisor_sft_samples_keeps_tool_call_response():
     tool_call = {
         "id": "call-1",
         "type": "function",
-        "function": {"name": "bash", "arguments": "{\"command\":\"pytest\"}"},
+        "function": {"name": "bash", "arguments": {"command": "pytest"}},
     }
     samples = build_direct_supervisor_sft_samples(
         {
@@ -197,6 +338,7 @@ def test_local_program_rollout_uses_current_python_env(tmp_path, monkeypatch):
     assert f"export PATH={Path(sys.executable).resolve().parent}:$PATH" in command_text
     assert spec.env["SFT_TASK_LIGHT_CONFIG"] == "1"
 
+
 def test_docker_runtime_default_agent_core_root(monkeypatch):
     from openjiuwen.agent_evolving.agent_rl.online.backends.rollouter import docker_runtime
 
@@ -205,7 +347,9 @@ def test_docker_runtime_default_agent_core_root(monkeypatch):
     monkeypatch.setenv("SFT_DOCKER_USE_HOST_CONDA", "0")
 
     mounts, pythonpath, command_prefix = docker_runtime.docker_runtime_mounts()
-    repo_root = next(parent for parent in docker_runtime.Path(__file__).resolve().parents if (parent / "pyproject.toml").exists())
+    repo_root = next(
+        parent for parent in docker_runtime.Path(__file__).resolve().parents if (parent / "pyproject.toml").exists()
+    )
 
     assert mounts[:2] == ["-v", f"{repo_root}:{repo_root}:ro"]
     assert pythonpath.split(":")[0] == str(repo_root)
@@ -302,6 +446,76 @@ def test_token_in_token_out_forwarder_builds_record_from_model_call_context():
     assert record.model_id == "m1"
 
 
+def test_sft_fallback_reads_chatml_fields_without_token_capture(monkeypatch):
+    from types import SimpleNamespace
+
+    _install_dashscope_stub(monkeypatch)
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.converter import SFTRawTrajectoryConverter
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rail import SFTOnlineRail
+    from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
+
+    class _Uploader:
+        async def enqueue(self, batch):
+            del batch
+
+    class _Config:
+        model_name = "teacher"
+        llm_return_token_ids = False
+        custom_headers = None
+
+    tool_call = {"id": "call-1", "name": "bash", "arguments": {"command": "pytest"}}
+    tool = {"type": "function", "name": "bash", "parameters": {}}
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(config=_Config()),
+        inputs=ModelCallInputs(
+            messages=[
+                {"role": "user", "content": "run tests"},
+                {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "passed"},
+            ],
+            tools=[tool],
+            response={
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [tool_call],
+            },
+        ),
+    )
+    rail = SFTOnlineRail(
+        session_id="s1",
+        gateway_endpoint="http://gateway.local",
+        tenant_id="u1",
+        uploader=_Uploader(),
+        async_evolution=False,
+        trajectory_span_processor=TrajectorySpanProcessor(),
+    )
+
+    rail._llm_step_count = 1
+    rail._collect_fallback_llm_interaction(ctx)
+    turn = rail._fallback_turns[0]
+
+    assert turn["prompt_ids"] is None
+    assert turn["completion_token_ids"] is None
+    assert turn["messages"][1]["tool_calls"][0]["function"]["name"] == "bash"
+    assert turn["tools"] == [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+    assert turn["response"]["content"] is None
+    assert turn["response"]["tool_calls"][0]["function"]["arguments"] == {"command": "pytest"}
+
+    trajectory = rail._build_fallback_trajectory(
+        session_id="s1",
+        metadata={"tenant_id": "u1"},
+        turns=[turn],
+    )
+    batch = SFTRawTrajectoryConverter(tenant_id="u1").convert(trajectory)
+    step = batch.steps[0]
+    assert step.messages[1]["tool_calls"][0]["function"]["name"] == "bash"
+    assert step.messages[2]["tool_call_id"] == "call-1"
+    assert step.tools == [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
+    assert step.response["content"] is None
+    assert step.response["tool_calls"][0]["function"]["arguments"] == {"command": "pytest"}
+
+
 def test_sft_online_rail_flushes_session_on_explicit_close(monkeypatch):
     from types import SimpleNamespace
 
@@ -328,22 +542,24 @@ def test_sft_online_rail_flushes_session_on_explicit_close(monkeypatch):
             session_id="",
             gateway_endpoint="http://gateway.local",
             tenant_id="u1",
-                uploader=uploader,
-                async_evolution=False,
-                session_done_on_invoke_end=False,
-                trajectory_span_processor=TrajectorySpanProcessor(),
-            )
+            uploader=uploader,
+            async_evolution=False,
+            session_done_on_invoke_end=False,
+            trajectory_span_processor=TrajectorySpanProcessor(),
+        )
         agent = SimpleNamespace(config=_Config())
 
         first = InvokeInputs(query="q1", conversation_id="same-session")
         await rail.before_invoke(AgentCallbackContext(agent=agent, inputs=first))
-        await rail.after_model_call(AgentCallbackContext(
-            agent=agent,
-            inputs=ModelCallInputs(
-                messages=[{"role": "user", "content": "q1"}],
-                response={"role": "assistant", "content": "a1", "choices": [{"token_ids": [11]}]},
-            ),
-        ))
+        await rail.after_model_call(
+            AgentCallbackContext(
+                agent=agent,
+                inputs=ModelCallInputs(
+                    messages=[{"role": "user", "content": "q1"}],
+                    response={"role": "assistant", "content": "a1", "choices": [{"token_ids": [11]}]},
+                ),
+            )
+        )
         await rail.after_invoke(AgentCallbackContext(agent=agent, inputs=first))
         assert uploader.batches == []
 
@@ -351,13 +567,15 @@ def test_sft_online_rail_flushes_session_on_explicit_close(monkeypatch):
         close_ctx = AgentCallbackContext(agent=agent, inputs=second)
         close_ctx.extra["session_done"] = True
         await rail.before_invoke(close_ctx)
-        await rail.after_model_call(AgentCallbackContext(
-            agent=agent,
-            inputs=ModelCallInputs(
-                messages=[{"role": "user", "content": "q2"}],
-                response={"role": "assistant", "content": "a2", "choices": [{"token_ids": [12]}]},
-            ),
-        ))
+        await rail.after_model_call(
+            AgentCallbackContext(
+                agent=agent,
+                inputs=ModelCallInputs(
+                    messages=[{"role": "user", "content": "q2"}],
+                    response={"role": "assistant", "content": "a2", "choices": [{"token_ids": [12]}]},
+                ),
+            )
+        )
         await rail.after_invoke(close_ctx)
 
         assert len(uploader.batches) == 1
@@ -399,11 +617,11 @@ def test_sft_online_rail_reads_dataset_case_from_env(monkeypatch):
             session_id="",
             gateway_endpoint="http://gateway.local",
             tenant_id="u1",
-                uploader=uploader,
-                async_evolution=False,
-                session_done_on_invoke_end=True,
-                trajectory_span_processor=TrajectorySpanProcessor(),
-            )
+            uploader=uploader,
+            async_evolution=False,
+            session_done_on_invoke_end=True,
+            trajectory_span_processor=TrajectorySpanProcessor(),
+        )
         agent = SimpleNamespace(config=_Config())
         invoke = InvokeInputs(query="", conversation_id="same-session")
         await rail.before_invoke(AgentCallbackContext(agent=agent, inputs=invoke))
@@ -454,11 +672,11 @@ def test_sft_online_rail_direct_sample_upload_mode(monkeypatch):
             gateway_endpoint="http://gateway.local",
             tenant_id="u1",
             uploader=uploader,
-                async_evolution=False,
-                session_done_on_invoke_end=True,
-                upload_mode="sample",
-                trajectory_span_processor=TrajectorySpanProcessor(),
-            )
+            async_evolution=False,
+            session_done_on_invoke_end=True,
+            upload_mode="sample",
+            trajectory_span_processor=TrajectorySpanProcessor(),
+        )
         agent = SimpleNamespace(config=_Config())
         invoke = InvokeInputs(query="fix bug", conversation_id="same-session")
         await rail.before_invoke(AgentCallbackContext(agent=agent, inputs=invoke))
@@ -677,6 +895,555 @@ def test_run_docker_command_spec_timeout_returns_bounded_result(monkeypatch):
     asyncio.run(_run())
 
 
+def test_task_rollouter_loads_markdown_cases_and_passes_image_env(tmp_path, monkeypatch):
+    import openjiuwen.agent_evolving.agent_rl.online.core.task_rollouter as task_rollouter_module
+    from openjiuwen.agent_evolving.agent_rl.online.core.task_rollouter import (
+        SFTTaskRolloutConfig,
+        build_task_rollout_docker_command,
+        load_sft_task_cases,
+    )
+
+    cases_file = tmp_path / "cases.md"
+    cases_file.write_text(
+        "```\n"
+        "swebench/sweb.eval.x86_64.<repo>_1776_<instance-id>:latest\n"
+        "```\n"
+        "- [ ] `swebench/sweb.eval.x86_64.django_1776_django-11790:latest`\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SFT_DOCKER_USE_HOST_CONDA", "0")
+    monkeypatch.setenv("SFT_DOCKER_AGENT_CORE_HOST_PATH", "/repo/agent-core")
+    monkeypatch.setenv("SFT_DOCKER_AGENT_CORE_CONTAINER_PATH", "/repo/agent-core")
+    monkeypatch.setenv("SFT_DOCKER_JIUWENCLAW_HOST_PATH", "/repo/jiuwenclaw")
+    monkeypatch.setenv("SFT_DOCKER_JIUWENCLAW_CONTAINER_PATH", "/repo/jiuwenclaw")
+    monkeypatch.setattr(
+        task_rollouter_module,
+        "_resolve_swe_bench_case",
+        lambda instance_id: (
+            {
+                "repo": "django",
+                "base_commit": "abc123",
+                "problem_statement": "Fix unicode validation in username validators.",
+                "fail_to_pass": ["auth_tests.test_validators.UsernameValidatorsTests.test_unicode_validator"],
+                "pass_to_pass": ["auth_tests.test_validators.UsernameValidatorsTests.test_valid_username"],
+            }
+            if instance_id == "django__django-11790"
+            else {}
+        ),
+    )
+
+    cases = load_sft_task_cases(cases_file)
+    assert len(cases) == 1
+    assert cases[0].instance_id == "django__django-11790"
+    assert cases[0].docker_image == "swebench/sweb.eval.x86_64.django_1776_django-11790:latest"
+    assert "Fix unicode validation in username validators." in cases[0].task_prompt
+    assert "Patch Output Format" in cases[0].task_prompt
+    assert cases[0].problem_statement == "Fix unicode validation in username validators."
+
+    cmd = build_task_rollout_docker_command(
+        cases[0],
+        SFTTaskRolloutConfig(
+            gateway_url="http://172.17.0.5:18080",
+            supervisor_url="http://172.17.0.5:18002",
+            supervisor_model="teacher",
+        ),
+    )
+    assert "--gpus" not in cmd
+    assert "SFT_DOCKER_IMAGE=swebench/sweb.eval.x86_64.django_1776_django-11790:latest" in cmd
+    assert "SFT_INSTANCE_ID=django__django-11790" in cmd
+    assert any(item.startswith("SFT_DATASET_CASE_JSON=") for item in cmd)
+    assert "TRAJECTORY_GATEWAY_URL=http://172.17.0.5:18080" in cmd
+    assert "API_BASE=http://172.17.0.5:18002/v1" in cmd
+    assert "USE_RL_ONLINE_RAIL=1" in cmd
+    assert "TRAIN_BACKEND=SFT" in cmd
+    assert "SFT_ONLINE_UPLOAD_MODE=raw" in cmd
+    assert "install_rl_online_rail_extension.py" not in cmd[-1]
+    assert '"method": "chat.send"' in cmd[-1]
+
+    direct_cmd = build_task_rollout_docker_command(
+        cases[0],
+        SFTTaskRolloutConfig(
+            gateway_url="http://172.17.0.5:18080",
+            supervisor_url="http://172.17.0.5:18002",
+            supervisor_model="teacher",
+            sft_upload_mode="sample",
+        ),
+    )
+    assert "SFT_ONLINE_UPLOAD_MODE=sample" in direct_cmd
+
+
+class _TinyTokenizer:
+    pad_token_id = 0
+
+    @staticmethod
+    def _text(messages):
+        parts = []
+        for message in messages:
+            content = message.get("content", "")
+            if isinstance(content, list):
+                content = "".join(str(item.get("text", "")) for item in content if isinstance(item, dict))
+            parts.append(f"<{message.get('role', '')}>{content}</{message.get('role', '')}>")
+        return "".join(parts)
+
+    def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=True):
+        del add_generation_prompt, tokenize
+        text = self._text(messages)
+        return list(range(1, len(text) + 1))
+
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return list(range(1, len(text) + 1))
+
+
+def test_build_sft_tokenized_sample_caches_empty_assistant_template():
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sft_data_formatter import build_sft_tokenized_sample
+
+    class CountingTokenizer(_TinyTokenizer):
+        def __init__(self):
+            self.empty_assistant_calls = 0
+
+        def apply_chat_template(self, messages, add_generation_prompt=False, tokenize=True):
+            if messages == [{"role": "assistant", "content": ""}]:
+                self.empty_assistant_calls += 1
+            return super().apply_chat_template(messages, add_generation_prompt, tokenize)
+
+    tokenizer = CountingTokenizer()
+    sample = build_sft_tokenized_sample(
+        tokenizer,
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "a2"},
+        ],
+        supervise="all",
+    )
+
+    assert tokenizer.empty_assistant_calls == 1
+    assert len(sample["turn_lengths"]) == 2
+
+
+def test_sft_parquet_matches_v1_columns_and_last_turn_mask(tmp_path):
+    import pandas as pd
+
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sft_data_formatter import write_sft_parquet
+
+    output = tmp_path / "train.parquet"
+    stats = write_sft_parquet(
+        samples=[
+            {
+                "sample_id": "s1",
+                "messages": [
+                    {"role": "system", "content": "tools are available"},
+                    {"role": "user", "content": "q1"},
+                    {"role": "assistant", "content": "a1"},
+                    {"role": "tool", "content": "tool result"},
+                    {"role": "user", "content": "q2"},
+                ],
+                "assistant_message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": '{"command":"pytest"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+        output_path=output,
+        model_path="/unused",
+        tokenizer=_TinyTokenizer(),
+        loss_norm="turn",
+        supervise="last",
+    )
+
+    df = pd.read_parquet(output)
+    assert stats.rows == 1
+    assert set(df.columns) == {
+        "messages",
+        "input_ids",
+        "attention_mask",
+        "position_ids",
+        "loss_mask",
+        "turn_lengths",
+        "turn_offsets",
+    }
+    assert df.iloc[0]["messages"][-1]["content"].startswith("<tool_call>")
+    assert sum(df.iloc[0]["loss_mask"]) == pytest.approx(1.0)
+
+
+def test_write_sft_parquet_rejects_empty_trainable_rows(tmp_path):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sft_data_formatter import write_sft_parquet
+
+    output = tmp_path / "train.parquet"
+    with pytest.raises(ValueError, match="no trainable rows"):
+        write_sft_parquet(
+            samples=[{"sample_id": "s1", "messages": [{"role": "user", "content": "hello"}]}],
+            output_path=output,
+            model_path="/unused",
+            tokenizer=_TinyTokenizer(),
+        )
+
+    assert not output.exists()
+
+
+def test_sft_executor_dry_run_writes_sft_artifacts(tmp_path, monkeypatch):
+    import pandas as pd
+    import yaml
+
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft import trainer as trainer_module
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sft_data_formatter import SFTDatasetStats
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    captured = {}
+
+    def fake_write_sft_parquet(*, samples, output_path, model_path, **kwargs):
+        del samples, kwargs
+        captured["model_path"] = model_path
+        pd.DataFrame(
+            [
+                {
+                    "messages": [[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "world"}]],
+                    "input_ids": [[1, 2, 3]],
+                    "attention_mask": [[1, 1, 1]],
+                    "position_ids": [[0, 1, 2]],
+                    "loss_mask": [[0.0, 0.0, 1.0]],
+                    "turn_lengths": [[1]],
+                    "turn_offsets": [[[0, 3]]],
+                }
+            ]
+        ).to_parquet(output_path, index=False)
+        return SFTDatasetStats(
+            path=str(output_path),
+            rows=1,
+            skipped=0,
+            filtered_multimodal=0,
+            filtered_no_assistant=0,
+            total_tokens=3,
+            loss_norm="sqrt",
+            supervise="last",
+        )
+
+    monkeypatch.setattr(trainer_module, "write_sft_parquet", fake_write_sft_parquet)
+    monkeypatch.setattr(
+        SFTTrainingExecutor,
+        "_verl_config_group_exists",
+        staticmethod(lambda *parts: False),
+    )
+    shared_root = tmp_path / "shared-verl-runs"
+    monkeypatch.setenv("SFT_VERL_RUN_ROOT", str(shared_root))
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+
+    async def _run():
+        dataset_path = await executor.train_batch(
+            user_id="u1",
+            samples=[
+                {
+                    "sample_id": "s1",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "assistant_message": {"role": "assistant", "content": "world"},
+                }
+            ],
+            training_count=1,
+            tmp_root=str(tmp_path),
+        )
+        dataset = Path(dataset_path)
+        config = dataset.with_name("train_verl_sft.yaml")
+        stats = dataset.with_name("dataset_stats.json")
+        payload = yaml.safe_load(config.read_text(encoding="utf-8"))
+        dataset.relative_to(shared_root)
+        assert dataset.suffix == ".parquet"
+        assert dataset.exists()
+        assert stats.exists()
+        assert payload["data"]["train_files"] == str(dataset)
+        assert payload["data"]["loss_mask_key"] == "loss_mask"
+        assert payload["data"]["custom_cls"]["name"] == "QwenMultiTurnSFTDataset"
+        assert payload["data"]["custom_cls"]["path"] == str(dataset.with_name("sft_verl_dataset.py"))
+        assert dataset.with_name("sft_verl_dataset.py").exists()
+        assert payload["model"]["lora_rank"] == 64
+        assert payload["model"]["path"] == "/models/Qwen3-4B-Instruct-2507"
+        assert payload["model"]["tokenizer_path"] == "/models/Qwen3-4B-Instruct-2507"
+        assert payload["trainer"]["nnodes"] == 1
+        assert {"profiler@profiler": "profiler"} not in payload["defaults"]
+        assert captured == {"model_path": "/models/Qwen3-4B-Instruct-2507"}
+
+    asyncio.run(_run())
+
+
+def test_sft_executor_uses_verl_profiler_default_when_available(tmp_path, monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    monkeypatch.setattr(
+        SFTTrainingExecutor,
+        "_verl_config_group_exists",
+        staticmethod(lambda *parts: parts == ("profiler", "profiler")),
+    )
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5,6,7",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+
+    payload = executor._build_sft_config(
+        user_id="u1",
+        dataset_path=tmp_path / "train.parquet",
+        output_dir=tmp_path / "output",
+        custom_cls_path=tmp_path / "sft_verl_dataset.py",
+        training_count=1,
+    )
+
+    assert {"profiler@profiler": "profiler"} in payload["defaults"]
+    assert payload["profiler"]["enable"] is False
+
+
+def test_sft_executor_clamps_train_batch_to_gpu_count(tmp_path, monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    monkeypatch.setenv("SFT_VERL_TRAIN_BATCH_SIZE", "1")
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5,6,7",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+
+    payload = executor._build_sft_config(
+        user_id="u1",
+        dataset_path=tmp_path / "train.parquet",
+        output_dir=tmp_path / "output",
+        custom_cls_path=tmp_path / "sft_verl_dataset.py",
+        training_count=1,
+    )
+
+    assert payload["data"]["train_batch_size"] == 4
+    assert payload["trainer"]["n_gpus_per_node"] == 4
+
+
+def test_sft_executor_parses_numeric_save_freq(tmp_path, monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    monkeypatch.setenv("SFT_VERL_SAVE_FREQ", "12")
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+
+    payload = executor._build_sft_config(
+        user_id="u1",
+        dataset_path=tmp_path / "train.parquet",
+        output_dir=tmp_path / "output",
+        custom_cls_path=tmp_path / "sft_verl_dataset.py",
+        training_count=1,
+    )
+
+    assert payload["trainer"]["save_freq"] == 12
+
+
+def test_sft_executor_respects_visible_devices_env_override(tmp_path, monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    captured = {}
+
+    class FakeRunner:
+        def run(self, command, *, cwd, env, shell):
+            captured.update({"command": command, "cwd": cwd, "env": env, "shell": shell})
+            return 0
+
+    monkeypatch.setenv("ONLINE_RL_VISIBLE_DEVICES_ENV", "ASCEND_VISIBLE_DEVICES")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+    executor._process_runner = FakeRunner()
+    executor._run_sft_trainer(config_path=tmp_path / "train_verl_sft.yaml", run_dir=tmp_path)
+
+    assert captured["env"]["ASCEND_VISIBLE_DEVICES"] == "4,5"
+    assert "CUDA_VISIBLE_DEVICES" not in captured["env"]
+    assert captured["cwd"] == tmp_path
+    assert captured["shell"] is True
+
+
+def test_sft_executor_reads_supervisor_timeout_from_env(monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    monkeypatch.setenv("SFT_SUPERVISOR_TIMEOUT", "300")
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5,6,7",
+        supervisor_url="https://api.minimaxi.com",
+        supervisor_model="MiniMax-M3",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+
+    assert executor._supervisor is not None
+    assert executor._supervisor.timeout == 300.0
+    asyncio.run(executor.aclose())
+
+
+def test_sft_executor_builds_multinode_torchrun_args(monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    monkeypatch.setenv("SFT_VERL_NNODES", "2")
+    monkeypatch.setenv("SFT_VERL_NODE_RANK", "1")
+    monkeypatch.setenv("SFT_VERL_MASTER_ADDR", "10.0.0.1")
+    monkeypatch.setenv("SFT_VERL_MASTER_PORT", "29600")
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+
+    assert executor._torchrun_distributed_args() == [
+        "--nnodes=2",
+        "--node_rank=1",
+        "--master_addr=10.0.0.1",
+        "--master_port=29600",
+        "--nproc_per_node=2",
+    ]
+
+
+def test_sft_executor_exports_verl_checkpoint_to_lora_adapter(tmp_path, monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    run_dir = tmp_path / "run"
+    output_dir = run_dir / "lora"
+    checkpoint_dir = output_dir / "global_step_6"
+    (checkpoint_dir / "huggingface").mkdir(parents=True)
+    (checkpoint_dir / "fsdp_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint_dir / "model_world_size_4_rank_0.pt").write_text("dummy", encoding="utf-8")
+
+    commands: list[str] = []
+
+    def fake_run(command_text, *, cwd, env, shell):
+        del cwd, env, shell
+        commands.append(command_text)
+        adapter_dir = run_dir / "merged_hf" / "lora_adapter"
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        (adapter_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+        (adapter_dir / "adapter_model.safetensors").write_text("dummy", encoding="utf-8")
+
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5,6,7",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+    monkeypatch.setattr(executor._process_runner, "run", fake_run)
+
+    adapter_dir = executor._export_sft_lora_adapter(output_dir=output_dir, run_dir=run_dir)
+
+    assert adapter_dir == run_dir / "merged_hf" / "lora_adapter"
+    assert executor._is_publishable_lora_dir(adapter_dir)
+    assert commands
+    assert "verl.model_merger" in commands[0]
+    assert "--backend" in commands[0]
+    assert "fsdp" in commands[0]
+    assert "--use_cpu_initialization" in commands[0]
+
+
+def test_managed_training_process_request_stop_terminates_process_group(tmp_path):
+    import textwrap
+    import threading
+    import time
+
+    from openjiuwen.agent_evolving.agent_rl.online.core.training_process import ManagedTrainingProcess
+
+    script = tmp_path / "sleeper.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import pathlib
+            import signal
+            import sys
+            import time
+
+            ready = pathlib.Path(sys.argv[1])
+            ready.write_text("ready", encoding="utf-8")
+
+            def _exit(_signum, _frame):
+                sys.exit(0)
+
+            signal.signal(signal.SIGINT, _exit)
+            signal.signal(signal.SIGTERM, _exit)
+
+            while True:
+                time.sleep(0.1)
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    process = ManagedTrainingProcess("sft", stop_grace_seconds=0.1, kill_after_seconds=0.1)
+    ready = tmp_path / "ready"
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            process.run([sys.executable, str(script), str(ready)], cwd=tmp_path)
+        except subprocess.CalledProcessError as exc:  # pragma: no cover - defensive cleanup
+            errors.append(exc)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    for _ in range(100):
+        if ready.exists():
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("training subprocess did not start")
+
+    result = process.request_stop()
+    thread.join(timeout=10)
+    if thread.is_alive():
+        process.force_kill()
+        thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert result["active"] is True
+    assert result["action"] == "signal:SIGINT"
+    assert errors == []
+
+
 def test_managed_training_process_falls_back_without_killpg(monkeypatch):
     from openjiuwen.agent_evolving.agent_rl.online.core import training_process
 
@@ -732,163 +1499,3 @@ def test_managed_training_process_force_kill_uses_sigterm_when_sigkill_missing(m
     runner.force_kill()
 
     assert proc.sent == [signal.SIGTERM]
-
-
-def test_task_rollouter_loads_markdown_cases_and_passes_image_env(tmp_path, monkeypatch):
-    import openjiuwen.agent_evolving.agent_rl.online.core.task_rollouter as task_rollouter_module
-    from openjiuwen.agent_evolving.agent_rl.online.core.task_rollouter import (
-        SFTTaskRolloutConfig,
-        build_task_rollout_docker_command,
-        load_sft_task_cases,
-    )
-
-    cases_file = tmp_path / "cases.md"
-    cases_file.write_text(
-        "```\n"
-        "swebench/sweb.eval.x86_64.<repo>_1776_<instance-id>:latest\n"
-        "```\n"
-        "- [ ] `swebench/sweb.eval.x86_64.django_1776_django-11790:latest`\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("SFT_DOCKER_USE_HOST_CONDA", "0")
-    monkeypatch.setenv("SFT_DOCKER_AGENT_CORE_HOST_PATH", "/repo/agent-core")
-    monkeypatch.setenv("SFT_DOCKER_AGENT_CORE_CONTAINER_PATH", "/repo/agent-core")
-    monkeypatch.setenv("SFT_DOCKER_JIUWENCLAW_HOST_PATH", "/repo/jiuwenclaw")
-    monkeypatch.setenv("SFT_DOCKER_JIUWENCLAW_CONTAINER_PATH", "/repo/jiuwenclaw")
-    monkeypatch.setattr(
-        task_rollouter_module,
-        "_resolve_swe_bench_case",
-        lambda instance_id: {
-            "repo": "django",
-            "base_commit": "abc123",
-            "problem_statement": "Fix unicode validation in username validators.",
-            "fail_to_pass": ["auth_tests.test_validators.UsernameValidatorsTests.test_unicode_validator"],
-            "pass_to_pass": ["auth_tests.test_validators.UsernameValidatorsTests.test_valid_username"],
-        }
-        if instance_id == "django__django-11790"
-        else {},
-    )
-
-    cases = load_sft_task_cases(cases_file)
-    assert len(cases) == 1
-    assert cases[0].instance_id == "django__django-11790"
-    assert cases[0].docker_image == "swebench/sweb.eval.x86_64.django_1776_django-11790:latest"
-    assert "Fix unicode validation in username validators." in cases[0].task_prompt
-    assert "Patch Output Format" in cases[0].task_prompt
-    assert cases[0].problem_statement == "Fix unicode validation in username validators."
-
-    cmd = build_task_rollout_docker_command(
-        cases[0],
-        SFTTaskRolloutConfig(
-            gateway_url="http://172.17.0.5:18080",
-            supervisor_url="http://172.17.0.5:18002",
-            supervisor_model="teacher",
-        ),
-    )
-    assert "--gpus" not in cmd
-    assert "SFT_DOCKER_IMAGE=swebench/sweb.eval.x86_64.django_1776_django-11790:latest" in cmd
-    assert "SFT_INSTANCE_ID=django__django-11790" in cmd
-    assert any(item.startswith("SFT_DATASET_CASE_JSON=") for item in cmd)
-    assert "TRAJECTORY_GATEWAY_URL=http://172.17.0.5:18080" in cmd
-    assert "API_BASE=http://172.17.0.5:18002/v1" in cmd
-    assert "USE_RL_ONLINE_RAIL=1" in cmd
-    assert "TRAIN_BACKEND=SFT" in cmd
-    assert "SFT_ONLINE_UPLOAD_MODE=raw" in cmd
-    assert "install_rl_online_rail_extension.py" not in cmd[-1]
-    assert '"method": "chat.send"' in cmd[-1]
-
-    direct_cmd = build_task_rollout_docker_command(
-        cases[0],
-        SFTTaskRolloutConfig(
-            gateway_url="http://172.17.0.5:18080",
-            supervisor_url="http://172.17.0.5:18002",
-            supervisor_model="teacher",
-            sft_upload_mode="sample",
-        ),
-    )
-    assert "SFT_ONLINE_UPLOAD_MODE=sample" in direct_cmd
-
-
-def test_sft_executor_dry_run_writes_generic_dataset(tmp_path):
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
-
-    executor = SFTTrainingExecutor(
-        base_model_path="/models/Qwen3-4B-Instruct-2507",
-        lora_repo=None,
-        notifier=None,
-        training_gpu_ids="4,5",
-        target_model_id="teacher",
-        trainer_command="",
-        dry_run=True,
-    )
-
-    async def _run():
-        dataset_path = await executor.train_batch(
-            user_id="u1",
-            samples=[{"sample_id": "s1", "messages": [{"role": "user", "content": "hello"}], "assistant_message": {"role": "assistant", "content": "world"}}],
-            training_count=1,
-            tmp_root=str(tmp_path),
-        )
-        payload = json.loads(Path(dataset_path).read_text(encoding="utf-8"))
-        assert payload["samples"][0]["sample_id"] == "s1"
-        assert payload["samples"][0]["messages"][-1]["loss_mask"] == 1
-
-    asyncio.run(_run())
-
-
-def test_sft_executor_requires_trainer_command_when_not_dry_run(tmp_path):
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
-
-    executor = SFTTrainingExecutor(
-        base_model_path="/models/Qwen3-4B-Instruct-2507",
-        lora_repo=None,
-        notifier=None,
-        training_gpu_ids="4,5",
-        target_model_id="teacher",
-        trainer_command="",
-        dry_run=False,
-    )
-
-    async def _run():
-        with pytest.raises(ValueError, match="trainer_command"):
-            await executor.train_batch(
-                user_id="u1",
-                samples=[{"sample_id": "s1", "messages": [{"role": "user", "content": "hello"}], "assistant_message": {"role": "assistant", "content": "world"}}],
-                training_count=1,
-                tmp_root=str(tmp_path),
-            )
-
-    asyncio.run(_run())
-
-
-def test_sft_executor_uses_configurable_visible_devices_env(monkeypatch):
-    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
-
-    executor = SFTTrainingExecutor(
-        base_model_path="/models/Qwen3-4B-Instruct-2507",
-        lora_repo=None,
-        notifier=None,
-        training_gpu_ids="4,5",
-        target_model_id="teacher",
-        trainer_command="echo ok",
-        dry_run=False,
-    )
-
-    captured = {}
-
-    def _run(command, *, cwd, env, shell):
-        captured["env"] = dict(env)
-        return 0
-
-    monkeypatch.setenv("ONLINE_RL_VISIBLE_DEVICES_ENV", "ASCEND_VISIBLE_DEVICES")
-    monkeypatch.setattr(executor._process_runner, "run", _run)
-
-    executor._run_trainer_command(
-        user_id="u1",
-        dataset_path=Path("/tmp/dataset.json"),
-        output_dir=Path("/tmp/output"),
-        run_dir=Path("/tmp/run"),
-    )
-
-    assert captured["env"]["ASCEND_VISIBLE_DEVICES"] == "4,5"
-    assert "CUDA_VISIBLE_DEVICES" not in captured["env"] or captured["env"]["CUDA_VISIBLE_DEVICES"] != "4,5"

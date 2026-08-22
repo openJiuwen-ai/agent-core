@@ -104,6 +104,7 @@ class TrainingConfig(BaseModel):
     rollouter: str | None = None
     evaler: str | None = None
     drain_pending_on_train: bool = False
+    auto_hotload_lora: bool = True
     max_samples_per_run: int = Field(default=0, ge=0)
     ppo_samples_per_step: int = Field(default=0, ge=0)
     allow_partial_last_step: bool = True
@@ -113,7 +114,6 @@ class TrainingConfig(BaseModel):
     supervisor_token: str = Field(default="")
     supervisor_model: str = Field(default="")
     target_model_id: str = Field(default="")
-    sft_trainer_command: str = Field(default="")
     sft_dry_run: bool = False
 
 

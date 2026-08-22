@@ -1,4 +1,3 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Shared SFT raw/sample payload helpers."""
@@ -10,10 +9,26 @@ import json
 import uuid
 from typing import Any
 
+from pydantic import BaseModel
+
 from openjiuwen.agent_evolving.agent_rl.online.gateway.common import utc_now_iso
 
 SFT_RAW_PROTOCOL_VERSION = "sft-raw-v1"
 SFT_SAMPLE_PROTOCOL_VERSION = "sft-sample-v1"
+
+_CHAT_MESSAGE_FIELDS = (
+    "role",
+    "content",
+    "name",
+    "tool_calls",
+    "tool_call_id",
+    "reasoning_content",
+    "reasoning",
+    "refusal",
+    "annotations",
+    "audio",
+    "function_call",
+)
 
 
 def json_safe(value: Any) -> Any:
@@ -26,26 +41,139 @@ def json_safe(value: Any) -> Any:
         return [json_safe(item) for item in value]
     if isinstance(value, dict):
         return {str(key): json_safe(item) for key, item in value.items()}
-    if hasattr(value, "model_dump"):
-        try:
-            dumped = value.model_dump()
-        except Exception:
-            dumped = None
-        if isinstance(dumped, dict):
-            return json_safe(dumped)
+    if isinstance(value, BaseModel):
+        return json_safe(value.model_dump())
     return str(value)
+
+
+def normalize_tool_calls(value: Any) -> list[dict[str, Any]]:
+    """Normalize flat/project tool calls to the OpenAI nested shape."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return []
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        payload = json_safe(item)
+        if not isinstance(payload, dict):
+            continue
+        function = payload.get("function")
+        if isinstance(function, dict):
+            call_function = dict(function)
+            arguments = call_function.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    call_function["arguments"] = json.loads(arguments)
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            if call_function.get("arguments") in (None, ""):
+                call_function["arguments"] = {}
+            normalized.append(
+                {
+                    "id": payload.get("id") or "",
+                    "type": payload.get("type") or "function",
+                    "function": {
+                        "name": str(call_function.get("name") or ""),
+                        "arguments": call_function.get("arguments", {}),
+                    },
+                }
+            )
+            continue
+
+        # AssistantMessage.model_dump() already emits the nested format, but
+        # trajectory and legacy callers may still provide flat ToolCall data.
+        arguments = payload.get("arguments") or ""
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (TypeError, json.JSONDecodeError):
+                pass
+        if arguments in (None, ""):
+            arguments = {}
+        call: dict[str, Any] = {
+            "id": payload.get("id") or "",
+            "type": payload.get("type") or "function",
+            "function": {
+                "name": payload.get("name") or "",
+                "arguments": arguments,
+            },
+        }
+        normalized.append(call)
+    return normalized
+
+
+def normalize_tool_definition(value: Any) -> dict[str, Any] | None:
+    """Normalize one tool definition into the OpenAI ChatML shape."""
+    payload = json_safe(value)
+    if not isinstance(payload, dict):
+        return None
+
+    tool_type = str(payload.get("type") or "function")
+    function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+    if not function:
+        function = {key: payload[key] for key in ("name", "description", "parameters") if key in payload}
+    if not function.get("name"):
+        return None
+
+    normalized: dict[str, Any] = {
+        "type": tool_type,
+        "function": {
+            "name": str(function.get("name") or ""),
+        },
+    }
+    if function.get("description") is not None:
+        normalized["function"]["description"] = function["description"]
+    if function.get("parameters") is not None:
+        normalized["function"]["parameters"] = json_safe(function["parameters"])
+    return normalized
+
+
+def normalize_tool_definitions(value: Any) -> list[dict[str, Any]]:
+    """Normalize a list of tool definitions for ChatML export."""
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        tool = normalize_tool_definition(item)
+        if tool is not None:
+            normalized.append(tool)
+    return normalized
 
 
 def normalize_message(message: Any) -> dict[str, Any]:
     """Normalize one chat message into OpenAI-style dict form."""
     if isinstance(message, dict):
         normalized = json_safe(message)
-        return normalized if isinstance(normalized, dict) else {"role": "unknown", "content": str(message)}
-    dumped = json_safe(message)
-    if isinstance(dumped, dict) and dumped.get("role") is not None:
-        return dumped
-    role = getattr(message, "role", "unknown")
-    return {"role": str(role or "unknown"), "content": str(getattr(message, "content", message) or "")}
+        if not isinstance(normalized, dict):
+            return {"role": "unknown", "content": str(message)}
+    else:
+        dumped = json_safe(message)
+        if isinstance(dumped, dict) and dumped.get("role") is not None:
+            normalized = dumped
+        else:
+            role = getattr(message, "role", "unknown")
+            normalized = {
+                "role": str(role or "unknown"),
+                "content": str(getattr(message, "content", message) or ""),
+            }
+
+    if normalized.get("tool_calls") is not None:
+        tool_calls = normalize_tool_calls(normalized.get("tool_calls"))
+        if tool_calls:
+            normalized["tool_calls"] = tool_calls
+        else:
+            normalized.pop("tool_calls", None)
+    if (
+        normalized.get("role") == "assistant"
+        and normalized.get("tool_calls")
+        and normalized.get("content") in ("", None)
+    ):
+        normalized["content"] = None
+    return normalized
 
 
 def normalize_messages(messages: Any) -> list[dict[str, Any]]:
@@ -74,13 +202,20 @@ def normalize_assistant_message(value: Any) -> dict[str, Any]:
                         return {"role": "assistant", "content": str(choice.get("text") or "")}
             if payload.get("message") and isinstance(payload["message"], dict):
                 return normalize_assistant_message(payload["message"])
-            return {
-                "role": str(payload.get("role") or "assistant"),
-                "content": payload.get("content") or payload.get("response_text") or "",
-                **({"tool_calls": payload["tool_calls"]} if payload.get("tool_calls") else {}),
-            }
+            message = {key: payload[key] for key in _CHAT_MESSAGE_FIELDS if key in payload}
+            message.setdefault("role", "assistant")
+            if "content" not in message:
+                message["content"] = None if message.get("tool_calls") else (payload.get("response_text") or "")
+            return normalize_message(message)
     content = getattr(value, "content", value)
-    return {"role": "assistant", "content": "" if content is None else str(content)}
+    message = {
+        "role": str(getattr(value, "role", "assistant") or "assistant"),
+        "content": json_safe(content),
+    }
+    tool_calls = getattr(value, "tool_calls", None)
+    if tool_calls:
+        message["tool_calls"] = normalize_tool_calls(tool_calls)
+    return normalize_message(message)
 
 
 def assistant_text(message: dict[str, Any]) -> str:
@@ -133,7 +268,7 @@ def build_sft_sample(
     normalized_messages = normalize_messages(messages)
     normalized_assistant = normalize_assistant_message(assistant_message)
     fallback_id = f"sft-{source_raw_id or session_id}-{fingerprint_messages(normalized_messages, normalized_assistant)}"
-    return {
+    sample = {
         "protocol_version": SFT_SAMPLE_PROTOCOL_VERSION,
         "sample_id": sample_id or fallback_id or str(uuid.uuid4()),
         "created_at": created_at or utc_now_iso(),
@@ -145,9 +280,14 @@ def build_sft_sample(
         "messages": normalized_messages,
         "assistant_message": normalized_assistant,
         "response_text": assistant_text(normalized_assistant),
-        "tools": json_safe(tools),
         "metadata": json_safe(metadata or {}),
     }
+    # Match llm-data-proxy ChatML: tools is a top-level field only when the
+    # request actually exposed tool definitions.
+    normalized_tools = normalize_tool_definitions(tools)
+    if normalized_tools:
+        sample["tools"] = normalized_tools
+    return sample
 
 
 def raw_user_id(raw: dict[str, Any], *, default_user_id: str = "") -> str:
