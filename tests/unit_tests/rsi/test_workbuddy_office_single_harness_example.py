@@ -116,6 +116,7 @@ def test_office_config_uses_existing_single_harness_optimizer(tmp_path: Path) ->
     assert config["evaluator"]["transient_case_retry_limit"] == 5
     assert config["evaluator"]["solver_backend"] == "deep_agent"
     assert config["model_configs"]["evaluation"] == str(run_model)
+    assert config["evaluation_result_analyzer"]["max_issues"] == 20
     assert config["member_optimizer"]["sibling_candidate_count"] == 1
     assert config["member_optimizer"]["improver_policy_ref"] == ""
     assert config["member_optimizer"]["candidate_min_target_behavior_delta"] == 0.0

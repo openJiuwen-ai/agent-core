@@ -81,6 +81,7 @@ def test_entrypoint_writes_canonical_dataset_refs_and_config(tmp_path: Path) -> 
     assert config.member_optimizer.sibling_candidate_count == 2
     assert config.member_optimizer.max_issue_attempts_per_batch == 8
     assert config.member_optimizer.max_repair_rounds_per_batch == 1
+    assert config.evaluation_result_analyzer.max_issues == 120
 
 
 def test_entrypoint_accepts_local_gdpval_office_cases(tmp_path: Path) -> None:

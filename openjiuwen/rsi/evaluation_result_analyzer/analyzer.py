@@ -102,7 +102,7 @@ _EVIDENCE_SUMMARY_CHARS = 6000
 _AGGREGATION_DIAGNOSIS_CHARS = 1200
 _AGGREGATION_SIGNAL_CHARS = 4000
 _RAW_OUTPUT_CHARS = 512
-_MAX_DIAGNOSES_PER_CASE = 3
+_MAX_DIAGNOSES_PER_CASE = 6
 _CAUSAL_INITIAL_REQUEST_LIMIT = 8
 _CAUSAL_TOTAL_REQUEST_LIMIT = 12
 _EVIDENCE_SUPPLEMENT_MAX_EVENTS = 10
@@ -127,7 +127,7 @@ _HARNESS_CONFIG_KEYS = {
     "rails",
 }
 _SENSITIVE_CONFIG_KEY = re.compile(r"(?:api.?key|token|secret|password|credential)", re.IGNORECASE)
-_ARTIFACT_SUFFIXES = {".csv", ".docx", ".html", ".json", ".md", ".pdf", ".pptx", ".txt", ".xlsx"}
+_ARTIFACT_SUFFIXES = {".csv", ".docx", ".html", ".json", ".md", ".pdf", ".pptx", ".txt", ".xlsx", ".xml"}
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +316,9 @@ message_index, and optional step_pointer.
 ## Epistemic boundary (hard)
 - `authoritative_task_contract.input_excerpt` is the only supplied record of
   what the user/benchmark originally asked and reproduced.
+  When it is non-empty, the public task contract is available: inspect it
+  directly and do not claim it is unavailable or search the repository for a
+  second copy. It may still be genuinely ambiguous; say that explicitly.
   `authoritative_benchmark_test_contract` is the authoritative acceptance-test
   contract when present, but it is not an implementation solution. Tool
   commands, scripts, examples, and probes in Key Events were authored by the
@@ -359,7 +362,15 @@ Variables (member_harness.<role>.<variable>):
   requires cross-case support before it permits any Skill change; a one-case
   Skill hypothesis will run only as a bounded prompt experiment.
 - tool: local atomic tool choice, args, schema, call format, implementation, or result handling is wrong.
-- config: runtime/model/harness configuration for this role is wrong.
+- execution_budget: an observed step, wall-clock, or token limit stops otherwise
+  relevant execution before the required action or verification. Name this only
+  when the effective Harness exposes a writable budget and the trace reaches the
+  limit; ordinary inefficiency is not budget evidence.
+- rail: an already declared Harness lifecycle/control rail is misconfigured, such
+  as repeated-action compaction or bailout behavior. Name this only when
+  effective_harness exposes that rail and the trace demonstrates its mechanism.
+- config: another package-local runtime/model/harness configuration is wrong.
+  Do not use generic config for an execution-budget or Rail diagnosis.
 
 ### Scope: team_skill
 Choose when the earliest decisive mistake is in team-level coordination,
@@ -518,7 +529,7 @@ Aggregation schema:
 - Prefer "unassigned" over guessing.
 """
 
-GENERIC_ANALYZER_PROTOCOL_VERSION = "generic_behavior_causal_v6"
+GENERIC_ANALYZER_PROTOCOL_VERSION = "generic_behavior_causal_v7"
 
 DIAGNOSIS_SYSTEM_PROMPT = """\
 You are an evidence-grounded behavior analyst for an AI Harness improvement
@@ -555,6 +566,12 @@ case-root `trace.json` or `result.json`; use the inline causal digest,
 `evidence_summary.md`, and the isolated `repository/` or artifact snapshot when
 provided.
 
+When `authoritative_task_contract.input_excerpt` is non-empty, the public task contract is available.
+Inspect that excerpt directly; do not claim it is unavailable or search the
+repository for a duplicate. The supplied contract
+may still be genuinely ambiguous, in which case preserve that uncertainty
+rather than importing an unstated benchmark interpretation.
+
 The causal digest may contain compact display excerpts. Any
 `ANALYZER_EVIDENCE_COMPACTION` marker was inserted after task execution by the
 Analyzer evidence pipeline. It was NOT visible to the task Agent and is never
@@ -577,12 +594,20 @@ stable handles, not suggestions. First account for every inventory item; only
 then search backward for causes. Do not select one salient or early runtime
 error and silently drop other failed requirements.
 
-For every diagnosis, partition all inventory IDs between
+Across the complete diagnosis set, partition all inventory IDs between
 `causal_coverage.explained_requirement_ids` and
-`causal_coverage.residual_requirement_ids`. Across the diagnoses, every
-inventory ID must also occur in at least one `failure_cluster.failed_checks`.
+`causal_coverage.residual_requirement_ids`. Each diagnosis should list only the
+IDs it causally explains or explicitly leaves unresolved; do not repeat an ID
+as residual after another diagnosis has explained it. Across the diagnoses,
+every inventory ID must also occur in one `failure_cluster.failed_checks`.
 When evidence cannot explain a requirement, emit an `unassigned` diagnosis for
 that requirement instead of omitting it.
+
+The IDs in one diagnosis's `explained_requirement_ids` must be exactly the IDs
+in that diagnosis's `failure_cluster.failed_checks`. Do not claim that a local
+mechanism explains requirements outside its own failure cluster. An
+insufficient/unassigned diagnosis explains no ID; its clustered IDs remain
+residual until evidence establishes a cause.
 
 An earlier event is a root cause only within an evidence-linked causal chain.
 Timing alone does not make the earliest anomaly the cause of later independent
@@ -635,9 +660,11 @@ For each independent failed requirement, perform these steps in order:
 8. Produce one intervention contract: trigger, one behavior change, one runtime
    acceptance observable, and boundaries that prevent over-generalization.
 
-Prefer one concrete diagnosis over several abstract diagnoses. Return at most
-three only when different failed checks or materially different observed
-behaviors require independent interventions.
+Use one concrete diagnosis per independent intervention. Do not compress
+different decision points or different Harness surfaces into one root cause
+merely because they contribute to the same final failed check. Return multiple
+diagnoses only when their failed checks, causal decision points, or target
+surfaces require independent interventions, up to the supplied per-Case limit.
 
 ## Paired candidate feedback
 `prior_candidate_feedback` is an experiment, not another narrative:
@@ -676,8 +703,14 @@ Valid values are:
   misrouted, or incorrectly executed;
 - `member_harness.<role>.tool`: an atomic executable capability, public schema,
   arguments, implementation, or result handling is wrong;
-- `member_harness.<role>.config`: model, budget, or runtime configuration is the
-  evidenced cause;
+- `member_harness.<role>.execution_budget`: the active step, wall-clock, or token
+  limit is observed to stop otherwise relevant execution before the required
+  action or verification;
+- `member_harness.<role>.rail`: an already declared lifecycle/control Rail is
+  observed to activate incorrectly or fail to activate;
+- `member_harness.<role>.config`: another package-local model or runtime
+  configuration is the evidenced cause; do not use this generic value for a
+  budget or Rail diagnosis;
 - `team_skill.<role>.role_coordination`, `constraint_violation`,
   `workflow_inefficiency`, or `capability_gap`: the decisive failure crosses a
   role boundary or belongs to team control;
@@ -730,7 +763,7 @@ Return one valid JSON object and nothing else. Keep strings concise.
       "recommendation": "<one concrete modification or missing discriminator>",
       "causal_coverage": {
         "explained_requirement_ids": ["<inventory ID causally addressed by this diagnosis>"],
-        "residual_requirement_ids": ["<every other inventory ID>"],
+        "residual_requirement_ids": ["<inventory IDs this diagnosis explicitly leaves unresolved>"],
         "unexplained_observations": ["<material fact this mechanism does not explain>"],
         "causal_chain": [
           {
@@ -791,8 +824,11 @@ Hard checks:
 - issue_category must match target_ref scope; unassigned maps to unassigned.
 - Assigned targets require evidence_refs and a concrete acceptance observable.
 - Do not claim `confirmed` when material alternatives remain unresolved.
-- Every diagnosis must partition the complete failed-requirement inventory into
-  explained and residual IDs; across diagnoses no inventory item may disappear.
+- Across the complete diagnosis set, explained and residual IDs must partition
+  the failed-requirement inventory; no inventory item may disappear or occur in
+  both sets.
+- A diagnosis may explain only the failed checks in its own failure cluster;
+  insufficient diagnoses explain none of their clustered checks.
 - `task_sufficient` requires no residual requirement or unexplained observation.
 - A confirmed diagnosis cannot contain an `unknown` causal-chain edge.
 - Analyzer-generated compaction markers cannot support an observed causal edge
@@ -1126,7 +1162,7 @@ Return one valid JSON object only:
         "evidence_requests": [
           {{
             "request_id": "q1",
-            "operation": "search_trace | read_event | inspect_artifact | search_repository | read_repository_file | compare_runs | check_relation | compare_numeric_change",
+            "operation": "search_trace | read_event | inspect_artifact | inspect_evaluation | search_repository | read_repository_file | compare_runs | check_relation | compare_numeric_change",
             "query": "terms that discriminate this hypothesis",
             "expression": "numeric expression for check_relation, using decimal literals",
             "operator": "approximately_equal | equal | not_equal | less_than | less_than_or_equal | greater_than | greater_than_or_equal",
@@ -1155,8 +1191,9 @@ Rules:
 - Request evidence that can refute a hypothesis, not merely repeat evidence that
   supports it.
 - Use search_trace to locate events, then read_event for an exact known event.
-- Use inspect_artifact for evaluator or artifact state and compare_runs for paired
-  Source-versus-Candidate evidence.
+- Use inspect_artifact only for physically materialized task files. Use
+  inspect_evaluation for judge/result metadata, and compare_runs for paired
+  Source-versus-Candidate evidence. A metadata match never proves file content.
 - For code tasks, use search_repository to locate a bounded source or public-test
   span, then read_repository_file only with a repository-relative path returned by
   that search. The controller rejects absolute paths and traversal.
@@ -1170,8 +1207,15 @@ Rules:
   access.
 - If prior_candidate_feedback shows an intervention experiment, request the
   evidence needed to distinguish non-activation from a false causal prediction.
-- Keep 2 to 3 materially distinct hypotheses and at most 8 first-pass evidence
-  requests. The controller reserves up to 4 requests for one immediate refinement.
+- Every inventory ID must appear in at least two hypotheses so that each failed
+  requirement has a real alternative, not merely a second unrelated story.
+- A non-empty `authoritative_task_contract.input_excerpt` already is the public
+  task contract. Do not spend an evidence request searching the repository for
+  that contract or treat its absence from workspace files as missing evidence.
+- Keep 2 to 6 materially distinct hypotheses and at most 8 first-pass evidence
+  requests. One hypothesis may cover several requirements only when it states a
+  shared mechanism. The controller reserves up to 4 requests for one immediate
+  refinement.
 
 DIAGNOSIS_INPUT:
 {diagnosis_input}
@@ -1231,7 +1275,10 @@ For every diagnosis, add these fields to the required JSON shape:
 }}
 
 Hard rules:
-- Assess every investigation hypothesis; do not silently discard alternatives.
+- Across the complete diagnosis set, assess every investigation hypothesis; do
+  not silently discard alternatives. Each diagnosis should assess the
+  hypotheses relevant to its own failed checks, not copy unrelated unresolved
+  hypotheses into every diagnosis.
 - Compare each assessment against that hypothesis's own `falsified_if`. If the
   falsifying observable is present, status MUST be falsified even when other
   evidence superficially supports the claim.
@@ -1245,8 +1292,19 @@ Hard rules:
 - Quantitative and formula claims must agree with every available
   `check_relation` and `compare_numeric_change` result. Treat the controller's
   computed values as immutable.
+- A verifier score, expected value, or reference outcome proves only what failed.
+  Never reverse-engineer the missing input, formula, or semantic rule from the
+  expected outcome and then cite that derivation as causal support. A changed
+  numeric decision is actionable only when its input/provenance is observed in
+  the public contract, trace, repository, or physical artifact. Otherwise keep
+  the hypothesis unresolved.
 - A confirmed diagnosis requires one supported hypothesis and all material
   alternatives to be falsified by controller evidence.
+- A supported local mechanism may remain actionable when a different material
+  hypothesis is unresolved. Preserve the supported diagnosis and emit a
+  separate evidence_status="insufficient", target_ref="unassigned" residual
+  diagnosis for the unresolved hypothesis and affected failed checks. Never let
+  that residual erase an independently supported local Issue.
 - If evidence changed behavior but the predicted outcome did not occur, mark the
   prior causal hypothesis falsified. Do not relabel it as a new downstream problem.
 - If evidence cannot distinguish the hypotheses, return evidence_status="insufficient"
@@ -1295,12 +1353,28 @@ DRAFT_UNRESOLVED_DIAGNOSES:
 """
 
 
-def _diagnoses_need_causal_refinement(diagnoses: list[dict[str, Any]]) -> bool:
+def _diagnoses_need_causal_refinement(
+    diagnoses: list[dict[str, Any]],
+    *,
+    failed_requirement_ids: list[str] | None = None,
+) -> bool:
+    """Return whether the same Case still lacks a causally explained failure.
+
+    A syntactically valid local contributor is not enough when another failed
+    requirement remains only residual.  Keep evidence acquisition on the
+    current Case so the next Case cannot displace the unresolved mechanism.
+    """
     if not diagnoses:
         return False
+    explained_ids: set[str] = set()
     for diagnosis in diagnoses:
         if str(diagnosis.get("evidence_status", "") or "").strip().casefold() == "insufficient":
             return True
+        coverage = diagnosis.get("causal_coverage")
+        if isinstance(coverage, dict):
+            explained_ids.update(_string_items(coverage.get("explained_requirement_ids", [])))
+            if str(coverage.get("sufficiency_status", "") or "").strip().casefold() == "unknown":
+                return True
         assessments = diagnosis.get("hypothesis_assessment", [])
         if any(
             isinstance(item, dict) and str(item.get("status", "") or "").strip().casefold() == "unresolved"
@@ -1308,7 +1382,8 @@ def _diagnoses_need_causal_refinement(diagnoses: list[dict[str, Any]]) -> bool:
             if isinstance(assessments, list)
         ):
             return True
-    return False
+    required_ids = {item for item in (failed_requirement_ids or []) if item}
+    return bool(required_ids - explained_ids)
 
 
 def _causal_conflicts_need_more_evidence(conflicts: list[str]) -> bool:
@@ -1911,7 +1986,7 @@ def _compact_judge_criteria(metadata: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     criteria: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_criteria[:24], start=1):
+    for index, raw in enumerate(raw_criteria, start=1):
         if not isinstance(raw, dict):
             continue
         criterion_id = raw.get("criterion_id") or raw.get("verifier_id") or f"criterion_{index}"
@@ -2214,6 +2289,7 @@ def _normalize_case_diagnoses(
         candidates = [item for item in raw_diagnoses if isinstance(item, dict)]
     else:
         candidates = []
+    candidates = [expanded for candidate in candidates for expanded in _split_supported_diagnosis_residual(candidate)]
 
     feedback_sets = _candidate_feedback_check_sets(prior_candidate_feedback)
     ranked: list[tuple[int, int, dict[str, Any]]] = []
@@ -2243,6 +2319,120 @@ def _normalize_case_diagnoses(
         if len(normalized) >= _MAX_DIAGNOSES_PER_CASE:
             break
     return normalized
+
+
+def _split_supported_diagnosis_residual(diagnosis: dict[str, Any]) -> list[dict[str, Any]]:
+    """Preserve an evidenced local Issue without discarding unresolved residue.
+
+    Models sometimes assess all global hypotheses inside one diagnosis.  When
+    one mechanism is supported but a different hypothesis remains unresolved,
+    rejecting the assigned diagnosis loses useful causal evidence.  Split the
+    unresolved assessment into an unassigned record instead; the Improver sees
+    the local Issue while the Analyzer retains an explicit request for evidence.
+    """
+    evidence_status = str(diagnosis.get("evidence_status", "") or "").strip().casefold()
+    target_ref = _normalize_target_ref(diagnosis.get("target_ref", ""))
+    raw_assessments = diagnosis.get("hypothesis_assessment", [])
+    assessments = (
+        [item for item in raw_assessments if isinstance(item, dict)] if isinstance(raw_assessments, list) else []
+    )
+    supported = [item for item in assessments if str(item.get("status", "") or "").strip().casefold() == "supported"]
+    unresolved = [item for item in assessments if str(item.get("status", "") or "").strip().casefold() == "unresolved"]
+    if (
+        evidence_status not in {"confirmed", "supported_hypothesis"}
+        or target_ref in {"", "unassigned"}
+        or not supported
+        or not unresolved
+    ):
+        return [dict(diagnosis)]
+
+    local = dict(diagnosis)
+    local["evidence_status"] = "supported_hypothesis"
+    local["hypothesis_assessment"] = [
+        item for item in assessments if str(item.get("status", "") or "").strip().casefold() != "unresolved"
+    ]
+
+    coverage = diagnosis.get("causal_coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    residual_requirement_ids = _string_items(coverage.get("residual_requirement_ids", []))
+    if not residual_requirement_ids:
+        residual_requirement_ids = list(
+            dict.fromkeys(
+                requirement_id
+                for item in unresolved
+                for requirement_id in _string_items(item.get("explains_requirement_ids", []))
+            )
+        )
+    local_coverage = dict(coverage)
+    local_unexplained = _string_items(local_coverage.get("unexplained_observations", []))
+    local_unexplained.append(
+        "Residual investigation hypotheses remain unresolved: "
+        + ", ".join(str(item.get("hypothesis_id", "") or "") for item in unresolved)
+    )
+    local_coverage["unexplained_observations"] = list(dict.fromkeys(local_unexplained))
+    local_coverage["sufficiency_status"] = "local_contributor"
+    local["causal_coverage"] = local_coverage
+    if evidence_status == "confirmed":
+        local["confidence"] = "medium"
+    if not residual_requirement_ids:
+        # An unresolved alternative is not the same thing as an unexplained
+        # failed requirement. Keep it in causal_coverage for audit/refinement,
+        # but do not put it back into the executable local Issue.
+        return [local]
+    cluster = {
+        "failed_checks": residual_requirement_ids,
+        "observable_behavior": (
+            "; ".join(_string_items(coverage.get("unexplained_observations", [])))
+            or "residual failed requirements remain causally unresolved"
+        ),
+    }
+    unresolved_ids = [str(item.get("hypothesis_id", "") or "") for item in unresolved]
+    residual = {
+        **diagnosis,
+        "issue_category": "unassigned",
+        "severity": "low",
+        "summary": "Residual causal alternatives remain unresolved after a supported local finding.",
+        "failure_mode": f"{str(diagnosis.get('failure_mode', '') or 'causal_gap')}_unresolved_residual",
+        "failure_cluster": cluster,
+        "evidence_status": "insufficient",
+        "competing_hypotheses": unresolved_ids,
+        "discriminating_evidence": str(diagnosis.get("discriminating_evidence", "") or ""),
+        "root_cause": "The available evidence has not separated the residual causal alternatives.",
+        "critical_mistake": "No additional causal decision is established by the current evidence.",
+        "general_mechanism": "Keep unresolved causal alternatives unassigned until a discriminator is observed.",
+        "target_ref": "unassigned",
+        "evidence_refs": [],
+        "affected_components": [],
+        "recommendation": "Acquire the missing discriminator before assigning another Harness change.",
+        "causal_coverage": {
+            "explained_requirement_ids": [],
+            "residual_requirement_ids": residual_requirement_ids,
+            "unexplained_observations": ["Unresolved investigation hypotheses: " + ", ".join(unresolved_ids)],
+            "causal_chain": [
+                {
+                    "cause": "unresolved causal alternative",
+                    "effect": str(cluster.get("observable_behavior", "") or "failed requirement remains unexplained"),
+                    "evidence_status": "unknown",
+                    "evidence_refs": [],
+                }
+            ],
+            "counterfactual_prediction": (
+                "No additional behavior prediction is justified until the residual hypotheses are distinguished."
+            ),
+            "sufficiency_status": "unknown",
+        },
+        "decision_contract": {
+            "wrong_decision": "No additional wrong decision is established.",
+            "causal_distinction": "The missing discriminator separates the residual hypotheses.",
+            "required_action": "Collect the missing discriminator.",
+            "acceptance_observable": "Each residual hypothesis is supported or falsified by available evidence.",
+            "scope_boundary": ["Do not modify a Harness surface while attribution remains unresolved."],
+            "activation_phase": "during_investigation",
+        },
+        "hypothesis_assessment": unresolved,
+        "confidence": "low",
+    }
+    return [local, residual]
 
 
 def _diagnosis_has_semantic_content(diagnosis: dict[str, Any]) -> bool:
@@ -2366,6 +2556,19 @@ def _diagnoses_are_duplicate(left: dict[str, Any], right: dict[str, Any]) -> boo
     if left_checks and right_checks and left_checks != right_checks:
         return False
 
+    left_target = _normalize_target_ref(left.get("target_ref", ""))
+    right_target = _normalize_target_ref(right.get("target_ref", ""))
+    if left_target != right_target:
+        return False
+
+    left_mode = _normalize_cluster_text(left.get("failure_mode", ""))
+    right_mode = _normalize_cluster_text(right.get("failure_mode", ""))
+    if left_mode and right_mode and left_mode != right_mode:
+        left_mistake = _normalize_cluster_text(left.get("critical_mistake", ""))
+        right_mistake = _normalize_cluster_text(right.get("critical_mistake", ""))
+        if left_mistake and right_mistake and not _cluster_texts_are_similar(left_mistake, right_mistake):
+            return False
+
     left_cluster = _diagnosis_failure_cluster(left)
     right_cluster = _diagnosis_failure_cluster(right)
     left_observable = _normalize_cluster_text(left_cluster.get("observable_behavior", ""))
@@ -2376,11 +2579,7 @@ def _diagnoses_are_duplicate(left: dict[str, Any], right: dict[str, Any]) -> boo
         return True
     if left_checks and right_checks:
         return True
-    return _normalize_target_ref(left.get("target_ref", "")) == _normalize_target_ref(
-        right.get("target_ref", "")
-    ) and _normalize_cluster_text(left.get("failure_mode", "")) == _normalize_cluster_text(
-        right.get("failure_mode", "")
-    )
+    return left_mode == right_mode
 
 
 def _normalize_cluster_text(value: Any) -> str:
@@ -3287,7 +3486,7 @@ def _build_verifier_inventory(case: CaseAnalysisInput) -> dict[str, Any]:
         failures = group.get("failure")
         if not isinstance(failures, list):
             return []
-        return [str(item) for item in failures[:24] if str(item).strip()]
+        return [str(item) for item in failures if str(item).strip()]
 
     return {
         "empty_patch": empty_patch,
@@ -3411,12 +3610,9 @@ def _causal_coverage_validation_conflicts(
     residual = set(_string_items(coverage.get("residual_requirement_ids", [])))
     errors: list[str] = []
     unknown_ids = sorted((explained | residual) - required_ids)
-    missing_ids = sorted(required_ids - (explained | residual))
     overlap = sorted(explained & residual)
     if unknown_ids:
         errors.append("causal_coverage uses unknown requirement IDs: " + ", ".join(unknown_ids))
-    if missing_ids:
-        errors.append("causal_coverage omits requirement IDs: " + ", ".join(missing_ids))
     if overlap:
         errors.append("causal_coverage IDs cannot be both explained and residual: " + ", ".join(overlap))
 
@@ -3425,6 +3621,16 @@ def _causal_coverage_validation_conflicts(
         errors.append("failure_cluster.failed_checks must name at least one inventory ID")
     elif not cluster_ids <= required_ids:
         errors.append("failure_cluster.failed_checks contains IDs outside the authoritative inventory")
+    if evidence_status == "insufficient":
+        if explained:
+            errors.append("insufficient diagnosis cannot claim failed requirements as causally explained")
+        if cluster_ids and not cluster_ids <= residual:
+            errors.append("insufficient diagnosis must keep its clustered failed checks residual")
+    elif cluster_ids and explained != cluster_ids:
+        errors.append(
+            "causal_coverage.explained_requirement_ids must exactly match this diagnosis's "
+            "failure_cluster.failed_checks"
+        )
 
     counterfactual = str(coverage.get("counterfactual_prediction") or "").strip()
     if not counterfactual:
@@ -3461,12 +3667,15 @@ def _causal_coverage_validation_conflicts(
             "cluster_sufficient, local_contributor, or unknown"
         )
     unexplained = _string_items(coverage.get("unexplained_observations", []))
-    if sufficiency == "task_sufficient" and (residual or unexplained or explained != required_ids):
+    if sufficiency == "task_sufficient" and (
+        residual or unexplained or explained != required_ids or cluster_ids != required_ids
+    ):
         errors.append(
-            "task_sufficient requires all inventory IDs explained, no residual IDs, and no unexplained observations"
+            "task_sufficient requires all inventory IDs in this diagnosis's failure cluster and explained, "
+            "with no residual IDs or unexplained observations"
         )
-    if sufficiency == "cluster_sufficient" and not cluster_ids <= explained:
-        errors.append("cluster_sufficient requires every clustered failed check to be explained")
+    if sufficiency == "cluster_sufficient" and cluster_ids != explained:
+        errors.append("cluster_sufficient requires exactly every clustered failed check to be explained")
     if sufficiency == "local_contributor" and not (residual or unexplained):
         errors.append("local_contributor must name a residual requirement or unexplained observation")
     if sufficiency == "unknown" and evidence_status == "confirmed":
@@ -3510,6 +3719,35 @@ def _case_diagnoses_validation_conflicts(
         if unknown:
             conflicts.append(
                 "diagnosis set used failed_checks outside the authoritative inventory: " + ", ".join(unknown)
+            )
+        explained_ids = {
+            item
+            for diagnosis in diagnoses
+            for item in _string_items(
+                diagnosis.get("causal_coverage", {}).get("explained_requirement_ids", [])
+                if isinstance(diagnosis.get("causal_coverage"), dict)
+                else []
+            )
+        }
+        residual_ids = {
+            item
+            for diagnosis in diagnoses
+            for item in _string_items(
+                diagnosis.get("causal_coverage", {}).get("residual_requirement_ids", [])
+                if isinstance(diagnosis.get("causal_coverage"), dict)
+                else []
+            )
+        }
+        missing_coverage = sorted(required_ids - explained_ids - residual_ids)
+        contradictory_coverage = sorted(explained_ids & residual_ids)
+        if missing_coverage:
+            conflicts.append(
+                "diagnosis set omitted causal coverage for failed requirement IDs: " + ", ".join(missing_coverage)
+            )
+        if contradictory_coverage:
+            conflicts.append(
+                "diagnosis set marked failed requirement IDs both explained and residual: "
+                + ", ".join(contradictory_coverage)
             )
     return conflicts
 
@@ -3624,8 +3862,11 @@ def _causal_investigation_conflicts(
                 conflicts.append(f"diagnosis[{index}]: confirmed diagnosis has no supported investigation hypothesis")
             if "unresolved" in statuses:
                 conflicts.append(f"diagnosis[{index}]: confirmed diagnosis retains an unresolved material hypothesis")
-        if "unresolved" in statuses and target_ref not in {"", "unassigned"}:
-            conflicts.append(f"diagnosis[{index}]: unresolved material hypotheses require target_ref=unassigned")
+        if "unresolved" in statuses and "supported" not in statuses and target_ref not in {"", "unassigned"}:
+            conflicts.append(
+                f"diagnosis[{index}]: unresolved hypotheses without a supported local mechanism "
+                "require target_ref=unassigned"
+            )
 
     experiments = prior_candidate_feedback.get("experiments", []) if isinstance(prior_candidate_feedback, dict) else []
     prior_source_hypothesis_ids: set[str] = set()
@@ -3665,6 +3906,281 @@ def _causal_investigation_conflicts(
                         f"diagnosis[{index}]: falsified prior causal hypotheses were reused: {', '.join(reused)}"
                     )
     return conflicts
+
+
+_OUTCOME_FIT_MARKERS = (
+    "back-solved",
+    "backsolved",
+    "derived from expected",
+    "expected answer implies",
+    "expected output implies",
+    "implied by expected",
+    "reverse-engineer",
+    "reverse engineer",
+    "target value implies",
+    "反推",
+    "根据预期",
+    "由期望",
+)
+
+
+def _reconcile_causal_assessments(
+    diagnoses: list[dict[str, Any]],
+    investigation: dict[str, Any],
+    *,
+    evidence_results: dict[str, Any],
+    failed_requirement_inventory: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Downgrade only unsupported hypotheses instead of discarding a Case.
+
+    This is deliberately monotonic: it may remove an unplanned assessment or
+    turn a claim into ``unresolved``, but it never promotes evidence or invents
+    an executable target.  Valid supported local mechanisms therefore survive
+    a malformed sibling assessment while unresolved coverage remains explicit.
+    """
+    planned_rows = {
+        str(item.get("hypothesis_id", "") or ""): item
+        for item in investigation.get("hypotheses", [])
+        if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "")
+    }
+    if not diagnoses or not planned_rows:
+        return diagnoses, []
+    request_operations: dict[str, str] = {}
+    planned_requests: dict[str, set[str]] = {hypothesis_id: set() for hypothesis_id in planned_rows}
+    for request in investigation.get("evidence_requests", []):
+        if not isinstance(request, dict):
+            continue
+        request_id = str(request.get("request_id", "") or "")
+        if request_id:
+            request_operations[request_id] = str(request.get("operation", "") or "")
+        for hypothesis_id in _string_items(request.get("hypothesis_ids", [])):
+            if hypothesis_id in planned_rows and request_id:
+                planned_requests[hypothesis_id].add(request_id)
+    request_availability = {
+        str(item.get("request_id", "") or ""): str(item.get("availability", "") or "").casefold()
+        for item in evidence_results.get("results", [])
+        if isinstance(item, dict) and str(item.get("request_id", "") or "")
+    }
+
+    warnings: list[str] = []
+    reconciled: list[dict[str, Any]] = []
+    assessed_ids: set[str] = set()
+    for diagnosis_index, raw_diagnosis in enumerate(diagnoses, start=1):
+        diagnosis = dict(raw_diagnosis)
+        raw_assessments = diagnosis.get("hypothesis_assessment", [])
+        assessments: list[dict[str, Any]] = []
+        for raw in raw_assessments if isinstance(raw_assessments, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            assessment = dict(raw)
+            hypothesis_id = str(assessment.get("hypothesis_id", "") or "")
+            if hypothesis_id not in planned_rows:
+                if hypothesis_id:
+                    warnings.append(f"diagnosis[{diagnosis_index}] dropped unplanned hypothesis {hypothesis_id}")
+                continue
+            assessed_ids.add(hypothesis_id)
+            status = str(assessment.get("status", "") or "").strip().casefold()
+            falsifying = str(assessment.get("falsifying_condition_status", "") or "").strip().casefold()
+            follows = str(assessment.get("claim_follows_from_evidence", "") or "").strip().casefold()
+            logic = str(assessment.get("logic_check", "") or "").strip()
+            cited = set(_string_items(assessment.get("controller_request_ids", [])))
+            available_cited = sorted(
+                request_id for request_id in cited if request_availability.get(request_id) == "available"
+            )
+            invalid_reasons: list[str] = []
+            if status not in {"supported", "falsified", "unresolved"}:
+                invalid_reasons.append("invalid_status")
+            if status == "supported":
+                if falsifying != "not_observed":
+                    invalid_reasons.append("falsifier_not_cleared")
+                if follows != "yes":
+                    invalid_reasons.append("claim_not_entailed")
+                if not logic:
+                    invalid_reasons.append("missing_logic_check")
+                if planned_requests[hypothesis_id] and not available_cited:
+                    invalid_reasons.append("no_available_controller_evidence")
+                if bool(planned_rows[hypothesis_id].get("numeric_change_check_required")) and not any(
+                    request_operations.get(request_id) == "compare_numeric_change" for request_id in available_cited
+                ):
+                    invalid_reasons.append("missing_numeric_delta_evidence")
+                outcome_fit_text = " ".join(
+                    (
+                        str(planned_rows[hypothesis_id].get("claim", "") or ""),
+                        logic,
+                        str(assessment.get("reason", "") or ""),
+                    )
+                ).casefold()
+                if any(marker in outcome_fit_text for marker in _OUTCOME_FIT_MARKERS):
+                    invalid_reasons.append("outcome_reverse_engineering_is_not_causal_evidence")
+            elif status == "falsified" and falsifying != "observed" and follows != "no":
+                invalid_reasons.append("falsification_not_observed")
+            if cited - set(available_cited):
+                invalid_reasons.append("unavailable_or_unknown_controller_evidence")
+
+            assessment["controller_request_ids"] = available_cited
+            if invalid_reasons:
+                assessment.update(
+                    {
+                        "status": "unresolved",
+                        "falsifying_condition_status": "unknown",
+                        "claim_follows_from_evidence": "unknown",
+                        "logic_check": (
+                            "Controller reconciliation removed unsupported entailment: "
+                            + ", ".join(dict.fromkeys(invalid_reasons))
+                        ),
+                        "reason": ("The available controller evidence does not establish this causal claim."),
+                    }
+                )
+                warnings.append(
+                    f"diagnosis[{diagnosis_index}] downgraded {hypothesis_id}: "
+                    + ", ".join(dict.fromkeys(invalid_reasons))
+                )
+            assessments.append(assessment)
+        diagnosis["hypothesis_assessment"] = assessments
+        reconciled.append(diagnosis)
+
+    missing = sorted(set(planned_rows) - assessed_ids)
+    if missing:
+        destination = reconciled[0]
+        values = list(destination.get("hypothesis_assessment", []))
+        for hypothesis_id in missing:
+            values.append(
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "status": "unresolved",
+                    "falsifying_condition_status": "unknown",
+                    "claim_follows_from_evidence": "unknown",
+                    "logic_check": "The model omitted this planned alternative; no entailment was accepted.",
+                    "controller_request_ids": [],
+                    "reason": "Planned hypothesis was not validly assessed.",
+                    "evidence_refs": [],
+                }
+            )
+            warnings.append(f"synthesized unresolved assessment for omitted hypothesis {hypothesis_id}")
+        destination["hypothesis_assessment"] = values
+
+    for diagnosis in reconciled:
+        assessments = diagnosis.get("hypothesis_assessment", [])
+        statuses = {
+            str(item.get("status", "") or "").strip().casefold() for item in assessments if isinstance(item, dict)
+        }
+        target_ref = _normalize_target_ref(diagnosis.get("target_ref", ""))
+        coverage = diagnosis.get("causal_coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        explained = _string_items(coverage.get("explained_requirement_ids", []))
+        residual = [
+            item for item in _string_items(coverage.get("residual_requirement_ids", [])) if item not in explained
+        ]
+        coverage["residual_requirement_ids"] = residual
+        if "supported" not in statuses and target_ref not in {"", "unassigned"}:
+            cluster_ids = _string_items(_diagnosis_failure_cluster(diagnosis).get("failed_checks", []))
+            diagnosis["evidence_status"] = "insufficient"
+            diagnosis["target_ref"] = "unassigned"
+            diagnosis["confidence"] = "low"
+            diagnosis["issue_category"] = "unassigned"
+            diagnosis["evidence_refs"] = []
+            coverage["explained_requirement_ids"] = []
+            coverage["residual_requirement_ids"] = list(dict.fromkeys([*residual, *cluster_ids]))
+            coverage["sufficiency_status"] = "unknown"
+            unexplained = _string_items(coverage.get("unexplained_observations", []))
+            unexplained.append("No planned causal hypothesis retained valid positive support.")
+            coverage["unexplained_observations"] = list(dict.fromkeys(unexplained))
+        elif "unresolved" in statuses and str(diagnosis.get("evidence_status", "") or "").casefold() == "confirmed":
+            diagnosis["evidence_status"] = "supported_hypothesis"
+            diagnosis["confidence"] = "medium"
+            coverage["sufficiency_status"] = "local_contributor"
+            unexplained = _string_items(coverage.get("unexplained_observations", []))
+            unexplained.append("One or more planned causal alternatives remain unresolved.")
+            coverage["unexplained_observations"] = list(dict.fromkeys(unexplained))
+        diagnosis["causal_coverage"] = coverage
+
+    # An explained requirement wins over a duplicate residual claim. This is a
+    # deterministic partition repair, not an evidence promotion.
+    explained_any = {
+        requirement_id
+        for diagnosis in reconciled
+        for requirement_id in _string_items(
+            diagnosis.get("causal_coverage", {}).get("explained_requirement_ids", [])
+            if isinstance(diagnosis.get("causal_coverage"), dict)
+            else []
+        )
+    }
+    for diagnosis in reconciled:
+        coverage = diagnosis.get("causal_coverage")
+        if not isinstance(coverage, dict):
+            continue
+        coverage["residual_requirement_ids"] = [
+            item for item in _string_items(coverage.get("residual_requirement_ids", [])) if item not in explained_any
+        ]
+
+    required_ids = _failed_requirement_ids(failed_requirement_inventory)
+    covered_ids = {
+        requirement_id
+        for diagnosis in reconciled
+        for key in ("explained_requirement_ids", "residual_requirement_ids")
+        for requirement_id in _string_items(
+            diagnosis.get("causal_coverage", {}).get(key, [])
+            if isinstance(diagnosis.get("causal_coverage"), dict)
+            else []
+        )
+    }
+    missing_coverage = sorted(required_ids - covered_ids)
+    if missing_coverage:
+        # Preserve the model's semantic fields, but explicitly leave uncovered
+        # requirements unassigned rather than inventing a cause.
+        template = reconciled[0]
+        residual = dict(template)
+        residual.update(
+            {
+                "issue_category": "unassigned",
+                "severity": "low",
+                "summary": "Residual failed requirements remain causally unresolved.",
+                "failure_mode": "unresolved_failed_requirements",
+                "failure_cluster": {
+                    "failed_checks": missing_coverage,
+                    "observable_behavior": "Authoritative requirements remain unmet without a supported mechanism.",
+                },
+                "evidence_status": "insufficient",
+                "failed_requirement": ", ".join(missing_coverage),
+                "root_cause": "Available evidence does not establish a causal mechanism for these requirements.",
+                "critical_mistake": "No causal decision is established by current evidence.",
+                "general_mechanism": "Acquire a discriminator before changing the Harness.",
+                "target_ref": "unassigned",
+                "evidence_refs": [],
+                "affected_components": [],
+                "recommendation": "Collect evidence that distinguishes the planned alternatives.",
+                "confidence": "low",
+                "hypothesis_assessment": [],
+                "causal_coverage": {
+                    "explained_requirement_ids": [],
+                    "residual_requirement_ids": missing_coverage,
+                    "unexplained_observations": ["No supported causal explanation is available."],
+                    "causal_chain": [
+                        {
+                            "cause": "unknown causal mechanism",
+                            "effect": "authoritative requirement remains unmet",
+                            "evidence_status": "unknown",
+                            "evidence_refs": [],
+                        }
+                    ],
+                    "counterfactual_prediction": (
+                        "No behavior change is predicted until a causal discriminator is observed."
+                    ),
+                    "sufficiency_status": "unknown",
+                },
+                "decision_contract": {
+                    "wrong_decision": "No wrong decision is established.",
+                    "causal_distinction": "A future discriminator must separate the causal alternatives.",
+                    "required_action": "Collect the missing discriminator.",
+                    "acceptance_observable": "Each residual hypothesis is supported or falsified by evidence.",
+                    "scope_boundary": ["Do not change a Harness surface without causal support."],
+                    "activation_phase": "during_investigation",
+                },
+            }
+        )
+        reconciled.append(residual)
+        warnings.append("materialized unassigned coverage for omitted failed requirements")
+    return reconciled, warnings
 
 
 def _diagnosis_validation_conflicts(
@@ -4417,6 +4933,7 @@ class DiagnosisAgentStrategy:
                     failed_requirement_ids=requirement_ids,
                     max_requests=_CAUSAL_INITIAL_REQUEST_LIMIT,
                     min_hypotheses=2,
+                    min_hypotheses_per_requirement=2,
                     require_evidence_per_hypothesis=True,
                 )
                 strict_plan_correction_attempted = False
@@ -4433,6 +4950,7 @@ class DiagnosisAgentStrategy:
                         failed_requirement_ids=requirement_ids,
                         max_requests=_CAUSAL_INITIAL_REQUEST_LIMIT,
                         min_hypotheses=2,
+                        min_hypotheses_per_requirement=2,
                         require_evidence_per_hypothesis=True,
                     )
                     if investigation is None:
@@ -4513,7 +5031,10 @@ class DiagnosisAgentStrategy:
                         else []
                     )
                     if (
-                        _diagnoses_need_causal_refinement(draft_diagnoses)
+                        _diagnoses_need_causal_refinement(
+                            draft_diagnoses,
+                            failed_requirement_ids=requirement_ids,
+                        )
                         and len(investigation.get("evidence_requests", [])) < _CAUSAL_TOTAL_REQUEST_LIMIT
                     ):
                         investigation_record["refinement_attempted"] = True
@@ -4687,12 +5208,44 @@ class DiagnosisAgentStrategy:
                             *validation_conflicts,
                             "evidence-conflict repair output did not contain JSON",
                         ]
+                if validation_conflicts and investigation is not None:
+                    reconciled_diagnoses, reconciliation_warnings = _reconcile_causal_assessments(
+                        diagnoses,
+                        investigation,
+                        evidence_results=evidence_results,
+                        failed_requirement_inventory=failed_requirement_inventory,
+                    )
+                    reconciled_conflicts = _case_diagnoses_validation_conflicts(
+                        reconciled_diagnoses,
+                        validation_inventory,
+                        verifier_inventory,
+                        failed_requirement_inventory,
+                    )
+                    reconciled_conflicts.extend(
+                        _causal_investigation_conflicts(
+                            reconciled_diagnoses,
+                            investigation,
+                            evidence_results=evidence_results,
+                            prior_candidate_feedback=case_feedback,
+                        )
+                    )
+                    investigation_record["deterministic_reconciliation"] = {
+                        "attempted": True,
+                        "warnings": reconciliation_warnings,
+                        "remaining_conflicts": reconciled_conflicts,
+                    }
+                    if not reconciled_conflicts:
+                        diagnoses = reconciled_diagnoses
+                        validation_conflicts = []
                 if (
                     investigation is not None
                     and (not validation_conflicts or _causal_conflicts_need_more_evidence(validation_conflicts))
                     and not bool(investigation_record.get("refinement_attempted"))
                     and (
-                        _diagnoses_need_causal_refinement(diagnoses)
+                        _diagnoses_need_causal_refinement(
+                            diagnoses,
+                            failed_requirement_ids=requirement_ids,
+                        )
                         or _causal_conflicts_need_more_evidence(validation_conflicts)
                     )
                     and len(investigation.get("evidence_requests", [])) < _CAUSAL_TOTAL_REQUEST_LIMIT
@@ -4793,6 +5346,35 @@ class DiagnosisAgentStrategy:
                                         prior_candidate_feedback=case_feedback,
                                     )
                                 )
+                            if refined_conflicts and refined_diagnoses:
+                                reconciled_refined, refined_warnings = _reconcile_causal_assessments(
+                                    refined_diagnoses,
+                                    investigation,
+                                    evidence_results=evidence_results,
+                                    failed_requirement_inventory=failed_requirement_inventory,
+                                )
+                                reconciled_refined_conflicts = _case_diagnoses_validation_conflicts(
+                                    reconciled_refined,
+                                    validation_inventory,
+                                    verifier_inventory,
+                                    failed_requirement_inventory,
+                                )
+                                reconciled_refined_conflicts.extend(
+                                    _causal_investigation_conflicts(
+                                        reconciled_refined,
+                                        investigation,
+                                        evidence_results=evidence_results,
+                                        prior_candidate_feedback=case_feedback,
+                                    )
+                                )
+                                investigation_record["refinement_reconciliation"] = {
+                                    "attempted": True,
+                                    "warnings": refined_warnings,
+                                    "remaining_conflicts": reconciled_refined_conflicts,
+                                }
+                                if not reconciled_refined_conflicts:
+                                    refined_diagnoses = reconciled_refined
+                                    refined_conflicts = []
                             if refined_conflicts:
                                 investigation_record["refinement_status"] = "diagnosis_rejected"
                                 investigation_record["refinement_rejection_reason"] = "; ".join(refined_conflicts)

@@ -378,6 +378,7 @@ def _is_concrete_change(change: Mapping[str, Any]) -> bool:
     if field_name in {
         "generation_directives.require_unique_candidate_fingerprint",
         "generation_directives.require_distinct_intervention_surfaces",
+        "generation_directives.preserve_partial_progress_and_target_residual",
     }:
         return operation == "set" and change.get("value") is True
     if len(parts) == 3 and ".".join(parts[:2]) in {

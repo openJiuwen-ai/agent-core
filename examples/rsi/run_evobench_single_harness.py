@@ -107,12 +107,16 @@ def main(argv: list[str] | None = None) -> int:
                 dataset_id=dataset_id,
                 resume=args.resume,
                 baseline_eval_ref_path="",
+                # The benchmark evolves H after every batch. Each batch source
+                # execution is the paired pre-intervention reference; do not
+                # spend a separate full-suite H0 pass before optimization.
+                auto_full_baseline=False,
             )
         )
         return result
 
     result = asyncio.run(_run())
-    print("BASELINE_MODE=epoch_batch_source")
+    print("BASELINE_MODE=paired_batch_source_evaluations")
     print(f"SINGLE_HARNESS_STATE={result.state_path}")
     print(f"SINGLE_HARNESS_REPORT={result.report_path}")
     print(f"BEST_HARNESS_REFS={result.best_harness_refs_path}")
@@ -281,7 +285,10 @@ def _write_config(  # pylint: disable=huawei-too-many-arguments
                 "evaluation_method": "evobench-claw-official",
             },
             "evaluation_result_analyzer": {
-                "max_issues": 8,
+                # Preserve every per-case diagnosis (up to six) through
+                # deterministic aggregation. Candidate evaluation remains
+                # bounded separately by max_issue_attempts_per_batch.
+                "max_issues": max(20, batch_size * 6),
                 "evidence_limit_per_issue": 3,
             },
             "member_optimizer": {

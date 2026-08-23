@@ -105,6 +105,11 @@ def test_lever_policy_does_not_recast_configuration_as_instruction() -> None:
     assert available_surfaces_for_lever(lever, ["prompt", "skill", "tool"]) == []
 
 
+def test_execution_budget_has_an_explicit_configuration_lever() -> None:
+    assert target_ref_lever("member_harness.solver.execution_budget") == "configuration"
+    assert target_ref_lever("member_harness.solver.rail") == "control"
+
+
 def test_instruction_lever_exposes_only_instruction_surfaces() -> None:
     lever = target_ref_lever("member_harness.solver.skill")
 
@@ -4290,6 +4295,10 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
                             "forbidden_behavior": ["Treat __iter__ alone as sufficient."],
                             "attribution": {
                                 "target_ref": "member_harness.solver.skill",
+                                "evidence_status": "confirmed",
+                                "hypothesis_assessment": [
+                                    {"hypothesis_id": "h_direct_protocol", "status": "supported"}
+                                ],
                                 "general_mechanism": (
                                     "A directly requested stateful protocol must implement and "
                                     "probe its direct operation."
@@ -4370,6 +4379,115 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="content digest mismatch"):
         load_optimization_hypotheses(hypothesis_path)
+
+
+@pytest.mark.parametrize(
+    ("attribution", "affected_cases"),
+    [
+        ({"evidence_status": "confirmed"}, ["case_1"]),
+        (
+            {"target_ref": "member_harness.solver.prompt", "evidence_status": "confirmed"},
+            ["case_1"],
+        ),
+        ({"target_ref": "member_harness.solver.prompt", "evidence_status": "insufficient"}, ["case_1"]),
+        ({"target_ref": "member_harness.solver.prompt", "evidence_status": "confirmed"}, []),
+        (
+            {
+                "target_ref": "member_harness.solver.prompt",
+                "evidence_status": "supported_hypothesis",
+                "hypothesis_assessment": [{"hypothesis_id": "h1", "status": "unresolved"}],
+            },
+            ["case_1"],
+        ),
+    ],
+)
+def test_optimization_hypothesis_rejects_unattributed_or_unresolved_issues(
+    tmp_path: Path,
+    attribution: dict[str, object],
+    affected_cases: list[str],
+) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "category": "execution",
+                        "severity": "high",
+                        "summary": "The task failed.",
+                        "affected_cases": affected_cases,
+                        "evidence": [],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Change the harness.",
+                        "metadata": {"attribution": attribution},
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hypothesis_path = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Do the task."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    assert load_optimization_hypotheses(hypothesis_path) == []
+
+
+def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alternative(tmp_path: Path) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_local",
+                        "category": "decision",
+                        "severity": "medium",
+                        "summary": "An observed decision causes the failed requirement.",
+                        "affected_cases": ["case_1"],
+                        "evidence": [{"case_id": "case_1", "step_pointer": "step_2"}],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Use the observed discriminator before selecting the value.",
+                        "metadata": {
+                            "attribution": {
+                                "target_ref": "member_harness.solver.prompt",
+                                "evidence_status": "supported_hypothesis",
+                                "hypothesis_assessment": [
+                                    {"hypothesis_id": "h1", "status": "supported"},
+                                    {"hypothesis_id": "h2", "status": "unresolved"},
+                                ],
+                                "general_mechanism": "Select values only after observing their source provenance.",
+                                "causal_coverage": {
+                                    "explained_requirement_ids": ["criterion:value"],
+                                    "residual_requirement_ids": [],
+                                    "unexplained_observations": ["one alternative remains unresolved"],
+                                    "counterfactual_prediction": "the selected value matches the observed source",
+                                    "sufficiency_status": "local_contributor",
+                                },
+                            }
+                        },
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hypothesis_path = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Select the documented value."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    hypotheses = load_optimization_hypotheses(hypothesis_path)
+    assert len(hypotheses) == 1
+    assert hypotheses[0]["source_issue_id"] == "issue_local"
 
 
 def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None:

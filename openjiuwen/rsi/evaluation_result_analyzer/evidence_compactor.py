@@ -87,9 +87,9 @@ _COMPACTION_MARKER = (
 
 def public_task_contract_snapshot(task: Mapping[str, Any]) -> dict[str, Any]:
     """Keep the public task and tool contract while excluding scorer internals."""
-    public = task.get("claw_public")
+    public = task.get("public_task_contract")
     public = public if isinstance(public, Mapping) else {}
-    metadata = task.get("metadata")
+    metadata = public.get("metadata", task.get("metadata"))
     metadata = metadata if isinstance(metadata, Mapping) else {}
     tool_schemas = public.get("tool_schemas")
     tool_schemas = tool_schemas if isinstance(tool_schemas, Sequence) and not isinstance(tool_schemas, str) else []
@@ -97,8 +97,8 @@ def public_task_contract_snapshot(task: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "provenance": "official_suite.public_task_contract",
         "task_id": str(task.get("id") or public.get("task_id") or ""),
-        "domain": str(task.get("domain") or ""),
-        "prompt": str(task.get("prompt") or ""),
+        "domain": str(public.get("domain") or task.get("domain") or ""),
+        "prompt": str(public.get("prompt") or task.get("prompt") or ""),
         "task_metadata": {
             str(key): value
             for key, value in metadata.items()
@@ -334,7 +334,13 @@ def _compact_judge_evidence(metadata: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def compact_candidate_feedback(feedback: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Keep the intervention prediction and observed outcome, not bulky repeated prose."""
+    """Normalize paired intervention evidence without losing outcome signals.
+
+    Candidate evaluation and historical journal records use slightly different
+    field names.  Normalize both into one analyzer-facing schema so a diagnosis
+    always sees the pre-evaluation prediction, activation evidence, strict
+    acceptance score, continuous diagnostic score, and per-requirement delta.
+    """
     if not isinstance(feedback, Mapping):
         return {}
     records = feedback.get("experiments")
@@ -346,24 +352,107 @@ def compact_candidate_feedback(feedback: Mapping[str, Any] | None) -> dict[str, 
             continue
         diagnoses = record.get("candidate_failure_diagnoses")
         diagnoses = diagnoses if isinstance(diagnoses, list) else []
+        raw_observed = record.get("observed_outcome")
+        raw_observed = raw_observed if isinstance(raw_observed, Mapping) else {}
+        raw_prediction = record.get("prediction")
+        raw_prediction = raw_prediction if isinstance(raw_prediction, Mapping) else {}
+        strict_score = _compact_score_comparison(
+            raw_observed.get("strict_score"),
+            source=_first_present(raw_observed, record, keys=("source_target_score", "source_strict_score")),
+            candidate=_first_present(
+                raw_observed,
+                record,
+                keys=("candidate_target_score", "candidate_strict_score"),
+            ),
+            delta=_first_present(raw_observed, record, keys=("target_score_delta", "strict_score_delta")),
+        )
+        continuous_score = _compact_score_comparison(
+            raw_observed.get("continuous_score"),
+            source=_first_present(raw_observed, record, keys=("source_native_score", "source_continuous_score")),
+            candidate=_first_present(
+                raw_observed,
+                record,
+                keys=("candidate_native_score", "candidate_continuous_score"),
+            ),
+            delta=_first_present(raw_observed, record, keys=("native_score_delta", "continuous_score_delta")),
+        )
+        continuous_score.update(
+            {
+                "source_signal": str(
+                    _first_present(raw_observed, record, keys=("source_native_signal", "source_continuous_signal"))
+                    or ""
+                ),
+                "candidate_signal": str(
+                    _first_present(
+                        raw_observed,
+                        record,
+                        keys=("candidate_native_signal", "candidate_continuous_signal"),
+                    )
+                    or ""
+                ),
+                "role": str(_first_present(raw_observed, record, keys=("native_signal_role",)) or ""),
+            }
+        )
+        requirement_delta = _first_mapping(
+            raw_observed.get("requirement_delta"),
+            raw_observed.get("verifier_delta"),
+            record.get("requirement_delta"),
+            record.get("verifier_delta"),
+        )
+        dimension_deltas = _first_mapping(
+            raw_observed.get("dimension_deltas"),
+            raw_observed.get("native_dimension_deltas"),
+            record.get("dimension_deltas"),
+            record.get("native_dimension_deltas"),
+        )
+        contracts = raw_prediction.get("causal_intervention_contracts")
+        if not isinstance(contracts, list):
+            contracts = record.get("causal_intervention_contracts")
+        contracts = contracts if isinstance(contracts, list) else []
+        activation = record.get("activation")
+        activation = activation if isinstance(activation, Mapping) else {}
+        observed_outcome = {
+            "status": str(_first_present(raw_observed, record, keys=("status", "outcome")) or ""),
+            "reason": str(_first_present(raw_observed, record, keys=("reason",)) or ""),
+            "strict_score": strict_score,
+            "continuous_score": continuous_score,
+            "requirement_delta": _compact_value(requirement_delta),
+            "dimension_deltas": _compact_value(dimension_deltas),
+            "selected_for_promotion": _first_present(
+                raw_observed,
+                record,
+                keys=("selected_for_promotion",),
+            ),
+            # Preserve v1 aliases while analyzer consumers migrate to the
+            # explicit strict/continuous comparison objects above.
+            "source_target_score": strict_score["source"],
+            "candidate_target_score": strict_score["candidate"],
+            "target_score_delta": strict_score["delta"],
+            "source_native_score": continuous_score["source"],
+            "candidate_native_score": continuous_score["candidate"],
+            "native_score_delta": continuous_score["delta"],
+            "verifier_delta": _compact_value(requirement_delta),
+        }
         experiments.append(
             {
+                "schema_version": 2,
                 "experiment_id": str(record.get("experiment_id") or ""),
                 "surface": str(record.get("surface") or ""),
                 "predicted_rank": record.get("predicted_rank"),
                 "predicted_score": record.get("predicted_score"),
-                "observed_outcome": {
-                    "status": str(record.get("status") or record.get("outcome") or ""),
-                    "reason": str(record.get("reason") or ""),
-                    "source_target_score": record.get("source_target_score"),
-                    "candidate_target_score": record.get("candidate_target_score"),
-                    "target_score_delta": record.get("target_score_delta"),
-                    "selected_for_promotion": record.get("selected_for_promotion"),
-                    "verifier_delta": _compact_value(record.get("verifier_delta", {})),
+                "prediction": {
+                    "predicted_rank": _first_present(raw_prediction, record, keys=("predicted_rank",)),
+                    "predicted_score": _first_present(raw_prediction, record, keys=("predicted_score",)),
+                    "candidate_patch_excerpt": _compact_text(
+                        _first_present(raw_prediction, record, keys=("candidate_patch_excerpt",)),
+                        2_000,
+                    ),
+                    "causal_intervention_contracts": _compact_value(contracts),
                 },
-                "activation": _compact_value(record.get("activation", {})),
-                "causal_intervention_contracts": _compact_value(record.get("causal_intervention_contracts", [])),
-                "verifier_delta": _compact_value(record.get("verifier_delta", {})),
+                "observed_outcome": observed_outcome,
+                "activation": _compact_value(activation),
+                "causal_intervention_contracts": _compact_value(contracts),
+                "verifier_delta": _compact_value(requirement_delta),
                 "candidate_failure_diagnoses": [
                     {
                         key: _compact_value(diagnosis.get(key))
@@ -384,6 +473,42 @@ def compact_candidate_feedback(feedback: Mapping[str, Any] | None) -> dict[str, 
             }
         )
     return {"case_id": str(feedback.get("case_id") or ""), "experiments": experiments}
+
+
+def _first_present(*values: Mapping[str, Any], keys: Sequence[str]) -> Any:
+    """Return the first explicitly present alias, including false and zero."""
+    for value in values:
+        for key in keys:
+            if key in value:
+                return value.get(key)
+    return None
+
+
+def _first_mapping(*values: Any) -> Mapping[str, Any]:
+    for value in values:
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def _compact_score_comparison(
+    nested: Any,
+    *,
+    source: Any,
+    candidate: Any,
+    delta: Any,
+) -> dict[str, Any]:
+    nested = nested if isinstance(nested, Mapping) else {}
+    source_value = nested.get("source") if "source" in nested else source
+    candidate_value = nested.get("candidate") if "candidate" in nested else candidate
+    delta_value = nested.get("delta") if "delta" in nested else delta
+    if not _is_number(delta_value) and _is_number(source_value) and _is_number(candidate_value):
+        delta_value = float(candidate_value) - float(source_value)
+    return {
+        "source": source_value if _is_number(source_value) else None,
+        "candidate": candidate_value if _is_number(candidate_value) else None,
+        "delta": delta_value if _is_number(delta_value) else None,
+    }
 
 
 def _build_trial_record(

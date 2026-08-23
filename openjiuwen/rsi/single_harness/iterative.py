@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -20,6 +21,15 @@ from openjiuwen.rsi.evaluation_result_analyzer import (
     EvaluationResultAnalyzer,
 )
 from openjiuwen.rsi.evaluator import TeamEvaluator
+from openjiuwen.rsi.evaluator.requirement_results import (
+    ATOMIC_CHECK_GROUP,
+    FAIL_TO_PASS_GROUP,
+    PASS_TO_PASS_GROUP,
+    evaluation_requirement_results,
+)
+from openjiuwen.rsi.evaluator.optimization_signals import (
+    evaluation_optimization_signals,
+)
 from openjiuwen.rsi.evaluator.trajectory_usage import (
     collect_jsonl_pre_edit_successful_usage,
     collect_jsonl_successful_usage,
@@ -63,6 +73,7 @@ class IterativeSingleHarnessRequest:
     dataset_id: str = "single_harness_benchmark"
     resume: bool = False
     baseline_eval_ref_path: str = ""
+    auto_full_baseline: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +181,19 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             source_harness_refs_path=source_refs,
             expected_case_ids=all_case_ids,
         )
+        if request.auto_full_baseline and not str(state.get("baseline_eval_ref_path", "") or ""):
+            baseline_eval_ref = await self._evaluate(
+                cases=all_cases,
+                harness_refs_path=source_refs,
+                output_dir=output_dir / "evaluations" / "frozen_baseline",
+                dataset=dataset,
+            )
+            _initialize_frozen_baseline(
+                state,
+                baseline_eval_ref_path=baseline_eval_ref,
+                source_harness_refs_path=source_refs,
+                expected_case_ids=all_case_ids,
+            )
         _write_yaml_atomic(state_path, state)
         current_refs = str(state["best_harness_refs_path"])
         max_epochs = int(self.config.max_epochs)
@@ -191,7 +215,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             epoch_start_retained_case_ids = set(working_retained_case_ids)
             if all_case_ids <= working_retained_case_ids:
                 break
-            batches = list(self.data_loader.load(str(dataset_dir), epoch=epoch))
+            if callable(getattr(type(self.data_loader), "load_files", None)):
+                planned_batches = list(self.data_loader.load_files(request.dataset_files, epoch=epoch))
+            else:
+                planned_batches = list(self.data_loader.load(str(dataset_dir), epoch=epoch))
+            batches = _validate_and_filter_planned_batches(planned_batches, expected_case_ids=all_case_ids)
             state["batch_plan_paths"][f"epoch_{epoch:03d}"] = str(
                 getattr(self.data_loader, "batch_plan_path", "") or ""
             )
@@ -256,6 +284,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 attempt_index = 0
                 issue_attempt_count = 0
                 analysis_round_index = 0
+                last_analysis_issue_count = 0
+                last_optimization_hypothesis_count = 0
                 repair_stop_reason = "repair_round_limit_reached"
                 current_repair_round = 1
                 repair_resume_contexts: list[dict[str, Any]] = []
@@ -295,8 +325,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     hypotheses = load_optimization_hypotheses(hypotheses_ref)
                     issue_case_ids = _analysis_issue_case_ids(analysis_ref)
                     issue_signatures = _analysis_issue_signatures(analysis_ref)
+                    last_analysis_issue_count = len(issue_case_ids)
+                    last_optimization_hypothesis_count = len(hypotheses)
                     nonpassing_case_ids = _nonpassing_case_ids(attempt_source_eval_ref)
-                    issue_queue: list[tuple[str | None, str, set[str]]] = []
+                    issue_queue: list[tuple[str, str]] = []
                     repeated_issue_ids: list[str] = []
                     known_issue_signatures = set(attempted_issue_signatures)
                     for hypothesis in hypotheses:
@@ -304,26 +336,14 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         if not issue_id:
                             continue
                         target_case_ids = issue_case_ids.get(issue_id, set())
-                        if target_case_ids and not (target_case_ids & nonpassing_case_ids):
+                        if not target_case_ids or not (target_case_ids & nonpassing_case_ids):
                             continue
                         signature = issue_signatures.get(issue_id, issue_id)
                         if signature in known_issue_signatures:
                             repeated_issue_ids.append(issue_id)
                             continue
-                        issue_queue.append((issue_id, signature, set()))
+                        issue_queue.append((issue_id, signature))
                         known_issue_signatures.add(signature)
-                    if not hypotheses and not _analysis_uses_strict_causal_protocol(analysis_ref):
-                        for case_id in sorted(
-                            _fallback_analysis_case_ids(
-                                analysis_ref,
-                                nonpassing_case_ids=nonpassing_case_ids,
-                            )
-                        ):
-                            signature = f"__legacy_no_issue__:{case_id}"
-                            if signature in attempted_issue_signatures:
-                                repeated_issue_ids.append(signature)
-                                continue
-                            issue_queue.append((None, signature, {case_id}))
                     if not issue_queue:
                         if repair_resume_contexts:
                             resume = repair_resume_contexts.pop()
@@ -333,14 +353,21 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             active_cases = list(resume["active_cases"])
                             current_repair_round = int(resume["repair_round_index"])
                             continue
-                        repair_stop_reason = "repeated_issue_detected" if repeated_issue_ids else "no_residual_issues"
+                        if repeated_issue_ids:
+                            repair_stop_reason = "repeated_issue_detected"
+                        elif not issue_case_ids:
+                            repair_stop_reason = "no_actionable_analysis_issues"
+                        elif not hypotheses:
+                            repair_stop_reason = "no_executable_hypotheses"
+                        else:
+                            repair_stop_reason = "no_applicable_hypotheses_for_active_cases"
                         break
 
                     refresh_residual_analysis = False
                     issue_budget_exhausted = False
                     repair_budget_exhausted = False
                     deferred_repairs: list[dict[str, Any]] = []
-                    for issue_id, issue_signature, fallback_target_case_ids in issue_queue:
+                    for issue_id, issue_signature in issue_queue:
                         if max_issue_attempts and issue_attempt_count >= max_issue_attempts:
                             issue_budget_exhausted = True
                             break
@@ -349,16 +376,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         attempted_issue_signatures.add(issue_signature)
                         attempt_dir = batch_dir / "attempts" / f"a{attempt_index:03d}"
                         before_attempt_refs = current_refs
-                        frozen_target_case_ids = set(issue_case_ids.get(issue_id or "", set()))
+                        frozen_target_case_ids = set(issue_case_ids.get(issue_id, set()))
                         frozen_target_case_ids &= nonpassing_case_ids
                         if not frozen_target_case_ids:
-                            frozen_target_case_ids = set(fallback_target_case_ids) & nonpassing_case_ids
-                        if not frozen_target_case_ids:
-                            frozen_target_case_ids = {
-                                str(case.get("case_id", "") or "")
-                                for case in active_cases
-                                if str(case.get("case_id", "") or "") in nonpassing_case_ids
-                            }
+                            continue
                         cohort_id = _improvement_cohort_id(
                             epoch=epoch,
                             batch_index=batch_index,
@@ -447,6 +468,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                     "source_issue_signature": issue_signature,
                                     "member_optimization_ref_path": str(
                                         proposal.get("member_optimization_ref_path", "") or ""
+                                    ),
+                                    "candidate_generation_error": (
+                                        dict(proposal.get("generation_error", {}))
+                                        if isinstance(proposal.get("generation_error"), dict)
+                                        else {}
                                     ),
                                     "composition_mode": str(proposal.get("composition_mode", "") or ""),
                                     "primary_gate_accepted": primary_accepted,
@@ -658,12 +684,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 if not batch_accepted:
                     current_refs = batch_before_refs
                 batch_gate_status = (
-                    "provisional" if batch_accepted else str((last_gate or {}).get("status", "rejected"))
+                    "provisional" if batch_accepted else str((last_gate or {}).get("status", "not_generated"))
                 )
                 batch_gate_reason = (
                     "candidate_passed_batch_gate_pending_epoch_checkpoint"
                     if batch_accepted
-                    else str((last_gate or {}).get("reason", ""))
+                    else str((last_gate or {}).get("reason", repair_stop_reason))
                 )
                 state["working_harness_refs_path"] = current_refs
                 state["completed_batches"][batch_key] = {
@@ -681,6 +707,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "max_issue_attempts": max_issue_attempts,
                     "max_repair_rounds": max_repair_rounds,
                     "repair_stop_reason": repair_stop_reason,
+                    "last_analysis_issue_count": last_analysis_issue_count,
+                    "last_optimization_hypothesis_count": last_optimization_hypothesis_count,
                     "residual_case_ids": sorted(
                         str(case.get("case_id", "") or "")
                         for case in active_cases
@@ -765,8 +793,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             opaque_snapshot_epoch = any(
                 str(gate.get("composition_mode", "") or "") == "opaque_snapshot" for gate in epoch_provisional_gates
             )
-            retained_case_ids = set(state.get("retained_case_ids", []))
-            protected_case_ids = retained_case_ids
+            protected_case_ids = set(state.get("retained_case_ids", []))
             if opaque_snapshot_epoch and not protected_case_ids:
                 protected_case_ids = {case_id for case_id, score in previous_best_case_scores.items() if score >= 1.0}
             regressed_best_case_ids = []
@@ -809,6 +836,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             "failure_class": "regression_or_retention_failure",
                         }
                     )
+            opaque_partial_selection = _reject_mixed_opaque_snapshot_selection(
+                epoch_provisional_gates,
+                gate_selections,
+            )
+            if opaque_partial_selection:
+                checkpoint_blocked = True
             retained_gates = []
             removed_gates = []
             for gate, selection in zip(epoch_provisional_gates, gate_selections, strict=True):
@@ -831,10 +864,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     full_eval_ref_path=full_eval_ref,
                 )
                 checkpoint_status = "filtered"
-            elif retained_gates and removed_gates and opaque_snapshot_epoch:
-                # A PolicyHarness candidate is one atomic filesystem snapshot.
-                # Never feed it through the ExpertHarness skill/tool composer.
-                checkpoint_status = "verified_opaque_snapshot"
             elif retained_gates and failed_retention_case_ids:
                 checkpoint_status = "verified_with_unrelated_failures"
             elif not retained_gates and epoch_provisional_gates:
@@ -861,6 +890,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "new_infra_failures": new_infra_failures,
                     "new_policy_violations": new_policy_violations,
                     "opaque_snapshot_epoch": opaque_snapshot_epoch,
+                    "opaque_partial_selection": opaque_partial_selection,
                     "retained_candidate_action_ids": _capability_action_ids(retained_gates),
                     "removed_candidate_action_ids": _capability_action_ids(removed_gates),
                     "selected_harness_refs_path": (selected_refs if retained_gates else epoch_start_refs),
@@ -868,14 +898,24 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 }
             )
             state["epoch_checkpoints"].append(checkpoint)
-            if not checkpoint_blocked and (
-                retained_gates or (not epoch_provisional_gates and checkpoint_status == "verified")
-            ):
+            promotion_applied = bool(not checkpoint_blocked and retained_gates)
+            noop_initial_score_seed = bool(
+                state.get("best_score") is None
+                and not epoch_provisional_gates
+                and current_refs == epoch_start_refs
+                and checkpoint_status == "verified"
+            )
+            checkpoint["promotion_applied"] = promotion_applied
+            checkpoint["noop_initial_score_seed"] = noop_initial_score_seed
+            if promotion_applied or noop_initial_score_seed:
                 current_refs = selected_refs
                 state["best_score"] = full_score
                 state["best_eval_ref_path"] = full_eval_ref
                 state["best_harness_refs_path"] = current_refs
                 state["retained_case_ids"] = sorted(full_passing_case_ids)
+                if noop_initial_score_seed:
+                    state["baseline_score"] = full_score
+                    state["baseline_eval_ref_path"] = full_eval_ref
             else:
                 current_refs = epoch_start_refs
                 state["best_score"] = epoch_start_score
@@ -1044,36 +1084,54 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         "generation_directives": policy_payload["generation_directives"],
                         "budget_policy": policy_payload["budget_policy"],
                     }
-                member_ref = await self.member_optimizer.optimize(
-                    eval_ref_path=source_eval_ref,
-                    analysis_result_path=analysis_ref,
-                    harness_refs_path=parent_harness_refs_path,
-                    output_dir=str(cohort_dir / f"c{candidate_index:03d}"),
-                    defer_publish=True,
-                    rejected_capabilities=list(rejected_capabilities),
-                    single_harness=True,
-                    optimization_hypotheses_path=optimization_hypotheses_path,
-                    optimization_issue_ids=([source_issue_id] if source_issue_id else None),
-                    optimization_experience=candidate_experience,
-                )
-                member_info = _read_yaml(member_ref)
-                candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or parent_harness_refs_path)
-                capabilities = _candidate_capabilities(member_info)
-                plan_path = str(member_info.get("plan_path", "") or "")
-                proposal = {
-                    "candidate_id": candidate_id,
-                    "candidate_index": candidate_index,
-                    "generation_order": candidate_index,
-                    "member_optimization_ref_path": member_ref,
-                    "candidate_harness_refs_path": candidate_refs,
-                    "member_status": str(member_info.get("status", "") or ""),
-                    "composition_mode": _member_composition_mode(member_info),
-                    "plan_path": plan_path,
-                    "plan_sha256": _file_sha256(plan_path) if Path(plan_path).is_file() else "",
-                    "capabilities": capabilities,
-                    "causal_intervention_contracts": _causal_intervention_contracts(capabilities),
-                    "candidate_fingerprint": canonical_candidate_fingerprint(capabilities),
-                }
+                try:
+                    member_ref = await self.member_optimizer.optimize(
+                        eval_ref_path=source_eval_ref,
+                        analysis_result_path=analysis_ref,
+                        harness_refs_path=parent_harness_refs_path,
+                        output_dir=str(cohort_dir / f"c{candidate_index:03d}"),
+                        defer_publish=True,
+                        rejected_capabilities=list(rejected_capabilities),
+                        single_harness=True,
+                        optimization_hypotheses_path=optimization_hypotheses_path,
+                        optimization_issue_ids=([source_issue_id] if source_issue_id else None),
+                        optimization_experience=candidate_experience,
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate one candidate, preserve the benchmark run
+                    proposal = {
+                        "candidate_id": candidate_id,
+                        "candidate_index": candidate_index,
+                        "generation_order": candidate_index,
+                        "member_optimization_ref_path": "",
+                        "candidate_harness_refs_path": parent_harness_refs_path,
+                        "member_status": "generation_error",
+                        "composition_mode": "",
+                        "plan_path": "",
+                        "plan_sha256": "",
+                        "capabilities": [],
+                        "causal_intervention_contracts": [],
+                        "candidate_fingerprint": "",
+                        "generation_error": _safe_candidate_error(exc),
+                    }
+                else:
+                    member_info = _read_yaml(member_ref)
+                    candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or parent_harness_refs_path)
+                    capabilities = _candidate_capabilities(member_info)
+                    plan_path = str(member_info.get("plan_path", "") or "")
+                    proposal = {
+                        "candidate_id": candidate_id,
+                        "candidate_index": candidate_index,
+                        "generation_order": candidate_index,
+                        "member_optimization_ref_path": member_ref,
+                        "candidate_harness_refs_path": candidate_refs,
+                        "member_status": str(member_info.get("status", "") or ""),
+                        "composition_mode": _member_composition_mode(member_info),
+                        "plan_path": plan_path,
+                        "plan_sha256": _file_sha256(plan_path) if Path(plan_path).is_file() else "",
+                        "capabilities": capabilities,
+                        "causal_intervention_contracts": _causal_intervention_contracts(capabilities),
+                        "candidate_fingerprint": canonical_candidate_fingerprint(capabilities),
+                    }
             proposals.append(proposal)
             manifest["candidates"] = proposals
             _write_yaml_atomic(manifest_path, manifest)
@@ -1128,13 +1186,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "score_delta": None,
             "capabilities": capabilities,
         }
-        if _eval_has_errors(source_eval_ref):
-            return {
-                "accepted": False,
-                "status": "inconclusive",
-                "reason": "source_gate_inconclusive_due_to_error_cases",
-                **base,
-            }
         if member_status not in {"success", "partial_success"}:
             return {
                 "accepted": False,
@@ -1166,6 +1217,16 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         )
         if not target_case_ids:
             target_case_ids = set(fallback_target_case_ids) & batch_case_ids
+        inconclusive_source_target_case_ids = sorted(_error_case_ids(source_eval_ref) & target_case_ids)
+        if inconclusive_source_target_case_ids:
+            return {
+                "accepted": False,
+                "status": "inconclusive",
+                "reason": "source_gate_inconclusive_due_to_error_cases",
+                **base,
+                "target_case_ids": sorted(target_case_ids),
+                "inconclusive_source_target_case_ids": inconclusive_source_target_case_ids,
+            }
         non_target_case_ids = batch_case_ids - target_case_ids
         _, task_acceptance_contracts = _bind_task_acceptance_contracts(
             cases,
@@ -1179,12 +1240,22 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         paired_source_eval_ref = source_eval_ref
         source_case_scores = _eval_case_scores(paired_source_eval_ref)
         source_target_score = _average_case_scores(source_case_scores, target_case_ids)
-        candidate_eval_ref = await self._evaluate(
-            cases=candidate_cases,
-            harness_refs_path=candidate_harness_refs_path,
-            output_dir=output_dir,
-            dataset=dataset,
-        )
+        try:
+            candidate_eval_ref = await self._evaluate(
+                cases=candidate_cases,
+                harness_refs_path=candidate_harness_refs_path,
+                output_dir=output_dir,
+                dataset=dataset,
+            )
+        except Exception as exc:  # noqa: BLE001 - one candidate must not abort the benchmark
+            return {
+                "accepted": False,
+                "status": "inconclusive",
+                "reason": "candidate_evaluation_failed",
+                **base,
+                "target_case_ids": sorted(target_case_ids),
+                "candidate_evaluation_error": _safe_candidate_error(exc),
+            }
         skipped_target_case_ids = sorted(_skipped_case_ids(candidate_eval_ref) & target_case_ids)
         if skipped_target_case_ids:
             return {
@@ -1286,9 +1357,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             case_id for case_id, delta in verifier_deltas_by_case.items() if bool(delta.get("partial_progress"))
         )
         verifier_progress_target_case_ids = sorted(
-            case_id
-            for case_id, delta in verifier_deltas_by_case.items()
-            if delta.get("newly_passed_fail_to_pass") or delta.get("newly_passed_atomic_checks")
+            case_id for case_id, delta in verifier_deltas_by_case.items() if delta.get("newly_passed_requirements")
         )
         target_improved = bool(failing_target_case_ids) and (
             not unimproved_target_case_ids and not regressed_target_case_ids
@@ -1366,7 +1435,21 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "by_case": {
                     case_id: [
                         {
+                            "schema_version": 2,
+                            "experiment_id": output_dir.name,
                             "kind": "paired_source_candidate_delta",
+                            "surface": ",".join(
+                                sorted(
+                                    {
+                                        str(capability.get("action_group", "") or "")
+                                        for capability in capabilities
+                                        if str(capability.get("action_group", "") or "")
+                                    }
+                                )
+                            ),
+                            "status": "rejected",
+                            "reason": reason,
+                            "selected_for_promotion": False,
                             "verifier_delta": dict(delta),
                             "candidate_patch_excerpt": str(candidate_patch_excerpts_by_case.get(case_id, "")),
                             "source_native_score": _number(source_native_case_scores.get(case_id)),
@@ -1380,6 +1463,57 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             "source_native_signal": str(source_native_signals.get(case_id, {}).get("source", "")),
                             "candidate_native_signal": str(candidate_native_signals.get(case_id, {}).get("source", "")),
                             "native_signal_role": "sibling_and_repair_ranking_only",
+                            "source_target_score": _number(source_case_scores.get(case_id)),
+                            "candidate_target_score": _number(candidate_case_scores.get(case_id)),
+                            "target_score_delta": _paired_score_delta(
+                                source_case_scores,
+                                candidate_case_scores,
+                                case_id,
+                            ),
+                            "activation": _paired_candidate_activation(
+                                capabilities,
+                                case_id=case_id,
+                                pre_edit_tools_by_case=pre_edit_tools_by_case,
+                                pre_edit_skills_by_case=pre_edit_skills_by_case,
+                            ),
+                            "prediction": {
+                                "candidate_patch_excerpt": str(candidate_patch_excerpts_by_case.get(case_id, "")),
+                                "causal_intervention_contracts": [
+                                    dict(contract)
+                                    for contract in causal_intervention_contracts
+                                    if case_id in set(contract.get("target_case_ids", []))
+                                ],
+                            },
+                            "observed_outcome": {
+                                "status": "rejected",
+                                "reason": reason,
+                                "selected_for_promotion": False,
+                                "strict_score": {
+                                    "source": _number(source_case_scores.get(case_id)),
+                                    "candidate": _number(candidate_case_scores.get(case_id)),
+                                    "delta": _paired_score_delta(
+                                        source_case_scores,
+                                        candidate_case_scores,
+                                        case_id,
+                                    ),
+                                },
+                                "continuous_score": {
+                                    "source": _number(source_native_case_scores.get(case_id)),
+                                    "candidate": _number(candidate_native_case_scores.get(case_id)),
+                                    "delta": _paired_score_delta(
+                                        source_native_case_scores,
+                                        candidate_native_case_scores,
+                                        case_id,
+                                    ),
+                                    "source_signal": str(source_native_signals.get(case_id, {}).get("source", "")),
+                                    "candidate_signal": str(
+                                        candidate_native_signals.get(case_id, {}).get("source", "")
+                                    ),
+                                    "role": "sibling_and_repair_ranking_only",
+                                },
+                                "requirement_delta": dict(delta),
+                                "dimension_deltas": dict(native_dimension_deltas_by_case.get(case_id, {})),
+                            },
                             "causal_intervention_contracts": [
                                 dict(contract)
                                 for contract in causal_intervention_contracts
@@ -1417,9 +1551,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "source_target_score": source_target_score,
             "candidate_target_score": candidate_target_score,
             "target_score_delta": target_score_delta,
-            # Native EvoBench scores are diagnostic ranking signals only. The
+            # Evaluator-native scores are diagnostic ranking signals only. The
             # acceptance and epoch-promotion gates above remain on eval-ref
-            # Pass^3 scores and must not be relaxed by this continuous delta.
+            # strict scores and must not be relaxed by this continuous delta.
             "source_native_target_score": source_native_target_score,
             "candidate_native_target_score": candidate_native_target_score,
             "native_target_score_delta": native_target_score_delta,
@@ -1509,7 +1643,44 @@ def _load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
             if not isinstance(case, dict):
                 raise ValueError(f"dataset case must be a mapping: {path}#{index}")
             cases.append({**case, "case_path": str(path), "case_index": index})
+    case_ids = [str(case.get("case_id", "") or "").strip() for case in cases]
+    if any(not case_id for case_id in case_ids):
+        raise ValueError("single-harness dataset cases must have non-empty case_id values")
+    seen_case_ids: set[str] = set()
+    duplicates: set[str] = set()
+    for case_id in case_ids:
+        if case_id in seen_case_ids:
+            duplicates.add(case_id)
+        seen_case_ids.add(case_id)
+    if duplicates:
+        raise ValueError(f"single-harness dataset contains duplicate case ids: {sorted(duplicates)}")
     return cases
+
+
+def _validate_and_filter_planned_batches(
+    batches: list[list[dict[str, Any]]],
+    *,
+    expected_case_ids: set[str],
+) -> list[list[dict[str, Any]]]:
+    """Reject missing/duplicate requested cases and ignore neighboring datasets."""
+    filtered: list[list[dict[str, Any]]] = []
+    seen: set[str] = set()
+    for batch in batches:
+        selected: list[dict[str, Any]] = []
+        for case in batch:
+            case_id = str(case.get("case_id", "") or "").strip()
+            if case_id not in expected_case_ids:
+                continue
+            if case_id in seen:
+                raise ValueError(f"data loader returned duplicate requested case id: {case_id}")
+            seen.add(case_id)
+            selected.append(case)
+        if selected:
+            filtered.append(selected)
+    missing = sorted(expected_case_ids - seen)
+    if missing:
+        raise ValueError(f"data loader omitted requested case ids: {missing}")
+    return filtered
 
 
 def _validate_single_harness_refs(harness_refs_path: str) -> None:
@@ -1542,7 +1713,7 @@ def _request_fingerprint(
     improver_policy_digest: str,
 ) -> dict[str, Any]:
     return {
-        "optimization_chain_version": 17,
+        "optimization_chain_version": 18,
         "dataset_files": [str(Path(path).expanduser().resolve()) for path in request.dataset_files],
         "dataset_sha256": [_file_sha256(path) for path in request.dataset_files],
         "source_harness_refs_path": source_harness_refs_path,
@@ -1552,6 +1723,7 @@ def _request_fingerprint(
         "baseline_eval_ref_sha256": (
             _file_sha256(request.baseline_eval_ref_path) if request.baseline_eval_ref_path else ""
         ),
+        "auto_full_baseline": bool(request.auto_full_baseline),
         "sibling_candidate_count": sibling_candidate_count,
         "improver_policy_digest": improver_policy_digest,
     }
@@ -1636,6 +1808,17 @@ def _candidate_proposal_summary(proposal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_candidate_error(exc: Exception) -> dict[str, str]:
+    message = str(exc).strip()
+    message = re.sub(r"(?i)\bsk-[A-Za-z0-9._-]{8,}", "[redacted]", message)
+    message = re.sub(r"(?i)(api[_-]?key\s*[=:]\s*)\S+", r"\1[redacted]", message)
+    message = re.sub(r"(?i)(authorization\s*:\s*bearer\s+)\S+", r"\1[redacted]", message)
+    return {
+        "error_type": type(exc).__name__,
+        "message": message[:2_000],
+    }
+
+
 def _verify_frozen_candidate_proposals(proposals: list[dict[str, Any]]) -> None:
     """Reject plan drift after pre-execution priority has been frozen."""
     for proposal in proposals:
@@ -1715,11 +1898,11 @@ def _attach_native_signal_feedback(
                 else {}
             ),
             "role": "sibling_and_repair_ranking_only",
-            "promotion_authority": "eval_ref_pass_hat_k",
+            "promotion_authority": "eval_ref_case_score",
         }
     selection = cohort_feedback.get("selection")
     if isinstance(selection, dict):
-        selection["realized_sort_policy"] = "pass_hat_k_then_native_continuous_v1"
+        selection["realized_sort_policy"] = "strict_eval_ref_score_then_continuous_signal_v1"
 
 
 def _write_candidate_feedback_ledger(state: dict[str, Any], output_dir: Path) -> str:
@@ -1856,6 +2039,9 @@ def _initialize_frozen_baseline(
     if not str(state.get("best_eval_ref_path", "") or ""):
         state["best_eval_ref_path"] = str(baseline_path)
         state["best_score"] = state["baseline_score"]
+        state["retained_case_ids"] = sorted(
+            case_id for case_id, score in _eval_case_scores(baseline_path).items() if score >= 1.0
+        )
 
 
 def _resume_fingerprint_matches(stored: Any, requested: dict[str, Any]) -> bool:
@@ -2021,7 +2207,13 @@ def _experiment_outcome(gate: dict[str, Any]) -> str:
         return "flipped" if gate.get("status") == "accepted" else "improved_but_rejected"
     verifier_deltas = gate.get("verifier_deltas_by_case", {})
     if isinstance(verifier_deltas, dict) and any(
-        isinstance(delta, dict) and delta.get("newly_passed_fail_to_pass") for delta in verifier_deltas.values()
+        isinstance(delta, dict)
+        and (
+            delta.get("newly_passed_requirements")
+            or delta.get("newly_passed_fail_to_pass")
+            or delta.get("newly_passed_atomic_checks")
+        )
+        for delta in verifier_deltas.values()
     ):
         return "partial_contract_progress"
     return "still_failed"
@@ -2135,13 +2327,6 @@ def _analysis_issue_case_ids(analysis_ref: str | Path) -> dict[str, set[str]]:
     return issue_case_ids
 
 
-def _analysis_uses_strict_causal_protocol(analysis_ref: str | Path) -> bool:
-    analysis = _read_yaml(analysis_ref)
-    metadata = analysis.get("metadata") if isinstance(analysis.get("metadata"), dict) else {}
-    version = str(metadata.get("analyzer_protocol_version", "") or "")
-    return version.startswith("generic_behavior_causal_v")
-
-
 def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
     """Build stable semantic keys so a residual loop cannot retry one issue."""
     analysis = _read_yaml(analysis_ref)
@@ -2156,6 +2341,8 @@ def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
         metadata = metadata if isinstance(metadata, dict) else {}
         attribution = metadata.get("attribution", {})
         attribution = attribution if isinstance(attribution, dict) else {}
+        causal_coverage = attribution.get("causal_coverage", {})
+        causal_coverage = causal_coverage if isinstance(causal_coverage, dict) else {}
         semantic_payload = {
             "category": str(issue.get("category", "") or "").strip().lower(),
             "summary": " ".join(str(issue.get("summary", "") or "").lower().split()),
@@ -2163,6 +2350,18 @@ def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
             "failure_mode": " ".join(str(issue.get("failure_mode", "") or "").lower().split()),
             "target_ref": str(attribution.get("target_ref", issue.get("target_ref", "")) or "").strip().lower(),
             "affected_cases": sorted(str(case_id) for case_id in issue.get("affected_cases", []) if str(case_id)),
+            # A residual issue is a different repair problem after part of the
+            # original contract has been fixed, even when prose stays similar.
+            "explained_requirement_ids": sorted(
+                str(requirement_id)
+                for requirement_id in causal_coverage.get("explained_requirement_ids", [])
+                if str(requirement_id)
+            ),
+            "residual_requirement_ids": sorted(
+                str(requirement_id)
+                for requirement_id in causal_coverage.get("residual_requirement_ids", [])
+                if str(requirement_id)
+            ),
         }
         if not any(value for key, value in semantic_payload.items() if key != "affected_cases"):
             signatures[issue_id] = issue_id
@@ -2282,50 +2481,6 @@ def _compact_analysis_diagnoses(
     return compact
 
 
-def _fallback_analysis_case_ids(
-    analysis_ref: str | Path,
-    *,
-    nonpassing_case_ids: set[str],
-) -> set[str]:
-    """Select isolated low-confidence experiment targets when no Issue exists.
-
-    Older analyzers did not materialize per-case diagnoses, so they retain the
-    legacy behavior of attempting each failed case independently. When a
-    diagnosis artifact is available, records that explicitly failed
-    deterministic validation are not allowed to seed a Harness change.
-    """
-    analysis = _read_yaml(analysis_ref)
-    metadata = analysis.get("metadata", {})
-    metadata = metadata if isinstance(metadata, dict) else {}
-    diagnoses_path = Path(str(metadata.get("per_case_diagnoses_path", "") or ""))
-    if not diagnoses_path.is_file():
-        return set(nonpassing_case_ids)
-
-    diagnoses = _compact_analysis_diagnoses(analysis_ref)
-    usable_case_ids: set[str] = set()
-    invalid_statuses = {"analysis_failed", "evidence_conflict", "failed", "invalid", "unusable"}
-    for case_id in nonpassing_case_ids:
-        records = diagnoses.get(case_id, [])
-        for diagnosis in records:
-            status = str(diagnosis.get("diagnosis_status", "") or "").strip().casefold()
-            if diagnosis.get("analysis_failed") is True or status in invalid_statuses:
-                continue
-            if any(
-                diagnosis.get(key) not in (None, "", {}, [])
-                for key in (
-                    "summary",
-                    "root_cause",
-                    "critical_mistake",
-                    "general_mechanism",
-                    "recommendation",
-                    "decision_contract",
-                )
-            ):
-                usable_case_ids.add(case_id)
-                break
-    return usable_case_ids
-
-
 def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Preserve what each candidate predicted before its outcome was observed."""
     contracts: list[dict[str, Any]] = []
@@ -2349,6 +2504,9 @@ def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[d
                     2_000,
                 ),
                 "predicted_behavior_and_outcome": expected_effect,
+                "analyzer_counterfactual_predictions": [
+                    str(item) for item in capability.get("analyzer_counterfactual_predictions", []) if str(item)
+                ],
                 "source_causal_hypothesis_id": str(capability.get("source_causal_hypothesis_id", "") or ""),
                 "source_causal_hypothesis_ids": [
                     str(item) for item in capability.get("source_causal_hypothesis_ids", []) if str(item)
@@ -2357,6 +2515,110 @@ def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[d
             }
         )
     return contracts
+
+
+def _paired_candidate_activation(
+    capabilities: list[dict[str, Any]],
+    *,
+    case_id: str,
+    pre_edit_tools_by_case: dict[str, set[str]],
+    pre_edit_skills_by_case: dict[str, set[str]],
+) -> dict[str, Any]:
+    """Separate observed candidate delivery from surface behavior activation."""
+    delivery = {
+        "availability": "observed",
+        "state": "executed",
+        "evidence": "candidate_harness_was_used_for_paired_evaluation",
+    }
+    surfaces = {
+        str(capability.get("action_group", "") or "")
+        for capability in capabilities
+        if str(capability.get("action_group", "") or "")
+    }
+    expected: list[dict[str, Any]] = []
+    missing_runtime_name = False
+    for capability in capabilities:
+        action_group = str(capability.get("action_group", "") or "")
+        operation = str(capability.get("operation", "") or "")
+        if action_group not in {"skill", "tool"} or operation not in {"add", "modify", "update"}:
+            continue
+        target_case_ids = {
+            str(target_case_id) for target_case_id in capability.get("target_case_ids", []) if str(target_case_id)
+        }
+        if target_case_ids and case_id not in target_case_ids:
+            continue
+        runtime_name = str(capability.get("runtime_name", "") or "")
+        if not runtime_name:
+            missing_runtime_name = True
+            continue
+        observed_names = (
+            pre_edit_tools_by_case.get(case_id, set())
+            if action_group == "tool"
+            else pre_edit_skills_by_case.get(case_id, set())
+        )
+        names_match = _tool_names_match if action_group == "tool" else _skill_names_match
+        expected.append(
+            {
+                "surface": action_group,
+                "runtime_name": runtime_name,
+                "triggered_pre_edit": any(names_match(runtime_name, name) for name in observed_names),
+            }
+        )
+
+    if missing_runtime_name:
+        return {
+            "schema_version": 1,
+            "delivery": delivery,
+            "availability": "missing_artifact",
+            "state": "unknown",
+            "surfaces": sorted(surfaces),
+            "reason": "expected_runtime_name_missing",
+            "expected": expected,
+            "behavior_activation": {
+                "availability": "missing_artifact",
+                "state": "unknown",
+                "reason": "expected_runtime_name_missing",
+            },
+        }
+    if not expected:
+        availability = "not_instrumented" if surfaces & {"prompt", "rail", "config", "control"} else "not_applicable"
+        return {
+            "schema_version": 1,
+            "delivery": delivery,
+            "availability": availability,
+            "state": "unknown",
+            "surfaces": sorted(surfaces),
+            "reason": "surface_has_no_observable_activation_event",
+            "expected": [],
+            "behavior_activation": {
+                "availability": availability,
+                "state": "unknown",
+                "reason": "surface_has_no_observable_activation_event",
+            },
+        }
+
+    observed_count = sum(item["triggered_pre_edit"] is True for item in expected)
+    state = (
+        "triggered" if observed_count == len(expected) else "partially_triggered" if observed_count else "not_triggered"
+    )
+    return {
+        "schema_version": 1,
+        "delivery": delivery,
+        "availability": "observed",
+        "state": state,
+        "surfaces": sorted(surfaces & {"skill", "tool"}),
+        "expected_count": len(expected),
+        "observed_pre_edit_count": observed_count,
+        "trigger_rate": observed_count / len(expected),
+        "expected": expected,
+        "behavior_activation": {
+            "availability": "observed",
+            "state": state,
+            "expected_count": len(expected),
+            "observed_pre_edit_count": observed_count,
+            "trigger_rate": observed_count / len(expected),
+        },
+    }
 
 
 def _prior_candidate_feedback(
@@ -2618,13 +2880,7 @@ def _eval_case_scores(eval_ref_path: str | Path) -> dict[str, float]:
 
 
 def _eval_case_native_signals(eval_ref_path: str | Path) -> dict[str, dict[str, Any]]:
-    """Read continuous evaluator signals, falling back to the eval-ref score.
-
-    EvoBench deliberately stores Pass^3 as ``eval_ref.cases[].score`` while its
-    continuous trial mean remains under ``result.evaluation.metadata``. Keeping
-    that distinction here lets search rank equally passing siblings without
-    changing the binary promotion contract.
-    """
+    """Read the evaluator's generic search signals, falling back to strict score."""
     payload = _read_yaml(eval_ref_path)
     signals: dict[str, dict[str, Any]] = {}
     for case in payload.get("cases", []):
@@ -2639,11 +2895,17 @@ def _eval_case_native_signals(eval_ref_path: str | Path) -> dict[str, dict[str, 
         evaluation = evaluation if isinstance(evaluation, dict) else {}
         metadata = evaluation.get("metadata", {})
         metadata = metadata if isinstance(metadata, dict) else {}
-        dimensions = _native_dimension_scores(metadata)
-        native_score, source = _native_score_from_metadata(metadata)
-        if native_score is None and dimensions:
-            native_score = sum(dimensions.values()) / len(dimensions)
-            source = "dimension_mean"
+        contract = evaluation_optimization_signals(metadata)
+        continuous = contract["continuous_score"]
+        native_score = _number(continuous.get("value")) if continuous.get("availability") == "available" else None
+        source = str(continuous.get("source") or "")
+        dimensions = {
+            str(name): score
+            for name, dimension in contract["dimensions"].items()
+            if isinstance(dimension, dict)
+            and dimension.get("availability") == "available"
+            and (score := _number(dimension.get("value"))) is not None
+        }
         if native_score is None:
             native_score = fallback_score
             source = "eval_ref_score_fallback"
@@ -2655,74 +2917,6 @@ def _eval_case_native_signals(eval_ref_path: str | Path) -> dict[str, dict[str, 
             "dimensions": dimensions,
         }
     return signals
-
-
-def _native_score_from_metadata(metadata: dict[str, Any]) -> tuple[float | None, str]:
-    trial_scores = metadata.get("trial_scores")
-    if isinstance(trial_scores, list | tuple):
-        numeric_trials = [score for value in trial_scores if (score := _number(value)) is not None]
-        if numeric_trials:
-            return sum(numeric_trials) / len(numeric_trials), "trial_scores_mean"
-    for key in (
-        "aggregate_mean_score",
-        "native_mean_score",
-        "mean_score",
-        "avg_behavior_score",
-    ):
-        value = _number(metadata.get(key))
-        if value is not None:
-            return value, key
-    parsed = metadata.get("parsed", {})
-    parsed = parsed if isinstance(parsed, dict) else {}
-    dimensions = parsed.get("dimensions", {})
-    dimensions = dimensions if isinstance(dimensions, dict) else {}
-    value = _number(dimensions.get("avg_behavior_score"))
-    return (value, "parsed_dimensions_avg_behavior_score") if value is not None else (None, "")
-
-
-def _native_dimension_scores(metadata: dict[str, Any]) -> dict[str, float]:
-    trial_details = metadata.get("trial_details")
-    if isinstance(trial_details, list):
-        trial_values: dict[str, list[float]] = {}
-        for detail in trial_details:
-            if not isinstance(detail, dict):
-                continue
-            raw_dimensions = detail.get("dimension_scores")
-            if not isinstance(raw_dimensions, dict):
-                continue
-            for name, raw_dimension in raw_dimensions.items():
-                if not isinstance(raw_dimension, dict) or raw_dimension.get("availability") != "available":
-                    continue
-                score = _number(raw_dimension.get("value"))
-                if score is not None:
-                    trial_values.setdefault(str(name), []).append(score)
-        if trial_values:
-            return {name: sum(values) / len(values) for name, values in sorted(trial_values.items()) if values}
-
-    parsed = metadata.get("parsed", {})
-    parsed = parsed if isinstance(parsed, dict) else {}
-    candidates = [parsed.get("dimensions"), metadata.get("dimensions"), metadata.get("judge_dimensions")]
-    scores: dict[str, float] = {}
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        for key in ("per_behavior_scores", "dimension_scores", "scores"):
-            values = candidate.get(key)
-            if not isinstance(values, dict):
-                continue
-            for name, raw_score in values.items():
-                score = _number(raw_score)
-                if score is not None:
-                    scores[str(name)] = score
-        for name, raw_score in candidate.items():
-            if not str(name).endswith("_score") or isinstance(raw_score, dict):
-                continue
-            score = _number(raw_score)
-            if score is not None:
-                scores.setdefault(str(name), score)
-        if scores:
-            break
-    return dict(sorted(scores.items()))
 
 
 def _native_case_scores(signals: dict[str, dict[str, Any]]) -> dict[str, float]:
@@ -2798,7 +2992,7 @@ def _epoch_full_source_eval_ref(
 def _eval_verifier_statuses(
     eval_ref_path: str | Path,
 ) -> dict[str, dict[str, Any]]:
-    """Read official per-test outcomes without collapsing them to case score."""
+    """Read dataset-neutral per-requirement outcomes without score collapse."""
     payload = _read_yaml(eval_ref_path)
     statuses: dict[str, dict[str, Any]] = {}
     for case in payload.get("cases", []):
@@ -2812,44 +3006,19 @@ def _eval_verifier_statuses(
         evaluation = evaluation if isinstance(evaluation, dict) else {}
         metadata = evaluation.get("metadata", {})
         metadata = metadata if isinstance(metadata, dict) else {}
+        requirements = evaluation_requirement_results(metadata, case_id=case_id)
         instance_report = metadata.get("instance_report", {})
         instance_report = instance_report if isinstance(instance_report, dict) else {}
         report = instance_report.get(case_id, {})
         if not isinstance(report, dict) and len(instance_report) == 1:
             report = next(iter(instance_report.values()))
         report = report if isinstance(report, dict) else {}
-        tests_status = report.get("tests_status", {})
-        tests_status = tests_status if isinstance(tests_status, dict) else {}
         normalized: dict[str, Any] = {
             "patch_successfully_applied": report.get("patch_successfully_applied"),
             "resolved": report.get("resolved"),
             "empty_patch": metadata.get("empty_patch"),
+            "requirement_results": requirements,
         }
-        raw_atomic_checks = metadata.get("atomic_checks", [])
-        atomic_passed: set[str] = set()
-        atomic_failed: set[str] = set()
-        if isinstance(raw_atomic_checks, list):
-            for check in raw_atomic_checks:
-                if not isinstance(check, dict):
-                    continue
-                name = str(check.get("name", "") or "").strip()
-                if not name:
-                    continue
-                if check.get("passed") is True:
-                    atomic_passed.add(name)
-                else:
-                    atomic_failed.add(name)
-        normalized["atomic_checks"] = {
-            "success": sorted(atomic_passed),
-            "failure": sorted(atomic_failed),
-        }
-        for group in ("FAIL_TO_PASS", "PASS_TO_PASS"):
-            group_status = tests_status.get(group, {})
-            group_status = group_status if isinstance(group_status, dict) else {}
-            normalized[group] = {
-                "success": sorted({str(item) for item in group_status.get("success", []) or [] if str(item)}),
-                "failure": sorted({str(item) for item in group_status.get("failure", []) or [] if str(item)}),
-            }
         statuses[case_id] = normalized
     return statuses
 
@@ -2866,27 +3035,36 @@ def _verifier_deltas_by_case(
     for case_id in sorted(target_case_ids):
         source_status = source.get(case_id, {})
         candidate_status = candidate.get(case_id, {})
-        source_f2p = source_status.get("FAIL_TO_PASS", {})
-        candidate_f2p = candidate_status.get("FAIL_TO_PASS", {})
-        source_p2p = source_status.get("PASS_TO_PASS", {})
-        candidate_p2p = candidate_status.get("PASS_TO_PASS", {})
-        source_f2p_success = set(source_f2p.get("success", []) or [])
-        candidate_f2p_success = set(candidate_f2p.get("success", []) or [])
-        candidate_f2p_failure = set(candidate_f2p.get("failure", []) or [])
-        source_p2p_success = set(source_p2p.get("success", []) or [])
-        candidate_p2p_failure = set(candidate_p2p.get("failure", []) or [])
+        source_requirements = _requirement_result_index(source_status.get("requirement_results"))
+        candidate_requirements = _requirement_result_index(candidate_status.get("requirement_results"))
+        source_passed = {key for key, item in source_requirements.items() if item.get("passed") is True}
+        candidate_passed = {key for key, item in candidate_requirements.items() if item.get("passed") is True}
+        candidate_failed = {key for key, item in candidate_requirements.items() if item.get("passed") is False}
+        newly_passed_keys = candidate_passed - source_passed
+        regressed_keys = source_passed & candidate_failed
+
+        source_f2p_success = _requirement_ids(source_passed, group=FAIL_TO_PASS_GROUP)
+        candidate_f2p_success = _requirement_ids(candidate_passed, group=FAIL_TO_PASS_GROUP)
+        candidate_f2p_failure = _requirement_ids(candidate_failed, group=FAIL_TO_PASS_GROUP)
         newly_passed = sorted(candidate_f2p_success - source_f2p_success)
         regressed_f2p = sorted(source_f2p_success - candidate_f2p_success)
+        source_p2p_success = _requirement_ids(source_passed, group=PASS_TO_PASS_GROUP)
+        candidate_p2p_failure = _requirement_ids(candidate_failed, group=PASS_TO_PASS_GROUP)
         regressed_p2p = sorted(source_p2p_success & candidate_p2p_failure)
-        source_atomic = source_status.get("atomic_checks", {})
-        candidate_atomic = candidate_status.get("atomic_checks", {})
-        source_atomic_success = set(source_atomic.get("success", []) or [])
-        candidate_atomic_success = set(candidate_atomic.get("success", []) or [])
-        candidate_atomic_failure = set(candidate_atomic.get("failure", []) or [])
+        source_atomic_success = _requirement_ids(source_passed, group=ATOMIC_CHECK_GROUP)
+        candidate_atomic_success = _requirement_ids(candidate_passed, group=ATOMIC_CHECK_GROUP)
+        candidate_atomic_failure = _requirement_ids(candidate_failed, group=ATOMIC_CHECK_GROUP)
         newly_passed_atomic = sorted(candidate_atomic_success - source_atomic_success)
         regressed_atomic = sorted(source_atomic_success - candidate_atomic_success)
-        atomic_partial_progress = bool(newly_passed_atomic and candidate_atomic_failure and not regressed_atomic)
+        newly_passed_requirements = _requirement_snapshots(candidate_requirements, newly_passed_keys)
+        remaining_failed_requirements = _requirement_snapshots(candidate_requirements, candidate_failed)
+        regressed_requirements = _requirement_snapshots(candidate_requirements, regressed_keys)
         deltas[case_id] = {
+            "source_requirement_results": list(source_requirements.values()),
+            "candidate_requirement_results": list(candidate_requirements.values()),
+            "newly_passed_requirements": newly_passed_requirements,
+            "remaining_failed_requirements": remaining_failed_requirements,
+            "regressed_requirements": regressed_requirements,
             "source_fail_to_pass_success": sorted(source_f2p_success),
             "candidate_fail_to_pass_success": sorted(candidate_f2p_success),
             "newly_passed_fail_to_pass": newly_passed,
@@ -2899,14 +3077,38 @@ def _verifier_deltas_by_case(
             "remaining_failed_atomic_checks": sorted(candidate_atomic_failure),
             "regressed_atomic_checks": regressed_atomic,
             "partial_progress": bool(
-                atomic_partial_progress
-                or (newly_passed and candidate_f2p_failure and not regressed_f2p and not regressed_p2p)
+                newly_passed_requirements and remaining_failed_requirements and not regressed_requirements
             ),
             "source_patch_successfully_applied": source_status.get("patch_successfully_applied"),
             "candidate_patch_successfully_applied": candidate_status.get("patch_successfully_applied"),
             "candidate_empty_patch": candidate_status.get("empty_patch"),
         }
     return deltas
+
+
+def _requirement_result_index(value: Any) -> dict[tuple[str, str], dict[str, Any]]:
+    if not isinstance(value, list):
+        return {}
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        requirement_id = str(raw.get("requirement_id", "") or "").strip()
+        group = str(raw.get("group", "requirement") or "requirement").strip()
+        if requirement_id:
+            index[(group, requirement_id)] = dict(raw)
+    return index
+
+
+def _requirement_ids(keys: set[tuple[str, str]], *, group: str) -> set[str]:
+    return {requirement_id for result_group, requirement_id in keys if result_group == group}
+
+
+def _requirement_snapshots(
+    index: dict[tuple[str, str], dict[str, Any]],
+    keys: set[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    return [dict(index[key]) for key in sorted(keys) if key in index]
 
 
 def _candidate_patch_excerpts_by_case(
@@ -3150,7 +3352,12 @@ def _classify_gate_failure(
         return "infrastructure_or_evidence_failure"
     if missing_skill_invocations:
         return "natural_skill_activation_failure"
-    if any(delta.get("newly_passed_fail_to_pass") for delta in (verifier_deltas_by_case or {}).values()):
+    if any(
+        delta.get("newly_passed_requirements")
+        or delta.get("newly_passed_fail_to_pass")
+        or delta.get("newly_passed_atomic_checks")
+        for delta in (verifier_deltas_by_case or {}).values()
+    ):
         return "partial_contract_progress"
 
     failed_targets = {case_id for case_id in target_case_ids if candidate_case_scores.get(case_id, 0.0) < 1.0}
@@ -3276,6 +3483,35 @@ def _select_gate_from_epoch_checkpoint(
         "missing_runtime_invocations": [],
         "correlated_regression_case_ids": [],
     }
+
+
+def _reject_mixed_opaque_snapshot_selection(
+    gates: list[dict[str, Any]],
+    selections: list[dict[str, Any]],
+) -> bool:
+    """Reject an opaque epoch when only some cumulative snapshots survive."""
+    if len(gates) != len(selections):
+        raise ValueError("opaque snapshot gates and selections must be paired")
+    opaque = any(str(gate.get("composition_mode", "") or "") == "opaque_snapshot" for gate in gates)
+    mixed = bool(
+        opaque
+        and any(bool(selection.get("retained")) for selection in selections)
+        and any(not bool(selection.get("retained")) for selection in selections)
+    )
+    if not mixed:
+        return False
+    # PolicyHarness candidates are cumulative filesystem snapshots. Removing
+    # one action while keeping a later snapshot would retain rejected bytes.
+    # Reject the epoch atomically until an opaque composer/replay exists.
+    for selection in selections:
+        selection.update(
+            {
+                "retained": False,
+                "reason": "epoch_opaque_snapshot_partial_retention_unsupported",
+                "failure_class": "regression_or_retention_failure",
+            }
+        )
+    return True
 
 
 def _materialize_checkpoint_filtered_harness(

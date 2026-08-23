@@ -48,6 +48,34 @@ class DataLoader:
         if not dataset_files:
             raise FileNotFoundError(f"dataset json files not found: {root / self.config.file_pattern}")
 
+        yield from self._load_and_plan(root=root, dataset_files=dataset_files, epoch=epoch)
+
+    def load_files(self, dataset_files: list[str], epoch: int = 1) -> Iterator[list[CaseMapping]]:
+        """Load only the explicitly frozen dataset files.
+
+        This keeps an optimization request isolated when its directory also
+        contains another split or an earlier generated subset.
+        """
+        paths = [Path(value).expanduser().resolve() for value in dataset_files]
+        if not paths:
+            raise ValueError("dataset_files must not be empty")
+        missing = [str(path) for path in paths if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(f"dataset json files not found: {missing}")
+        roots = {path.parent for path in paths}
+        if len(roots) != 1:
+            raise ValueError("explicit dataset files must share one directory")
+        yield from self._load_and_plan(root=next(iter(roots)), dataset_files=paths, epoch=epoch)
+
+    def _load_and_plan(
+        self,
+        *,
+        root: Path,
+        dataset_files: list[Path],
+        epoch: int,
+    ) -> Iterator[list[CaseMapping]]:
+        """Materialize cases and persist one deterministic batch plan."""
+
         cases: list[CaseMapping] = []
         for dataset_file in dataset_files:
             for case_index, case in enumerate(_load_json_cases(dataset_file), start=1):

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -16,7 +17,7 @@ def _finance_task() -> dict:
         "domain": "general",
         "prompt": "Submit the February expense report.",
         "metadata": {"category": "finance", "difficulty": "easy", "secret": "excluded"},
-        "claw_public": {
+        "public_task_contract": {
             "task_id": "T012_expense_report",
             "tool_schemas": [
                 {
@@ -544,6 +545,78 @@ class TestCandidateFeedbackCompression:
             experiment["candidate_failure_diagnoses"][0]["prior_experiment_assessment"]["causal_hypothesis_status"]
             == "falsified"
         )
+
+    def test_normalizes_candidate_gate_feedback_without_losing_continuous_progress(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+            compact_candidate_feedback,
+        )
+
+        compact = compact_candidate_feedback(
+            {
+                "case_id": "case_1",
+                "experiments": [
+                    {
+                        "schema_version": 2,
+                        "experiment_id": "exp_2",
+                        "prediction": {
+                            "candidate_patch_excerpt": "Require a final verification pass.",
+                            "causal_intervention_contracts": [
+                                {
+                                    "source_causal_hypothesis_id": "h1",
+                                    "predicted_behavior_and_outcome": "five remaining checks pass",
+                                }
+                            ],
+                        },
+                        "activation": {
+                            "availability": "observed",
+                            "state": "triggered",
+                            "trigger_rate": 1.0,
+                            "delivery": {"availability": "observed", "state": "executed"},
+                            "behavior_activation": {"availability": "observed", "state": "triggered"},
+                        },
+                        "observed_outcome": {
+                            "status": "rejected",
+                            "reason": "strict target still failed",
+                            "strict_score": {"source": 0.0, "candidate": 0.0, "delta": 0.0},
+                            "continuous_score": {
+                                "source": 3 / 9,
+                                "candidate": 8 / 9,
+                                "delta": 5 / 9,
+                                "source_signal": "official_judge",
+                                "candidate_signal": "official_judge",
+                                "role": "diagnostic_only",
+                            },
+                            "requirement_delta": {
+                                "newly_passed_requirements": ["r2", "r3", "r4", "r5", "r6"],
+                                "remaining_failed_requirements": ["r9"],
+                            },
+                            "dimension_deltas": {"accuracy": 5 / 9},
+                            "selected_for_promotion": False,
+                        },
+                    }
+                ],
+            }
+        )
+
+        experiment = compact["experiments"][0]
+        assert experiment["schema_version"] == 2
+        assert experiment["prediction"]["causal_intervention_contracts"][0]["source_causal_hypothesis_id"] == "h1"
+        assert experiment["activation"]["state"] == "triggered"
+        assert experiment["activation"]["delivery"] == {
+            "availability": "observed",
+            "state": "executed",
+        }
+        assert experiment["activation"]["behavior_activation"]["state"] == "triggered"
+        assert experiment["observed_outcome"]["strict_score"] == {
+            "source": 0.0,
+            "candidate": 0.0,
+            "delta": 0.0,
+        }
+        assert experiment["observed_outcome"]["continuous_score"]["delta"] == pytest.approx(5 / 9)
+        assert experiment["observed_outcome"]["source_native_score"] == pytest.approx(3 / 9)
+        assert experiment["observed_outcome"]["native_score_delta"] == pytest.approx(5 / 9)
+        assert experiment["observed_outcome"]["requirement_delta"]["remaining_failed_requirements"] == ["r9"]
+        assert experiment["verifier_delta"]["newly_passed_requirements"] == ["r2", "r3", "r4", "r5", "r6"]
 
 
 class TestAnalyzerIntegration:

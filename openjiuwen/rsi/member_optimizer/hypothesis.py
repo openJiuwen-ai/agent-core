@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
@@ -77,12 +78,20 @@ def compile_optimization_hypotheses(
             for item in hypothesis_assessment
             if isinstance(item, dict)
         }
+        evidence_status = str(attribution.get("evidence_status", "") or "").strip().casefold()
         if (
-            target_ref.casefold() == "unassigned"
-            or str(attribution.get("evidence_status", "") or "").strip().casefold() == "insufficient"
+            not target_ref
+            or target_ref.casefold() == "unassigned"
+            or evidence_status not in {"confirmed", "supported_hypothesis"}
+            or not target_case_ids
+            or "supported" not in assessment_statuses
         ):
             continue
-        if hypothesis_assessment and ("supported" not in assessment_statuses or "unresolved" in assessment_statuses):
+        # A supported local contributor may coexist with unresolved causal
+        # alternatives outside its claimed cluster. The Analyzer keeps those
+        # alternatives for audit/refinement; they must not suppress the
+        # evidence-backed intervention. A confirmed diagnosis remains strict.
+        if evidence_status == "confirmed" and "unresolved" in assessment_statuses:
             continue
         prior_experiment_assessment = (
             dict(attribution.get("prior_experiment_assessment", {}))
@@ -273,14 +282,21 @@ def _strip_benchmark_transport(value: str) -> str:
         "execution environment:",
         "shell commands already run there.",
         "use `bash` for repository file inspection",
-        "swe-bench lite instance:",
         "repository:",
         "base commit:",
         "work in the checked-out repository.",
         "diagnose the issue, implement the smallest correct fix",
         "do not modify tests to make them pass.",
     )
-    kept = [line for line in str(value or "").splitlines() if not line.strip().lower().startswith(transport_prefixes)]
+    kept = []
+    for line in str(value or "").splitlines():
+        normalized = line.strip().lower()
+        benchmark_instance_header = bool(
+            re.match(r"^[a-z0-9_. -]*(?:bench|benchmark)[a-z0-9_. -]*\binstance\s*:", normalized)
+        )
+        if normalized.startswith(transport_prefixes) or benchmark_instance_header:
+            continue
+        kept.append(line)
     return "\n".join(kept).strip()
 
 

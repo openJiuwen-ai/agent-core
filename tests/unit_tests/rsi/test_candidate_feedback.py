@@ -499,6 +499,13 @@ def test_build_cohort_keeps_verifier_and_cost_evidence_compact() -> None:
         candidate_failure_diagnoses={"case_a": [{"root_cause": "large generated claim"}]},
         candidate_patch_excerpts_by_case={"case_a": "large patch body"},
     )
+    candidate["verifier_deltas_by_case"]["case_a"].update(
+        {
+            "newly_passed_requirements": ["criterion:a", "criterion:b"],
+            "remaining_failed_requirements": ["criterion:c"],
+        }
+    )
+    candidate["verifier_deltas_by_case"]["case_b"]["regressed_requirements"] = ["criterion:d"]
 
     ledger = build_candidate_feedback_cohort(
         cohort=_cohort(),
@@ -509,6 +516,9 @@ def test_build_cohort_keeps_verifier_and_cost_evidence_compact() -> None:
 
     assert record["verifier_summary"]["newly_passed_atomic_checks_count"] == 1
     assert record["verifier_summary"]["remaining_failed_atomic_checks_count"] == 1
+    assert record["verifier_summary"]["newly_passed_requirements_count"] == 2
+    assert record["verifier_summary"]["remaining_failed_requirements_count"] == 1
+    assert record["verifier_summary"]["regressed_requirements_count"] == 1
     assert record["cost"]["availability"] == "not_instrumented"
     serialized = str(record)
     assert "large generated claim" not in serialized

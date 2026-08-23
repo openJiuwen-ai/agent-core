@@ -49,6 +49,8 @@ _TARGET_VARIABLE_LEVERS = {
     "processor": LEVER_CONTROL,
     "rail": LEVER_CONTROL,
     "control": LEVER_CONTROL,
+    "execution_budget": LEVER_CONFIGURATION,
+    "budget": LEVER_CONFIGURATION,
     "config": LEVER_CONFIGURATION,
     "configuration": LEVER_CONFIGURATION,
 }

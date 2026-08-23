@@ -28,6 +28,7 @@ def _raw_candidate(
     triggered: bool = True,
     regressed: bool = False,
     semantic_variant: str = "",
+    partial_requirements: bool = False,
 ) -> dict:
     candidate_id = f"{cohort_id}_candidate_{candidate_index}"
     runtime_name = f"runtime_{cohort_id}_{candidate_index}"
@@ -57,7 +58,14 @@ def _raw_candidate(
         "candidate_target_score": 0.2 + gain,
         "capabilities": [capability],
         "regressed_target_case_ids": [f"{cohort_id}_case"] if regressed else [],
-        "verifier_deltas_by_case": {f"{cohort_id}_case": {"partial_progress": gain > 0}},
+        "verifier_deltas_by_case": {
+            f"{cohort_id}_case": {
+                "partial_progress": partial_requirements,
+                "newly_passed_requirements": ([{"requirement_id": "r1"}] if partial_requirements else []),
+                "remaining_failed_requirements": ([{"requirement_id": "r2"}] if partial_requirements else []),
+                "regressed_requirements": [],
+            }
+        },
     }
     if surface in {"skill", "tool"}:
         candidate[f"pre_edit_invoked_{surface}_names_by_case"] = {
@@ -75,6 +83,7 @@ def _cohort(
     trigger_failure_index: int | None = None,
     regression_index: int | None = None,
     surface: str = "skill",
+    partial_requirements: bool = False,
 ) -> dict:
     candidates = [
         _raw_candidate(
@@ -85,6 +94,7 @@ def _cohort(
             surface=surface,
             triggered=index != trigger_failure_index,
             regressed=index == regression_index,
+            partial_requirements=partial_requirements,
         )
         for index, gain in enumerate(gains)
     ]
@@ -194,6 +204,49 @@ def test_unavailable_evidence_is_counted_but_never_treated_as_failure() -> None:
     assert analysis["stable_patterns"] == []
 
 
+def test_partial_requirement_progress_evolves_residual_repair_directive() -> None:
+    first = _cohort("partial_a", [0.2, 0.1], top_m=2, partial_requirements=True)
+    second = _cohort("partial_b", [0.3, 0.1], top_m=2, partial_requirements=True)
+
+    analysis = analyze_candidate_feedback_ledgers(
+        _ledger(first, second),
+        min_support_cohorts=2,
+    )
+
+    pattern = next(
+        item
+        for item in analysis["stable_patterns"]
+        if item["pattern_id"] == "partial_candidate_has_residual_requirements"
+    )
+    assert pattern["support_cohorts"] == 2
+    assert pattern["opportunity_cohorts"] == 2
+    assert pattern["recommended_policy_change"]["field"] == (
+        "generation_directives.preserve_partial_progress_and_target_residual"
+    )
+    candidates = propose_policy_candidates(default_improver_policy(), analysis)
+    evolved = next(
+        candidate
+        for candidate in candidates
+        if candidate.generation_directives.get("preserve_partial_progress_and_target_residual") is True
+    )
+    assert evolved.parent_version_id == "I0"
+
+
+def test_invalid_partial_progress_count_is_not_treated_as_policy_evidence() -> None:
+    cohort = _cohort("partial_invalid", [0.2, 0.1], top_m=2, partial_requirements=True)
+    for candidate in cohort["candidates"]:
+        candidate["verifier_summary"]["partial_progress_case_count"] = "unknown"
+
+    analysis = analyze_candidate_feedback_ledgers(_ledger(cohort), min_support_cohorts=1)
+
+    outcome = analysis["outcomes"]["partial_candidate_residual_repair"]
+    assert outcome["opportunity_cohort_count"] == 1
+    assert outcome["support_cohort_count"] == 0
+    assert all(
+        item["pattern_id"] != "partial_candidate_has_residual_requirements" for item in analysis["stable_patterns"]
+    )
+
+
 def test_all_nonpositive_and_duplicates_require_minimum_cohort_support() -> None:
     first = _cohort("cohort_a", [-0.1, 0.0])
     second = _cohort("cohort_b", [-0.2, -0.1])
@@ -266,8 +319,7 @@ def test_emits_ranking_weight_change_only_for_repeated_isolated_feature_misalign
         "operation": "decrease",
         "value": 0.1,
         "rationale": (
-            "Isolated coverage pairs repeatedly opposed realized ordering in cohorts with positive "
-            "selection regret."
+            "Isolated coverage pairs repeatedly opposed realized ordering in cohorts with positive selection regret."
         ),
     }
     policy_candidates = propose_policy_candidates(default_improver_policy(), analysis)

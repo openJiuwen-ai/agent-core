@@ -222,6 +222,18 @@ def test_load_preserves_existing_case_index(tmp_path: Path) -> None:
     assert batches[0][0]["case_index"] == 99
 
 
+def test_load_files_ignores_neighboring_dataset_json(tmp_path: Path) -> None:
+    """Explicit request files isolate one split from neighboring JSON files."""
+    requested = tmp_path / "validation.json"
+    _write_json(requested, [{"case_id": "validation_case"}])
+    _write_json(tmp_path / "evaluation.json", [{"case_id": "evaluation_case"}])
+
+    loader = DataLoader(DataLoaderConfig(batch_size=10))
+    batches = list(loader.load_files([str(requested)]))
+
+    assert _case_ids(batches) == [["validation_case"]]
+
+
 # 错误路径
 
 

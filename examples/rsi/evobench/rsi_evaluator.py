@@ -40,6 +40,12 @@ from examples.rsi.evobench.subset import DEFAULT_ENV_FILE, read_env_file
 from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
     public_task_contract_snapshot,
 )
+from openjiuwen.rsi.evaluator.requirement_results import (
+    requirement_results_from_judge_criteria,
+)
+from openjiuwen.rsi.evaluator.optimization_signals import (
+    optimization_signals_contract,
+)
 
 
 DEFAULT_JUDGE_SOURCE = Path(".local/rsi/models/bailian_glm5_1_single_harness.yaml")
@@ -55,6 +61,25 @@ _CLAW_REASON_PATTERN = re.compile(
     r"M=(?P<communication>-?\d+(?:\.\d+)?)\s+"
     r"S=(?P<safety>-?\d+(?:\.\d+)?)\s*->\s*-?\d+(?:\.\d+)?\s*$"
 )
+_ANALYSIS_ARTIFACT_SUFFIXES = {
+    ".csv",
+    ".docx",
+    ".html",
+    ".htm",
+    ".json",
+    ".md",
+    ".pdf",
+    ".pptx",
+    ".tsv",
+    ".txt",
+    ".xlsm",
+    ".xlsx",
+    ".xml",
+}
+_MAX_ANALYSIS_ARTIFACT_FILES = 200
+_MAX_ANALYSIS_ARTIFACT_FILE_BYTES = 50 * 1024 * 1024
+_MAX_ANALYSIS_ARTIFACT_TOTAL_BYTES = 250 * 1024 * 1024
+_SAFE_SNAPSHOT_PATH_CHARS = 240
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,6 +649,13 @@ def _materialize(  # pylint: disable=huawei-too-many-arguments
     return str(eval_ref_path)
 
 
+def _analysis_task_contract(official_task: Mapping[str, Any]) -> dict[str, Any]:
+    source = dict(official_task)
+    public = official_task.get("claw_public")
+    source["public_task_contract"] = dict(public) if isinstance(public, Mapping) else {}
+    return public_task_contract_snapshot(source)
+
+
 def _materialize_case(  # pylint: disable=huawei-too-many-arguments
     *,
     case: Mapping[str, Any],
@@ -672,11 +704,23 @@ def _materialize_case(  # pylint: disable=huawei-too-many-arguments
         task_id=case_id,
         domain=domain,
     )
+    judge_evidence = _normalize_judge_evidence(judge_detail)
+    artifact_snapshot = _materialize_analysis_artifacts(
+        case_dir=case_dir,
+        official_result=official_result,
+        official_eval_dir=official_eval_dir,
+        task_id=case_id,
+    )
     evaluation_metadata = {
         "source": "official_evobench_result",
         "domain": domain,
         "metric_family": official_result.get("metric_family"),
         "aggregate_mean_score": aggregate_mean_score,
+        "optimization_signals": optimization_signals_contract(
+            continuous_score=aggregate_mean_score,
+            dimensions=_mean_available_trial_dimensions(trial_details),
+            source="official_evobench_trial_mean",
+        ),
         "pass_hat_k": passed,
         "pass_at_k": official_result.get("pass_at_k"),
         "trial_count": trial_count,
@@ -689,14 +733,19 @@ def _materialize_case(  # pylint: disable=huawei-too-many-arguments
         "trial_policy_violation_present": official_result.get("trial_policy_violation_present") or [],
         "policy_violation": bool(official_result.get("policy_violation")),
         "judge_detail": judge_detail,
-        "judge_evidence": _normalize_judge_evidence(judge_detail),
+        "judge_evidence": judge_evidence,
+        "requirement_results": requirement_results_from_judge_criteria(
+            judge_evidence.get("criteria", []),
+            source="official_result.judge_detail.criteria",
+        ),
         "judge_evidence_source": judge_evidence_source,
         "official_result_path": str(official_result_path.resolve()),
         "official_trajectory_paths": [str(path.resolve()) for path in trajectory_paths],
         "reused_official_result": reused_official_result,
-        "analysis_task_contract": public_task_contract_snapshot(official_task),
+        "analysis_task_contract": _analysis_task_contract(official_task),
+        "analysis_artifact_snapshot": artifact_snapshot,
     }
-    workspace_dir = _host_path(official_result.get("workspace_path"))
+    workspace_dir = str(artifact_snapshot.get("path") or _host_path(official_result.get("workspace_path")))
     result_path = case_dir / "result.json"
     _write_json(
         result_path,
@@ -760,6 +809,123 @@ def _materialize_case(  # pylint: disable=huawei-too-many-arguments
             "trial_count": trial_count,
         },
     }
+
+
+def _materialize_analysis_artifacts(
+    *,
+    case_dir: Path,
+    official_result: Mapping[str, Any],
+    official_eval_dir: Path,
+    task_id: str,
+) -> dict[str, Any]:
+    """Copy bounded task-owned files into the Analyzer's physical evidence root.
+
+    The official runner may keep an evaluated workspace outside the canonical
+    RSI case directory (or, for remote sandboxes, stage it beside the rollout).
+    This snapshot makes those files inspectable without exposing evaluator code,
+    hidden tests, or arbitrary host paths.
+    """
+    candidate_roots: list[tuple[str, Path]] = []
+    workspace_value = _host_path(official_result.get("workspace_path"))
+    if workspace_value:
+        candidate_roots.append(("official_workspace", Path(workspace_value).expanduser()))
+    candidate_roots.append(("staged_remote_workspace", official_eval_dir / "rollouts" / task_id / "evidence_workspace"))
+
+    destination = case_dir / "artifacts" / "workspace"
+    copied: list[dict[str, Any]] = []
+    source_roots: list[str] = []
+    total_bytes = 0
+    omitted_count = 0
+    seen_destinations: set[str] = set()
+    for source_name, root in candidate_roots:
+        try:
+            resolved_root = root.resolve()
+        except OSError:
+            continue
+        if not resolved_root.is_dir():
+            continue
+        source_roots.append(source_name)
+        try:
+            paths = sorted(resolved_root.rglob("*"))
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                resolved = path.resolve()
+                if not resolved.is_file() or not resolved.is_relative_to(resolved_root):
+                    continue
+                if resolved.suffix.casefold() not in _ANALYSIS_ARTIFACT_SUFFIXES:
+                    continue
+                relative = resolved.relative_to(resolved_root)
+                relative_key = relative.as_posix().casefold()
+                size = resolved.stat().st_size
+            except OSError:
+                continue
+            if relative_key in seen_destinations:
+                continue
+            if (
+                len(copied) >= _MAX_ANALYSIS_ARTIFACT_FILES
+                or size > _MAX_ANALYSIS_ARTIFACT_FILE_BYTES
+                or total_bytes + size > _MAX_ANALYSIS_ARTIFACT_TOTAL_BYTES
+            ):
+                omitted_count += 1
+                continue
+            snapshot_relative = _bounded_snapshot_relative_path(
+                destination=destination,
+                source_relative=relative,
+            )
+            target = (destination / snapshot_relative).resolve()
+            if not target.is_relative_to(destination.resolve()):
+                omitted_count += 1
+                continue
+            os.makedirs(_filesystem_path(target.parent), exist_ok=True)
+            shutil.copy2(_filesystem_path(resolved), _filesystem_path(target))
+            copied.append(
+                {
+                    "path": snapshot_relative.as_posix(),
+                    "source_path": relative.as_posix(),
+                    "source": source_name,
+                    "size": size,
+                }
+            )
+            seen_destinations.add(relative_key)
+            total_bytes += size
+
+    return {
+        "availability": "available" if copied else "not_available",
+        "path": str(destination.resolve()) if copied else "",
+        "file_count": len(copied),
+        "total_bytes": total_bytes,
+        "omitted_file_count": omitted_count,
+        "source_roots": source_roots,
+        "files": copied,
+        "limits": {
+            "max_files": _MAX_ANALYSIS_ARTIFACT_FILES,
+            "max_file_bytes": _MAX_ANALYSIS_ARTIFACT_FILE_BYTES,
+            "max_total_bytes": _MAX_ANALYSIS_ARTIFACT_TOTAL_BYTES,
+        },
+    }
+
+
+def _bounded_snapshot_relative_path(*, destination: Path, source_relative: Path) -> Path:
+    """Keep canonical evidence paths addressable by all downstream Windows readers."""
+    target = (destination / source_relative).resolve(strict=False)
+    if len(str(target)) <= _SAFE_SNAPSHOT_PATH_CHARS:
+        return source_relative
+    digest = hashlib.sha256(source_relative.as_posix().encode("utf-8")).hexdigest()[:16]
+    suffix = source_relative.suffix.casefold()
+    return Path("__longpath__") / f"{digest}{suffix}"
+
+
+def _filesystem_path(path: Path) -> str:
+    """Return an OS path string that supports long Windows source paths."""
+    raw = str(path)
+    if os.name != "nt" or raw.startswith("\\\\?\\"):
+        return raw
+    absolute = str(path.resolve(strict=False))
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute.lstrip("\\")
+    return "\\\\?\\" + absolute
 
 
 def _apex_judge_detail(
@@ -842,7 +1008,7 @@ def _materialize_infrastructure_skip(  # pylint: disable=huawei-too-many-argumen
         "excluded_from_metrics": True,
         "skip_reason": reason,
         "official_result_path": str(official_result_path.resolve()),
-        "analysis_task_contract": public_task_contract_snapshot(official_task),
+        "analysis_task_contract": _analysis_task_contract(official_task),
         "runtime_errors": official_result.get("runtime_errors") or [],
     }
     _write_json(
@@ -1089,6 +1255,21 @@ def _trial_score_details(
         )
         for trial_index in range(1, trial_count + 1)
     ]
+
+
+def _mean_available_trial_dimensions(trial_details: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+    values: dict[str, list[float]] = {}
+    for detail in trial_details:
+        dimensions = detail.get("dimension_scores")
+        if not isinstance(dimensions, Mapping):
+            continue
+        for raw_name, raw_dimension in dimensions.items():
+            if not isinstance(raw_dimension, Mapping) or raw_dimension.get("availability") != "available":
+                continue
+            score = raw_dimension.get("value")
+            if _finite_number(score):
+                values.setdefault(str(raw_name), []).append(float(score))
+    return {name: sum(scores) / len(scores) for name, scores in sorted(values.items()) if scores}
 
 
 def _read_trial_score_detail(  # pylint: disable=huawei-too-many-locals

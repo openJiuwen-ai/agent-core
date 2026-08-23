@@ -158,6 +158,61 @@ def test_strict_plan_requires_competing_hypotheses_and_evidence_for_each() -> No
     assert duplicate is None
 
 
+def test_strict_plan_requires_two_alternatives_for_every_failed_requirement() -> None:
+    partial = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "claim": "The parser caused both failures.",
+                    "explains_requirement_ids": ["criterion:value", "criterion:format"],
+                    "falsified_if": "The parser output is correct.",
+                    "evidence_requests": [{"operation": "search_trace", "query": "parser output"}],
+                },
+                {
+                    "hypothesis_id": "h2",
+                    "claim": "The formatter caused the format failure.",
+                    "explains_requirement_ids": ["criterion:format"],
+                    "falsified_if": "The formatter output is correct.",
+                    "evidence_requests": [{"operation": "search_trace", "query": "formatter output"}],
+                },
+            ]
+        },
+        failed_requirement_ids=["criterion:value", "criterion:format"],
+        min_hypotheses=2,
+        min_hypotheses_per_requirement=2,
+        require_evidence_per_hypothesis=True,
+    )
+    complete = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "claim": "A shared extraction error caused both failures.",
+                    "explains_requirement_ids": ["criterion:value", "criterion:format"],
+                    "falsified_if": "The extracted value and format are both correct.",
+                    "evidence_requests": [{"operation": "search_trace", "query": "extracted value format"}],
+                },
+                {
+                    "hypothesis_id": "h2",
+                    "claim": "Independent decision errors caused the two failures.",
+                    "explains_requirement_ids": ["criterion:value", "criterion:format"],
+                    "falsified_if": "One decision explains both failures.",
+                    "evidence_requests": [{"operation": "search_trace", "query": "value decision format decision"}],
+                },
+            ]
+        },
+        failed_requirement_ids=["criterion:value", "criterion:format"],
+        min_hypotheses=2,
+        min_hypotheses_per_requirement=2,
+        require_evidence_per_hypothesis=True,
+    )
+
+    assert partial is None
+    assert complete is not None
+    assert len(complete["hypotheses"]) == 2
+
+
 def test_controller_searches_and_reads_only_public_case_events(tmp_path: Path) -> None:
     case = _case(tmp_path)
     plan = normalize_causal_investigation(
@@ -301,7 +356,7 @@ def test_controller_compares_prior_experiment_without_zero_filling(tmp_path: Pat
                     "claim": "The artifact contract was not satisfied.",
                     "falsified_if": "The evaluator reports the contract was satisfied.",
                     "evidence_requests": [
-                        {"operation": "inspect_artifact", "query": "artifact contract mismatch"},
+                        {"operation": "inspect_evaluation", "query": "artifact contract mismatch"},
                         {"operation": "compare_runs", "query": "predicted behavior"},
                     ],
                 }
@@ -330,6 +385,31 @@ def test_controller_compares_prior_experiment_without_zero_filling(tmp_path: Pat
     assert comparison["availability"] == "available"
     assert "predicted behavior" in comparison["paired_feedback"]["exact_spans"][0]["text"]
     assert "null" in comparison["paired_feedback"]["exact_spans"][0]["text"]
+
+
+def test_artifact_search_does_not_treat_evaluation_metadata_as_a_file(tmp_path: Path) -> None:
+    case = _case(tmp_path, metadata={"judge_detail": {"reason": "missing contract clause"}})
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "A physical file contains the contract clause.",
+                    "falsified_if": "The file does not contain it.",
+                    "evidence_requests": [
+                        {"operation": "inspect_artifact", "query": "missing contract clause"},
+                        {"operation": "inspect_evaluation", "query": "missing contract clause"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    results = execute_causal_investigation(case, plan)["results"]
+    assert results[0]["availability"] == "not_available"
+    assert results[0]["reason"] == "physical_artifact_snapshot_not_available"
+    assert results[1]["availability"] == "available"
+    assert results[1]["evidence_class"] == "evaluation_metadata"
 
 
 def test_controller_checks_numeric_relation_without_executing_code(tmp_path: Path) -> None:
@@ -434,7 +514,92 @@ def test_unresolved_material_hypothesis_cannot_assign_optimization_target() -> N
         prior_candidate_feedback=None,
     )
 
-    assert "unresolved material hypotheses require target_ref=unassigned" in " ".join(conflicts)
+    assert "unresolved hypotheses without a supported local mechanism require target_ref=unassigned" in " ".join(
+        conflicts
+    )
+
+
+def test_supported_local_issue_survives_when_unresolved_hypothesis_is_split() -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        _causal_investigation_conflicts,
+        _normalize_case_diagnoses,
+    )
+
+    diagnoses = _normalize_case_diagnoses(
+        {
+            "diagnoses": [
+                {
+                    "issue_category": "member_harness",
+                    "summary": "A supported read behavior contributes to the failed value.",
+                    "failure_mode": "incomplete_source_read",
+                    "failure_cluster": {
+                        "failed_checks": ["criterion:value"],
+                        "observable_behavior": "the controlling clause was not read",
+                    },
+                    "evidence_status": "supported_hypothesis",
+                    "target_ref": "member_harness.solver.skill",
+                    "causal_coverage": {
+                        "explained_requirement_ids": ["criterion:value"],
+                        "residual_requirement_ids": ["criterion:format"],
+                        "unexplained_observations": ["a routing alternative remains unresolved"],
+                    },
+                    "hypothesis_assessment": [
+                        {
+                            "hypothesis_id": "h_read",
+                            "status": "supported",
+                            "falsifying_condition_status": "not_observed",
+                            "claim_follows_from_evidence": "yes",
+                            "logic_check": "q1 shows the read ended before the clause",
+                            "controller_request_ids": ["q1"],
+                        },
+                        {
+                            "hypothesis_id": "h_route",
+                            "status": "unresolved",
+                            "falsifying_condition_status": "unknown",
+                            "claim_follows_from_evidence": "unknown",
+                            "logic_check": "q2 did not find a routing discriminator",
+                            "controller_request_ids": [],
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    conflicts = _causal_investigation_conflicts(
+        diagnoses,
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h_read",
+                    "claim": "The read stopped early.",
+                    "explains_requirement_ids": ["criterion:value"],
+                    "falsified_if": "The clause was read.",
+                },
+                {
+                    "hypothesis_id": "h_route",
+                    "claim": "Routing hid the clause.",
+                    "explains_requirement_ids": ["criterion:value"],
+                    "falsified_if": "Routing exposed the clause.",
+                },
+            ],
+            "evidence_requests": [
+                {"request_id": "q1", "hypothesis_ids": ["h_read"], "operation": "read_event"},
+                {"request_id": "q2", "hypothesis_ids": ["h_route"], "operation": "search_trace"},
+            ],
+        },
+        evidence_results={
+            "results": [
+                {"request_id": "q1", "availability": "available"},
+                {"request_id": "q2", "availability": "not_found"},
+            ]
+        },
+        prior_candidate_feedback=None,
+    )
+
+    assert len(diagnoses) == 2
+    assert diagnoses[0]["target_ref"] == "member_harness.solver.skill"
+    assert diagnoses[1]["target_ref"] == "unassigned"
+    assert conflicts == []
 
 
 def test_falsified_prior_causal_hypothesis_cannot_be_reused() -> None:
@@ -514,6 +679,7 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
                             {
                                 "hypothesis_id": "h_parser",
                                 "claim": "Legacy parser selection caused the failure.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
                                 "falsified_if": "The modern parser was selected.",
                                 "evidence_requests": [
                                     {"operation": "search_trace", "query": "EXACT_DISCRIMINATOR parser"}
@@ -522,6 +688,7 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
                             {
                                 "hypothesis_id": "h_route",
                                 "claim": "Routing selected the wrong handler.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
                                 "falsified_if": "The expected handler processed the request.",
                                 "evidence_requests": [{"operation": "search_trace", "query": "handler routing"}],
                             },
@@ -682,6 +849,7 @@ async def test_legacy_diagnosis_cannot_bypass_mandatory_investigation(
                             {
                                 "hypothesis_id": "h_parser",
                                 "claim": "Legacy parser selection caused the failure.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
                                 "falsified_if": "The modern parser was selected.",
                                 "evidence_requests": [
                                     {"operation": "search_trace", "query": "EXACT_DISCRIMINATOR parser"}
@@ -690,6 +858,7 @@ async def test_legacy_diagnosis_cannot_bypass_mandatory_investigation(
                             {
                                 "hypothesis_id": "h_route",
                                 "claim": "Routing selected the wrong handler.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
                                 "falsified_if": "The expected handler was selected.",
                                 "evidence_requests": [{"operation": "search_trace", "query": "handler routing"}],
                             },
@@ -737,6 +906,7 @@ async def test_legacy_diagnosis_cannot_bypass_mandatory_investigation(
 
     results = await strategy._per_case_diagnosis([case], DeterministicSignals(method="script_based"), None)
 
-    assert len(prompts) == 3
+    assert len(prompts) == 4
+    assert "CAUSAL_INVESTIGATION_PHASE=refine" in prompts[3]
     assert results[0]["causal_investigation"]["strict_plan_correction_attempted"] is True
     assert results[0]["causal_investigation"]["hypothesis_count"] == 2

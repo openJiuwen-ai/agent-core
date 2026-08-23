@@ -21,12 +21,13 @@ _ALLOWED_OPERATIONS = {
     "compare_numeric_change",
     "compare_runs",
     "inspect_artifact",
+    "inspect_evaluation",
     "read_repository_file",
     "read_event",
     "search_repository",
     "search_trace",
 }
-_MAX_HYPOTHESES = 3
+_MAX_HYPOTHESES = 6
 _MAX_REQUESTS = 12
 _MAX_SEARCH_RESULTS = 5
 _MAX_EVENT_CHARS = 12_000
@@ -43,6 +44,7 @@ _TEXT_ARTIFACT_SUFFIXES = {
     ".md",
     ".patch",
     ".txt",
+    ".xml",
     ".yaml",
     ".yml",
 }
@@ -81,6 +83,7 @@ def normalize_causal_investigation(
     failed_requirement_ids: Sequence[str] = (),
     max_requests: int = _MAX_REQUESTS,
     min_hypotheses: int = 1,
+    min_hypotheses_per_requirement: int = 0,
     require_evidence_per_hypothesis: bool = False,
 ) -> dict[str, Any] | None:
     """Validate and bound a model-proposed causal investigation plan."""
@@ -135,6 +138,14 @@ def normalize_causal_investigation(
         raw_requests.extend(("", request) for request in top_level_requests if isinstance(request, Mapping))
     if len(hypotheses) < max(1, min(_MAX_HYPOTHESES, int(min_hypotheses))):
         return None
+    required_alternatives = max(0, min(_MAX_HYPOTHESES, int(min_hypotheses_per_requirement)))
+    if allowed_requirements and required_alternatives:
+        hypothesis_coverage = {
+            requirement_id: sum(requirement_id in hypothesis["explains_requirement_ids"] for hypothesis in hypotheses)
+            for requirement_id in allowed_requirements
+        }
+        if any(count < required_alternatives for count in hypothesis_coverage.values()):
+            return None
 
     request_limit = min(_MAX_REQUESTS, max(0, int(max_requests)))
     requests: list[dict[str, Any]] = []
@@ -200,6 +211,8 @@ def execute_causal_investigation(
             evidence = _read_event(events, request)
         elif operation == "inspect_artifact":
             evidence = _inspect_artifact(case, request)
+        elif operation == "inspect_evaluation":
+            evidence = _inspect_evaluation(case, request)
         elif operation == "search_repository":
             evidence = _search_repository(repository_dir, request)
             discovered_repository_paths.update(
@@ -253,7 +266,7 @@ def _normalize_request(
     if operation not in _ALLOWED_OPERATIONS:
         return None
     query = str(request.get("query", "") or "").strip()
-    if operation in {"search_trace", "inspect_artifact", "search_repository"} and not query:
+    if operation in {"search_trace", "inspect_artifact", "inspect_evaluation", "search_repository"} and not query:
         return None
     if operation == "read_repository_file" and not _safe_relative_path(request.get("relative_path")):
         return None
@@ -555,13 +568,17 @@ def _read_event(events: list[dict[str, Any]], request: Mapping[str, Any]) -> dic
 
 
 def _inspect_artifact(case: CaseAnalysisInput, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Search only physically materialized task artifacts.
+
+    Evaluation metadata is deliberately excluded.  Previously a criterion or
+    judge explanation could satisfy an ``inspect_artifact`` request even when
+    the source document/spreadsheet was absent, which turned a repeated outcome
+    description into apparent causal evidence.
+    """
     query = str(request.get("query", "") or "")
     terms = _query_terms(query)
     case_dir = Path(case.result_path).parent.resolve()
-    sources: list[tuple[str, str]] = [
-        ("case.evaluation_metadata", json.dumps(case.evaluation_metadata, ensure_ascii=False, indent=2)),
-        ("case.result", _read_text(Path(case.result_path), _MAX_ARTIFACT_FILE_CHARS)),
-    ]
+    sources: list[tuple[str, str]] = []
     artifacts_dir = case_dir / "artifacts"
     if artifacts_dir.is_dir():
         files = [
@@ -589,6 +606,14 @@ def _inspect_artifact(case: CaseAnalysisInput, request: Mapping[str, Any]) -> di
             if text:
                 sources.append((f"artifacts/{path.relative_to(artifacts_dir).as_posix()}", text))
 
+    if not sources:
+        return {
+            "availability": "not_available",
+            "reason": "physical_artifact_snapshot_not_available",
+            "query": query,
+            "matches": [],
+        }
+
     matches: list[tuple[int, str, str]] = []
     for source, text in sources:
         lowered = text.casefold()
@@ -605,6 +630,35 @@ def _inspect_artifact(case: CaseAnalysisInput, request: Mapping[str, Any]) -> di
                 "exact_spans": _exact_match_spans(text, terms, max_spans=3),
             }
             for _, source, text in selected
+        ],
+    }
+
+
+def _inspect_evaluation(case: CaseAnalysisInput, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Search evaluator-owned result metadata without calling it an artifact."""
+    query = str(request.get("query", "") or "")
+    terms = _query_terms(query)
+    sources = [
+        ("case.evaluation_metadata", json.dumps(case.evaluation_metadata, ensure_ascii=False, indent=2)),
+        ("case.result", _read_text(Path(case.result_path), _MAX_ARTIFACT_FILE_CHARS)),
+    ]
+    matches: list[tuple[int, str, str]] = []
+    for source, content in sources:
+        lowered = content.casefold()
+        matched = [term for term in terms if term in lowered]
+        if matched:
+            matches.append((len(set(matched)), source, content))
+    selected = sorted(matches, key=lambda item: (-item[0], item[1]))[:_MAX_SEARCH_RESULTS]
+    return {
+        "availability": "available" if selected else "not_found",
+        "evidence_class": "evaluation_metadata",
+        "query": query,
+        "matches": [
+            {
+                "source": source,
+                "exact_spans": _exact_match_spans(content, terms, max_spans=3),
+            }
+            for _, source, content in selected
         ],
     }
 

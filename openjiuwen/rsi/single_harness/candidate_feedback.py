@@ -531,6 +531,9 @@ def _verifier_summary(candidate: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(deltas, dict) or not deltas:
         return {"availability": "missing_artifact", "case_count": 0}
     list_fields = (
+        "newly_passed_requirements",
+        "remaining_failed_requirements",
+        "regressed_requirements",
         "newly_passed_fail_to_pass",
         "remaining_failed_fail_to_pass",
         "regressed_fail_to_pass",

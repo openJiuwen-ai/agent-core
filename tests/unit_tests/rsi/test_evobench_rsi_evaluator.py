@@ -59,6 +59,53 @@ def _write_model_config(path: Path, *, model: str) -> None:
     )
 
 
+def test_analysis_artifact_snapshot_copies_only_bounded_task_files(tmp_path: Path) -> None:
+    workspace = tmp_path / "official_workspace"
+    workspace.mkdir()
+    (workspace / "contract.txt").write_text("controlling contract clause", encoding="utf-8")
+    (workspace / "unsafe.py").write_text("raise SystemExit", encoding="utf-8")
+    staged = tmp_path / "evaluation" / "rollouts" / TASK_OFFICE / "evidence_workspace"
+    staged.mkdir(parents=True)
+    (staged / "result.xlsx").write_bytes(b"spreadsheet")
+
+    snapshot = rsi_evaluator._materialize_analysis_artifacts(
+        case_dir=tmp_path / "case",
+        official_result={"workspace_path": str(workspace)},
+        official_eval_dir=tmp_path / "evaluation",
+        task_id=TASK_OFFICE,
+    )
+
+    snapshot_root = Path(snapshot["path"])
+    assert snapshot["availability"] == "available"
+    assert snapshot["file_count"] == 2
+    assert (snapshot_root / "contract.txt").read_text(encoding="utf-8") == "controlling contract clause"
+    assert (snapshot_root / "result.xlsx").is_file()
+    assert not (snapshot_root / "unsafe.py").exists()
+
+
+def test_analysis_artifact_snapshot_shortens_deep_destination_paths(tmp_path: Path) -> None:
+    workspace = tmp_path / "official_workspace"
+    source = workspace / "Authorization Documents" / "SECRETARY'S CERTIFICATE of AIAG.docx"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"contract")
+    deep_case_dir = tmp_path.joinpath(*(["long_evaluation_segment"] * 3), "case")
+
+    snapshot = rsi_evaluator._materialize_analysis_artifacts(
+        case_dir=deep_case_dir,
+        official_result={"workspace_path": str(workspace)},
+        official_eval_dir=tmp_path / "evaluation",
+        task_id=TASK_OFFICE,
+    )
+
+    copied = snapshot["files"][0]
+    assert copied["source_path"] == "Authorization Documents/SECRETARY'S CERTIFICATE of AIAG.docx"
+    assert copied["path"].startswith("__longpath__/")
+    copied_path = Path(snapshot["path"]) / copied["path"]
+    assert len(str(copied_path)) <= rsi_evaluator._SAFE_SNAPSHOT_PATH_CHARS
+    with open(rsi_evaluator._filesystem_path(copied_path), "rb") as artifact:
+        assert artifact.read() == b"contract"
+
+
 def _fake_root(tmp_path: Path) -> Path:
     root = tmp_path / "Evo-Bench"
     (root / "evobench").mkdir(parents=True)
@@ -207,6 +254,12 @@ async def test_reuses_h0_and_materializes_pass_hat_k_objective(tmp_path: Path) -
     assert result["evaluation"]["passed"] is True
     assert result["evaluation"]["metadata"]["aggregate_mean_score"] == 0.73
     assert result["evaluation"]["metadata"]["trial_scores"] == [0.73, 0.73, 0.73]
+    assert result["evaluation"]["metadata"]["optimization_signals"]["continuous_score"] == {
+        "availability": "available",
+        "value": 0.73,
+        "source": "official_evobench_trial_mean",
+    }
+    assert result["evaluation"]["metadata"]["optimization_signals"]["promotion_authority"] == ("eval_ref_case_score")
 
     normalized_path = Path(eval_ref["cases"][0]["trace_path"]).parent / "judge" / "normalized_trace.json"
     normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
@@ -351,6 +404,20 @@ async def test_materializes_aggregate_office_judge_criteria_for_analyzer(tmp_pat
             "source": "official_result.judge_detail.criteria",
         }
     ]
+    assert result["evaluation"]["metadata"]["requirement_results"] == {
+        "schema_version": 1,
+        "items": [
+            {
+                "requirement_id": "ver_yes_no",
+                "group": "requirement",
+                "passed": False,
+                "score": 0.0,
+                "evidence": "The final answer says No, which is opposite to the required criterion.",
+                "status": "ok",
+                "source": "official_result.judge_detail.criteria",
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio

@@ -36,13 +36,13 @@ from openjiuwen.rsi.single_harness.iterative import (
     _bind_task_acceptance_contracts,
     _candidate_capabilities,
     _failed_machine_evidence,
-    _fallback_analysis_case_ids,
     _initialize_frozen_baseline,
     _invoked_skill_names,
     _invoked_tool_names,
     _refresh_optimization_experience,
     _resume_fingerprint_matches,
     _tool_names_match,
+    _validate_and_filter_planned_batches,
 )
 
 
@@ -67,53 +67,18 @@ def test_infrastructure_skip_is_not_an_optimization_target(tmp_path: Path) -> No
     assert iterative_module._skipped_case_ids(str(eval_ref)) == {"grader-timeout"}
 
 
-def test_no_issue_fallback_keeps_only_usable_case_diagnoses(tmp_path: Path) -> None:
-    diagnoses_path = tmp_path / "analysis" / "per_case_diagnoses.json"
-    diagnoses_path.parent.mkdir(parents=True)
-    diagnoses_path.write_text(
-        json.dumps(
-            {
-                "per_case_diagnoses": [
-                    {
-                        "case_id": "case-a",
-                        "summary": "The observed conflict was handled too shallowly.",
-                        "recommendation": "Run one bounded deeper-analysis experiment.",
-                        "confidence": "low",
-                    },
-                    {
-                        "case_id": "case-b",
-                        "analysis_failed": True,
-                        "diagnosis_status": "evidence_conflict",
-                        "summary": "Diagnosis contradicted deterministic evidence.",
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    analysis_ref = tmp_path / "analysis" / "analysis_ref.yaml"
-    _write_yaml(
-        analysis_ref,
-        {
-            "issues": [],
-            "metadata": {"per_case_diagnoses_path": str(diagnoses_path)},
-        },
-    )
+def test_batch_plan_cannot_omit_or_duplicate_frozen_cases() -> None:
+    with pytest.raises(ValueError, match="duplicate requested case id"):
+        _validate_and_filter_planned_batches(
+            [[{"case_id": "case_1"}], [{"case_id": "case_1"}, {"case_id": "neighbor"}]],
+            expected_case_ids={"case_1"},
+        )
 
-    assert _fallback_analysis_case_ids(
-        analysis_ref,
-        nonpassing_case_ids={"case-a", "case-b"},
-    ) == {"case-a"}
-
-
-def test_no_issue_fallback_isolates_legacy_cases_without_diagnosis_artifact(tmp_path: Path) -> None:
-    analysis_ref = tmp_path / "analysis_ref.yaml"
-    _write_yaml(analysis_ref, {"issues": []})
-
-    assert _fallback_analysis_case_ids(
-        analysis_ref,
-        nonpassing_case_ids={"case-a", "case-b"},
-    ) == {"case-a", "case-b"}
+    with pytest.raises(ValueError, match="omitted requested case ids"):
+        _validate_and_filter_planned_batches(
+            [[{"case_id": "case_1"}, {"case_id": "neighbor"}]],
+            expected_case_ids={"case_1", "case_2"},
+        )
 
 
 def test_frozen_baseline_seeds_global_comparison_without_consuming_batches(tmp_path: Path) -> None:
@@ -158,7 +123,121 @@ def test_frozen_baseline_seeds_global_comparison_without_consuming_batches(tmp_p
     assert state["baseline_score"] == 0.5
     assert state["best_score"] == 0.5
     assert state["best_eval_ref_path"] == str(baseline_eval_ref.resolve())
-    assert state["retained_case_ids"] == []
+    assert state["retained_case_ids"] == ["case_001"]
+
+
+def test_auto_full_baseline_is_frozen_inside_single_run(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    evaluator = _Evaluator()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+        ),
+        evaluator=evaluator,
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+                auto_full_baseline=True,
+            )
+        )
+    )
+    report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
+
+    assert Path(evaluator.calls[0]["output_dir"]).name == "frozen_baseline"
+    assert report["baseline_score"] == 0.0
+    assert Path(report["baseline_eval_ref_path"]).name == "eval_ref.yaml"
+    assert report["best_score"] == 1.0
+
+
+def test_no_candidate_cannot_turn_stochastic_replay_into_best_score(tmp_path: Path) -> None:
+    class StochasticReplayEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            score = 1.0 if output_dir.name == "full" else 0.0
+            case_refs = []
+            for case in kwargs["cases"]:
+                case_dir = output_dir / "cases" / str(case["case_id"])
+                case_dir.mkdir(parents=True, exist_ok=True)
+                result_path = case_dir / "result.json"
+                trace_path = case_dir / "trace.json"
+                result_path.write_text("{}", encoding="utf-8")
+                trace_path.write_text("{}", encoding="utf-8")
+                case_refs.append(
+                    {
+                        "case_id": case["case_id"],
+                        "status": "passed" if score == 1.0 else "failed",
+                        "score": score,
+                        "result_path": str(result_path),
+                        "trace_path": str(trace_path),
+                    }
+                )
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {
+                    "harness_refs_path": kwargs["harness_refs_path"],
+                    "cases": case_refs,
+                },
+            )
+            return str(eval_ref)
+
+    class NoIssueAnalyzer:
+        async def analyze(self, invocation: Any) -> str:
+            output_dir = Path(invocation.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            analysis_ref = output_dir / "analysis_ref.yaml"
+            _write_yaml(analysis_ref, {"issues": []})
+            return str(analysis_ref)
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}), encoding="utf-8")
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+        ),
+        evaluator=StochasticReplayEvaluator(),
+        analyzer=NoIssueAnalyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+                auto_full_baseline=True,
+            )
+        )
+    )
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    checkpoint = state["epoch_checkpoints"][0]
+
+    assert checkpoint["score"] == 1.0
+    assert checkpoint["promotion_applied"] is False
+    assert checkpoint["noop_initial_score_seed"] is False
+    assert state["baseline_score"] == 0.0
+    assert state["best_score"] == 0.0
 
 
 class _Evaluator:
@@ -260,7 +339,41 @@ class _Analyzer:
         output_dir = Path(invocation.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         analysis_ref = output_dir / "analysis_ref.yaml"
-        _write_yaml(analysis_ref, {"issues": []})
+        eval_ref = yaml.safe_load(Path(invocation.eval_ref_path).read_text(encoding="utf-8")) or {}
+        case_ids = [
+            str(case.get("case_id", "") or "")
+            for case in eval_ref.get("cases", [])
+            if isinstance(case, dict)
+            and str(case.get("case_id", "") or "")
+            and case.get("metadata", {}).get("infrastructure_skip") is not True
+        ]
+        _write_yaml(
+            analysis_ref,
+            {
+                "issues": [
+                    {
+                        "issue_id": f"issue_{index:03d}",
+                        "category": "member_harness",
+                        "severity": "medium",
+                        "summary": "The observed behavior did not satisfy the task contract.",
+                        "optimization_target": "member_harness",
+                        "target_members": ["solver"],
+                        "affected_cases": [case_id],
+                        "evidence": [{"case_id": case_id, "failure_mode": "test_fixture_failure"}],
+                        "recommendation": "Apply the evidenced behavior correction and verify the result.",
+                        "metadata": {
+                            "attribution": {
+                                "evidence_status": "confirmed",
+                                "target_ref": "member_harness.solver.prompt",
+                                "hypothesis_assessment": [{"hypothesis_id": f"h_{index:03d}", "status": "supported"}],
+                                "general_mechanism": "Verify the requested outcome before finishing.",
+                            }
+                        },
+                    }
+                    for index, case_id in enumerate(case_ids, start=1)
+                ]
+            },
+        )
         return str(analysis_ref)
 
 
@@ -352,9 +465,55 @@ def test_strict_causal_analysis_without_issue_stops_before_candidate_generation(
         )
     )
     report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    completed = state["completed_batches"]["epoch_001:batch_001"]
 
     assert optimizer.calls == 0
     assert report["candidate_count"] == 0
+    assert completed["candidate_gate_status"] == "not_generated"
+    assert completed["candidate_gate_reason"] == "no_actionable_analysis_issues"
+    assert completed["last_analysis_issue_count"] == 0
+    assert completed["last_optimization_hypothesis_count"] == 0
+
+
+def test_candidate_generation_error_is_recorded_without_aborting_benchmark(tmp_path: Path) -> None:
+    class FailingOptimizer:
+        async def optimize(self, **kwargs: Any) -> str:
+            del kwargs
+            raise ValueError("invalid response for api_key=sk-1234567890abcdef")
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}), encoding="utf-8")
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+        ),
+        evaluator=_Evaluator(),
+        analyzer=_Analyzer(),
+        member_optimizer=FailingOptimizer(),
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+            )
+        )
+    )
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    gate = state["candidate_gates"][0]
+
+    assert state["status"] == "completed"
+    assert gate["reason"] == "member_optimization_status_generation_error"
+    assert gate["candidate_generation_error"]["error_type"] == "ValueError"
+    assert "sk-1234567890abcdef" not in gate["candidate_generation_error"]["message"]
+    assert "[redacted]" in gate["candidate_generation_error"]["message"]
 
 
 def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path) -> None:
@@ -629,7 +788,9 @@ def test_three_siblings_freeze_parent_then_promote_best_realized_candidate(
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
+                                    "hypothesis_assessment": [{"hypothesis_id": "h_workbook", "status": "supported"}],
                                 }
                             },
                         }
@@ -1075,7 +1236,9 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.skill",
+                                    "hypothesis_assessment": [{"hypothesis_id": "h_case_001", "status": "supported"}],
                                 }
                             },
                         },
@@ -1089,7 +1252,9 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.skill",
+                                    "hypothesis_assessment": [{"hypothesis_id": "h_case_002", "status": "supported"}],
                                 }
                             },
                         },
@@ -1295,7 +1460,11 @@ def test_partial_candidate_is_reanalyzed_before_case_is_retained(tmp_path: Path)
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
+                                    "hypothesis_assessment": [
+                                        {"hypothesis_id": f"h_residual_{index}", "status": "supported"}
+                                    ],
                                 }
                             },
                         }
@@ -1447,7 +1616,9 @@ def test_residual_repair_stops_when_analyzer_repeats_same_issue(tmp_path: Path) 
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
+                                    "hypothesis_assessment": [{"hypothesis_id": "h_repeated", "status": "supported"}],
                                 }
                             },
                         }
@@ -1564,7 +1735,15 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                     "recommendation": f"Apply credential masking to {scope}.",
                     "affected_cases": ["case_001"],
                     "optimization_target": "member_harness",
-                    "metadata": {"attribution": {"target_ref": "member_harness.solver.prompt_section"}},
+                    "metadata": {
+                        "attribution": {
+                            "evidence_status": "confirmed",
+                            "target_ref": "member_harness.solver.prompt_section",
+                            "hypothesis_assessment": [
+                                {"hypothesis_id": f"h_scope_{self.call_count}", "status": "supported"}
+                            ],
+                        }
+                    },
                 }
             ]
             if self.call_count == 1:
@@ -1576,7 +1755,15 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                         "recommendation": "Repair case two after resolving case one's feedback.",
                         "affected_cases": ["case_002"],
                         "optimization_target": "member_harness",
-                        "metadata": {"attribution": {"target_ref": "member_harness.solver.prompt_section"}},
+                        "metadata": {
+                            "attribution": {
+                                "evidence_status": "confirmed",
+                                "target_ref": "member_harness.solver.prompt_section",
+                                "hypothesis_assessment": [
+                                    {"hypothesis_id": "h_sibling_case_002", "status": "supported"}
+                                ],
+                            }
+                        },
                     }
                 )
             _write_yaml(
@@ -1724,9 +1911,9 @@ def test_repair_parent_prefers_native_signal_when_pass_hat_k_ties() -> None:
         "source_signal_sources_by_case": {},
         "candidate_signal_sources_by_case": {},
         "role": "sibling_and_repair_ranking_only",
-        "promotion_authority": "eval_ref_pass_hat_k",
+        "promotion_authority": "eval_ref_case_score",
     }
-    assert feedback["selection"]["realized_sort_policy"] == "pass_hat_k_then_native_continuous_v1"
+    assert feedback["selection"]["realized_sort_policy"] == "strict_eval_ref_score_then_continuous_signal_v1"
 
 
 def test_pass_hat_k_stays_ahead_of_native_signal_in_realized_ranking() -> None:
@@ -1769,21 +1956,22 @@ def test_native_signal_improvement_cannot_pass_candidate_gate(tmp_path: Path) ->
                 {
                     "evaluation": {
                         "metadata": {
-                            "trial_scores": trial_scores,
-                            "trial_details": [
-                                {
-                                    "trial_index": index,
-                                    "dimension_scores": {
-                                        name: {
-                                            "availability": "available",
-                                            "value": value,
-                                            "source": "judge_detail",
-                                        }
-                                        for name, value in dimension_scores.items()
-                                    },
-                                }
-                                for index in range(1, 4)
-                            ],
+                            "optimization_signals": {
+                                "schema_version": 1,
+                                "continuous_score": {
+                                    "availability": "available",
+                                    "value": sum(trial_scores) / len(trial_scores),
+                                    "source": "test_evaluator",
+                                },
+                                "dimensions": {
+                                    name: {
+                                        "availability": "available",
+                                        "value": value,
+                                        "source": "test_evaluator",
+                                    }
+                                    for name, value in dimension_scores.items()
+                                },
+                            }
                         }
                     }
                 }
@@ -1885,6 +2073,22 @@ def test_native_signal_improvement_cannot_pass_candidate_gate(tmp_path: Path) ->
         "completeness": pytest.approx(0.6),
     }
     assert feedback["native_signal_role"] == "sibling_and_repair_ranking_only"
+    assert feedback["schema_version"] == 2
+    assert feedback["observed_outcome"]["strict_score"] == {
+        "source": 0.0,
+        "candidate": 0.0,
+        "delta": 0.0,
+    }
+    assert feedback["observed_outcome"]["continuous_score"]["source"] == pytest.approx(0.2)
+    assert feedback["observed_outcome"]["continuous_score"]["candidate"] == pytest.approx(0.9)
+    assert feedback["observed_outcome"]["continuous_score"]["delta"] == pytest.approx(0.7)
+    assert feedback["observed_outcome"]["dimension_deltas"] == {
+        "accuracy": pytest.approx(0.7),
+        "completeness": pytest.approx(0.6),
+    }
+    assert feedback["activation"]["delivery"]["availability"] == "observed"
+    assert feedback["activation"]["delivery"]["state"] == "executed"
+    assert feedback["activation"]["availability"] in {"not_applicable", "not_instrumented"}
     checkpoint_selection = iterative_module._select_gate_from_epoch_checkpoint(
         gate,
         full_eval_ref=gate["candidate_eval_ref_path"],
@@ -1893,6 +2097,33 @@ def test_native_signal_improvement_cannot_pass_candidate_gate(tmp_path: Path) ->
     )
     assert checkpoint_selection["retained"] is False
     assert checkpoint_selection["reason"] == "candidate_failed_target_replay_checkpoint"
+
+
+def test_paired_prompt_activation_separates_delivery_from_behavior_observation() -> None:
+    activation = iterative_module._paired_candidate_activation(
+        [
+            {
+                "action_group": "prompt",
+                "operation": "modify",
+                "target_case_ids": ["case_001"],
+            }
+        ],
+        case_id="case_001",
+        pre_edit_tools_by_case={"case_001": set()},
+        pre_edit_skills_by_case={"case_001": set()},
+    )
+
+    assert activation["delivery"] == {
+        "availability": "observed",
+        "state": "executed",
+        "evidence": "candidate_harness_was_used_for_paired_evaluation",
+    }
+    assert activation["behavior_activation"] == {
+        "availability": "not_instrumented",
+        "state": "unknown",
+        "reason": "surface_has_no_observable_activation_event",
+    }
+    assert activation["state"] == "unknown"
 
 
 def test_batch_winner_is_rolled_back_when_clean_full_checkpoint_does_not_improve(
@@ -2077,6 +2308,23 @@ def test_epoch_selection_scopes_infrastructure_failure_to_candidate_target(
     assert unrelated_error["retained"] is True
     assert target_error["retained"] is False
     assert target_error["reason"] == ("candidate_target_inconclusive_at_epoch_checkpoint")
+
+
+def test_mixed_opaque_snapshot_checkpoint_is_rejected_atomically() -> None:
+    gates = [
+        {"candidate_id": "c1", "composition_mode": "opaque_snapshot"},
+        {"candidate_id": "c2", "composition_mode": "opaque_snapshot"},
+    ]
+    selections = [
+        {"retained": True, "reason": "target_passed"},
+        {"retained": False, "reason": "target_failed"},
+    ]
+
+    blocked = iterative_module._reject_mixed_opaque_snapshot_selection(gates, selections)
+
+    assert blocked is True
+    assert all(selection["retained"] is False for selection in selections)
+    assert {selection["reason"] for selection in selections} == {"epoch_opaque_snapshot_partial_retention_unsupported"}
 
 
 def test_epoch_checkpoint_keeps_effective_skill_and_prunes_failed_skill_once(
@@ -2554,6 +2802,7 @@ def test_verifier_delta_preserves_partial_contract_progress(
     assert delta["newly_passed_fail_to_pass"] == ["state_a", "state_b"]
     assert delta["remaining_failed_fail_to_pass"] == ["state_c"]
     assert delta["partial_progress"] is True
+    assert [item["requirement_id"] for item in delta["newly_passed_requirements"]] == ["state_a", "state_b"]
     assert (
         iterative_module._classify_gate_failure(
             accepted=False,
@@ -2566,6 +2815,71 @@ def test_verifier_delta_preserves_partial_contract_progress(
         )
         == "partial_contract_progress"
     )
+
+
+def test_verifier_delta_recognizes_evobench_criteria_progress(
+    tmp_path: Path,
+) -> None:
+    def write_eval(name: str, *, passed_count: int) -> Path:
+        case_dir = tmp_path / name / "case"
+        case_dir.mkdir(parents=True)
+        result_path = case_dir / "result.json"
+        result_path.write_text(
+            json.dumps(
+                {
+                    "evaluation": {
+                        "metadata": {
+                            "requirement_results": {
+                                "schema_version": 1,
+                                "items": [
+                                    {
+                                        "requirement_id": f"criterion_{index}",
+                                        "group": "requirement",
+                                        "passed": index <= passed_count,
+                                        "score": 1.0 if index <= passed_count else 0.0,
+                                        "source": "official_result.judge_detail.criteria",
+                                    }
+                                    for index in range(1, 10)
+                                ],
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        eval_ref = tmp_path / name / "eval_ref.yaml"
+        _write_yaml(
+            eval_ref,
+            {
+                "cases": [
+                    {
+                        "case_id": "case_001",
+                        "score": 0.0,
+                        "status": "failed",
+                        "result_path": str(result_path),
+                    }
+                ]
+            },
+        )
+        return eval_ref
+
+    delta = iterative_module._verifier_deltas_by_case(
+        write_eval("source_evobench", passed_count=3),
+        write_eval("candidate_evobench", passed_count=8),
+        {"case_001"},
+    )["case_001"]
+
+    assert [item["requirement_id"] for item in delta["newly_passed_requirements"]] == [
+        "criterion_4",
+        "criterion_5",
+        "criterion_6",
+        "criterion_7",
+        "criterion_8",
+    ]
+    assert [item["requirement_id"] for item in delta["remaining_failed_requirements"]] == ["criterion_9"]
+    assert delta["regressed_requirements"] == []
+    assert delta["partial_progress"] is True
 
 
 def test_prior_candidate_feedback_returns_case_scoped_causal_delta() -> None:
@@ -2631,6 +2945,65 @@ def test_prior_candidate_feedback_returns_case_scoped_causal_delta() -> None:
     assert experiment["causal_intervention_contracts"][0]["predicted_behavior_and_outcome"] == ("state_b becomes valid")
     assert experiment["causal_intervention_contracts"][0]["source_causal_hypothesis_id"] == "h_state_b"
     assert "other" not in feedback["by_case"]
+
+
+def test_candidate_contract_keeps_analyzer_counterfactual_separate() -> None:
+    contracts = iterative_module._causal_intervention_contracts(
+        [
+            {
+                "action_id": "a1",
+                "action_group": "prompt",
+                "operation": "modify",
+                "expected_effect": "The next run writes the output.",
+                "analyzer_counterfactual_predictions": ["Only the diagnosed decision changes before output creation."],
+                "source_causal_hypothesis_id": "h1",
+                "target_case_ids": ["case_001"],
+            }
+        ]
+    )
+
+    assert contracts[0]["predicted_behavior_and_outcome"] == "The next run writes the output."
+    assert contracts[0]["analyzer_counterfactual_predictions"] == [
+        "Only the diagnosed decision changes before output creation."
+    ]
+
+
+def test_issue_signature_changes_when_only_residual_requirements_change(tmp_path: Path) -> None:
+    def write_analysis(name: str, residual_ids: list[str]) -> Path:
+        path = tmp_path / f"{name}.yaml"
+        _write_yaml(
+            path,
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "category": "member_harness",
+                        "summary": "The requested output is only partially complete.",
+                        "recommendation": "Continue from the verified partial result.",
+                        "failure_mode": "partial_completion",
+                        "affected_cases": ["case_1"],
+                        "metadata": {
+                            "attribution": {
+                                "evidence_status": "confirmed",
+                                "target_ref": "member_harness.policy_harness.prompt",
+                                "causal_coverage": {
+                                    "explained_requirement_ids": ["r1"],
+                                    "residual_requirement_ids": residual_ids,
+                                },
+                            }
+                        },
+                    }
+                ]
+            },
+        )
+        return path
+
+    first = iterative_module._analysis_issue_signatures(write_analysis("first", ["r2", "r3"]))
+    same = iterative_module._analysis_issue_signatures(write_analysis("same", ["r3", "r2"]))
+    repaired = iterative_module._analysis_issue_signatures(write_analysis("repaired", ["r3"]))
+
+    assert first["issue_1"] == same["issue_1"]
+    assert first["issue_1"] != repaired["issue_1"]
 
 
 def test_compact_analysis_diagnoses_preserves_multiple_case_diagnoses(tmp_path: Path) -> None:
@@ -3037,6 +3410,56 @@ def test_candidate_gate_reports_evaluation_error_before_missing_skill(
     assert gate["accepted"] is False
     assert gate["status"] == "inconclusive"
     assert gate["reason"] == "candidate_gate_inconclusive_due_to_error_cases"
+
+
+def test_candidate_gate_records_evaluator_exception_as_inconclusive(tmp_path: Path) -> None:
+    class RaisingEvaluator:
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            del kwargs
+            raise TimeoutError("judge timed out with api_key=sk-1234567890abcdef")
+
+    source_eval = tmp_path / "source" / "eval_ref.yaml"
+    _write_yaml(source_eval, {"cases": [{"case_id": "case_001", "score": 0.0}]})
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        encoding="utf-8",
+    )
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(evaluator=EvaluatorConfig(backend="single_harness")),
+        evaluator=RaisingEvaluator(),
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    gate = asyncio.run(
+        orchestrator._candidate_gate(
+            cases=[{"case_id": "case_001", "input": "fix"}],
+            source_eval_ref=str(source_eval),
+            before_harness_refs_path=str(tmp_path / "baseline_refs.yaml"),
+            candidate_harness_refs_path=str(tmp_path / "candidate_refs.yaml"),
+            member_status="success",
+            capabilities=[{"action_group": "prompt", "operation": "modify"}],
+            output_dir=tmp_path / "candidate_eval",
+            dataset=type(
+                "Dataset",
+                (),
+                {
+                    "dataset_id": "test",
+                    "dataset_dir": str(dataset_path.parent),
+                    "dataset_files": [str(dataset_path)],
+                    "cases": 1,
+                },
+            )(),
+        )
+    )
+
+    assert gate["accepted"] is False
+    assert gate["status"] == "inconclusive"
+    assert gate["reason"] == "candidate_evaluation_failed"
+    assert gate["candidate_evaluation_error"]["error_type"] == "TimeoutError"
+    assert "sk-1234567890abcdef" not in gate["candidate_evaluation_error"]["message"]
 
 
 def test_candidate_gate_requires_every_skill_and_tool_in_multi_action_plan(tmp_path: Path) -> None:
@@ -3960,6 +4383,77 @@ def test_candidate_gate_rejects_inconclusive_source_without_evaluating_candidate
     assert gate["accepted"] is False
     assert gate["reason"] == "source_gate_inconclusive_due_to_error_cases"
     assert evaluator.calls == []
+
+
+def test_candidate_gate_ignores_unrelated_source_error(tmp_path: Path) -> None:
+    class TargetEvaluator:
+        def __init__(self) -> None:
+            self.case_ids: list[str] = []
+
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            output_dir = Path(kwargs["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self.case_ids = [str(case["case_id"]) for case in kwargs["cases"]]
+            eval_ref = output_dir / "eval_ref.yaml"
+            _write_yaml(
+                eval_ref,
+                {"cases": [{"case_id": case_id, "status": "passed", "score": 1.0} for case_id in self.case_ids]},
+            )
+            return str(eval_ref)
+
+    source_eval = tmp_path / "source" / "eval_ref.yaml"
+    _write_yaml(
+        source_eval,
+        {
+            "cases": [
+                {"case_id": "target", "status": "failed", "score": 0.0},
+                {"case_id": "unrelated", "status": "error", "score": 0.0},
+            ]
+        },
+    )
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    cases = [
+        {"case_id": "target", "input": "fix target"},
+        {"case_id": "unrelated", "input": "unavailable"},
+    ]
+    dataset_path.write_text(json.dumps({"cases": cases}), encoding="utf-8")
+    evaluator = TargetEvaluator()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(evaluator=EvaluatorConfig(backend="single_harness")),
+        evaluator=evaluator,
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    gate = asyncio.run(
+        orchestrator._candidate_gate(
+            cases=cases,
+            source_eval_ref=str(source_eval),
+            before_harness_refs_path=str(tmp_path / "baseline_refs.yaml"),
+            candidate_harness_refs_path=str(tmp_path / "candidate_refs.yaml"),
+            member_status="success",
+            capabilities=[
+                {
+                    "action_group": "prompt",
+                    "operation": "modify",
+                    "runtime_name": "prompt",
+                    "target_case_ids": ["target"],
+                }
+            ],
+            output_dir=tmp_path / "candidate_eval",
+            dataset=SimpleNamespace(
+                dataset_id="test",
+                dataset_dir=str(dataset_path.parent),
+                dataset_files=[str(dataset_path)],
+                cases=2,
+            ),
+            frozen_target_case_ids={"target"},
+        )
+    )
+
+    assert gate["accepted"] is True
+    assert evaluator.case_ids == ["target"]
 
 
 def test_candidate_gate_evaluates_only_the_attributed_target(tmp_path: Path) -> None:

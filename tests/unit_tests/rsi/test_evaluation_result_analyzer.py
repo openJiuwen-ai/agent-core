@@ -2134,35 +2134,65 @@ class TestDiagnosisPromptEvidenceSummary:
     ) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
+            _case_prior_candidate_feedback,
         )
 
         result_path = tmp_path / "case_feedback" / "result.json"
         result_path.parent.mkdir(parents=True)
         result_path.write_text("{}", encoding="utf-8")
 
+        paired_feedback = {
+            "by_case": {
+                "case_001": [
+                    {
+                        "schema_version": 2,
+                        "prediction": {
+                            "causal_intervention_contracts": [
+                                {
+                                    "source_causal_hypothesis_id": "h1",
+                                    "predicted_behavior_and_outcome": "state_b becomes valid",
+                                }
+                            ]
+                        },
+                        "activation": {"availability": "observed", "state": "triggered"},
+                        "observed_outcome": {
+                            "strict_score": {"source": 0.0, "candidate": 0.0, "delta": 0.0},
+                            "continuous_score": {"source": 0.2, "candidate": 0.8, "delta": 0.6},
+                            "requirement_delta": {
+                                "newly_passed_fail_to_pass": ["state_a"],
+                                "remaining_failed_fail_to_pass": ["state_b"],
+                            },
+                        },
+                    }
+                ],
+                "unrelated_case": [{"experiment_id": "must_not_leak"}],
+            }
+        }
+        case_feedback = _case_prior_candidate_feedback(paired_feedback, "case_001")
         payload = json.loads(
             _build_diagnosis_input_json(
                 case=self._make_case_input(str(result_path)),
                 signals=self._make_signals(),
                 retrieved_experience=None,
                 evidence_summary_available=True,
-                prior_candidate_feedback={
-                    "case_id": "case_001",
-                    "experiments": [
-                        {
-                            "verifier_delta": {
-                                "newly_passed_fail_to_pass": ["state_a"],
-                                "remaining_failed_fail_to_pass": ["state_b"],
-                            },
-                        }
-                    ],
-                },
+                prior_candidate_feedback=case_feedback,
             )
         )
 
         assert payload["prior_candidate_feedback"]["experiments"][0]["verifier_delta"][
             "remaining_failed_fail_to_pass"
         ] == ["state_b"]
+        experiment = payload["prior_candidate_feedback"]["experiments"][0]
+        assert (
+            experiment["prediction"]["causal_intervention_contracts"][0]["predicted_behavior_and_outcome"]
+            == "state_b becomes valid"
+        )
+        assert experiment["activation"]["state"] == "triggered"
+        assert experiment["observed_outcome"]["strict_score"]["delta"] == 0.0
+        assert experiment["observed_outcome"]["continuous_score"]["delta"] == 0.6
+        assert experiment["observed_outcome"]["requirement_delta"]["remaining_failed_fail_to_pass"] == ["state_b"]
+        assert payload["prior_candidate_feedback"]["case_id"] == "case_001"
+        assert "must_not_leak" not in json.dumps(payload["prior_candidate_feedback"])
         assert "Preserve newly passing operations" in payload["prior_candidate_feedback_policy"]
 
     def test_diagnosis_input_preserves_complete_authoritative_task(self, tmp_path: Path) -> None:
@@ -2217,7 +2247,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
         payload = json.loads(raw)
 
-        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v6"
+        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v7"
         assert payload["retrieved_experience"]["matches"][0]["component_layer"] == "prompt_section"
         assert payload["experience_usage_policy"]["must_use_current_evidence_first"] is True
         assert "Do not copy a historical target_ref" in payload["experience_usage_policy"]["rules"][0]
@@ -2242,9 +2272,13 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "evidence_summary.md" in DIAGNOSIS_SYSTEM_PROMPT
         assert "no-exception smoke probe" in DIAGNOSIS_SYSTEM_PROMPT
         assert "Do not convert a Tool, Skill, Config" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "member_harness.<role>.execution_budget" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "member_harness.<role>.rail" in DIAGNOSIS_SYSTEM_PROMPT
         assert "Failed-requirement coverage (hard)" in DIAGNOSIS_SYSTEM_PROMPT
         assert "task_sufficient" in DIAGNOSIS_SYSTEM_PROMPT
         assert "counterfactual_prediction" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "public task contract is available" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "do not claim it is unavailable" in DIAGNOSIS_SYSTEM_PROMPT
 
     def test_input_builds_complete_failed_requirement_inventory(self, tmp_path: Path) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
@@ -2288,6 +2322,34 @@ class TestDiagnosisPromptEvidenceSummary:
         inventory = payload["deterministic_failed_requirement_inventory"]
         assert [item["requirement_id"] for item in inventory["items"]] == ["criterion:correct_value"]
         assert "does not identify their causes" in inventory["policy"]
+
+    def test_failed_requirement_inventory_does_not_drop_criteria_after_twenty_four(self, tmp_path: Path) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _build_failed_requirement_inventory
+
+        result_path = tmp_path / "case_many_requirements" / "result.json"
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text("{}", encoding="utf-8")
+        case = replace(
+            self._make_case_input(str(result_path)),
+            evaluation_metadata={
+                "judge_evidence": {
+                    "criteria": [
+                        {
+                            "criterion_id": f"requirement_{index}",
+                            "score": 0.0,
+                            "status": "failed",
+                            "rationale": f"requirement {index} failed",
+                        }
+                        for index in range(30)
+                    ]
+                }
+            },
+        )
+
+        inventory = _build_failed_requirement_inventory(case)
+
+        assert len(inventory["items"]) == 30
+        assert inventory["items"][-1]["requirement_id"] == "criterion:requirement_29"
 
     def test_causal_coverage_rejects_local_cause_claimed_as_complete(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
@@ -2335,7 +2397,10 @@ class TestDiagnosisPromptEvidenceSummary:
             failed_requirement_inventory=inventory,
         )
 
-        assert any("task_sufficient requires all inventory IDs explained" in item for item in conflicts)
+        assert any(
+            "task_sufficient requires all inventory IDs in this diagnosis's failure cluster" in item
+            for item in conflicts
+        )
 
     def test_causal_coverage_accepts_explicit_local_contributor(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
@@ -2385,6 +2450,46 @@ class TestDiagnosisPromptEvidenceSummary:
             )
             == []
         )
+
+    def test_causal_coverage_rejects_explaining_checks_outside_own_cluster(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _diagnosis_validation_conflicts
+
+        diagnosis = {
+            "evidence_status": "supported_hypothesis",
+            "target_ref": "member_harness.solver.prompt",
+            "failed_requirement": "the value requirement failed",
+            "discriminating_evidence": "the trace supports the value-decision gap",
+            "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 2}],
+            "failure_cluster": {
+                "failed_checks": ["criterion:value"],
+                "observable_behavior": "the value is wrong",
+            },
+            "causal_coverage": {
+                "explained_requirement_ids": ["criterion:value", "criterion:format"],
+                "residual_requirement_ids": [],
+                "unexplained_observations": [],
+                "causal_chain": [
+                    {"cause": "wrong value decision", "effect": "value failed", "evidence_status": "supported"}
+                ],
+                "counterfactual_prediction": "the value changes",
+                "sufficiency_status": "cluster_sufficient",
+            },
+            "decision_contract": {"acceptance_observable": "the value criterion improves"},
+            "confidence": "medium",
+        }
+
+        conflicts = _diagnosis_validation_conflicts(
+            diagnosis,
+            {},
+            failed_requirement_inventory={
+                "items": [
+                    {"requirement_id": "criterion:value"},
+                    {"requirement_id": "criterion:format"},
+                ]
+            },
+        )
+
+        assert any("must exactly match this diagnosis's failure_cluster" in item for item in conflicts)
 
     def test_diagnosis_set_cannot_drop_an_independent_failed_requirement(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
@@ -3673,6 +3778,206 @@ class TestBoundedMultiDiagnosis:
                 "summary": "Current evidence cannot attribute the failure.",
             }
         ]
+
+    def test_normalize_preserves_supported_issue_and_splits_unresolved_residual(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
+
+        diagnosis = self._diagnosis(
+            failure_mode="incomplete_extraction",
+            failed_check="criterion:value",
+            observable="the extracted value is incomplete",
+        )
+        diagnosis.update(
+            {
+                "evidence_status": "confirmed",
+                "causal_coverage": {
+                    "explained_requirement_ids": ["criterion:value"],
+                    "residual_requirement_ids": ["criterion:format"],
+                    "unexplained_observations": ["the format mechanism is unresolved"],
+                    "causal_chain": [
+                        {
+                            "cause": "the extraction stopped early",
+                            "effect": "the value is incomplete",
+                            "evidence_status": "supported",
+                        }
+                    ],
+                    "counterfactual_prediction": "the extracted value becomes complete",
+                    "sufficiency_status": "local_contributor",
+                },
+                "hypothesis_assessment": [
+                    {
+                        "hypothesis_id": "h_extract",
+                        "status": "supported",
+                        "falsifying_condition_status": "not_observed",
+                        "claim_follows_from_evidence": "yes",
+                        "logic_check": "the exact read ends before the required value",
+                        "controller_request_ids": ["q1"],
+                    },
+                    {
+                        "hypothesis_id": "h_format",
+                        "status": "unresolved",
+                        "falsifying_condition_status": "unknown",
+                        "claim_follows_from_evidence": "unknown",
+                        "logic_check": "the format discriminator is unavailable",
+                        "controller_request_ids": [],
+                    },
+                ],
+            }
+        )
+
+        normalized = _normalize_case_diagnoses({"diagnoses": [diagnosis]})
+
+        assert len(normalized) == 2
+        supported, residual = normalized
+        assert supported["target_ref"] == "member_harness.solver.skill"
+        assert supported["evidence_status"] == "supported_hypothesis"
+        assert supported["causal_coverage"]["sufficiency_status"] == "local_contributor"
+        assert [item["hypothesis_id"] for item in supported["hypothesis_assessment"]] == ["h_extract"]
+        assert residual["target_ref"] == "unassigned"
+        assert residual["evidence_status"] == "insufficient"
+        assert residual["causal_coverage"]["explained_requirement_ids"] == []
+        assert residual["failure_cluster"]["failed_checks"] == ["criterion:format"]
+        assert residual["causal_coverage"]["residual_requirement_ids"] == ["criterion:format"]
+        assert [item["hypothesis_id"] for item in residual["hypothesis_assessment"]] == ["h_format"]
+
+    def test_normalize_keeps_supported_local_issue_when_only_an_alternative_is_unresolved(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
+
+        diagnosis = self._diagnosis(
+            failure_mode="wrong_decision",
+            failed_check="criterion:value",
+            observable="the selected value is unsupported",
+        )
+        diagnosis.update(
+            {
+                "evidence_status": "supported_hypothesis",
+                "hypothesis_assessment": [
+                    {"hypothesis_id": "h_observed", "status": "supported"},
+                    {"hypothesis_id": "h_alternative", "status": "unresolved"},
+                ],
+                "causal_coverage": {
+                    "explained_requirement_ids": ["criterion:value"],
+                    "residual_requirement_ids": [],
+                    "unexplained_observations": [],
+                    "causal_chain": [
+                        {
+                            "cause": "an observed decision",
+                            "effect": "the selected value is unsupported",
+                            "evidence_status": "supported",
+                        }
+                    ],
+                    "counterfactual_prediction": "the selected value follows the observed source",
+                    "sufficiency_status": "cluster_sufficient",
+                },
+            }
+        )
+
+        normalized = _normalize_case_diagnoses({"diagnoses": [diagnosis]})
+
+        assert len(normalized) == 1
+        assert normalized[0]["target_ref"] == "member_harness.solver.skill"
+        assert [item["hypothesis_id"] for item in normalized[0]["hypothesis_assessment"]] == ["h_observed"]
+        assert normalized[0]["causal_coverage"]["sufficiency_status"] == "local_contributor"
+
+    def test_causal_reconciliation_downgrades_only_the_unsupported_hypothesis(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+
+        diagnosis = self._diagnosis(
+            failure_mode="wrong_decision",
+            failed_check="criterion:value",
+            observable="the selected value violates the source",
+        )
+        diagnosis["evidence_status"] = "confirmed"
+        diagnosis["hypothesis_assessment"] = [
+            {
+                "hypothesis_id": "h_supported",
+                "status": "supported",
+                "falsifying_condition_status": "not_observed",
+                "claim_follows_from_evidence": "yes",
+                "logic_check": "q1 contains the source value used by the agent",
+                "controller_request_ids": ["q1"],
+            },
+            {
+                "hypothesis_id": "h_bad",
+                "status": "supported",
+                "falsifying_condition_status": "not_observed",
+                "claim_follows_from_evidence": "yes",
+                "logic_check": "q2 supports the alternative",
+                "controller_request_ids": ["q2"],
+            },
+        ]
+        reconciled, warnings = _reconcile_causal_assessments(
+            [diagnosis],
+            {
+                "hypotheses": [
+                    {"hypothesis_id": "h_supported", "claim": "observed wrong decision"},
+                    {"hypothesis_id": "h_bad", "claim": "unobserved alternative"},
+                ],
+                "evidence_requests": [
+                    {"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "inspect_artifact"},
+                    {"request_id": "q2", "hypothesis_ids": ["h_bad"], "operation": "inspect_artifact"},
+                ],
+            },
+            evidence_results={
+                "results": [
+                    {"request_id": "q1", "availability": "available"},
+                    {"request_id": "q2", "availability": "not_available"},
+                ]
+            },
+            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
+        )
+
+        assert reconciled[0]["target_ref"] == "member_harness.solver.skill"
+        assert reconciled[0]["evidence_status"] == "supported_hypothesis"
+        statuses = {item["hypothesis_id"]: item["status"] for item in reconciled[0]["hypothesis_assessment"]}
+        assert statuses == {"h_supported": "supported", "h_bad": "unresolved"}
+        assert any("downgraded h_bad" in warning for warning in warnings)
+
+    def test_normalize_keeps_independent_surfaces_for_the_same_failed_check(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
+
+        extraction = self._diagnosis(
+            failure_mode="incomplete_extraction",
+            failed_check="criterion:value",
+            observable="the final value is wrong",
+            target_ref="member_harness.solver.skill",
+        )
+        extraction["critical_mistake"] = "the source read stopped before the controlling clause"
+        calculation = self._diagnosis(
+            failure_mode="wrong_calculation",
+            failed_check="criterion:value",
+            observable="the final value is wrong",
+            target_ref="member_harness.solver.tool",
+        )
+        calculation["critical_mistake"] = "the calculator used the wrong operands"
+
+        normalized = _normalize_case_diagnoses({"diagnoses": [extraction, calculation]})
+
+        assert len(normalized) == 2
+        assert {item["target_ref"] for item in normalized} == {
+            "member_harness.solver.skill",
+            "member_harness.solver.tool",
+        }
+
+    def test_causal_refinement_runs_when_a_failed_requirement_is_only_residual(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _diagnoses_need_causal_refinement
+
+        diagnoses = [
+            {
+                "evidence_status": "supported_hypothesis",
+                "causal_coverage": {
+                    "explained_requirement_ids": ["criterion:value"],
+                    "residual_requirement_ids": ["criterion:format"],
+                    "sufficiency_status": "local_contributor",
+                },
+                "hypothesis_assessment": [{"hypothesis_id": "h1", "status": "supported"}],
+            }
+        ]
+
+        assert _diagnoses_need_causal_refinement(
+            diagnoses,
+            failed_requirement_ids=["criterion:value", "criterion:format"],
+        )
 
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_flattens_wrapped_diagnoses(

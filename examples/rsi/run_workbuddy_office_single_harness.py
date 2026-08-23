@@ -125,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
                     output_dir=str(run_dir / "single_harness_optimization"),
                     dataset_id="workbuddy_office_v1",
                     resume=args.resume,
+                    auto_full_baseline=True,
                 )
             ),
             run_dir,
@@ -388,7 +389,13 @@ def _write_config(
                 "jiuwenswarm_runtime_timeout_sec": jiuwenswarm_runtime_timeout_sec,
                 "jiuwenswarm_runtime_profile": jiuwenswarm_runtime_profile,
             },
-            "evaluation_result_analyzer": {"max_issues": 8, "evidence_limit_per_issue": 3},
+            "evaluation_result_analyzer": {
+                # Diagnostic coverage and candidate-evaluation budget are
+                # separate concerns. Preserve up to six causal clusters per
+                # case even when only a bounded subset is attempted.
+                "max_issues": max(20, batch_size * 6),
+                "evidence_limit_per_issue": 3,
+            },
             "member_optimizer": {
                 "action_group_configs": ["prompt", "skill", "tool", "rail"],
                 "max_roles_per_run": 1,

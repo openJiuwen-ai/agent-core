@@ -82,6 +82,8 @@ def analyze_candidate_feedback_ledgers(
     regression_by_surface: dict[str, _SurfaceEvidence] = {}
     feature_evidence: dict[str, _FeatureEvidence] = {}
     positive_selection_regret_ids: list[str] = []
+    partial_repair_opportunity_ids: set[str] = set()
+    partial_repair_support_ids: set[str] = set()
 
     for cohort in cohorts:
         cohort_id = cohort["cohort"]["cohort_id"]
@@ -127,6 +129,23 @@ def analyze_candidate_feedback_ledgers(
                 trigger.observe_trigger(cohort_id, candidate["activation"])
                 regression = regression_by_surface.setdefault(surface, _SurfaceEvidence())
                 regression.observe_regression(cohort_id, candidate["regression"]["target"])
+            verifier = candidate.get("verifier_summary")
+            if isinstance(verifier, Mapping) and verifier.get("availability") == "observed":
+                remaining = verifier.get("remaining_failed_requirements_count")
+                newly_passed = verifier.get("newly_passed_requirements_count")
+                regressed = verifier.get("regressed_requirements_count")
+                partial_progress_cases = verifier.get("partial_progress_case_count")
+                if _is_nonnegative_int(remaining) and remaining > 0:
+                    partial_repair_opportunity_ids.add(cohort_id)
+                    if (
+                        _is_nonnegative_int(newly_passed)
+                        and newly_passed > 0
+                        and _is_nonnegative_int(regressed)
+                        and regressed == 0
+                        and _is_nonnegative_int(partial_progress_cases)
+                        and partial_progress_cases > 0
+                    ):
+                        partial_repair_support_ids.add(cohort_id)
 
     stable_patterns = _stable_patterns(
         min_support_cohorts=min_support_cohorts,
@@ -140,6 +159,8 @@ def analyze_candidate_feedback_ledgers(
         regression_by_surface=regression_by_surface,
         feature_evidence=feature_evidence,
         positive_selection_regret_ids=positive_selection_regret_ids,
+        partial_repair_opportunity_ids=sorted(partial_repair_opportunity_ids),
+        partial_repair_support_ids=sorted(partial_repair_support_ids),
     )
 
     return {
@@ -185,6 +206,10 @@ def analyze_candidate_feedback_ledgers(
                     for cohort in cohorts
                     if cohort["metrics"]["selection_regret"]["status"] == "available"
                 ],
+            ),
+            "partial_candidate_residual_repair": _cohort_rate(
+                sorted(partial_repair_support_ids),
+                sorted(partial_repair_opportunity_ids),
             ),
         },
         "duplicates": {
@@ -561,6 +586,8 @@ def _stable_patterns(
     regression_by_surface: dict[str, _SurfaceEvidence],
     feature_evidence: dict[str, _FeatureEvidence],
     positive_selection_regret_ids: list[str],
+    partial_repair_opportunity_ids: list[str],
+    partial_repair_support_ids: list[str],
 ) -> list[dict[str, Any]]:
     patterns: list[dict[str, Any]] = []
     _append_pattern(
@@ -576,6 +603,24 @@ def _stable_patterns(
             "operation": "set",
             "value": True,
             "rationale": "Comparable cohorts repeatedly produced no positive-gain candidate.",
+        },
+    )
+    _append_pattern(
+        patterns,
+        min_support_cohorts=min_support_cohorts,
+        pattern_id="partial_candidate_has_residual_requirements",
+        pattern_type="partial_candidate_has_residual_requirements",
+        surface=None,
+        support_ids=partial_repair_support_ids,
+        opportunity_ids=partial_repair_opportunity_ids,
+        policy_change={
+            "field": "generation_directives.preserve_partial_progress_and_target_residual",
+            "operation": "set",
+            "value": True,
+            "rationale": (
+                "Candidates repeatedly improved some requirements without regression while residual "
+                "requirements remained; repair should preserve verified gains and target only the residue."
+            ),
         },
     )
     _append_pattern(
@@ -754,3 +799,7 @@ def _require_nonempty_text(value: Any, location: str) -> None:
 
 def _is_number(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _is_nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0

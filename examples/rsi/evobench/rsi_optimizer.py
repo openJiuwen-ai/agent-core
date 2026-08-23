@@ -5,8 +5,8 @@
 The regular member optimizer understands Expert Harness manifests. Evo-Bench
 owns a different, deliberately small PolicyHarness package contract. This
 adapter preserves the regular optimizer artifact protocol while allowing only
-the two PolicyHarness surfaces that are safe to tune without changing the
-official execution framework.
+the PolicyHarness surfaces declared by the runtime package itself. Python
+execution code remains immutable.
 """
 
 from __future__ import annotations
@@ -26,13 +26,16 @@ import yaml
 _ROLE = "policy_harness"
 _PROMPT_PATH = "system_prompt.md"
 _HARNESS_PATH = "harness.json"
-_ALLOWED_HARNESS_FIELDS = {"max_steps", "rollout_wall_clock_seconds"}
+_BUDGET_HARNESS_FIELDS = {"max_steps", "rollout_wall_clock_seconds"}
+_RAIL_HARNESS_FIELD = "tool_loop_compaction"
+_ALLOWED_RAIL_FIELDS = {"enabled", "consecutive_threshold", "bailout_threshold"}
+_ALLOWED_HARNESS_FIELDS = _BUDGET_HARNESS_FIELDS | {_RAIL_HARNESS_FIELD}
 _WALL_CLOCK_ALIASES = {"wall_clock", "wall_clock_seconds"}
 _MAX_PROMPT_APPEND_CHARS = 8_000
 _MAX_STRUCTURED_EVIDENCE_CHARS = 40_000
 _MAX_LEGACY_RESULT_CHARS = 3_000
 _MAX_LEGACY_TRACE_CHARS = 4_000
-GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v2"
+GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v3"
 _CAUSAL_EVIDENCE_PATH_KEYS = {
     "causal_evidence_path",
     "causal_digest_path",
@@ -52,6 +55,14 @@ _SENSITIVE_VALUE_KEYS = {
     "reference_answer",
     "reference_answers",
 }
+_TASK_SPECIFIC_VALUE_KEYS = {
+    "benchmark_entities",
+    "fixed_values",
+    "non_generalizable_literals",
+    "proper_nouns",
+    "task_entities",
+}
+_PUBLIC_TASK_TEXT_KEYS = {"input", "input_excerpt", "prompt", "query", "task_input"}
 _CASE_ID_KEYS = {
     "case_id",
     "case_ids",
@@ -111,18 +122,30 @@ class PolicyHarnessRSIOptimizer:
         analysis_path, analysis = _load_analysis(analysis_result_path)
         selected_issues = _select_issues(analysis, optimization_issue_ids)
         if not selected_issues:
-            if _analysis_uses_strict_causal_protocol(analysis):
-                raise ValueError("PolicyHarness optimization requires an actionable, evidence-grounded analysis issue")
-            selected_issues = [
-                _build_unattributed_failure_issue(
-                    eval_ref_path,
-                    target_case_ids=_frozen_target_case_ids(optimization_experience),
-                )
-            ]
+            raise ValueError("PolicyHarness optimization requires an actionable, evidence-grounded analysis issue")
 
         output_root = Path(output_dir).expanduser().resolve()
         output_root.mkdir(parents=True, exist_ok=True)
         run_dir = _allocate_run_dir(output_root)
+        requested_surfaces = _requested_issue_surfaces(selected_issues)
+        source_prompt_path = source_harness / _PROMPT_PATH
+        source_harness_path = source_harness / _HARNESS_PATH
+        if not source_prompt_path.is_file() or not source_harness_path.is_file():
+            raise ValueError(f"PolicyHarness must contain system_prompt.md and harness.json: {source_harness}")
+        source_harness_json = _read_json_mapping(source_harness_path)
+        supported_surfaces = {"prompt", "budget"}
+        if isinstance(source_harness_json.get(_RAIL_HARNESS_FIELD), Mapping):
+            supported_surfaces.add("rail")
+        unsupported_surfaces = sorted(requested_surfaces - supported_surfaces)
+        if unsupported_surfaces:
+            return _write_unsupported_surface_artifact(
+                run_dir=run_dir,
+                source_refs_path=source_refs_path,
+                source_harness=source_harness,
+                selected_issues=selected_issues,
+                requested_surfaces=requested_surfaces,
+                unsupported_surfaces=unsupported_surfaces,
+            )
         candidate_harness = _candidate_harness_path(run_dir, source_harness)
         candidate_harness.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_harness, candidate_harness)
@@ -132,7 +155,6 @@ class PolicyHarnessRSIOptimizer:
         if not prompt_path.is_file() or not harness_path.is_file():
             raise ValueError(f"PolicyHarness must contain system_prompt.md and harness.json: {source_harness}")
         source_prompt = prompt_path.read_text(encoding="utf-8")
-        source_harness_json = _read_json_mapping(harness_path)
         source_tree = _tree_hashes(source_harness)
 
         evidence = _build_evidence_bundle(
@@ -155,18 +177,23 @@ class PolicyHarnessRSIOptimizer:
             causal_hypothesis_policy=causal_hypothesis_policy,
             generation_context=generation_context,
             rejected_capabilities=rejected_capabilities or [],
+            requested_surfaces=requested_surfaces,
         )
         raw_patch = await self._generate_patch(
             request,
             run_dir=run_dir,
+            source_harness=source_harness_json,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            requested_surfaces=requested_surfaces,
         )
         patch = _validate_patch(
             raw_patch,
             source_prompt=source_prompt,
+            source_harness=source_harness_json,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            requested_surfaces=requested_surfaces,
         )
         _apply_patch(
             prompt_path=prompt_path,
@@ -179,15 +206,18 @@ class PolicyHarnessRSIOptimizer:
             source_tree=source_tree,
             source_harness=source_harness,
             candidate_harness=candidate_harness,
+            requested_surfaces=requested_surfaces,
         )
 
         issue_ids = [str(issue["issue_id"]) for issue in selected_issues]
         case_ids = _issue_case_ids(selected_issues)
+        analyzer_counterfactual_predictions = _issue_counterfactual_predictions(selected_issues)
         actions = _build_actions(
             patch=patch,
             issue_ids=issue_ids,
             case_ids=case_ids,
             source_hypothesis_id=patch["source_hypothesis_id"],
+            analyzer_counterfactual_predictions=analyzer_counterfactual_predictions,
         )
         plan = _build_plan(
             source_harness=source_harness,
@@ -296,8 +326,10 @@ class PolicyHarnessRSIOptimizer:
         request: str,
         *,
         run_dir: Path,
+        source_harness: dict[str, Any],
         leakage_guard: dict[str, Any],
         causal_hypothesis_policy: dict[str, Any],
+        requested_surfaces: set[str],
     ) -> dict[str, Any]:
         if self._patch_generator is not None:
             generated = self._patch_generator(request)
@@ -308,12 +340,139 @@ class PolicyHarnessRSIOptimizer:
             request=request,
             model_config_ref=self.model_config_ref,
             workspace=run_dir,
+            source_harness=source_harness,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            requested_surfaces=requested_surfaces,
         )
 
 
 EvoBenchPolicyHarnessOptimizer = PolicyHarnessRSIOptimizer
+
+
+def _requested_issue_surfaces(issues: list[dict[str, Any]]) -> set[str]:
+    """Resolve Analyzer targets without silently converting them to prompts."""
+    surfaces: set[str] = set()
+    for issue in issues:
+        metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
+        attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+        target_ref = str(attribution.get("target_ref", "") or "").strip().casefold()
+        if not target_ref:
+            surfaces.add("unknown")
+            continue
+        tokens = {token for token in re.split(r"[^a-z0-9_]+", target_ref) if token}
+        if tokens & {"tool", "tools"}:
+            surfaces.add("tool")
+        elif tokens & {"skill", "skills"}:
+            surfaces.add("skill")
+        elif tokens & {"rail", "rails"}:
+            surfaces.add("rail")
+        elif tokens & {"budget", "execution_budget"}:
+            surfaces.add("budget")
+        elif tokens & {"config", "configuration"}:
+            surfaces.add("config")
+        elif tokens & {"prompt", "system_prompt", "prompt_section"}:
+            surfaces.add("prompt")
+        else:
+            surfaces.add("unknown")
+    return surfaces
+
+
+def _write_unsupported_surface_artifact(
+    *,
+    run_dir: Path,
+    source_refs_path: Path,
+    source_harness: Path,
+    selected_issues: list[dict[str, Any]],
+    requested_surfaces: set[str],
+    unsupported_surfaces: list[str],
+) -> str:
+    """Return a rejected proposal artifact instead of fabricating a prompt fix."""
+    issue_ids = [str(issue.get("issue_id", "") or "") for issue in selected_issues]
+    case_ids = _issue_case_ids(selected_issues)
+    plan_path = run_dir / "plan.yaml"
+    _write_yaml_atomic(
+        plan_path,
+        {
+            "plan_id": f"evobench_policy_{run_dir.name}",
+            "targets": [
+                {
+                    "role": _ROLE,
+                    "member_name": _ROLE,
+                    "harness_ref_path": str(source_harness),
+                    "attributed_issue_ids": issue_ids,
+                    "evidence_refs": [
+                        {"case_id": case_id, "issue_id": issue_ids[0]} for case_id in case_ids if issue_ids
+                    ],
+                    "optimization_surfaces": sorted(requested_surfaces),
+                }
+            ],
+            "actions": [],
+            "action_waves": [],
+            "metadata": {
+                "optimizer_kind": "evobench_policy_harness_v1",
+                "improver_protocol_version": GENERIC_IMPROVER_PROTOCOL_VERSION,
+                "requested_surfaces": sorted(requested_surfaces),
+                "unsupported_surfaces": unsupported_surfaces,
+            },
+        },
+    )
+    execution_path = run_dir / "execution_results.json"
+    _write_json_atomic(
+        execution_path,
+        {
+            "status": "unsupported_surface",
+            "requested_surfaces": sorted(requested_surfaces),
+            "unsupported_surfaces": unsupported_surfaces,
+            "actions": [],
+        },
+    )
+    artifact = {
+        "optimization_id": run_dir.name,
+        "output_dir": str(run_dir),
+        "status": "unsupported_surface",
+        "optimized_harness_refs_path": str(source_refs_path),
+        "roles": [_ROLE],
+        "candidate_ready_roles": [],
+        "published_roles": [],
+        "staged_roles": [],
+        "verified_roles": [],
+        "promoted_roles": [],
+        "promotion_status": "not_applicable",
+        "composition_mode": "opaque_snapshot",
+        "failed_roles": [_ROLE],
+        "skipped_roles": [],
+        "plan_path": str(plan_path),
+        "execution_result_path": str(execution_path),
+        "verification_path": "",
+        "fix_result_path": "",
+        "role_results": {
+            _ROLE: {
+                "status": "unsupported_surface",
+                "before_harness_ref_path": str(source_harness),
+                "after_harness_ref_path": "",
+                "action_ids": [],
+                "verification_status": "not_run",
+                "error": (
+                    "The current PolicyHarness mutation contract does not expose " + ", ".join(unsupported_surfaces)
+                ),
+            }
+        },
+        "metadata": {
+            "source_harness_refs_path": str(source_refs_path),
+            "optimization_issue_ids": issue_ids,
+            "target_case_ids": case_ids,
+            "optimizer_kind": "evobench_policy_harness_v1",
+            "improver_protocol_version": GENERIC_IMPROVER_PROTOCOL_VERSION,
+            "requested_surfaces": sorted(requested_surfaces),
+            "unsupported_surfaces": unsupported_surfaces,
+            "routing_decision": "reject_without_prompt_downgrade",
+        },
+        "role": _ROLE,
+    }
+    ref_path = run_dir / "member_optimization_ref.yaml"
+    _write_yaml_atomic(ref_path, artifact)
+    return str(ref_path)
 
 
 def _candidate_harness_path(run_dir: Path, source_harness: Path) -> Path:
@@ -342,8 +501,10 @@ async def _invoke_patch_agent(
     request: str,
     model_config_ref: str,
     workspace: Path,
+    source_harness: dict[str, Any],
     leakage_guard: dict[str, Any],
     causal_hypothesis_policy: dict[str, Any],
+    requested_surfaces: set[str],
 ) -> dict[str, Any]:
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
     from openjiuwen.harness.factory import create_deep_agent
@@ -364,6 +525,8 @@ async def _invoke_patch_agent(
             "paired evaluation evidence. The task domain is not assumed. Separate facts "
             "from hypotheses and return only the requested JSON mapping. Make one "
             "falsifiable behavior intervention within the supplied mutation contract. "
+            "Express persistent instructions as a transferable behavior rule rather than "
+            "an answer for the observed benchmark instance. "
             "Never encode case IDs, known answers, benchmark entities, or private tool fields."
         ),
         tools=None,
@@ -383,8 +546,10 @@ async def _invoke_patch_agent(
         parse_response=parse_yaml_or_json_object_response,
         validate_response=lambda value: _patch_validation_errors(
             value,
+            source_harness=source_harness,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            requested_surfaces=requested_surfaces,
         ),
         build_retry_message=lambda _previous, error: (
             f"{request}\n\nThe previous output was invalid: {error}\nReturn only a corrected JSON mapping."
@@ -438,24 +603,22 @@ def _select_issues(
     return selected
 
 
-def _analysis_uses_strict_causal_protocol(analysis: Mapping[str, Any]) -> bool:
-    metadata = analysis.get("metadata") if isinstance(analysis.get("metadata"), Mapping) else {}
-    version = str(metadata.get("analyzer_protocol_version", "") or "")
-    return version.startswith("generic_behavior_causal_v")
-
-
 def _issue_is_actionable(issue: Mapping[str, Any]) -> bool:
     metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
     attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
     target_ref = str(attribution.get("target_ref", "") or "").strip().casefold()
     evidence_status = str(attribution.get("evidence_status", "") or "").strip().casefold()
-    if target_ref == "unassigned" or evidence_status == "insufficient":
+    if not target_ref or target_ref == "unassigned":
+        return False
+    if evidence_status not in {"confirmed", "supported_hypothesis"}:
         return False
     assessments = [item for item in attribution.get("hypothesis_assessment", []) if isinstance(item, Mapping)]
     if not assessments:
-        return True
+        return False
     statuses = {str(item.get("status", "") or "").strip().casefold() for item in assessments}
-    return "supported" in statuses and "unresolved" not in statuses
+    if evidence_status == "confirmed" and "unresolved" in statuses:
+        return False
+    return "supported" in statuses
 
 
 def _causal_hypothesis_policy(issues: list[dict[str, Any]]) -> dict[str, Any]:
@@ -490,66 +653,16 @@ def _causal_hypothesis_policy(issues: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _frozen_target_case_ids(optimization_experience: dict[str, Any] | None) -> set[str]:
-    if not isinstance(optimization_experience, Mapping):
-        return set()
-    values = optimization_experience.get("frozen_target_case_ids", [])
-    if not isinstance(values, list):
-        return set()
-    return {str(case_id) for case_id in values if str(case_id).strip()}
-
-
-def _build_unattributed_failure_issue(
-    eval_ref_path: str,
-    *,
-    target_case_ids: set[str] | None = None,
-) -> dict[str, Any]:
-    """Preserve the controller's evidence-first fallback when attribution is empty.
-
-    The candidate remains low-confidence and must pass the same frozen target
-    gate as an attributed candidate.  This is preferable to aborting a whole
-    epoch because the Analyzer returned no optimizable target.
-    """
-    eval_ref = _read_yaml_mapping(Path(eval_ref_path).expanduser().resolve())
-    failed_case_ids: list[str] = []
-    for case in eval_ref.get("cases", []) if isinstance(eval_ref.get("cases"), list) else []:
-        if not isinstance(case, dict):
-            continue
-        metadata = case.get("metadata") if isinstance(case.get("metadata"), dict) else {}
-        explicit_passed = metadata.get("evaluation_passed")
-        status = str(case.get("status", "") or "").strip().casefold()
-        score = case.get("score")
-        failed = explicit_passed is False or status in {"failed", "error"}
-        if explicit_passed is not True and not failed and isinstance(score, (int, float)):
-            failed = float(score) < 1.0
-        case_id = str(case.get("case_id", "") or "").strip()
-        if failed and case_id:
-            failed_case_ids.append(case_id)
-    failed_case_ids = list(dict.fromkeys(failed_case_ids))
-    requested_targets = set(target_case_ids or set())
-    if requested_targets:
-        failed_case_ids = [case_id for case_id in failed_case_ids if case_id in requested_targets]
-    if not failed_case_ids:
-        raise ValueError("PolicyHarness optimization requires failed cases or an attributed analysis issue")
-    return {
-        "issue_id": "issue_unattributed_failure_001",
-        "category": "member_harness",
-        "severity": "medium",
-        "summary": "Observed task failure has no usable Analyzer attribution.",
-        "affected_cases": failed_case_ids,
-        "affected_components": [_ROLE],
-        "recommendation": (
-            "Derive one reusable policy prompt intervention from the materialized "
-            "causal evidence and validate it on the failed cases."
-        ),
-        "metadata": {
-            "unattributed_fallback": True,
-            "attribution": {
-                "target_ref": "member_harness.policy_harness.prompt",
-                "confidence": "low",
-            },
-        },
-    }
+def _issue_counterfactual_predictions(issues: list[dict[str, Any]]) -> list[str]:
+    predictions: list[str] = []
+    for issue in issues:
+        metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
+        attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+        coverage = attribution.get("causal_coverage") if isinstance(attribution.get("causal_coverage"), Mapping) else {}
+        prediction = str(coverage.get("counterfactual_prediction", "") or "").strip()
+        if prediction and prediction not in predictions:
+            predictions.append(prediction)
+    return predictions
 
 
 def _build_evidence_bundle(
@@ -620,7 +733,7 @@ def _build_evidence_bundle(
     eval_ref = _read_yaml_mapping(eval_path)
     legacy_evidence: list[dict[str, Any]] = []
     legacy_guard_sources: list[Any] = []
-    remaining_result = _MAX_LEGACY_RESULT_CHARS
+    remaining_result = 0 if primary_structured_available else _MAX_LEGACY_RESULT_CHARS
     remaining_trace = _MAX_LEGACY_TRACE_CHARS if not primary_structured_available else 0
     for case in eval_ref.get("cases", []) if isinstance(eval_ref.get("cases"), list) else []:
         if not isinstance(case, dict):
@@ -694,6 +807,7 @@ def _build_evidence_bundle(
         guard_sources.extend(_diagnosis_records(payload, target_case_ids))
     for payload in materialized_payloads["feedback"]:
         guard_sources.extend(_feedback_records(payload, target_case_ids))
+    evidence_locations = _issue_evidence_locations(selected_issues)
     return {
         "schema_version": 2,
         "evidence_priority": [
@@ -703,12 +817,18 @@ def _build_evidence_bundle(
             "bounded_legacy_fallback",
         ],
         "analyzer_causal_digest": _bounded_evidence_records(
-            [_sanitize_model_evidence(value, target_case_ids) for value in causal_digests],
+            [
+                _sanitize_model_evidence(
+                    _compact_causal_digest_for_improver(value, evidence_locations),
+                    target_case_ids,
+                )
+                for value in causal_digests
+            ],
             _MAX_STRUCTURED_EVIDENCE_CHARS,
         ),
         "analyzer_diagnoses": _bounded_evidence_records(
             [
-                _sanitize_model_evidence(value, target_case_ids)
+                _sanitize_model_evidence(_compact_materialized_diagnosis(value), target_case_ids)
                 for value in [*diagnoses, *_compact_selected_issue_diagnoses(selected_issues)]
             ],
             _MAX_STRUCTURED_EVIDENCE_CHARS // 2,
@@ -717,7 +837,10 @@ def _build_evidence_bundle(
             [_sanitize_model_evidence(value, target_case_ids) for value in feedback_deltas],
             _MAX_STRUCTURED_EVIDENCE_CHARS // 2,
         ),
-        "optimization_hypotheses": _sanitize_model_evidence(hypotheses, target_case_ids),
+        "optimization_hypotheses": _sanitize_model_evidence(
+            _compact_optimization_hypotheses(hypotheses),
+            target_case_ids,
+        ),
         "legacy_fallback_used": not primary_structured_available,
         # Preserve the v1 key for older Analyzer artifacts. Raw traces are used
         # only when no materialized causal/feedback evidence is available.
@@ -866,6 +989,200 @@ def _compact_selected_issue_diagnoses(issues: list[dict[str, Any]]) -> list[dict
     return compact
 
 
+def _compact_materialized_diagnosis(value: Any) -> Any:
+    """Keep causal decisions while dropping verbose protocol bookkeeping."""
+    if not isinstance(value, Mapping):
+        return value
+    metadata = value.get("metadata") if isinstance(value.get("metadata"), Mapping) else {}
+    attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+    fields = (
+        "failure_mode",
+        "failed_requirement",
+        "root_cause",
+        "critical_mistake",
+        "general_mechanism",
+        "recommendation",
+        "target_ref",
+        "evidence_status",
+        "decision_contract",
+        "causal_coverage",
+        "prior_experiment_assessment",
+    )
+    compact = {
+        key: value.get(key, attribution.get(key))
+        for key in fields
+        if value.get(key, attribution.get(key)) not in (None, "", {}, [])
+    }
+    return compact or dict(value)
+
+
+def _issue_evidence_locations(issues: list[dict[str, Any]]) -> set[tuple[str, int | str]]:
+    locations: set[tuple[str, int | str]] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            trace_id = str(value.get("trace_id", "") or "")
+            message_index = value.get("message_index")
+            step_pointer = str(value.get("step_pointer", "") or "")
+            if message_index is not None:
+                try:
+                    locations.add((trace_id, int(message_index)))
+                except (TypeError, ValueError):
+                    pass
+            if step_pointer:
+                locations.add((trace_id, step_pointer))
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(issues)
+    return locations
+
+
+def _compact_causal_digest_for_improver(
+    value: Any,
+    evidence_locations: set[tuple[str, int | str]],
+) -> Any:
+    """Project Analyzer evidence onto cited decisions without head truncation."""
+    if not isinstance(value, Mapping) or not isinstance(value.get("trials"), list):
+        return value
+    compact = {
+        key: value[key]
+        for key in (
+            "schema_version",
+            "decision",
+            "causal_decision",
+            "task_contract",
+            "outcome",
+            "tool_contract_observations",
+            "critical_evidence_terms",
+            "cross_trial_contrast",
+            "fallback_final_response",
+            "compression_stats",
+        )
+        if key in value and value[key] not in (None, "", {}, [])
+    }
+    compact_trials: list[dict[str, Any]] = []
+    for raw_trial in value["trials"]:
+        if not isinstance(raw_trial, Mapping):
+            continue
+        trial = {
+            key: raw_trial[key]
+            for key in (
+                "trial_id",
+                "role",
+                "passed",
+                "score",
+                "exit_reason",
+                "tool_call_count",
+                "tool_sequence",
+                "tool_sequence_truncated",
+                "selection_coverage",
+                "final_output",
+                "trial_evaluation",
+            )
+            if key in raw_trial and raw_trial[key] not in (None, "", {}, [])
+        }
+        actions = [action for action in raw_trial.get("selected_actions", []) if isinstance(action, Mapping)]
+        cited = [action for action in actions if _action_matches_evidence_location(action, evidence_locations)]
+        if not cited:
+            cited = [
+                action
+                for action in actions
+                if {
+                    str(reason)
+                    for reason in (
+                        action.get("selection_reasons", [])
+                        if isinstance(action.get("selection_reasons"), list)
+                        else [action.get("selection_reasons", "")]
+                    )
+                    if str(reason)
+                }
+                & {"observed_failure", "terminal_window"}
+            ][:8]
+        trial["cited_actions"] = [_compact_causal_action(action) for action in cited]
+        compact_trials.append(trial)
+    compact["trials"] = compact_trials
+    return compact
+
+
+def _action_matches_evidence_location(
+    action: Mapping[str, Any],
+    evidence_locations: set[tuple[str, int | str]],
+) -> bool:
+    trace_id = str(action.get("trace_id", "") or "")
+    message_index = action.get("message_index")
+    step_pointer = str(action.get("step_pointer", "") or "")
+    candidates: set[tuple[str, int | str]] = set()
+    if message_index is not None:
+        try:
+            candidates.add((trace_id, int(message_index)))
+            candidates.add(("", int(message_index)))
+        except (TypeError, ValueError):
+            pass
+    if step_pointer:
+        candidates.add((trace_id, step_pointer))
+        candidates.add(("", step_pointer))
+    return bool(candidates & evidence_locations)
+
+
+def _compact_causal_action(action: Mapping[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: action[key]
+        for key in (
+            "evidence_id",
+            "trace_id",
+            "role",
+            "message_index",
+            "step_pointer",
+            "tool",
+            "request",
+            "selection_reasons",
+        )
+        if key in action and action[key] not in (None, "", {}, [])
+    }
+    response_evidence = action.get("response_evidence")
+    if isinstance(response_evidence, Mapping):
+        compact["response_evidence"] = response_evidence
+    elif action.get("response") not in (None, "", {}, []):
+        compact["response"] = action["response"]
+    return compact
+
+
+def _compact_optimization_hypotheses(document: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate immutable contracts before presenting them to the model."""
+    records = document.get("hypotheses") if isinstance(document, Mapping) else None
+    if not isinstance(records, list):
+        return {}
+    compact_records: list[dict[str, Any]] = []
+    fields = (
+        "hypothesis_id",
+        "required_behavior",
+        "forbidden_behavior",
+        "decision_contract",
+        "causal_coverage",
+        "supported_causal_hypothesis_ids",
+        "falsified_causal_hypothesis_ids",
+        "prior_experiment_assessment",
+        "lever_policy",
+    )
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        compact_record = {key: record[key] for key in fields if key in record and record[key] not in (None, "", {}, [])}
+        lever_policy = compact_record.get("lever_policy")
+        if isinstance(lever_policy, Mapping):
+            compact_record["lever_policy"] = {
+                key: lever_policy[key]
+                for key in ("recommended_lever", "target_ref", "why_this_lever", "why_not_other_levers")
+                if key in lever_policy and lever_policy[key] not in (None, "", {}, [])
+            }
+        compact_records.append(compact_record)
+    return {"version": document.get("version"), "hypotheses": compact_records}
+
+
 def _sanitize_model_evidence(value: Any, case_ids: set[str]) -> Any:
     if isinstance(value, Mapping):
         sanitized: dict[str, Any] = {}
@@ -907,11 +1224,16 @@ def _bounded_evidence_records(records: list[Any], limit: int) -> list[Any]:
             bounded.append(record)
             remaining -= len(encoded)
             continue
-        if remaining > 256:
+        if not bounded:
+            # A complete causal record is safer than a head-only JSON excerpt:
+            # decisive evidence and counterfactuals often live near the tail.
+            bounded.append(record)
+        elif remaining > 256:
             bounded.append(
                 {
-                    "truncated": True,
-                    "structured_json_excerpt": encoded[: remaining - 128],
+                    "omitted_due_to_budget": True,
+                    "content_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                    "encoded_chars": len(encoded),
                 }
             )
         break
@@ -920,6 +1242,8 @@ def _bounded_evidence_records(records: list[Any], limit: int) -> list[Any]:
 
 def _leakage_guard_from_sources(sources: list[Any], *, case_ids: set[str]) -> dict[str, Any]:
     sensitive_literals: set[str] = set()
+    task_specific_literals: set[str] = set()
+    task_numeric_literals: set[str] = set()
     public_tool_fields: set[str] = set()
     non_public_tool_fields: set[str] = set()
 
@@ -929,6 +1253,10 @@ def _leakage_guard_from_sources(sources: list[Any], *, case_ids: set[str]) -> di
                 key = str(raw_key).casefold()
                 if key in _SENSITIVE_VALUE_KEYS:
                     sensitive_literals.update(_literal_values(child))
+                if key in _TASK_SPECIFIC_VALUE_KEYS:
+                    task_specific_literals.update(_literal_values(child))
+                if key in _PUBLIC_TASK_TEXT_KEYS and isinstance(child, str):
+                    task_numeric_literals.update(_numeric_literals(child))
                 if key in {"allowed_request_fields", "required_request_fields"}:
                     public_tool_fields.update(_identifier_values(child))
                 if key in _NON_PUBLIC_TOOL_FIELD_KEYS:
@@ -943,6 +1271,8 @@ def _leakage_guard_from_sources(sources: list[Any], *, case_ids: set[str]) -> di
     return {
         "case_ids": sorted(case_ids),
         "sensitive_literals": sorted(sensitive_literals),
+        "task_specific_literals": sorted(task_specific_literals),
+        "task_numeric_literals": sorted(task_numeric_literals),
         "public_tool_fields": sorted(public_tool_fields),
         "non_public_tool_fields": sorted(non_public_tool_fields - public_tool_fields),
     }
@@ -961,6 +1291,15 @@ def _literal_values(value: Any) -> set[str]:
         if len(text) >= 4:
             values.add(text)
     return values
+
+
+def _numeric_literals(value: str) -> set[str]:
+    literals: set[str] = set()
+    for match in re.finditer(r"(?<![A-Za-z0-9_])[$€£¥￥]?\s*\d[\d,]*(?:\.\d+)?%?(?![A-Za-z0-9_])", value):
+        normalized = re.sub(r"[^0-9.]", "", match.group())
+        if len(re.sub(r"\D", "", normalized)) >= 3:
+            literals.add(normalized)
+    return literals
 
 
 def _identifier_values(value: Any) -> set[str]:
@@ -991,7 +1330,14 @@ def _build_prompt_leakage_guard(
     )
     return {
         key: sorted(set(internal.get(key, [])) | set(fallback.get(key, [])))
-        for key in ("case_ids", "sensitive_literals", "public_tool_fields", "non_public_tool_fields")
+        for key in (
+            "case_ids",
+            "sensitive_literals",
+            "task_specific_literals",
+            "task_numeric_literals",
+            "public_tool_fields",
+            "non_public_tool_fields",
+        )
     }
 
 
@@ -999,6 +1345,10 @@ def _generation_context(experience: dict[str, Any] | None) -> dict[str, Any]:
     value = experience or {}
     sibling = value.get("sibling_generation")
     sibling = dict(sibling) if isinstance(sibling, dict) else {}
+    improver_policy = value.get("improver_policy")
+    improver_policy = dict(improver_policy) if isinstance(improver_policy, Mapping) else {}
+    generation_directives = improver_policy.get("generation_directives")
+    generation_directives = dict(generation_directives) if isinstance(generation_directives, Mapping) else {}
     index = max(1, int(sibling.get("generation_index", 1) or 1))
     focuses = (
         "direct repair of the diagnosed decision rule",
@@ -1012,6 +1362,11 @@ def _generation_context(experience: dict[str, Any] | None) -> dict[str, Any]:
         "candidate_id": str(sibling.get("candidate_id", "") or ""),
         "differentiation_focus": focuses[(index - 1) % len(focuses)],
         "prior_proposals": [dict(item) for item in sibling.get("prior_proposals", []) if isinstance(item, dict)],
+        "improver_policy": {
+            "version_id": str(improver_policy.get("version_id", "") or ""),
+            "policy_digest": str(improver_policy.get("policy_digest", "") or ""),
+            "generation_directives": generation_directives,
+        },
     }
 
 
@@ -1023,6 +1378,7 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
     causal_hypothesis_policy: dict[str, Any],
     generation_context: dict[str, Any],
     rejected_capabilities: list[dict[str, Any]],
+    requested_surfaces: set[str],
 ) -> str:
     model_evidence = {key: value for key, value in evidence.items() if not key.startswith("_")}
     internal_guard = evidence.get("_prompt_leakage_guard")
@@ -1037,7 +1393,12 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
         "current_harness_json": source_harness,
         "supported_mutation_contract": {
             "prompt_append": _PROMPT_PATH,
-            "budget_fields": sorted(_ALLOWED_HARNESS_FIELDS),
+            "budget_fields": sorted(_BUDGET_HARNESS_FIELDS),
+            "rail_config": (
+                {_RAIL_HARNESS_FIELD: sorted(_ALLOWED_RAIL_FIELDS)}
+                if isinstance(source_harness.get(_RAIL_HARNESS_FIELD), Mapping)
+                else {}
+            ),
             "unsupported": [
                 "task implementation code",
                 "tool implementation",
@@ -1047,12 +1408,17 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
                 "environment",
             ],
         },
+        "requested_mutation_surfaces": sorted(requested_surfaces),
         "failure_evidence": model_evidence,
         "causal_hypothesis_policy": causal_hypothesis_policy,
         "sibling_generation": _sanitize_model_evidence(generation_context, case_ids),
+        "improver_policy_directives": _sanitize_model_evidence(
+            generation_context.get("improver_policy", {}),
+            case_ids,
+        ),
         "rejected_capabilities": _sanitize_model_evidence(rejected_capabilities, case_ids),
     }
-    return f"""Create one minimal, domain-independent behavior intervention for the current AI Harness.
+    return f"""Create one minimal, transferable behavior intervention for the current AI Harness.
 
 This is sibling candidate {generation_context["generation_index"]} of
 {generation_context["candidate_count"]}. Its secondary differentiation lens is:
@@ -1071,12 +1437,18 @@ Return ONLY this JSON shape:
 }}
 
 Rules:
-- system_prompt_append is required, must be no more than {_MAX_PROMPT_APPEND_CHARS} characters,
-  and must not repeat text already in the current prompt.
-- harness_updates is optional. Its only legal keys are max_steps and
-  rollout_wall_clock_seconds. Change them only when the evidence specifically
-  shows a step or wall-clock budget failure.
+- system_prompt_append is required for a Prompt target and must be empty when
+  the requested target does not include Prompt. A non-empty append must be no more than
+  {_MAX_PROMPT_APPEND_CHARS} characters and must not repeat existing text.
+- harness_updates is optional. Budget targets may change only max_steps or
+  rollout_wall_clock_seconds. Rail targets may change only fields explicitly
+  listed under supported_mutation_contract.rail_config. An update is required
+  for either target and must be empty for a Prompt-only target.
 - Do not replace or summarize the current prompt. Return only the new append.
+- Apply improver_policy_directives as versioned search guidance only when they
+  are compatible with current causal evidence and the supported mutation
+  contract. They cannot override a failed requirement, invent an activation
+  event, or weaken the one-intervention rule.
 - Obey supported_mutation_contract. Do not disguise an unsupported Tool, Skill,
   Config, environment, evaluator, or framework defect as a Prompt defect.
 - Keep one primary behavioral intervention expressed as trigger -> action ->
@@ -1116,6 +1488,12 @@ Rules:
   private, or merely observed field is not a valid request field.
 - Generalize the causal distinction and observable behavior. Do not memorize the
   benchmark instance. Redaction markers in the evidence must remain redacted.
+- A persistent Prompt rule must transfer to more than the observed task instance.
+  It may target a recurring domain behavior when the causal evidence requires that
+  specificity, but it must not name the observed document, section, party, product,
+  jurisdiction, benchmark label, fixed value, or answer. State a public trigger,
+  the reusable decision procedure, and a scope boundary. Prefer operational words
+  over broad advice; do not force output content that only this case requested.
 - Treat analyzer_causal_digest, analyzer_diagnoses, and
   candidate_feedback_delta as primary. Use failed_case_evidence only as a
   bounded compatibility fallback when legacy_fallback_used is true.
@@ -1128,15 +1506,19 @@ INPUT:
 def _patch_validation_errors(
     value: dict[str, Any],
     *,
+    source_harness: dict[str, Any] | None = None,
     leakage_guard: dict[str, Any] | None = None,
     causal_hypothesis_policy: dict[str, Any] | None = None,
+    requested_surfaces: set[str] | None = None,
 ) -> list[str]:
     try:
         _validate_patch(
             value,
             source_prompt="",
+            source_harness=source_harness,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            requested_surfaces=requested_surfaces,
         )
     except (TypeError, ValueError) as exc:
         return [str(exc)]
@@ -1147,8 +1529,10 @@ def _validate_patch(
     value: dict[str, Any],
     *,
     source_prompt: str,
+    source_harness: dict[str, Any] | None = None,
     leakage_guard: dict[str, Any] | None = None,
     causal_hypothesis_policy: dict[str, Any] | None = None,
+    requested_surfaces: set[str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("patch must be a mapping")
@@ -1162,12 +1546,19 @@ def _validate_patch(
     unknown = sorted(set(value) - allowed_top_level)
     if unknown:
         raise ValueError(f"unknown patch fields: {unknown}")
+    surfaces = set(requested_surfaces or {"prompt"})
+    prompt_required = bool(surfaces & {"prompt", "unspecified"})
+    budget_required = "budget" in surfaces
+    rail_required = "rail" in surfaces
     append = str(value.get("system_prompt_append", "") or "").strip()
-    if not append:
+    _validate_generated_text_integrity(append, field="system_prompt_append")
+    if prompt_required and not append:
         raise ValueError("system_prompt_append must not be empty")
+    if not prompt_required and append:
+        raise ValueError("system_prompt_append must be empty when Prompt is not the requested mutation surface")
     if len(append) > _MAX_PROMPT_APPEND_CHARS:
         raise ValueError(f"system_prompt_append exceeds {_MAX_PROMPT_APPEND_CHARS} characters")
-    if source_prompt and append.casefold() in source_prompt.casefold():
+    if append and source_prompt and append.casefold() in source_prompt.casefold():
         raise ValueError("system_prompt_append already exists in the parent prompt")
     _validate_global_prompt_append(append, leakage_guard or {})
 
@@ -1182,7 +1573,10 @@ def _validate_patch(
     }
     if bool(hypothesis_policy.get("instrumented")):
         if not source_hypothesis_id:
-            raise ValueError("source_hypothesis_id is required for instrumented causal evidence")
+            if len(supported) == 1:
+                source_hypothesis_id = next(iter(supported))
+            else:
+                raise ValueError("source_hypothesis_id is required when multiple causal hypotheses are supported")
         if source_hypothesis_id in forbidden:
             raise ValueError(f"source_hypothesis_id is not actionable: {source_hypothesis_id}")
         if source_hypothesis_id not in supported:
@@ -1191,11 +1585,36 @@ def _validate_patch(
     raw_updates = value.get("harness_updates", {})
     if not isinstance(raw_updates, dict):
         raise TypeError("harness_updates must be a mapping")
-    normalized_updates: dict[str, int] = {}
+    normalized_updates: dict[str, Any] = {}
     for raw_key, raw_value in raw_updates.items():
         key = "rollout_wall_clock_seconds" if raw_key in _WALL_CLOCK_ALIASES else str(raw_key)
         if key not in _ALLOWED_HARNESS_FIELDS:
             raise ValueError(f"harness update is not allowed: {raw_key}")
+        if key in _BUDGET_HARNESS_FIELDS and not budget_required:
+            raise ValueError(f"budget harness update is outside the requested mutation surface: {raw_key}")
+        if key == _RAIL_HARNESS_FIELD:
+            if not rail_required:
+                raise ValueError("rail harness update is outside the requested mutation surface")
+            source_rail = (source_harness or {}).get(_RAIL_HARNESS_FIELD)
+            if not isinstance(source_rail, Mapping):
+                raise ValueError("the current PolicyHarness does not expose tool_loop_compaction rail config")
+            if not isinstance(raw_value, Mapping) or not raw_value:
+                raise TypeError("tool_loop_compaction update must be a non-empty mapping")
+            unknown_rail_fields = sorted(set(raw_value) - _ALLOWED_RAIL_FIELDS)
+            if unknown_rail_fields:
+                raise ValueError(f"tool_loop_compaction update contains unsupported fields: {unknown_rail_fields}")
+            normalized_rail: dict[str, bool | int] = {}
+            for rail_key, rail_value in raw_value.items():
+                if rail_key == "enabled":
+                    if not isinstance(rail_value, bool):
+                        raise TypeError("tool_loop_compaction enabled must be a boolean")
+                elif isinstance(rail_value, bool) or not isinstance(rail_value, int):
+                    raise TypeError(f"tool_loop_compaction {rail_key} must be an integer")
+                elif not 1 <= rail_value <= 100:
+                    raise ValueError(f"tool_loop_compaction {rail_key} must be between 1 and 100")
+                normalized_rail[str(rail_key)] = rail_value
+            normalized_updates[key] = normalized_rail
+            continue
         if isinstance(raw_value, bool) or not isinstance(raw_value, int):
             raise TypeError(f"harness update {raw_key} must be an integer")
         if key == "max_steps" and not 1 <= raw_value <= 5_000:
@@ -1203,13 +1622,34 @@ def _validate_patch(
         if key == "rollout_wall_clock_seconds" and not 30 <= raw_value <= 14_400:
             raise ValueError("rollout_wall_clock_seconds must be between 30 and 14400")
         normalized_updates[key] = raw_value
+    if budget_required and not (_BUDGET_HARNESS_FIELDS & set(normalized_updates)):
+        raise ValueError("harness_updates must not be empty for a budget intervention")
+    if rail_required and _RAIL_HARNESS_FIELD not in normalized_updates:
+        raise ValueError("harness_updates must include tool_loop_compaction for a rail intervention")
+    if not budget_required and not rail_required and normalized_updates:
+        raise ValueError("harness_updates must be empty for a prompt-only intervention")
+    rationale = str(value.get("rationale", "") or "").strip()
+    expected_effect = str(value.get("expected_effect", "") or "").strip()
+    _validate_generated_text_integrity(rationale, field="rationale")
+    _validate_generated_text_integrity(expected_effect, field="expected_effect")
+    if not rationale:
+        raise ValueError("rationale must name the evidence-grounded discriminator")
+    if not expected_effect:
+        raise ValueError("expected_effect must name an observable candidate outcome")
     return {
         "source_hypothesis_id": source_hypothesis_id,
         "system_prompt_append": append,
         "harness_updates": normalized_updates,
-        "rationale": str(value.get("rationale", "") or "").strip(),
-        "expected_effect": str(value.get("expected_effect", "") or "").strip(),
+        "rationale": rationale,
+        "expected_effect": expected_effect,
     }
+
+
+def _validate_generated_text_integrity(value: str, *, field: str) -> None:
+    if "\ufffd" in value:
+        raise ValueError(f"{field} contains Unicode replacement characters; regenerate clean text")
+    if any(ord(character) < 32 and character not in "\n\r\t" for character in value):
+        raise ValueError(f"{field} contains unsupported control characters")
 
 
 def _validate_global_prompt_append(append: str, guard: dict[str, Any]) -> None:
@@ -1223,6 +1663,15 @@ def _validate_global_prompt_append(append: str, guard: dict[str, Any]) -> None:
         literal = str(literal).strip()
         if len(literal) >= 4 and literal.casefold() in normalized:
             raise ValueError("system_prompt_append contains a known answer or benchmark entity literal")
+
+    for literal in guard.get("task_specific_literals", []):
+        literal = str(literal).strip()
+        if len(literal) >= 4 and literal.casefold() in normalized:
+            raise ValueError("system_prompt_append contains a task-specific entity literal")
+
+    appended_numbers = _numeric_literals(append)
+    if appended_numbers & {str(value) for value in guard.get("task_numeric_literals", [])}:
+        raise ValueError("system_prompt_append contains a task-specific numeric literal")
 
     for field in guard.get("non_public_tool_fields", []):
         field = str(field).strip()
@@ -1253,10 +1702,19 @@ def _apply_patch(
     source_harness: dict[str, Any],
     patch: dict[str, Any],
 ) -> None:
-    prompt = source_prompt.rstrip() + "\n\n" + patch["system_prompt_append"].strip() + "\n"
-    prompt_path.write_text(prompt, encoding="utf-8")
+    if patch["system_prompt_append"]:
+        prompt = source_prompt.rstrip() + "\n\n" + patch["system_prompt_append"].strip() + "\n"
+        prompt_path.write_text(prompt, encoding="utf-8")
+    harness_updates = dict(patch["harness_updates"])
+    if not harness_updates:
+        return
     harness = dict(source_harness)
-    harness.update(patch["harness_updates"])
+    rail_updates = harness_updates.pop(_RAIL_HARNESS_FIELD, None)
+    harness.update(harness_updates)
+    if isinstance(rail_updates, Mapping):
+        rail_config = dict(harness.get(_RAIL_HARNESS_FIELD, {}))
+        rail_config.update(rail_updates)
+        harness[_RAIL_HARNESS_FIELD] = rail_config
     harness_path.write_text(json.dumps(harness, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -1265,6 +1723,7 @@ def _verify_candidate_tree(
     source_tree: dict[str, str],
     source_harness: Path,
     candidate_harness: Path,
+    requested_surfaces: set[str],
 ) -> list[str]:
     candidate_tree = _tree_hashes(candidate_harness)
     if set(candidate_tree) != set(source_tree):
@@ -1284,8 +1743,12 @@ def _verify_candidate_tree(
     }
     if changed_fields - _ALLOWED_HARNESS_FIELDS:
         raise RuntimeError(f"candidate changed forbidden harness.json fields: {sorted(changed_fields)}")
-    if _PROMPT_PATH not in changed:
+    if requested_surfaces & {"prompt", "unspecified"} and _PROMPT_PATH not in changed:
         raise RuntimeError("candidate did not change system_prompt.md")
+    if "budget" in requested_surfaces and _HARNESS_PATH not in changed:
+        raise RuntimeError("candidate did not change harness.json for the requested budget intervention")
+    if "rail" in requested_surfaces and _HARNESS_PATH not in changed:
+        raise RuntimeError("candidate did not change harness.json for the requested rail intervention")
     return changed
 
 
@@ -1295,10 +1758,10 @@ def _build_actions(
     issue_ids: list[str],
     case_ids: list[str],
     source_hypothesis_id: str,
+    analyzer_counterfactual_predictions: list[str],
 ) -> list[dict[str, Any]]:
     common = {
         "role": _ROLE,
-        "action_group": "prompt",
         "operation": "modify",
         "action_type": "update_file",
         "attributed_issue_ids": issue_ids,
@@ -1311,26 +1774,44 @@ def _build_actions(
         "constraints": {
             "target_case_ids": case_ids,
             "source_causal_hypothesis_id": source_hypothesis_id,
+            "analyzer_counterfactual_predictions": analyzer_counterfactual_predictions,
         },
     }
-    actions = [
-        {
-            **common,
-            "action_id": "evobench_policy_prompt",
-            "target_path": _PROMPT_PATH,
-            "description": "Append one evidence-grounded PolicyHarness instruction block.",
-            "rationale": patch["rationale"],
-        }
-    ]
-    if patch["harness_updates"]:
+    actions = []
+    if patch["system_prompt_append"]:
         actions.append(
             {
                 **common,
+                "action_group": "prompt",
+                "action_id": "evobench_policy_prompt",
+                "target_path": _PROMPT_PATH,
+                "description": "Append one evidence-grounded PolicyHarness instruction block.",
+                "rationale": patch["rationale"],
+            }
+        )
+    budget_updates = {key: value for key, value in patch["harness_updates"].items() if key in _BUDGET_HARNESS_FIELDS}
+    if budget_updates:
+        actions.append(
+            {
+                **common,
+                "action_group": "config",
                 "action_id": "evobench_policy_budget",
                 "target_path": _HARNESS_PATH,
                 "description": "Adjust only the permitted PolicyHarness execution budget fields.",
                 "rationale": patch["rationale"],
-                "depends_on": ["evobench_policy_prompt"],
+                "depends_on": ["evobench_policy_prompt"] if patch["system_prompt_append"] else [],
+            }
+        )
+    if _RAIL_HARNESS_FIELD in patch["harness_updates"]:
+        actions.append(
+            {
+                **common,
+                "action_group": "rail",
+                "action_id": "evobench_policy_tool_loop_compaction",
+                "target_path": _HARNESS_PATH,
+                "description": "Adjust the declared tool-loop compaction rail configuration.",
+                "rationale": patch["rationale"],
+                "depends_on": [action["action_id"] for action in actions],
             }
         )
     return actions
@@ -1356,8 +1837,8 @@ def _build_plan(
                 "confidence": 1.0,
                 "reason": "Current PolicyHarness optimization target selected from Analyzer evidence.",
                 "evidence_refs": evidence_refs,
-                "mechanism_types": ["instruction"],
-                "optimization_surfaces": ["prompt_section"],
+                "mechanism_types": sorted({str(action["action_group"]) for action in actions}),
+                "optimization_surfaces": sorted({str(action["action_group"]) for action in actions}),
             }
         ],
         "actions": actions,
@@ -1376,7 +1857,7 @@ def _capabilities(actions: list[dict[str, Any]], case_ids: list[str]) -> list[di
         {
             "action_id": action["action_id"],
             "role": _ROLE,
-            "action_group": "prompt",
+            "action_group": str(action.get("action_group", "") or ""),
             "operation": "modify",
             "target_path": action["target_path"],
             "runtime_name": Path(action["target_path"]).stem,
@@ -1384,6 +1865,14 @@ def _capabilities(actions: list[dict[str, Any]], case_ids: list[str]) -> list[di
             "source_causal_hypothesis_id": str(
                 (action.get("constraints", {}) or {}).get("source_causal_hypothesis_id", "")
             ),
+            "analyzer_counterfactual_predictions": [
+                str(item)
+                for item in (action.get("constraints", {}) or {}).get(
+                    "analyzer_counterfactual_predictions",
+                    [],
+                )
+                if str(item)
+            ],
             "target_case_ids": case_ids,
         }
         for action in actions
