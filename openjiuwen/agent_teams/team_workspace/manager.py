@@ -252,12 +252,25 @@ class TeamWorkspaceManager:
 
     @staticmethod
     def _create_windows_junction(target_path: str, link_path: str) -> None:
-        """Create a directory junction using mklink /J on Windows."""
+        """Create a directory junction using mklink /J on Windows.
+
+        ``cmd.exe`` emits its localized messages in the OEM code page, which is
+        not necessarily the encoding ``text=True`` would pick: on a system where
+        ``locale.getpreferredencoding(False)`` resolves to UTF-8 (Windows 11's
+        "Use Unicode UTF-8 worldwide language support", or Python UTF-8 mode)
+        the two disagree, and a non-ASCII failure message such as the Chinese
+        text for "the client does not hold the required privilege" raises
+        ``UnicodeDecodeError`` inside ``subprocess``'s reader thread rather than
+        surfacing as the intended ``OSError``. Decode with the OEM code page and
+        never let a decoding mismatch mask the real failure.
+        """
         cmd_path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
         result = subprocess.run(
             [cmd_path, "/c", "mklink", "/J", link_path, target_path],
             capture_output=True,
             text=True,
+            encoding="oem",
+            errors="replace",
             check=False,
             shell=False,
         )
