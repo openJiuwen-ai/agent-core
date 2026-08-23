@@ -28,7 +28,7 @@ _TIERED_PATH_MATCHER = PathMatcher()
 _STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLevel.ALLOW: 2}
 
 # 规则内 tools 必须同类（与产品设计一致）
-_SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal", "powershell"})
 _PATH_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",

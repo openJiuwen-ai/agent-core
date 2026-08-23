@@ -1,6 +1,6 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-07-31
+最近一次修订日期：2026-08-22
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -171,3 +171,14 @@ PAUSED 收到 `send` 等价于「resume + 把新内容 steer 进去」——**�
 IDLE 不续 task_plan。StreamController 仅校验 `is_pending_interrupt_resume_valid` 后转发，不再
 client 侧排队。此路径与 warm resume 正交：一个 InteractiveInput round 被 pause 时不缓存其 query
 （不可 replay），PAUSED 收到 InteractiveInput 则直接起它自己的单轮 round。
+
+> **user-mediated teammate 审批**（[[F_74_teammate-user-mediated-approval]]）：`InteractiveInput`
+> 新增 sibling 字段 `member_name: Optional[str] = None`（构造后赋值，**不改 `__init__`**
+> ——该类自定义 `__init__(raw_inputs=_sentinel)` 不吃 kwargs）。relay 经 chat.send params
+> 回传 member_name，sidecar `interface.py` 缝入此字段。`manager.interact()`（InteractiveInput
+> 分支）读 `payload.member_name`：`team_approval_mode=user-mediated` 且 `member_name` 非空且
+> `≠ leader_name` 时短路调 `entry.agent.team_backend.approve_tool(member_name, tool_call_id,
+> approved, feedback, auto_confirm)`（不经 `resume_interrupt`）；leader-mediated /
+> `member_name==leader`/`None` fall through `resume_interrupt` 逐字不变。teammate 帧带
+> `member_name` 时 relay auto-approve 跳过（强制人工卡），leader 帧无 `member_name` 仍
+> auto-approve。三者（member_rails / team_helpers / manager）读开关皆快照，不支持热切换。

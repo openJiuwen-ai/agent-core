@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-08-22 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_74_teammate-user-mediated-approval.md`（`team_approval_mode` teammate 审批 surfacing 开关）。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -292,6 +292,7 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 | `agent_customizer` | `Optional[Callable]` | `None`（exclude） | 仅 inprocess spawn 可用的 DeepAgent 改造回调 |
 | `memory` | `Optional[TeamMemoryConfig]` | `None` | 团队级 memory 配置 |
 | `enable_permissions` | `bool` | `False` | Team-specific permission control；为 True 时 teammate 挂 `TeamPermissionRail` 替代 `TeamToolApprovalRail` |
+| `team_approval_mode` | `Literal["leader-mediated", "user-mediated"]` | `"user-mediated"` | teammate 工具审批 surfacing 开关；`user-mediated` 时审批卡弹前端用户（member_name 回程经 `InteractiveInput.member_name` 缝入 + `manager.interact` 路由 `team_backend.approve_tool`，详见 [[F_74_teammate-user-mediated-approval]]）；默认 `user-mediated`（feature 默认开），`leader-mediated` 为 opt-out。三者（member_rails 装配期 `RailSpec.params` / team_helpers 请求期 enriched 快照 / manager activate 期 `entry.agent.spec`）皆快照，不支持热切换 |
 
 方法：
 

@@ -33,6 +33,8 @@ _PATH_AWARE_COMMANDS = frozenset({
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
     "ls", "dir", "type", "del", "rd", "copy", "move", "md",
     "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
+    "get-content", "gc", "get-childitem", "remove-item", "set-content",
+    "add-content", "out-file", "new-item", "rename-item", "copy-item", "move-item",
 })
 
 _INTERPRETER_BASENAMES = frozenset({
@@ -49,11 +51,13 @@ _NT_CMD_SWITCH_BODY = re.compile(r"^[A-Za-z]{1,2}(?::[^\s/\\]+)?$")
 
 _READ_CMDS = frozenset({
     "cat", "ls", "dir", "type", "head", "tail", "more", "less",
+    "get-content", "gc", "get-childitem",
 })
 _WRITE_CMDS = frozenset({
     "rm", "mkdir", "touch", "chmod", "chown", "del", "rd", "md",
+    "remove-item", "set-content", "add-content", "out-file", "new-item", "rename-item",
 })
-_TRANSFER_CMDS = frozenset({"cp", "copy", "mv", "move"})
+_TRANSFER_CMDS = frozenset({"cp", "copy", "mv", "move", "copy-item", "move-item"})
 
 
 def _nt_cmd_exe_switch_token(stripped: str) -> bool:
@@ -269,7 +273,7 @@ def extract_accesses_native(
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
 
-    if tool_name in ("mcp_exec_command", "bash", "create_terminal"):
+    if tool_name in ("mcp_exec_command", "bash", "create_terminal", "powershell"):
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve() if workdir else workspace

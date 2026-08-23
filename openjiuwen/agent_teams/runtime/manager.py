@@ -402,6 +402,49 @@ class TeamRuntimeManager:
             return DeliverResult.failure("not_active")
 
         if isinstance(payload, InteractiveInput):
+            # user-mediated teammate approval sidecar: when the team is
+            # configured for direct user approval (spec.team_approval_mode
+            # == "user-mediated") and payload.member_name names a teammate
+            # (not the leader, not None), route each pending tool call to
+            # the teammate's own harness via approve_tool instead of
+            # resume_interrupt — leader's resume_interrupt cannot find the
+            # teammate's pending interrupt (different request_id space) and
+            # would drop it. leader-mediated and member_name==leader/None
+            # keep the original resume_interrupt path verbatim.
+            spec = entry.agent.spec
+            member_name = payload.member_name
+            leader_name = entry.agent.member_name
+            if (
+                spec is not None
+                and spec.team_approval_mode == "user-mediated"
+                and member_name
+                and member_name != leader_name
+            ):
+                # user_inputs key = tool_call_id (== request_id by
+                # construction); value = confirm_payload
+                # {approved, feedback, auto_confirm}. ``.get`` is double
+                # insurance: the interface.py source gate already rejects
+                # non-approval payloads, so a missing key only arises if a
+                # relay mistakenly carries member_name on a non-approval frame;
+                # ``.get`` denies silently (None) rather than raising KeyError.
+                for tcid, val in payload.user_inputs.items():
+                    ok = await entry.agent.team_backend.approve_tool(
+                        member_name=member_name,
+                        tool_call_id=tcid,
+                        approved=val.get("approved"),
+                        feedback=val.get("feedback"),
+                        auto_confirm=val.get("auto_confirm", False),
+                    )
+                    if not ok:
+                        # approve_tool returns False only when the teammate
+                        # does not exist (publish failures are logged inside
+                        # and still return True). Surface it so the relay
+                        # does not treat a dropped approval as delivered —
+                        # that would leave the teammate silently hung on the
+                        # ask. The leader-mediated (resume_interrupt) path
+                        # below is unaffected.
+                        return DeliverResult.failure("approve_tool_failed")
+                return DeliverResult.success(None)
             # resume_interrupt delivers now if a matching interrupt is pending,
             # queues the approval if the round is busy (e.g. the 2nd of N
             # permission-gated tool calls in one turn), or drops it when no

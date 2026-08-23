@@ -91,6 +91,17 @@ class AgentRoundController(Protocol):
         """Return whether an unresolved tool interrupt is pending."""
         ...
 
+    def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
+        """Return whether ``user_input`` resolves the pending interrupt.
+
+        Called by the DB-mailbox approval fallback in
+        ``MessageHandler._process_unread_messages`` before
+        ``resume_interrupt``: a DB poll landing after the event path already
+        cleared the interrupt must not re-resume. The owning TeamAgent
+        delegates this to its stream controller.
+        """
+        ...
+
     async def cancel_agent(self) -> None:
         """Cancel the running agent task."""
         ...

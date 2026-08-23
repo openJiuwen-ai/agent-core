@@ -89,7 +89,7 @@ def _load_agent_config_for_persist(
     return {"permissions": deepcopy(fallback_permissions)}
 
 
-_SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal", "powershell"})
 _PATH_APPROVAL_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",

@@ -181,6 +181,9 @@ class StaleTaskHandler(BaseCoordinationHandler):
         if not relevant:
             return
 
+        if self._round.has_pending_interrupt():
+            return  # 有 pending interrupt（如 user-mediated 审批等用户）→ 不误报卡死
+
         idle = self._round.idle_seconds()
         if idle is None or idle < self._idle_claim_seconds:
             return
@@ -402,6 +405,12 @@ class ScheduledStaleTaskHandler(StaleTaskHandler):
 
         if not relevant:
             return
+
+        # Mirror the autonomous base gate (Task 8): a pending interrupt (e.g.
+        # a user-mediated approval waiting on the user) must not be misread
+        # as a stalled claim — the member is deliberately idle on the ask.
+        if self._round.has_pending_interrupt():
+            return  # 有 pending interrupt（如 user-mediated 审批等用户）→ 不误报卡死
 
         # Throttle stays in seconds (time.time); the millisecond now is only
         # for rendering the relative-time string and is kept separate so the

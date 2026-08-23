@@ -434,6 +434,16 @@ class TeamAgent(BaseAgent):
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 
+    def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
+        # Delegate to the stream controller, which owns the interrupt-resume
+        # state (has_pending_interrupt / is_valid_interrupt_resume). The
+        # DB-mailbox approval fallback in ``MessageHandler._process_unread_messages``
+        # calls this on its owning TeamAgent (``self._round``) to guard
+        # ``resume_interrupt``; without this delegation the call raised
+        # AttributeError and was swallowed by ``AsyncCallbackFramework.trigger``,
+        # losing the approval after ``mark_message_read`` had already run.
+        return self._stream_controller.is_valid_interrupt_resume(user_input)
+
     async def start_agent(self, content: str) -> None:
         await self._start_agent(content)
 

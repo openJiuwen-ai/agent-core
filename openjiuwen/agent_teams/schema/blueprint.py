@@ -503,6 +503,16 @@ class TeamAgentSpec(BaseModel):
     enable_permissions: bool = False
     """Team-specific permission control."""
 
+    team_approval_mode: Literal["leader-mediated", "user-mediated"] = "user-mediated"
+    """Per-member tool-approval routing for teammate tool calls.
+
+    ``user-mediated`` (default): teammate tool calls surface to the end user
+    for direct approval. ``leader-mediated``: teammate tool calls route to the
+    leader for approval via the team tool-approval rail.
+    Default is user-mediated (feature on by default); leader-mediated is an
+    opt-out (behavior unchanged when explicitly selected).
+    """
+
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 

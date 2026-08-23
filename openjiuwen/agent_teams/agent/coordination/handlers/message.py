@@ -19,7 +19,7 @@ and a member that is already SHUTDOWN is never fed at all.
 from __future__ import annotations
 
 import json
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
     CoordinationEvent,
@@ -46,6 +46,9 @@ from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions
 from openjiuwen.core.common.logging import team_logger
+
+if TYPE_CHECKING:
+    from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 
 
 class MessageHandler(BaseCoordinationHandler):
@@ -225,7 +228,6 @@ class MessageHandler(BaseCoordinationHandler):
         is_human_agent = backend is not None and await backend.is_human_agent(member_name)
         is_bridge = self._blueprint.role == TeamRole.BRIDGE_AGENT and backend is not None
 
-
         while True:
             all_unread = await self._read_all_unread(member_name)
             new_messages = [m for m in all_unread if m.message_id not in seen_ids]
@@ -268,15 +270,23 @@ class MessageHandler(BaseCoordinationHandler):
                     if self._round.has_pending_interrupt():
                         # Approval messages are admitted to resume_interrupt;
                         # all other messages are deferred until the interrupt clears.
-                        approval_data = self._try_parse_approval_payload(msg)
-                        if approval_data is not None:
+                        ii = self._approval_to_interactive_input(msg)
+                        if ii is not None:
                             team_logger.info(
                                 "[{}] admitting approval message {} to resume interrupt",
                                 member_name,
                                 msg.message_id,
                             )
                             await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                            await self._round.resume_interrupt(approval_data)
+                            # Idempotency: a DB poll may land after the event path
+                            # already cleared the interrupt. Only resume when the
+                            # pending interrupt still matches this input — mirroring
+                            # AgentLifecycleHandler.on_tool_approval_result, which
+                            # hands an InteractiveInput (not a raw dict) that the
+                            # ``isinstance`` guard in is_pending_interrupt_resume_valid
+                            # accepts.
+                            if self._round.is_pending_interrupt_resume_valid(ii):
+                                await self._round.resume_interrupt(ii)
                             continue
                         team_logger.info(
                             "[{}] deferring mailbox message {} until pending interrupt is resolved",
@@ -287,10 +297,7 @@ class MessageHandler(BaseCoordinationHandler):
                         break
                     if debate_meta and debate_state is not None:
                         message_role = debate_meta["message_role"]
-                        if (
-                            self._blueprint.role == TeamRole.TEAMMATE
-                            and message_role == DebateMessageRole.INVITE.value
-                        ):
+                        if self._blueprint.role == TeamRole.TEAMMATE and message_role == DebateMessageRole.INVITE.value:
                             await debate_state.activate_participant(
                                 debate_meta["round_id"],
                             )
@@ -316,8 +323,7 @@ class MessageHandler(BaseCoordinationHandler):
                             now_ms=get_current_time(),
                             suppress_reply_hint=(
                                 debate_meta is not None
-                                and debate_meta["message_role"]
-                                == DebateMessageRole.CAP_NOTICE.value
+                                and debate_meta["message_role"] == DebateMessageRole.CAP_NOTICE.value
                             ),
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
@@ -749,3 +755,36 @@ class MessageHandler(BaseCoordinationHandler):
         if isinstance(data, dict) and data.get("type") == "tool_approval_result":
             return data
         return None
+
+    @staticmethod
+    def _approval_to_interactive_input(msg: Any) -> "InteractiveInput | None":
+        """Build an ``InteractiveInput`` from a DB approval message.
+
+        Mirrors ``AgentLifecycleHandler.on_tool_approval_result`` (the event
+        path), which hands an ``InteractiveInput`` to ``resume_interrupt``.
+        The DB mailbox path used to pass the raw parsed dict, which the
+        ``isinstance(user_input, InteractiveInput)`` guard in
+        ``is_pending_interrupt_resume_valid`` silently drops — so the DB
+        fallback never actually resumed. Returns ``None`` for non-approval
+        messages; ``_try_parse_approval_payload`` is unchanged.
+        """
+        data = MessageHandler._try_parse_approval_payload(msg)
+        if data is None:
+            return None
+        from openjiuwen.core.session import InteractiveInput
+
+        tool_call_id = data.get("tool_call_id")
+        if not tool_call_id:
+            # Malformed approval payload (missing tool_call_id) — cannot target
+            # an interrupt; treat as non-approval so the poll loop defers it.
+            return None
+        ii = InteractiveInput()
+        ii.update(
+            tool_call_id,
+            {
+                "approved": data.get("approved"),
+                "feedback": data.get("feedback"),
+                "auto_confirm": data.get("auto_confirm", False),
+            },
+        )
+        return ii

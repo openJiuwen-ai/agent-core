@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,8 @@ class InteractiveInput(BaseModel):
 
     # input not bind to any id, used for the first interaction
     raw_inputs: Any = Field(default=None)
+
+    member_name: Optional[str] = None
 
     def __init__(self, raw_inputs: Any = _sentinel):
         super().__init__(**{})
