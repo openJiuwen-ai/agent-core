@@ -10,8 +10,26 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, cast
 
-from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
-from opentelemetry.trace import Span
+try:
+    from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
+    from opentelemetry.trace import Span
+except ImportError:  # pragma: no cover - exercised via the optional-otel test
+    # OpenTelemetry ships with the optional ``observability`` extra.  Without
+    # it no spans are ever produced, so span tracking is disabled: the module
+    # stays importable and inert instead of breaking every importer (e.g.
+    # ``openjiuwen.harness.rails``) at module load time.
+    import logging as _stdlib_logging
+
+    ReadableSpan = Any  # type: ignore[assignment,misc]
+    Span = Any  # type: ignore[assignment,misc]
+
+    class SpanProcessor:  # type: ignore[no-redef]
+        """Minimal stand-in for ``opentelemetry.sdk.trace.SpanProcessor``."""
+
+    _stdlib_logging.getLogger(__name__).warning(
+        "opentelemetry is not installed; observability span tracking is disabled. "
+        "Install the 'observability' extra (pip install 'openjiuwen[observability]') to enable it."
+    )
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.call_scope import get_current_llm_call_id
