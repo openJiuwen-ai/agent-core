@@ -414,12 +414,9 @@ class TeamRuntimeManager:
             spec = entry.agent.spec
             member_name = payload.member_name
             leader_name = entry.agent.member_name
-            if (
-                spec is not None
-                and spec.team_approval_mode == "user-mediated"
-                and member_name
-                and member_name != leader_name
-            ):
+            user_mediated = spec is not None and spec.team_approval_mode == "user-mediated"
+            targets_teammate = bool(member_name) and member_name != leader_name
+            if user_mediated and targets_teammate:
                 # user_inputs key = tool_call_id (== request_id by
                 # construction); value = confirm_payload
                 # {approved, feedback, auto_confirm}. ``.get`` is double
