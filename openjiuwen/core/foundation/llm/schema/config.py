@@ -4,7 +4,7 @@ import uuid
 from enum import Enum
 from typing import Optional, Union, Any, Self, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -185,10 +185,37 @@ class ModelClientConfig(BaseModel):
 
 
 class ModelRequestConfig(BaseModel):
-    """Model config"""
+    """Per-call model parameters.
+
+    ``max_tokens`` / ``max_output_tokens`` is the generation cap and is sent to
+    the provider. ``max_input_tokens`` is the declared input budget used to
+    backfill the context window at agent assembly; it is not a wire field.
+    """
     model_name: str = Field(default="", alias="model", description="Model name, e.g. gpt-4")
     temperature: float = Field(default=0.95, description="Temperature parameter, controlling the randomness of outputs")
     top_p: float = Field(default=0.1, description="Top-p sampling parameter")
-    max_tokens: Optional[int] = Field(default=None, description="Maximum number of tokens to generate")
+    max_tokens: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("max_tokens", "max_output_tokens"),
+        serialization_alias="max_tokens",
+        description=(
+            "Maximum number of output tokens to generate. "
+            "Also accepted as max_output_tokens. Sent to the provider as max_tokens."
+        ),
+    )
+    max_input_tokens: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Maximum input tokens this model accepts. When set, agent assembly "
+            "writes it to ContextEngineConfig.context_window_tokens, taking "
+            "priority over an explicit context_window_tokens value. "
+            "Not sent to the provider."
+        ),
+    )
     stop: Union[Optional[str], None] = Field(default=None, description="Stop sequence")
     model_config = {"extra": "allow", "populate_by_name": True}
+
+    @property
+    def max_output_tokens(self) -> Optional[int]:
+        return self.max_tokens

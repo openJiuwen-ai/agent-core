@@ -288,7 +288,8 @@ Model parameter configuration data class for a single request.
 * **model_name** (str): Model name (alias `model`). Default value: `""`.
 * **temperature** (float): Temperature parameter, controlling output randomness. Value range [0, 1]. Default value: `0.95`.
 * **top_p** (float): top_p sampling parameter. Value range [0, 1]. Default value: `0.1`.
-* **max_tokens** (int, optional): Maximum number of tokens to generate. Default value: `None`.
+* **max_tokens** (int, optional): Maximum number of output tokens to generate. Alias: `max_output_tokens`. Default value: `None`.
+* **max_input_tokens** (int, optional): Maximum input tokens this model accepts. Backfilled as the context window at agent assembly; not sent to the provider. Default value: `None`.
 * **stop** (str, optional): Stop sequence. Default value: `None`.
 
 ---
