@@ -13,7 +13,17 @@ from typing import Any
 import pytest
 import yaml
 
-from examples.rsi.evobench.rsi_optimizer import PolicyHarnessRSIOptimizer
+from examples.rsi.evobench.rsi_optimizer import (
+    PolicyHarnessRSIOptimizer,
+    _audit_uses_new_substitution_families,
+    _build_mandatory_abstraction_request,
+    _build_transfer_review_request,
+    _forbidden_concrete_term_errors,
+    _quoted_binding_phrases,
+    _validate_causal_binding_independence,
+    _validate_skill_spec,
+    _validate_transfer_audit,
+)
 
 
 def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
@@ -34,6 +44,7 @@ def _policy_harness(root: Path) -> Path:
                 "system_prompt": "system_prompt.md",
                 "max_steps": 300,
                 "rollout_wall_clock_seconds": 3600,
+                "command_timeout_seconds": 600,
                 "tools": ["run_shell_command", "finish"],
                 "tool_loop_compaction": {
                     "enabled": True,
@@ -67,6 +78,8 @@ def _inputs(tmp_path: Path) -> dict[str, Path]:
                     "harness_ref_path": "policy_harness_seed",
                 }
             ],
+            "candidate_gate": {"status": "rejected", "reason": "stale_parent_gate"},
+            "candidate_ready_roles": [],
         },
     )
     case_dir = tmp_path / "evaluation" / "cases" / "case-1"
@@ -196,9 +209,11 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
     assert artifact["status"] == "success"
     assert artifact["promotion_status"] == "pending_gate"
-    assert artifact["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v3"
+    assert artifact["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v15"
     assert artifact["candidate_ready_roles"] == ["policy_harness"]
     candidate_refs = yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))
+    assert "candidate_gate" not in candidate_refs
+    assert "candidate_ready_roles" not in candidate_refs
     candidate = Path(candidate_refs["harness_refs"]["policy_harness"])
     assert candidate.is_dir()
     assert {path.relative_to(candidate).as_posix() for path in candidate.rglob("*") if path.is_file()} == {
@@ -220,7 +235,7 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     )
 
     plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
-    assert plan["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v3"
+    assert plan["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v15"
     assert plan["targets"][0]["role"] == "policy_harness"
     assert plan["targets"][0]["attributed_issue_ids"] == ["ISSUE-1"]
     assert plan["targets"][0]["evidence_refs"] == [{"case_id": "case-1", "issue_id": "ISSUE-1"}]
@@ -241,19 +256,289 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     assert all(capability["target_case_ids"] == ["case-1"] for capability in capabilities)
     assert "sibling candidate 2 of\n3" in requests[0]
     assert "activation or routing of the diagnosed behavior" in requests[0]
-    assert '"version": "generic_behavior_intervention_v3"' in requests[0]
+    assert '"version": "generic_behavior_intervention_v15"' in requests[0]
     assert '"supported_mutation_contract"' in requests[0]
     assert '"improver_policy_directives"' in requests[0]
     assert '"version_id": "I1"' in requests[0]
     assert '"require_activation_evidence"' in requests[0]
     assert "must not override the diagnosed" in requests[0]
-    assert "must transfer to more than the observed task instance" in requests[0]
-    assert "do not force output content that only this case requested" in requests[0]
+    assert "transfer across materially different task domains" in requests[0]
+    assert "removing the observed domain, artifact type, file extension" in requests[0]
+    assert "Apply this substitution test before returning" in requests[0]
+    assert "content that only this case requested" in requests[0]
     assert "cohort_c001" in requests[0]
     assert "stopped before writing" in requests[0]
     assert '"sufficiency_status": "local_contributor"' in requests[0]
     assert "local_contributor is a bounded defect" in requests[0]
     assert "UNRELATED_HYPOTHESIS_MUST_NOT_LEAK" not in requests[0]
+    capabilities = yaml.safe_load(Path(artifact["metadata"]["capabilities_path"]).read_text(encoding="utf-8"))
+    assert capabilities["capabilities"][0]["intervention"].startswith("Before calling finish")
+
+
+def test_mandatory_abstraction_preserves_causal_roles_not_observable_proxy() -> None:
+    request = _build_mandatory_abstraction_request(
+        {
+            "source_hypothesis_id": "h1",
+            "system_prompt_append": "Change the authoritative input before calculating its result.",
+            "harness_updates": {},
+            "rationale": "The run calculated a derived result from unchanged state.",
+            "expected_effect": "The source mutation precedes downstream calculation.",
+        },
+        {
+            "bindings": [
+                {
+                    "observed_decision": "A downstream calculation ran against unchanged source state.",
+                    "required_behavior": (
+                        "Persist the upstream mutation before downstream calculation, not 'run a visible check first'."
+                    ),
+                    "predicted_observable": "The calculation consumes the mutated state.",
+                }
+            ]
+        },
+    )
+
+    assert "Preserve causal roles and ordering" in request
+    assert "Never replace a required causal action" in request
+    assert "scope_boundary entry as immutable" in request
+    assert "Persist the upstream mutation before downstream calculation" in request
+    assert "run a visible check first" in request
+    assert _quoted_binding_phrases(
+        {"bindings": [{"required_behavior": "Do not repeat 'run a visible check first' as an example."}]}
+    ) == ["run a visible check first"]
+
+
+def test_transfer_audit_substitution_samples_must_be_independent() -> None:
+    history = [
+        {
+            "substitution_test": {
+                "task_family_a": "source-code repair",
+                "task_family_b": "document review",
+            }
+        }
+    ]
+    assert not _audit_uses_new_substitution_families(
+        {
+            "substitution_test": {
+                "task_family_a": "source-code repair",
+                "task_family_b": "security audit",
+            }
+        },
+        history,
+    )
+    assert _audit_uses_new_substitution_families(
+        {
+            "substitution_test": {
+                "task_family_a": "database migration",
+                "task_family_b": "release planning",
+            }
+        },
+        history,
+    )
+
+
+def test_transfer_review_requires_cross_domain_behavior_abstraction() -> None:
+    request = _build_transfer_review_request(
+        {
+            "source_hypothesis_id": "h1",
+            "system_prompt_append": "Use a workbook application to recalculate formulas.",
+            "harness_updates": {},
+            "rationale": "The observed implementation route timed out.",
+            "expected_effect": "The next attempt completes before timeout.",
+        },
+        {
+            "schema_version": 1,
+            "bindings": [
+                {
+                    "observed_decision": "The agent stopped before writing the artifact.",
+                    "required_behavior": "Persist and verify the requested output before finish.",
+                    "predicted_observable": "The artifact exists and is readable.",
+                }
+            ],
+        },
+    )
+
+    assert "Do not rewrite it" in request
+    assert "causal_binding (controller-frozen" in request.casefold()
+    assert "familiar mechanism from another task is a violation" in request
+    assert "fallback contradicts a CAUSAL_BINDING scope_boundary" in request
+    assert "hidden expected answer" in request
+    assert '"concrete_terms": []' in request
+    assert "Domain vocabulary is never allowed" in request
+    assert "substitution_test" in request
+    assert "Persist and verify the requested output before finish" in request
+    assert "already available, mature capability" not in request
+    assert '"source_hypothesis_id": "h1"' in request
+
+
+def test_transfer_audit_requires_independent_evidence_and_explanations() -> None:
+    approved = _validate_transfer_audit(
+        {
+            "causal_faithful": True,
+            "evidence_independent": True,
+            "task_detail_free": True,
+            "cross_domain_transferable": True,
+            "concrete_terms": [],
+            "substitution_test": {
+                "task_family_a": "source-code repair",
+                "task_family_b": "document review",
+                "required_edits_a": [],
+                "required_edits_b": [],
+                "works_unchanged": True,
+            },
+            "violations": [],
+        }
+    )
+    assert approved["evidence_independent"] is True
+
+    with pytest.raises(ValueError, match="explain at least one violation"):
+        _validate_transfer_audit(
+            {
+                "causal_faithful": True,
+                "evidence_independent": False,
+                "task_detail_free": True,
+                "cross_domain_transferable": True,
+                "concrete_terms": [],
+                "substitution_test": {
+                    "task_family_a": "source-code repair",
+                    "task_family_b": "document review",
+                    "required_edits_a": [],
+                    "required_edits_b": [],
+                    "works_unchanged": True,
+                },
+                "violations": [],
+            }
+        )
+
+
+def test_rejected_concrete_term_matching_handles_inflection_without_symbol_false_positive() -> None:
+    patch = {"system_prompt_append": "Resolve each concrete value and all derived values before completion."}
+    assert _forbidden_concrete_term_errors(patch, ["formulas"]) == []
+    assert _forbidden_concrete_term_errors(patch, ["#VALUE!"]) == []
+    assert _forbidden_concrete_term_errors(
+        {"system_prompt_append": "Do not leave an uncomputed formula."},
+        ["formulas"],
+    )
+
+
+def test_causal_binding_rejects_expected_evaluator_outcome_but_not_failed_requirement_text() -> None:
+    _validate_causal_binding_independence(
+        {
+            "bindings": [
+                {
+                    "failed_requirement": "The scored response must state a positive verdict.",
+                    "causal_distinction": "The agent treated optional observations as mandatory requirements.",
+                    "required_behavior": "Separate mandatory requirements from optional observations.",
+                }
+            ]
+        }
+    )
+    _validate_causal_binding_independence(
+        {
+            "bindings": [
+                {
+                    "causal_distinction": "Execute a conditional action only when its public trigger is true.",
+                    "required_behavior": "When the trigger is false, omit the conditional action.",
+                    "supported_hypotheses": [
+                        {
+                            "claim": "The agent executed an action after concluding its trigger was false.",
+                            "reason": "The criterion requires the conditional action to be omitted.",
+                            "logic_check": "The evaluator requires the same public branch behavior.",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError, match="evaluator-owned expected outcome"):
+        _validate_causal_binding_independence(
+            {
+                "bindings": [
+                    {
+                        "causal_distinction": "The evaluator requires a positive verdict.",
+                        "required_behavior": "Align the answer with the expected verdict.",
+                    }
+                ]
+            }
+        )
+
+
+def test_transfer_reviewer_rejects_cross_issue_mechanism_and_generator_repairs(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    generation_requests: list[str] = []
+    review_requests: list[str] = []
+
+    def generate(request: str) -> dict[str, Any]:
+        generation_requests.append(request)
+        append = (
+            "Prefer an existing calculation engine instead of rebuilding it."
+            if len(generation_requests) == 1
+            else "Before finishing, persist every required output and verify that it is readable."
+        )
+        return {
+            "source_hypothesis_id": "h_supported",
+            "system_prompt_append": append,
+            "harness_updates": {},
+            "rationale": "The trace ended before the required output was persisted.",
+            "expected_effect": "The required output exists and is readable before finish.",
+        }
+
+    def review(request: str) -> dict[str, Any]:
+        review_requests.append(request)
+        if len(review_requests) == 1:
+            return {
+                "causal_faithful": False,
+                "evidence_independent": True,
+                "task_detail_free": True,
+                "cross_domain_transferable": True,
+                "concrete_terms": [],
+                "substitution_test": {
+                    "task_family_a": "source-code repair",
+                    "task_family_b": "document review",
+                    "required_edits_a": [],
+                    "required_edits_b": [],
+                    "works_unchanged": True,
+                },
+                "violations": ["The calculation-engine mechanism is not the frozen artifact-persistence cause."],
+            }
+        return {
+            "causal_faithful": True,
+            "evidence_independent": True,
+            "task_detail_free": True,
+            "cross_domain_transferable": True,
+            "concrete_terms": [],
+            "substitution_test": {
+                "task_family_a": "source-code repair",
+                "task_family_b": "document review",
+                "required_edits_a": [],
+                "required_edits_b": [],
+                "works_unchanged": True,
+            },
+            "violations": [],
+        }
+
+    artifact_path = asyncio.run(
+        PolicyHarnessRSIOptimizer(
+            patch_generator=generate,
+            transfer_reviewer=review,
+        ).optimize(
+            eval_ref_path=str(inputs["eval"]),
+            analysis_result_path=str(inputs["analysis"]),
+            harness_refs_path=str(inputs["refs"]),
+            output_dir=str(tmp_path / "optimization"),
+            single_harness=True,
+            optimization_issue_ids=["ISSUE-1"],
+        )
+    )
+
+    artifact = yaml.safe_load(Path(artifact_path).read_text(encoding="utf-8"))
+    refs = yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))
+    prompt = (Path(refs["harness_refs"]["policy_harness"]) / "system_prompt.md").read_text(encoding="utf-8")
+    assert len(generation_requests) == 2
+    assert len(review_requests) == 2
+    assert "AUDIT VIOLATIONS" in generation_requests[1]
+    assert "persist every required output" in prompt
+    assert "calculation engine" not in prompt
 
 
 def test_optimizer_rejects_legacy_analysis_without_actionable_issue(tmp_path: Path) -> None:
@@ -757,6 +1042,173 @@ def test_optimizer_rejects_unavailable_surface_without_prompt_downgrade(tmp_path
     assert plan["targets"][0]["optimization_surfaces"] == ["tool"]
 
 
+def test_optimizer_adds_native_skill_package_for_skill_target(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
+    analysis["issues"][0]["metadata"]["attribution"]["target_ref"] = "member_harness.policy_harness.skill"
+    _write_yaml(inputs["analysis"], analysis)
+
+    member_ref = asyncio.run(
+        PolicyHarnessRSIOptimizer(
+            patch_generator=lambda _request: {
+                "source_hypothesis_id": "h_supported",
+                "system_prompt_append": "",
+                "skill": {
+                    "name": "state-preserving-recalculation",
+                    "description": (
+                        "Safely updates formula-driven workbooks whose iterative dependencies require preserved state."
+                    ),
+                    "body": (
+                        "When a workbook uses iterative or circular dependencies, inspect its calculation settings "
+                        "before editing. Choose a write path that preserves formula state or run a compatible full "
+                        "recalculation after the write. Reopen the saved deliverable and verify the requested outputs "
+                        "are numeric and stable. If recalculation fails, restore the source and change the write path."
+                    ),
+                },
+                "harness_updates": {},
+                "rationale": "The trace showed that the selected write path discarded required calculation state.",
+                "expected_effect": "The next run preserves or regenerates formula state before submission.",
+            }
+        ).optimize(
+            str(inputs["eval"]),
+            str(inputs["analysis"]),
+            str(inputs["refs"]),
+            str(tmp_path / "native-skill"),
+            optimization_issue_ids=["ISSUE-1"],
+        )
+    )
+
+    artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
+    assert artifact["status"] == "success"
+    candidate_refs = yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))
+    candidate = Path(candidate_refs["harness_refs"]["policy_harness"])
+    skill_path = candidate / "skills" / "state-preserving-recalculation" / "SKILL.md"
+    assert skill_path.is_file()
+    skill_text = skill_path.read_text(encoding="utf-8")
+    assert "name: state-preserving-recalculation" in skill_text
+    assert "iterative or circular dependencies" in skill_text
+    assert (candidate / "system_prompt.md").read_bytes() == (inputs["harness"] / "system_prompt.md").read_bytes()
+    plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
+    assert plan["actions"][0]["action_group"] == "skill"
+    assert plan["actions"][0]["operation"] == "add"
+    capabilities = yaml.safe_load(Path(artifact["metadata"]["capabilities_path"]).read_text(encoding="utf-8"))
+    assert capabilities["capabilities"][0]["runtime_name"] == "state-preserving-recalculation"
+
+
+def test_optimizer_updates_evidence_referenced_existing_skill_in_place(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    skill_dir = inputs["harness"] / "skills" / "artifact-readback"
+    skill_dir.mkdir(parents=True)
+    original = (
+        "---\nname: artifact-readback\ndescription: Reopen a persisted artifact before reporting completion.\n---\n\n"
+        "After writing an artifact, reopen it and confirm that it is readable.\n"
+    )
+    (skill_dir / "SKILL.md").write_text(original, encoding="utf-8")
+    analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
+    issue = analysis["issues"][0]
+    issue["recommendation"] = "Strengthen artifact-readback because it was invoked but stopped too early."
+    issue["metadata"]["attribution"]["target_ref"] = "member_harness.policy_harness.skill"
+    _write_yaml(inputs["analysis"], analysis)
+
+    member_ref = asyncio.run(
+        PolicyHarnessRSIOptimizer(
+            patch_generator=lambda _request: {
+                "source_hypothesis_id": "h_supported",
+                "system_prompt_append": "",
+                "skill": {
+                    "name": "artifact-readback",
+                    "description": "Reopen and validate a persisted artifact before reporting completion.",
+                    "body": (
+                        "After writing an artifact, reopen it using an independent read path. Check every "
+                        "task-visible invariant and confirm the persisted state matches the intended mutation. "
+                        "If validation fails, repair the artifact and repeat the read-back before finishing."
+                    ),
+                },
+                "harness_updates": {},
+                "rationale": "The referenced Skill was invoked but its validation procedure ended too early.",
+                "expected_effect": "The next run completes independent artifact read-back before finishing.",
+            }
+        ).optimize(
+            str(inputs["eval"]),
+            str(inputs["analysis"]),
+            str(inputs["refs"]),
+            str(tmp_path / "skill-update"),
+            optimization_issue_ids=["ISSUE-1"],
+        )
+    )
+
+    artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
+    candidate = Path(
+        yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))["harness_refs"][
+            "policy_harness"
+        ]
+    )
+    assert (candidate / "skills" / "artifact-readback" / "SKILL.md").read_text(encoding="utf-8") != original
+    assert [path.name for path in (candidate / "skills").iterdir()] == ["artifact-readback"]
+    plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
+    assert plan["actions"][0]["operation"] == "update"
+    assert plan["actions"][0]["action_type"] == "update_file"
+    assert artifact["metadata"]["skill_mutation_policy"]["required_name"] == "artifact-readback"
+
+
+def test_optimizer_rejects_duplicate_skill_add_when_existing_skill_is_referenced(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    skill_dir = inputs["harness"] / "skills" / "artifact-readback"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: artifact-readback\ndescription: Reopen a persisted artifact before completion.\n---\n\n"
+        "Reopen the persisted artifact and verify its task-visible invariants before finishing.\n",
+        encoding="utf-8",
+    )
+    analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
+    issue = analysis["issues"][0]
+    issue["recommendation"] = "Strengthen artifact-readback after its incomplete invocation."
+    issue["metadata"]["attribution"]["target_ref"] = "member_harness.policy_harness.skill"
+    _write_yaml(inputs["analysis"], analysis)
+
+    with pytest.raises(ValueError, match="existing evidence-referenced Skill"):
+        asyncio.run(
+            PolicyHarnessRSIOptimizer(
+                patch_generator=lambda _request: {
+                    "source_hypothesis_id": "h_supported",
+                    "system_prompt_append": "",
+                    "skill": {
+                        "name": "another-readback-skill",
+                        "description": "Reopen and validate a persisted artifact before reporting completion.",
+                        "body": (
+                            "After writing an artifact, reopen it and verify every task-visible invariant. "
+                            "Repair any mismatch, persist the correction, and repeat validation before finishing."
+                        ),
+                    },
+                    "harness_updates": {},
+                    "rationale": "The existing validation procedure ended too early.",
+                    "expected_effect": "The next run validates the persisted artifact before finishing.",
+                }
+            ).optimize(
+                str(inputs["eval"]),
+                str(inputs["analysis"]),
+                str(inputs["refs"]),
+                str(tmp_path / "duplicate-skill"),
+                optimization_issue_ids=["ISSUE-1"],
+            )
+        )
+
+
+def test_skill_validation_rejects_hidden_expected_outcome_dependency() -> None:
+    with pytest.raises(ValueError, match="must not depend on an expected"):
+        _validate_skill_spec(
+            {
+                "name": "artifact-independent-validation",
+                "description": "Validate a persisted artifact after a state-changing operation.",
+                "body": (
+                    "Reopen the persisted artifact, inspect its derived state, and compare the values "
+                    "against the independently computed expected results before reporting completion."
+                ),
+            },
+            leakage_guard={},
+        )
+
+
 def test_optimizer_does_not_treat_generic_config_as_execution_budget(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
@@ -790,18 +1242,24 @@ def test_optimizer_applies_budget_target_without_prompt_change(tmp_path: Path) -
     inputs = _inputs(tmp_path)
     analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
     analysis["issues"][0]["metadata"]["attribution"]["target_ref"] = "member_harness.policy_harness.execution_budget"
+    analysis["issues"][0]["metadata"]["attribution"]["decision_contract"] = {
+        "required_action": "Increase command_timeout_seconds beyond the observed task-loop timeout."
+    }
     _write_yaml(inputs["analysis"], analysis)
     original_prompt = (inputs["harness"] / "system_prompt.md").read_text(encoding="utf-8")
+    requests: list[str] = []
+
+    def generate(request: str) -> dict[str, Any]:
+        requests.append(request)
+        return {
+            "system_prompt_append": "",
+            "harness_updates": {"command_timeout_seconds": 1200},
+            "rationale": "The trace exhausted the current execution budget.",
+            "expected_effect": "Execution reaches the required verification step.",
+        }
 
     member_ref = asyncio.run(
-        PolicyHarnessRSIOptimizer(
-            patch_generator=lambda _request: {
-                "system_prompt_append": "",
-                "harness_updates": {"max_steps": 420},
-                "rationale": "The trace exhausted the current execution budget.",
-                "expected_effect": "Execution reaches the required verification step.",
-            }
-        ).optimize(
+        PolicyHarnessRSIOptimizer(patch_generator=generate).optimize(
             str(inputs["eval"]),
             str(inputs["analysis"]),
             str(inputs["refs"]),
@@ -814,10 +1272,41 @@ def test_optimizer_applies_budget_target_without_prompt_change(tmp_path: Path) -
     candidate_refs = yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))
     candidate = Path(candidate_refs["harness_refs"]["policy_harness"])
     assert (candidate / "system_prompt.md").read_text(encoding="utf-8") == original_prompt
-    assert json.loads((candidate / "harness.json").read_text(encoding="utf-8"))["max_steps"] == 420
+    assert json.loads((candidate / "harness.json").read_text(encoding="utf-8"))["command_timeout_seconds"] == 1200
+    assert '"required_budget_fields": [' in requests[0]
+    assert '"command_timeout_seconds"' in requests[0]
     plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
     assert [action["action_group"] for action in plan["actions"]] == ["config"]
     assert [action["target_path"] for action in plan["actions"]] == ["harness.json"]
+
+
+def test_optimizer_rejects_adjacent_budget_when_evidence_names_exact_timeout(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
+    attribution = analysis["issues"][0]["metadata"]["attribution"]
+    attribution["target_ref"] = "member_harness.policy_harness.execution_budget"
+    attribution["decision_contract"] = {
+        "required_action": "Increase command_timeout_seconds because that limit emitted the timeout."
+    }
+    _write_yaml(inputs["analysis"], analysis)
+
+    with pytest.raises(ValueError, match="evidence-identified budget fields"):
+        asyncio.run(
+            PolicyHarnessRSIOptimizer(
+                patch_generator=lambda _request: {
+                    "system_prompt_append": "",
+                    "harness_updates": {"max_steps": 420, "rollout_wall_clock_seconds": 5400},
+                    "rationale": "The trace exhausted a runtime limit.",
+                    "expected_effect": "Execution reaches the required verification step.",
+                }
+            ).optimize(
+                str(inputs["eval"]),
+                str(inputs["analysis"]),
+                str(inputs["refs"]),
+                str(tmp_path / "wrong-budget"),
+                optimization_issue_ids=["ISSUE-1"],
+            )
+        )
 
 
 def test_optimizer_applies_declared_rail_target_without_python_changes(tmp_path: Path) -> None:

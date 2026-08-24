@@ -98,7 +98,7 @@ class EvaluationResultAnalyzerConfig:
     diagnosis_agent_max_retries: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     diagnosis_agent_max_concurrency: int = 5
     diagnosis_agent_max_iterations: int = 20
-    diagnosis_agent_max_tokens: int = 8192
+    diagnosis_agent_max_tokens: int = 16384
     causal_investigation_required: bool = True
     max_issues: int = 20
     evidence_limit_per_issue: int = 5
@@ -123,7 +123,7 @@ class EvaluationResultAnalyzerConfig:
             ),
             diagnosis_agent_max_tokens=_int_value(
                 data.get("diagnosis_agent_max_tokens"),
-                default=8192,
+                default=16384,
             ),
             causal_investigation_required=_bool_value(
                 data.get("causal_investigation_required"),

@@ -78,6 +78,27 @@ def compile_optimization_hypotheses(
             for item in hypothesis_assessment
             if isinstance(item, dict)
         }
+        selected_causal_hypothesis_id = str(attribution.get("selected_hypothesis_id", "") or "").strip()
+        supported_assessment_ids = [
+            str(item.get("hypothesis_id", "") or "").strip()
+            for item in hypothesis_assessment
+            if isinstance(item, dict)
+            and str(item.get("status", "") or "").strip().casefold() == "supported"
+            and str(item.get("hypothesis_id", "") or "").strip()
+        ]
+        if not selected_causal_hypothesis_id and len(supported_assessment_ids) == 1:
+            # Backward compatibility for pre-v12 Analyzer artifacts. One and
+            # only one supported hypothesis is already an unambiguous binding.
+            selected_causal_hypothesis_id = supported_assessment_ids[0]
+        selected_causal_hypothesis_semantic_id = str(
+            attribution.get("selected_hypothesis_semantic_id", "") or ""
+        ).strip()
+        selected_assessment_supported = any(
+            isinstance(item, dict)
+            and str(item.get("hypothesis_id", "") or "").strip() == selected_causal_hypothesis_id
+            and str(item.get("status", "") or "").strip().casefold() == "supported"
+            for item in hypothesis_assessment
+        )
         evidence_status = str(attribution.get("evidence_status", "") or "").strip().casefold()
         if (
             not target_ref
@@ -85,6 +106,8 @@ def compile_optimization_hypotheses(
             or evidence_status not in {"confirmed", "supported_hypothesis"}
             or not target_case_ids
             or "supported" not in assessment_statuses
+            or not selected_causal_hypothesis_id
+            or not selected_assessment_supported
         ):
             continue
         # A supported local contributor may coexist with unresolved causal
@@ -119,19 +142,43 @@ def compile_optimization_hypotheses(
             "decision_contract": decision_contract,
             "causal_coverage": causal_coverage,
             "hypothesis_assessment": hypothesis_assessment,
+            "selected_causal_hypothesis_id": selected_causal_hypothesis_id,
+            "selected_causal_hypothesis_semantic_id": selected_causal_hypothesis_semantic_id,
             "supported_causal_hypothesis_ids": [
                 str(item.get("hypothesis_id", "") or "")
                 for item in hypothesis_assessment
                 if isinstance(item, dict)
                 and str(item.get("status", "") or "").strip().casefold() == "supported"
-                and str(item.get("hypothesis_id", "") or "")
+                and str(item.get("hypothesis_id", "") or "") == selected_causal_hypothesis_id
             ],
+            "supported_causal_hypothesis_semantic_ids": list(
+                dict.fromkeys(
+                    [
+                        *[
+                            str(item.get("hypothesis_semantic_id", "") or "")
+                            for item in hypothesis_assessment
+                            if isinstance(item, dict)
+                            and str(item.get("status", "") or "").strip().casefold() == "supported"
+                            and str(item.get("hypothesis_id", "") or "") == selected_causal_hypothesis_id
+                            and str(item.get("hypothesis_semantic_id", "") or "")
+                        ],
+                        *([selected_causal_hypothesis_semantic_id] if selected_causal_hypothesis_semantic_id else []),
+                    ]
+                )
+            ),
             "falsified_causal_hypothesis_ids": [
                 str(item.get("hypothesis_id", "") or "")
                 for item in hypothesis_assessment
                 if isinstance(item, dict)
                 and str(item.get("status", "") or "").strip().casefold() == "falsified"
                 and str(item.get("hypothesis_id", "") or "")
+            ],
+            "falsified_causal_hypothesis_semantic_ids": [
+                str(item.get("hypothesis_semantic_id", "") or "")
+                for item in hypothesis_assessment
+                if isinstance(item, dict)
+                and str(item.get("status", "") or "").strip().casefold() == "falsified"
+                and str(item.get("hypothesis_semantic_id", "") or "")
             ],
             "prior_experiment_assessment": prior_experiment_assessment,
             "evidence_refs": _evidence_refs(issue.evidence),

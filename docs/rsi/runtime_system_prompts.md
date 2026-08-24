@@ -4,13 +4,15 @@
 
 ### 1.1 原文
 
-当前协议版本为 `generic_behavior_causal_v7`。系统提示词原文位于：
+当前协议版本为 `generic_behavior_causal_v16`。系统提示词原文位于：
 
 - `openjiuwen/rsi/evaluation_result_analyzer/analyzer.py::DIAGNOSIS_SYSTEM_PROMPT`
 - 计划阶段用户模板：`_build_causal_investigation_prompt`
 - 纠正计划阶段模板：`_build_causal_plan_correction_prompt`
 - 诊断阶段模板：`_build_investigation_diagnosis_prompt`
 - 补证阶段模板：`_build_investigation_refinement_prompt`
+- 因果交接审计模板：`_build_causal_handoff_audit_prompt`
+- 因果交接修复模板：`_build_causal_handoff_repair_prompt`
 
 `DIAGNOSIS_SYSTEM_PROMPT` 是计划、补证和诊断阶段共享的真实系统提示词，不存在
 另一套只供 Evo 或 SWE 使用的 Analyzer Prompt。下面保留其不可删减的运行契约；
@@ -60,6 +62,12 @@ should change. A complete-sounding story is not evidence.
     `inspect_evaluation`。在评分文字中命中关键词不能证明源文件包含该内容。
 15. 标准结果、期望数值和总分只能证明“哪里失败”，不能用它们反推出缺失输入、公式或
     语义规则并当作因果证据；涉及数值决策时必须有公开合同、轨迹、代码或物理文件来源。
+16. 全部调查假设都必须被评估。已支持但没有被选中的假设必须明确标记为被其他诊断
+    选择、被原子机制包含或不可行动，不能因为排在第二位而静默消失。
+17. 模型修复一条冲突诊断时，控制器冻结已通过的兄弟诊断；坏交接只会被单独降级，
+    不得清空同一 Case 中其他已验证根因。
+18. 可执行动作不仅要与公开任务相容，还必须能由公开任务条款、任务可见不变量或通用
+    运行安全不变量正向推出。“可能是这个意思”“也许评分器希望如此”不能进入 Improver。
 
 ### 1.2 计划阶段用户消息
 
@@ -108,7 +116,22 @@ CAUSAL_INVESTIGATION_PHASE=plan
 - `prior_experiment_assessment`：上一候选是否激活、预测行为和结果是否发生；
 - `decision_contract`：错误决策、因果区分、唯一动作、验收现象和范围边界。
 
-### 1.4 聚合提示词
+### 1.4 因果交接审计
+
+逐 Case 诊断在生成 Issue 前还会进入独立审计。审计逐条检查：
+
+- `hypothesis_binding`：动作是否确实来自被选中的 supported 假设；
+- `runtime_decidable`：未来 Agent 能否只靠任务可见信息选择该动作；
+- `public_contract_consistent`：动作是否不违背公开任务；
+- `decision_rule_entailed`：动作是否由明确条款或可见不变量正向推出；
+- `evaluation_independent`：删除金标、期望值和分数后，动作是否仍成立；
+- `single_intervention`：是否只有一个触发条件、一个行为变化和一个可见验收现象。
+
+审计还必须返回 `decision_rule_source` 和 `decision_rule_evidence`。`approved` 是上述六项
+布尔值的合取。审计遗漏某条诊断时只拒绝该条；修复仍未通过时，该条保持
+`unassigned`，不会进入优化假设。
+
+### 1.5 聚合提示词
 
 兼容原文仍位于：
 

@@ -2954,6 +2954,7 @@ def test_candidate_contract_keeps_analyzer_counterfactual_separate() -> None:
                 "action_id": "a1",
                 "action_group": "prompt",
                 "operation": "modify",
+                "intervention": "Persist the causal source state before deriving its result.",
                 "expected_effect": "The next run writes the output.",
                 "analyzer_counterfactual_predictions": ["Only the diagnosed decision changes before output creation."],
                 "source_causal_hypothesis_id": "h1",
@@ -2963,9 +2964,30 @@ def test_candidate_contract_keeps_analyzer_counterfactual_separate() -> None:
     )
 
     assert contracts[0]["predicted_behavior_and_outcome"] == "The next run writes the output."
+    assert contracts[0]["intervention"] == "Persist the causal source state before deriving its result."
     assert contracts[0]["analyzer_counterfactual_predictions"] == [
         "Only the diagnosed decision changes before output creation."
     ]
+
+
+def test_candidate_intervention_excerpt_uses_harness_mutation_when_task_patch_is_absent() -> None:
+    excerpts = iterative_module._candidate_intervention_excerpts_by_case(
+        [
+            {
+                "action_group": "prompt",
+                "target_path": "system_prompt.md",
+                "intervention": "Apply the required upstream state change before downstream validation.",
+                "target_case_ids": ["case_001"],
+            }
+        ],
+        {"case_001", "case_002"},
+    )
+
+    assert excerpts == {
+        "case_001": (
+            "[prompt:system_prompt.md]\nApply the required upstream state change before downstream validation."
+        )
+    }
 
 
 def test_issue_signature_changes_when_only_residual_requirements_change(tmp_path: Path) -> None:
@@ -3154,6 +3176,80 @@ def test_jiuwenswarm_type_steps_count_successful_skill_before_code_edit() -> Non
     assert all_names == {"spreadsheet_delivery_preflight"}
     assert pre_edit_names == {"spreadsheet_delivery_preflight"}
     assert first_edit == 1
+
+
+def test_normalized_message_trace_counts_successful_skill_before_edit(tmp_path: Path) -> None:
+    from openjiuwen.rsi.single_harness.iterative import (
+        _invoked_skill_names,
+        _pre_edit_invoked_names_by_case,
+    )
+
+    normalized_path = tmp_path / "normalized_trace.json"
+    normalized_path.write_text(
+        json.dumps(
+            {
+                "traces": [
+                    {
+                        "messages": [
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "skill_tool",
+                                        "input": json.dumps({"skill_name": "spreadsheet_fidelity"}),
+                                        "output": "success=True data={'skill_content': 'ok'} error=None",
+                                        "error": "",
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "name": "bash",
+                                        "input": json.dumps(
+                                            {"command": "python -c \"open('result.txt', 'w').write('ok')\""}
+                                        ),
+                                        "output": "success=True data={} error=None",
+                                        "error": "",
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_text(
+        json.dumps({"behavior_trace": {"normalized_trace_path": str(normalized_path)}}),
+        encoding="utf-8",
+    )
+    result_path = tmp_path / "result.json"
+    result_path.write_text("{}", encoding="utf-8")
+    eval_ref = tmp_path / "eval_ref.yaml"
+    _write_yaml(
+        eval_ref,
+        {
+            "cases": [
+                {
+                    "case_id": "case_001",
+                    "status": "failed",
+                    "score": 0.0,
+                    "trace_path": str(trace_path),
+                    "result_path": str(result_path),
+                }
+            ]
+        },
+    )
+
+    pre_edit, first_edit = _pre_edit_invoked_names_by_case(str(eval_ref), action_group="skill")
+
+    assert _invoked_skill_names(str(eval_ref)) == {"spreadsheet_fidelity"}
+    assert pre_edit == {"case_001": {"spreadsheet_fidelity"}}
+    assert first_edit == {"case_001": 1}
 
 
 def test_task_start_trigger_counts_as_natural_skill_delivery(

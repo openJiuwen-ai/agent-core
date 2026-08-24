@@ -29,7 +29,7 @@ import uuid
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
@@ -53,6 +53,7 @@ from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
     load_public_task_contract,
 )
 from openjiuwen.rsi.evaluation_result_analyzer.evidence_investigation import (
+    causal_hypothesis_semantic_id,
     execute_causal_investigation,
     normalize_causal_investigation,
 )
@@ -110,6 +111,17 @@ _EVIDENCE_SUPPLEMENT_EVENT_CHARS = 4_000
 _EVIDENCE_SUPPLEMENT_RESPONSE_CHARS = 8_000
 _HARNESS_PROMPT_CHARS = 12_000
 _HARNESS_SKILL_CHARS = 3_000
+_EVALUATOR_OUTCOME_DEPENDENCY_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bexpected\s+(?:answer|answers|metric|metrics|outcome|outcomes|output|outputs|result|results|value|values)\b",
+        r"\b(?:gold|golden|reference)\s+(?:answer|answers|outcome|outcomes|output|outputs|result|results|value|values)\b",
+        r"\btarget\s+(?:answer|answers|outcome|outcomes|output|outputs|result|results|value|values)\b",
+        r"\b(?:grader|judge|verifier)(?:'s)?\s+(?:answer|expectation|expectations|target|value|values)\b",
+        r"\bwhat\s+(?:the\s+)?(?:grader|judge|verifier)\s+expects\b",
+        r"(?:期望|预期|金标|参考|评分器目标)(?:答案|结果|输出|数值|值)",
+    )
+)
 _HARNESS_CONFIG_KEYS = {
     "name",
     "version",
@@ -529,7 +541,7 @@ Aggregation schema:
 - Prefer "unassigned" over guessing.
 """
 
-GENERIC_ANALYZER_PROTOCOL_VERSION = "generic_behavior_causal_v7"
+GENERIC_ANALYZER_PROTOCOL_VERSION = "generic_behavior_causal_v16"
 
 DIAGNOSIS_SYSTEM_PROMPT = """\
 You are an evidence-grounded behavior analyst for an AI Harness improvement
@@ -565,6 +577,13 @@ answers, evaluator implementation, or gold/solution patches. Do NOT read
 case-root `trace.json` or `result.json`; use the inline causal digest,
 `evidence_summary.md`, and the isolated `repository/` or artifact snapshot when
 provided.
+
+A sibling candidate that happens to pass does not prove its Prompt intervention
+caused the pass. When paired feedback says behavior activation is unknown, not
+instrumented, or unrelated to the changed outcome, treat the result as an
+unattributed observation. Never convert "the evaluator expected answer X" into
+a Harness rule. A causal correction must remain justified after removing the
+score, expected label, and candidate outcome; otherwise use target_ref=unassigned.
 
 When `authoritative_task_contract.input_excerpt` is non-empty, the public task contract is available.
 Inspect that excerpt directly; do not claim it is unavailable or search the
@@ -659,6 +678,18 @@ For each independent failed requirement, perform these steps in order:
    Improver happens to support that surface.
 8. Produce one intervention contract: trigger, one behavior change, one runtime
    acceptance observable, and boundaries that prevent over-generalization.
+9. Bind every assigned diagnosis to exactly one supported investigation
+   hypothesis through `selected_hypothesis_id`. The root cause, decision
+   contract, recommendation, and counterfactual must all implement that same
+   hypothesis. Never splice the observed behavior from one hypothesis together
+   with the corrective action from an unresolved alternative.
+10. Separate evaluation evidence from deployable evidence. Verifier scores,
+    expected values, gold/reference outcomes, and pass/fail deltas may reject a
+    hypothesis or measure a candidate, but the next task Agent cannot use them
+    to choose an action. An assigned intervention must be decidable from the
+    public task contract, runtime trace, public repository, or task artifact.
+    If removing evaluator-owned outcomes removes the decision rule, use
+    target_ref="unassigned".
 
 Use one concrete diagnosis per independent intervention. Do not compress
 different decision points or different Harness surfaces into one root cause
@@ -752,6 +783,7 @@ Return one valid JSON object and nothing else. Keep strings concise.
       "failed_requirement": "<known requirement, or explicitly unknown>",
       "competing_hypotheses": ["<plausible explanation A>", "<plausible explanation B>"],
       "discriminating_evidence": "<evidence that separates them, or what is missing>",
+      "selected_hypothesis_id": "<one supported investigation hypothesis ID, or empty when unassigned>",
       "root_cause": "<confirmed mechanism or explicitly labeled hypothesis>",
       "critical_mistake": "<earliest observed wrong action or omission>",
       "general_mechanism": "<trigger -> reusable behavior rule>",
@@ -833,6 +865,12 @@ Hard checks:
 - A confirmed diagnosis cannot contain an `unknown` causal-chain edge.
 - Analyzer-generated compaction markers cannot support an observed causal edge
   or a claim about what the task Agent saw.
+- Every assigned diagnosis must select exactly one supported investigation
+  hypothesis. All causal handoff fields must follow from that selected claim.
+- The selected action must be decidable without evaluator-owned expected, gold,
+  reference, score, or pass/fail outcomes. Those signals validate outcomes only.
+- The required action must be consistent with the authoritative public task
+  contract. A scored mismatch cannot silently reverse an explicit instruction.
 - Do not make required_action a menu or make it optional later.
 - Prefer `unassigned` over an elegant but unsupported explanation.
 """
@@ -1159,10 +1197,11 @@ Return one valid JSON object only:
         "explains_requirement_ids": ["an exact inventory ID"],
         "current_support": ["existing evidence pointer or observation"],
         "falsified_if": "an observable that would refute this explanation",
+        "numeric_change_check_required": false,
         "evidence_requests": [
           {{
             "request_id": "q1",
-            "operation": "search_trace | read_event | inspect_artifact | inspect_evaluation | search_repository | read_repository_file | compare_runs | check_relation | compare_numeric_change",
+            "operation": "search_trace | read_event | inspect_artifact | read_artifact_window | inspect_evaluation | search_repository | read_repository_file | compare_runs | check_relation | compare_numeric_change",
             "query": "terms that discriminate this hypothesis",
             "expression": "numeric expression for check_relation, using decimal literals",
             "operator": "approximately_equal | equal | not_equal | less_than | less_than_or_equal | greater_than | greater_than_or_equal",
@@ -1175,6 +1214,8 @@ Return one valid JSON object only:
             "message_index": 0,
             "tool_call_index": 0,
             "relative_path": "repository-relative path returned by search_repository",
+            "source_char_start": 0,
+            "max_chars": 12000,
             "purpose": "how this result separates hypotheses"
           }}
         ]
@@ -1190,21 +1231,53 @@ Rules:
   contradiction.
 - Request evidence that can refute a hypothesis, not merely repeat evidence that
   supports it.
+- Form hypotheses at one controllable decision boundary. Do not combine an
+  upstream production fault, a missing observation/validation step, and a
+  missing recovery action into one explanation. When the final released output
+  is observably invalid, consider the production mechanism, post-mutation
+  validation of the exact released object, and recovery-after-detection as
+  separate alternatives when the public evidence makes them plausible.
+- A containment failure can be independently actionable even when the upstream
+  physical cause remains unresolved. Test whether the exact final output was
+  invalid after its last mutation, whether the Agent checked the relevant
+  acceptance observable after that mutation, and whether it recovered before
+  release. Do not require knowledge of the hidden scorer or the ultimate
+  physical cause to test those task-visible decisions.
+- An evidence request may discriminate several competing hypotheses. When that
+  is already known, list every affected hypothesis in its `hypothesis_ids`;
+  `hypothesis_ids` records why evidence was collected, not who owns the facts it
+  reveals.
 - Use search_trace to locate events, then read_event for an exact known event.
 - Use inspect_artifact only for physically materialized task files. Use
   inspect_evaluation for judge/result metadata, and compare_runs for paired
   Source-versus-Candidate evidence. A metadata match never proves file content.
+- inspect_artifact is a search primitive. Its matches include an exact physical
+  source path, logical source name, character ranges, and window_complete. When
+  the needed discriminator lies outside a returned search window, use
+  read_artifact_window with that exact source path and a source_char_start from
+  the returned range; do not repeat the same broad inspect_artifact query and do
+  not call a truncated window complete evidence.
 - For code tasks, use search_repository to locate a bounded source or public-test
   span, then read_repository_file only with a repository-relative path returned by
   that search. The controller rejects absolute paths and traversal.
 - If a hypothesis depends on a before-versus-after numeric or formula delta, it
-  MUST request compare_numeric_change; never compare the candidate expression
-  directly with the requested delta. For other arithmetic, counts, or orderings,
-  use check_relation. Express percentages as decimals (1 percentage point is
-  0.01). Only numeric literals and +, -, *, / are allowed.
+  MUST set numeric_change_check_required=true and request
+  compare_numeric_change; never compare the candidate expression directly with
+  the requested delta. Set it false when the causal claim is about whether an
+  action, write, invocation, branch, or artifact state occurred, even when the
+  task context or downstream outcome contains numbers or percentages. For other
+  arithmetic, counts, or orderings, use check_relation. Express percentages as
+  decimals (1 percentage point is 0.01). Only numeric literals and +, -, *, /
+  are allowed.
 - Never request an absolute filesystem path, shell command, hidden test, gold
   answer, or unrestricted repository search. The controller owns all evidence
   access.
+- State each hypothesis claim and falsified_if only in terms of a runtime
+  mechanism and an independently observable prediction. Do not put evaluator
+  expected/target values, gold/reference answers, scores, or pass/fail outcomes
+  into either field. Those outcomes may appear in current_support only when
+  prefixed `evaluation_only:`; they identify what failed but cannot decide which
+  runtime behavior was correct.
 - If prior_candidate_feedback shows an intervention experiment, request the
   evidence needed to distinguish non-activation from a false causal prediction.
 - Every inventory ID must appear in at least two hypotheses so that each failed
@@ -1212,7 +1285,7 @@ Rules:
 - A non-empty `authoritative_task_contract.input_excerpt` already is the public
   task contract. Do not spend an evidence request searching the repository for
   that contract or treat its absence from workspace files as missing evidence.
-- Keep 2 to 6 materially distinct hypotheses and at most 8 first-pass evidence
+- Keep 2 to 4 materially distinct hypotheses and at most 8 first-pass evidence
   requests. One hypothesis may cover several requirements only when it states a
   shared mechanism. The controller reserves up to 4 requests for one immediate
   refinement.
@@ -1222,13 +1295,55 @@ DIAGNOSIS_INPUT:
 """
 
 
-def _build_causal_plan_correction_prompt(diagnosis_input: str, previous_output: str) -> str:
+def _contains_evaluator_outcome_dependency(value: Any) -> bool:
+    """Detect an evaluator-owned outcome being used as a causal decision rule."""
+    if isinstance(value, dict):
+        return any(_contains_evaluator_outcome_dependency(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_evaluator_outcome_dependency(item) for item in value)
+    text = str(value or "")
+    return any(pattern.search(text) for pattern in _EVALUATOR_OUTCOME_DEPENDENCY_PATTERNS)
+
+
+def _causal_plan_outcome_dependency_conflicts(
+    investigation: dict[str, Any] | None,
+) -> list[str]:
+    """Reject hypotheses whose semantics cannot be used by a future task Agent."""
+    if not isinstance(investigation, dict):
+        return []
+    conflicts: list[str] = []
+    for hypothesis in investigation.get("hypotheses", []):
+        if not isinstance(hypothesis, dict):
+            continue
+        hypothesis_id = str(hypothesis.get("hypothesis_id", "") or "")
+        for field in ("claim", "falsified_if"):
+            if _contains_evaluator_outcome_dependency(hypothesis.get(field, "")):
+                conflicts.append(f"hypothesis {hypothesis_id or '<unknown>'} uses evaluator-owned outcomes in {field}")
+    return conflicts
+
+
+def _build_causal_plan_correction_prompt(
+    diagnosis_input: str,
+    previous_output: str,
+    *,
+    validation_conflicts: list[str] | None = None,
+) -> str:
     """Correct any response that did not satisfy the mandatory plan phase."""
     return f"""The previous response did not provide a valid mandatory
 CAUSAL_INVESTIGATION_PHASE=plan. It may have skipped directly to a diagnosis,
 proposed too few alternatives, or omitted a falsifying evidence request. Discard
 its conclusion. Return only the bounded causal_investigation JSON requested below.
 Do not emit a diagnoses object.
+
+CONTROLLER_VALIDATION_CONFLICTS:
+{json.dumps(validation_conflicts or [], ensure_ascii=False)}
+
+Resolve every listed conflict explicitly. In particular, rewrite a rejected
+claim or falsified_if as a runtime mechanism and independently observable
+prediction. Moving evaluator expected/target values, gold/reference answers,
+scores, or pass/fail outcomes to different wording does not resolve the conflict.
+Keep evaluator facts only as `evaluation_only:` current_support. Preserve valid
+independent hypotheses rather than letting one invalid explanation erase them.
 
 PREMATURE_DIAGNOSIS_TO_TREAT_ONLY_AS_CANDIDATE_HYPOTHESES:
 {_truncate_text(previous_output, 6_000)}
@@ -1261,6 +1376,8 @@ For every diagnosis, add these fields to the required JSON shape:
     "claim_follows_from_evidence": "yes | no | unknown",
     "logic_check": "explicit derivation; for quantitative claims cite check_relation",
     "controller_request_ids": ["q1"],
+    "handoff_disposition": "selected | separate_diagnosis | subsumed | non_actionable",
+    "handoff_reason": "why this supported mechanism is or is not handed off independently",
     "reason": "comparison of prediction with controller evidence",
     "evidence_refs": []
   }}
@@ -1282,6 +1399,32 @@ Hard rules:
 - Compare each assessment against that hypothesis's own `falsified_if`. If the
   falsifying observable is present, status MUST be falsified even when other
   evidence superficially supports the claim.
+- Before assigning statuses, make an internal falsifier matrix: compare every
+  hypothesis in one failed-requirement cluster with every available controller
+  result in that cluster and with every evidence-backed `current_support`
+  statement from its competing hypotheses. A request's `hypothesis_ids` records
+  its collection purpose; it does not give one hypothesis exclusive ownership
+  of an observed fact.
+- Facts may cross hypothesis boundaries only inside an overlapping
+  failed-requirement cluster. They may falsify or support any hypothesis in that
+  cluster when the fact logically bears on its claim. Never transfer facts
+  across unrelated requirement clusters merely because wording is similar.
+- Test every necessary subclaim in a composite explanation. If any necessary
+  subclaim is contradicted, the composite hypothesis cannot be supported. Keep a
+  narrower explanation only when it was separately stated and independently
+  supported; otherwise mark the explanation unresolved and request the missing
+  discriminator.
+- Treat production, validation, and recovery as distinct decision mechanisms.
+  An unresolved production cause must not erase an independently supported
+  containment diagnosis when controller evidence proves that the exact final
+  output was invalid after its last mutation and the required post-mutation
+  check or recovery did not occur. Conversely, the existence of a bad output
+  alone does not prove that validation was omitted; cite the relevant trace
+  evidence.
+- Never say that a falsifying observable was not observed when it appears in any
+  available controller result or in another hypothesis's evidence-backed
+  `current_support`. Cite the request that exposed it and reassess the affected
+  hypothesis.
 - A supported hypothesis requires `falsifying_condition_status=not_observed`
   and `claim_follows_from_evidence=yes`. Show the actual derivation in
   `logic_check`; do not rely on keyword overlap.
@@ -1289,6 +1432,10 @@ Hard rules:
   request with availability other than `available` supplies no positive or
   falsifying fact. Never describe `not_found`, `not_available`, or `invalid`
   evidence as confirmation.
+- Positive support still requires an available controller request compatible
+  with the same failed-requirement cluster. A model-authored `current_support`
+  sentence alone is not positive evidence, but it must be checked for a
+  contradiction when it cites an available controller result.
 - Quantitative and formula claims must agree with every available
   `check_relation` and `compare_numeric_change` result. Treat the controller's
   computed values as immutable.
@@ -1298,6 +1445,29 @@ Hard rules:
   numeric decision is actionable only when its input/provenance is observed in
   the public contract, trace, repository, or physical artifact. Otherwise keep
   the hypothesis unresolved.
+- For every assigned diagnosis, set `selected_hypothesis_id` to exactly one
+  investigation hypothesis whose assessment is supported. The root_cause,
+  general_mechanism, decision_contract, recommendation, and counterfactual must
+  be consequences of that selected claim. If several hypotheses are supported
+  but the proposed action actually comes from an unresolved one, do not combine
+  them: select a supported mechanism that really entails the action or return
+  the diagnosis unassigned.
+- Account for every supported hypothesis across the complete diagnosis set. Set
+  handoff_disposition="selected" when that diagnosis selects it. Use
+  "separate_diagnosis" only when another returned diagnosis actually selects
+  it. Use "subsumed" only when the selected atomic mechanism logically entails
+  it, and "non_actionable" only when no Harness decision can change it; both
+  require a concrete handoff_reason. Never silently drop an independently
+  supported mechanism because another hypothesis was ranked first.
+- Mentally remove all evaluator-owned expected values, gold/reference answers,
+  scores, and pass/fail labels before writing an assigned decision_contract. The
+  action must still be selectable and checkable from the public task contract,
+  task-visible artifact, trace, or public repository. Evaluation outcomes may
+  falsify and rank hypotheses, but they cannot be the runtime decision rule.
+- Treat the authoritative public task contract as a constraint, not merely
+  another hypothesis. If the proposed action contradicts its explicit wording
+  and only the evaluator outcome favors the contradiction, the diagnosis is
+  not deployable and must remain unassigned.
 - A confirmed diagnosis requires one supported hypothesis and all material
   alternatives to be falsified by controller evidence.
 - A supported local mechanism may remain actionable when a different material
@@ -1326,7 +1496,7 @@ def _build_causal_refinement_prompt(
     evidence_results: dict[str, Any],
     draft_diagnoses: list[dict[str, Any]],
 ) -> str:
-    """Ask only for missing discriminators after an unresolved first pass."""
+    """Ask for missing discriminators or independently tested new explanations."""
     remaining = max(
         0,
         _CAUSAL_TOTAL_REQUEST_LIMIT - len(investigation.get("evidence_requests", [])),
@@ -1335,15 +1505,38 @@ def _build_causal_refinement_prompt(
 
 The first evidence pass left material causal hypotheses unresolved. Stay on this
 same Case and request only the smallest missing discriminators. Do not diagnose,
-recommend a Harness change, rename hypotheses, or repeat completed requests.
+recommend a Harness change, rename existing hypotheses, or repeat completed
+requests.
 
 Return the same `causal_investigation` JSON shape used in the plan phase. Copy
 the existing hypothesis IDs, claims, and falsified_if fields unchanged, and put
 only NEW evidence requests under them. At most {remaining} new requests are
-available. Prefer exact read_event requests when a message index is already
-known. Use compare_numeric_change for every before-versus-after formula claim.
+available. If the first evidence pass exposed a materially different mechanism
+that no existing hypothesis states, you may add at most one new hypothesis.
+Mark each with `origin="abductive_refinement"` and
+`discovery_evidence_request_ids` naming the completed requests that revealed it.
+Each new hypothesis must also contain at least one NEW, independently useful
+request capable of falsifying or confirming it. Discovery evidence alone cannot
+make the new hypothesis supported.
+
+Treat evidence ownership as cluster-scoped, not hypothesis-exclusive. If a
+completed result or a new hypothesis's evidence-backed `current_support`
+contradicts an existing hypothesis's `falsified_if`, include that existing
+hypothesis in any new discriminating request and make the contradiction explicit
+for the next diagnosis pass. Do not preserve an earlier status merely because
+the contradicting result was first requested for another explanation.
+
+Prefer exact read_event requests when a message index is already known. When an
+artifact search result has window_complete=false, continue with
+read_artifact_window using its exact source and source_char_end instead of
+repeating the broad search. Use compare_numeric_change for every
+before-versus-after formula claim.
 If no allowed controller operation can obtain the missing fact, return the same
 hypotheses with empty evidence_requests and ready_without_more_evidence=true.
+If completed evidence reveals a distinct production-versus-validation-versus-
+recovery decision that no frozen hypothesis states, use the one permitted
+abductive_refinement hypothesis for that atomic mechanism rather than widening
+an existing composite claim.
 
 FIRST_INVESTIGATION_AND_EVIDENCE:
 {_bounded_json({"investigation": investigation, "controller_evidence_results": evidence_results}, 24_000)}
@@ -1408,11 +1601,27 @@ def _merge_causal_investigation(
     remaining = max(0, _CAUSAL_TOTAL_REQUEST_LIMIT - len(base_requests))
     if remaining == 0:
         return dict(base), []
-    hypothesis_ids = {
+    base_hypotheses = [dict(item) for item in base.get("hypotheses", []) if isinstance(item, dict)]
+    base_hypothesis_ids = {
         str(item.get("hypothesis_id", "") or "")
-        for item in base.get("hypotheses", [])
+        for item in base_hypotheses
         if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "")
     }
+    new_hypotheses: list[dict[str, Any]] = []
+    for item in refinement.get("hypotheses", []):
+        if not isinstance(item, dict):
+            continue
+        hypothesis_id = str(item.get("hypothesis_id", "") or "")
+        if (
+            not hypothesis_id
+            or hypothesis_id in base_hypothesis_ids
+            or str(item.get("origin", "") or "") != "abductive_refinement"
+        ):
+            continue
+        new_hypotheses.append(dict(item))
+        if len(base_hypotheses) + len(new_hypotheses) >= 5:
+            break
+    hypothesis_ids = base_hypothesis_ids | {str(item.get("hypothesis_id", "") or "") for item in new_hypotheses}
 
     def _fingerprint(request: dict[str, Any]) -> str:
         comparable = {key: value for key, value in request.items() if key != "request_id"}
@@ -1446,7 +1655,30 @@ def _merge_causal_investigation(
         if len(additions) >= remaining:
             break
 
+    referenced_new_ids = {
+        hypothesis_id
+        for request in additions
+        for hypothesis_id in _string_items(request.get("hypothesis_ids", []))
+        if hypothesis_id not in base_hypothesis_ids
+    }
+    retained_new_hypotheses = [
+        item for item in new_hypotheses if str(item.get("hypothesis_id", "") or "") in referenced_new_ids
+    ]
+    retained_ids = base_hypothesis_ids | {str(item.get("hypothesis_id", "") or "") for item in retained_new_hypotheses}
+    additions = [
+        {
+            **request,
+            "hypothesis_ids": [
+                hypothesis_id
+                for hypothesis_id in _string_items(request.get("hypothesis_ids", []))
+                if hypothesis_id in retained_ids
+            ],
+        }
+        for request in additions
+    ]
+    additions = [request for request in additions if request["hypothesis_ids"]]
     merged = dict(base)
+    merged["hypotheses"] = [*base_hypotheses, *retained_new_hypotheses]
     merged["evidence_requests"] = [*base_requests, *additions]
     return merged, additions
 
@@ -1457,17 +1689,29 @@ def _normalize_causal_refinement(
     base: dict[str, Any],
     failed_requirement_ids: list[str],
 ) -> dict[str, Any] | None:
-    """Freeze hypothesis semantics while accepting concise refinement-only JSON."""
+    """Preserve planned hypotheses and admit independently testable discoveries."""
     if not isinstance(value, dict):
         return None
-    raw = value.get("causal_investigation", value)
+    raw = value.get("causal_investigation")
+    if not isinstance(raw, dict):
+        raw = value.get("investigation")
+    if not isinstance(raw, dict):
+        raw = value
     if not isinstance(raw, dict):
         return None
+    base_hypotheses = [dict(item) for item in base.get("hypotheses", []) if isinstance(item, dict)]
     base_hypothesis_ids = [
         str(item.get("hypothesis_id", "") or "")
-        for item in base.get("hypotheses", [])
+        for item in base_hypotheses
         if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "")
     ]
+    base_hypothesis_id_set = set(base_hypothesis_ids)
+    base_request_ids = {
+        str(item.get("request_id", "") or "")
+        for item in base.get("evidence_requests", [])
+        if isinstance(item, dict) and str(item.get("request_id", "") or "")
+    }
+    allowed_requirements = {item for item in failed_requirement_ids if item}
     requests: list[dict[str, Any]] = []
     top_level = raw.get("evidence_requests", [])
     if isinstance(top_level, list):
@@ -1478,14 +1722,80 @@ def _normalize_causal_refinement(
             if not _string_items(request.get("hypothesis_ids", [])):
                 request["hypothesis_ids"] = list(base_hypothesis_ids)
             requests.append(request)
+    frozen_hypotheses = [
+        {
+            "hypothesis_id": str(item.get("hypothesis_id", "") or ""),
+            "claim": str(item.get("claim", "") or ""),
+            "explains_requirement_ids": _string_items(item.get("explains_requirement_ids", [])),
+            "current_support": _string_items(item.get("current_support", [])),
+            "falsified_if": str(item.get("falsified_if", "") or ""),
+            "numeric_change_check_required": bool(item.get("numeric_change_check_required")),
+        }
+        for item in base_hypotheses
+    ]
+    accepted_new_hypotheses: list[dict[str, Any]] = []
+    seen_semantics = {
+        (
+            _normalize_cluster_text(str(item.get("claim", "") or "")),
+            _normalize_cluster_text(str(item.get("falsified_if", "") or "")),
+        )
+        for item in frozen_hypotheses
+    }
     raw_hypotheses = raw.get("hypotheses", [])
     if isinstance(raw_hypotheses, list):
         for hypothesis in raw_hypotheses:
             if not isinstance(hypothesis, dict):
                 continue
             hypothesis_id = str(hypothesis.get("hypothesis_id", "") or "")
-            for request in hypothesis.get("evidence_requests", []):
+            is_new = hypothesis_id not in base_hypothesis_id_set
+            if is_new:
+                if len(accepted_new_hypotheses) >= min(1, max(0, 5 - len(frozen_hypotheses))):
+                    continue
+                claim = str(hypothesis.get("claim", "") or "").strip()
+                falsified_if = str(hypothesis.get("falsified_if", "") or "").strip()
+                explains = _string_items(hypothesis.get("explains_requirement_ids", []))
+                if allowed_requirements:
+                    explains = [item for item in explains if item in allowed_requirements]
+                discovery_ids = list(dict.fromkeys(_string_items(hypothesis.get("discovery_evidence_request_ids", []))))
+                raw_hypothesis_requests = hypothesis.get("evidence_requests", [])
+                hypothesis_requests = (
+                    [item for item in raw_hypothesis_requests if isinstance(item, dict)]
+                    if isinstance(raw_hypothesis_requests, list)
+                    else []
+                )
+                semantics = (_normalize_cluster_text(claim), _normalize_cluster_text(falsified_if))
+                if (
+                    not hypothesis_id
+                    or not claim
+                    or not falsified_if
+                    or str(hypothesis.get("origin", "") or "") != "abductive_refinement"
+                    or (allowed_requirements and not explains)
+                    or not discovery_ids
+                    or not set(discovery_ids).issubset(base_request_ids)
+                    or not hypothesis_requests
+                    or semantics in seen_semantics
+                    or _contains_evaluator_outcome_dependency(claim)
+                    or _contains_evaluator_outcome_dependency(falsified_if)
+                ):
+                    continue
+                seen_semantics.add(semantics)
+                accepted_new_hypotheses.append(
+                    {
+                        "hypothesis_id": hypothesis_id,
+                        "claim": claim,
+                        "explains_requirement_ids": explains,
+                        "current_support": _string_items(hypothesis.get("current_support", [])),
+                        "falsified_if": falsified_if,
+                        "numeric_change_check_required": bool(hypothesis.get("numeric_change_check_required")),
+                        "origin": "abductive_refinement",
+                        "discovery_evidence_request_ids": discovery_ids,
+                    }
+                )
+            nested_requests = hypothesis.get("evidence_requests", [])
+            for request in nested_requests if isinstance(nested_requests, list) else []:
                 if not isinstance(request, dict):
+                    continue
+                if is_new and not any(item["hypothesis_id"] == hypothesis_id for item in accepted_new_hypotheses):
                     continue
                 item = dict(request)
                 ids = _string_items(item.get("hypothesis_ids", []))
@@ -1494,21 +1804,10 @@ def _normalize_causal_refinement(
                 item["hypothesis_ids"] = list(dict.fromkeys(ids))
                 requests.append(item)
     remaining = max(0, _CAUSAL_TOTAL_REQUEST_LIMIT - len(base.get("evidence_requests", [])))
-    frozen_hypotheses = [
-        {
-            "hypothesis_id": str(item.get("hypothesis_id", "") or ""),
-            "claim": str(item.get("claim", "") or ""),
-            "explains_requirement_ids": _string_items(item.get("explains_requirement_ids", [])),
-            "current_support": _string_items(item.get("current_support", [])),
-            "falsified_if": str(item.get("falsified_if", "") or ""),
-        }
-        for item in base.get("hypotheses", [])
-        if isinstance(item, dict)
-    ]
-    return normalize_causal_investigation(
+    normalized = normalize_causal_investigation(
         {
             "causal_investigation": {
-                "hypotheses": frozen_hypotheses,
+                "hypotheses": [*frozen_hypotheses, *accepted_new_hypotheses],
                 "evidence_requests": requests,
                 "ready_without_more_evidence": bool(raw.get("ready_without_more_evidence")),
             }
@@ -1516,6 +1815,49 @@ def _normalize_causal_refinement(
         failed_requirement_ids=failed_requirement_ids,
         max_requests=remaining,
     )
+    if normalized is None:
+        return None
+    normalized_requests = normalized.get("evidence_requests", [])
+    covered_new_ids = {
+        hypothesis_id
+        for request in normalized_requests
+        if isinstance(request, dict)
+        for hypothesis_id in _string_items(request.get("hypothesis_ids", []))
+    }
+    accepted_by_id = {item["hypothesis_id"]: item for item in accepted_new_hypotheses}
+    normalized_hypotheses: list[dict[str, Any]] = []
+    retained_ids = set(base_hypothesis_ids)
+    for item in normalized.get("hypotheses", []):
+        if not isinstance(item, dict):
+            continue
+        hypothesis_id = str(item.get("hypothesis_id", "") or "")
+        if hypothesis_id in accepted_by_id:
+            if hypothesis_id not in covered_new_ids:
+                continue
+            item = {
+                **item,
+                "origin": "abductive_refinement",
+                "discovery_evidence_request_ids": accepted_by_id[hypothesis_id]["discovery_evidence_request_ids"],
+            }
+            retained_ids.add(hypothesis_id)
+        normalized_hypotheses.append(item)
+    normalized["hypotheses"] = normalized_hypotheses
+    normalized["evidence_requests"] = [
+        {
+            **request,
+            "hypothesis_ids": [
+                hypothesis_id
+                for hypothesis_id in _string_items(request.get("hypothesis_ids", []))
+                if hypothesis_id in retained_ids
+            ],
+        }
+        for request in normalized_requests
+        if isinstance(request, dict)
+    ]
+    normalized["evidence_requests"] = [
+        request for request in normalized["evidence_requests"] if request["hypothesis_ids"]
+    ]
+    return normalized
 
 
 def _merge_causal_evidence_results(
@@ -2351,6 +2693,8 @@ def _split_supported_diagnosis_residual(diagnosis: dict[str, Any]) -> list[dict[
     local["hypothesis_assessment"] = [
         item for item in assessments if str(item.get("status", "") or "").strip().casefold() != "unresolved"
     ]
+    if not str(local.get("selected_hypothesis_id", "") or "").strip() and len(supported) == 1:
+        local["selected_hypothesis_id"] = str(supported[0].get("hypothesis_id", "") or "").strip()
 
     coverage = diagnosis.get("causal_coverage")
     coverage = coverage if isinstance(coverage, dict) else {}
@@ -2401,6 +2745,7 @@ def _split_supported_diagnosis_residual(diagnosis: dict[str, Any]) -> list[dict[
         "critical_mistake": "No additional causal decision is established by the current evidence.",
         "general_mechanism": "Keep unresolved causal alternatives unassigned until a discriminator is observed.",
         "target_ref": "unassigned",
+        "selected_hypothesis_id": "",
         "evidence_refs": [],
         "affected_components": [],
         "recommendation": "Acquire the missing discriminator before assigning another Harness change.",
@@ -2617,6 +2962,8 @@ def _compact_per_case_diagnoses(per_case_diagnoses: list[dict[str, Any]]) -> lis
                 item.get("discriminating_evidence", ""),
                 500,
             ),
+            "selected_hypothesis_id": item.get("selected_hypothesis_id", ""),
+            "selected_hypothesis_semantic_id": item.get("selected_hypothesis_semantic_id", ""),
             "root_cause": _truncate_text(item.get("root_cause", ""), 500),
             "critical_mistake": _truncate_text(item.get("critical_mistake", ""), 500),
             "general_mechanism": _truncate_text(item.get("general_mechanism", ""), 500),
@@ -2757,6 +3104,10 @@ def _aggregate_structured_diagnoses(
                             else []
                         ),
                         "discriminating_evidence": str(strongest.get("discriminating_evidence", "") or ""),
+                        "selected_hypothesis_id": str(strongest.get("selected_hypothesis_id", "") or ""),
+                        "selected_hypothesis_semantic_id": str(
+                            strongest.get("selected_hypothesis_semantic_id", "") or ""
+                        ),
                         "root_cause": str(strongest.get("root_cause", "") or ""),
                         "critical_mistake": str(strongest.get("critical_mistake", "") or ""),
                         "general_mechanism": str(strongest.get("general_mechanism", "") or ""),
@@ -3752,6 +4103,41 @@ def _case_diagnoses_validation_conflicts(
     return conflicts
 
 
+def _compatible_evidence_requests(
+    investigation: dict[str, Any],
+) -> dict[str, set[str]]:
+    """Allow discriminating evidence across hypotheses for the same failure.
+
+    A request planned for one alternative often supplies the falsifier for its
+    competitor.  Sharing it within an overlapping failed-requirement cluster is
+    causally valid; sharing it across unrelated clusters is not.
+    """
+    hypotheses = {
+        str(item.get("hypothesis_id", "") or ""): set(_string_items(item.get("explains_requirement_ids", [])))
+        for item in investigation.get("hypotheses", [])
+        if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "")
+    }
+    compatible: dict[str, set[str]] = {hypothesis_id: set() for hypothesis_id in hypotheses}
+    for request in investigation.get("evidence_requests", []):
+        if not isinstance(request, dict):
+            continue
+        request_id = str(request.get("request_id", "") or "")
+        if not request_id:
+            continue
+        scoped_ids = {
+            hypothesis_id
+            for hypothesis_id in _string_items(request.get("hypothesis_ids", []))
+            if hypothesis_id in hypotheses
+        }
+        scoped_requirements = {
+            requirement_id for hypothesis_id in scoped_ids for requirement_id in hypotheses[hypothesis_id]
+        }
+        for hypothesis_id, requirement_ids in hypotheses.items():
+            if hypothesis_id in scoped_ids or (requirement_ids and requirement_ids & scoped_requirements):
+                compatible[hypothesis_id].add(request_id)
+    return compatible
+
+
 def _causal_investigation_conflicts(
     diagnoses: list[dict[str, Any]],
     investigation: dict[str, Any],
@@ -3765,7 +4151,7 @@ def _causal_investigation_conflicts(
         for item in investigation.get("hypotheses", [])
         if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "")
     }
-    planned_requests: dict[str, set[str]] = {hypothesis_id: set() for hypothesis_id in planned}
+    compatible_requests = _compatible_evidence_requests(investigation)
     request_operations: dict[str, str] = {}
     for request in investigation.get("evidence_requests", []):
         if not isinstance(request, dict):
@@ -3773,9 +4159,6 @@ def _causal_investigation_conflicts(
         request_id = str(request.get("request_id", "") or "")
         if request_id:
             request_operations[request_id] = str(request.get("operation", "") or "")
-        for hypothesis_id in _string_items(request.get("hypothesis_ids", [])):
-            if hypothesis_id in planned and request_id:
-                planned_requests[hypothesis_id].add(request_id)
     request_availability = {
         str(item.get("request_id", "") or ""): str(item.get("availability", "") or "").casefold()
         for item in evidence_results.get("results", [])
@@ -3832,16 +4215,27 @@ def _causal_investigation_conflicts(
             conflicts.append(
                 f"{prefix}: treated unavailable controller requests as evidence: {', '.join(unavailable_requests)}"
             )
+        out_of_scope_requests = sorted(cited_requests - compatible_requests.get(hypothesis_id, set()))
+        if out_of_scope_requests:
+            conflicts.append(
+                f"{prefix}: cited controller requests outside its causal requirement cluster: "
+                + ", ".join(out_of_scope_requests)
+            )
+        available_scoped_requests = {
+            request_id
+            for request_id in cited_requests & compatible_requests.get(hypothesis_id, set())
+            if request_availability.get(request_id) == "available"
+        }
         if status == "supported" and falsifying_status != "not_observed":
             conflicts.append(f"{prefix}: supported claim requires its falsifying condition to be not_observed")
         if status == "supported" and follows != "yes":
             conflicts.append(f"{prefix}: supported claim must follow from the controller evidence")
-        if status == "supported" and planned_requests.get(hypothesis_id) and not cited_requests:
-            conflicts.append(f"{prefix}: supported claim cites no available controller request")
+        if status == "supported" and not available_scoped_requests:
+            conflicts.append(f"{prefix}: supported claim cites no available hypothesis-scoped controller request")
         if status == "supported" and bool(hypotheses_by_id.get(hypothesis_id, {}).get("numeric_change_check_required")):
             available_delta_checks = {
                 request_id
-                for request_id in planned_requests.get(hypothesis_id, set())
+                for request_id in compatible_requests.get(hypothesis_id, set())
                 if request_operations.get(request_id) == "compare_numeric_change"
                 and request_availability.get(request_id) == "available"
             }
@@ -3850,13 +4244,43 @@ def _causal_investigation_conflicts(
         if status == "falsified" and falsifying_status != "observed" and follows != "no":
             conflicts.append(f"{prefix}: falsified claim requires an observed falsifier or failed entailment")
     for index, diagnosis in enumerate(diagnoses, start=1):
-        statuses = {
-            str(item.get("status", "") or "").strip().casefold()
+        assessment_statuses = {
+            str(item.get("hypothesis_id", "") or "").strip(): str(item.get("status", "") or "").strip().casefold()
             for item in diagnosis.get("hypothesis_assessment", [])
-            if isinstance(item, dict)
+            if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "").strip()
         }
+        statuses = set(assessment_statuses.values())
         evidence_status = str(diagnosis.get("evidence_status", "") or "").strip().casefold()
         target_ref = str(diagnosis.get("target_ref", "") or "").strip().casefold()
+        selected_hypothesis_id = str(diagnosis.get("selected_hypothesis_id", "") or "").strip()
+        assigned = target_ref not in {"", "unassigned"}
+        if assigned:
+            if not selected_hypothesis_id:
+                conflicts.append(f"diagnosis[{index}]: assigned diagnosis must name selected_hypothesis_id")
+            elif selected_hypothesis_id not in planned:
+                conflicts.append(
+                    f"diagnosis[{index}]: selected_hypothesis_id is not in the investigation: {selected_hypothesis_id}"
+                )
+            elif assessment_statuses.get(selected_hypothesis_id) != "supported":
+                conflicts.append(
+                    f"diagnosis[{index}]: selected_hypothesis_id must have status=supported: {selected_hypothesis_id}"
+                )
+            selected_hypothesis = hypotheses_by_id.get(selected_hypothesis_id, {})
+            causal_handoff = {
+                "selected_hypothesis_claim": selected_hypothesis.get("claim", ""),
+                "selected_hypothesis_falsified_if": selected_hypothesis.get("falsified_if", ""),
+                "root_cause": diagnosis.get("root_cause", ""),
+                "general_mechanism": diagnosis.get("general_mechanism", ""),
+                "recommendation": diagnosis.get("recommendation", ""),
+                "decision_contract": diagnosis.get("decision_contract", {}),
+            }
+            if _contains_evaluator_outcome_dependency(causal_handoff):
+                conflicts.append(
+                    f"diagnosis[{index}]: causal handoff depends on evaluator-owned expected, "
+                    "target, gold, or reference outcomes"
+                )
+        elif selected_hypothesis_id:
+            conflicts.append(f"diagnosis[{index}]: unassigned diagnosis must leave selected_hypothesis_id empty")
         if evidence_status == "confirmed":
             if "supported" not in statuses:
                 conflicts.append(f"diagnosis[{index}]: confirmed diagnosis has no supported investigation hypothesis")
@@ -3868,25 +4292,66 @@ def _causal_investigation_conflicts(
                 "require target_ref=unassigned"
             )
 
+    selected_supported_ids = {
+        str(diagnosis.get("selected_hypothesis_id", "") or "").strip()
+        for diagnosis in diagnoses
+        if _normalize_target_ref(diagnosis.get("target_ref", "")) not in {"", "unassigned"}
+        and str(diagnosis.get("selected_hypothesis_id", "") or "").strip()
+    }
+    supported_rows_by_id: dict[str, list[dict[str, Any]]] = {}
+    for _, assessment in assessment_rows:
+        hypothesis_id = str(assessment.get("hypothesis_id", "") or "").strip()
+        if hypothesis_id and str(assessment.get("status", "") or "").strip().casefold() == "supported":
+            supported_rows_by_id.setdefault(hypothesis_id, []).append(assessment)
+    for hypothesis_id, supported_rows in sorted(supported_rows_by_id.items()):
+        if hypothesis_id in selected_supported_ids:
+            continue
+        explicitly_disposed = any(
+            str(item.get("handoff_disposition", "") or "").strip().casefold() in {"subsumed", "non_actionable"}
+            and bool(str(item.get("handoff_reason", "") or "").strip())
+            for item in supported_rows
+        )
+        if not explicitly_disposed:
+            conflicts.append(f"supported causal hypothesis was not handed off or explicitly disposed: {hypothesis_id}")
+
     experiments = prior_candidate_feedback.get("experiments", []) if isinstance(prior_candidate_feedback, dict) else []
-    prior_source_hypothesis_ids: set[str] = set()
+    # ``h1``/``h2`` labels are local to one investigation.  Cross-round causal
+    # feedback must therefore compare semantic identities, never those labels.
+    prior_source_hypothesis_semantic_ids: set[str] = set()
     for record in experiments if isinstance(experiments, list) else []:
         if not isinstance(record, dict):
             continue
         for contract in record.get("causal_intervention_contracts", []):
             if not isinstance(contract, dict):
                 continue
-            source_id = str(contract.get("source_causal_hypothesis_id", "") or "").strip()
-            if source_id:
-                prior_source_hypothesis_ids.add(source_id)
-            prior_source_hypothesis_ids.update(_string_items(contract.get("source_causal_hypothesis_ids", [])))
+            source_semantic_id = str(contract.get("source_causal_hypothesis_semantic_id", "") or "").strip()
+            if source_semantic_id:
+                prior_source_hypothesis_semantic_ids.add(source_semantic_id)
+            prior_source_hypothesis_semantic_ids.update(
+                _string_items(contract.get("source_causal_hypothesis_semantic_ids", []))
+            )
     has_recorded_prediction = any(
         isinstance(record, dict) and bool(record.get("causal_intervention_contracts"))
         for record in experiments
         if isinstance(experiments, list)
     )
     if has_recorded_prediction:
+        planned_semantics = {
+            str(item.get("hypothesis_id", "") or "").strip(): str(item.get("hypothesis_semantic_id", "") or "").strip()
+            for item in investigation.get("hypotheses", [])
+            if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "").strip()
+        }
         for index, diagnosis in enumerate(diagnoses, start=1):
+            diagnosis_semantics = {
+                planned_semantics.get(str(item.get("hypothesis_id", "") or "").strip(), "")
+                for item in diagnosis.get("hypothesis_assessment", [])
+                if isinstance(item, dict)
+                and str(item.get("status", "") or "").strip().casefold() in {"supported", "falsified"}
+            } - {""}
+            if prior_source_hypothesis_semantic_ids and not diagnosis_semantics.intersection(
+                prior_source_hypothesis_semantic_ids
+            ):
+                continue
             assessment = diagnosis.get("prior_experiment_assessment")
             if not isinstance(assessment, dict) or assessment.get("availability") != "available":
                 conflicts.append(f"diagnosis[{index}]: paired causal experiment was not assessed")
@@ -3894,18 +4359,469 @@ def _causal_investigation_conflicts(
             status = str(assessment.get("causal_hypothesis_status", "") or "").strip().casefold()
             if status not in {"supported", "falsified", "not_tested", "inconclusive"}:
                 conflicts.append(f"diagnosis[{index}]: invalid paired causal hypothesis status")
-            if status == "falsified" and prior_source_hypothesis_ids:
-                newly_supported = {
-                    str(item.get("hypothesis_id", "") or "").strip()
+            if status == "falsified" and prior_source_hypothesis_semantic_ids:
+                newly_supported_semantics = {
+                    planned_semantics.get(str(item.get("hypothesis_id", "") or "").strip(), "")
                     for item in diagnosis.get("hypothesis_assessment", [])
                     if isinstance(item, dict) and str(item.get("status", "") or "").strip().casefold() == "supported"
                 }
-                reused = sorted(newly_supported & prior_source_hypothesis_ids)
+                reused = sorted((newly_supported_semantics - {""}) & prior_source_hypothesis_semantic_ids)
                 if reused:
                     conflicts.append(
-                        f"diagnosis[{index}]: falsified prior causal hypotheses were reused: {', '.join(reused)}"
+                        "diagnosis["
+                        f"{index}]: falsified prior causal hypotheses were reused by semantic identity: "
+                        f"{', '.join(reused)}"
                     )
     return conflicts
+
+
+def _attach_hypothesis_semantics(
+    diagnoses: list[dict[str, Any]],
+    investigation: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Persist semantic causal identity after model-facing local IDs are resolved."""
+    if not isinstance(investigation, dict):
+        return diagnoses
+    planned = {
+        str(item.get("hypothesis_id", "") or "").strip(): item
+        for item in investigation.get("hypotheses", [])
+        if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "").strip()
+    }
+    annotated: list[dict[str, Any]] = []
+    for raw_diagnosis in diagnoses:
+        diagnosis = dict(raw_diagnosis)
+        assessments: list[dict[str, Any]] = []
+        for raw_assessment in diagnosis.get("hypothesis_assessment", []):
+            if not isinstance(raw_assessment, dict):
+                continue
+            assessment = dict(raw_assessment)
+            hypothesis = planned.get(str(assessment.get("hypothesis_id", "") or "").strip())
+            if hypothesis is not None:
+                claim = str(hypothesis.get("claim", "") or "")
+                falsified_if = str(hypothesis.get("falsified_if", "") or "")
+                semantic_id = str(hypothesis.get("hypothesis_semantic_id", "") or "")
+                if not semantic_id and claim and falsified_if:
+                    semantic_id = causal_hypothesis_semantic_id(claim, falsified_if)
+                if semantic_id:
+                    assessment["hypothesis_semantic_id"] = semantic_id
+                if claim:
+                    assessment["claim"] = claim
+                if falsified_if:
+                    assessment["falsified_if"] = falsified_if
+            assessments.append(assessment)
+        diagnosis["hypothesis_assessment"] = assessments
+        selected_hypothesis_id = str(diagnosis.get("selected_hypothesis_id", "") or "").strip()
+        selected = planned.get(selected_hypothesis_id)
+        if selected is not None:
+            selected_semantic_id = str(selected.get("hypothesis_semantic_id", "") or "").strip()
+            if not selected_semantic_id:
+                claim = str(selected.get("claim", "") or "")
+                falsified_if = str(selected.get("falsified_if", "") or "")
+                if claim and falsified_if:
+                    selected_semantic_id = causal_hypothesis_semantic_id(claim, falsified_if)
+            if selected_semantic_id:
+                diagnosis["selected_hypothesis_semantic_id"] = selected_semantic_id
+        elif not selected_hypothesis_id:
+            diagnosis.pop("selected_hypothesis_semantic_id", None)
+        annotated.append(diagnosis)
+    return annotated
+
+
+def _assigned_diagnosis_indices(diagnoses: list[dict[str, Any]]) -> list[int]:
+    return [
+        index
+        for index, diagnosis in enumerate(diagnoses, start=1)
+        if _normalize_target_ref(diagnosis.get("target_ref", "")) not in {"", "unassigned"}
+    ]
+
+
+def _compact_causal_handoff_audit_diagnosis(
+    *,
+    diagnosis_index: int,
+    diagnosis: dict[str, Any],
+    investigation: dict[str, Any],
+    evidence_results: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep one audit record complete without forwarding unrelated evidence."""
+    selected_hypothesis_id = str(diagnosis.get("selected_hypothesis_id", "") or "").strip()
+    selected_hypothesis = next(
+        (
+            item
+            for item in investigation.get("hypotheses", [])
+            if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "").strip() == selected_hypothesis_id
+        ),
+        {},
+    )
+    selected_assessment = next(
+        (
+            item
+            for item in diagnosis.get("hypothesis_assessment", [])
+            if isinstance(item, dict) and str(item.get("hypothesis_id", "") or "").strip() == selected_hypothesis_id
+        ),
+        {},
+    )
+    cited_request_ids = set(_string_items(selected_assessment.get("controller_request_ids", [])))
+    relevant_results = [
+        _bounded_structured_value(item, 2_000)
+        for item in evidence_results.get("results", [])
+        if isinstance(item, dict) and str(item.get("request_id", "") or "") in cited_request_ids
+    ]
+    return {
+        "diagnosis_index": diagnosis_index,
+        "selected_hypothesis_id": selected_hypothesis_id,
+        "selected_hypothesis": _bounded_structured_value(selected_hypothesis, 3_000),
+        "selected_assessment": _bounded_structured_value(selected_assessment, 3_000),
+        "controller_evidence_used": relevant_results,
+        "causal_handoff": {
+            "summary": _truncate_text(diagnosis.get("summary", ""), 700),
+            "failure_mode": _truncate_text(diagnosis.get("failure_mode", ""), 300),
+            "root_cause": _truncate_text(diagnosis.get("root_cause", ""), 900),
+            "general_mechanism": _truncate_text(diagnosis.get("general_mechanism", ""), 900),
+            "recommendation": _truncate_text(diagnosis.get("recommendation", ""), 900),
+            "decision_contract": _bounded_structured_value(diagnosis.get("decision_contract", {}), 3_000),
+            "causal_coverage": _bounded_structured_value(diagnosis.get("causal_coverage", {}), 1_500),
+            "evidence_refs": _bounded_structured_value(diagnosis.get("evidence_refs", []), 1_500),
+        },
+    }
+
+
+def _build_causal_handoff_audit_prompt(
+    *,
+    public_task_contract: str,
+    diagnoses: list[dict[str, Any]],
+    investigation: dict[str, Any],
+    evidence_results: dict[str, Any],
+) -> str:
+    """Ask for an independent deployability review before emitting an Issue."""
+    assigned_indices = set(_assigned_diagnosis_indices(diagnoses))
+    audit_payload = {
+        "authoritative_public_task_contract": _truncate_text(public_task_contract, 8_000),
+        "assigned_diagnoses": [
+            _compact_causal_handoff_audit_diagnosis(
+                diagnosis_index=index,
+                diagnosis=diagnosis,
+                investigation=investigation,
+                evidence_results=evidence_results,
+            )
+            for index, diagnosis in enumerate(diagnoses, start=1)
+            if index in assigned_indices
+        ],
+    }
+    return f"""CAUSAL_HANDOFF_PHASE=audit
+
+You are auditing causal attribution, not improving the Harness and not solving
+the observed task. Review each assigned diagnosis independently. Return only:
+{{
+  "diagnosis_audits": [
+    {{
+      "diagnosis_index": 1,
+      "selected_hypothesis_id": "h1",
+      "hypothesis_binding": true,
+      "runtime_decidable": true,
+      "public_contract_consistent": true,
+      "decision_rule_entailed": true,
+      "decision_rule_source": "public_task_contract | task_visible_invariant | runtime_safety_invariant | none",
+      "decision_rule_evidence": "the exact public clause or visible invariant that entails the action",
+      "evaluation_independent": true,
+      "single_intervention": true,
+      "approved": true,
+      "violations": []
+    }}
+  ]
+}}
+
+Audit rules:
+- hypothesis_binding is true only when root_cause, general_mechanism,
+  recommendation, decision_contract, and counterfactual all follow from the
+  exact selected investigation hypothesis whose assessment is supported. An
+  observed symptom from one hypothesis cannot justify the action of another.
+- runtime_decidable is true only when a future task Agent can select the action
+  from its public task, task-visible artifacts, trace-visible state, public
+  repository, or public tool results.
+- evaluation_independent is true only after mentally deleting verifier-owned
+  expected values, gold/reference answers, scores, pass/fail labels, and
+  candidate outcome deltas. Such evidence may falsify or measure a hypothesis,
+  but it cannot be the rule that selects the next action or decides success.
+- public_contract_consistent is false when the proposed behavior reverses an
+  explicit public instruction and the only support for doing so is the scored
+  outcome. Do not reinterpret the contract merely to approach a target value.
+- decision_rule_entailed is stricter than consistency. It is true only when the
+  exact required_action and acceptance_observable are positively entailed by
+  one source available to the future Agent: an explicit public-task clause, a
+  task-visible artifact/repository invariant, or a general runtime-safety
+  invariant such as validating the exact released object after its last
+  mutation. Record that source and the concrete support in decision_rule_source
+  and decision_rule_evidence. "May mean", "could mean", "perhaps intended",
+  or merely being compatible with the contract is not entailment. A bad output
+  can entail validation or withholding that invalid output, but it does not
+  entail an arbitrary domain-specific repair.
+- single_intervention is true only when one trigger selects one behavior change
+  with one runtime-visible acceptance observable. Bundled independent repairs
+  must be separate diagnoses.
+- approved must equal the conjunction of the six preceding booleans. It must
+  be false whenever violations is non-empty. Explain every false field in
+  violations, and leave violations empty only when approved is true.
+- Audit every assigned diagnosis exactly once. Do not audit unassigned records,
+  rewrite a diagnosis, invent evidence, or propose a replacement.
+
+AUDIT_INPUT:
+{json.dumps(audit_payload, ensure_ascii=False, separators=(",", ":"))}
+"""
+
+
+def _normalize_causal_handoff_audit(
+    value: dict[str, Any] | None,
+    *,
+    diagnoses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate model audit structure and fail closed on missing diagnoses."""
+    expected_indices = _assigned_diagnosis_indices(diagnoses)
+    raw_rows = value.get("diagnosis_audits") if isinstance(value, dict) else None
+    if not isinstance(raw_rows, list):
+        raise ValueError("causal handoff audit must contain diagnosis_audits")
+    rows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    expected_by_index = {index: diagnoses[index - 1] for index in expected_indices}
+    boolean_fields = (
+        "hypothesis_binding",
+        "runtime_decidable",
+        "public_contract_consistent",
+        "decision_rule_entailed",
+        "evaluation_independent",
+        "single_intervention",
+        "approved",
+    )
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            raise TypeError("causal handoff audit rows must be mappings")
+        index = raw.get("diagnosis_index")
+        if not isinstance(index, int) or isinstance(index, bool) or index not in expected_by_index:
+            raise ValueError("causal handoff audit used an unknown diagnosis_index")
+        if index in seen:
+            raise ValueError("causal handoff audit repeated a diagnosis_index")
+        seen.add(index)
+        selected = str(raw.get("selected_hypothesis_id", "") or "").strip()
+        expected_selected = str(expected_by_index[index].get("selected_hypothesis_id", "") or "").strip()
+        if selected != expected_selected:
+            raise ValueError(f"causal handoff audit changed selected_hypothesis_id for diagnosis[{index}]")
+        normalized: dict[str, Any] = {
+            "diagnosis_index": index,
+            "selected_hypothesis_id": selected,
+        }
+        for field in boolean_fields:
+            field_value = raw.get(field)
+            if not isinstance(field_value, bool):
+                raise TypeError(f"causal handoff audit {field} must be a boolean")
+            normalized[field] = field_value
+        decision_rule_source = str(raw.get("decision_rule_source", "") or "").strip()
+        if decision_rule_source not in {
+            "public_task_contract",
+            "task_visible_invariant",
+            "runtime_safety_invariant",
+            "none",
+        }:
+            raise ValueError("causal handoff audit decision_rule_source is invalid")
+        decision_rule_evidence = str(raw.get("decision_rule_evidence", "") or "").strip()
+        if normalized["decision_rule_entailed"] and (decision_rule_source == "none" or not decision_rule_evidence):
+            raise ValueError("causal handoff audit entailed decision rule requires a concrete source and evidence")
+        normalized["decision_rule_source"] = decision_rule_source
+        normalized["decision_rule_evidence"] = decision_rule_evidence
+        violations = raw.get("violations")
+        if not isinstance(violations, list) or any(
+            not isinstance(item, str) or not item.strip() for item in violations
+        ):
+            raise TypeError("causal handoff audit violations must be a list of non-empty strings")
+        normalized["violations"] = [item.strip() for item in violations]
+        expected_approval = all(normalized[field] for field in boolean_fields[:-1])
+        if normalized["approved"] != expected_approval:
+            raise ValueError("causal handoff audit approved field does not match its component checks")
+        if normalized["approved"] == bool(normalized["violations"]):
+            raise ValueError("causal handoff audit violations must be empty exactly when approved")
+        rows.append(normalized)
+    missing = sorted(set(expected_indices) - seen)
+    for index in missing:
+        expected = expected_by_index[index]
+        rows.append(
+            {
+                "diagnosis_index": index,
+                "selected_hypothesis_id": str(expected.get("selected_hypothesis_id", "") or "").strip(),
+                "hypothesis_binding": False,
+                "runtime_decidable": False,
+                "public_contract_consistent": False,
+                "decision_rule_entailed": False,
+                "decision_rule_source": "none",
+                "decision_rule_evidence": "",
+                "evaluation_independent": False,
+                "single_intervention": False,
+                "approved": False,
+                "violations": ["The audit response omitted this assigned diagnosis; no causal handoff was approved."],
+            }
+        )
+    return {"diagnosis_audits": sorted(rows, key=lambda item: item["diagnosis_index"])}
+
+
+def _causal_handoff_audit_approved(audit: dict[str, Any]) -> bool:
+    return all(bool(item.get("approved")) for item in audit.get("diagnosis_audits", []))
+
+
+def _build_causal_handoff_repair_prompt(
+    *,
+    public_task_contract: str,
+    diagnoses: list[dict[str, Any]],
+    investigation: dict[str, Any],
+    evidence_results: dict[str, Any],
+    audit: dict[str, Any],
+) -> str:
+    """Give the diagnosis model one bounded chance to repair attribution itself."""
+    return f"""CAUSAL_HANDOFF_PHASE=repair
+
+The independent causal handoff audit rejected the diagnoses listed below.
+Already-approved sibling diagnoses are frozen outside this prompt and will be
+preserved by the controller. Repair only the rejected diagnosis records, not the
+Harness. Return only one complete
+{{"diagnoses":[...]}} JSON object using the same fields as the previous
+diagnosis, including selected_hypothesis_id.
+
+Rules:
+- Hypothesis claims, falsifiers, controller evidence, and the public task
+  contract are frozen. Do not add or rewrite a hypothesis or invent evidence.
+- An assigned diagnosis must select exactly one hypothesis already assessed as
+  supported. Every causal field and the one required action must follow from it.
+- Remove evaluator-owned expected/gold/reference values, scores, and pass/fail
+  labels mentally. If the action is no longer decidable from task-visible
+  evidence, set target_ref="unassigned", selected_hypothesis_id="",
+  evidence_status="insufficient", confidence="low", and keep its failed checks
+  residual rather than inventing a replacement.
+- Do not reverse an explicit public instruction merely because another behavior
+  would move the scored output toward an expected value.
+- The repaired required action must be positively entailed by an explicit
+  public-task clause, a task-visible invariant, or a general runtime-safety
+  invariant. Compatibility, ambiguity, and phrases such as "may have intended"
+  are not enough. If only validation is entailed, do not invent a specific
+  recovery algorithm; narrow the action to validation/withholding or leave it
+  unassigned.
+- Do not bundle two independent behavior changes into one diagnosis.
+- Do not reproduce, summarize, or replace any approved sibling diagnosis. An
+  omitted rejected diagnosis means that rejected causal handoff is abandoned;
+  it does not remove an approved sibling.
+
+PUBLIC_TASK_CONTRACT:
+{_bounded_json({"input_excerpt": public_task_contract}, 8_000)}
+
+FROZEN_INVESTIGATION_AND_EVIDENCE:
+{_bounded_json({"investigation": investigation, "controller_evidence_results": evidence_results}, 24_000)}
+
+REJECTED_DIAGNOSES:
+{_bounded_json(diagnoses, 16_000)}
+
+AUDIT:
+{_bounded_json(audit, 8_000)}
+"""
+
+
+def _downgrade_rejected_causal_handoffs(
+    diagnoses: list[dict[str, Any]],
+    *,
+    rejected_indices: set[int],
+    violations_by_index: dict[int, list[str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Fail closed without discarding the observed failure or its hypotheses."""
+    violations_by_index = violations_by_index or {}
+    downgraded: list[dict[str, Any]] = []
+    for index, raw in enumerate(diagnoses, start=1):
+        diagnosis = dict(raw)
+        if index not in rejected_indices:
+            downgraded.append(diagnosis)
+            continue
+        cluster_ids = _string_items(_diagnosis_failure_cluster(diagnosis).get("failed_checks", []))
+        coverage = diagnosis.get("causal_coverage")
+        coverage = dict(coverage) if isinstance(coverage, dict) else {}
+        unexplained = _string_items(coverage.get("unexplained_observations", []))
+        audit_violations = violations_by_index.get(index, [])
+        unexplained.append(
+            "The causal handoff was not deployable from task-visible evidence"
+            + (": " + "; ".join(audit_violations) if audit_violations else ".")
+        )
+        coverage.update(
+            {
+                "explained_requirement_ids": [],
+                "residual_requirement_ids": list(
+                    dict.fromkeys(
+                        [
+                            *_string_items(coverage.get("residual_requirement_ids", [])),
+                            *cluster_ids,
+                        ]
+                    )
+                ),
+                "unexplained_observations": list(dict.fromkeys(unexplained)),
+                "sufficiency_status": "unknown",
+            }
+        )
+        diagnosis.update(
+            {
+                "issue_category": "unassigned",
+                "evidence_status": "insufficient",
+                "target_ref": "unassigned",
+                "selected_hypothesis_id": "",
+                "confidence": "low",
+                "evidence_refs": [],
+                "recommendation": (
+                    "Acquire a task-visible discriminator that makes one causal action deployable "
+                    "without evaluator-owned outcomes."
+                ),
+                "causal_coverage": coverage,
+            }
+        )
+        downgraded.append(diagnosis)
+    explained_any = {
+        requirement_id
+        for diagnosis in downgraded
+        if str(diagnosis.get("evidence_status", "") or "").strip().casefold() != "insufficient"
+        for requirement_id in _string_items(
+            diagnosis.get("causal_coverage", {}).get("explained_requirement_ids", [])
+            if isinstance(diagnosis.get("causal_coverage"), dict)
+            else []
+        )
+    }
+    partitioned: list[dict[str, Any]] = []
+    for diagnosis in downgraded:
+        if str(diagnosis.get("evidence_status", "") or "").strip().casefold() != "insufficient":
+            partitioned.append(diagnosis)
+            continue
+        cluster = _diagnosis_failure_cluster(diagnosis)
+        unresolved = [item for item in _string_items(cluster.get("failed_checks", [])) if item not in explained_any]
+        if not unresolved:
+            continue
+        cluster["failed_checks"] = unresolved
+        diagnosis["failure_cluster"] = cluster
+        coverage = dict(diagnosis.get("causal_coverage", {}))
+        coverage["residual_requirement_ids"] = [
+            item for item in _string_items(coverage.get("residual_requirement_ids", [])) if item not in explained_any
+        ]
+        diagnosis["causal_coverage"] = coverage
+        partitioned.append(diagnosis)
+    return partitioned
+
+
+def _replace_rejected_causal_handoffs(
+    diagnoses: list[dict[str, Any]],
+    *,
+    rejected_indices: set[int],
+    replacements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Replace rejected rows without allowing repair to erase approved siblings."""
+    merged: list[dict[str, Any]] = []
+    inserted = False
+    for index, diagnosis in enumerate(diagnoses, start=1):
+        if index not in rejected_indices:
+            merged.append(dict(diagnosis))
+            continue
+        if not inserted:
+            merged.extend(dict(item) for item in replacements)
+            inserted = True
+    if not inserted:
+        merged.extend(dict(item) for item in replacements)
+    return merged
 
 
 _OUTCOME_FIT_MARKERS = (
@@ -3918,6 +4834,14 @@ _OUTCOME_FIT_MARKERS = (
     "reverse-engineer",
     "reverse engineer",
     "target value implies",
+    "evaluator expects",
+    "evaluator requires",
+    "scorer expects",
+    "scorer requires",
+    "rubric expects",
+    "rubric requires",
+    "criteria require the answer",
+    "criterion requires the answer",
     "反推",
     "根据预期",
     "由期望",
@@ -3930,6 +4854,7 @@ def _reconcile_causal_assessments(
     *,
     evidence_results: dict[str, Any],
     failed_requirement_inventory: dict[str, Any] | None,
+    prior_candidate_feedback: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Downgrade only unsupported hypotheses instead of discarding a Case.
 
@@ -3945,24 +4870,64 @@ def _reconcile_causal_assessments(
     }
     if not diagnoses or not planned_rows:
         return diagnoses, []
+    warnings: list[str] = []
+    required_ids = _failed_requirement_ids(failed_requirement_inventory)
+    if required_ids:
+        prepared_diagnoses: list[dict[str, Any]] = []
+        has_authoritative_cluster = any(
+            set(_string_items(_diagnosis_failure_cluster(item).get("failed_checks", []))) & required_ids
+            for item in diagnoses
+        )
+        for diagnosis_index, raw_diagnosis in enumerate(diagnoses, start=1):
+            diagnosis = dict(raw_diagnosis)
+            cluster = _diagnosis_failure_cluster(diagnosis)
+            cluster_ids = _string_items(cluster.get("failed_checks", []))
+            known_cluster_ids = [item for item in cluster_ids if item in required_ids]
+            unknown_cluster_ids = [item for item in cluster_ids if item not in required_ids]
+            if unknown_cluster_ids and not known_cluster_ids and has_authoritative_cluster:
+                warnings.append(
+                    f"diagnosis[{diagnosis_index}] dropped a redundant cluster containing only "
+                    "non-authoritative requirement IDs: " + ", ".join(unknown_cluster_ids)
+                )
+                continue
+            if unknown_cluster_ids and known_cluster_ids:
+                cluster["failed_checks"] = known_cluster_ids
+                diagnosis["failure_cluster"] = cluster
+                coverage = diagnosis.get("causal_coverage")
+                if isinstance(coverage, dict):
+                    coverage = dict(coverage)
+                    coverage["explained_requirement_ids"] = [
+                        item
+                        for item in _string_items(coverage.get("explained_requirement_ids", []))
+                        if item in required_ids
+                    ]
+                    coverage["residual_requirement_ids"] = [
+                        item
+                        for item in _string_items(coverage.get("residual_requirement_ids", []))
+                        if item in required_ids
+                    ]
+                    diagnosis["causal_coverage"] = coverage
+                warnings.append(
+                    f"diagnosis[{diagnosis_index}] removed non-authoritative requirement IDs while "
+                    "preserving its authoritative cluster: " + ", ".join(unknown_cluster_ids)
+                )
+            prepared_diagnoses.append(diagnosis)
+        if prepared_diagnoses:
+            diagnoses = prepared_diagnoses
     request_operations: dict[str, str] = {}
-    planned_requests: dict[str, set[str]] = {hypothesis_id: set() for hypothesis_id in planned_rows}
+    compatible_requests = _compatible_evidence_requests(investigation)
     for request in investigation.get("evidence_requests", []):
         if not isinstance(request, dict):
             continue
         request_id = str(request.get("request_id", "") or "")
         if request_id:
             request_operations[request_id] = str(request.get("operation", "") or "")
-        for hypothesis_id in _string_items(request.get("hypothesis_ids", [])):
-            if hypothesis_id in planned_rows and request_id:
-                planned_requests[hypothesis_id].add(request_id)
     request_availability = {
         str(item.get("request_id", "") or ""): str(item.get("availability", "") or "").casefold()
         for item in evidence_results.get("results", [])
         if isinstance(item, dict) and str(item.get("request_id", "") or "")
     }
 
-    warnings: list[str] = []
     reconciled: list[dict[str, Any]] = []
     assessed_ids: set[str] = set()
     for diagnosis_index, raw_diagnosis in enumerate(diagnoses, start=1):
@@ -3984,8 +4949,11 @@ def _reconcile_causal_assessments(
             follows = str(assessment.get("claim_follows_from_evidence", "") or "").strip().casefold()
             logic = str(assessment.get("logic_check", "") or "").strip()
             cited = set(_string_items(assessment.get("controller_request_ids", [])))
+            scoped_requests = compatible_requests.get(hypothesis_id, set())
             available_cited = sorted(
-                request_id for request_id in cited if request_availability.get(request_id) == "available"
+                request_id
+                for request_id in cited & scoped_requests
+                if request_availability.get(request_id) == "available"
             )
             invalid_reasons: list[str] = []
             if status not in {"supported", "falsified", "unresolved"}:
@@ -3997,7 +4965,7 @@ def _reconcile_causal_assessments(
                     invalid_reasons.append("claim_not_entailed")
                 if not logic:
                     invalid_reasons.append("missing_logic_check")
-                if planned_requests[hypothesis_id] and not available_cited:
+                if not available_cited:
                     invalid_reasons.append("no_available_controller_evidence")
                 if bool(planned_rows[hypothesis_id].get("numeric_change_check_required")) and not any(
                     request_operations.get(request_id) == "compare_numeric_change" for request_id in available_cited
@@ -4014,8 +4982,16 @@ def _reconcile_causal_assessments(
                     invalid_reasons.append("outcome_reverse_engineering_is_not_causal_evidence")
             elif status == "falsified" and falsifying != "observed" and follows != "no":
                 invalid_reasons.append("falsification_not_observed")
+            if cited - scoped_requests:
+                warnings.append(
+                    f"diagnosis[{diagnosis_index}] stripped evidence outside {hypothesis_id}: "
+                    + ", ".join(sorted(cited - scoped_requests))
+                )
             if cited - set(available_cited):
-                invalid_reasons.append("unavailable_or_unknown_controller_evidence")
+                warnings.append(
+                    f"diagnosis[{diagnosis_index}] stripped unavailable evidence from {hypothesis_id}: "
+                    + ", ".join(sorted(cited - set(available_cited)))
+                )
 
             assessment["controller_request_ids"] = available_cited
             if invalid_reasons:
@@ -4064,7 +5040,52 @@ def _reconcile_causal_assessments(
         statuses = {
             str(item.get("status", "") or "").strip().casefold() for item in assessments if isinstance(item, dict)
         }
+        supported_ids = [
+            str(item.get("hypothesis_id", "") or "").strip()
+            for item in assessments
+            if isinstance(item, dict)
+            and str(item.get("status", "") or "").strip().casefold() == "supported"
+            and str(item.get("hypothesis_id", "") or "").strip()
+        ]
         target_ref = _normalize_target_ref(diagnosis.get("target_ref", ""))
+        selected_hypothesis_id = str(diagnosis.get("selected_hypothesis_id", "") or "").strip()
+        if target_ref not in {"", "unassigned"} and selected_hypothesis_id:
+            selected_hypothesis = planned_rows.get(selected_hypothesis_id, {})
+            causal_handoff = {
+                "selected_hypothesis_claim": selected_hypothesis.get("claim", ""),
+                "selected_hypothesis_falsified_if": selected_hypothesis.get("falsified_if", ""),
+                "root_cause": diagnosis.get("root_cause", ""),
+                "general_mechanism": diagnosis.get("general_mechanism", ""),
+                "recommendation": diagnosis.get("recommendation", ""),
+                "decision_contract": diagnosis.get("decision_contract", {}),
+            }
+            if _contains_evaluator_outcome_dependency(causal_handoff):
+                for assessment in assessments:
+                    if not isinstance(assessment, dict):
+                        continue
+                    if str(assessment.get("hypothesis_id", "") or "").strip() != selected_hypothesis_id:
+                        continue
+                    assessment["handoff_disposition"] = "non_actionable"
+                    assessment["handoff_reason"] = (
+                        "The proposed runtime handoff depends on evaluator-owned outcomes; "
+                        "the observed mechanism is retained but cannot define a deployable decision."
+                    )
+                diagnosis["target_ref"] = "unassigned"
+                diagnosis["selected_hypothesis_id"] = ""
+                target_ref = "unassigned"
+                selected_hypothesis_id = ""
+                warnings.append(
+                    "downgraded evaluator-outcome-dependent causal handoff without erasing sibling diagnoses"
+                )
+        if target_ref in {"", "unassigned"} and selected_hypothesis_id:
+            diagnosis["selected_hypothesis_id"] = ""
+            selected_hypothesis_id = ""
+        if target_ref not in {"", "unassigned"} and not selected_hypothesis_id and len(supported_ids) == 1:
+            selected_hypothesis_id = supported_ids[0]
+            diagnosis["selected_hypothesis_id"] = selected_hypothesis_id
+        handoff_has_supported_binding = target_ref in {"", "unassigned"} or bool(
+            selected_hypothesis_id and selected_hypothesis_id in supported_ids
+        )
         coverage = diagnosis.get("causal_coverage")
         coverage = dict(coverage) if isinstance(coverage, dict) else {}
         explained = _string_items(coverage.get("explained_requirement_ids", []))
@@ -4072,10 +5093,11 @@ def _reconcile_causal_assessments(
             item for item in _string_items(coverage.get("residual_requirement_ids", [])) if item not in explained
         ]
         coverage["residual_requirement_ids"] = residual
-        if "supported" not in statuses and target_ref not in {"", "unassigned"}:
+        if target_ref in {"", "unassigned"} or "supported" not in statuses or not handoff_has_supported_binding:
             cluster_ids = _string_items(_diagnosis_failure_cluster(diagnosis).get("failed_checks", []))
             diagnosis["evidence_status"] = "insufficient"
             diagnosis["target_ref"] = "unassigned"
+            diagnosis["selected_hypothesis_id"] = ""
             diagnosis["confidence"] = "low"
             diagnosis["issue_category"] = "unassigned"
             diagnosis["evidence_refs"] = []
@@ -4083,16 +5105,86 @@ def _reconcile_causal_assessments(
             coverage["residual_requirement_ids"] = list(dict.fromkeys([*residual, *cluster_ids]))
             coverage["sufficiency_status"] = "unknown"
             unexplained = _string_items(coverage.get("unexplained_observations", []))
-            unexplained.append("No planned causal hypothesis retained valid positive support.")
+            unexplained.append(
+                "No planned causal hypothesis retained valid positive support."
+                if "supported" not in statuses
+                else "The proposed handoff was not bound to exactly one supported causal hypothesis."
+            )
             coverage["unexplained_observations"] = list(dict.fromkeys(unexplained))
-        elif "unresolved" in statuses and str(diagnosis.get("evidence_status", "") or "").casefold() == "confirmed":
-            diagnosis["evidence_status"] = "supported_hypothesis"
-            diagnosis["confidence"] = "medium"
-            coverage["sufficiency_status"] = "local_contributor"
-            unexplained = _string_items(coverage.get("unexplained_observations", []))
-            unexplained.append("One or more planned causal alternatives remain unresolved.")
-            coverage["unexplained_observations"] = list(dict.fromkeys(unexplained))
+        else:
+            supported_hypothesis_ids = {
+                str(item.get("hypothesis_id", "") or "")
+                for item in assessments
+                if isinstance(item, dict) and str(item.get("status", "") or "").strip().casefold() == "supported"
+            }
+            supported_requirement_ids = {
+                requirement_id
+                for hypothesis_id in supported_hypothesis_ids
+                for requirement_id in _string_items(
+                    planned_rows.get(hypothesis_id, {}).get("explains_requirement_ids", [])
+                )
+            }
+            cluster_ids = _string_items(_diagnosis_failure_cluster(diagnosis).get("failed_checks", []))
+            explained_cluster_ids = [item for item in cluster_ids if item in supported_requirement_ids]
+            if explained_cluster_ids:
+                cluster = _diagnosis_failure_cluster(diagnosis)
+                cluster["failed_checks"] = explained_cluster_ids
+                diagnosis["failure_cluster"] = cluster
+                coverage["explained_requirement_ids"] = explained_cluster_ids
+                coverage["residual_requirement_ids"] = [
+                    item
+                    for item in _string_items(coverage.get("residual_requirement_ids", []))
+                    if item not in explained_cluster_ids
+                ]
+            if "unresolved" in statuses and str(diagnosis.get("evidence_status", "") or "").casefold() == "confirmed":
+                diagnosis["evidence_status"] = "supported_hypothesis"
+                diagnosis["confidence"] = "medium"
+                coverage["sufficiency_status"] = "local_contributor"
+                unexplained = _string_items(coverage.get("unexplained_observations", []))
+                unexplained.append("One or more planned causal alternatives remain unresolved.")
+                coverage["unexplained_observations"] = list(dict.fromkeys(unexplained))
+            current_explained = set(_string_items(coverage.get("explained_requirement_ids", [])))
+            current_residual = _string_items(coverage.get("residual_requirement_ids", []))
+            current_unexplained = _string_items(coverage.get("unexplained_observations", []))
+            current_cluster_ids = set(_string_items(_diagnosis_failure_cluster(diagnosis).get("failed_checks", [])))
+            if str(coverage.get("sufficiency_status", "") or "").casefold() == "task_sufficient" and (
+                current_residual
+                or current_unexplained
+                or current_explained != required_ids
+                or current_cluster_ids != required_ids
+            ):
+                if (
+                    current_cluster_ids
+                    and current_explained == current_cluster_ids
+                    and not current_residual
+                    and not current_unexplained
+                ):
+                    coverage["sufficiency_status"] = "cluster_sufficient"
+                else:
+                    coverage["sufficiency_status"] = "local_contributor"
+                    if not current_residual and not current_unexplained:
+                        current_unexplained.append(
+                            "This mechanism does not establish every authoritative failed requirement."
+                        )
+                        coverage["unexplained_observations"] = current_unexplained
+                warnings.append(f"diagnosis[{diagnosis_index}] downgraded unsupported task_sufficient coverage")
         diagnosis["causal_coverage"] = coverage
+
+    fallback_experiment_assessment = _synthesized_prior_experiment_assessment(prior_candidate_feedback)
+    for diagnosis_index, diagnosis in enumerate(reconciled, start=1):
+        assessment = diagnosis.get("prior_experiment_assessment")
+        if isinstance(assessment, dict) and assessment.get("availability") == "available":
+            normalized_assessment, correction = _normalize_prior_experiment_assessment(assessment)
+            diagnosis["prior_experiment_assessment"] = normalized_assessment
+            if correction:
+                warnings.append(f"diagnosis[{diagnosis_index}] {correction}")
+            continue
+        if fallback_experiment_assessment:
+            diagnosis["prior_experiment_assessment"] = dict(fallback_experiment_assessment)
+            warnings.append(
+                f"diagnosis[{diagnosis_index}] synthesized a conservative paired-experiment "
+                "assessment from controller-owned feedback"
+            )
 
     # An explained requirement wins over a duplicate residual claim. This is a
     # deterministic partition repair, not an evidence promotion.
@@ -4105,15 +5197,86 @@ def _reconcile_causal_assessments(
             else []
         )
     }
-    for diagnosis in reconciled:
+    partitioned: list[dict[str, Any]] = []
+    redundant_unresolved: list[tuple[int, dict[str, Any]]] = []
+    for diagnosis_index, diagnosis in enumerate(reconciled, start=1):
         coverage = diagnosis.get("causal_coverage")
         if not isinstance(coverage, dict):
+            partitioned.append(diagnosis)
             continue
+        cluster = _diagnosis_failure_cluster(diagnosis)
+        cluster_ids = _string_items(cluster.get("failed_checks", []))
+        evidence_status = str(diagnosis.get("evidence_status", "") or "").casefold()
+        if evidence_status == "insufficient":
+            unresolved_cluster = [item for item in cluster_ids if item not in explained_any]
+            if cluster_ids and not unresolved_cluster:
+                redundant_unresolved.append((diagnosis_index, diagnosis))
+                continue
+            if unresolved_cluster != cluster_ids:
+                cluster["failed_checks"] = unresolved_cluster
+                diagnosis["failure_cluster"] = cluster
         coverage["residual_requirement_ids"] = [
             item for item in _string_items(coverage.get("residual_requirement_ids", [])) if item not in explained_any
         ]
+        if evidence_status == "insufficient":
+            coverage["residual_requirement_ids"] = list(
+                dict.fromkeys([*coverage["residual_requirement_ids"], *unresolved_cluster])
+            )
+        partitioned.append(diagnosis)
 
-    required_ids = _failed_requirement_ids(failed_requirement_inventory)
+    for diagnosis_index, redundant in redundant_unresolved:
+        redundant_cluster = set(_string_items(_diagnosis_failure_cluster(redundant).get("failed_checks", [])))
+        destination = next(
+            (
+                item
+                for item in partitioned
+                if redundant_cluster & set(_string_items(_diagnosis_failure_cluster(item).get("failed_checks", [])))
+            ),
+            None,
+        )
+        if destination is None:
+            partitioned.append(redundant)
+            warnings.append(
+                f"diagnosis[{diagnosis_index}] retained an unresolved alternative because no "
+                "overlapping supported diagnosis could own its hypothesis assessments"
+            )
+            continue
+        destination_assessments = [
+            dict(item) for item in destination.get("hypothesis_assessment", []) if isinstance(item, dict)
+        ]
+        present_ids = {str(item.get("hypothesis_id", "") or "").strip() for item in destination_assessments}
+        transferred_ids: list[str] = []
+        for assessment in redundant.get("hypothesis_assessment", []):
+            if not isinstance(assessment, dict):
+                continue
+            hypothesis_id = str(assessment.get("hypothesis_id", "") or "").strip()
+            if not hypothesis_id or hypothesis_id in present_ids:
+                continue
+            destination_assessments.append(dict(assessment))
+            present_ids.add(hypothesis_id)
+            transferred_ids.append(hypothesis_id)
+        destination["hypothesis_assessment"] = destination_assessments
+        if (
+            any(
+                str(item.get("status", "") or "").strip().casefold() == "unresolved" for item in destination_assessments
+            )
+            and str(destination.get("evidence_status", "") or "").strip().casefold() == "confirmed"
+        ):
+            destination["evidence_status"] = "supported_hypothesis"
+            destination["confidence"] = "medium"
+            destination_coverage = destination.get("causal_coverage")
+            destination_coverage = dict(destination_coverage) if isinstance(destination_coverage, dict) else {}
+            destination_coverage["sufficiency_status"] = "local_contributor"
+            unexplained = _string_items(destination_coverage.get("unexplained_observations", []))
+            unexplained.append("One or more competing causal hypotheses remain unresolved.")
+            destination_coverage["unexplained_observations"] = list(dict.fromkeys(unexplained))
+            destination["causal_coverage"] = destination_coverage
+        warnings.append(
+            f"diagnosis[{diagnosis_index}] dropped a redundant unresolved alternative after "
+            "transferring its hypothesis assessments" + (f": {', '.join(transferred_ids)}" if transferred_ids else "")
+        )
+    reconciled = partitioned
+
     covered_ids = {
         requirement_id
         for diagnosis in reconciled
@@ -4128,7 +5291,7 @@ def _reconcile_causal_assessments(
     if missing_coverage:
         # Preserve the model's semantic fields, but explicitly leave uncovered
         # requirements unassigned rather than inventing a cause.
-        template = reconciled[0]
+        template = reconciled[0] if reconciled else (diagnoses[0] if diagnoses else {})
         residual = dict(template)
         residual.update(
             {
@@ -4146,6 +5309,7 @@ def _reconcile_causal_assessments(
                 "critical_mistake": "No causal decision is established by current evidence.",
                 "general_mechanism": "Acquire a discriminator before changing the Harness.",
                 "target_ref": "unassigned",
+                "selected_hypothesis_id": "",
                 "evidence_refs": [],
                 "affected_components": [],
                 "recommendation": "Collect evidence that distinguishes the planned alternatives.",
@@ -4181,6 +5345,103 @@ def _reconcile_causal_assessments(
         reconciled.append(residual)
         warnings.append("materialized unassigned coverage for omitted failed requirements")
     return reconciled, warnings
+
+
+def _synthesized_prior_experiment_assessment(
+    prior_candidate_feedback: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Preserve experiment existence when the model omits its assessment.
+
+    This fallback never claims semantic activation or causal support.  It only
+    records controller-known delivery, activation instrumentation, and score
+    direction so one missing JSON field cannot discard an otherwise evidenced
+    diagnosis.
+    """
+    if not isinstance(prior_candidate_feedback, dict):
+        return {}
+    experiments = prior_candidate_feedback.get("experiments", [])
+    records = [item for item in experiments if isinstance(item, dict)] if isinstance(experiments, list) else []
+    if not records:
+        return {}
+    record = records[-1]
+    activation = record.get("activation")
+    activation = activation if isinstance(activation, dict) else {}
+    activation_state = str(activation.get("state", "") or "").strip().casefold()
+    if activation_state == "triggered":
+        activated = "yes"
+    elif activation_state == "not_triggered":
+        activated = "no"
+    else:
+        activated = "unknown"
+
+    observed = record.get("observed_outcome")
+    observed = observed if isinstance(observed, dict) else {}
+    strict_score = observed.get("strict_score")
+    strict_score = strict_score if isinstance(strict_score, dict) else {}
+    delta_value = strict_score.get("delta", record.get("target_score_delta"))
+    try:
+        delta = float(delta_value)
+    except (TypeError, ValueError):
+        predicted_outcome = "unknown"
+    else:
+        predicted_outcome = "yes" if delta > 0 else "no"
+
+    causal_status = "not_tested" if activated == "no" else "inconclusive"
+    return {
+        "availability": "available",
+        "intervention_activated": activated,
+        "predicted_behavior_occurred": "unknown",
+        "predicted_outcome_occurred": predicted_outcome,
+        "causal_hypothesis_status": causal_status,
+        "reason": (
+            "The controller recorded a paired candidate experiment, but the diagnosis "
+            "did not provide a valid semantic activation assessment. Delivery and score "
+            "direction are preserved without inferring causal support."
+        ),
+    }
+
+
+def _normalize_prior_experiment_assessment(
+    assessment: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Enforce the activation-before-effect semantics of a causal experiment."""
+    normalized = dict(assessment)
+    activated = str(normalized.get("intervention_activated", "") or "").strip().casefold()
+    behavior = str(normalized.get("predicted_behavior_occurred", "") or "").strip().casefold()
+    outcome = str(normalized.get("predicted_outcome_occurred", "") or "").strip().casefold()
+    status = str(normalized.get("causal_hypothesis_status", "") or "").strip().casefold()
+
+    corrected_status = status
+    correction = ""
+    if activated == "no" or behavior == "no":
+        corrected_status = "not_tested"
+        if status != corrected_status:
+            correction = (
+                "corrected paired causal status to not_tested because the predicted "
+                "intervention behavior did not activate"
+            )
+    elif activated == "yes" and behavior == "yes" and outcome == "no":
+        corrected_status = "falsified"
+        if status != corrected_status:
+            correction = (
+                "corrected paired causal status to falsified because the intervention "
+                "behavior occurred without its predicted outcome"
+            )
+    elif activated == "yes" and behavior == "yes" and outcome == "yes":
+        corrected_status = "supported"
+        if status != corrected_status:
+            correction = (
+                "corrected paired causal status to supported because both predicted behavior and outcome occurred"
+            )
+    elif status not in {"supported", "falsified", "not_tested", "inconclusive"}:
+        corrected_status = "inconclusive"
+        correction = "corrected invalid paired causal status to inconclusive"
+
+    normalized["causal_hypothesis_status"] = corrected_status
+    if correction:
+        reason = str(normalized.get("reason", "") or "").strip()
+        normalized["reason"] = f"{reason} Controller causal-consistency correction: {correction}.".strip()
+    return normalized, correction
 
 
 def _diagnosis_validation_conflicts(
@@ -4932,16 +6193,24 @@ class DiagnosisAgentStrategy:
                     first_parsed,
                     failed_requirement_ids=requirement_ids,
                     max_requests=_CAUSAL_INITIAL_REQUEST_LIMIT,
+                    max_hypotheses=4,
                     min_hypotheses=2,
                     min_hypotheses_per_requirement=2,
                     require_evidence_per_hypothesis=True,
                 )
+                plan_dependency_conflicts = _causal_plan_outcome_dependency_conflicts(investigation)
+                if plan_dependency_conflicts:
+                    investigation = None
                 strict_plan_correction_attempted = False
                 if investigation is None and self._config.causal_investigation_required:
                     strict_plan_correction_attempted = True
                     corrected_plan_raw = await _run_agent(
                         agent,
-                        _build_causal_plan_correction_prompt(diagnosis_input, first_raw),
+                        _build_causal_plan_correction_prompt(
+                            diagnosis_input,
+                            first_raw,
+                            validation_conflicts=plan_dependency_conflicts,
+                        ),
                         max_retries=self._config.diagnosis_agent_max_retries,
                     )
                     corrected_plan_parsed = _extract_json_object(corrected_plan_raw)
@@ -4949,10 +6218,15 @@ class DiagnosisAgentStrategy:
                         corrected_plan_parsed,
                         failed_requirement_ids=requirement_ids,
                         max_requests=_CAUSAL_INITIAL_REQUEST_LIMIT,
+                        max_hypotheses=4,
                         min_hypotheses=2,
                         min_hypotheses_per_requirement=2,
                         require_evidence_per_hypothesis=True,
                     )
+                    corrected_dependency_conflicts = _causal_plan_outcome_dependency_conflicts(investigation)
+                    if corrected_dependency_conflicts:
+                        plan_dependency_conflicts = corrected_dependency_conflicts
+                        investigation = None
                     if investigation is None:
                         if first_parsed is None and corrected_plan_parsed is None:
                             raise _unusable_diagnosis_output_error(case.case_id, [first_raw, corrected_plan_raw])
@@ -4962,7 +6236,8 @@ class DiagnosisAgentStrategy:
                         )
                         result = _diagnosis_evidence_conflict_result(
                             case,
-                            ["diagnosis model skipped the required causal investigation phase"],
+                            plan_dependency_conflicts
+                            or ["diagnosis model skipped the required causal investigation phase"],
                         )
                         result["causal_investigation"] = {
                             "protocol_version": 1,
@@ -5066,7 +6341,7 @@ class DiagnosisAgentStrategy:
                                 refinement_evidence = execute_causal_investigation(
                                     case,
                                     {
-                                        "hypotheses": investigation.get("hypotheses", []),
+                                        "hypotheses": merged_investigation.get("hypotheses", []),
                                         "evidence_requests": added_requests,
                                     },
                                     prior_candidate_feedback=case_feedback,
@@ -5081,6 +6356,8 @@ class DiagnosisAgentStrategy:
                                     {
                                         "refinement_status": "completed",
                                         "refinement_request_count": len(added_requests),
+                                        "hypothesis_count": len(investigation.get("hypotheses", [])),
+                                        "hypotheses": list(investigation.get("hypotheses", [])),
                                         "evidence_request_count": len(investigation.get("evidence_requests", [])),
                                         "completed_evidence_request_count": int(
                                             evidence_results.get("completed_request_count", 0) or 0
@@ -5155,6 +6432,37 @@ class DiagnosisAgentStrategy:
                             prior_candidate_feedback=case_feedback,
                         )
                     )
+                if validation_conflicts and investigation is not None:
+                    reconciled_diagnoses, reconciliation_warnings = _reconcile_causal_assessments(
+                        diagnoses,
+                        investigation,
+                        evidence_results=evidence_results,
+                        failed_requirement_inventory=failed_requirement_inventory,
+                        prior_candidate_feedback=case_feedback,
+                    )
+                    reconciled_conflicts = _case_diagnoses_validation_conflicts(
+                        reconciled_diagnoses,
+                        validation_inventory,
+                        verifier_inventory,
+                        failed_requirement_inventory,
+                    )
+                    reconciled_conflicts.extend(
+                        _causal_investigation_conflicts(
+                            reconciled_diagnoses,
+                            investigation,
+                            evidence_results=evidence_results,
+                            prior_candidate_feedback=case_feedback,
+                        )
+                    )
+                    investigation_record["deterministic_reconciliation"] = {
+                        "attempted": True,
+                        "phase": "before_model_repair",
+                        "warnings": reconciliation_warnings,
+                        "remaining_conflicts": reconciled_conflicts,
+                    }
+                    if not reconciled_conflicts:
+                        diagnoses = reconciled_diagnoses
+                        validation_conflicts = []
                 if validation_conflicts:
                     repair_raw = await _run_agent(
                         agent,
@@ -5191,10 +6499,10 @@ class DiagnosisAgentStrategy:
                                         prior_candidate_feedback=case_feedback,
                                     )
                                 )
+                            raw = repair_raw
+                            parsed = repair_parsed
+                            diagnoses = repair_diagnoses
                             if not repaired_conflicts:
-                                raw = repair_raw
-                                parsed = repair_parsed
-                                diagnoses = repair_diagnoses
                                 validation_conflicts = []
                             else:
                                 validation_conflicts = repaired_conflicts
@@ -5214,6 +6522,7 @@ class DiagnosisAgentStrategy:
                         investigation,
                         evidence_results=evidence_results,
                         failed_requirement_inventory=failed_requirement_inventory,
+                        prior_candidate_feedback=case_feedback,
                     )
                     reconciled_conflicts = _case_diagnoses_validation_conflicts(
                         reconciled_diagnoses,
@@ -5231,6 +6540,7 @@ class DiagnosisAgentStrategy:
                     )
                     investigation_record["deterministic_reconciliation"] = {
                         "attempted": True,
+                        "phase": "after_model_repair",
                         "warnings": reconciliation_warnings,
                         "remaining_conflicts": reconciled_conflicts,
                     }
@@ -5278,7 +6588,7 @@ class DiagnosisAgentStrategy:
                             refinement_evidence = execute_causal_investigation(
                                 case,
                                 {
-                                    "hypotheses": investigation.get("hypotheses", []),
+                                    "hypotheses": merged_investigation.get("hypotheses", []),
                                     "evidence_requests": added_requests,
                                 },
                                 prior_candidate_feedback=case_feedback,
@@ -5293,6 +6603,8 @@ class DiagnosisAgentStrategy:
                                 {
                                     "refinement_status": "completed",
                                     "refinement_request_count": len(added_requests),
+                                    "hypothesis_count": len(investigation.get("hypotheses", [])),
+                                    "hypotheses": list(investigation.get("hypotheses", [])),
                                     "evidence_request_count": len(investigation.get("evidence_requests", [])),
                                     "completed_evidence_request_count": int(
                                         evidence_results.get("completed_request_count", 0) or 0
@@ -5352,6 +6664,7 @@ class DiagnosisAgentStrategy:
                                     investigation,
                                     evidence_results=evidence_results,
                                     failed_requirement_inventory=failed_requirement_inventory,
+                                    prior_candidate_feedback=case_feedback,
                                 )
                                 reconciled_refined_conflicts = _case_diagnoses_validation_conflicts(
                                     reconciled_refined,
@@ -5495,6 +6808,176 @@ class DiagnosisAgentStrategy:
                                     "reason": _truncate_text(str(exc), 500),
                                 }
                             )
+                causal_handoff_audit: dict[str, Any] = {
+                    "attempted": False,
+                    "status": "not_applicable",
+                    "attempts": [],
+                }
+                if investigation is not None and _assigned_diagnosis_indices(diagnoses):
+                    causal_handoff_audit["attempted"] = True
+                    try:
+                        audit_raw = await _run_agent(
+                            agent,
+                            _build_causal_handoff_audit_prompt(
+                                public_task_contract=case.input,
+                                diagnoses=diagnoses,
+                                investigation=investigation,
+                                evidence_results=evidence_results,
+                            ),
+                            max_retries=0,
+                            json_repair_prompt_builder=_build_causal_handoff_audit_json_repair_prompt,
+                        )
+                        audit = _normalize_causal_handoff_audit(
+                            _extract_json_object(audit_raw),
+                            diagnoses=diagnoses,
+                        )
+                        causal_handoff_audit["attempts"].append(audit)
+                        if _causal_handoff_audit_approved(audit):
+                            causal_handoff_audit["status"] = "approved"
+                        else:
+                            rejected_audit_rows = [
+                                dict(item) for item in audit["diagnosis_audits"] if not item["approved"]
+                            ]
+                            rejected_indices = {int(item["diagnosis_index"]) for item in rejected_audit_rows}
+                            violations_by_index = {
+                                int(item["diagnosis_index"]): list(item["violations"]) for item in rejected_audit_rows
+                            }
+                            rejected_diagnoses = [
+                                dict(diagnosis)
+                                for index, diagnosis in enumerate(diagnoses, start=1)
+                                if index in rejected_indices
+                            ]
+                            repair_raw = await _run_agent(
+                                agent,
+                                _build_causal_handoff_repair_prompt(
+                                    public_task_contract=case.input,
+                                    diagnoses=rejected_diagnoses,
+                                    investigation=investigation,
+                                    evidence_results=evidence_results,
+                                    audit={"diagnosis_audits": rejected_audit_rows},
+                                ),
+                                max_retries=0,
+                            )
+                            repaired_parsed = _extract_json_object(repair_raw)
+                            repaired_diagnoses = (
+                                _normalize_case_diagnoses(
+                                    repaired_parsed,
+                                    prior_candidate_feedback=case_feedback,
+                                )
+                                if repaired_parsed is not None
+                                else []
+                            )
+                            repair_conflicts = []
+                            combined_diagnoses: list[dict[str, Any]] = []
+                            if repaired_diagnoses:
+                                repaired_diagnoses, repair_warnings = _reconcile_causal_assessments(
+                                    repaired_diagnoses,
+                                    investigation,
+                                    evidence_results=evidence_results,
+                                    failed_requirement_inventory=failed_requirement_inventory,
+                                    prior_candidate_feedback=case_feedback,
+                                )
+                                causal_handoff_audit["repair_warnings"] = repair_warnings
+                                combined_diagnoses = _replace_rejected_causal_handoffs(
+                                    diagnoses,
+                                    rejected_indices=rejected_indices,
+                                    replacements=repaired_diagnoses,
+                                )
+                                repair_conflicts = _case_diagnoses_validation_conflicts(
+                                    combined_diagnoses,
+                                    validation_inventory,
+                                    verifier_inventory,
+                                    failed_requirement_inventory,
+                                )
+                                repair_conflicts.extend(
+                                    _causal_investigation_conflicts(
+                                        combined_diagnoses,
+                                        investigation,
+                                        evidence_results=evidence_results,
+                                        prior_candidate_feedback=case_feedback,
+                                    )
+                                )
+                            else:
+                                repair_conflicts = ["causal handoff repair returned no diagnoses"]
+                            if repair_conflicts:
+                                diagnoses = _downgrade_rejected_causal_handoffs(
+                                    diagnoses,
+                                    rejected_indices=rejected_indices,
+                                    violations_by_index=violations_by_index,
+                                )
+                                causal_handoff_audit.update(
+                                    {
+                                        "status": "rejected_fail_closed",
+                                        "repair_conflicts": repair_conflicts,
+                                    }
+                                )
+                            elif not _assigned_diagnosis_indices(repaired_diagnoses):
+                                diagnoses = combined_diagnoses
+                                causal_handoff_audit["status"] = "repaired_to_unassigned"
+                            else:
+                                second_audit_raw = await _run_agent(
+                                    agent,
+                                    _build_causal_handoff_audit_prompt(
+                                        public_task_contract=case.input,
+                                        diagnoses=repaired_diagnoses,
+                                        investigation=investigation,
+                                        evidence_results=evidence_results,
+                                    ),
+                                    max_retries=0,
+                                    json_repair_prompt_builder=_build_causal_handoff_audit_json_repair_prompt,
+                                )
+                                second_audit = _normalize_causal_handoff_audit(
+                                    _extract_json_object(second_audit_raw),
+                                    diagnoses=repaired_diagnoses,
+                                )
+                                causal_handoff_audit["attempts"].append(second_audit)
+                                if _causal_handoff_audit_approved(second_audit):
+                                    diagnoses = combined_diagnoses
+                                    causal_handoff_audit["status"] = "repaired_and_approved"
+                                else:
+                                    repaired_rejected_indices = {
+                                        int(item["diagnosis_index"])
+                                        for item in second_audit["diagnosis_audits"]
+                                        if not item["approved"]
+                                    }
+                                    repaired_violations_by_index = {
+                                        int(item["diagnosis_index"]): list(item["violations"])
+                                        for item in second_audit["diagnosis_audits"]
+                                        if not item["approved"]
+                                    }
+                                    downgraded_replacements = _downgrade_rejected_causal_handoffs(
+                                        repaired_diagnoses,
+                                        rejected_indices=repaired_rejected_indices,
+                                        violations_by_index=repaired_violations_by_index,
+                                    )
+                                    diagnoses = _replace_rejected_causal_handoffs(
+                                        diagnoses,
+                                        rejected_indices=rejected_indices,
+                                        replacements=downgraded_replacements,
+                                    )
+                                    causal_handoff_audit["status"] = "rejected_fail_closed"
+                    except Exception as exc:
+                        logger.warning(
+                            "per-case causal handoff audit unavailable for %s: %s",
+                            case.case_id,
+                            exc,
+                        )
+                        assigned_indices = set(_assigned_diagnosis_indices(diagnoses))
+                        diagnoses = _downgrade_rejected_causal_handoffs(
+                            diagnoses,
+                            rejected_indices=assigned_indices,
+                            violations_by_index={
+                                index: ["causal handoff audit was unavailable"] for index in assigned_indices
+                            },
+                        )
+                        causal_handoff_audit.update(
+                            {
+                                "status": "audit_unavailable_fail_closed",
+                                "error": _truncate_text(str(exc), 500),
+                            }
+                        )
+                investigation_record["causal_handoff_audit"] = causal_handoff_audit
+                diagnoses = _attach_hypothesis_semantics(diagnoses, investigation)
                 diagnosis_count = len(diagnoses)
                 return [
                     {
@@ -5597,6 +7080,7 @@ async def _run_agent(
     prompt: str,
     *,
     max_retries: int,
+    json_repair_prompt_builder: Callable[[str, str], str] | None = None,
 ) -> str:
     """Run the agent with retries and return its last text output."""
     from openjiuwen.core.runner import Runner
@@ -5627,12 +7111,30 @@ async def _run_agent(
     if _extract_json_object(last_raw) is not None:
         return last_raw
 
-    current_prompt = _build_json_repair_prompt(prompt, last_raw)
+    repair_builder = json_repair_prompt_builder or _build_json_repair_prompt
+    current_prompt = repair_builder(prompt, last_raw)
     return await run_model_call_with_retries(
         call_once,
         operation_name="diagnosis JSON formatter",
         max_retries=max(0, int(max_retries or 0)),
     )
+
+
+def _build_causal_handoff_audit_json_repair_prompt(
+    original_prompt: str,
+    previous_output: str,
+) -> str:
+    del original_prompt
+    return f"""Previous causal handoff audit output was not valid JSON.
+
+FORMAT-ONLY TASK. Preserve the prior audit conclusions and convert them into:
+{{"diagnosis_audits":[{{"diagnosis_index":1,"selected_hypothesis_id":"h1","hypothesis_binding":true,"runtime_decidable":true,"public_contract_consistent":true,"decision_rule_entailed":true,"decision_rule_source":"public_task_contract","decision_rule_evidence":"exact clause or visible invariant","evaluation_independent":true,"single_intervention":true,"approved":true,"violations":[]}}]}}
+
+Return only JSON. Do not rewrite a diagnosis or propose a Harness change.
+
+PREVIOUS_AUDIT:
+{_truncate_text(previous_output, 8_000)}
+"""
 
 
 def _build_json_repair_prompt(original_prompt: str, previous_output: str) -> str:
@@ -5642,7 +7144,7 @@ def _build_json_repair_prompt(original_prompt: str, previous_output: str) -> str
 
 FORMAT-ONLY TASK. Do not analyze the evidence again and do not explain your work.
 Convert only the conclusions already present in PREVIOUS_ANALYSIS into this shape:
-{{"diagnoses":[{{"issue_category":"member_harness|team_skill|unassigned","severity":"high|medium|low","summary":"...","failure_mode":"...","failure_cluster":{{"failed_checks":[],"observable_behavior":"..."}},"evidence_status":"confirmed|supported_hypothesis|insufficient","failed_requirement":"...","competing_hypotheses":[],"discriminating_evidence":"...","root_cause":"...","critical_mistake":"...","general_mechanism":"...","target_ref":"member_harness.<role>.<variable>|team_skill.<role>.<variable>|unassigned","evidence_refs":[],"affected_components":[],"recommendation":"...","causal_coverage":{{"explained_requirement_ids":[],"residual_requirement_ids":[],"unexplained_observations":[],"causal_chain":[{{"cause":"...","effect":"...","evidence_status":"observed|supported|unknown","evidence_refs":[]}}],"counterfactual_prediction":"...","sufficiency_status":"task_sufficient|cluster_sufficient|local_contributor|unknown"}},"decision_contract":{{"wrong_decision":"...","causal_distinction":"...","required_action":"...","acceptance_observable":"...","scope_boundary":[],"activation_phase":"task_start|during_investigation|post_diagnosis|pre_submission"}},"hypothesis_assessment":[{{"hypothesis_id":"h1","status":"supported|falsified|unresolved","falsifying_condition_status":"observed|not_observed|unknown","claim_follows_from_evidence":"yes|no|unknown","logic_check":"...","controller_request_ids":["q1"],"reason":"...","evidence_refs":[]}}],"prior_experiment_assessment":{{"availability":"available|not_available","intervention_activated":"yes|no|unknown","predicted_behavior_occurred":"yes|no|unknown","predicted_outcome_occurred":"yes|no|unknown","causal_hypothesis_status":"supported|falsified|not_tested|inconclusive","reason":"..."}},"confidence":"high|medium|low"}}]}}
+{{"diagnoses":[{{"issue_category":"member_harness|team_skill|unassigned","severity":"high|medium|low","summary":"...","failure_mode":"...","failure_cluster":{{"failed_checks":[],"observable_behavior":"..."}},"evidence_status":"confirmed|supported_hypothesis|insufficient","failed_requirement":"...","competing_hypotheses":[],"discriminating_evidence":"...","selected_hypothesis_id":"h1 or empty when unassigned","root_cause":"...","critical_mistake":"...","general_mechanism":"...","target_ref":"member_harness.<role>.<variable>|team_skill.<role>.<variable>|unassigned","evidence_refs":[],"affected_components":[],"recommendation":"...","causal_coverage":{{"explained_requirement_ids":[],"residual_requirement_ids":[],"unexplained_observations":[],"causal_chain":[{{"cause":"...","effect":"...","evidence_status":"observed|supported|unknown","evidence_refs":[]}}],"counterfactual_prediction":"...","sufficiency_status":"task_sufficient|cluster_sufficient|local_contributor|unknown"}},"decision_contract":{{"wrong_decision":"...","causal_distinction":"...","required_action":"...","acceptance_observable":"...","scope_boundary":[],"activation_phase":"task_start|during_investigation|post_diagnosis|pre_submission"}},"hypothesis_assessment":[{{"hypothesis_id":"h1","status":"supported|falsified|unresolved","falsifying_condition_status":"observed|not_observed|unknown","claim_follows_from_evidence":"yes|no|unknown","logic_check":"...","controller_request_ids":["q1"],"reason":"...","evidence_refs":[]}}],"prior_experiment_assessment":{{"availability":"available|not_available","intervention_activated":"yes|no|unknown","predicted_behavior_occurred":"yes|no|unknown","predicted_outcome_occurred":"yes|no|unknown","causal_hypothesis_status":"supported|falsified|not_tested|inconclusive","reason":"..."}},"confidence":"high|medium|low"}}]}}
 
 Rules:
 - Return only the single valid JSON object and nothing else.

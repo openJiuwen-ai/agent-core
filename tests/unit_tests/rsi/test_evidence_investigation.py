@@ -102,6 +102,117 @@ def test_normalize_plan_rejects_shell_and_arbitrary_path_requests() -> None:
     assert plan["hypotheses"][0]["explains_requirement_ids"] == ["criterion:parser"]
 
 
+def test_normalize_plan_accepts_generic_investigation_wrapper() -> None:
+    plan = normalize_causal_investigation(
+        {
+            "investigation": {
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h_parser",
+                        "claim": "The parser selected a legacy mode.",
+                        "falsified_if": "The trace shows the modern parser was selected.",
+                        "evidence_requests": [
+                            {
+                                "request_id": "q1",
+                                "operation": "search_trace",
+                                "query": "parser selected mode",
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert plan is not None
+    assert plan["hypotheses"][0]["hypothesis_id"] == "h_parser"
+    assert plan["evidence_requests"][0]["request_id"] == "q1"
+
+
+def test_normalize_plan_respects_explicit_hypothesis_budget() -> None:
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": f"h{index}",
+                    "claim": f"Distinct mechanism {index} occurred.",
+                    "falsified_if": f"Mechanism {index} did not occur.",
+                }
+                for index in range(1, 6)
+            ]
+        },
+        max_hypotheses=4,
+    )
+
+    assert plan is not None
+    assert [item["hypothesis_id"] for item in plan["hypotheses"]] == ["h1", "h2", "h3", "h4"]
+
+
+def test_numeric_delta_obligation_distinguishes_behavior_from_numeric_context() -> None:
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h_write",
+                    "claim": "The agent did not write the +1pp scenario into the persisted artifact.",
+                    "falsified_if": "A write event shows the 1% scenario was persisted.",
+                    "numeric_change_check_required": False,
+                    "evidence_requests": [
+                        {
+                            "operation": "search_trace",
+                            "query": "write persisted artifact",
+                        }
+                    ],
+                },
+                {
+                    "hypothesis_id": "h_delta",
+                    "claim": "The formula has a before-versus-after numeric delta.",
+                    "falsified_if": "The computed delta is zero.",
+                    "numeric_change_check_required": True,
+                    "evidence_requests": [
+                        {
+                            "operation": "compare_numeric_change",
+                            "before_expression": "0.17",
+                            "after_expression": "0.18",
+                            "expected_delta": 0.01,
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert plan is not None
+    obligations = {item["hypothesis_id"]: item["numeric_change_check_required"] for item in plan["hypotheses"]}
+    assert obligations == {"h_write": False, "h_delta": True}
+
+
+def test_numeric_delta_request_cannot_be_disabled_by_model_declaration() -> None:
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "claim": "The numeric result changed.",
+                    "falsified_if": "The result did not change.",
+                    "numeric_change_check_required": False,
+                    "evidence_requests": [
+                        {
+                            "operation": "compare_numeric_change",
+                            "before_expression": "1",
+                            "after_expression": "2",
+                            "expected_delta": 1,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    assert plan["hypotheses"][0]["numeric_change_check_required"] is True
+
+
 def test_strict_plan_requires_competing_hypotheses_and_evidence_for_each() -> None:
     single = normalize_causal_investigation(
         {
@@ -344,6 +455,161 @@ def test_controller_inspects_xlsx_formulas_as_structured_artifact(tmp_path: Path
     assert result["availability"] == "available"
     assert result["matches"][0]["source"] == "artifacts/result.xlsx"
     assert any("SUM(A1:A2)" in span["text"] for span in result["matches"][0]["exact_spans"])
+
+
+def test_structured_artifact_inspection_filters_file_types_and_reuses_parse_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+
+    case = _case(tmp_path)
+    artifacts = Path(case.result_path).parent / "artifacts"
+    artifacts.mkdir()
+    workbook = artifacts / "result.xlsx"
+    workbook.write_bytes(b"placeholder")
+    (artifacts / "unrelated.pdf").write_bytes(b"placeholder")
+    parsed: list[str] = []
+
+    def fake_structured_text(path: Path) -> str:
+        parsed.append(path.name)
+        return "Summary A1=10 A2=20 A3=SUM(A1:A2)"
+
+    monkeypatch.setattr(evidence_investigation, "_structured_artifact_text", fake_structured_text)
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The workbook contains the required formula.",
+                    "falsified_if": "The worksheet formula is absent.",
+                    "evidence_requests": [
+                        {"operation": "inspect_artifact", "query": "workbook Summary formula"},
+                        {"operation": "inspect_artifact", "query": "worksheet SUM A1 A2"},
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    results = execute_causal_investigation(case, plan)["results"]
+    assert [result["availability"] for result in results] == ["available", "available"]
+    assert parsed == [workbook.name]
+
+
+def test_artifact_search_uses_logical_source_name_before_structured_parse_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+
+    logical_name = "Authorization Documents/Controlling Contract.xlsx"
+    stored_name = "hashed_target.xlsx"
+    case = _case(
+        tmp_path,
+        metadata={"analysis_artifact_snapshot": {"files": [{"path": stored_name, "source_path": logical_name}]}},
+    )
+    artifacts = Path(case.result_path).parent / "artifacts"
+    artifacts.mkdir()
+    for index in range(20):
+        (artifacts / f"noise_{index:02d}.xlsx").write_bytes(b"placeholder")
+    (artifacts / stored_name).write_bytes(b"placeholder")
+    parsed: list[str] = []
+
+    def fake_structured_text(path: Path) -> str:
+        parsed.append(path.name)
+        return "The controlling contract requires written authorization."
+
+    monkeypatch.setattr(evidence_investigation, "_structured_artifact_text", fake_structured_text)
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The controlling contract contains the decisive authorization.",
+                    "falsified_if": "The contract contains no authorization.",
+                    "evidence_requests": [
+                        {"operation": "inspect_artifact", "query": "Controlling Contract authorization"}
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    result = execute_causal_investigation(case, plan)["results"][0]
+    assert result["availability"] == "available"
+    assert result["matches"][0]["logical_source"] == logical_name
+    assert stored_name in parsed
+
+
+def test_artifact_search_window_can_be_followed_without_repeating_broad_query(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    artifact = Path(case.result_path).parent / "artifacts" / "contract.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("A" * 2_400 + "DECISIVE_CLAUSE" + "B" * 1_000, encoding="utf-8")
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The contract contains a decisive clause after the first search window.",
+                    "falsified_if": "The complete contract contains no decisive clause.",
+                    "evidence_requests": [
+                        {"operation": "inspect_artifact", "query": "contract full document"},
+                        {
+                            "operation": "read_artifact_window",
+                            "relative_path": "artifacts/contract.txt",
+                            "source_char_start": 2_000,
+                            "max_chars": 1_000,
+                        },
+                        {
+                            "operation": "read_artifact_window",
+                            "relative_path": "../outside.txt",
+                            "source_char_start": 0,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    assert [item["operation"] for item in plan["evidence_requests"]] == [
+        "inspect_artifact",
+        "read_artifact_window",
+    ]
+    results = execute_causal_investigation(case, plan)["results"]
+    search_span = results[0]["matches"][0]["exact_spans"][0]
+    assert search_span["window_complete"] is False
+    assert results[1]["source_char_start"] == 2_000
+    assert results[1]["source_char_end"] == 3_000
+    assert "DECISIVE_CLAUSE" in results[1]["text"]
+
+
+def test_artifact_search_prefers_window_covering_specific_terms(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    artifact = Path(case.result_path).parent / "artifacts" / "contract.txt"
+    artifact.parent.mkdir()
+    artifact.write_text(
+        (("contract payment general text " * 120) + "contract payment WATERFALL_TRIGGER decisive clause"),
+        encoding="utf-8",
+    )
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The payment waterfall controls the decision.",
+                    "falsified_if": "No waterfall clause is present.",
+                    "evidence_requests": [
+                        {"operation": "inspect_artifact", "query": "contract payment WATERFALL_TRIGGER"}
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    result = execute_causal_investigation(case, plan)["results"][0]
+    assert "WATERFALL_TRIGGER" in result["matches"][0]["exact_spans"][0]["text"]
 
 
 def test_controller_compares_prior_experiment_without_zero_filling(tmp_path: Path) -> None:
@@ -602,7 +868,7 @@ def test_supported_local_issue_survives_when_unresolved_hypothesis_is_split() ->
     assert conflicts == []
 
 
-def test_falsified_prior_causal_hypothesis_cannot_be_reused() -> None:
+def test_falsified_prior_causal_hypothesis_cannot_be_reused_by_semantic_identity() -> None:
     from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
 
     conflicts = _causal_investigation_conflicts(
@@ -630,6 +896,7 @@ def test_falsified_prior_causal_hypothesis_cannot_be_reused() -> None:
             "hypotheses": [
                 {
                     "hypothesis_id": "h_failed_before",
+                    "hypothesis_semantic_id": "chs:same-causal-claim",
                     "claim": "The previous causal explanation.",
                     "falsified_if": "Its intervention activates without the predicted outcome.",
                 }
@@ -644,11 +911,81 @@ def test_falsified_prior_causal_hypothesis_cannot_be_reused() -> None:
         },
         evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
         prior_candidate_feedback={
-            "experiments": [{"causal_intervention_contracts": [{"source_causal_hypothesis_id": "h_failed_before"}]}]
+            "experiments": [
+                {
+                    "causal_intervention_contracts": [
+                        {
+                            "source_causal_hypothesis_id": "h_failed_before",
+                            "source_causal_hypothesis_semantic_id": "chs:same-causal-claim",
+                        }
+                    ]
+                }
+            ]
         },
     )
 
-    assert "falsified prior causal hypotheses were reused: h_failed_before" in " ".join(conflicts)
+    assert "falsified prior causal hypotheses were reused by semantic identity: chs:same-causal-claim" in " ".join(
+        conflicts
+    )
+
+
+def test_local_hypothesis_label_can_be_reused_for_a_different_causal_claim() -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
+
+    conflicts = _causal_investigation_conflicts(
+        [
+            {
+                "evidence_status": "confirmed",
+                "target_ref": "member_harness.solver.skill",
+                "hypothesis_assessment": [
+                    {
+                        "hypothesis_id": "h1",
+                        "status": "supported",
+                        "falsifying_condition_status": "not_observed",
+                        "claim_follows_from_evidence": "yes",
+                        "logic_check": "Current evidence supports the new claim.",
+                        "controller_request_ids": ["q1"],
+                    }
+                ],
+                "prior_experiment_assessment": {
+                    "availability": "available",
+                    "causal_hypothesis_status": "falsified",
+                },
+            }
+        ],
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "hypothesis_semantic_id": "chs:new-claim",
+                    "claim": "A newly observed mechanism.",
+                    "falsified_if": "The new observation is absent.",
+                }
+            ],
+            "evidence_requests": [
+                {
+                    "request_id": "q1",
+                    "hypothesis_ids": ["h1"],
+                    "operation": "compare_runs",
+                }
+            ],
+        },
+        evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
+        prior_candidate_feedback={
+            "experiments": [
+                {
+                    "causal_intervention_contracts": [
+                        {
+                            "source_causal_hypothesis_id": "h1",
+                            "source_causal_hypothesis_semantic_id": "chs:old-claim",
+                        }
+                    ]
+                }
+            ]
+        },
+    )
+
+    assert not any("falsified prior causal hypotheses were reused" in conflict for conflict in conflicts)
 
 
 @pytest.mark.asyncio
@@ -667,9 +1004,9 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
     async def fake_build_agent(workspace: str) -> dict[str, str]:
         return {"workspace": workspace}
 
-    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
+    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int, **kwargs: Any) -> str:
         nonlocal diagnosis_calls
-        del agent, max_retries
+        del agent, max_retries, kwargs
         prompts.append(prompt)
         if prompt.startswith("CAUSAL_INVESTIGATION_PHASE=plan"):
             return json.dumps(
@@ -710,6 +1047,27 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
                     }
                 }
             )
+        if prompt.startswith("CAUSAL_HANDOFF_PHASE=audit"):
+            return json.dumps(
+                {
+                    "diagnosis_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "selected_hypothesis_id": "h_parser",
+                            "hypothesis_binding": True,
+                            "runtime_decidable": True,
+                            "public_contract_consistent": True,
+                            "decision_rule_entailed": True,
+                            "decision_rule_source": "public_task_contract",
+                            "decision_rule_evidence": "The public input requires the compatible parser.",
+                            "evaluation_independent": True,
+                            "single_intervention": True,
+                            "approved": True,
+                            "violations": [],
+                        }
+                    ]
+                }
+            )
         assert "EXACT_DISCRIMINATOR" in prompt
         diagnosis_calls += 1
         if diagnosis_calls == 1:
@@ -746,6 +1104,7 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
                         "failed_requirement": "public task failed",
                         "competing_hypotheses": ["parser selection", "routing"],
                         "discriminating_evidence": "The trace explicitly records legacy parser selection.",
+                        "selected_hypothesis_id": "h_parser",
                         "root_cause": "Legacy parser selection caused the observed behavior.",
                         "critical_mistake": "The runtime selected legacy mode.",
                         "general_mechanism": "Select the parser compatible with the public input contract.",
@@ -799,7 +1158,7 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
         None,
     )
 
-    assert len(prompts) == 4
+    assert len(prompts) == 5
     assert prompts[1].startswith("CAUSAL_INVESTIGATION_PHASE=diagnose")
     assert prompts[2].startswith("CAUSAL_INVESTIGATION_PHASE=refine")
     assert prompts[3].startswith("CAUSAL_INVESTIGATION_PHASE=diagnose")
@@ -825,15 +1184,37 @@ async def test_legacy_diagnosis_cannot_bypass_mandatory_investigation(
     async def fake_build_agent(workspace: str) -> dict[str, str]:
         return {"workspace": workspace}
 
-    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
-        del agent, max_retries
+    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int, **kwargs: Any) -> str:
+        del agent, max_retries, kwargs
         prompts.append(prompt)
+        if prompt.startswith("CAUSAL_HANDOFF_PHASE=audit"):
+            return json.dumps(
+                {
+                    "diagnosis_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "selected_hypothesis_id": "h_parser",
+                            "hypothesis_binding": True,
+                            "runtime_decidable": True,
+                            "public_contract_consistent": True,
+                            "decision_rule_entailed": True,
+                            "decision_rule_source": "public_task_contract",
+                            "decision_rule_evidence": "The public input requires the compatible parser.",
+                            "evaluation_independent": True,
+                            "single_intervention": True,
+                            "approved": True,
+                            "violations": [],
+                        }
+                    ]
+                }
+            )
         if len(prompts) == 1:
             return json.dumps(
                 {
                     "diagnoses": [
                         {
                             "evidence_status": "confirmed",
+                            "selected_hypothesis_id": "h_parser",
                             "root_cause": "A premature single explanation.",
                             "target_ref": "member_harness.solver.prompt",
                         }
@@ -906,7 +1287,7 @@ async def test_legacy_diagnosis_cannot_bypass_mandatory_investigation(
 
     results = await strategy._per_case_diagnosis([case], DeterministicSignals(method="script_based"), None)
 
-    assert len(prompts) == 4
+    assert len(prompts) == 5
     assert "CAUSAL_INVESTIGATION_PHASE=refine" in prompts[3]
     assert results[0]["causal_investigation"]["strict_plan_correction_attempted"] is True
     assert results[0]["causal_investigation"]["hypothesis_count"] == 2

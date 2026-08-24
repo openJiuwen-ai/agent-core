@@ -1202,8 +1202,12 @@ def _bind_immutable_hypotheses(
             }
             if item.get("supported_causal_hypothesis_ids"):
                 contract["supported_causal_hypothesis_ids"] = item["supported_causal_hypothesis_ids"]
+            if item.get("supported_causal_hypothesis_semantic_ids"):
+                contract["supported_causal_hypothesis_semantic_ids"] = item["supported_causal_hypothesis_semantic_ids"]
             if item.get("falsified_causal_hypothesis_ids"):
                 contract["falsified_causal_hypothesis_ids"] = item["falsified_causal_hypothesis_ids"]
+            if item.get("falsified_causal_hypothesis_semantic_ids"):
+                contract["falsified_causal_hypothesis_semantic_ids"] = item["falsified_causal_hypothesis_semantic_ids"]
             if isinstance(item.get("decision_contract"), dict) and item.get("decision_contract"):
                 contract["decision_contract"] = item["decision_contract"]
             if isinstance(item.get("lever_policy"), dict) and item.get("lever_policy"):
@@ -1237,6 +1241,16 @@ def _bind_immutable_hypotheses(
             raise RuntimeError("optimization hypothesis has no supported causal hypothesis")
         if supported_causal_ids:
             constraints["source_causal_hypothesis_ids"] = supported_causal_ids
+        supported_causal_semantic_ids = list(
+            dict.fromkeys(
+                str(semantic_id)
+                for item in selected
+                for semantic_id in item.get("supported_causal_hypothesis_semantic_ids", [])
+                if str(semantic_id)
+            )
+        )
+        if supported_causal_semantic_ids:
+            constraints["source_causal_hypothesis_semantic_ids"] = supported_causal_semantic_ids
         policies = [
             dict(item.get("lever_policy", {}))
             for item in selected

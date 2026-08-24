@@ -158,16 +158,12 @@ def collect_jsonl_pre_investigation_successful_skill_usage(
 
 
 def _successful_tool_steps(value: Any):
-    if isinstance(value, dict):
-        if _tool_step_succeeded(value):
-            detail = value.get("detail")
-            if isinstance(detail, dict):
-                yield value, detail
-        for nested in value.values():
-            yield from _successful_tool_steps(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            yield from _successful_tool_steps(nested)
+    for step in _ordered_steps(value):
+        if not _tool_step_succeeded(step):
+            continue
+        detail = step.get("detail")
+        if isinstance(detail, dict):
+            yield step, detail
 
 
 def _ordered_steps(value: Any):
@@ -178,6 +174,25 @@ def _ordered_steps(value: Any):
             for step in steps:
                 if isinstance(step, dict):
                     yield step
+            return
+        messages = value.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                tool_calls = message.get("tool_calls")
+                for call in tool_calls if isinstance(tool_calls, list) else []:
+                    if not isinstance(call, dict):
+                        continue
+                    yield {
+                        "kind": "tool",
+                        "error": str(call.get("error", "") or "") or None,
+                        "detail": {
+                            "tool_name": str(call.get("name", "") or ""),
+                            "call_args": call.get("input"),
+                            "call_result": call.get("output"),
+                        },
+                    }
             return
         if ("kind" in value or "type" in value) and "detail" in value:
             yield value

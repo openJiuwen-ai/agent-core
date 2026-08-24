@@ -11,7 +11,7 @@ execution code remains immutable.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 import hashlib
 import inspect
 import json
@@ -26,16 +26,19 @@ import yaml
 _ROLE = "policy_harness"
 _PROMPT_PATH = "system_prompt.md"
 _HARNESS_PATH = "harness.json"
-_BUDGET_HARNESS_FIELDS = {"max_steps", "rollout_wall_clock_seconds"}
+_SKILLS_DIR = "skills"
+_BUDGET_HARNESS_FIELDS = {"command_timeout_seconds", "max_steps", "rollout_wall_clock_seconds"}
 _RAIL_HARNESS_FIELD = "tool_loop_compaction"
 _ALLOWED_RAIL_FIELDS = {"enabled", "consecutive_threshold", "bailout_threshold"}
 _ALLOWED_HARNESS_FIELDS = _BUDGET_HARNESS_FIELDS | {_RAIL_HARNESS_FIELD}
 _WALL_CLOCK_ALIASES = {"wall_clock", "wall_clock_seconds"}
 _MAX_PROMPT_APPEND_CHARS = 8_000
+_MAX_SKILL_DESCRIPTION_CHARS = 500
+_MAX_SKILL_BODY_CHARS = 12_000
 _MAX_STRUCTURED_EVIDENCE_CHARS = 40_000
 _MAX_LEGACY_RESULT_CHARS = 3_000
 _MAX_LEGACY_TRACE_CHARS = 4_000
-GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v3"
+GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v15"
 _CAUSAL_EVIDENCE_PATH_KEYS = {
     "causal_evidence_path",
     "causal_digest_path",
@@ -82,8 +85,29 @@ _NON_PUBLIC_TOOL_FIELD_KEYS = {
     "private_fields",
     "non_public_fields",
 }
+_OUTCOME_ONLY_CAUSAL_PATTERNS = (
+    re.compile(r"\b(?:evaluator|grader|scorer|rubric|criterion|criteria)\s+(?:expects?|requires?)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:match|align(?:ment)?)\b.{0,40}\b(?:expected|gold|scored)\s+(?:answer|label|verdict|outcome)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\breverse[- ]keyed\b", re.IGNORECASE),
+)
+_PERSISTENT_HIDDEN_OUTCOME_PATTERNS = (
+    re.compile(
+        r"\b(?:compare|match|align|equal|verify|validate|confirm)\w*\b.{0,80}"
+        r"\b(?:expected|gold|reference|known)\s+(?:answer|result|output|value|outcome)s?\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\b(?:expected|gold|reference|known)\s+(?:answer|result|output|value|outcome)s?\b.{0,80}"
+        r"\b(?:compare|match|align|equal|verify|validate|confirm)\w*\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
 
 PatchGenerator = Callable[[str], dict[str, Any] | Awaitable[dict[str, Any]]]
+TransferReviewer = Callable[[str], dict[str, Any] | Awaitable[dict[str, Any]]]
 
 
 class PolicyHarnessRSIOptimizer:
@@ -95,10 +119,12 @@ class PolicyHarnessRSIOptimizer:
         *,
         model_config_ref: str = "",
         patch_generator: PatchGenerator | None = None,
+        transfer_reviewer: TransferReviewer | None = None,
     ) -> None:
         self.config = config
         self.model_config_ref = str(model_config_ref or getattr(config, "model_config_ref", "") or "").strip()
         self._patch_generator = patch_generator
+        self._transfer_reviewer = transfer_reviewer
 
     async def optimize(  # pylint: disable=huawei-too-many-arguments
         self,
@@ -133,7 +159,12 @@ class PolicyHarnessRSIOptimizer:
         if not source_prompt_path.is_file() or not source_harness_path.is_file():
             raise ValueError(f"PolicyHarness must contain system_prompt.md and harness.json: {source_harness}")
         source_harness_json = _read_json_mapping(source_harness_path)
-        supported_surfaces = {"prompt", "budget"}
+        skill_mutation_policy = _skill_mutation_policy(
+            source_harness=source_harness,
+            selected_issues=selected_issues,
+            requested_surfaces=requested_surfaces,
+        )
+        supported_surfaces = {"prompt", "skill", "budget"}
         if isinstance(source_harness_json.get(_RAIL_HARNESS_FIELD), Mapping):
             supported_surfaces.add("rail")
         unsupported_surfaces = sorted(requested_surfaces - supported_surfaces)
@@ -165,6 +196,9 @@ class PolicyHarnessRSIOptimizer:
             hypotheses_path=optimization_hypotheses_path,
         )
         causal_hypothesis_policy = _causal_hypothesis_policy(selected_issues)
+        causal_binding = _causal_binding(selected_issues)
+        _validate_causal_binding_independence(causal_binding)
+        required_budget_fields = _required_budget_fields(selected_issues, source_harness_json)
         leakage_guard = _build_prompt_leakage_guard(
             selected_issues=selected_issues,
             evidence=evidence,
@@ -175,9 +209,12 @@ class PolicyHarnessRSIOptimizer:
             source_harness=source_harness_json,
             evidence=evidence,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            causal_binding=causal_binding,
             generation_context=generation_context,
             rejected_capabilities=rejected_capabilities or [],
             requested_surfaces=requested_surfaces,
+            required_budget_fields=required_budget_fields,
+            skill_mutation_policy=skill_mutation_policy,
         )
         raw_patch = await self._generate_patch(
             request,
@@ -185,7 +222,10 @@ class PolicyHarnessRSIOptimizer:
             source_harness=source_harness_json,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            causal_binding=causal_binding,
             requested_surfaces=requested_surfaces,
+            required_budget_fields=required_budget_fields,
+            skill_mutation_policy=skill_mutation_policy,
         )
         patch = _validate_patch(
             raw_patch,
@@ -194,19 +234,24 @@ class PolicyHarnessRSIOptimizer:
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
             requested_surfaces=requested_surfaces,
+            required_budget_fields=required_budget_fields,
+            skill_mutation_policy=skill_mutation_policy,
         )
         _apply_patch(
             prompt_path=prompt_path,
             harness_path=harness_path,
+            candidate_harness=candidate_harness,
             source_prompt=source_prompt,
             source_harness=source_harness_json,
             patch=patch,
+            skill_mutation_policy=skill_mutation_policy,
         )
         changed_paths = _verify_candidate_tree(
             source_tree=source_tree,
             source_harness=source_harness,
             candidate_harness=candidate_harness,
             requested_surfaces=requested_surfaces,
+            skill_mutation_policy=skill_mutation_policy,
         )
 
         issue_ids = [str(issue["issue_id"]) for issue in selected_issues]
@@ -217,7 +262,14 @@ class PolicyHarnessRSIOptimizer:
             issue_ids=issue_ids,
             case_ids=case_ids,
             source_hypothesis_id=patch["source_hypothesis_id"],
+            source_hypothesis_semantic_id=str(
+                causal_hypothesis_policy.get("semantic_ids_by_hypothesis_id", {}).get(
+                    patch["source_hypothesis_id"],
+                    "",
+                )
+            ),
             analyzer_counterfactual_predictions=analyzer_counterfactual_predictions,
+            skill_mutation_policy=skill_mutation_policy,
         )
         plan = _build_plan(
             source_harness=source_harness,
@@ -258,7 +310,7 @@ class PolicyHarnessRSIOptimizer:
             verification_path,
             {
                 "status": "passed",
-                "allowed_paths": [_PROMPT_PATH, _HARNESS_PATH],
+                "allowed_paths": [_PROMPT_PATH, _HARNESS_PATH, f"{_SKILLS_DIR}/*/SKILL.md"],
                 "changed_paths": changed_paths,
                 "python_framework_unchanged": True,
                 "source_tree_sha256": _canonical_digest(source_tree),
@@ -311,9 +363,14 @@ class PolicyHarnessRSIOptimizer:
                 "optimizer_kind": "evobench_policy_harness_v1",
                 "improver_protocol_version": GENERIC_IMPROVER_PROTOCOL_VERSION,
                 "composition_mode": "opaque_snapshot",
-                "allowed_mutation_paths": [_PROMPT_PATH, _HARNESS_PATH],
+                "allowed_mutation_paths": [_PROMPT_PATH, _HARNESS_PATH, f"{_SKILLS_DIR}/*/SKILL.md"],
                 "generation_context": generation_context,
+                "skill_mutation_policy": skill_mutation_policy,
                 "source_causal_hypothesis_id": patch["source_hypothesis_id"],
+                "causal_binding_digest": _canonical_digest(causal_binding),
+                "transfer_audit_path": str(run_dir / "transfer_audit.json")
+                if (run_dir / "transfer_audit.json").is_file()
+                else "",
             },
             "role": _ROLE,
         }
@@ -329,11 +386,23 @@ class PolicyHarnessRSIOptimizer:
         source_harness: dict[str, Any],
         leakage_guard: dict[str, Any],
         causal_hypothesis_policy: dict[str, Any],
+        causal_binding: dict[str, Any],
         requested_surfaces: set[str],
+        required_budget_fields: set[str],
+        skill_mutation_policy: dict[str, Any],
     ) -> dict[str, Any]:
         if self._patch_generator is not None:
             generated = self._patch_generator(request)
-            return await generated if inspect.isawaitable(generated) else generated
+            candidate = await generated if inspect.isawaitable(generated) else generated
+            if self._transfer_reviewer is None or not ({"prompt", "skill", "unspecified"} & requested_surfaces):
+                return candidate
+            return await _review_injected_candidate(
+                candidate=candidate,
+                request=request,
+                generator=self._patch_generator,
+                reviewer=self._transfer_reviewer,
+                causal_binding=causal_binding,
+            )
         if not self.model_config_ref:
             raise RuntimeError("model_config_ref is required for PolicyHarness optimization")
         return await _invoke_patch_agent(
@@ -343,7 +412,10 @@ class PolicyHarnessRSIOptimizer:
             source_harness=source_harness,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
+            causal_binding=causal_binding,
             requested_surfaces=requested_surfaces,
+            required_budget_fields=required_budget_fields,
+            skill_mutation_policy=skill_mutation_policy,
         )
 
 
@@ -376,6 +448,120 @@ def _requested_issue_surfaces(issues: list[dict[str, Any]]) -> set[str]:
         else:
             surfaces.add("unknown")
     return surfaces
+
+
+def _skill_mutation_policy(
+    *,
+    source_harness: Path,
+    selected_issues: list[dict[str, Any]],
+    requested_surfaces: set[str],
+) -> dict[str, Any]:
+    """Choose add versus update from references to runtime-visible Skills."""
+    if "skill" not in requested_surfaces:
+        return {"operation": "none", "allowed_names": [], "required_name": "", "existing_skills": []}
+
+    existing = _source_skill_specs(source_harness)
+    evidence_text = "\n".join(_iter_text_values(selected_issues)).casefold()
+    referenced = [
+        skill
+        for skill in existing
+        if any(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])",
+                evidence_text,
+            )
+            for alias in {
+                str(skill["name"]).casefold(),
+                str(skill["name"]).casefold().replace("-", "_"),
+            }
+        )
+    ]
+    if referenced:
+        names = [str(skill["name"]) for skill in referenced]
+        return {
+            "operation": "update",
+            "allowed_names": names,
+            "required_name": names[0] if len(names) == 1 else "",
+            "existing_skills": referenced,
+        }
+    return {
+        "operation": "add",
+        "allowed_names": [],
+        "required_name": "",
+        "existing_skills": [
+            {"name": str(skill["name"]), "description": str(skill["description"])} for skill in existing
+        ],
+    }
+
+
+def _source_skill_specs(source_harness: Path) -> list[dict[str, str]]:
+    skills_root = source_harness / _SKILLS_DIR
+    if not skills_root.is_dir():
+        return []
+    specs: list[dict[str, str]] = []
+    for skill_path in sorted(skills_root.glob("*/SKILL.md")):
+        text = skill_path.read_text(encoding="utf-8")
+        metadata: dict[str, Any] = {}
+        body = text.strip()
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) == 3:
+                loaded = yaml.safe_load(parts[1]) or {}
+                metadata = dict(loaded) if isinstance(loaded, Mapping) else {}
+                body = parts[2].strip()
+        specs.append(
+            {
+                "name": skill_path.parent.name,
+                "description": str(metadata.get("description", "") or "").strip(),
+                "body": body,
+            }
+        )
+    return specs
+
+
+def _iter_text_values(value: Any) -> Iterator[str]:
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            yield from _iter_text_values(nested)
+    elif isinstance(value, (list, tuple, set)):
+        for nested in value:
+            yield from _iter_text_values(nested)
+    elif isinstance(value, str):
+        yield value
+
+
+def _required_budget_fields(
+    issues: list[dict[str, Any]],
+    source_harness: Mapping[str, Any],
+) -> set[str]:
+    """Bind a budget mutation to the exact runtime limit named by evidence."""
+    required: set[str] = set()
+    for issue in issues:
+        metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
+        attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+        decision_contract = (
+            attribution.get("decision_contract") if isinstance(attribution.get("decision_contract"), Mapping) else {}
+        )
+        primary_text = str(decision_contract.get("required_action", "") or "")
+        fields = _budget_fields_named_in_text(primary_text, source_harness)
+        if not fields:
+            causal_coverage = (
+                attribution.get("causal_coverage") if isinstance(attribution.get("causal_coverage"), Mapping) else {}
+            )
+            fields = _budget_fields_named_in_text(
+                str(causal_coverage.get("counterfactual_prediction", "") or ""),
+                source_harness,
+            )
+        required.update(fields)
+    return required
+
+
+def _budget_fields_named_in_text(text: str, source_harness: Mapping[str, Any]) -> set[str]:
+    return {
+        field
+        for field in _BUDGET_HARNESS_FIELDS
+        if field in source_harness and re.search(rf"(?<![A-Za-z0-9_]){re.escape(field)}(?![A-Za-z0-9_])", text)
+    }
 
 
 def _write_unsupported_surface_artifact(
@@ -504,7 +690,10 @@ async def _invoke_patch_agent(
     source_harness: dict[str, Any],
     leakage_guard: dict[str, Any],
     causal_hypothesis_policy: dict[str, Any],
+    causal_binding: dict[str, Any],
     requested_surfaces: set[str],
+    required_budget_fields: set[str],
+    skill_mutation_policy: dict[str, Any],
 ) -> dict[str, Any]:
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
     from openjiuwen.harness.factory import create_deep_agent
@@ -514,8 +703,9 @@ async def _invoke_patch_agent(
         parse_yaml_or_json_object_response,
     )
 
-    agent = create_deep_agent(
-        model=load_member_optimizer_model(model_config_ref),
+    model = load_member_optimizer_model(model_config_ref)
+    generator = create_deep_agent(
+        model=model,
         card=AgentCard(
             name="evobench_policy_harness_optimizer",
             description="Produces one constrained Evo-Bench PolicyHarness patch.",
@@ -526,7 +716,11 @@ async def _invoke_patch_agent(
             "from hypotheses and return only the requested JSON mapping. Make one "
             "falsifiable behavior intervention within the supplied mutation contract. "
             "Express persistent instructions as a transferable behavior rule rather than "
-            "an answer for the observed benchmark instance. "
+            "an answer for the observed benchmark instance. Persistent prompt text must "
+            "remain valid across materially different task domains and must omit the "
+            "observed domain, artifact type, application, command, library, and example. "
+            "A Skill may retain the public domain operations required by its capability, "
+            "but it must transfer across different tasks and omit instance literals. "
             "Never encode case IDs, known answers, benchmark entities, or private tool fields."
         ),
         tools=None,
@@ -537,24 +731,479 @@ async def _invoke_patch_agent(
         restrict_to_work_dir=True,
         auto_create_workspace=True,
     )
-    return await invoke_member_optimizer_agent_structured(
-        agent=agent,
-        agent_name="EvoBenchPolicyHarnessOptimizerAgent",
-        user_message=request,
-        session_id=f"evobench_policy_{hashlib.sha256(request.encode('utf-8')).hexdigest()[:16]}",
-        retry_limit=2,
-        parse_response=parse_yaml_or_json_object_response,
-        validate_response=lambda value: _patch_validation_errors(
-            value,
+    reviewer = create_deep_agent(
+        model=model,
+        card=AgentCard(
+            name="evobench_policy_harness_transfer_reviewer",
+            description="Audits one candidate without authoring or rewriting it.",
+        ),
+        system_prompt=(
+            "You are an independent Harness intervention auditor, not an improver. "
+            "Never propose, rewrite, or complete a candidate. Judge only whether the "
+            "submitted candidate preserves the controller-frozen causal binding, avoids "
+            "task-answer leakage, and transfers beyond the observed instance. Return only "
+            "the requested JSON audit."
+        ),
+        tools=None,
+        workspace=str(workspace),
+        enable_task_loop=False,
+        max_iterations=2,
+        language="en",
+        restrict_to_work_dir=True,
+        auto_create_workspace=True,
+    )
+
+    forbidden_prompt_terms: list[str] = []
+
+    async def generate(message: str) -> dict[str, Any]:
+        return await invoke_member_optimizer_agent_structured(
+            agent=generator,
+            agent_name="EvoBenchPolicyHarnessOptimizerAgent",
+            user_message=message,
+            session_id=f"evobench_policy_{hashlib.sha256(message.encode('utf-8')).hexdigest()[:16]}",
+            retry_limit=2,
+            parse_response=parse_yaml_or_json_object_response,
+            validate_response=lambda value: [
+                *_patch_validation_errors(
+                    value,
+                    source_harness=source_harness,
+                    leakage_guard=leakage_guard,
+                    causal_hypothesis_policy=causal_hypothesis_policy,
+                    requested_surfaces=requested_surfaces,
+                    required_budget_fields=required_budget_fields,
+                    skill_mutation_policy=skill_mutation_policy,
+                ),
+                *_forbidden_concrete_term_errors(value, forbidden_prompt_terms),
+            ],
+            build_retry_message=lambda _previous, error: (
+                f"{message}\n\nThe previous output was invalid: {error}\nReturn only a corrected JSON mapping."
+            ),
+        )
+
+    candidate = await generate(request)
+    if not ({"prompt", "skill", "unspecified"} & requested_surfaces):
+        return candidate
+    forbidden_prompt_terms.extend(_quoted_binding_phrases(causal_binding))
+    candidate = await generate(
+        _build_mandatory_abstraction_request(candidate, causal_binding, requested_surfaces=requested_surfaces)
+    )
+
+    audit_history: list[dict[str, Any]] = []
+    consecutive_approvals = 0
+    for review_index in range(4):
+        validated = _validate_patch(
+            candidate,
+            source_prompt="",
             source_harness=source_harness,
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
             requested_surfaces=requested_surfaces,
-        ),
-        build_retry_message=lambda _previous, error: (
-            f"{request}\n\nThe previous output was invalid: {error}\nReturn only a corrected JSON mapping."
-        ),
+            required_budget_fields=required_budget_fields,
+            skill_mutation_policy=skill_mutation_policy,
+        )
+        review_request = _build_transfer_review_request(
+            validated,
+            causal_binding,
+            audit_pass=review_index + 1,
+            prior_substitution_families=[
+                str(family)
+                for prior in audit_history
+                for family in (
+                    (prior.get("substitution_test", {}) or {}).get("task_family_a", ""),
+                    (prior.get("substitution_test", {}) or {}).get("task_family_b", ""),
+                )
+                if str(family)
+            ],
+        )
+        audit = await invoke_member_optimizer_agent_structured(
+            agent=reviewer,
+            agent_name="EvoBenchPolicyHarnessTransferReviewerAgent",
+            user_message=review_request,
+            session_id=f"evobench_transfer_{hashlib.sha256(review_request.encode('utf-8')).hexdigest()[:16]}",
+            retry_limit=2,
+            parse_response=parse_yaml_or_json_object_response,
+            validate_response=_transfer_audit_validation_errors,
+            build_retry_message=lambda _previous, error: (
+                f"{review_request}\n\nThe audit JSON was invalid: {error}\n"
+                "Return only a corrected audit JSON mapping. Do not rewrite the candidate."
+            ),
+        )
+        audit = _validate_transfer_audit(audit)
+        independently_sampled = _audit_uses_new_substitution_families(audit, audit_history)
+        approved = _transfer_audit_approved(audit) and independently_sampled
+        if not independently_sampled:
+            audit = {
+                **audit,
+                "independent_substitution_sample": False,
+                "violations": [
+                    *audit["violations"],
+                    "substitution task families repeated an earlier audit sample",
+                ],
+            }
+        consecutive_approvals = consecutive_approvals + 1 if approved else 0
+        audit_history.append(
+            {
+                "review_index": review_index + 1,
+                "consecutive_approvals": consecutive_approvals,
+                **audit,
+            }
+        )
+        _write_json_atomic(
+            workspace / "transfer_audit.json",
+            {
+                "schema_version": 1,
+                "status": "approved"
+                if consecutive_approvals >= 2
+                else ("pending_consensus" if approved else "rejected"),
+                "attempts": audit_history,
+            },
+        )
+        if consecutive_approvals >= 2:
+            return validated
+        if approved:
+            continue
+        if not independently_sampled:
+            if review_index == 3:
+                raise ValueError("transfer audit did not produce two independent substitution samples")
+            continue
+        if review_index == 3:
+            raise ValueError("transfer audit rejected candidate: " + "; ".join(audit["violations"]))
+        forbidden_prompt_terms.extend(audit["concrete_terms"])
+        candidate = await generate(_build_generation_repair_request(request, validated, audit))
+    raise AssertionError("unreachable transfer review state")
+
+
+def _build_mandatory_abstraction_request(
+    patch: dict[str, Any],
+    causal_binding: dict[str, Any],
+    *,
+    requested_surfaces: set[str] | None = None,
+) -> str:
+    """Lift a concrete repair into a persistent functional decision rule."""
+    skill_target = "skill" in set(requested_surfaces or {"prompt"})
+    rewrite_instruction = (
+        "Rewrite only skill.name, skill.description, and skill.body. Preserve "
+        "source_hypothesis_id, system_prompt_append, harness_updates, rationale, and expected_effect exactly. "
+        "Retain public domain operations required to execute this reusable capability, while removing "
+        "observed-instance names, exact locations, answers, values, worked solutions, and the observed task "
+        "family when it appears only as an example. The resulting Skill "
+        "must apply unchanged to at least two different tasks in the same capability family. Its validation "
+        "must use task-visible requirements, invariants, independent recomputation, or artifact read-back; "
+        "it must never compare against an expected, gold, reference, or known answer."
+        if skill_target
+        else "Rewrite only system_prompt_append. Preserve source_hypothesis_id, skill, harness_updates, "
+        "rationale, and expected_effect exactly. Remove every observed domain and implementation term so the "
+        "global policy applies unchanged across materially different task domains."
     )
+    return f"""Perform the mandatory abstraction pass for this Harness candidate.
+{rewrite_instruction}
+Return only the complete six-field candidate JSON mapping.
+
+The persistent intervention must keep the same falsifiable trigger -> action ->
+observable relationship. For a global Prompt, express the mechanism through functional
+concepts such as requirement, evidence, dependency, operation, state, result,
+validation, fallback, and completion. For a Skill, preserve the executable public
+method while removing only observed-instance details. Do not turn either surface into
+broad quality advice.
+
+Preserve causal roles and ordering, not merely topic words. If the binding distinguishes
+an upstream state or decision from a downstream computation, validation, or outcome,
+the abstract rule must still require the upstream causal action before the downstream
+operation. Never replace a required causal action with an easier proxy such as any
+edit, any tool call, any saved artifact, visible progress, or a final statement.
+Treat every scope_boundary entry as immutable. Inspect the full persistent
+intervention, including fallback and recovery sections, and remove any action that
+contradicts a boundary; never trade semantic correctness for visible completion.
+Do not copy, quote, negate, or present as an example any phrase in
+OBSERVED_QUOTED_PHRASES. Express the underlying branch rule functionally instead.
+
+OBSERVED_QUOTED_PHRASES:
+{json.dumps(_quoted_binding_phrases(causal_binding), ensure_ascii=False, indent=2)}
+
+CAUSAL_BINDING (controller-frozen; preserve its causal roles):
+{json.dumps(causal_binding, ensure_ascii=False, indent=2)}
+
+SOURCE CANDIDATE:
+{json.dumps(patch, ensure_ascii=False, indent=2)}
+"""
+
+
+def _build_transfer_review_request(
+    patch: dict[str, Any],
+    causal_binding: dict[str, Any],
+    *,
+    audit_pass: int = 1,
+    prior_substitution_families: list[str] | None = None,
+) -> str:
+    """Ask an independent model to audit without changing candidate semantics."""
+    skill = patch.get("skill") if isinstance(patch.get("skill"), Mapping) else {}
+    skill_target = bool(skill)
+    persistent_field = "skill.description and skill.body" if skill_target else "system_prompt_append"
+    detail_rule = (
+        "For a Skill, public artifact classes, commands, libraries, and algorithms that are necessary to execute "
+        "the declared capability are allowed. concrete_terms must instead contain observed-instance source names, "
+        "case-specific locations, known answers, exact target values, benchmark labels, and worked solutions. "
+        "Also flag the observed task-family label when it is included only as an example and is not needed to "
+        "define or execute the capability. "
+        "cross_domain_transferable means unchanged transfer to two different tasks inside the same declared "
+        "capability family; the tasks may share the public tool or artifact class."
+        if skill_target
+        else "For a global Prompt, concrete_terms must contain every observed-domain term, artifact/media class, "
+        "file format, application, command, package/library, API, function, implementation parameter, named entity, "
+        "fixed value, and worked example. Domain vocabulary is never allowed in a global persistent prompt. "
+        "cross_domain_transferable requires two task families that do not share "
+        "the observed artifact, tool, or execution environment."
+    )
+    return f"""Audit pass {audit_pass}. Audit this proposed global Harness intervention. Do not rewrite it and do
+not propose an alternative.
+
+Return ONLY this JSON shape:
+{{
+  "causal_faithful": true,
+  "evidence_independent": true,
+  "task_detail_free": true,
+  "cross_domain_transferable": true,
+  "concrete_terms": [],
+  "substitution_test": {{
+    "task_family_a": "one materially different task family",
+    "task_family_b": "another materially different task family",
+    "required_edits_a": [],
+    "required_edits_b": [],
+    "works_unchanged": true
+  }},
+  "violations": []
+}}
+
+Audit rules:
+- causal_faithful is true only when the candidate implements the observed_decision
+  -> required_behavior -> predicted_observable relationship in CAUSAL_BINDING. A
+  familiar mechanism from another task is a violation, even if it sounds general.
+- causal_faithful is false when any instruction, validation step, recovery path, or
+  fallback contradicts a CAUSAL_BINDING scope_boundary. Audit the full candidate,
+  not only its primary procedure. A last-resort action is still a violation.
+- evidence_independent is true only when the persistent rule is justified by
+  evidence available to the task agent. Audit both the binding and the candidate:
+  controller-frozen means the causal relationship cannot be rewritten, not that it
+  is automatically valid. A hidden expected answer, gold label, evaluator
+  preference, or one lucky candidate outcome is not an independent cause. Remove
+  scores, pass/fail labels, and evaluator-owned expected outcomes mentally; if no
+  causal reason remains, evidence_independent must be false.
+- Apply evidence_independent to the executable persistent surface named above.
+  rationale and expected_effect may cite the observed evidence that motivated the
+  experiment; those provenance citations are not persistent task instructions and
+  do not by themselves make the candidate dependent on a hidden outcome. Reject
+  only when the executable trigger, procedure, validation, or fallback needs a
+  hidden expected/gold/reference/known answer to run or to decide success.
+- Before assigning booleans, scan {persistent_field} phrase by phrase and copy
+  every disallowed concrete term and every phrase requiring replacement in either
+  substitution task into concrete_terms.
+- {detail_rule}
+- task_detail_free is true only when concrete_terms is empty and
+  {persistent_field} contains no case ID, answer, fixed target value, named source
+  document/entity, benchmark label, or worked solution.
+- cross_domain_transferable is true only when the behavioral decision rule can be
+  applied unchanged in the two materially different tasks named in substitution_test.
+  List every candidate phrase that must be changed for each family in
+  required_edits_a and required_edits_b.
+  Set works_unchanged=false when either application would require replacing a noun,
+  required term or implementation step in {persistent_field}.
+- This is an independent audit. Choose two task families not used by an earlier
+  audit pass. Previously used families are listed below; do not reuse or paraphrase
+  them.
+- violations must contain short, concrete reasons for every false field and must
+  be empty only when all four booleans are true.
+
+PRIOR_SUBSTITUTION_FAMILIES:
+{json.dumps(prior_substitution_families or [], ensure_ascii=False, indent=2)}
+
+CAUSAL_BINDING (controller-frozen; audit may reject but never replace it):
+{json.dumps(causal_binding, ensure_ascii=False, indent=2)}
+
+CANDIDATE (read-only):
+{json.dumps(patch, ensure_ascii=False, indent=2)}
+"""
+
+
+def _build_generation_repair_request(
+    original_request: str,
+    rejected_patch: dict[str, Any],
+    audit: dict[str, Any],
+) -> str:
+    del original_request
+    skill_target = isinstance(rejected_patch.get("skill"), Mapping) and bool(rejected_patch.get("skill"))
+    rewrite_target = (
+        "Rewrite only skill.name, skill.description, and skill.body. Preserve the public operations required by "
+        "the capability, but remove every observed-instance term listed by the audit. Replace any validation "
+        "against an expected, gold, reference, or known answer with task-visible contract checks, invariants, "
+        "independent recomputation, or artifact read-back."
+        if skill_target
+        else "Rewrite only system_prompt_append at the functional trigger -> action -> observable level. Remove "
+        "every listed concrete term and any synonymous observed domain, artifact, application, command, library, "
+        "parameter, or worked-example term."
+    )
+    return f"""The independent transfer audit rejected the persistent instruction.
+{rewrite_target}
+Preserve source_hypothesis_id, the other persistent surface, harness_updates,
+rationale, and expected_effect exactly as supplied.
+Do not weaken the causal intervention into generic advice.
+
+Return only the complete candidate JSON mapping with the same six top-level fields.
+
+REJECTED CANDIDATE:
+{json.dumps(rejected_patch, ensure_ascii=False, indent=2)}
+
+AUDIT VIOLATIONS:
+{json.dumps(audit["violations"], ensure_ascii=False, indent=2)}
+"""
+
+
+def _validate_transfer_audit(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError("transfer audit must be a mapping")
+    expected = {
+        "causal_faithful",
+        "evidence_independent",
+        "task_detail_free",
+        "cross_domain_transferable",
+        "concrete_terms",
+        "substitution_test",
+        "violations",
+    }
+    unknown = sorted(set(value) - expected)
+    missing = sorted(expected - set(value))
+    if unknown or missing:
+        raise ValueError(f"transfer audit fields mismatch: missing={missing}, unknown={unknown}")
+    boolean_fields = {
+        "causal_faithful",
+        "evidence_independent",
+        "task_detail_free",
+        "cross_domain_transferable",
+    }
+    for key in boolean_fields:
+        if not isinstance(value[key], bool):
+            raise TypeError(f"transfer audit {key} must be a boolean")
+    concrete_terms = value["concrete_terms"]
+    if not isinstance(concrete_terms, list) or any(
+        not isinstance(item, str) or not item.strip() for item in concrete_terms
+    ):
+        raise TypeError("transfer audit concrete_terms must be a list of non-empty strings")
+    substitution = value["substitution_test"]
+    if not isinstance(substitution, Mapping):
+        raise TypeError("transfer audit substitution_test must be a mapping")
+    substitution_fields = {
+        "task_family_a",
+        "task_family_b",
+        "required_edits_a",
+        "required_edits_b",
+        "works_unchanged",
+    }
+    if set(substitution) != substitution_fields:
+        raise ValueError("transfer audit substitution_test fields mismatch")
+    family_a = str(substitution["task_family_a"] or "").strip()
+    family_b = str(substitution["task_family_b"] or "").strip()
+    if not family_a or not family_b or family_a.casefold() == family_b.casefold():
+        raise ValueError("transfer audit substitution_test requires two distinct task families")
+    required_edits_a = substitution["required_edits_a"]
+    required_edits_b = substitution["required_edits_b"]
+    for field, edits in (("required_edits_a", required_edits_a), ("required_edits_b", required_edits_b)):
+        if not isinstance(edits, list) or any(not isinstance(item, str) or not item.strip() for item in edits):
+            raise TypeError(f"transfer audit substitution_test {field} must be a list of non-empty strings")
+    if not isinstance(substitution["works_unchanged"], bool):
+        raise TypeError("transfer audit substitution_test works_unchanged must be a boolean")
+    if bool(concrete_terms) == bool(value["task_detail_free"]):
+        raise ValueError("transfer audit task_detail_free must be false exactly when concrete_terms is non-empty")
+    if bool(substitution["works_unchanged"]) != bool(value["cross_domain_transferable"]):
+        raise ValueError("transfer audit cross_domain_transferable must match substitution_test works_unchanged")
+    if bool(substitution["works_unchanged"]) == bool(required_edits_a or required_edits_b):
+        raise ValueError("transfer audit works_unchanged must be false exactly when substitution edits are required")
+    violations = value["violations"]
+    if not isinstance(violations, list) or any(not isinstance(item, str) or not item.strip() for item in violations):
+        raise TypeError("transfer audit violations must be a list of non-empty strings")
+    normalized = {key: value[key] for key in boolean_fields}
+    normalized["concrete_terms"] = [item.strip() for item in concrete_terms]
+    normalized["substitution_test"] = {
+        "task_family_a": family_a,
+        "task_family_b": family_b,
+        "required_edits_a": [item.strip() for item in required_edits_a],
+        "required_edits_b": [item.strip() for item in required_edits_b],
+        "works_unchanged": substitution["works_unchanged"],
+    }
+    normalized["violations"] = [item.strip() for item in violations]
+    if all(normalized[key] for key in boolean_fields) and normalized["violations"]:
+        raise ValueError("approved transfer audit must not contain violations")
+    if not all(normalized[key] for key in boolean_fields) and not normalized["violations"]:
+        raise ValueError("rejected transfer audit must explain at least one violation")
+    return normalized
+
+
+def _audit_uses_new_substitution_families(
+    audit: Mapping[str, Any],
+    audit_history: list[dict[str, Any]],
+) -> bool:
+    """Require each approval to test a fresh cross-domain substitution pair."""
+    previous = {
+        _normalized_phrase(str(family))
+        for item in audit_history
+        for family in (
+            ((item.get("substitution_test", {}) or {}).get("task_family_a", "")),
+            ((item.get("substitution_test", {}) or {}).get("task_family_b", "")),
+        )
+        if str(family).strip()
+    }
+    current_test = audit.get("substitution_test")
+    current_test = current_test if isinstance(current_test, Mapping) else {}
+    current = {
+        _normalized_phrase(str(current_test.get(key, "") or ""))
+        for key in ("task_family_a", "task_family_b")
+        if str(current_test.get(key, "") or "").strip()
+    }
+    return bool(current) and not (previous & current)
+
+
+def _transfer_audit_validation_errors(value: Any) -> list[str]:
+    try:
+        _validate_transfer_audit(value)
+    except (TypeError, ValueError) as exc:
+        return [str(exc)]
+    return []
+
+
+def _transfer_audit_approved(audit: Mapping[str, Any]) -> bool:
+    return (
+        all(
+            bool(audit.get(key))
+            for key in (
+                "causal_faithful",
+                "evidence_independent",
+                "task_detail_free",
+                "cross_domain_transferable",
+            )
+        )
+        and not audit.get("concrete_terms")
+        and bool((audit.get("substitution_test") or {}).get("works_unchanged"))
+        and not audit.get("violations")
+    )
+
+
+async def _review_injected_candidate(
+    *,
+    candidate: dict[str, Any],
+    request: str,
+    generator: PatchGenerator,
+    reviewer: TransferReviewer,
+    causal_binding: dict[str, Any],
+) -> dict[str, Any]:
+    for review_index in range(2):
+        raw_audit = reviewer(_build_transfer_review_request(candidate, causal_binding))
+        audit = await raw_audit if inspect.isawaitable(raw_audit) else raw_audit
+        audit = _validate_transfer_audit(audit)
+        if _transfer_audit_approved(audit):
+            return candidate
+        if review_index == 1:
+            raise ValueError("transfer audit rejected candidate: " + "; ".join(audit["violations"]))
+        generated = generator(_build_generation_repair_request(request, candidate, audit))
+        candidate = await generated if inspect.isawaitable(generated) else generated
+    raise AssertionError("unreachable injected transfer review state")
 
 
 def _load_policy_harness_ref(path_value: str) -> tuple[Path, dict[str, Any], Path]:
@@ -603,6 +1252,22 @@ def _select_issues(
     return selected
 
 
+def _selected_supported_hypothesis_id(attribution: Mapping[str, Any]) -> str:
+    assessments = [item for item in attribution.get("hypothesis_assessment", []) if isinstance(item, Mapping)]
+    supported_ids = [
+        str(item.get("hypothesis_id", "") or "").strip()
+        for item in assessments
+        if str(item.get("status", "") or "").strip().casefold() == "supported"
+        and str(item.get("hypothesis_id", "") or "").strip()
+    ]
+    selected = str(attribution.get("selected_hypothesis_id", "") or "").strip()
+    if selected:
+        return selected if selected in supported_ids else ""
+    # Pre-v12 analysis artifacts did not persist an explicit selection. They
+    # remain safe only when positive support is already unique.
+    return supported_ids[0] if len(supported_ids) == 1 else ""
+
+
 def _issue_is_actionable(issue: Mapping[str, Any]) -> bool:
     metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
     attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
@@ -615,10 +1280,17 @@ def _issue_is_actionable(issue: Mapping[str, Any]) -> bool:
     assessments = [item for item in attribution.get("hypothesis_assessment", []) if isinstance(item, Mapping)]
     if not assessments:
         return False
+    selected_hypothesis_id = _selected_supported_hypothesis_id(attribution)
+    if not selected_hypothesis_id:
+        return False
     statuses = {str(item.get("status", "") or "").strip().casefold() for item in assessments}
     if evidence_status == "confirmed" and "unresolved" in statuses:
         return False
-    return "supported" in statuses
+    return any(
+        str(item.get("hypothesis_id", "") or "").strip() == selected_hypothesis_id
+        and str(item.get("status", "") or "").strip().casefold() == "supported"
+        for item in assessments
+    )
 
 
 def _causal_hypothesis_policy(issues: list[dict[str, Any]]) -> dict[str, Any]:
@@ -626,9 +1298,11 @@ def _causal_hypothesis_policy(issues: list[dict[str, Any]]) -> dict[str, Any]:
     falsified: set[str] = set()
     unresolved: set[str] = set()
     instrumented = False
+    semantic_ids_by_hypothesis_id: dict[str, str] = {}
     for issue in issues:
         metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
         attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+        selected_hypothesis_id = _selected_supported_hypothesis_id(attribution)
         assessments = attribution.get("hypothesis_assessment", [])
         for assessment in assessments if isinstance(assessments, list) else []:
             if not isinstance(assessment, Mapping):
@@ -639,7 +1313,12 @@ def _causal_hypothesis_policy(issues: list[dict[str, Any]]) -> dict[str, Any]:
                 continue
             instrumented = True
             if status == "supported":
+                if hypothesis_id != selected_hypothesis_id:
+                    continue
                 supported.add(hypothesis_id)
+                semantic_id = str(assessment.get("hypothesis_semantic_id", "") or "").strip()
+                if semantic_id:
+                    semantic_ids_by_hypothesis_id[hypothesis_id] = semantic_id
             elif status == "falsified":
                 falsified.add(hypothesis_id)
             else:
@@ -650,7 +1329,90 @@ def _causal_hypothesis_policy(issues: list[dict[str, Any]]) -> dict[str, Any]:
         "supported_hypothesis_ids": sorted(supported),
         "falsified_hypothesis_ids": sorted(falsified),
         "unresolved_hypothesis_ids": sorted(unresolved),
+        "semantic_ids_by_hypothesis_id": {
+            hypothesis_id: semantic_ids_by_hypothesis_id[hypothesis_id]
+            for hypothesis_id in sorted(supported)
+            if hypothesis_id in semantic_ids_by_hypothesis_id
+        },
     }
+
+
+def _causal_binding(issues: list[dict[str, Any]]) -> dict[str, Any]:
+    """Freeze each selected Issue's own causal claim for generation and review."""
+    bindings: list[dict[str, Any]] = []
+    for issue in issues:
+        metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
+        attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+        selected_hypothesis_id = _selected_supported_hypothesis_id(attribution)
+        decision = (
+            attribution.get("decision_contract") if isinstance(attribution.get("decision_contract"), Mapping) else {}
+        )
+        coverage = attribution.get("causal_coverage") if isinstance(attribution.get("causal_coverage"), Mapping) else {}
+        supported_hypotheses = []
+        assessments = attribution.get("hypothesis_assessment", [])
+        for assessment in assessments if isinstance(assessments, list) else []:
+            if not isinstance(assessment, Mapping):
+                continue
+            if str(assessment.get("status", "") or "").strip().casefold() != "supported":
+                continue
+            if str(assessment.get("hypothesis_id", "") or "").strip() != selected_hypothesis_id:
+                continue
+            supported_hypotheses.append(
+                {
+                    key: assessment[key]
+                    for key in ("hypothesis_id", "claim", "reason", "logic_check")
+                    if assessment.get(key) not in (None, "", {}, [])
+                }
+            )
+        binding = {
+            "source_issue_id": str(issue.get("issue_id", "") or ""),
+            "target_ref": attribution.get("target_ref", ""),
+            "evidence_status": attribution.get("evidence_status", ""),
+            "failed_requirement": attribution.get("failed_requirement", ""),
+            "observed_decision": decision.get("wrong_decision", attribution.get("critical_mistake", "")),
+            "causal_distinction": decision.get("causal_distinction", attribution.get("general_mechanism", "")),
+            "required_behavior": decision.get("required_action", issue.get("recommendation", "")),
+            "predicted_observable": decision.get(
+                "acceptance_observable",
+                coverage.get("counterfactual_prediction", ""),
+            ),
+            "scope_boundary": decision.get("scope_boundary", []),
+            "sufficiency_status": coverage.get("sufficiency_status", ""),
+            "supported_hypotheses": supported_hypotheses,
+        }
+        bindings.append({key: value for key, value in binding.items() if value not in (None, "", {}, [])})
+    return {
+        "schema_version": 1,
+        "immutability": "review_may_reject_but_must_not_replace_this_causal_relationship",
+        "bindings": bindings,
+    }
+
+
+def _validate_causal_binding_independence(causal_binding: Mapping[str, Any]) -> None:
+    """Reject causal rules that merely encode an evaluator-owned outcome."""
+    bindings = causal_binding.get("bindings", [])
+    for index, binding in enumerate(bindings if isinstance(bindings, list) else []):
+        if not isinstance(binding, Mapping):
+            continue
+        causal_texts = [
+            str(binding.get("causal_distinction", "") or ""),
+            str(binding.get("required_behavior", "") or ""),
+        ]
+        hypotheses = binding.get("supported_hypotheses", [])
+        for hypothesis in hypotheses if isinstance(hypotheses, list) else []:
+            if not isinstance(hypothesis, Mapping):
+                continue
+            # The claim is part of the causal relationship.  Its reason and
+            # logic_check are evidence provenance and may legitimately quote a
+            # failed evaluator requirement; treating those citations as the
+            # causal rule itself creates false positives.
+            causal_texts.append(str(hypothesis.get("claim", "") or ""))
+        combined = " ".join(causal_texts)
+        if any(pattern.search(combined) for pattern in _OUTCOME_ONLY_CAUSAL_PATTERNS):
+            raise ValueError(
+                f"causal binding {index} depends on an evaluator-owned expected outcome; "
+                "return it to the Analyzer as unassigned instead of generating a Harness rule"
+            )
 
 
 def _issue_counterfactual_predictions(issues: list[dict[str, Any]]) -> list[str]:
@@ -1376,9 +2138,12 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
     source_harness: dict[str, Any],
     evidence: dict[str, Any],
     causal_hypothesis_policy: dict[str, Any],
+    causal_binding: dict[str, Any],
     generation_context: dict[str, Any],
     rejected_capabilities: list[dict[str, Any]],
     requested_surfaces: set[str],
+    required_budget_fields: set[str],
+    skill_mutation_policy: dict[str, Any],
 ) -> str:
     model_evidence = {key: value for key, value in evidence.items() if not key.startswith("_")}
     internal_guard = evidence.get("_prompt_leakage_guard")
@@ -1393,7 +2158,10 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
         "current_harness_json": source_harness,
         "supported_mutation_contract": {
             "prompt_append": _PROMPT_PATH,
+            "skill_package": f"{_SKILLS_DIR}/<skill-name>/SKILL.md",
+            "skill_mutation": skill_mutation_policy,
             "budget_fields": sorted(_BUDGET_HARNESS_FIELDS),
+            "required_budget_fields": sorted(required_budget_fields),
             "rail_config": (
                 {_RAIL_HARNESS_FIELD: sorted(_ALLOWED_RAIL_FIELDS)}
                 if isinstance(source_harness.get(_RAIL_HARNESS_FIELD), Mapping)
@@ -1402,7 +2170,6 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
             "unsupported": [
                 "task implementation code",
                 "tool implementation",
-                "skill package",
                 "benchmark or evaluator",
                 "model weights",
                 "environment",
@@ -1411,6 +2178,7 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
         "requested_mutation_surfaces": sorted(requested_surfaces),
         "failure_evidence": model_evidence,
         "causal_hypothesis_policy": causal_hypothesis_policy,
+        "causal_binding": causal_binding,
         "sibling_generation": _sanitize_model_evidence(generation_context, case_ids),
         "improver_policy_directives": _sanitize_model_evidence(
             generation_context.get("improver_policy", {}),
@@ -1431,6 +2199,7 @@ Return ONLY this JSON shape:
 {{
   "source_hypothesis_id": "the supported causal hypothesis this candidate implements",
   "system_prompt_append": "a concise instruction block to append",
+  "skill": {{"name": "", "description": "", "body": ""}},
   "harness_updates": {{}},
   "rationale": "evidence-grounded reason",
   "expected_effect": "observable behavior change"
@@ -1440,8 +2209,25 @@ Rules:
 - system_prompt_append is required for a Prompt target and must be empty when
   the requested target does not include Prompt. A non-empty append must be no more than
   {_MAX_PROMPT_APPEND_CHARS} characters and must not repeat existing text.
-- harness_updates is optional. Budget targets may change only max_steps or
-  rollout_wall_clock_seconds. Rail targets may change only fields explicitly
+- skill is required for a Skill target and must be an empty object otherwise.
+  A Skill is one reusable procedural capability, not a disguised answer: use a
+  lowercase hyphenated name, a routing description that states when it applies,
+  and a bounded SKILL.md body with trigger -> procedure -> validation -> fallback.
+  It may retain public domain/tool concepts needed to execute the capability, but
+  must omit benchmark IDs, named source artifacts, known answers, exact target
+  values, cells/sections unique to the observed instance, evaluator language, and
+  the observed task family when it appears only as an illustrative example.
+  Validation and fallback must be executable without a hidden expected, gold,
+  reference, or known answer. Use task-visible requirements, invariants,
+  independent recomputation from public inputs, and artifact read-back instead.
+  Obey supported_mutation_contract.skill_mutation: for `update`, rewrite one
+  allowed existing Skill under its exact current name instead of adding an
+  overlapping Skill; for `add`, choose a new name that is not already present.
+- harness_updates is optional. Budget targets may change only fields explicitly
+  listed under supported_mutation_contract.budget_fields. When
+  supported_mutation_contract.required_budget_fields is non-empty, every named
+  field must be changed; modifying an adjacent budget does not implement the
+  evidenced causal intervention. Rail targets may change only fields explicitly
   listed under supported_mutation_contract.rail_config. An update is required
   for either target and must be empty for a Prompt-only target.
 - Do not replace or summarize the current prompt. Return only the new append.
@@ -1449,10 +2235,18 @@ Rules:
   are compatible with current causal evidence and the supported mutation
   contract. They cannot override a failed requirement, invent an activation
   event, or weaken the one-intervention rule.
-- Obey supported_mutation_contract. Do not disguise an unsupported Tool, Skill,
+- Obey supported_mutation_contract. Do not disguise an unsupported Tool,
   Config, environment, evaluator, or framework defect as a Prompt defect.
 - Keep one primary behavioral intervention expressed as trigger -> action ->
   observable. Do not write generic advice or a broad checklist.
+- causal_binding is controller-frozen. The candidate must implement its own
+  observed_decision -> required_behavior -> predicted_observable relationship.
+  Do not replace that relationship with a familiar mechanism from another task,
+  even when the replacement sounds more general or easier to test.
+- Every causal_binding.scope_boundary entry is a hard negative constraint. No
+  primary step, validation step, recovery path, or last-resort fallback may perform
+  an action that the boundary excludes. Omit a fallback rather than violate the
+  diagnosed task semantics.
 - Read analyzer evidence_status before proposing the change. For `confirmed`,
   repair the confirmed decision. For `supported_hypothesis`, make the candidate a
   falsifiable experiment and state the predicted observable without upgrading the
@@ -1488,12 +2282,27 @@ Rules:
   private, or merely observed field is not a valid request field.
 - Generalize the causal distinction and observable behavior. Do not memorize the
   benchmark instance. Redaction markers in the evidence must remain redacted.
-- A persistent Prompt rule must transfer to more than the observed task instance.
-  It may target a recurring domain behavior when the causal evidence requires that
-  specificity, but it must not name the observed document, section, party, product,
-  jurisdiction, benchmark label, fixed value, or answer. State a public trigger,
-  the reusable decision procedure, and a scope boundary. Prefer operational words
-  over broad advice; do not force output content that only this case requested.
+- A persistent Prompt rule must transfer across materially different task domains,
+  not merely to another instance in the observed domain. Write the append one
+  abstraction level above the evidence: preserve the causal decision rule while
+  removing the observed domain, artifact type, file extension, application,
+  command, package/library, function name, benchmark role, and worked example.
+  Those concrete details may appear in rationale as evidence, but not in the
+  persistent system_prompt_append.
+- Apply this substitution test before returning: if every observed domain noun,
+  artifact name, application, and command were replaced by unrelated ones, the
+  system_prompt_append must remain valid without editing. It must plausibly govern
+  at least two materially different task families. If it fails, abstract the
+  trigger/action/observable further without turning it into generic advice or
+  changing the causal relationship in causal_binding.
+- A persistent Skill must transfer unchanged to at least two materially different
+  tasks in the same capability family. Keep the concrete public operations required
+  by that capability, but remove every observed-instance noun, source name, answer,
+  fixed target value, and worked solution. Do not over-abstract a procedural Skill
+  until it no longer tells the runtime what to do.
+- State a public trigger, reusable decision procedure, scope boundary, and
+  observable. Prefer operational words over broad advice; do not force output
+  content that only this case requested.
 - Treat analyzer_causal_digest, analyzer_diagnoses, and
   candidate_feedback_delta as primary. Use failed_case_evidence only as a
   bounded compatibility fallback when legacy_fallback_used is true.
@@ -1510,6 +2319,8 @@ def _patch_validation_errors(
     leakage_guard: dict[str, Any] | None = None,
     causal_hypothesis_policy: dict[str, Any] | None = None,
     requested_surfaces: set[str] | None = None,
+    required_budget_fields: set[str] | None = None,
+    skill_mutation_policy: dict[str, Any] | None = None,
 ) -> list[str]:
     try:
         _validate_patch(
@@ -1519,10 +2330,97 @@ def _patch_validation_errors(
             leakage_guard=leakage_guard,
             causal_hypothesis_policy=causal_hypothesis_policy,
             requested_surfaces=requested_surfaces,
+            required_budget_fields=required_budget_fields,
+            skill_mutation_policy=skill_mutation_policy,
         )
     except (TypeError, ValueError) as exc:
         return [str(exc)]
     return []
+
+
+def _forbidden_concrete_term_errors(value: Any, forbidden_terms: list[str]) -> list[str]:
+    """Keep rejected implementation vocabulary out of the persistent retry."""
+    if not forbidden_terms or not isinstance(value, Mapping):
+        return []
+    skill = value.get("skill") if isinstance(value.get("skill"), Mapping) else {}
+    persistent_text = "\n".join(
+        (
+            str(value.get("system_prompt_append", "") or ""),
+            str(skill.get("description", "") or ""),
+            str(skill.get("body", "") or ""),
+        )
+    )
+    append_normalized = _normalized_phrase(persistent_text)
+    append_stems = {_light_stem(token) for token in append_normalized.split()}
+    remaining: list[str] = []
+    for term in forbidden_terms:
+        raw_term = str(term).strip()
+        term_normalized = _normalized_phrase(raw_term)
+        if not term_normalized:
+            continue
+        plain_term = re.fullmatch(r"[A-Za-z0-9 ]+", raw_term) is not None
+        exact_match = (
+            f" {term_normalized} " in f" {append_normalized} "
+            if plain_term
+            else raw_term.casefold() in persistent_text.casefold()
+        )
+        tokens = term_normalized.split()
+        stem_match = (
+            len(tokens) == 1
+            and re.fullmatch(r"[A-Za-z]+", raw_term) is not None
+            and _light_stem(tokens[0]) in append_stems
+        )
+        if exact_match or stem_match:
+            remaining.append(raw_term)
+    if not remaining:
+        return []
+    return [
+        "persistent intervention retained concrete terms rejected by the transfer audit: "
+        + ", ".join(sorted(set(remaining), key=str.casefold))
+    ]
+
+
+def _quoted_binding_phrases(causal_binding: Mapping[str, Any]) -> list[str]:
+    """Extract observed worked examples that must not survive abstraction."""
+    phrases: list[str] = []
+    bindings = causal_binding.get("bindings", [])
+    texts: list[str] = []
+    for binding in bindings if isinstance(bindings, list) else []:
+        if not isinstance(binding, Mapping):
+            continue
+        for key in (
+            "observed_decision",
+            "causal_distinction",
+            "required_behavior",
+            "predicted_observable",
+        ):
+            value = binding.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+        boundary = binding.get("scope_boundary", [])
+        if isinstance(boundary, list):
+            texts.extend(str(item) for item in boundary if isinstance(item, str))
+
+    for value in texts:
+        for match in re.finditer(r"(?P<quote>['\"`])(?P<body>[^'\"`\r\n]{8,160})(?P=quote)", value):
+            phrase = " ".join(match.group("body").split())
+            if len(re.findall(r"[A-Za-z0-9]+", phrase)) < 3:
+                continue
+            if phrase not in phrases:
+                phrases.append(phrase)
+    return phrases
+
+
+def _normalized_phrase(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(value).casefold()))
+
+
+def _light_stem(token: str) -> str:
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
 
 
 def _validate_patch(
@@ -1533,12 +2431,15 @@ def _validate_patch(
     leakage_guard: dict[str, Any] | None = None,
     causal_hypothesis_policy: dict[str, Any] | None = None,
     requested_surfaces: set[str] | None = None,
+    required_budget_fields: set[str] | None = None,
+    skill_mutation_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("patch must be a mapping")
     allowed_top_level = {
         "source_hypothesis_id",
         "system_prompt_append",
+        "skill",
         "harness_updates",
         "rationale",
         "expected_effect",
@@ -1548,6 +2449,7 @@ def _validate_patch(
         raise ValueError(f"unknown patch fields: {unknown}")
     surfaces = set(requested_surfaces or {"prompt"})
     prompt_required = bool(surfaces & {"prompt", "unspecified"})
+    skill_required = "skill" in surfaces
     budget_required = "budget" in surfaces
     rail_required = "rail" in surfaces
     append = str(value.get("system_prompt_append", "") or "").strip()
@@ -1561,6 +2463,31 @@ def _validate_patch(
     if append and source_prompt and append.casefold() in source_prompt.casefold():
         raise ValueError("system_prompt_append already exists in the parent prompt")
     _validate_global_prompt_append(append, leakage_guard or {})
+
+    raw_skill = value.get("skill", {})
+    if raw_skill is None:
+        raw_skill = {}
+    if not isinstance(raw_skill, Mapping):
+        raise TypeError("skill must be a mapping")
+    skill = _validate_skill_spec(raw_skill, leakage_guard=leakage_guard or {}) if raw_skill else {}
+    if skill_required and not skill:
+        raise ValueError("skill must not be empty for a Skill intervention")
+    if not skill_required and skill:
+        raise ValueError("skill must be empty when Skill is not the requested mutation surface")
+    if skill:
+        policy = skill_mutation_policy or {"operation": "add", "allowed_names": []}
+        operation = str(policy.get("operation", "add") or "add")
+        allowed_names = {str(name) for name in policy.get("allowed_names", []) if str(name)}
+        if operation == "update" and str(skill["name"]) not in allowed_names:
+            raise ValueError(
+                "skill.name must identify an existing evidence-referenced Skill selected for update: "
+                f"{sorted(allowed_names)}"
+            )
+        existing_names = {
+            str(item.get("name", "") or "") for item in policy.get("existing_skills", []) if isinstance(item, Mapping)
+        }
+        if operation == "add" and str(skill["name"]) in existing_names:
+            raise ValueError(f"new Skill name already exists in the parent Harness: {skill['name']}")
 
     source_hypothesis_id = str(value.get("source_hypothesis_id", "") or "").strip()
     hypothesis_policy = causal_hypothesis_policy or {}
@@ -1621,13 +2548,26 @@ def _validate_patch(
             raise ValueError("max_steps must be between 1 and 5000")
         if key == "rollout_wall_clock_seconds" and not 30 <= raw_value <= 14_400:
             raise ValueError("rollout_wall_clock_seconds must be between 30 and 14400")
+        if key == "command_timeout_seconds" and not 30 <= raw_value <= 14_400:
+            raise ValueError("command_timeout_seconds must be between 30 and 14400")
+        if source_harness is not None and raw_value == source_harness.get(key):
+            raise ValueError(f"harness update must change the current value: {key}")
         normalized_updates[key] = raw_value
     if budget_required and not (_BUDGET_HARNESS_FIELDS & set(normalized_updates)):
         raise ValueError("harness_updates must not be empty for a budget intervention")
+    required_budget = set(required_budget_fields or ())
+    unknown_required_budget = required_budget - _BUDGET_HARNESS_FIELDS
+    if unknown_required_budget:
+        raise ValueError(f"required budget fields are unsupported: {sorted(unknown_required_budget)}")
+    missing_required_budget = required_budget - set(normalized_updates)
+    if budget_required and missing_required_budget:
+        raise ValueError(
+            f"harness_updates must change the evidence-identified budget fields: {sorted(missing_required_budget)}"
+        )
     if rail_required and _RAIL_HARNESS_FIELD not in normalized_updates:
         raise ValueError("harness_updates must include tool_loop_compaction for a rail intervention")
     if not budget_required and not rail_required and normalized_updates:
-        raise ValueError("harness_updates must be empty for a prompt-only intervention")
+        raise ValueError("harness_updates must be empty when no config or Rail mutation is requested")
     rationale = str(value.get("rationale", "") or "").strip()
     expected_effect = str(value.get("expected_effect", "") or "").strip()
     _validate_generated_text_integrity(rationale, field="rationale")
@@ -1639,6 +2579,7 @@ def _validate_patch(
     return {
         "source_hypothesis_id": source_hypothesis_id,
         "system_prompt_append": append,
+        "skill": skill,
         "harness_updates": normalized_updates,
         "rationale": rationale,
         "expected_effect": expected_effect,
@@ -1650,6 +2591,33 @@ def _validate_generated_text_integrity(value: str, *, field: str) -> None:
         raise ValueError(f"{field} contains Unicode replacement characters; regenerate clean text")
     if any(ord(character) < 32 and character not in "\n\r\t" for character in value):
         raise ValueError(f"{field} contains unsupported control characters")
+
+
+def _validate_skill_spec(value: Mapping[str, Any], *, leakage_guard: dict[str, Any]) -> dict[str, str]:
+    unknown = sorted(set(value) - {"name", "description", "body"})
+    if unknown:
+        raise ValueError(f"unknown skill fields: {unknown}")
+    name = str(value.get("name", "") or "").strip().casefold().replace("_", "-")
+    description = str(value.get("description", "") or "").strip()
+    body = str(value.get("body", "") or "").strip()
+    if not re.fullmatch(r"[a-z][a-z0-9-]{2,63}", name):
+        raise ValueError("skill.name must be a lowercase hyphenated identifier of 3-64 characters")
+    if not 20 <= len(description) <= _MAX_SKILL_DESCRIPTION_CHARS:
+        raise ValueError(f"skill.description must contain 20-{_MAX_SKILL_DESCRIPTION_CHARS} characters")
+    if not 80 <= len(body) <= _MAX_SKILL_BODY_CHARS:
+        raise ValueError(f"skill.body must contain 80-{_MAX_SKILL_BODY_CHARS} characters")
+    _validate_generated_text_integrity(description, field="skill.description")
+    _validate_generated_text_integrity(body, field="skill.body")
+    if body.startswith("---"):
+        raise ValueError("skill.body must not include YAML front matter")
+    persistent_text = f"{description}\n{body}"
+    if any(pattern.search(persistent_text) for pattern in _PERSISTENT_HIDDEN_OUTCOME_PATTERNS):
+        raise ValueError(
+            "skill validation must not depend on an expected, gold, reference, or known answer; "
+            "use task-visible contracts, invariants, independent recomputation, or artifact read-back"
+        )
+    _validate_global_prompt_append(persistent_text, leakage_guard)
+    return {"name": name, "description": description, "body": body}
 
 
 def _validate_global_prompt_append(append: str, guard: dict[str, Any]) -> None:
@@ -1698,13 +2666,37 @@ def _apply_patch(
     *,
     prompt_path: Path,
     harness_path: Path,
+    candidate_harness: Path,
     source_prompt: str,
     source_harness: dict[str, Any],
     patch: dict[str, Any],
+    skill_mutation_policy: dict[str, Any],
 ) -> None:
     if patch["system_prompt_append"]:
         prompt = source_prompt.rstrip() + "\n\n" + patch["system_prompt_append"].strip() + "\n"
         prompt_path.write_text(prompt, encoding="utf-8")
+    skill = patch.get("skill") if isinstance(patch.get("skill"), Mapping) else {}
+    if skill:
+        skill_dir = candidate_harness / _SKILLS_DIR / str(skill["name"])
+        operation = str(skill_mutation_policy.get("operation", "add") or "add")
+        if operation == "add" and skill_dir.exists():
+            raise ValueError(f"skill already exists in the parent Harness: {skill['name']}")
+        if operation == "update" and not skill_dir.is_dir():
+            raise ValueError(f"skill selected for update does not exist in the parent Harness: {skill['name']}")
+        skill_dir.mkdir(parents=True, exist_ok=operation == "update")
+        skill_path = skill_dir / "SKILL.md"
+        skill_path.write_text(
+            "---\n"
+            + yaml.safe_dump(
+                {"name": str(skill["name"]), "description": str(skill["description"])},
+                allow_unicode=True,
+                sort_keys=False,
+            ).strip()
+            + "\n---\n\n"
+            + str(skill["body"]).strip()
+            + "\n",
+            encoding="utf-8",
+        )
     harness_updates = dict(patch["harness_updates"])
     if not harness_updates:
         return
@@ -1724,12 +2716,26 @@ def _verify_candidate_tree(
     source_harness: Path,
     candidate_harness: Path,
     requested_surfaces: set[str],
+    skill_mutation_policy: dict[str, Any],
 ) -> list[str]:
     candidate_tree = _tree_hashes(candidate_harness)
-    if set(candidate_tree) != set(source_tree):
+    if not set(source_tree) <= set(candidate_tree):
         raise RuntimeError("candidate PolicyHarness must preserve the complete source directory tree")
-    changed = sorted(path for path in source_tree if source_tree[path] != candidate_tree[path])
-    illegal = sorted(set(changed) - {_PROMPT_PATH, _HARNESS_PATH})
+    changed = sorted(
+        path for path in set(source_tree) | set(candidate_tree) if source_tree.get(path) != candidate_tree.get(path)
+    )
+    added = set(candidate_tree) - set(source_tree)
+    added_skill_paths = {
+        path
+        for path in added
+        if re.fullmatch(rf"{_SKILLS_DIR}/[a-z][a-z0-9-]{{2,63}}/SKILL\.md", path.replace("\\", "/"))
+    }
+    operation = str(skill_mutation_policy.get("operation", "none") or "none")
+    updatable_skill_paths = {
+        f"{_SKILLS_DIR}/{name}/SKILL.md" for name in skill_mutation_policy.get("allowed_names", []) if str(name)
+    }
+    allowed_skill_paths = added_skill_paths if operation == "add" else updatable_skill_paths
+    illegal = sorted(set(changed) - {_PROMPT_PATH, _HARNESS_PATH} - allowed_skill_paths)
     if illegal:
         raise RuntimeError(f"candidate modified forbidden PolicyHarness files: {illegal}")
     for relative in source_tree:
@@ -1749,6 +2755,13 @@ def _verify_candidate_tree(
         raise RuntimeError("candidate did not change harness.json for the requested budget intervention")
     if "rail" in requested_surfaces and _HARNESS_PATH not in changed:
         raise RuntimeError("candidate did not change harness.json for the requested rail intervention")
+    changed_skill_paths = set(changed) & allowed_skill_paths
+    if "skill" in requested_surfaces and not changed_skill_paths:
+        raise RuntimeError(f"candidate did not {operation} the selected native SKILL.md package")
+    if operation == "update" and added_skill_paths:
+        raise RuntimeError("candidate added a Skill when the evidence requires updating an existing Skill")
+    if "skill" not in requested_surfaces and added_skill_paths:
+        raise RuntimeError("candidate added a Skill outside the requested mutation surface")
     return changed
 
 
@@ -1758,7 +2771,9 @@ def _build_actions(
     issue_ids: list[str],
     case_ids: list[str],
     source_hypothesis_id: str,
+    source_hypothesis_semantic_id: str,
     analyzer_counterfactual_predictions: list[str],
+    skill_mutation_policy: dict[str, Any],
 ) -> list[dict[str, Any]]:
     common = {
         "role": _ROLE,
@@ -1774,6 +2789,7 @@ def _build_actions(
         "constraints": {
             "target_case_ids": case_ids,
             "source_causal_hypothesis_id": source_hypothesis_id,
+            "source_causal_hypothesis_semantic_id": source_hypothesis_semantic_id,
             "analyzer_counterfactual_predictions": analyzer_counterfactual_predictions,
         },
     }
@@ -1787,6 +2803,24 @@ def _build_actions(
                 "target_path": _PROMPT_PATH,
                 "description": "Append one evidence-grounded PolicyHarness instruction block.",
                 "rationale": patch["rationale"],
+                "intervention": patch["system_prompt_append"],
+            }
+        )
+    skill = patch.get("skill") if isinstance(patch.get("skill"), Mapping) else {}
+    if skill:
+        skill_path = f"{_SKILLS_DIR}/{skill['name']}/SKILL.md"
+        skill_operation = str(skill_mutation_policy.get("operation", "add") or "add")
+        actions.append(
+            {
+                **common,
+                "operation": skill_operation,
+                "action_type": "add_file" if skill_operation == "add" else "update_file",
+                "action_group": "skill",
+                "action_id": f"evobench_policy_skill_{skill['name']}",
+                "target_path": skill_path,
+                "description": str(skill["description"]),
+                "rationale": patch["rationale"],
+                "intervention": str(skill["body"]),
             }
         )
     budget_updates = {key: value for key, value in patch["harness_updates"].items() if key in _BUDGET_HARNESS_FIELDS}
@@ -1799,6 +2833,7 @@ def _build_actions(
                 "target_path": _HARNESS_PATH,
                 "description": "Adjust only the permitted PolicyHarness execution budget fields.",
                 "rationale": patch["rationale"],
+                "intervention": json.dumps(budget_updates, ensure_ascii=False, sort_keys=True),
                 "depends_on": ["evobench_policy_prompt"] if patch["system_prompt_append"] else [],
             }
         )
@@ -1811,6 +2846,11 @@ def _build_actions(
                 "target_path": _HARNESS_PATH,
                 "description": "Adjust the declared tool-loop compaction rail configuration.",
                 "rationale": patch["rationale"],
+                "intervention": json.dumps(
+                    {_RAIL_HARNESS_FIELD: patch["harness_updates"][_RAIL_HARNESS_FIELD]},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 "depends_on": [action["action_id"] for action in actions],
             }
         )
@@ -1858,12 +2898,25 @@ def _capabilities(actions: list[dict[str, Any]], case_ids: list[str]) -> list[di
             "action_id": action["action_id"],
             "role": _ROLE,
             "action_group": str(action.get("action_group", "") or ""),
-            "operation": "modify",
+            "operation": str(action.get("operation", "modify") or "modify"),
             "target_path": action["target_path"],
-            "runtime_name": Path(action["target_path"]).stem,
+            "runtime_name": (
+                Path(action["target_path"]).parent.name
+                if str(action.get("action_group", "") or "") == "skill"
+                else Path(action["target_path"]).stem
+            ),
             "expected_effect": action.get("expected_effect", ""),
+            "description": action.get("description", ""),
+            "rationale": action.get("rationale", ""),
+            "intervention": action.get("intervention", ""),
+            "attributed_issue_ids": [
+                str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)
+            ],
             "source_causal_hypothesis_id": str(
                 (action.get("constraints", {}) or {}).get("source_causal_hypothesis_id", "")
+            ),
+            "source_causal_hypothesis_semantic_id": str(
+                (action.get("constraints", {}) or {}).get("source_causal_hypothesis_semantic_id", "")
             ),
             "analyzer_counterfactual_predictions": [
                 str(item)
@@ -1887,6 +2940,15 @@ def _candidate_refs_payload(
     defer_publish: bool,
 ) -> dict[str, Any]:
     payload = dict(source_refs)
+    for transient_key in (
+        "candidate_gate",
+        "candidate_ready_roles",
+        "promoted_roles",
+        "published_roles",
+        "staged_roles",
+        "verified_roles",
+    ):
+        payload.pop(transient_key, None)
     payload["version"] = payload.get("version", 1)
     payload["source_harness_refs_path"] = str(source_refs_path)
     payload["promotion_status"] = "pending_gate" if defer_publish else "published"

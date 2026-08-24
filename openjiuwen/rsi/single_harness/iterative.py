@@ -1288,6 +1288,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             candidate_eval_ref,
             target_case_ids,
         )
+        intervention_excerpts = _candidate_intervention_excerpts_by_case(
+            capabilities,
+            target_case_ids,
+        )
+        for case_id, excerpt in intervention_excerpts.items():
+            if not candidate_patch_excerpts_by_case.get(case_id):
+                candidate_patch_excerpts_by_case[case_id] = excerpt
         candidate_target_score = _average_case_scores(candidate_case_scores, target_case_ids)
         target_score_delta = candidate_target_score - source_target_score
         source_score = source_target_score
@@ -2257,6 +2264,12 @@ def _candidate_capabilities(member_info: dict[str, Any]) -> list[dict[str, Any]]
                 "source_causal_hypothesis_ids": [
                     str(item) for item in constraints.get("source_causal_hypothesis_ids", []) if str(item)
                 ],
+                "source_causal_hypothesis_semantic_id": str(
+                    constraints.get("source_causal_hypothesis_semantic_id", "") or ""
+                ),
+                "source_causal_hypothesis_semantic_ids": [
+                    str(item) for item in constraints.get("source_causal_hypothesis_semantic_ids", []) if str(item)
+                ],
                 "optimization_contract_sha256": [
                     str(item.get("content_sha256", "") or "")
                     for item in optimization_contracts
@@ -2500,7 +2513,12 @@ def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[d
                 ],
                 "target_case_ids": [str(case_id) for case_id in capability.get("target_case_ids", []) if str(case_id)],
                 "intervention": _bounded_candidate_text(
-                    str(capability.get("description", capability.get("rationale", "")) or ""),
+                    str(
+                        capability.get("intervention")
+                        or capability.get("description")
+                        or capability.get("rationale")
+                        or ""
+                    ),
                     2_000,
                 ),
                 "predicted_behavior_and_outcome": expected_effect,
@@ -2510,6 +2528,12 @@ def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[d
                 "source_causal_hypothesis_id": str(capability.get("source_causal_hypothesis_id", "") or ""),
                 "source_causal_hypothesis_ids": [
                     str(item) for item in capability.get("source_causal_hypothesis_ids", []) if str(item)
+                ],
+                "source_causal_hypothesis_semantic_id": str(
+                    capability.get("source_causal_hypothesis_semantic_id", "") or ""
+                ),
+                "source_causal_hypothesis_semantic_ids": [
+                    str(item) for item in capability.get("source_causal_hypothesis_semantic_ids", []) if str(item)
                 ],
                 "prediction_recorded_before_evaluation": True,
             }
@@ -3140,6 +3164,41 @@ def _candidate_patch_excerpts_by_case(
     return excerpts
 
 
+def _candidate_intervention_excerpts_by_case(
+    capabilities: list[dict[str, Any]],
+    target_case_ids: set[str],
+) -> dict[str, str]:
+    """Return the actual Harness mutations used in a paired evaluation.
+
+    ``model_patch_path`` describes a task-agent workspace patch and is commonly
+    absent for document or prompt-driven tasks.  Candidate feedback instead
+    needs the Harness intervention that was under test.  Optimizers publish that
+    immutable mutation on each capability before evaluation, so use it as the
+    cross-domain source of truth.
+    """
+    excerpts: dict[str, list[str]] = {case_id: [] for case_id in target_case_ids}
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            continue
+        intervention = str(capability.get("intervention", "") or "").strip()
+        if not intervention:
+            continue
+        capability_case_ids = {str(case_id) for case_id in capability.get("target_case_ids", []) if str(case_id)}
+        applicable_case_ids = (capability_case_ids or target_case_ids) & target_case_ids
+        label = ":".join(
+            item
+            for item in (
+                str(capability.get("action_group", "") or ""),
+                str(capability.get("target_path", "") or ""),
+            )
+            if item
+        )
+        block = f"[{label}]\n{intervention}" if label else intervention
+        for case_id in applicable_case_ids:
+            excerpts.setdefault(case_id, []).append(block)
+    return {case_id: _bounded_candidate_text("\n\n".join(blocks)) for case_id, blocks in excerpts.items() if blocks}
+
+
 def _bounded_candidate_text(value: str, limit: int = 6000) -> str:
     if len(value) <= limit:
         return value
@@ -3224,9 +3283,9 @@ def _invoked_tool_names_by_case(eval_ref_path: str) -> dict[str, set[str]]:
         names = names_by_case.setdefault(case_id, set())
         if _task_start_triggered_skill_names(case):
             names.add("skill_tool")
-        trace = _read_json(str(case.get("trace_path", "") or ""))
-        _collect_tool_names(trace, names)
-        _collect_trajectory_dir_usage(trace, tool_names=names)
+        for trace in _case_usage_traces(case):
+            _collect_tool_names(trace, names)
+            _collect_trajectory_dir_usage(trace, tool_names=names)
     return names_by_case
 
 
@@ -3245,9 +3304,9 @@ def _invoked_skill_names_by_case(eval_ref_path: str) -> dict[str, set[str]]:
             continue
         names = names_by_case.setdefault(case_id, set())
         names.update(_task_start_triggered_skill_names(case))
-        trace = _read_json(str(case.get("trace_path", "") or ""))
-        _collect_skill_names(trace, names)
-        _collect_trajectory_dir_usage(trace, skill_names=names)
+        for trace in _case_usage_traces(case):
+            _collect_skill_names(trace, names)
+            _collect_trajectory_dir_usage(trace, skill_names=names)
     return names_by_case
 
 
@@ -3272,24 +3331,40 @@ def _pre_edit_invoked_names_by_case(
             names.update(triggered_skills)
         elif triggered_skills:
             names.add("skill_tool")
-        trace = _read_json(str(case.get("trace_path", "") or ""))
         kwargs = {
             "tool_names": names if action_group == "tool" else None,
             "skill_names": names if action_group == "skill" else None,
         }
-        edit_steps = [step for step in [collect_pre_edit_successful_usage(trace, **kwargs)] if step is not None]
-        trajectory_dir = Path(str(trace.get("trajectory_dir", "") or ""))
-        if trajectory_dir.is_dir():
-            for member_trace_path in trajectory_dir.glob("*.jsonl"):
-                step = collect_jsonl_pre_edit_successful_usage(
-                    member_trace_path,
-                    **kwargs,
-                )
-                if step is not None:
-                    edit_steps.append(step)
+        edit_steps: list[int] = []
+        for trace in _case_usage_traces(case):
+            step = collect_pre_edit_successful_usage(trace, **kwargs)
+            if step is not None:
+                edit_steps.append(step)
+            trajectory_dir = Path(str(trace.get("trajectory_dir", "") or ""))
+            if trajectory_dir.is_dir():
+                for member_trace_path in trajectory_dir.glob("*.jsonl"):
+                    step = collect_jsonl_pre_edit_successful_usage(
+                        member_trace_path,
+                        **kwargs,
+                    )
+                    if step is not None:
+                        edit_steps.append(step)
         if edit_steps:
             first_edit_steps_by_case[case_id] = min(edit_steps)
     return names_by_case, first_edit_steps_by_case
+
+
+def _case_usage_traces(case: dict[str, Any]) -> list[dict[str, Any]]:
+    """Load the adapter trace plus any structured normalized trace it references."""
+    trace = _read_json(str(case.get("trace_path", "") or ""))
+    traces = [trace]
+    behavior = trace.get("behavior_trace", {}) if isinstance(trace.get("behavior_trace"), dict) else {}
+    normalized_path = str(behavior.get("normalized_trace_path", "") or "")
+    if normalized_path:
+        normalized = _read_json(normalized_path)
+        if normalized and normalized != trace:
+            traces.append(normalized)
+    return traces
 
 
 def _task_start_triggered_skill_names(case: dict[str, Any]) -> set[str]:
