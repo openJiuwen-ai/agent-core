@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from sqlalchemy import event, inspect
+from sqlalchemy.schema import CreateTable
 from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -725,7 +726,12 @@ async def create_cur_session_tables(engine: AsyncEngine) -> None:
 
     async with engine.begin() as conn:
         for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
-            await conn.run_sync(model.__table__.create, checkfirst=True)
+            # 原子建表：checkfirst=True 是"先查再建"两步，并发/多进程下有窗口
+            # （成员惰性拉起并发初始化同会话动态表时炸 already exists）；
+            # CREATE TABLE IF NOT EXISTS 由 SQLite 单写者锁保证原子性。
+            await conn.run_sync(
+                lambda c, t=model.__table__: c.execute(CreateTable(t, if_not_exists=True))
+            )
         await conn.run_sync(_ensure_message_protocol_column)
         await conn.run_sync(_ensure_message_meta_column)
         await conn.run_sync(_ensure_dynamic_table_indexes)

@@ -142,7 +142,7 @@ from openjiuwen.harness.resources.extension_resolver import (
     resolve_plugin_parts,
 )
 from openjiuwen.harness.schema.build_context import BuildContext
-from openjiuwen.harness.schema.extension_spec import PluginSpec
+from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec, PluginSpec
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
@@ -1735,6 +1735,38 @@ class DeepAgent(BaseAgent):
             ctx.extras["_parent_model"] = self.deep_config.model
             parts = resolve_agent_template_parts(spec, ctx)
             return await self._apply_extension_parts(parts, source_uri=str(manifest_path))
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def load_agent_template_spec(
+        self,
+        spec: AgentTemplateSpec,
+        *,
+        context: BuildContext | None = None,
+    ) -> LoadRecord:
+        """Hot-load an in-memory ``AgentTemplateSpec`` snapshot.
+
+        Symmetric to :meth:`load_plugin_spec`: unlike :meth:`load_agent_template`,
+        nothing is read from disk and no ``source_root`` is injected — every
+        path-bearing field on ``spec`` must already be an absolute path, or
+        resolve rejects it. ``_parent_model`` is still set so direct
+        ``subagents`` on the template resolve against this agent's model.
+
+        The snapshot is applied verbatim: any ``prompt_sections`` it carries
+        hot-replace the matching sections (identity uses
+        ``replace_existing=True``). Callers that manage identity through
+        other channels must strip ``prompt_sections`` before handing the
+        snapshot over.
+        """
+        try:
+            ctx = self._new_extension_context(context)
+            ctx.extras["_parent_model"] = self.deep_config.model
+            parts = resolve_agent_template_parts(spec, ctx)
+            return await self._apply_extension_parts(parts, source_uri=None)
         except Exception as exc:
             raise build_error(
                 StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,

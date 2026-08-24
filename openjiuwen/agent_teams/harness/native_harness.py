@@ -259,14 +259,30 @@ class NativeHarness(DeepAgent):
     # ------------------------------------------------------------------
 
     async def _prepare(self) -> None:
-        """Run ``ensure_initialized`` (async rail init).
+        """Run ``ensure_initialized`` (async rail init), then hot-load the
+        optional AgentTemplate snapshot carried on the spec.
 
         Idempotent. ``start`` calls this first; the synchronous config + rail
         mounting already ran in ``__init__``.
+
+        The snapshot mount runs strictly AFTER ``ensure_initialized``: template
+        skills bind onto the already-initialized SkillUseRail instead of
+        creating a second one. Any failure (invalid snapshot dict, resolve or
+        bind error) propagates with ``_prepared`` left False — the member must
+        not enter a runnable state half-mounted; there is no retry and no
+        fallback to running without the template. Both ``start`` and
+        ``run_once`` funnel through here, so the mount always completes before
+        the first model call.
         """
         if self._prepared:
             return
         await self.ensure_initialized()
+        raw_template = getattr(self._agent_spec, "agent_template_spec", None)
+        if raw_template is not None:
+            from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
+
+            template = AgentTemplateSpec.model_validate(raw_template)
+            await self.load_agent_template_spec(template, context=self._build_context)
         self._prepared = True
 
     async def run_once(self, content: "str | InteractiveInput", *, session: Session | None = None) -> dict[str, Any]:
