@@ -23,9 +23,9 @@ from openjiuwen.harness.tools.code_graph import (
 )
 from openjiuwen.harness.tools.code_graph.submit_nudge import locate_submit_nudge
 from openjiuwen.harness.tools.code_graph.session import reset_localization_sessions
+from tests.unit_tests.core.retrieval.code_graph.parser_guard import skip_unless_code_graph_parser
 
 pytestmark = pytest.mark.level0
-pytest.importorskip("tree_sitter_language_pack")
 
 
 @pytest.fixture(autouse=True)
@@ -178,6 +178,7 @@ def _tools(tmp_path: Path, state: CodeGraphRunState):
 
 @pytest.mark.asyncio
 async def test_submit_includes_already_read_file_on_the_second_call(tmp_path: Path) -> None:
+    skip_unless_code_graph_parser()
     state = CodeGraphRunState(
         request=CodeGraphRequest(query="fix entry and compute"),
         profile=CodeGraphProfile.GRAPH.value,

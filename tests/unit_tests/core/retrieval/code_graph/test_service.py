@@ -15,10 +15,10 @@ from openjiuwen.core.retrieval.code_graph.manager import (
 )
 from openjiuwen.core.retrieval.code_graph.models import CodeGraphConfig
 from openjiuwen.core.retrieval.code_graph.service import CodeGraphService
+from tests.unit_tests.core.retrieval.code_graph.parser_guard import skip_unless_code_graph_parser
 
 pytestmark = pytest.mark.level0
-
-pytest.importorskip("tree_sitter_language_pack")
+skip_unless_code_graph_parser()
 
 SAMPLE_USER = '''\
 class UserService:
@@ -214,6 +214,18 @@ async def test_path_escape_is_rejected(service: CodeGraphService) -> None:
     with pytest.raises(Exception) as exc_info:
         service.resolve_path("../secret")
     assert "outside repo root" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+@pytest.mark.asyncio
+async def test_fork_session_is_constructed_without_mutating_privates(service: CodeGraphService) -> None:
+    await service.ensure_ready()
+    forked = service.fork_session()
+    assert forked is not service
+    assert forked._store is None
+    assert forked._session_scoped is True
+    assert forked._index is not None
+    assert forked._index is not service._index
 
 
 @pytest.mark.asyncio

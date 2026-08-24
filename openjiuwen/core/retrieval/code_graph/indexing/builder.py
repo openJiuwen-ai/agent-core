@@ -562,18 +562,18 @@ def definition_documents(symbol, source: str) -> list[tuple[LexicalDocument, lis
     if symbol.kind not in SEARCHABLE_SYMBOL_KINDS:
         return []
     body = _line_slice(source, symbol.start_line, symbol.end_line)
-    text = " ".join(
-        part
-        for part in (
-            symbol.qualified_name,
-            symbol.name,
-            symbol.kind.value,
-            symbol.file,
-            symbol.signature,
-            body,
-        )
-        if part
-    )
+    parts: list[str] = []
+    for part in (
+        symbol.qualified_name,
+        symbol.name,
+        symbol.kind.value,
+        symbol.file,
+        symbol.signature,
+        body,
+    ):
+        if part:
+            parts.append(part)
+    text = " ".join(parts)
     tokens = tokenize(text)
     if not tokens:
         return []
@@ -629,7 +629,8 @@ def _line_slice(source: str, start_line: int, end_line: int) -> str:
     lines = source.splitlines()
     start = max(1, int(start_line or 1))
     end = min(len(lines), max(start, int(end_line or start)))
-    return "\n".join(lines[start - 1 : end])
+    start_idx = start - 1
+    return "\n".join(lines[start_idx:end])
 
 
 def _chunk_text(text: str, size: int, overlap: int) -> list[tuple[int, int, str, int]]:

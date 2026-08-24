@@ -33,6 +33,11 @@ from openjiuwen.core.retrieval.code_graph.query.test_paths import is_test_path
 # A patch that rewrites more symbols than this is a refactor, not a fix: only the
 # first few get a full impact query so one call cannot blow up the prompt.
 MAX_FOCUS_SYMBOLS = 20
+_WIRE_RELATIONS = (
+    RelationKind.CALLED_BY,
+    RelationKind.IMPORTED_BY,
+    RelationKind.INHERITED_BY,
+)
 
 
 @dataclass(frozen=True)
@@ -230,11 +235,22 @@ def _symbol_matches_focus(symbol: Symbol, wanted: Sequence[str]) -> bool:
             continue
         if token in {sid, name, file}:
             return True
-        if sid.endswith(token) or token.endswith(sid) or token.endswith(name):
-            head = token.split("::", 1)[0].split(":", 1)[0]
-            if not head or file.endswith(head) or head.endswith(file) or head in file:
-                return True
+        if _suffix_overlap(token, sid, name) and _file_matches_token_head(file, token):
+            return True
     return False
+
+
+def _suffix_overlap(token: str, sid: str, name: str) -> bool:
+    return sid.endswith(token) or token.endswith(sid) or token.endswith(name)
+
+
+def _file_matches_token_head(file: str, token: str) -> bool:
+    head = token.split("::", 1)[0].split(":", 1)[0]
+    if not head:
+        return True
+    if file.endswith(head) or head.endswith(file):
+        return True
+    return head in file
 
 
 def _dangling_references(
@@ -278,20 +294,19 @@ def _unwired_symbols(
     for symbol in added:
         if symbol.kind.value in {"module", "variable"} or is_test_path(symbol.file):
             continue
-        referenced = any(
-            index.neighbors(symbol.symbol_id, relation)
-            for relation in (
-                RelationKind.CALLED_BY,
-                RelationKind.IMPORTED_BY,
-                RelationKind.INHERITED_BY,
-            )
-        )
-        if referenced or symbol.file in tested_files:
+        if _is_referenced(index, symbol.symbol_id) or symbol.file in tested_files:
             continue
         row = _node(symbol)
         row["reason"] = "added but nothing references it; check registration or import"
         rows.append(row)
     return rows
+
+
+def _is_referenced(index: CodeGraphIndex, symbol_id: str) -> bool:
+    for relation in _WIRE_RELATIONS:
+        if index.neighbors(symbol_id, relation):
+            return True
+    return False
 
 
 def _is_api(symbol: Symbol) -> bool:
@@ -326,13 +341,38 @@ def _patch_risk(
     if RISK_HIGH in levels:
         reasons.append("a changed symbol has a high-risk change surface")
 
-    if dangling or RISK_HIGH in levels or (removed_symbols and not tests):
+    if _patch_risk_high(dangling, levels, removed_symbols, tests):
         level = RISK_HIGH
-    elif unwired or removed_edges or not tests or RISK_MEDIUM in levels or truncated:
+    elif _patch_risk_medium(unwired, removed_edges, tests, levels, truncated):
         level = RISK_MEDIUM
     else:
         level = RISK_LOW
     return {"level": level, "reasons": reasons}
+
+
+def _patch_risk_high(
+    dangling: list[dict[str, object]],
+    levels: set[str],
+    removed_symbols: list[Symbol],
+    tests: list[dict[str, object]],
+) -> bool:
+    if dangling:
+        return True
+    if RISK_HIGH in levels:
+        return True
+    return bool(removed_symbols) and not tests
+
+
+def _patch_risk_medium(
+    unwired: list[dict[str, object]],
+    removed_edges: list[tuple[str, str, str]],
+    tests: list[dict[str, object]],
+    levels: set[str],
+    truncated: bool,
+) -> bool:
+    if unwired or removed_edges or not tests:
+        return True
+    return RISK_MEDIUM in levels or truncated
 
 
 def _edge(item: tuple[str, str, str]) -> dict[str, object]:

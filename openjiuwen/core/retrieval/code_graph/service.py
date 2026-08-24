@@ -82,6 +82,8 @@ class CodeGraphService:
         config: CodeGraphConfig | None = None,
         *,
         index: CodeGraphIndex | None = None,
+        persist_index: bool = True,
+        session_scoped: bool = False,
     ) -> None:
         self.repo_root = Path(repo_root).resolve()
         self.config = config or CodeGraphConfig()
@@ -89,7 +91,7 @@ class CodeGraphService:
         self._snapshot: str | None = index.snapshot if index is not None else None
         self._store = (
             DiskIndexStore(self.config.cache_dir, max_size_mb=self.config.max_index_size_mb)
-            if self.config.cache_dir
+            if persist_index and self.config.cache_dir
             else None
         )
         self._ready_lock = asyncio.Lock()
@@ -97,7 +99,7 @@ class CodeGraphService:
         # A session index is updated by ``refresh_files`` alone. Letting a moved
         # repository snapshot invalidate it would rebuild the whole repository
         # after every edit and discard the refreshes already applied.
-        self._session_scoped = False
+        self._session_scoped = session_scoped
 
     @property
     def available(self) -> bool:
@@ -110,16 +112,15 @@ class CodeGraphService:
         the same index to every caller for a repo, so a session that edits code
         must not write into the copy another session is querying.
         """
-        forked = CodeGraphService(
+        # A session index diverges from what the cache key describes, so it must
+        # never be written back to disk as that snapshot's index.
+        return CodeGraphService(
             self.repo_root,
             self.config,
             index=self._index.copy_for_session() if self._index is not None else None,
+            persist_index=False,
+            session_scoped=True,
         )
-        # A session index diverges from what the cache key describes, so it must
-        # never be written back to disk as that snapshot's index.
-        forked._store = None
-        forked._session_scoped = True
-        return forked
 
     def cache_key(self, snapshot: str | None = None) -> str:
         snap = snapshot or self._snapshot or compute_snapshot(self.repo_root)
@@ -200,7 +201,7 @@ class CodeGraphService:
                 asyncio.to_thread(build_index, self.repo_root, self.config),
                 timeout=self.config.index_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             record_code_graph_event(
                 "index_build",
                 (time.perf_counter() - started) * 1000,
@@ -212,7 +213,8 @@ class CodeGraphService:
                 StatusCode.RETRIEVAL_CODE_GRAPH_TIMEOUT,
                 timeout=str(self.config.index_timeout_seconds),
                 error_msg=f"indexing {self.repo_root} timed out",
-            )
+                cause=exc,
+            ) from exc
         self._index = index
         self._snapshot = index.snapshot
         if self._store is not None:
@@ -932,11 +934,12 @@ class CodeGraphService:
         resolved = candidate.resolve() if candidate.is_absolute() else (root / path).resolve()
         try:
             resolved.relative_to(root)
-        except ValueError:
+        except ValueError as exc:
             raise build_error(
                 StatusCode.RETRIEVAL_CODE_GRAPH_PATH_INVALID,
                 error_msg=f"path {path!r} is outside repo root {str(root)!r}",
-            )
+                cause=exc,
+            ) from exc
         return resolved
 
     async def _ready_for_query(self) -> CodeGraphIndex:
@@ -1025,7 +1028,8 @@ class CodeGraphService:
                 error_msg=f"repo root does not exist: {self.repo_root}",
             )
 
-    def _failure_payload(self, exc: Exception) -> dict[str, object]:
+    @staticmethod
+    def _failure_payload(exc: Exception) -> dict[str, object]:
         from openjiuwen.core.common.exception.errors import BaseError
 
         message = str(exc)

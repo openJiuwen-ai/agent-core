@@ -29,6 +29,14 @@
 pip install -U openjiuwen
 ```
 
+可选 extra（默认不安装）：
+
+```bash
+pip install "openjiuwen[code-graph]"   # Code Graph 的 tree-sitter language pack
+```
+
+把 `code_graph_profile` 设成 `graph` 之前必须先装这个 extra，否则只能注册工具、无法建索引。请使用**预编译 wheel**，不要走源码编译（会下载 rustup，内网 CI 会超时）。`dev` / 单测环境默认不带这个 extra。
+
 ### 样例
 
 让我们创建一个简单的WorkflowAgent，调用工作流生成一段文本:

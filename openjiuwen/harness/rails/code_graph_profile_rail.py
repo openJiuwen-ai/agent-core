@@ -24,6 +24,7 @@ from openjiuwen.harness.schema.code_graph import (
     CodeGraphRequest,
     CodeGraphRunState,
     FIND_GRAPH_QUERY_POLICY,
+    bind_code_graph_runtime,
     resolve_code_graph_profile,
 )
 from openjiuwen.harness.tools.code_graph import (
@@ -74,6 +75,7 @@ class CodeGraphProfileRail(DeepAgentRail):
 
         if self.profile == CodeGraphProfile.OFF:
             return
+        _warn_if_parser_missing()
         deep_config = getattr(agent, "deep_config", None)
         if not (isinstance(agent, DeepAgent) and deep_config and hasattr(agent, "ability_manager")):
             logger.warning(
@@ -106,12 +108,21 @@ class CodeGraphProfileRail(DeepAgentRail):
             policy=FIND_GRAPH_QUERY_POLICY,
         )
         self.repo_root = repo_root
-        agent._code_graph_session_id = self.session_id  # noqa: SLF001
-        agent._code_graph_repo_root = repo_root  # noqa: SLF001
-        agent._code_graph_config = context.config  # noqa: SLF001
+        bind_code_graph_runtime(
+            agent,
+            session_id=self.session_id,
+            repo_root=repo_root,
+            config=context.config,
+        )
         try:
             self.run_state = self._new_run_state()
-            agent._code_graph_run_state = self.run_state  # noqa: SLF001 — tools share it
+            bind_code_graph_runtime(
+                agent,
+                session_id=self.session_id,
+                repo_root=repo_root,
+                config=context.config,
+                run_state=self.run_state,
+            )
             for tool in build_code_graph_profile_tools(
                 context,
                 self.run_state,
@@ -232,7 +243,26 @@ class CodeGraphProfileRail(DeepAgentRail):
             except Exception:  # noqa: BLE001
                 pass
         self._section = None
+        if getattr(agent, "code_graph_runtime", None) is not None:
+            agent.code_graph_runtime = None
         self._agent = None
+
+
+def _warn_if_parser_missing() -> None:
+    """Yaml ``profile: graph`` is not enough without the language-pack extra."""
+    from openjiuwen.core.retrieval.code_graph.indexing.parser import (
+        parser_available,
+        parser_unavailable_reason,
+    )
+
+    if parser_available():
+        return
+    logger.warning(
+        "CodeGraphProfileRail: profile=graph but the parser is unavailable (%s). "
+        "Install openjiuwen[code-graph] with a prebuilt wheel "
+        "(do not source-build; rustup times out on restricted networks).",
+        parser_unavailable_reason(),
+    )
 
 
 __all__ = ["CodeGraphProfileRail"]

@@ -17,8 +17,10 @@ from openjiuwen.harness.schema.code_graph import (
     CodeGraphRequest,
     CodeGraphResult,
     CodeGraphRunState,
+    CodeGraphRuntime,
     CodeGraphScope,
     GraphQueryPolicy,
+    bind_code_graph_runtime,
 )
 from openjiuwen.harness.schema.loop_event import (
     DeepLoopEvent,
@@ -52,6 +54,8 @@ __all__ = [
     "CodeGraphRelation",
     "CodeGraphScope",
     "CodeGraphBudget",
+    "CodeGraphRuntime",
+    "bind_code_graph_runtime",
     "GraphQueryPolicy",
     "DeepLoopEvent",
     "DeepLoopEventType",

@@ -12,9 +12,10 @@ import pytest
 from openjiuwen.core.retrieval.code_graph.indexing.builder import build_index
 from openjiuwen.core.retrieval.code_graph.manager import CodeGraphManager, reset_code_graph_manager
 from openjiuwen.core.retrieval.code_graph.models import CodeGraphConfig
+from tests.unit_tests.core.retrieval.code_graph.parser_guard import skip_unless_code_graph_parser
 
 pytestmark = pytest.mark.level0
-pytest.importorskip("tree_sitter_language_pack")
+skip_unless_code_graph_parser()
 
 SAMPLE = """\
 class UserService:
