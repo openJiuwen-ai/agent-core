@@ -67,6 +67,12 @@ class CacheLockError(Exception):
     """Stand-in for tree_sitter_language_pack.CacheLockError."""
 
 
+@pytest.fixture
+def allow_parser_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(parser_mod, "_network_fetch_allowed", lambda: True)
+
+
+@pytest.mark.usefixtures("allow_parser_download")
 def test_download_error_is_cached_and_disables_the_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"n": 0}
 
@@ -88,6 +94,7 @@ def test_download_error_is_cached_and_disables_the_backend(monkeypatch: pytest.M
     assert calls["n"] == 1
 
 
+@pytest.mark.usefixtures("allow_parser_download")
 def test_cache_lock_error_disables_the_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(_name: str) -> None:
         raise CacheLockError("Download cache lock error: acquire exclusive download lock")
@@ -100,6 +107,7 @@ def test_cache_lock_error_disables_the_backend(monkeypatch: pytest.MonkeyPatch) 
     assert "download cache lock" in parser_mod.parser_unavailable_reason().lower()
 
 
+@pytest.mark.usefixtures("allow_parser_download")
 def test_unknown_language_error_does_not_disable_the_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(_name: str) -> None:
         raise ValueError("unknown language: fortran")
@@ -136,6 +144,45 @@ def test_python_grammar_is_cached_true_when_python_so_is_present(
     monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
     parser_mod._reset_parser_state()
     assert parser_mod.python_grammar_is_cached() is True
+
+
+def test_python_grammar_is_cached_true_when_so_is_nested_under_version_libs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache = tmp_path / "tree-sitter-language-pack"
+    libs = cache / "v1.15.0" / "libs"
+    libs.mkdir(parents=True)
+    (libs / "libtree_sitter_python.so").write_bytes(b"")
+    fake = types.ModuleType("tree_sitter_language_pack")
+    fake.get_parser = lambda name: None
+    fake.cache_dir = lambda: str(cache)
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    parser_mod._reset_parser_state()
+    assert parser_mod.python_grammar_is_cached() is True
+
+
+def test_uncached_grammar_does_not_call_get_parser_during_pytest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache = tmp_path / "libs"
+    cache.mkdir()
+    calls = {"n": 0}
+
+    def _boom(_name: str) -> None:
+        calls["n"] += 1
+        raise DownloadError("Failed to download parsers-linux-x86_64.tar.zst: timeout: global")
+
+    fake = types.ModuleType("tree_sitter_language_pack")
+    fake.get_parser = _boom
+    fake.cache_dir = lambda: str(cache)
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    parser_mod._reset_parser_state()
+
+    assert parser_mod.parse_source_as(SourceLanguage.PYTHON, b"x = 1\n") is None
+    assert parser_mod.parser_available() is False
+    assert "not in the local cache" in parser_mod.parser_unavailable_reason()
+    assert parser_mod.parse_source_as(SourceLanguage.PYTHON, b"y = 2\n") is None
+    assert calls["n"] == 0
 
 
 def test_python_grammar_is_cached_none_when_pack_has_no_cache_api(monkeypatch: pytest.MonkeyPatch) -> None:

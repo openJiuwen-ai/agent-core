@@ -9,8 +9,11 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus
 from openjiuwen.core.retrieval.code_graph.models import CodeGraphConfig
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+import openjiuwen.harness.rails.code_graph_profile_rail as profile_rail_mod
 from openjiuwen.harness.rails import CodeGraphProfileRail
 from openjiuwen.harness.schema.code_graph import (
     CodeGraphProfile,
@@ -483,8 +486,21 @@ def _registered_tool_names(agent) -> set[str]:
     return {tool.card.name for tool in rail._tools}  # noqa: SLF001
 
 
+def _graph_tool_ctx(agent, *, tool_name: str, status: str) -> AgentCallbackContext:
+    return AgentCallbackContext(
+        agent=agent,
+        inputs=ToolCallInputs(
+            tool_name=tool_name,
+            tool_result={"status": status, "message": status},
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_graph_profile_registers_find_tools_on_the_code_agent(tmp_path: Path) -> None:
+async def test_graph_profile_registers_find_tools_on_the_code_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(profile_rail_mod, "_parser_ready", lambda: True)
     agent = await _code_agent(
         tmp_path,
         code_graph_profile="graph",
@@ -502,9 +518,94 @@ async def test_graph_profile_registers_find_tools_on_the_code_agent(tmp_path: Pa
     assert "analyze_impact" not in names
     assert agent.ability_manager.get("resolve_symbol") is not None
     assert agent.ability_manager.get("submit_code_context") is None
-    assert agent.ability_manager.get("grep") is not None
+    assert agent.ability_manager.get("grep") is None
+    assert agent.ability_manager.get("glob") is None
     assert agent.ability_manager.get("edit_file") is not None
+    assert agent.ability_manager.get("read_file") is not None
     assert [spec.agent_card.name for spec in (agent.deep_config.subagents or [])] == []
+
+
+@pytest.mark.asyncio
+async def test_graph_profile_keeps_grep_when_parser_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(profile_rail_mod, "_parser_ready", lambda: False)
+    agent = await _code_agent(
+        tmp_path,
+        code_graph_profile="graph",
+        inject_builtin_plan_agents=False,
+    )
+    assert agent.ability_manager.get("resolve_symbol") is not None
+    assert agent.ability_manager.get("grep") is not None
+    assert agent.ability_manager.get("glob") is not None
+
+
+@pytest.mark.asyncio
+async def test_graph_profile_restores_grep_when_graph_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(profile_rail_mod, "_parser_ready", lambda: True)
+    agent = await _code_agent(
+        tmp_path,
+        code_graph_profile="graph",
+        inject_builtin_plan_agents=False,
+    )
+    assert agent.ability_manager.get("grep") is None
+    rail = agent.find_rails_by_type((CodeGraphProfileRail,))[0]
+    await rail.after_tool_call(
+        _graph_tool_ctx(
+            agent,
+            tool_name="find_code_symbols",
+            status=CodeGraphStatus.UNAVAILABLE.value,
+        )
+    )
+    assert agent.ability_manager.get("grep") is not None
+    assert agent.ability_manager.get("glob") is not None
+
+
+@pytest.mark.asyncio
+async def test_graph_profile_does_not_restore_grep_on_query_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(profile_rail_mod, "_parser_ready", lambda: True)
+    agent = await _code_agent(
+        tmp_path,
+        code_graph_profile="graph",
+        inject_builtin_plan_agents=False,
+    )
+    rail = agent.find_rails_by_type((CodeGraphProfileRail,))[0]
+    await rail.after_tool_call(
+        _graph_tool_ctx(
+            agent,
+            tool_name="find_code_symbols",
+            status=CodeGraphStatus.ERROR.value,
+        )
+    )
+    assert agent.ability_manager.get("grep") is None
+    assert agent.ability_manager.get("glob") is None
+
+
+@pytest.mark.asyncio
+async def test_locate_exam_does_not_restore_grep_when_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(profile_rail_mod, "_parser_ready", lambda: True)
+    agent = await _code_agent(
+        tmp_path,
+        code_graph_profile="graph",
+        code_graph_prompt_mode="locate",
+        inject_builtin_plan_agents=False,
+    )
+    assert agent.ability_manager.get("grep") is None
+    rail = agent.find_rails_by_type((CodeGraphProfileRail,))[0]
+    await rail.after_tool_call(
+        _graph_tool_ctx(
+            agent,
+            tool_name="find_code_symbols",
+            status=CodeGraphStatus.UNAVAILABLE.value,
+        )
+    )
+    assert agent.ability_manager.get("grep") is None
 
 
 @pytest.mark.asyncio
