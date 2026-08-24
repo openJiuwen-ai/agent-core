@@ -22,6 +22,8 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -112,6 +114,7 @@ class TeamBackend:
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
         enable_fork: bool = False,
+        evolution_enabled: bool = True,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
@@ -199,6 +202,10 @@ class TeamBackend:
         self.member_name = member_name
         self.is_leader = is_leader
         self.leader_member_name = str(leader_member_name or (member_name if is_leader else "")).strip()
+        # B-class overlay: the backend does not hold its own cache —
+        # ``workspace_cache`` delegates to the team workspace manager, which
+        # owns the single resident instance attached at assembly.
+        self._workspace_manager: "TeamWorkspaceManager | None" = None
         # Lazily-resolved leader name for members that were not handed one at
         # construction. The leader is fixed for a team's life, so the DB row is
         # queried once and cached. See ``resolve_leader_member_name``.
@@ -234,6 +241,12 @@ class TeamBackend:
         # flag, mirroring the ``enable_hitt`` pattern.
         self._spec_enable_task_verification: bool = enable_task_verification
         self._enable_task_verification: bool = enable_task_verification
+        # Evolution-mechanism master switch (TeamAgentSpec.evolution_enabled),
+        # immutable from spec: off means the write side never writes workspace
+        # files and the manager carries no cache (the read side falls back to
+        # framework / DB). No runtime override — unlike enable_hitt, build_team
+        # cannot flip it.
+        self._spec_evolution_enabled: bool = evolution_enabled
         # True once build_team took over a team that already existed rather
         # than creating one, so the tool result can say which it was.
         self._team_taken_over: bool = False
@@ -1125,7 +1138,69 @@ class TeamBackend:
         Returns:
             TeamMember info or None
         """
-        return await self.db.member.get_member(member_name, self.team_name)
+        member = await self.db.member.get_member(member_name, self.team_name)
+        return self._overlay_member(member)
+
+    @property
+    def workspace_cache(self) -> "WorkspaceCache | None":
+        """The resident per-team evolvable-workspace cache (A/B/C classes).
+
+        Delegates to the team workspace manager — the manager owns
+        the single resident instance attached at assembly. ``None`` until
+        assembly attaches a cache to the manager. Assembly points (rail
+        factories, tool factory) read it to bind loader closures; the B-class
+        overlay reads it on ``get_member`` / ``list_members`` /
+        ``get_team_info``.
+        """
+        if self._workspace_manager is None:
+            return None
+        return self._workspace_manager.workspace_cache
+
+    def attach_workspace_manager(self, manager: "TeamWorkspaceManager | None") -> None:
+        """Point backend cache reads at the team workspace manager.
+
+        Assembly-time, once: the manager owns the resident ``WorkspaceCache``
+        (single source of truth); the backend only holds the manager
+        reference, so A/B-class reads always see the same instance every other
+        consumer uses. ``display_name`` never rides the overlay — it is not
+        file-evolvable and always falls back to the DB column.
+        """
+        self._workspace_manager = manager
+
+    def _write_team_identity(self, team_name: str, team_desc: Optional[str]) -> None:
+        """Write the team-level identity files (team_card.md, team_prompt.md).
+
+        Called right after the team DB row is created (``build_team``) or
+        taken over (``_reattach_team``): the ``desc`` value comes from that
+        row. ``team_prompt`` is a write-only column today (``build_team`` has
+        no prompt argument), so None is passed and ``write_team_prompt(None)``
+        is a no-op. Idempotent and evolution-safe (``_evolved_body``).
+
+        Skipped when the evolution mechanism is off
+        (``_spec_evolution_enabled`` is False) — no file is written and no
+        cache is primed.
+        """
+        if not self._spec_evolution_enabled:
+            return
+        from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+        WorkspaceAssembler(cache=self.workspace_cache).write_team_identity(
+            team_name=team_name,
+            team_desc=team_desc,
+            team_prompt=None,
+        )
+
+    def _overlay_member(self, member: Optional[TeamMember]) -> Optional[TeamMember]:
+        """Overlay evolved B-class file values onto a member row in place."""
+        if member is None or self.workspace_cache is None:
+            return member
+        desc = self.workspace_cache.get_member_field(member.member_name, "desc")
+        if desc is not None:
+            member.desc = desc
+        prompt = self.workspace_cache.get_member_field(member.member_name, "prompt")
+        if prompt is not None:
+            member.prompt = prompt
+        return member
 
     async def member_exists(self, member_name: str) -> bool:
         """Check whether a member exists without loading its full row.
@@ -1169,7 +1244,7 @@ class TeamBackend:
             List of TeamMember info
         """
         members = await self.db.member.get_team_members(self.team_name)
-        return [member for member in members if member.member_name != self.member_name]
+        return [self._overlay_member(m) for m in members if m.member_name != self.member_name]
 
     async def list_member_roster(self) -> List[MemberRosterEntry]:
         """List the roster (name / display name / status) excluding self.
@@ -1196,7 +1271,15 @@ class TeamBackend:
         Returns:
             Team information
         """
-        return await self.db.team.get_team(self.team_name)
+        team = await self.db.team.get_team(self.team_name)
+        if team is not None and self.workspace_cache is not None:
+            desc = self.workspace_cache.get_team_field("desc")
+            if desc is not None:
+                team.desc = desc
+            prompt = self.workspace_cache.get_team_field("prompt")
+            if prompt is not None:
+                team.prompt = prompt
+        return team
 
     async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
         """Evaluate whether the whole team has reached a completed state.
@@ -1380,6 +1463,11 @@ class TeamBackend:
             self._enable_task_verification,
         )
 
+        # The team row already exists — write its identity files (idempotent:
+        # evolved files are never overwritten). ``desc`` lives on the row;
+        # ``prompt`` is the write-only column.
+        self._write_team_identity(self.team_name, getattr(existing, "desc", None))
+
         if self._on_team_built is not None:
             try:
                 await self._on_team_built()
@@ -1491,6 +1579,11 @@ class TeamBackend:
 
         if not success:
             raise RuntimeError(f"Failed to create team {team_name}")
+
+        # Write the team-level identity files (team_card.md, team_prompt.md)
+        # now that the team row exists — their values come from this row's
+        # desc (the prompt column is currently write-only, see build_team).
+        self._write_team_identity(team_name, desc)
 
         # Register leader as a member — starts busy/running immediately
         leader_card_id = f"{team_name}_{leader_member_name}"

@@ -123,7 +123,9 @@ class _FakeBackend:
 
     async def get_member(self, member_name: str):
         if member_name == "claude-1":
-            return SimpleNamespace(member_name="claude-1", display_name="Claude One", desc="", role="teammate")
+            return SimpleNamespace(
+                member_name="claude-1", display_name="Claude One", desc="", role="teammate", prompt=""
+            )
         return next((m for m in self.members if m.member_name == member_name), None)
 
     def add_member(self, member_name: str, display_name: str) -> None:

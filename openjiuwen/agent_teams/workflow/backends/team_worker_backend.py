@@ -43,7 +43,6 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
-from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
@@ -140,7 +139,24 @@ class TeamWorkerBackend(AgentBackend):
             build_context=build_context,
             session_id=session_id,
         )
-        self._t = make_translator(language if language in ("cn", "en") else "cn")
+        # Bind the team's resident WorkspaceCache when the build context
+        # exposes a workspace manager, so worker prompts (swarmflow_worker /
+        # structured_output) resolve evolved values; None (no team workspace)
+        # keeps the framework defaults. The worker path has no TeamBackend
+        # object (it runs outside the member shell), so manager-direct access
+        # is the one declared exception to the "read cache off the backend"
+        # contract.
+        cache = None
+        if build_context is not None:
+            from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
+
+            ws_mgr = get_workspace_manager(build_context)
+            if ws_mgr is not None:
+                cache = ws_mgr.workspace_cache
+        self._t = make_translator(
+            language if language in ("cn", "en") else "cn",
+            ws_cache=cache,
+        )
         self._counter = 0
         # Stateful agent_session / human_session manager, built on first use so a
         # workflow that only uses single-shot agent() never pays for it.
@@ -351,9 +367,7 @@ class TeamWorkerBackend(AgentBackend):
         )
 
         if self._worker_base_spec is None:
-            raise BackendError(
-                "TeamWorkerBackend requires a worker_base_spec to build a worker harness"
-            )
+            raise BackendError("TeamWorkerBackend requires a worker_base_spec to build a worker harness")
 
         try:
             # Worker = teammate without team tools: per-call model (else inherit),
@@ -365,9 +379,7 @@ class TeamWorkerBackend(AgentBackend):
                 team_name=self._team_name,
                 member_name=member_name,
                 system_prompt=(
-                    self._t("swarmflow_worker", key="schema")
-                    if has_schema
-                    else self._t("swarmflow_worker", key="free")
+                    self._t("swarmflow_worker", key="schema") if has_schema else self._t("swarmflow_worker", key="free")
                 ),
                 model=model,
                 extra_tools=tools,
@@ -375,9 +387,7 @@ class TeamWorkerBackend(AgentBackend):
             )
             # Worker gets its own workspace, not the teammate's.
             worker_workspace, worker_cwd = self._setup_worker_workspace(member_name)
-            worker_spec = worker_spec.model_copy(
-                update={"workspace": worker_workspace, "cwd": worker_cwd}
-            )
+            worker_spec = worker_spec.model_copy(update={"workspace": worker_workspace, "cwd": worker_cwd})
             worker_spec = self._apply_worker_skill_visibility(worker_spec, member_name)
             worker_build_context = derive_member_build_context(
                 self._build_context,
@@ -441,11 +451,13 @@ class TeamWorkerBackend(AgentBackend):
 
         Mirrors the layout used by ``agent_configurator`` for stable_base
         members: each worker gets its own workspace at
-        ``{agent_teams_home}/{team_name}/workspaces/{member}_workspace/``.
-        It lives under the team home, which ``agent_configurator`` already
-        registers for team cleanup — so the worker workspace is removed with
-        the team and needs no per-worker cleanup registration. Also mounts the
-        team shared workspace into the worker's tree (``.team/{team_name}/``).
+        the member link position ``workspaces/{member}_workspace`` (a junction
+        to ``.agent_teams/<team>#<member>`` for dynamic workers, a real
+        in-team dir for the leader). It lives under the team home, which
+        ``agent_configurator`` already registers for team cleanup — so the
+        worker workspace is removed with the team and needs no per-worker
+        cleanup registration. Also mounts the team shared workspace into the
+        worker's tree (``.team/{team_name}/``).
 
         The workspace is always the worker's own directory. With
         ``agent(options={"isolation": "worktree"})`` only the *cwd* moves into
@@ -459,7 +471,7 @@ class TeamWorkerBackend(AgentBackend):
         """
         worktree = self._worktrees.get(member_name)
         worker_cwd = worktree.worktree_path if worktree is not None else None
-        ws_root = ensure_team_member_workspace_link(self._team_name, member_name)
+        ws_root = self._member_workspace_root(member_name)
 
         if self._worker_base_spec.workspace is not None:
             # Inherit language / stable_base from the base spec, only override root_path.
@@ -544,6 +556,18 @@ class TeamWorkerBackend(AgentBackend):
         if workspace_manager is None:
             return None
         return workspace_manager.workspace_path
+
+    def _member_workspace_root(self, member_name: str) -> str:
+        """Resolve the worker's workspace root.
+
+        Returns the member link path (``workspaces/<member>_workspace`` — the
+        legacy ``team_member_workspace_dir`` shape restored by 301, a junction
+        to the flattened real directory for dynamic workers, the in-team real
+        dir for the leader).
+        """
+        from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
+
+        return ensure_team_member_workspace_link(self._team_name, member_name)
 
     # ------------------------------------------------------------------
     # Helpers

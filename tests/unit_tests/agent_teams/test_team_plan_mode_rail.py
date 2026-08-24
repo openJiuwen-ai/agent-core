@@ -8,11 +8,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from openjiuwen.agent_teams.prompts.team_plan_agent import (
-    TEAM_PLAN_AGENT_DESC,
-    TEAM_PLAN_AGENT_SYSTEM_PROMPT_CN,
-    TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN,
-)
+from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.team_plan_agent import TEAM_PLAN_AGENT_DESC
 from openjiuwen.agent_teams.rails import TeamPlanModeRail
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections import SectionName
@@ -109,7 +106,7 @@ def test_team_plan_mode_rail_specializes_default_plan_agent() -> None:
     rail.init(agent)
 
     assert spec.agent_card.description == TEAM_PLAN_AGENT_DESC["en"]
-    assert spec.system_prompt == TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN
+    assert spec.system_prompt == str(load_template("team_plan_agent", "en").content).strip()
 
 
 def test_team_plan_mode_rail_preserves_custom_plan_agent() -> None:
@@ -135,4 +132,4 @@ async def test_team_plan_mode_rail_specializes_late_default_plan_agent_with_over
     await rail.before_model_call(SimpleNamespace(session=SimpleNamespace(session_id="sess1")))
 
     assert spec.agent_card.description == TEAM_PLAN_AGENT_DESC["cn"]
-    assert spec.system_prompt == TEAM_PLAN_AGENT_SYSTEM_PROMPT_CN
+    assert spec.system_prompt == str(load_template("team_plan_agent", "cn").content).strip()

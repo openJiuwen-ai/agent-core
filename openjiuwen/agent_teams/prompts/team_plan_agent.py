@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.schema.config import SubAgentConfig
@@ -29,30 +29,30 @@ TEAM_PLAN_AGENT_DESC: Dict[str, str] = {
     ),
 }
 
-TEAM_PLAN_AGENT_SYSTEM_PROMPT_CN = str(load_template("team_plan_agent", "cn").content).strip()
-TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN = str(load_template("team_plan_agent", "en").content).strip()
-
-DEFAULT_TEAM_PLAN_AGENT_SYSTEM_PROMPT: Dict[str, str] = {
-    "cn": TEAM_PLAN_AGENT_SYSTEM_PROMPT_CN,
-    "en": TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN,
-}
-
 
 def _team_plan_agent_description(language: str) -> str:
     return TEAM_PLAN_AGENT_DESC.get(language, TEAM_PLAN_AGENT_DESC["cn"])
 
 
-def _team_plan_agent_prompt(language: str) -> str:
-    return DEFAULT_TEAM_PLAN_AGENT_SYSTEM_PROMPT.get(
-        language,
-        DEFAULT_TEAM_PLAN_AGENT_SYSTEM_PROMPT["cn"],
-    )
+def _team_plan_agent_prompt(
+    language: str,
+    loader: TemplateLoader = load_template,
+) -> str:
+    """Return the team.plan subagent prompt, read lazily through ``loader``.
+
+    Lazy: a per-team loader closure bound at rail
+    construction makes an evolved ``team_plan_agent`` workspace file take
+    effect after a restart; without one the framework default is returned.
+    """
+    resolved = resolve_language(language)
+    return str(loader("team_plan_agent", resolved).content).strip()
 
 
 def apply_team_plan_agent_prompt(
     subagents: Optional[list[Any]],
     *,
     language: Optional[str] = None,
+    loader: TemplateLoader = load_template,
 ) -> bool:
     """Specialize the built-in plan_agent for team.plan leaders.
 
@@ -72,7 +72,7 @@ def apply_team_plan_agent_prompt(
             continue
         if spec.system_prompt not in builtin_prompts:
             return False
-        spec.system_prompt = _team_plan_agent_prompt(resolved_language)
+        spec.system_prompt = _team_plan_agent_prompt(resolved_language, loader=loader)
         spec.agent_card = spec.agent_card.model_copy(
             update={
                 "description": _team_plan_agent_description(resolved_language),
@@ -92,10 +92,7 @@ def build_team_plan_agent_card(language: Optional[str] = None) -> AgentCard:
 
 
 __all__ = [
-    "DEFAULT_TEAM_PLAN_AGENT_SYSTEM_PROMPT",
     "TEAM_PLAN_AGENT_DESC",
-    "TEAM_PLAN_AGENT_SYSTEM_PROMPT_CN",
-    "TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN",
     "apply_team_plan_agent_prompt",
     "build_team_plan_agent_card",
 ]

@@ -2218,6 +2218,7 @@ def _external_backend() -> MagicMock:
             display_name="Claude One",
             desc="",
             role=TeamRole.TEAMMATE.value,
+            prompt="",
         )
     )
     backend.get_team_info = AsyncMock(

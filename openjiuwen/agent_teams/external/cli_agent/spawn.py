@@ -30,7 +30,7 @@ from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTrans
 from openjiuwen.agent_teams.external.descriptor import OPENJIUWEN_HOME_ENV, TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
-from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_home
+from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_home, team_workspace_dir
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRuntimeContext
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
@@ -92,7 +92,7 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
             workspace_config = candidate_workspace
     workspace_path = None
     if workspace_config is not None:
-        workspace_path = workspace_config.root_path or str(team_home(team_name) / "team-workspace")
+        workspace_path = workspace_config.root_path or str(team_workspace_dir(team_name))
 
     return TeamJoinDescriptor(
         session_id=session_id,

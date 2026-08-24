@@ -26,7 +26,6 @@ leader itself receives direct input injections (digests / escalations).
 from __future__ import annotations
 
 import asyncio
-
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -41,12 +40,11 @@ from openjiuwen.agent_teams.agent.scheduling.verdict import (
     settle_review_tally,
 )
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template, make_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.agent_teams.prompts.loader import load_template
-
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
@@ -122,6 +120,19 @@ class TeamScheduler:
         self._review_feedback_dispatched: set[tuple[str, int]] = set()
         self._review_feedback_tasks: set[asyncio.Task[Any]] = set()
         self._team_review_feedback_dispatched = False
+        # A-class loader bound lazily from the team backend's workspace cache:
+        # reviewer_* templates read evolved values.
+        self._template_loader_cache: TemplateLoader | None = None
+
+    @property
+    def _template_loader(self) -> TemplateLoader:
+        """Per-team A-class loader, bound once from ``_infra.team_backend``."""
+        loader = self._template_loader_cache
+        if loader is None:
+            backend = self._infra.team_backend
+            loader = make_template_loader(backend.workspace_cache if backend is not None else None)
+            self._template_loader_cache = loader
+        return loader
 
     @property
     def is_active(self) -> bool:
@@ -251,15 +262,25 @@ class TeamScheduler:
             verdict = settle_review_tally(tally)
             if verdict == VERDICT_PASS:
                 if await self._settle_pass(task_manager, task):
-                    team_logger.info("[judge-pass] task=%s round=%d tally(pass=%d fail=%d total=%d)",
-                        task.task_id, task.review_round,
-                        tally["pass_count"], tally["fail_count"], tally["reviewer_count"])
+                    team_logger.info(
+                        "[judge-pass] task=%s round=%d tally(pass=%d fail=%d total=%d)",
+                        task.task_id,
+                        task.review_round,
+                        tally["pass_count"],
+                        tally["fail_count"],
+                        tally["reviewer_count"],
+                    )
                     acted = True
             elif verdict == VERDICT_FAIL:
                 if await self._settle_fail_or_escalate(task_manager, task, tally):
-                    team_logger.info("[judge-fail] task=%s round=%d tally(pass=%d fail=%d total=%d)",
-                        task.task_id, task.review_round,
-                        tally["pass_count"], tally["fail_count"], tally["reviewer_count"])
+                    team_logger.info(
+                        "[judge-fail] task=%s round=%d tally(pass=%d fail=%d total=%d)",
+                        task.task_id,
+                        task.review_round,
+                        tally["pass_count"],
+                        tally["fail_count"],
+                        tally["reviewer_count"],
+                    )
                     acted = True
             else:
                 await self._handle_undecided(task, tally, now_ms)
@@ -391,11 +412,7 @@ class TeamScheduler:
 
         team_rails = find_rails(TeamSkillEvolutionRail)
         rail = next(
-            (
-                candidate
-                for candidate in team_rails
-                if getattr(candidate, "review_feedback_evolution_enabled", False)
-            ),
+            (candidate for candidate in team_rails if getattr(candidate, "review_feedback_evolution_enabled", False)),
             None,
         )
         if rail is None:
@@ -459,10 +476,10 @@ class TeamScheduler:
         outcome; a crash is logged and retried on the next scan.
         """
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+        from openjiuwen.agent_teams.schema.team import TeamRole
         from openjiuwen.agent_teams.tools.locales import make_translator
         from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
         from openjiuwen.agent_teams.tools.tool_task import VerifyTaskTool, ViewTaskToolV2
-        from openjiuwen.agent_teams.schema.team import TeamRole
 
         spec = self._blueprint.spec
         agents = getattr(spec, "agents", None) or {}
@@ -488,7 +505,13 @@ class TeamScheduler:
             dispatch_mode=self._blueprint.spec.dispatch_mode,
         )
         language = self._blueprint.language or "cn"
-        tr = make_translator(language)
+        # temp-reviewer tool descriptions resolve evolved values through the
+        # team backend's cache (it delegates to the workspace manager — the
+        # single source every consumer uses). ``None`` keeps the framework
+        # default.
+        backend = self._infra.team_backend
+        cache = backend.workspace_cache if backend is not None else None
+        tr = make_translator(language, ws_cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
         view_tool = ViewTaskToolV2(backend, tr)
@@ -500,7 +523,7 @@ class TeamScheduler:
             # structured reviewer list so the correct prompt template is used.
             reviewer_type = "verifier"
             instruction = ""
-            for detail in (task.reviewer_details() if hasattr(task, 'reviewer_details') else []):
+            for detail in task.reviewer_details() if hasattr(task, "reviewer_details") else []:
                 if detail.get("reviewer_id") == reviewer:
                     reviewer_type = detail.get("type", "verifier")
                     instruction = detail.get("instruction", "")
@@ -521,16 +544,23 @@ class TeamScheduler:
                     "tools": list(base_agent_spec.tools or []) + [verify_tool, view_tool],
                 }
             )
-            reviewer_ctx = self._build_context.derive(
-                member_name=member_name,
-                role=TeamRole.TEAMMATE.value,
-                language=language,
-            ) if self._build_context is not None else None
+            reviewer_ctx = (
+                self._build_context.derive(
+                    member_name=member_name,
+                    role=TeamRole.TEAMMATE.value,
+                    language=language,
+                )
+                if self._build_context is not None
+                else None
+            )
 
             # Use the review request message as the prompt: template
             # rendered at delivery-time against the current task row.
             review_prompt = await render.render_review_request_for_harness(
-                task, language=language, reviewer=reviewer,
+                task,
+                language=language,
+                reviewer=reviewer,
+                loader=self._template_loader,
             )
             # Retry transient model-call failures up to 3 times.
             # Each attempt builds a fresh harness and disposes the old
@@ -555,7 +585,10 @@ class TeamScheduler:
                     break
                 team_logger.warning(
                     "[reviewer_retry] reviewer %s task=%s attempt=%d/3: %s",
-                    reviewer, task.task_id, attempt + 1, output_str[:200],
+                    reviewer,
+                    task.task_id,
+                    attempt + 1,
+                    output_str[:200],
                 )
                 try:
                     await harness.dispose()
@@ -617,7 +650,9 @@ class TeamScheduler:
         self._escalated.add(round_key)
         team_logger.info(
             "[scheduler] escalating task %s round %s to the leader, message: %s",
-            task.task_id, task.review_round, content,
+            task.task_id,
+            task.review_round,
+            content,
         )
         await self._host.deliver_input(content, use_steer=False)
 

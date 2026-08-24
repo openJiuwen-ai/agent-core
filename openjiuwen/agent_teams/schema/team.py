@@ -465,6 +465,9 @@ class TeamSpec(BaseModel):
     """Transport used by an external CLI member's MCP client."""
     workspace: Optional[dict[str, Any]] = None
     """Shared workspace config mirrored from ``TeamAgentSpec`` for runtime-only paths."""
+    evolution_enabled: bool = True
+    """Self-evolution coverage switch — mirrors ``TeamAgentSpec.evolution_enabled``
+    so spawn-time assembly reads the same switch from the runtime spec."""
 
 
 class TeamRuntimeContext(BaseModel):
@@ -494,6 +497,17 @@ class TeamRuntimeContext(BaseModel):
     Delivered ONLY to this member, as part of its identity, and never surfaces
     in ``list_members`` or peers' rosters."""
     team_spec: Optional[TeamSpec] = None
+    team_desc: Optional[str] = None
+    """Team-level description (DB ``team_info.desc``), resolved at spawn time.
+
+    ``build_team`` inserts the ``team_info`` row (with ``desc``) only after
+    the leader calls the tool, so this is empty on the leader's first spawn
+    and populated once the team row exists (later member spawns / session
+    recovery). Fed into ``WorkspaceAssembler.assemble`` so ``team_card.md``
+    can be seeded; an evolved file is never overwritten (write-side guard).
+    """
+    team_prompt: Optional[str] = None
+    """Team-level prompt (DB ``team_info.prompt``), same lifecycle as ``team_desc``."""
     messager_config: Optional[MessagerTransportConfig] = None
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
