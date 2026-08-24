@@ -37,10 +37,8 @@ from openjiuwen.harness.tools.code_graph import (
 )
 from openjiuwen.harness.tools.code_graph._base import CodeGraphToolContext
 
-# Product ``profile: graph`` replaces text search while the index works.
-# Parser missing or UNAVAILABLE puts grep/glob back. Edit / bash stay so the
-# host can patch. ContextBench locate exam keeps its own hide list and must
-# not restore grep (that would contaminate the ablation).
+# ``profile: graph`` hides grep/glob while the index works. Missing parser or
+# UNAVAILABLE restores them. Locate exam uses its own hide list.
 GRAPH_HIDDEN_SEARCH_TOOLS = ("grep", "glob")
 _GRAPH_TOOL_NAMES = frozenset(LOCATE_EXAM_TOOL_NAMES)
 
@@ -372,15 +370,13 @@ def _parser_ready() -> bool:
 
 
 def _warn_if_parser_missing() -> None:
-    """Yaml ``profile: graph`` is not enough without the language-pack extra."""
+    """``profile: graph`` needs tree-sitter-language-pack; otherwise keep grep."""
     from openjiuwen.core.retrieval.code_graph.indexing.parser import parser_unavailable_reason
 
     if _parser_ready():
         return
     logger.warning(
-        "CodeGraphProfileRail: profile=graph but the parser is unavailable (%s). "
-        "Keeping grep/glob. Install openjiuwen[code-graph] with a prebuilt wheel "
-        "(do not source-build; rustup times out on restricted networks).",
+        "profile=graph but tree-sitter-language-pack is missing (%s). Falling back to grep.",
         parser_unavailable_reason(),
     )
 

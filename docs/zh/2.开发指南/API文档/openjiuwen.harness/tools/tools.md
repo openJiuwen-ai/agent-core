@@ -34,7 +34,7 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 
 ### Code Graph 检索工具
 
-在 Code Agent 上设置 `code_graph_profile="graph"` 后注册。产品默认 `off`。打开前须 `pip install "openjiuwen[code-graph]"`（预编译 wheel，不要源码编译）。产品模式定位后继续编辑；`prompt_mode="locate"`（评测）额外注册 `submit_code_context`。
+在 Code Agent 上设置 `code_graph_profile="graph"` 后注册。默认 `off`。需自行安装 `tree-sitter-language-pack`；语法在 `jiuwenswarm-init` / `jiuwenswarm-start` 时下载。Coding Agent 运行时不会下载。缺失或语法未缓存会提示并走 grep。`prompt_mode="locate"`（评测）额外注册 `submit_code_context`。
 
 | 工具 | 说明 |
 |---|---|

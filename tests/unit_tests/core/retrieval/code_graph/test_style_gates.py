@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.retrieval.code_graph.indexing import parser as parser_mod
 from openjiuwen.core.retrieval.code_graph.indexing import symbol_extractor
 from openjiuwen.core.retrieval.code_graph.indexing.builder import definition_documents, _line_slice
 from openjiuwen.core.retrieval.code_graph.models import Symbol, SymbolKind
@@ -47,6 +49,13 @@ def test_line_slice_avoids_whitespace_before_colon() -> None:
     source = inspect.getsource(_line_slice)
     assert " - 1 :" not in source
     assert _line_slice("a\nb\nc", 2, 3) == "b\nc"
+
+
+def test_language_parser_lib_avoids_whitespace_before_colon() -> None:
+    source = inspect.getsource(parser_mod._is_language_parser_lib)
+    assert "len(prefix) :" not in source
+    assert parser_mod._is_language_parser_lib(Path("libtree_sitter_python.so"), "python") is True
+    assert parser_mod._is_language_parser_lib(Path("libtree_sitter_java.so"), "python") is False
 
 
 def test_definition_documents_does_not_use_a_multiline_comprehension() -> None:
