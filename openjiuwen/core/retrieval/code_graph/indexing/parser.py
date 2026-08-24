@@ -2,14 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Lazy tree-sitter parsing for Code Graph.
 
-``tree-sitter`` / ``tree-sitter-language-pack`` are optional. When they are
-missing, or when the pack cannot load grammars (GitHub download timeout,
-cache lock), the service reports ``UNAVAILABLE`` and callers fall back to grep.
-
-``tree-sitter-language-pack`` 1.x downloads parser binaries on first
-``get_parser()``. That must happen at most once: a failed download is cached
-so ``build_index`` does not retry GitHub for every file. Unit tests never
-call ``get_parser`` when the grammar is missing from the local cache.
+``tree-sitter-language-pack`` is optional and is not a ``uv sync`` extra.
+Install the pack yourself, then call ``preload_language_pack()`` immediately.
+Indexing never downloads grammars: if they are not already cached, the query
+falls back to grep.
 """
 
 from __future__ import annotations
@@ -33,13 +29,20 @@ _DOWNLOAD_ERROR_NAMES = frozenset({"DownloadError", "CacheLockError"})
 _DOWNLOAD_DENIED = frozenset({"0", "false", "no"})
 _DOWNLOAD_ALLOWED = frozenset({"1", "true", "yes"})
 _CACHE_WALK_DEPTH = 3
+_LANGUAGE_PACK_REQUIRED = (
+    "Download tree-sitter-language-pack to enable Code Graph. Falling back to grep."
+)
 
 
 def parser_available() -> bool:
-    """True when the language pack can be imported and has not failed to load."""
+    """True when the pack is importable and a local Python grammar is ready."""
     if _BACKEND_UNAVAILABLE:
         return False
-    return _load_get_parser() is not None
+    if _load_get_parser() is None:
+        return False
+    if _should_avoid_uncached_fetch("python"):
+        return False
+    return True
 
 
 def parser_unavailable_reason() -> str:
@@ -56,8 +59,8 @@ def python_grammar_is_cached() -> bool | None:
     Looks at the on-disk cache only. Calling ``get_parser`` / ``downloaded_languages``
     can download from GitHub or take a cache lock, which times out in CI.
 
-    Returns ``None`` for older wheels that bundle grammars and expose no cache
-    directory API — callers may then call ``get_parser`` without a download.
+    Returns ``None`` for older wheels that expose no cache directory API.
+    A missing or unknown cache means indexing will not call ``get_parser``.
     """
     return _grammar_is_cached("python")
 
@@ -108,10 +111,7 @@ def _is_language_parser_lib(path: Path, lang_id: str) -> bool:
         return False
     prefix = f"libtree_sitter_{lang_id.lower()}"
     name = path.name.lower()
-    if not name.startswith(prefix):
-        return False
-    rest = name[len(prefix) :]
-    return rest.startswith(".")
+    return name.startswith(f"{prefix}.")
 
 
 def _looks_like_parser_lib(path: Path) -> bool:
@@ -123,6 +123,21 @@ def _looks_like_parser_lib(path: Path) -> bool:
     if ".so." in name:
         return True
     return False
+
+
+def preload_language_pack() -> bool:
+    """Download grammars during setup. Do not call this from a query path."""
+    get_parser = _load_get_parser()
+    if get_parser is None:
+        return False
+    try:
+        get_parser("python")
+    except Exception as exc:  # noqa: BLE001 — rust downloader raises pack-specific types
+        _mark_backend_failure("python", exc)
+        logger.warning("%s", _LANGUAGE_PACK_REQUIRED)
+        return False
+    _parser_for.cache_clear()
+    return True
 
 
 def parse_source(path: Path, source: bytes) -> Any | None:
@@ -182,41 +197,30 @@ def _parser_for(lang_id: str) -> Any | None:
 def _should_avoid_uncached_fetch(lang_id: str) -> bool:
     if _network_fetch_allowed():
         return False
-    return _grammar_is_cached(lang_id) is False
+    return _grammar_is_cached(lang_id) is not True
 
 
 def _network_fetch_allowed() -> bool:
-    """Product may download grammars; unit tests must not hit GitHub."""
+    """Indexing never fetches unless setup explicitly opts in."""
     flag = os.environ.get("OPENJIUWEN_CODE_GRAPH_ALLOW_PARSER_DOWNLOAD", "").strip().lower()
     if flag in _DOWNLOAD_DENIED:
         return False
-    if flag in _DOWNLOAD_ALLOWED:
-        return True
-    return not os.environ.get("PYTEST_CURRENT_TEST")
+    return flag in _DOWNLOAD_ALLOWED
 
 
 def _disable_backend_for_uncached_grammar(lang_id: str) -> None:
     global _BACKEND_UNAVAILABLE, _PARSER_IMPORT_ERROR
-    _BACKEND_UNAVAILABLE = (
-        f"tree-sitter grammar {lang_id!r} is not in the local cache; "
-        "refusing to download from GitHub during tests. "
-        "Pre-download parsers or use a host that can reach GitHub releases."
-    )
+    _BACKEND_UNAVAILABLE = _LANGUAGE_PACK_REQUIRED
     _PARSER_IMPORT_ERROR = _BACKEND_UNAVAILABLE
-    logger.info("code_graph parser skipped uncached grammar %s", lang_id)
+    logger.warning("%s", _LANGUAGE_PACK_REQUIRED)
 
 
 def _mark_backend_failure(lang_id: str, exc: BaseException) -> None:
     global _BACKEND_UNAVAILABLE, _PARSER_IMPORT_ERROR
+    if _is_download_backend_error(exc):
+        _BACKEND_UNAVAILABLE = f"{_LANGUAGE_PACK_REQUIRED} ({exc})"
+        _PARSER_IMPORT_ERROR = _BACKEND_UNAVAILABLE
     logger.warning("code_graph parser unavailable for %s: %s", lang_id, exc)
-    if not _is_download_backend_error(exc):
-        return
-    _BACKEND_UNAVAILABLE = (
-        "tree-sitter-language-pack could not load parsers "
-        f"({exc}). Pre-download grammars or use a host that can reach "
-        "GitHub releases; install openjiuwen[code-graph] is not enough."
-    )
-    _PARSER_IMPORT_ERROR = _BACKEND_UNAVAILABLE
 
 
 def _is_download_backend_error(exc: BaseException) -> bool:
@@ -235,12 +239,9 @@ def _load_get_parser() -> Any | None:
     global _PARSER_IMPORT_ERROR
     try:
         from tree_sitter_language_pack import get_parser
-    except ImportError as exc:
-        _PARSER_IMPORT_ERROR = (
-            "tree-sitter-language-pack is not installed; "
-            "install openjiuwen[code-graph] to enable Code Graph"
-        )
-        logger.info("code_graph parser unavailable: %s", exc)
+    except ImportError:
+        _PARSER_IMPORT_ERROR = _LANGUAGE_PACK_REQUIRED
+        logger.warning("%s", _LANGUAGE_PACK_REQUIRED)
         return None
     if not _BACKEND_UNAVAILABLE:
         _PARSER_IMPORT_ERROR = None

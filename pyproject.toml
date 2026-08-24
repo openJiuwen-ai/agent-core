@@ -120,7 +120,6 @@ all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
 cli = ["click>=8.0", "rich>=13.0", "prompt-toolkit>=3.0"]
 code-graph = [
     "tree-sitter>=0.25.0,<0.26.0",
-    "tree-sitter-language-pack>=0.10.0",
 ]
 
 default = []
