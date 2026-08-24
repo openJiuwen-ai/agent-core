@@ -85,6 +85,35 @@ def resolve_code_graph_profile(
 
 
 @dataclass
+class CodeGraphRuntime:
+    """Public graph handles published on the host coding agent."""
+
+    session_id: str
+    repo_root: str
+    config: Any
+    run_state: Any = None
+
+
+def bind_code_graph_runtime(
+    agent: Any,
+    *,
+    session_id: str,
+    repo_root: str,
+    config: Any,
+    run_state: Any = None,
+) -> CodeGraphRuntime:
+    """Attach graph session handles through a public agent attribute."""
+    runtime = CodeGraphRuntime(
+        session_id=session_id,
+        repo_root=repo_root,
+        config=config,
+        run_state=run_state,
+    )
+    agent.code_graph_runtime = runtime
+    return runtime
+
+
+@dataclass
 class CodeGraphScope:
     include_paths: list[str] = field(default_factory=list)
     exclude_paths: list[str] = field(default_factory=list)

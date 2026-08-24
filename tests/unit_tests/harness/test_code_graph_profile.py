@@ -30,9 +30,9 @@ from openjiuwen.harness.tools.code_graph import (
     CodeGraphToolContext,
     build_code_graph_profile_tools,
 )
+from tests.unit_tests.core.retrieval.code_graph.parser_guard import skip_unless_code_graph_parser
 
 pytestmark = pytest.mark.level0
-pytest.importorskip("tree_sitter_language_pack")
 
 SAMPLE = '''\
 class UserService:
@@ -372,6 +372,7 @@ def test_unknown_profile_spellings_are_off() -> None:
 async def test_submit_code_context_publishes_a_packet_without_finishing(
     tmp_path: Path,
 ) -> None:
+    skip_unless_code_graph_parser()
     repo = _repo(tmp_path / "repo")
     state = CodeGraphRunState(
         request=CodeGraphRequest(query="fix create_user"),
@@ -491,6 +492,12 @@ async def test_graph_profile_registers_find_tools_on_the_code_agent(tmp_path: Pa
     )
     names = _registered_tool_names(agent)
     assert names == set(PRODUCT_GRAPH_TOOL_NAMES)
+    runtime = getattr(agent, "code_graph_runtime", None)
+    assert runtime is not None
+    assert runtime.session_id
+    assert runtime.repo_root
+    assert runtime.run_state is not None
+    assert not hasattr(agent, "_code_graph_session_id")
     assert "search_code" not in names
     assert "analyze_impact" not in names
     assert agent.ability_manager.get("resolve_symbol") is not None

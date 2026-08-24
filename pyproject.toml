@@ -125,7 +125,7 @@ code-graph = [
 
 default = []
 # Includes A2A SDK so the A2A remote/server plugins work when using `openjiuwen[all]`.
-all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a,code-graph]"]
+all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a]"]
 
 [dependency-groups]
 # Testing
@@ -144,7 +144,6 @@ test = [
     "aiosqlite>=0.22.1",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
-    "tree-sitter-language-pack>=0.10.0",
 ]
 
 # Linting & formatting
@@ -185,6 +184,7 @@ Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
 
 [tool.uv]
 default-groups = ['dev']
+no-build-package = ["tree-sitter-language-pack"]
 
 [[tool.uv.index]]
 name = "aliyun"

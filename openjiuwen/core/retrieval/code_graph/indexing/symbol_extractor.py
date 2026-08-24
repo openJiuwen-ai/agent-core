@@ -182,6 +182,17 @@ class ExtractedFile:
     assignments: list[PendingAssignment] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _WalkContext:
+    """Shared walk inputs so extractors stay under the argument-count gate."""
+
+    result: ExtractedFile
+    rel_path: str
+    language: SourceLanguage
+    module_id: str
+    max_depth: int
+
+
 def extract_file(
     *,
     rel_path: str,
@@ -223,10 +234,17 @@ def extract_file(
     result.symbols.append(module_symbol)
     result.contains.append((file_id, module_id))
 
+    walk_ctx = _WalkContext(
+        result=result,
+        rel_path=rel_path,
+        language=language,
+        module_id=module_id,
+        max_depth=max_depth,
+    )
     if language == SourceLanguage.PYTHON:
-        _walk_python(root, result, rel_path, language, module_id, max_depth)
+        _walk_python(root, walk_ctx)
     else:
-        _walk_generic(root, result, rel_path, language, module_id, max_depth)
+        _walk_generic(root, walk_ctx)
     return result
 
 
@@ -258,19 +276,15 @@ def kind_from_ast_type(ast_type: str, *, inside_class: bool) -> SymbolKind:
     return SymbolKind.VARIABLE
 
 
-def _walk_python(
-    root: Any,
-    result: ExtractedFile,
-    rel_path: str,
-    language: SourceLanguage,
-    module_id: str,
-    max_depth: int,
-) -> None:
-    def_stack: list[str] = [module_id]
+def _walk_python(root: Any, ctx: _WalkContext) -> None:
+    result = ctx.result
+    rel_path = ctx.rel_path
+    language = ctx.language
+    def_stack: list[str] = [ctx.module_id]
     class_stack: list[str] = []
 
     def visit(node: Any, depth: int) -> None:
-        if depth > max_depth:
+        if depth > ctx.max_depth:
             return
         ntype = node.type
         if ntype == "decorated_definition":
@@ -279,13 +293,7 @@ def _walk_python(
                 visit(inner, depth + 1)
             return
         if ntype in _PYTHON_DEF_TYPES:
-            symbol = _make_python_symbol(
-                node,
-                rel_path,
-                language,
-                def_stack[-1],
-                class_stack,
-            )
+            symbol = _make_python_symbol(node, ctx, def_stack[-1], class_stack)
             if symbol is not None:
                 result.symbols.append(symbol)
                 result.contains.append((def_stack[-1], symbol.symbol_id))
@@ -349,19 +357,15 @@ def _walk_python(
         visit(child, 1)
 
 
-def _walk_generic(
-    root: Any,
-    result: ExtractedFile,
-    rel_path: str,
-    language: SourceLanguage,
-    module_id: str,
-    max_depth: int,
-) -> None:
-    def_stack: list[str] = [module_id]
+def _walk_generic(root: Any, ctx: _WalkContext) -> None:
+    result = ctx.result
+    rel_path = ctx.rel_path
+    language = ctx.language
+    def_stack: list[str] = [ctx.module_id]
     class_stack: list[str] = []
 
     def visit(node: Any, depth: int) -> None:
-        if depth > max_depth:
+        if depth > ctx.max_depth:
             return
         ntype = node.type
         if is_definition_type(ntype) and ntype not in {"module", "program"}:
@@ -439,8 +443,7 @@ def _walk_generic(
 
 def _make_python_symbol(
     node: Any,
-    rel_path: str,
-    language: SourceLanguage,
+    ctx: _WalkContext,
     parent_id: str,
     class_stack: list[str],
 ) -> Symbol | None:
@@ -458,14 +461,14 @@ def _make_python_symbol(
         kind = SymbolKind.FUNCTION
         qualified = name
     return Symbol(
-        symbol_id=f"{rel_path}::{qualified}",
+        symbol_id=f"{ctx.rel_path}::{qualified}",
         name=name,
         kind=kind,
-        file=rel_path,
+        file=ctx.rel_path,
         start_line=_start_line(node),
         end_line=_end_line(node),
         qualified_name=qualified,
-        language=language.value,
+        language=ctx.language.value,
         parent_id=parent_id,
         signature=_node_text(node).split("\n", 1)[0][:200],
     )
@@ -677,10 +680,8 @@ def _generic_bases(text: str, class_name: str) -> list[str]:
             if ident and ident not in _SKIP_BASES and _IDENT_RE.fullmatch(ident):
                 bases.append(ident)
     # C++ ``class Foo : public Bar``
-    cpp = re.search(
-        r"\b(?:class|struct)\s+" + re.escape(class_name) + r"\s*:\s*([^;{]+)",
-        header,
-    )
+    pattern = rf"\b(?:class|struct)\s+{re.escape(class_name)}\s*:\s*([^;{{]+)"
+    cpp = re.search(pattern, header)
     if cpp:
         cleaned = re.sub(r"\b(?:public|protected|private|virtual)\b", " ", cpp.group(1))
         for ident in _IDENT_RE.findall(cleaned):
@@ -733,8 +734,8 @@ def _child_by_types(node: Any, types: Iterable[str]) -> Any | None:
 
 def _node_name(node: Any) -> str | None:
     if hasattr(node, "child_by_field_name"):
-        for field in ("name", "declarator"):
-            child = node.child_by_field_name(field)
+        for field_name in ("name", "declarator"):
+            child = node.child_by_field_name(field_name)
             if child is None:
                 continue
             if child.type in {"identifier", "type_identifier", "field_identifier", "property_identifier"}:

@@ -29,6 +29,14 @@
 pip install -U openjiuwen
 ```
 
+Optional extras (not installed by default):
+
+```bash
+pip install "openjiuwen[code-graph]"   # tree-sitter language pack for Code Graph find_*
+```
+
+`code-graph` is required before `code_graph_profile="graph"` can build an index. Install a **prebuilt wheel** only; source builds download rustup and fail on restricted networks. Unit-test / `dev` installs do not pull this extra.
+
 ### Example
 
 Let's create a simple WorkflowAgent that calls a workflow to generate a piece of text:

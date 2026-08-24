@@ -20,10 +20,10 @@ from openjiuwen.core.retrieval.code_graph.models import (
     RelationKind,
 )
 from openjiuwen.core.retrieval.code_graph.query.expand_related import expand_related
+from tests.unit_tests.core.retrieval.code_graph.parser_guard import skip_unless_code_graph_parser
 
 pytestmark = pytest.mark.level0
-
-pytest.importorskip("tree_sitter_language_pack")
+skip_unless_code_graph_parser()
 
 SAME_NAME = '''\
 class Alpha:

@@ -172,9 +172,7 @@ def impact_surface(
         )
         truncated = truncated or hit_limit
         direct_callers = levels.get(1, [])
-        transitive_callers = [
-            row for level in sorted(levels) if level > 1 for row in levels[level]
-        ]
+        transitive_callers = _rows_from_levels(levels, min_level=2)
 
     subclasses: list[dict[str, object]] = []
     implementations: list[dict[str, object]] = []
@@ -298,7 +296,7 @@ def _inheritance_surface(
         budget=budget,
         include_tests=include_tests,
     )
-    subclasses = [row for level in sorted(levels) for row in levels[level]]
+    subclasses = _rows_from_levels(levels)
     if target.kind in CLASS_LIKE_KINDS:
         return subclasses, [], truncated
     overrides: list[dict[str, object]] = []
@@ -427,23 +425,47 @@ def _risk(
     if truncated:
         reasons.append("graph traversal truncated")
 
-    if (
-        caller_count >= HIGH_CALLER_COUNT
-        or len(modules) >= HIGH_MODULE_COUNT
-        or derived >= HIGH_DERIVED_COUNT
-    ):
+    if _high_change_surface(caller_count, modules, derived):
         level = RISK_HIGH
-    elif (
-        caller_count >= MEDIUM_CALLER_COUNT
-        or len(modules) >= MEDIUM_MODULE_COUNT
-        or derived
-        or truncated
-        or unresolved
-    ):
+    elif _medium_change_surface(caller_count, modules, derived, truncated, unresolved):
         level = RISK_MEDIUM
     else:
         level = RISK_LOW
     return {"level": level, "reasons": reasons}
+
+
+def _rows_from_levels(
+    levels: dict[int, list[dict[str, object]]],
+    *,
+    min_level: int = 1,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for level in sorted(levels):
+        if level >= min_level:
+            rows.extend(levels[level])
+    return rows
+
+
+def _high_change_surface(caller_count: int, modules: set[str], derived: int) -> bool:
+    if caller_count >= HIGH_CALLER_COUNT:
+        return True
+    if len(modules) >= HIGH_MODULE_COUNT:
+        return True
+    return derived >= HIGH_DERIVED_COUNT
+
+
+def _medium_change_surface(
+    caller_count: int,
+    modules: set[str],
+    derived: int,
+    truncated: bool,
+    unresolved: list[dict[str, object]],
+) -> bool:
+    if caller_count >= MEDIUM_CALLER_COUNT:
+        return True
+    if len(modules) >= MEDIUM_MODULE_COUNT:
+        return True
+    return bool(derived or truncated or unresolved)
 
 
 def _node(symbol: Symbol) -> dict[str, object]:
