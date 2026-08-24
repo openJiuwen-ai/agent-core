@@ -37,7 +37,6 @@
 | [TrainingDiagnostics](./offline/store.md) | 开发模式下的训练管线分阶段诊断（`metrics_tracker`）。 |
 | [BackendProxy](./proxy.md) | 反向代理，提供稳定的后端推理 URL。 |
 | [RLRail](./offline/runtime.md) | 继承 `EvolutionRail` 的 RL 轨迹收集 Rail。 |
-| [TrajectoryCollector](./offline/runtime.md) | Agent 轨迹收集封装器。 |
 | [RuntimeExecutor](./offline/runtime.md) | 自包含的单任务执行器。 |
 | [ParallelRuntimeExecutor](./offline/runtime.md) | 并行 rollout 执行引擎。 |
 | [AgentFactory](./offline/runtime.md) | 为每个 RL 任务创建 **DeepAgent** 的可调用工厂。 |
@@ -63,6 +62,7 @@
 
 | FUNCTION | DESCRIPTION |
 |----------|-------------|
+| [run_agent_and_collect_trajectory](./offline/runtime.md) | 使用临时 `RLRail` 运行一次 Agent，并返回 canonical trajectory。 |
 | [build_agent_factory](./offline/runtime.md) | 从运行时配置和工具构建默认 AgentFactory。 |
 | [register_reward](./reward.md) | 用于按名称注册奖励函数的装饰器。 |
 | [get_ppo_ray_runtime_env](./optimizer.md) | 返回 PPO/GRPO Ray Worker 的默认运行时环境配置。 |

@@ -225,30 +225,20 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
         raise ValueError("No SkillUseRail registered on the agent; cannot bind a skill.")
     target = rails[0]
 
-    roots, enabled_names = _skill_paths_to_rail_mounts([skill.directory])
-    if skill.enabled_skills:
-        for name in skill.enabled_skills:
-            if name not in enabled_names:
-                enabled_names.append(name)
+    roots, _ = _skill_paths_to_rail_mounts([skill.directory])
 
     previous_dirs = _skill_values(target.skills_dir)
     current_dirs = {str(Path(item).expanduser().resolve()) for item in previous_dirs}
 
-    if mount_root in current_dirs:
-        # Parent-dir mounts are one-shot. Leaf dirs under the same parent are
-        # siblings in new manifests and must merge into the shared mount.
-        if not is_leaf or target.enabled_skills is None:
-            raise ValueError(f"Skill already bound: {mount_root}")
-        if directory.name in target.enabled_skills:
-            raise ValueError(f"Skill already bound: {directory}")
+    if mount_root in current_dirs and not is_leaf:
+        raise ValueError(f"Skill already bound: {mount_root}")
 
     previous_enabled = None if target.enabled_skills is None else set(target.enabled_skills)
 
-    # New roots go first: duplicate skill names across roots keep the first
-    # (i.e. newly bound) one, so a fresh bind can refresh/shadow a stale copy.
-    target.skills_dir = [*(root for root in roots if root not in current_dirs), *previous_dirs]
-    if enabled_names:
-        target.enabled_skills = (target.enabled_skills or set()) | set(enabled_names)
+    # Append after host roots. SkillUseRail keeps the first loaded name, so
+    # workspace/skills wins over a same-named package skill. Do not write leaf
+    # names into enabled_skills: that global allow-list would hide host skills.
+    target.skills_dir = [*previous_dirs, *(root for root in roots if root not in current_dirs)]
     target.enable_cache = False
     target.clear_skills()
     try:
@@ -308,7 +298,10 @@ async def _ensure_subagent_rail_ready(agent: DeepAgent) -> ResourceRef | None:
     rail = rails[0] if rails else None
     created = False
     if rail is None:
-        rail = SubagentRail(enable_async_subagent=bool(config.enable_async_subagent))
+        rail = SubagentRail(
+            enable_async_subagent=bool(config.enable_async_subagent),
+            enable_subagent_runtime=bool(config.enable_subagent_runtime),
+        )
         await agent.register_rail(rail)
         created = True
 

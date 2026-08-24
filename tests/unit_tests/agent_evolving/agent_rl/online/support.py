@@ -30,6 +30,34 @@ class _InertTrajectoryRuntime:
         }
 
 
+class _InertTrainingTaskStore:
+    async def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task_id = str(payload.get("task_id") or "task-test")
+        return {"task_id": task_id, "status": "pending", **payload}
+
+    async def list_tasks(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        del limit
+        return []
+
+    async def get_task(self, task_id: str) -> dict[str, Any] | None:
+        del task_id
+        return None
+
+    async def request_stop(self, task_id: str) -> dict[str, Any] | None:
+        del task_id
+        return None
+
+    async def update_task_status(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        error: str = "",
+    ) -> dict[str, Any] | None:
+        del task_id, status, error
+        return None
+
+
 def collection_spec(**overrides: Any) -> CollectionSessionSpec:
     values = {
         "session_id": "session-1",
@@ -103,6 +131,7 @@ def gateway_test_app(
         forwarder=forwarder,
         upstream_client=SimpleNamespace(),
         trajectory_runtime=trajectory_runtime or _InertTrajectoryRuntime(),
+        training_task_store=_InertTrainingTaskStore(),
         close_resources=close_resources,
         collector=collector,
     )

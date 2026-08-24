@@ -17,6 +17,10 @@ def build_trajectory_env_updates(
     trajectory_batch_size: int,
     trajectory_mode: str,
     trajectory_tenant_id: str | None = None,
+    capture_mode: str = "ppo_turn",
+    sft_scenario: str = "multi_turn_supervisor",
+    session_done_on_invoke_end: bool = True,
+    session_flush_token_threshold_k: int = 0,
 ) -> dict[str, str]:
     """Build online-RL env vars for JiuwenClaw Rail uploads."""
     updates = {
@@ -26,6 +30,10 @@ def build_trajectory_env_updates(
         'TRAJECTORY_TOKENIZER_PATH': model_path,
         'TRAJECTORY_BATCH_SIZE': str(trajectory_batch_size),
         'TRAJECTORY_MODE': trajectory_mode,
+        'RL_ONLINE_CAPTURE_MODE': capture_mode,
+        'SFT_SCENARIO': sft_scenario,
+        'RL_ONLINE_SESSION_DONE_ON_INVOKE_END': 'true' if session_done_on_invoke_end else 'false',
+        'TRAJECTORY_SESSION_FLUSH_TOKEN_THRESHOLD_K': str(session_flush_token_threshold_k),
     }
     if trajectory_tenant_id:
         updates['RL_ONLINE_TENANT_ID'] = trajectory_tenant_id
@@ -41,6 +49,10 @@ def ensure_workspace(
     trajectory_mode: str,
     trajectory_gateway_url: str | None = None,
     trajectory_batch_size: int = 8,
+    capture_mode: str = "ppo_turn",
+    sft_scenario: str = "multi_turn_supervisor",
+    session_done_on_invoke_end: bool = True,
+    session_flush_token_threshold_k: int = 0,
     lora_repo_root: str | None = None,
     lora_default_policy: str = "disabled",
 ) -> None:
@@ -82,6 +94,10 @@ def ensure_workspace(
             trajectory_batch_size=trajectory_batch_size,
             trajectory_mode=trajectory_mode,
             trajectory_tenant_id=trajectory_tenant_id,
+            capture_mode=capture_mode,
+            sft_scenario=sft_scenario,
+            session_done_on_invoke_end=session_done_on_invoke_end,
+            session_flush_token_threshold_k=session_flush_token_threshold_k,
         )
     )
 

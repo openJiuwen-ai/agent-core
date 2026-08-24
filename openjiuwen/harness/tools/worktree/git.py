@@ -379,7 +379,7 @@ async def set_longpaths(repo_root: str, *, enabled: bool = True) -> None:
     worktree. On Windows, paths exceeding the 260-char MAX_PATH limit cause
     checkout to fail with returncode 128 — the dominant worktree failure on
     deeply-nested repos. ``core.longpaths=true`` makes git use the
-    extended-length (``\\?\``) path prefix, bypassing the Win32 limit
+    extended-length Windows path prefix, bypassing the Win32 limit
     without altering the source repo's directory structure.
 
     Args:

@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.external.cli_agent.codex.options import (
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -107,6 +108,7 @@ def _build_span_bridge(
     member_agent_id: str,
     team_name: str,
     session_id: str,
+    role: str | None = None,
 ) -> Any:
     """Load the OTel bridge only when its optional dependencies are installed."""
     try:
@@ -118,6 +120,7 @@ def _build_span_bridge(
         member_agent_id=member_agent_id,
         team_name=team_name,
         session_id=session_id,
+        role=role,
     )
 
 
@@ -271,12 +274,28 @@ class CodexSdkRuntime(CliRuntimeBase):
             self._client = self._sdk.AsyncCodex(config=self._config)
 
         options = dict(self._thread_options)
+        config_env = getattr(self._config, "env", None)
+        team_logger.info(
+            "[external-cli] ensuring codex thread for member {} resume_thread={} cwd={} codex_bin={} "
+            "team_join_env_present={} config_overrides={}",
+            self._member_name,
+            self._thread_id is not None,
+            getattr(self._config, "cwd", None),
+            getattr(self._config, "codex_bin", None),
+            isinstance(config_env, dict) and "OPENJIUWEN_TEAM_JOIN" in config_env,
+            getattr(self._config, "config_overrides", None),
+        )
         if self._thread_id:
             requested_thread_id = self._thread_id
             options.pop("ephemeral", None)
             try:
                 resumed_thread = await self._client.thread_resume(requested_thread_id, **options)
             except Exception as exc:  # noqa: BLE001 - SDK errors are optional dependency types
+                team_logger.exception(
+                    "[external-cli] failed to resume codex SDK thread {} for member {}",
+                    requested_thread_id,
+                    self._member_name,
+                )
                 raise RuntimeError(
                     f"failed to resume Codex SDK thread {requested_thread_id!r}; "
                     "strict resume forbids starting a replacement thread",
@@ -289,11 +308,18 @@ class CodexSdkRuntime(CliRuntimeBase):
             self._thread = resumed_thread
             activation = "resumed"
         else:
-            self._thread = await _start_thread_with_raw_events(
-                client=self._client,
-                sdk=self._sdk,
-                options=options,
-            )
+            try:
+                self._thread = await _start_thread_with_raw_events(
+                    client=self._client,
+                    sdk=self._sdk,
+                    options=options,
+                )
+            except Exception:
+                team_logger.exception(
+                    "[external-cli] failed to start codex SDK thread for member {}",
+                    self._member_name,
+                )
+                raise
             activation = "started"
         self._thread_id = self._thread.id
         await self._persist_thread_id()
@@ -873,10 +899,12 @@ async def build_codex_runtime(
     bypass_approvals_and_sandbox: bool,
     system_prompt: str | None,
     codex_bin: str | None,
+    external_model_config: ExternalCliModelConfig | None = None,
     resume_external_backend: bool = False,
     turn_idle_timeout_s: float | None = None,
     turn_idle_retries: int | None = None,
     team_context_tracker: Any = None,
+    role: str | None = None,
 ) -> CodexSdkRuntime:
     """Build a Codex Python SDK runtime without starting its thread eagerly."""
     sdk = load_codex_sdk()
@@ -885,6 +913,7 @@ async def build_codex_runtime(
         member_agent_id=member_agent_id,
         team_name=team_name,
         session_id=team_session_id,
+        role=role,
     )
     native_otel_receiver = None
     rollout_trace_reader = None
@@ -895,6 +924,20 @@ async def build_codex_runtime(
             observability_initialized = False
         else:
             observability_initialized = is_initialized()
+        team_logger.info(
+            "[external-cli] building codex runtime for member {} observability_initialized={} "
+            "span_bridge_enabled={} cwd={} codex_bin_configured={} inject_mcp={} mcp_server_command={} "
+            "team_join_env_present={} external_model_configured={}",
+            member_name,
+            observability_initialized,
+            not isinstance(span_bridge, _NoopCodexSpanBridge),
+            cwd,
+            codex_bin is not None,
+            inject_mcp,
+            mcp_server_command,
+            "OPENJIUWEN_TEAM_JOIN" in env,
+            external_model_config is not None,
+        )
 
         if observability_initialized and not isinstance(
             span_bridge,
@@ -905,10 +948,12 @@ async def build_codex_runtime(
                 CodexRolloutTraceReader,
             )
 
+            team_logger.info("[external-cli] starting codex rollout trace reader for member {}", member_name)
             rollout_trace_reader = await CodexRolloutTraceReader.start(
                 span_bridge.record_rollout_event,
             )
             span_bridge.enable_rollout_trace()
+            team_logger.info("[external-cli] starting codex native otel receiver for member {}", member_name)
             native_otel_receiver = await CodexOtelTraceReceiver.start(
                 span_bridge.record_native_model_span,
             )
@@ -931,6 +976,7 @@ async def build_codex_runtime(
             mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
             member_name=member_name,
             codex_bin=codex_bin,
+            external_model_config=external_model_config,
             native_otel_trace_endpoint=(native_otel_receiver.endpoint if native_otel_receiver is not None else None),
             rollout_trace_root=(str(rollout_trace_reader.root) if rollout_trace_reader is not None else None),
             sdk=sdk,
@@ -938,6 +984,7 @@ async def build_codex_runtime(
         thread_options = build_codex_thread_options(
             cwd=cwd,
             system_prompt=system_prompt,
+            external_model_config=external_model_config,
             bypass_approvals_and_sandbox=bypass_approvals_and_sandbox,
             sdk=sdk,
         )

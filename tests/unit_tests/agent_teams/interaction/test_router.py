@@ -83,6 +83,15 @@ def test_god_view_multi_recipient_fans_out():
 
 
 @pytest.mark.level0
+def test_god_view_inline_recipient_segments_fan_out_with_distinct_bodies():
+    payloads = parse_interact_str("# @m1 ship backend @m2 update docs")
+    assert payloads == [
+        OperatorMessage(body="ship backend", target="m1"),
+        OperatorMessage(body="update docs", target="m2"),
+    ]
+
+
+@pytest.mark.level0
 def test_god_view_at_all_collapses_to_broadcast():
     payloads = parse_interact_str("# @all heads up")
     assert payloads == [OperatorMessage(body="heads up")]
@@ -126,6 +135,15 @@ def test_human_agent_multi_recipient_fans_out():
     assert payloads == [
         HumanAgentMessage(body="status sync", sender="alice", target="m1"),
         HumanAgentMessage(body="status sync", sender="alice", target="m2"),
+    ]
+
+
+@pytest.mark.level0
+def test_human_agent_inline_recipient_segments_fan_out_with_distinct_bodies():
+    payloads = parse_interact_str("$human-member @member-1 query Hangzhou @member-2 query Shanghai")
+    assert payloads == [
+        HumanAgentMessage(body="query Hangzhou", sender="human-member", target="member-1"),
+        HumanAgentMessage(body="query Shanghai", sender="human-member", target="member-2"),
     ]
 
 

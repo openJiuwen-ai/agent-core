@@ -216,6 +216,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
         return AssistantMessageChunk(
             role=self.role,
             content=combined_content,
+            metadata=other.metadata or self.metadata,
             tool_calls=merged_tool_calls if merged_tool_calls else None,
             usage_metadata=other.usage_metadata or self.usage_metadata,
             finish_reason=merged_finish_reason,

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from openjiuwen.core.foundation.llm.schema.message import SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.message import SystemMessage, ToolMessage, UserMessage
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -33,18 +33,29 @@ _COMPACTION_PROMPT = (
 )
 
 
-async def compact_context(deep_agent, *, split_at: int, session_id: str | None = None) -> None:
-    """Compress messages before ``split_at`` into a summary.
+async def compact_context(
+    deep_agent,
+    *,
+    split_at: int,
+    session_id: str | None = None,
+    direction: str = "before",
+) -> None:
+    """Compress one side of the fork context at ``split_at`` into a summary.
 
-    Messages at and after ``split_at`` are kept verbatim.
+    ``direction="before"`` (default): compress the head (``msgs[:split_at]``)
+    into a summary and keep the tail verbatim.  ``direction="after"``: keep
+    the head verbatim and compress the tail (``msgs[split_at:]``).
+
     All ``SystemMessage`` entries are stripped before compaction.
 
     Args:
         deep_agent: The target ``DeepAgent`` whose context engine
             already holds the forked messages.
         split_at: Index in the (SystemMessage-stripped) message list
-            that separates old / recent.  ``0 <= split_at < len(msgs)``.
+            that separates the kept / compressed sides.
+            ``0 <= split_at < len(msgs)``.
         session_id: Optional session id for the new context engine.
+        direction: Which side to compress — ``"before"`` or ``"after"``.
     """
     msgs = deep_agent.get_current_context(session_id=session_id)
     msgs = [m for m in msgs if not isinstance(m, SystemMessage)]
@@ -56,21 +67,33 @@ async def compact_context(deep_agent, *, split_at: int, session_id: str | None =
         )
         return
 
-    old_msgs = msgs[:split_at]
-    recent_msgs = msgs[split_at:]
+    if direction == "after":
+        # Keep the head verbatim, compress the tail. The head must extend
+        # through the checkpoint call's closing ToolMessage block, otherwise
+        # it ends with a dangling tool call (its result sits in the compressed
+        # tail) that the context rail would flag as interrupted.
+        head_end = split_at
+        while head_end < len(msgs) and isinstance(msgs[head_end], ToolMessage):
+            head_end += 1
+        kept_msgs = msgs[:head_end]
+        to_compress = msgs[head_end:]
+    else:
+        kept_msgs = msgs[split_at:]
+        to_compress = msgs[:split_at]
 
     team_logger.info(
         "[fork] compact_context: compressing %d messages, keeping %d",
-        len(old_msgs), len(recent_msgs),
+        len(to_compress), len(kept_msgs),
     )
 
-    summary = await _run_compaction(deep_agent, old_msgs)
-    compacted = [
-        UserMessage(content=(
-            f"[Compacted context — earlier conversation summarised]\n\n{summary}"
-        )),
-        *recent_msgs,
-    ]
+    summary = await _run_compaction(deep_agent, to_compress)
+    summary_msg = UserMessage(content=(
+        f"[Compacted context — earlier conversation summarised]\n\n{summary}"
+    ))
+    if direction == "after":
+        compacted = [*kept_msgs, summary_msg]
+    else:
+        compacted = [summary_msg, *kept_msgs]
     # Directly replace messages in the existing context engine.
     # ``create_new_context_engine`` re-creates a fresh ``Session``
     # whose ``get_state()`` returns ``None``, so ``_load_state_from_session``

@@ -62,7 +62,7 @@ def _ctx(
             external_publish_url=_EVENT_WS_URL,
         )
     return TeamRuntimeContext(
-        role=TeamRole.TEAMMATE,
+        role=TeamRole.EXTERNAL_CLI,
         member_name=member,
         cli_agent=cli_agent,
         team_spec=TeamSpec(
@@ -92,7 +92,7 @@ def test_descriptor_from_context_carries_identity():
     assert descriptor.session_id == "sess-1"
     assert descriptor.team_name == "ext_team"
     assert descriptor.member_name == "dev-1"
-    assert descriptor.role == "teammate"
+    assert descriptor.role == "external_cli"
     assert descriptor.language == "en"
     assert descriptor.teammate_mode == "build_mode"
     transport = descriptor.transport_config

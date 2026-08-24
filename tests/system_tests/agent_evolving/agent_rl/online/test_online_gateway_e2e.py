@@ -23,10 +23,10 @@ GatewayConfig = importlib.import_module(
     "openjiuwen.agent_evolving.agent_rl.online.gateway.config"
 ).GatewayConfig
 RLOnlineRail = importlib.import_module(
-    "openjiuwen.agent_evolving.agent_rl.online.rail.online_rail"
+    "openjiuwen.agent_evolving.agent_rl.online.backends.rl.rail"
 ).RLOnlineRail
 TrajectoryUploader = importlib.import_module(
-    "openjiuwen.agent_evolving.agent_rl.online.rail.uploader"
+    "openjiuwen.agent_evolving.agent_rl.online.core.uploader"
 ).TrajectoryUploader
 trajectory_module = importlib.import_module("openjiuwen.agent_evolving.trajectory")
 Trajectory = trajectory_module.Trajectory

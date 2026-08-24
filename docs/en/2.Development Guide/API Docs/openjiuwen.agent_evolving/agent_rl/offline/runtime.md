@@ -1,206 +1,117 @@
-﻿# openjiuwen.agent_evolving.agent_rl.agent_runtime
+# openjiuwen.agent_evolving.agent_rl.offline.runtime
 
-## class openjiuwen.agent_evolving.agent_rl.rl_rail.RLRail
+Offline RL runtime APIs collect canonical trajectories through a shared `TrajectorySpanProcessor`. There is no
+`TrajectoryCollector` class or Rail-owned trajectory store in the online capture path.
+
+## class RLRail
 
 ```python
-class openjiuwen.agent_evolving.agent_rl.rl_rail.RLRail(
+class RLRail(
     session_id: str = "",
-    source: str = "offline",
-    case_id: Optional[str] = None,
+    source: str = "rl_offline",
+    case_id: str | None = None,
+    *,
+    trajectory_span_processor: TrajectorySpanProcessor,
     **kwargs,
 )
 ```
 
-Extends `EvolutionRail` for RL trajectory collection. The base class records LLM/tool steps and, on `after_invoke`, builds a `Trajectory` and saves it to `trajectory_store`. `RLRail` adds RL-oriented `meta` on LLM steps and captures tool results for patching.
+`RLRail` extends `EvolutionRail` and uses its processor subscription and clean window. RL capture keeps the complete
+invoke by setting `max_trajectory_spans=None`, then adds `source` and optional `case_id` to projected resource
+attributes.
 
-**Usage** (with an explicit store):
+`RLRail` does not own a builder, store, or persistent snapshot. Read the detached value with `get_trajectory()` before
+unregistering the Rail.
 
-```python
-from openjiuwen.agent_evolving.agent_rl.rl_rail import RLRail
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryStore
-
-store = InMemoryTrajectoryStore()
-rail = RLRail(session_id="s1", source="offline", case_id="c1", trajectory_store=store)
-await agent.register_rail(rail)
-await agent.invoke({"query": "..."})
-# After a full invoke (including after_invoke), read trajectories from `store.query()`.
-```
-
-### priority = 100
-
-Rail priority.
-
-### Extension points
-
-Overrides `_on_before_invoke`, `_on_after_model_call`, and `_on_after_tool_call` on top of `EvolutionRail`.
-
-## class openjiuwen.agent_evolving.agent_rl.offline.runtime.collector.TrajectoryCollector
+## async function run_agent_and_collect_trajectory
 
 ```python
-class openjiuwen.agent_evolving.agent_rl.offline.runtime.collector.TrajectoryCollector()
+async def run_agent_and_collect_trajectory(
+    agent: Any,
+    inputs: dict[str, Any],
+    *,
+    trajectory_span_processor: TrajectorySpanProcessor,
+    session_id: str = "",
+    source: str = "offline",
+    case_id: str | None = None,
+) -> Trajectory | None: ...
 ```
 
-Wrapper that registers `RLRail`, runs the agent, then reads the last saved `Trajectory` from an in-memory store (or returns `None` if `after_invoke` never persisted a trajectory).
+The function:
 
-### collect(self, agent: Any, inputs: Dict[str, Any], *, session_id: str = "", source: str = "offline", case_id: Optional[str] = None) -> Optional[Trajectory]
+1. Creates and registers a temporary `RLRail` with `EvolutionTriggerPoint.NONE`.
+2. Creates an Agent session and invokes the Agent.
+3. Reads the public clean-window getter, including the partial-trajectory failure path.
+4. Unregisters the Rail and closes the session in `finally` blocks.
 
-Run Agent and return a `Trajectory` when the rail lifecycle completes; otherwise `None`.
+The Agent must provide `register_rail()` and should provide `unregister_rail()` / `invoke()`. Invoke failures are logged
+and may return a partial canonical trajectory; an unsupported Agent raises `ValueError`.
 
-**Parameters**:
-
-* **agent**: Agent that supports `register_rail` / `unregister_rail` and `invoke` (or compatible runner).
-* **inputs**: Agent input dict (must contain `query` for typical flows).
-
-**Returns**:
-
-**Optional[Trajectory]**, the most recently saved trajectory, or `None` if none was written to the store.
-
-**Exceptions**:
-
-* **ValueError**: Agent does not support rail-based trajectory collection.
-
-## class openjiuwen.agent_evolving.agent_rl.offline.runtime.runtime_executor.RuntimeExecutor
+## class RuntimeExecutor
 
 ```python
-class openjiuwen.agent_evolving.agent_rl.offline.runtime.runtime_executor.RuntimeExecutor(*, task_runner: Optional[TaskRunnerCallable] = None, agent_factory: Optional[Callable[[RLTask], Any]] = None, task_data_fn: Optional[TaskDataFn] = None, reward_fn: Optional[Callable[[RolloutMessage], Any]] = None)
+class RuntimeExecutor(
+    *,
+    trajectory_span_processor: TrajectorySpanProcessor,
+    agent_factory: Callable[[RLTask], Any] | None = None,
+    task_data_fn: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    reward_fn: Callable[[RolloutMessage], Any] | None = None,
+)
 ```
 
-Self-contained single-task executor.
+`RuntimeExecutor` executes one `RLTask`. It creates the Agent through `agent_factory`, calls
+`run_agent_and_collect_trajectory()`, converts the canonical trajectory to rollouts, and optionally applies a reward
+function.
 
-Supports two execution modes:
-1. **task_runner mode**: Caller injects `task_runner(rl_task) -> RolloutMessage` coroutine for full control.
-2. **agent mode**: Uses `agent_factory` + `TrajectoryCollector` (based on RAIL) to run Agent and collect structured trajectory data.
+Methods:
 
-### __init__(self, *, task_runner: Optional[TaskRunnerCallable] = None, agent_factory: Optional[Callable[[RLTask], Any]] = None, task_data_fn: Optional[TaskDataFn] = None, reward_fn: Optional[Callable[[RolloutMessage], Any]] = None) -> None
+- `set_agent_factory(factory)`
+- `set_task_data_fn(fn)`
+- `set_reward_fn(fn)`
+- `await execute_async(rollout_task) -> RolloutMessage`
 
-Initialize runtime executor with optional task runner, Agent factory, and helper functions.
+`trajectory_span_processor` is required and must already belong to an initialized observability runtime.
 
-### set_task_runner(self, fn: TaskRunnerCallable) -> None
-
-Set task runner callable to execute rollout tasks.
-
-### set_agent_factory(self, factory: Callable[[RLTask], Any]) -> None
-
-Set Agent factory for creating an Agent per task.
-
-### set_task_data_fn(self, fn: TaskDataFn) -> None
-
-Set the function that converts task samples to Agent input.
-
-### set_reward_fn(self, fn: Callable[[RolloutMessage], Any]) -> None
-
-Set reward function that computes rewards for rollout messages.
-
-### execute_async(self, rollout_task: RLTask) -> RolloutMessage
-
-Execute rollout task and return filled RolloutMessage.
-
-**Returns**:
-
-**RolloutMessage**, RolloutMessage with complete execution result.
-
-## class openjiuwen.agent_evolving.agent_rl.offline.runtime.parallel_executor.ParallelRuntimeExecutor
+## class ParallelRuntimeExecutor
 
 ```python
-class openjiuwen.agent_evolving.agent_rl.offline.runtime.parallel_executor.ParallelRuntimeExecutor(data_store: TaskQueue, num_workers: int, *, task_runner: Optional[Callable] = None, agent_factory: Optional[Callable] = None, task_data_fn: Optional[Callable] = None, reward_fn: Optional[Callable] = None)
+class ParallelRuntimeExecutor(
+    data_store: TaskQueue,
+    num_workers: int,
+    *,
+    agent_factory: Callable | None = None,
+    task_data_fn: Callable | None = None,
+    reward_fn: Callable | None = None,
+    observability_config: ObservabilityConfig | None = None,
+)
 ```
 
-Parallel rollout execution engine that pulls tasks from TaskQueue.
+`ParallelRuntimeExecutor` owns the shared offline rollout capture boundary. `start()` creates one
+`TrajectorySpanProcessor`, registers it with observability, and passes it to every worker `RuntimeExecutor`.
+`stop()` shuts down observability only when this executor created the provider.
 
-Each worker creates its own RuntimeExecutor and processes tasks concurrently until stopped.
+Methods:
 
-### __init__(self, data_store: TaskQueue, num_workers: int, *, task_runner: Optional[Callable] = None, agent_factory: Optional[Callable] = None, task_data_fn: Optional[Callable] = None, reward_fn: Optional[Callable] = None) -> None
+- `await start()`
+- `await stop()`
+- `is_running() -> bool`
+- `set_agent_factory(factory)`
+- `set_task_data_fn(fn)`
+- `set_reward_fn(fn)`
 
-Initialize parallel executor with task queue and worker count.
+Each worker pulls tasks from `TaskQueue`, writes `RolloutMessage` results back to the queue, and reuses the same
+processor object.
 
-### start(self) -> None
-
-Start all worker loops.
-
-### stop(self) -> None
-
-Stop all workers and clean up resources.
-
-### is_running(self) -> bool
-
-Return whether executor is currently running.
-
-### set_task_runner(self, fn: Callable) -> None
-
-Set task runner callable.
-
-### set_agent_factory(self, factory: Callable) -> None
-
-Set Agent factory.
-
-### set_task_data_fn(self, fn: Callable) -> None
-
-Set task data function.
-
-### set_reward_fn(self, fn: Callable) -> None
-
-Set reward function.
-
-## class openjiuwen.agent_evolving.agent_rl.offline.runtime.agent_factory.AgentFactory
+## function build_agent_factory
 
 ```python
-class openjiuwen.agent_evolving.agent_rl.offline.runtime.agent_factory.AgentFactory(system_prompt: str, tools: List[Any], tool_names: List[str], temperature: float, max_new_tokens: int, top_p: float, presence_penalty: float, frequency_penalty: float)
+def build_agent_factory(
+    *,
+    tools: list,
+    config: AgentRuntimeConfig,
+    ...,
+) -> Callable[[RLTask], DeepAgent]: ...
 ```
 
-Callable factory that creates DeepAgent instances for each RL task.
-
-Must set `proxy_url` before first use (set by MainTrainer).
-
-### __init__(self, system_prompt: str, tools: List[Any], tool_names: List[str], temperature: float, max_new_tokens: int, top_p: float, presence_penalty: float, frequency_penalty: float) -> None
-
-Initialize Agent factory.
-
-### proxy_url: str | None
-
-Proxy URL; must be set before creating an Agent.
-
-### __call__(self, rl_task: RLTask)
-
-Create and configure a DeepAgent instance for the given RL task.
-
-**Returns**:
-
-Configured DeepAgent instance.
-
-**Exceptions**:
-
-* **BaseError**: Raised when proxy_url is not set.
-
-## func openjiuwen.agent_evolving.agent_rl.offline.runtime.agent_factory.build_agent_factory
-
-```python
-def build_agent_factory(runtime_cfg: AgentRuntimeConfig, tools: List[Any], tool_names: List[str]) -> AgentFactory
-```
-
-Build default AgentFactory from runtime config and tools.
-
-**Parameters**:
-
-* **runtime_cfg**(AgentRuntimeConfig): Runtime config.
-* **tools**(List[Any]): Tool list.
-* **tool_names**(List[str]): Tool name list.
-
-**Returns**:
-
-**AgentFactory**, Built AgentFactory instance.
-
-**Example**:
-
-```python
->>> from openjiuwen.agent_evolving.agent_rl.offline.runtime.agent_factory import build_agent_factory
->>> from openjiuwen.agent_evolving.agent_rl.config import AgentRuntimeConfig
->>> 
->>> runtime_cfg = AgentRuntimeConfig(
-...     system_prompt="You are a helpful assistant.",
-...     temperature=0.7,
-...     max_new_tokens=512,
-... )
->>> factory = build_agent_factory(runtime_cfg, [], [])
->>> # After setting proxy_url it can be used
->>> factory.proxy_url = "http://localhost:8000/v1"
-```
+Build the default callable that creates one `DeepAgent` per RL task. The returned Agent is compatible with
+`run_agent_and_collect_trajectory()`.

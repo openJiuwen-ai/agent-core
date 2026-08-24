@@ -307,6 +307,15 @@ class ContextProcessorRail(DeepAgentRail):
                 model_client_config=model_client_config,
             )
 
+        affinity_config = getattr(config, "kv_cache_affinity_config", None)
+        affinity_enabled = bool(
+            getattr(affinity_config, "enable_kv_cache_affinity", False)
+        )
+        self._apply_compressor_affinity_policy(
+            all_processors,
+            enabled=affinity_enabled,
+        )
+
         self._maybe_setup_session_memory_manager(all_processors, model_config, model_client_config)
 
         config.context_processors = all_processors
@@ -349,6 +358,25 @@ class ContextProcessorRail(DeepAgentRail):
             self._protect_compression_recall_tool_results(all_processors)
             self._register_compression_recall_tool(agent)
         self._reload_enabled = bool(getattr(context_engine_config, "enable_reload", False))
+
+    @staticmethod
+    def _apply_compressor_affinity_policy(
+        processors: List[Tuple[str, BaseModel]],
+        *,
+        enabled: bool,
+    ) -> None:
+        """Keep compressor affinity aligned with the owning ReActAgent."""
+        supported = {
+            "DialogueCompressor",
+            "CurrentRoundCompressor",
+            "RoundLevelCompressor",
+        }
+        for name, processor_config in processors:
+            if name in supported and hasattr(
+                processor_config,
+                "enable_kv_cache_affinity",
+            ):
+                processor_config.enable_kv_cache_affinity = enabled
 
     def _maybe_setup_session_memory_manager(
         self,

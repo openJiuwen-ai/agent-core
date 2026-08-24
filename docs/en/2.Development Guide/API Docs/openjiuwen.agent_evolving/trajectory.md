@@ -1,280 +1,191 @@
 # openjiuwen.agent_evolving.trajectory
 
-`openjiuwen.agent_evolving.trajectory` defines the public trajectory data model, extraction interface, persistence interface, and team aggregation utilities used by the agent-evolving pipeline.
+Canonical trajectory values, in-process span capture, synchronous archives, and stateless projections.
 
----
+## Public package exports
 
-## Type Aliases
-
-* **StepKind**: `Literal["llm", "tool"]`, step kind in the extracted trajectory.
-* **CostInfo**: `Dict[str, int]`, aggregated token cost such as `{"input_tokens": N, "output_tokens": M}`.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.types.LLMCallDetail
-
-Structured detail for one LLM step.
-
-* **model**(str): Model name.
-* **messages**(List[Dict[str, Any]]): Input messages.
-* **response**(Dict[str, Any], optional): Parsed response payload.
-* **tools**(List[Dict[str, Any]], optional): Tool schema passed to the model.
-* **usage**(Dict[str, Any], optional): Usage metadata.
-* **meta**(Dict[str, Any]): Extension metadata.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.types.ToolCallDetail
-
-Structured detail for one tool step.
-
-* **tool_name**(str): Tool name.
-* **call_args**(Any): Tool input arguments.
-* **call_result**(Any): Tool execution result.
-* **tool_description**(str, optional): Tool description from resource metadata.
-* **tool_schema**(Dict[str, Any], optional): Tool parameter schema.
-* **tool_call_id**(str, optional): Tool call ID for artifact tracking.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.types.TrajectoryStep
-
-Single extracted trajectory step.
-
-* **kind**(StepKind): Step kind.
-* **error**(Dict[str, Any], optional): Error payload.
-* **start_time_ms**(int, optional): Step start time in milliseconds.
-* **end_time_ms**(int, optional): Step end time in milliseconds.
-* **detail**(LLMCallDetail | ToolCallDetail, optional): Structured step detail.
-* **reward**(float, optional): Post-injected scalar reward.
-* **prompt_token_ids**(List[int], optional): Prompt token IDs lifted from LLM response.
-* **completion_token_ids**(List[int], optional): Completion token IDs lifted from LLM response.
-* **logprobs**(Any, optional): Token log probabilities.
-* **meta**(Dict[str, Any]): Extension metadata such as `operator_id`, `agent_id`, and invoke relationships.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.types.Trajectory
-
-Complete extracted trajectory.
-
-* **execution_id**(str): Unique execution ID.
-* **steps**(List[TrajectoryStep]): Ordered steps.
-* **source**(str): Execution source, default `"offline"`.
-* **case_id**(str, optional): Offline dataset case identifier.
-* **session_id**(str, optional): Session ID.
-* **cost**(CostInfo, optional): Aggregated token cost.
-* **meta**(Dict[str, Any]): Trajectory-level metadata.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.extractor.TrajectoryExtractor
-
-Extracts `Trajectory` from `Session.tracer()` spans and normalizes span data into trajectory steps.
-
-```text
-class TrajectoryExtractor(resource_manager: Any = None)
-```
-
-### extract(session, case_id=None) -> Trajectory
-
-Extract one trajectory from a session tracer.
-
-**Parameters**:
-
-* **session**: Session object exposing `tracer`.
-* **case_id**(str, optional): Case identifier used for offline training.
-
-**Returns**:
-
-* **Trajectory**: Assembled trajectory with normalized steps.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.builder.TrajectoryBuilder
-
-Incrementally records `TrajectoryStep` values and builds a final `Trajectory`.
-
-```text
-class TrajectoryBuilder(
-    execution_id: str | None = None,
-    *,
-    session_id: str | None = None,
-    source: str = "offline",
-    case_id: str | None = None,
+```python
+from openjiuwen.agent_evolving.trajectory import (
+    FileTrajectoryStore,
+    InMemoryTrajectoryStore,
+    Trajectory,
+    TrajectorySpanProcessor,
+    TrajectoryStore,
 )
 ```
 
-### record_step(step) -> None
+The root package intentionally exports only these five names. Span accessors, Team selectors, message projection,
+and offline construction are explicit submodule APIs.
 
-Append one step to the builder.
+## class Trajectory
 
-### build() -> Trajectory
+```python
+class Trajectory:
+    @classmethod
+    def from_otlp(cls, payload: Mapping[str, object]) -> "Trajectory": ...
 
-Build the final trajectory object.
+    @classmethod
+    def from_historical_otlp(cls, payload: Mapping[str, object]) -> "Trajectory": ...
 
----
-
-## class openjiuwen.agent_evolving.trajectory.store.TrajectoryStore
-
-Persistence protocol for saving, loading, and querying trajectories.
-
-### save(trajectory, version=None) -> None
-
-Save one trajectory.
-
-### load(execution_id, version=None) -> Optional[Trajectory]
-
-Load one trajectory by execution ID.
-
-### query(version=None, **filters) -> List[Trajectory]
-
-Query trajectories by metadata filters such as `session_id`, `case_id`, or `source`.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.store.InMemoryTrajectoryStore
-
-In-memory trajectory store for tests and development.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.store.FileTrajectoryStore
-
-JSONL-backed trajectory store.
-
-```text
-class FileTrajectoryStore(base_dir: Path)
+    def to_otlp(self) -> dict[str, object]: ...
+    def with_resource_attributes(self, attributes: Mapping[str, Any]) -> "Trajectory": ...
 ```
 
----
+`Trajectory` is an immutable value object that owns a detached canonical OTLP JSON payload. Current payloads require
+non-empty `resourceSpans` and `trajectory_id`; `team_id` or `member_id` also requires `session_id`.
 
-## class openjiuwen.agent_evolving.trajectory.registry.MemberTrajectorySnapshot
+Properties:
 
-Latest bounded trajectory snapshot for one team member in one session.
+- `trajectory_id: str`
+- `session_id: str | None`
+- `team_id: str | None`
+- `member_id: str | None`
+- `resource_attributes: dict[str, Any]`
+- `metadata: dict[str, Any]`, an alias for detached resource attributes
 
-```text
-class MemberTrajectorySnapshot(
-    team_id: str,
-    session_id: str,
-    member_id: str,
-    member_role: str | None,
-    trajectory: Trajectory,
-    recorded_at_ms: int,
+`to_otlp()`, `resource_attributes`, and `metadata` return detached values. `with_resource_attributes()` creates a new
+trajectory and does not mutate the original.
+
+Use `from_historical_otlp()` only at a compatibility read boundary where historical data may lack session identity.
+
+## class TrajectorySpanProcessor
+
+`TrajectorySpanProcessor` implements the OpenTelemetry `SpanProcessor` interface and fans out completed spans to
+in-process subscriptions. Register one shared instance with the active `TracerProvider`, then inject that same object
+into every consuming Rail.
+
+```python
+subscription = processor.subscribe(
+    include_span_categories={"llm", "tool"},
+    trace_id=None,
+)
+
+increment, issues = processor.drain(subscription)
+processor.unsubscribe(subscription)
+```
+
+- `include_span_categories` filters categories such as `llm` and `tool`.
+- `trace_id` routes a subscription to one trace; omit it for invoke-local `ContextVar` routing.
+- `drain()` atomically returns the pending canonical increment and capture-quality issues.
+- `unsubscribe()` releases the handle after the final drain.
+- `suppress()` prevents work performed by an optimizer or reviewer from re-entering trajectory subscriptions while
+  leaving normal exporters active.
+
+Do not read trajectories back from exporters or create one processor per Rail.
+
+## class TrajectoryStore
+
+```python
+class TrajectoryStore(Protocol):
+    def save(self, trajectory: Trajectory, version: str | None = None) -> None: ...
+
+    def load(
+        self,
+        trajectory_id: str,
+        version: str | None = None,
+    ) -> Trajectory | None: ...
+
+    def query(
+        self,
+        *,
+        version: str | None = None,
+        session_id: str | None = None,
+        team_id: str | None = None,
+        member_id: str | None = None,
+        case_id: str | None = None,
+        source: str | None = None,
+    ) -> list[Trajectory]: ...
+```
+
+Stores are synchronous archives. New writes accept only canonical `Trajectory` values.
+
+### InMemoryTrajectoryStore
+
+Process-local implementation keyed by version and trajectory ID. It stores canonical detached snapshots.
+
+### FileTrajectoryStore
+
+JSONL-backed implementation. `load()` and `query()` recognize supported historical step records and OTLP resource
+aliases, upgrade them once at the read boundary, and return canonical `Trajectory` values. New records are canonical
+OTLP only.
+
+## Stateless span accessors
+
+Use `openjiuwen.agent_evolving.trajectory.spans` to inspect canonical OTLP without building a second long-lived model:
+
+```python
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_exchange,
+    read_llm_messages,
+    read_rl_fields,
+    read_span_error,
+    read_tool_call,
+    read_usage,
+    span_attributes,
+    span_events,
+    span_identity,
+    span_status,
 )
 ```
 
-* **team_id**(str): Team ID.
-* **session_id**(str): Session ID.
-* **member_id**(str): Team member ID.
-* **member_role**(str, optional): Runtime member role such as `"leader"` or `"teammate"`.
-* **trajectory**(Trajectory): Member trajectory snapshot.
-* **recorded_at_ms**(int): Snapshot record time in milliseconds.
+The module also provides normalization, merge, crop, and trim helpers. These helpers return detached canonical values
+and do not mutate the input trajectory.
 
-### make(team_id, member_id, trajectory, member_role=None, session_id=None, recorded_at_ms=None) -> MemberTrajectorySnapshot
+## Conversation messages
 
-Create a snapshot and fill runtime defaults. When `session_id` is omitted, the snapshot uses `trajectory.session_id` or `""`. When `recorded_at_ms` is omitted, the current wall-clock time is used.
+Use `trajectory_to_messages()` when a consumer needs ordered conversation messages:
 
-`MemberTrajectorySnapshot` represents published content only. It does not expose a revision number; latest-snapshot ordering is owned by the registry that receives snapshots.
+```python
+from openjiuwen.agent_evolving.trajectory.messages import trajectory_to_messages
 
----
-
-## class openjiuwen.agent_evolving.trajectory.registry.TrajectorySink
-
-Protocol for publishing member trajectory snapshots.
-
-### publish_member_trajectory(snapshot) -> None
-
-Publish the latest bounded trajectory snapshot for one member.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.registry.TrajectorySource
-
-Protocol for reading aggregated runtime trajectory evidence.
-
-### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
-
-Return the aggregated team trajectory for a session, or `None` when the source has no snapshots for that `(team_id, session_id)`.
-
-### get_member_trajectory(team_id, session_id, member_id) -> Trajectory | None
-
-Return the latest independent trajectory published by one member without merging leader or peer trajectories. This
-method returns `None` when no matching snapshot exists and is suitable for hosts that must attribute task feedback
-strictly to its assignee.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.registry.InMemoryTrajectoryRegistry
-
-In-memory runtime registry that implements both `TrajectorySink` and `TrajectorySource`.
-
-```text
-class InMemoryTrajectoryRegistry()
-```
-
-### publish_member_trajectory(snapshot) -> None
-
-Receive one member snapshot. For the same `(team_id, session_id, member_id)`, the registry keeps the latest snapshot by this ordering:
-
-1. Newer `recorded_at_ms` wins.
-2. If `recorded_at_ms` is equal, the snapshot received later by this registry wins.
-
-The receive order is registry-local internal state and is not part of `MemberTrajectorySnapshot`.
-
-### get_trajectory(team_id, session_id, filter_collaborative=True) -> Trajectory | None
-
-Aggregate the latest snapshot for each member in the session. When `filter_collaborative=True`, teammate trajectories are filtered to collaboration-relevant steps before merging.
-
-### get_member_trajectory(team_id, session_id, member_id) -> Trajectory | None
-
-Return the latest trajectory for the full `(team_id, session_id, member_id)` key; unknown keys return `None`.
-
-### clear_session(team_id, session_id) -> None
-
-Remove all snapshots for one team session.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectory
-
-Aggregated team trajectory for a single session.
-
-* **team_id**(str): Team ID.
-* **session_id**(str): Session ID.
-* **combined**(Trajectory): Merged team trajectory.
-* **members**(Dict[str, Trajectory]): Member ID to individual trajectory mapping.
-
----
-
-## class openjiuwen.agent_evolving.trajectory.aggregator.TeamTrajectoryAggregator
-
-Aggregates member trajectories into one team-level view.
-
-```text
-class TeamTrajectoryAggregator(
-    *,
-    store: Optional[TrajectoryStore] = None,
-    trajectories_dir: Optional[Path] = None,
-    team_id: str,
+messages = trajectory_to_messages(
+    trajectory,
+    fields={"content", "name", "tool_calls", "tool_call_id"},
 )
 ```
 
-### aggregate(session_id, filter_collaborative=True) -> TeamTrajectory
+The projection sorts spans, merges overlapping prompt snapshots, normalizes OpenAI-compatible tool calls, and can
+select the message fields required by the caller. It does not write messages back into `Trajectory`.
 
-Aggregate all member trajectories for one session.
+`tool_call_id()`, `tool_call_name()`, and `tool_call_arguments()` accept mapping or object-style tool calls, including
+nested `function` fields.
 
-**Parameters**:
+## Team selectors
 
-* **session_id**(str): Session to aggregate.
-* **filter_collaborative**(bool): Whether to keep only collaboration-relevant member steps.
+`openjiuwen.agent_evolving.trajectory.team` provides stateless Team views:
 
-**Returns**:
+- `span_category()` and `is_team_span()`
+- `select_team_spans()` and `iter_team_spans()`
+- `build_team_forest()`, `team_forest()`, and `flatten_forest()`
+- `select_member_spans()`, `member_spans()`, `member_ids()`, and `group_spans_by_member()`
+- `select_task_spans()` and `descendant_spans()`
 
-* **TeamTrajectory**: Aggregated team view.
+These functions select or organize existing canonical spans. They do not create a Team trajectory registry or a
+second Team data model.
 
----
+## Offline construction
 
-## func openjiuwen.agent_evolving.trajectory.aggregator.filter_member_trajectory(trajectory: Trajectory) -> Trajectory
+Legacy-style construction and session extraction remain available only under the explicit offline namespace:
 
-Filter one member trajectory to collaboration-relevant steps only.
+```python
+from openjiuwen.agent_evolving.trajectory.offline import (
+    TrajectoryBuilder,
+    TrajectoryExtractor,
+)
+```
+
+Use these APIs for offline conversion and dataset tooling. Online evolution and RL capture use
+`TrajectorySpanProcessor` and Rails instead.
+
+## Migration notes
+
+The following former root/runtime APIs were removed:
+
+- `LLMCallDetail`, `ToolCallDetail`, and `TrajectoryStep`
+- online `TrajectoryBuilder` / `TrajectoryExtractor` exports
+- `MemberTrajectorySnapshot`, `TrajectorySource`, `TrajectorySink`, and `InMemoryTrajectoryRegistry`
+- `TeamTrajectory`, `TeamTrajectoryAggregator`, and online aggregation helpers
+
+Do not restore compatibility imports for these names. Use canonical spans, stateless accessors, Team root-trace
+routing, or the explicit offline namespace as appropriate.

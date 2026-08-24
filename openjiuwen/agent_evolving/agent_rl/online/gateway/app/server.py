@@ -45,10 +45,11 @@ async def _snapshot_stats(
     return {
         "total_requests": total_requests,
         "total_samples": trajectory_stats["total_samples"],
-        "trajectory_store_backend": trajectory_stats["trajectory_store_backend"],
         "trajectory_store_total": trajectory_stats["trajectory_store_total"],
         "trajectory_store_pending": trajectory_stats["trajectory_store_pending"],
         "collection": completion_runtime.collection_stats(),
+        "sft_pending_raw": trajectory_stats.get("sft_pending_raw", 0),
+        "sft_pending_samples": trajectory_stats.get("sft_pending_samples", 0),
     }
 
 
@@ -108,17 +109,20 @@ def _trajectory_list_filters(request: Request) -> TrajectoryListFilters:
     )
 
 
+def _lora_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
 def _lora_to_response(
     version: Any,
     *,
     latest_version: str | None = None,
     load_status: str = "not_loaded",
+    size_bytes: int = 0,
 ) -> dict[str, Any]:
     is_latest = latest_version == version.version
-    path = Path(version.path)
-    size_bytes = 0
-    if path.exists():
-        size_bytes = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
     return {
         "lora_id": _lora_id(version.user_id, version.version),
         "model_id": version.user_id,
@@ -189,7 +193,7 @@ def build_gateway_app(
     forwarder: Forwarder,
     upstream_client: UpstreamGatewayClient,
     trajectory_runtime: GatewayTrajectoryRuntime,
-    training_task_store: TrainingTaskStore | None = None,
+    training_task_store: TrainingTaskStore,
     close_resources: Callable[[], Awaitable[None]],
     lora_repo: Any = None,
     collector: GatewayCollector | None = None,
@@ -306,11 +310,19 @@ def build_gateway_app(
         }
 
     async def _lora_response(version: Any, *, latest_version: str | None = None) -> dict[str, Any]:
+        size_bytes = await asyncio.to_thread(_lora_size_bytes, Path(version.path))
         return _lora_to_response(
             version,
             latest_version=latest_version,
             load_status=await _lora_load_status(version),
+            size_bytes=size_bytes,
         )
+
+    async def _create_training_task(payload: Optional[dict[str, Any]]) -> dict[str, Any]:
+        try:
+            return await training_task_store.create_task(payload or {})
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI):
@@ -356,22 +368,26 @@ def build_gateway_app(
         payload: Optional[dict[str, Any]] = Body(default=None),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """Create the single active async training task consumed by the scheduler."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
-        try:
-            return await training_task_store.create_task(payload or {})
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return await _create_training_task(payload)
+
+    @app.post("/v1/training/tasks:trigger")
+    async def trigger_training_task(
+        payload: Optional[dict[str, Any]] = Body(default=None),
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        """Explicit manual trigger alias for creating one async training task."""
+        await ensure_gateway_auth(config.gateway_api_key, authorization)
+        return await _create_training_task(payload)
 
     @app.get("/v1/training/tasks")
     async def list_training_tasks(
         limit: int = Query(default=20),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """List recent async training tasks."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
         return {"items": await training_task_store.list_tasks(limit=limit)}
 
     @app.get("/v1/training/tasks/{task_id}")
@@ -379,9 +395,8 @@ def build_gateway_app(
         task_id: str,
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """Get one async training task by id."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
         task = await training_task_store.get_task(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="training task not found")
@@ -393,9 +408,8 @@ def build_gateway_app(
         payload: Optional[dict[str, Any]] = Body(default=None),
         authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        """Request stop or update terminal status for one async training task."""
         await ensure_gateway_auth(config.gateway_api_key, authorization)
-        if training_task_store is None:
-            raise HTTPException(status_code=503, detail="training task store is not configured")
         payload = payload or {}
         status = str(payload.get("status") or "").strip()
         if status not in {"stopping", "canceled", "succeeded", "failed"}:
@@ -421,7 +435,7 @@ def build_gateway_app(
             len(payload.get("samples") or []) if isinstance(payload.get("samples"), list) else None,
         )
         try:
-            result = await trajectory_runtime.rail_ingestor.ingest_rail_batch(payload)
+            result = await trajectory_runtime.batch_create_trajectories(payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"ok": True, "result": result}

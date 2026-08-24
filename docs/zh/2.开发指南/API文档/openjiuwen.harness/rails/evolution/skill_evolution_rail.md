@@ -37,6 +37,7 @@ configure_skill_evolution(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     auto_save=False,
     language="cn",
 )
@@ -52,6 +53,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )
@@ -110,7 +112,7 @@ class SkillEvolutionRail(
     review_runtime: EvolutionReviewRuntime,
     subject_kind: str = "skill",
     language: str = "cn",
-    trajectory_store: Optional[TrajectoryStore] = None,
+    trajectory_span_processor: TrajectorySpanProcessor,
     eval_interval: int = 5,
     evolution_total_timeout_secs: float = 600.0,
     generate_records_llm_policy: LLMInvokePolicy = ...,
@@ -138,7 +140,7 @@ class SkillEvolutionRail(
 * **review_runtime** (EvolutionReviewRuntime): review 子智能体状态与中断审核绑定的共享运行时，active-review 依赖必须显式传入。
 * **subject_kind** (str): 本 rail 的演进对象类型（`"skill"` 或 `"swarm-skill"`，会做统一归一化）。
 * **language** (str): prompt 语言，常见值为 `"cn"` 或 `"en"`。
-* **trajectory_store** (TrajectoryStore, 可选): 执行轨迹存储。
+* **trajectory_span_processor** (TrajectorySpanProcessor): 已注册到运行时 OpenTelemetry provider 的共享 processor。
 * **eval_interval** (int): 经验展示评分检查间隔，必须大于等于 1。
 * **evolution_total_timeout_secs** (float): 后台演进总超时预算。
 * **generate_records_llm_policy** (LLMInvokePolicy): 经验记录生成阶段的 LLM 重试/超时策略。
@@ -175,12 +177,14 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
 )
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     team_id="research-team",
 )
@@ -280,7 +284,7 @@ event.payload["evolution_meta"]
 
 ### evolution_store -> EvolutionStore
 
-skill 数据的演进存储，与 `trajectory_store` 不同。
+Skill experience 数据的演进存储。执行轨迹仍由注入的 processor 和 Rail clean window 管理。
 
 ### store -> EvolutionStore
 
@@ -360,6 +364,7 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     auto_save=False,
 )

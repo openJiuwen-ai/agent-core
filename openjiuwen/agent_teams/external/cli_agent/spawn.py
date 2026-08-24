@@ -32,7 +32,7 @@ from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliR
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
-from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRuntimeContext
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
@@ -174,6 +174,7 @@ async def build_cli_runtime(
     codex_bypass_approvals_and_sandbox: bool = False,
     codex_turn_idle_timeout_s: float | None = None,
     codex_turn_idle_retries: int | None = None,
+    external_model_config: ExternalCliModelConfig | None = None,
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
@@ -216,6 +217,8 @@ async def build_cli_runtime(
             one SDK turn. Every received SDK notification refreshes it.
         codex_turn_idle_retries: Optional number of same-thread retries when a
             stalled turn emitted no SDK notifications and was interrupted.
+        external_model_config: Optional model endpoint config translated into
+            backend-specific SDK options.
         system_prompt: The member's team-rail system prompt. Claude receives it
             through SDK options, Codex through SDK thread options, and other CLIs
             may receive it as a launch arg.
@@ -261,12 +264,25 @@ async def build_cli_runtime(
         else:
             base_env = {}
         env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
+        team_logger.info(
+            "[external-cli] preparing claude member {} cwd={} cli_path_configured={} inject_mcp={} "
+            "mcp_server_name={} mcp_server_command={} team_join_env_present={} ssh_transport_configured={}",
+            ctx.member_name,
+            cwd,
+            cli_path is not None,
+            inject_mcp,
+            mcp_server_name,
+            mcp_server_command,
+            "OPENJIUWEN_TEAM_JOIN" in env,
+            ssh_transport is not None,
+        )
         return build_claude_runtime(
             member_name=ctx.member_name or "",
             cwd=cwd,
             add_dirs=add_dirs,
             env=env,
             cli_path=cli_path,
+            external_model_config=external_model_config,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,
             mcp_server_command=mcp_server_command,
@@ -277,6 +293,7 @@ async def build_cli_runtime(
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
             team_name=descriptor.team_name,
+            role=ctx.role.value,
         )
     if ctx.cli_agent == "codex":
         if command_override is not None:
@@ -290,6 +307,18 @@ async def build_cli_runtime(
                 reason="ssh transport is not yet supported for Codex SDK members",
             )
         env = {**dict(os.environ), **(extra_env or {}), **descriptor.to_env()}
+        team_logger.info(
+            "[external-cli] preparing codex member {} cwd={} cli_path_configured={} codex_bin_configured={} "
+            "inject_mcp={} mcp_server_name={} mcp_server_command={} team_join_env_present={}",
+            ctx.member_name,
+            cwd,
+            cli_path is not None,
+            codex_bin is not None,
+            inject_mcp,
+            mcp_server_name,
+            mcp_server_command,
+            "OPENJIUWEN_TEAM_JOIN" in env,
+        )
         if add_dirs:
             team_logger.debug(
                 "[external-cli] codex member {} uses cwd {}; extra add_dirs are not supported by the Codex SDK",
@@ -315,10 +344,12 @@ async def build_cli_runtime(
             bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
             system_prompt=system_prompt,
             codex_bin=cli_path or codex_bin,
+            external_model_config=external_model_config,
             resume_external_backend=resume_external_backend,
             turn_idle_timeout_s=codex_turn_idle_timeout_s,
             turn_idle_retries=codex_turn_idle_retries,
             team_context_tracker=team_context_tracker,
+            role=ctx.role.value,
         )
     if ssh_transport is not None:
         raise_error(

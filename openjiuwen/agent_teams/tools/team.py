@@ -368,18 +368,18 @@ class TeamBackend:
         fork_value,
         *,
         fork_source: str | None = None,
-        compact: bool = False,
+        fork_mode: str = "before",
     ) -> None:
         self._pending_forks[member] = {
             "fork": fork_value,
             "since": None,
             "source": fork_source,
-            "compact": compact,
+            "fork_mode": fork_mode,
         }
         team_logger.debug(
             "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
-            "compact=%s team_name=%s pending_keys=%s",
-            member, fork_value, fork_source, compact,
+            "fork_mode=%s team_name=%s pending_keys=%s",
+            member, fork_value, fork_source, fork_mode,
             self.team_name, list(self._pending_forks.keys()),
         )
 
@@ -2029,9 +2029,31 @@ class TeamBackend:
                 restored[member.member_name] = cli_agent
         self._external_cli_specs.update(restored)
 
-    def is_external_cli_agent(self, member_name: str) -> bool:
-        """Return whether ``member_name`` is driven by an external CLI."""
-        return member_name in self._external_cli_specs
+    async def is_external_cli_agent(self, member_name: str) -> bool:
+        """Whether ``member_name`` is driven by an external CLI.
+
+        Queries ``member_options.cli_agent`` from DB on every call — no
+        in-memory cache, so the answer is always current regardless of when
+        the member was spawned or whether
+        :meth:`restore_external_cli_specs_from_db` has run yet. Mirrors
+        :meth:`is_human_agent`: a role probe used outside the hot spawn
+        path must read the persistent truth, because the in-memory
+        ``_external_cli_specs`` is only repopulated by
+        ``restore_external_cli_specs_from_db`` inside ``recover_team``; a
+        caller reaching this before that restore (fresh build, post-
+        ``clean_team`` rebuild, or any path that skips recover) would
+        otherwise get a stale ``False`` for a real external-CLI member.
+        """
+        if not member_name:
+            return False
+        if self.db is None:
+            return False
+        from openjiuwen.agent_teams.tools.member_options import get_member_cli_agent
+
+        row = await self.db.member.get_member(member_name, self.team_name)
+        if row is None:
+            return False
+        return bool(get_member_cli_agent(row))
 
     def get_external_cli_agent(self, member_name: str) -> Optional[str]:
         """Return the cli_agent backend name for a member, or ``None``."""
@@ -2117,7 +2139,7 @@ class TeamBackend:
             status=MemberStatus.UNSTARTED,
             execution_status=ExecutionStatus.IDLE,
             mode=self.teammate_mode,
-            role=TeamRole.TEAMMATE,
+            role=TeamRole.EXTERNAL_CLI,
             cli_agent=cli_agent,
         )
         if not result.ok:

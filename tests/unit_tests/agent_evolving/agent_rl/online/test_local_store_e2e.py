@@ -6,11 +6,11 @@ import httpx
 import pytest
 
 from openjiuwen.agent_evolving.agent_rl.online.gateway.app.bootstrap import build_app_from_config
-from openjiuwen.agent_evolving.agent_rl.online.scheduler.online_training_scheduler import (
+from openjiuwen.agent_evolving.agent_rl.online.core.scheduler import (
     OnlineTrainingScheduler,
 )
 from openjiuwen.agent_evolving.agent_rl.storage.local_store import LocalTrajectoryStore
-from openjiuwen.agent_evolving.agent_rl.storage.store_factory import build_scheduler_store_bundle
+from openjiuwen.agent_evolving.agent_rl.online.core.store_factory import build_scheduler_store_bundle
 
 
 class _FakeUpstreamClient:

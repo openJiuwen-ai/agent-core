@@ -33,12 +33,16 @@ class ForkContext:
         messages: Encoded message dicts (json-native), ready for
             cross-process transport.
         compact_split: When not ``None``, ``compact_context`` will
-            compress messages *before* this index; messages at and
-            after are kept verbatim.  Set by the caller after capture.
+            compress the side opposite ``compact_direction``.  Set by
+            the caller after capture.
+        compact_direction: Which side of ``compact_split`` is kept
+            verbatim — ``"before"`` (default, compress the tail) or
+            ``"after"`` (compress the head, keep the tail verbatim).
     """
 
     messages: list[dict]
     compact_split: int | None = None
+    compact_direction: str = "before"
 
     @classmethod
     def from_agent(
@@ -47,6 +51,7 @@ class ForkContext:
         *,
         session_id: str | None = None,
         checkpoint: int | None = None,
+        keep: str = "before",
     ) -> "ForkContext":
         """Snapshot an agent's current context.
 
@@ -58,8 +63,12 @@ class ForkContext:
                 ``get_current_context()`` yields the live messages.
             session_id: Optional session id passed to
                 ``get_current_context``.
-            checkpoint: Truncate messages *before* this index.
-                ``None`` returns the full context.
+            checkpoint: Split index for truncation. ``None`` returns the
+                full context.
+            keep: Which side of ``checkpoint`` to keep — ``"before"``
+                (messages before the checkpoint, default) or ``"after"``
+                (messages from the checkpoint onward). Ignored when
+                ``checkpoint`` is ``None``.
         """
         try:
             msgs = agent.get_current_context(session_id=session_id)
@@ -76,26 +85,47 @@ class ForkContext:
 
         if checkpoint is not None:
             if 0 <= checkpoint < len(msgs):
-                truncated = msgs[:checkpoint]
-                last = truncated[-1] if truncated else None
-                # The checkpoint is recorded at tool-invoke time (len(messages)),
-                # which lands right after the assistant carrying the checkpoint
-                # call and before its ToolMessage result is appended. Carry the
-                # closing ToolMessage(s) across the boundary so the injected
-                # context has no dangling tool call — the product rail would
-                # otherwise mark it as "[工具执行被中断]".
-                if (
-                    isinstance(last, AssistantMessage)
-                    and getattr(last, "tool_calls", None)
-                    and isinstance(msgs[checkpoint], ToolMessage)
-                ):
-                    i = checkpoint
-                    while i < len(msgs) and isinstance(msgs[i], ToolMessage):
-                        truncated.append(msgs[i])
-                        i += 1
-                msgs = truncated
+                if keep == "after":
+                    # The checkpoint is recorded at tool-invoke time, so the
+                    # after-window starts at the closing ToolMessage block of
+                    # the assistant that carried the checkpoint call. Drop
+                    # leading orphan ToolMessages (their assistant is not
+                    # inherited), then keep the rest.
+                    msgs = cls._trim_leading_orphan_tool_messages(msgs[checkpoint:])
+                else:
+                    truncated = msgs[:checkpoint]
+                    last = truncated[-1] if truncated else None
+                    # The checkpoint is recorded at tool-invoke time (len(messages)),
+                    # which lands right after the assistant carrying the checkpoint
+                    # call and before its ToolMessage result is appended. Carry the
+                    # closing ToolMessage(s) across the boundary so the injected
+                    # context has no dangling tool call — the product rail would
+                    # otherwise mark it as "[工具执行被中断]".
+                    if (
+                        isinstance(last, AssistantMessage)
+                        and getattr(last, "tool_calls", None)
+                        and isinstance(msgs[checkpoint], ToolMessage)
+                    ):
+                        i = checkpoint
+                        while i < len(msgs) and isinstance(msgs[i], ToolMessage):
+                            truncated.append(msgs[i])
+                            i += 1
+                    msgs = truncated
 
         return cls(messages=[encode_message(m) for m in msgs])
+
+    @staticmethod
+    def _trim_leading_orphan_tool_messages(messages: list) -> list:
+        """Drop leading ``ToolMessage`` entries that have no inherited assistant.
+
+        The after-window of a checkpoint starts at the checkpoint call's result
+        block; the assistant that produced those calls is not inherited, so the
+        results would otherwise appear as orphans to the context rail.
+        """
+        start = 0
+        while start < len(messages) and isinstance(messages[start], ToolMessage):
+            start += 1
+        return messages[start:]
 
     @classmethod
     def _read_persisted_messages(cls, agent) -> list | None:

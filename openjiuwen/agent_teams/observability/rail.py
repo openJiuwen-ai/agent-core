@@ -612,6 +612,31 @@ class ObservabilityRail(DeepAgentRail):
         return ""
 
     @staticmethod
+    def _resolve_role(agent: Any) -> str:
+        """Return the role string for span stamping, mirroring ``_resolve_member_name``.
+
+        Source priority (symmetric with member_name resolution):
+          1. ``agent.role`` — ``TeamAgent`` property, returns a ``TeamRole``
+             enum whose ``.value`` is the authoritative role string.
+          2. ``agent.build_context.role`` — ``NativeHarness`` / ``DeepAgent``
+             shells expose the build context set by the configurator from
+             ``ctx.role.value`` (a plain role string such as ``"leader"`` or
+             ``"human_agent"``).
+          3. Falls back to ``""`` (caller substitutes member_name).
+        """
+        role_attr = getattr(agent, "role", None)
+        if isinstance(role_attr, TeamRole):
+            return role_attr.value
+        build_ctx = getattr(agent, "build_context", None)
+        bc_role = getattr(build_ctx, "role", None) if build_ctx else None
+        if isinstance(bc_role, str) and bc_role:
+            try:
+                return TeamRole(bc_role).value
+            except ValueError:
+                pass
+        return ""
+
+    @staticmethod
     def _stamp_agent_attributes(
         span: Span,
         *,
@@ -623,11 +648,13 @@ class ObservabilityRail(DeepAgentRail):
     ) -> None:
         """Apply the common agent-span attributes shared by iteration and invoke spans.
 
-        ``is_leader`` is accepted for symmetry with the iteration path but
-        does not alter the role attribute here — ``AT_AGENT_ROLE`` carries
-        the member name (its long-standing semantics); leader-vs-teammate is
-        distinguished elsewhere via ``agent.role``.
+        ``AT_AGENT_ROLE`` carries the agent's role value (e.g. ``leader`` /
+        ``teammate`` / ``human_agent`` / ``external_cli``) resolved via
+        ``_resolve_role``. Sub-agents and shells that expose neither
+        ``agent.role`` nor a ``build_context.role`` fall back to the member
+        name so the attribute is never empty.
         """
+        role_value = ObservabilityRail._resolve_role(agent) or member_name or ""
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
         if team_name and member_name:
             span.set_attribute(AT_AGENT_ID, f"{team_name}_{member_name}")
@@ -637,7 +664,7 @@ class ObservabilityRail(DeepAgentRail):
             span.set_attribute(AT_AGENT_NAME, member_name)
             span.set_attribute(AT_MEMBER_ID, member_name)
             span.set_attribute(AT_MEMBER_NAME, member_name)
-        span.set_attribute(AT_AGENT_ROLE, member_name or "")
+        span.set_attribute(AT_AGENT_ROLE, role_value)
         if team_name:
             span.set_attribute(AT_TEAM_ID, team_name)
         if session_id:

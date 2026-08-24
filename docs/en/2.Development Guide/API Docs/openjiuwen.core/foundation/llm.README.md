@@ -12,7 +12,7 @@
 | **BaseModelClient** | Large model client abstract base class. |
 | **OpenAIModelClient** | OpenAI-compatible large model client implementation. |
 | **OpenAIAccountModelClient** | OpenAI account OAuth large model client implementation, signing in via OAuth credentials with no `api_key` required. |
-| **DashScopeModelClient** | DashScope (Tongyi Qianwen) large model client implementation, supporting conversational, image generation, speech synthesis, and video generation multimodal features. |
+| **AnthropicModelClient** | Anthropic protocol client. Legacy `client_provider` names such as `DashScope` and `DeepSeek` are OpenAI-compatible aliases. See [LLM Protocol Consolidation](../../Basic%20Functions/LLM%20Protocol%20Consolidation.md). |
 | **BaseOutputParser** | Output parser abstract base class. |
 | **JsonOutputParser** | JSON format output parser. |
 | **MarkdownOutputParser** | Markdown format output parser. |

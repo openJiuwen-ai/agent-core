@@ -94,13 +94,15 @@ async def inprocess_spawn(
             "[fork] %d messages injected into %s",
             len(fork_from.messages), ctx.member_name,
         )
-        # Compaction: compress older messages before the split point.
+        # Compaction: compress the side opposite ``compact_direction`` at the
+        # split point.
         if fork_from.compact_split is not None:
             from openjiuwen.agent_teams.fork_compact import compact_context
 
             await compact_context(
                 native, split_at=fork_from.compact_split,
                 session_id=session_id,
+                direction=fork_from.compact_direction,
             )
     else:
         team_logger.debug(

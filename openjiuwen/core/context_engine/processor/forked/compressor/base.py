@@ -39,6 +39,11 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
+from openjiuwen.core.foundation.kv_cache import (
+    KVCacheIdentity,
+    context_compressor_cache_identity,
+    resolve_session_lineage,
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)
@@ -73,6 +78,9 @@ class PrefixCompactProcessorConfig(BaseModel):
     # effect analysis. Disabled by default; zero overhead when off.
     enable_compression_dump: bool = Field(default=False)
     compression_dump_dir: str | None = Field(default=None)
+    # ContextProcessorRail derives this from the owning ReActAgent config.
+    # Direct processor users remain affinity-off unless they opt in explicitly.
+    enable_kv_cache_affinity: bool = Field(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -337,7 +345,10 @@ class PrefixCompactProcessor(ContextProcessor):
                 exclude_recent_messages=len(span.protected_tail),
             )
             try:
-                response = await self._compression_executor.invoke(request)
+                response = await self._invoke_compression(
+                    context=context,
+                    request=request,
+                )
                 return response, span, request
             except CompressionError as exc:
                 if exc.is_context_overflow:
@@ -443,6 +454,76 @@ class PrefixCompactProcessor(ContextProcessor):
             except Exception as exc:
                 logger.warning("[%s] compression failed: %s", self.processor_type(), exc, exc_info=True)
                 return None
+
+    async def _invoke_compression(
+        self,
+        *,
+        context: ModelContext,
+        request: CompressionRequest,
+    ) -> CompressionResult:
+        if self._compression_executor is None:
+            raise RuntimeError("compression executor is not initialized")
+
+        invoke_kwargs, identity = self._build_compressor_affinity(context)
+        try:
+            return await self._compression_executor.invoke(
+                request,
+                **invoke_kwargs,
+            )
+        finally:
+            if identity is not None:
+                await self._cleanup_compressor_cache(identity)
+
+    def _build_compressor_affinity(
+        self,
+        context: ModelContext,
+    ) -> tuple[dict[str, Any], KVCacheIdentity | None]:
+        if not getattr(self.config, "enable_kv_cache_affinity", False):
+            return {}, None
+        if self._model is None:
+            return {}, None
+
+        session = None
+        get_session_ref = getattr(context, "get_session_ref", None)
+        if callable(get_session_ref):
+            session = get_session_ref()
+        owner_cache_id, _ = resolve_session_lineage(session)
+        owner_cache_id = str(
+            owner_cache_id or context.session_id() or ""
+        ).strip()
+        identity = context_compressor_cache_identity(
+            owner_cache_id,
+            self.processor_type(),
+        )
+        invoke_kwargs = self._model.build_kv_cache_affinity_invoke_kwargs(
+            session_id=identity.cache_id,
+            parent_session_id=identity.parent_cache_id,
+            enable_kv_cache_affinity=True,
+        )
+        if not invoke_kwargs:
+            return {}, None
+        return invoke_kwargs, identity
+
+    async def _cleanup_compressor_cache(
+        self,
+        identity: KVCacheIdentity,
+    ) -> None:
+        if self._model is None:
+            return
+        try:
+            await self._model.evict_kvc(
+                session_id=identity.cache_id,
+                parent_session_id=identity.parent_cache_id,
+                target="session",
+            )
+        except Exception as exc:  # pragma: no cover - best-effort optimization
+            logger.warning(
+                "[%s] failed to evict compressor KV cache %s: %s",
+                self.processor_type(),
+                identity.cache_id,
+                exc,
+                exc_info=True,
+            )
 
     def _build_context_overflow_retry_span(
         self,

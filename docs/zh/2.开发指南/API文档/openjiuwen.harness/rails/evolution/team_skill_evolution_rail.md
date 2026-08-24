@@ -39,6 +39,7 @@ Rail 只校验重复证据数量，不判断证据是否属于同一语义模式
 class TeamSkillCreateRail(
     skills_dir: str,
     *,
+    trajectory_span_processor: TrajectorySpanProcessor,
     language: str = "cn",
     auto_trigger: bool = True,
     min_team_members_for_create: int = 2,
@@ -48,6 +49,7 @@ class TeamSkillCreateRail(
 **参数**：
 
 * **skills_dir** (str): 技能目录路径。
+* **trajectory_span_processor** (TrajectorySpanProcessor): 已注册到运行时 OpenTelemetry provider 的共享 processor。
 * **language** (str): 语言设置，支持 `"cn"` 或 `"en"`。
 * **auto_trigger** (bool): 是否自动触发，默认 `True`。
 * **min_team_members_for_create** (int): 触发阈值，`spawn_member` 调用次数达到此值时触发，默认 2。
@@ -91,6 +93,7 @@ configure_skill_evolution(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     team=True,
     auto_save=False,
     language="cn",
@@ -107,6 +110,7 @@ team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     team_id="research-team",
     auto_save=False,
@@ -141,12 +145,14 @@ skill_rail = SkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
 )
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
     team_id="research-team",
 )
@@ -181,9 +187,7 @@ class TeamSkillRail(
     llm: Model,
     model: str,
     language: str = "cn",
-    trajectory_store: Optional[TrajectoryStore] = None,
-    trajectory_source: Optional[TrajectorySource] = None,
-    trajectory_sink: Optional[TrajectorySink] = None,
+    trajectory_span_processor: TrajectorySpanProcessor,
     member_role: Optional[str] = None,
     signal_trigger: Optional[bool] = None,
     auto_save: bool = False,
@@ -191,7 +195,6 @@ class TeamSkillRail(
     async_evolution: bool = True,
     max_concurrent_evolution: int = 1,
     team_id: Optional[str] = None,
-    trajectories_dir: Optional[Path] = None,
     record_llm_policy: LLMInvokePolicy = ...,
     evaluate_llm_policy: LLMInvokePolicy = ...,
     simplify_llm_policy: LLMInvokePolicy = ...,
@@ -210,17 +213,14 @@ class TeamSkillRail(
 * **llm** (Model): LLM 客户端实例。
 * **model** (str): 模型名称。
 * **language** (str): 语言设置。
-* **trajectory_store** (TrajectoryStore, 可选): 轨迹存储实例。
-* **trajectory_source** (TrajectorySource, 可选): 运行时聚合成员轨迹证据的 source。
-* **trajectory_sink** (TrajectorySink, 可选): 发布当前成员最新轨迹 snapshot 的 sink。
-* **member_role** (str, 可选): 写入 snapshot 的成员角色。团队技能演进默认是 `"leader"`。
+* **trajectory_span_processor** (TrajectorySpanProcessor): 已注册到运行时 OpenTelemetry provider 的共享 processor。
+* **member_role** (str, 可选): 写入轨迹 resource metadata 的成员角色。团队技能演进默认是 `"leader"`。
 * **signal_trigger** (bool, 可选): 是否检测被动 team completion 并触发被动演进，默认 `False`。
 * **auto_save** (bool): 是否自动保存生成的经验记录，默认 `False`（需用户审批）。
 * **review_runtime** (EvolutionReviewRuntime): 主动审核与中断复用的共享运行时（必填）。
 * **async_evolution** (bool): 是否异步执行演进，默认 `True`。
 * **max_concurrent_evolution** (int): 后台演进最大并发数，默认 1。
 * **team_id** (str, 可选): 团队 ID。
-* **trajectories_dir** (Path, 可选): 轨迹目录路径。
 * **record_llm_policy** (LLMInvokePolicy): 经验记录生成 LLM 调用策略。
 * **evaluate_llm_policy** (LLMInvokePolicy): 经验评估 LLM 调用策略。
 * **simplify_llm_policy** (LLMInvokePolicy): 经验简化 LLM 调用策略。
@@ -231,29 +231,14 @@ class TeamSkillRail(
 * **review_interval** (int): 共享基类接受的 review 间隔，必须大于等于 1，默认 5；Team review follow-up 仍由团队完成态驱动。
 * **review_agent_max_iterations** (int): `evolution_reviewer` 的最大迭代次数，默认 40。
 
-### 运行时轨迹 Source/Sink
+### 运行时轨迹采集
 
-`TeamSkillRail` 使用 `trajectory_source` 和 `trajectory_sink` 完成在线团队轨迹聚合。常见配置是把同一个 `InMemoryTrajectoryRegistry` 同时作为 source 和 sink：
+`TeamSkillRail` 消费 `EvolutionRail` 维护的 canonical clean window。Subscription 使用当前 Team root
+trace ID，因此 leader Rail 可以选择同进程协作 span，不再需要运行时 source/sink registry。宿主必须注入
+与该 runtime 其他 Rails 共用的、已经注册的 `TrajectorySpanProcessor`。
 
-```python
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
-from openjiuwen.harness.rails import TeamSkillRail
-
-trajectory_registry = InMemoryTrajectoryRegistry()
-
-team_rail = TeamSkillRail(
-    skills_dir="/path/to/skills",
-    llm=model_client,
-    model="gpt-4",
-    team_id="research-team",
-    trajectory_source=trajectory_registry,
-    trajectory_sink=trajectory_registry,
-)
-```
-
-Rail 在 invoke 结束后发布 `MemberTrajectorySnapshot`。snapshot 包含 `team_id`、`session_id`、`member_id`、`member_role`、`trajectory` 和 `recorded_at_ms`，不包含 public revision。`InMemoryTrajectoryRegistry` 负责判定最新 snapshot：`recorded_at_ms` 更新者优先；时间相同则按 registry 接收顺序，后接收者优先。
-
-若要聚合多个成员，需要让所有贡献轨迹证据的 rail 或 agent 都发布到同一个 `trajectory_sink`；本 rail 再通过 `trajectory_source` 读取这个共享 registry。
+Team clean window 是在线演进证据，不是完整 Team runtime archive。当前实现不提供
+`TeamTrajectoryRail`、`MemberTrajectorySnapshot` 或 `InMemoryTrajectoryRegistry`。
 
 ### 优先级
 
@@ -278,18 +263,6 @@ Rail 在 invoke 结束后发布 `MemberTrajectorySnapshot`。snapshot 包含 `te
 ### evolution_config -> dict
 
 完整演进配置，包含各阶段 LLM 调用策略和超时设置。
-
----
-
-## 运行时轨迹方法
-
-### set_trajectory_source(source) -> None
-
-绑定或替换用于聚合团队轨迹证据的运行时 `TrajectorySource`。
-
-### set_trajectory_sink(sink, *, team_id, member_role=None) -> None
-
-绑定或替换用于发布本 rail 成员 snapshot 的运行时 `TrajectorySink`。当 `sink` 非 `None` 时必须提供 `team_id`。团队技能演进中的 `member_role` 默认是 `"leader"`。
 
 ---
 
@@ -513,26 +486,28 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 ## 示例
 
 ```python
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
-from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillRail
+from openjiuwen.harness.rails import EvolutionReviewRuntime, TeamSkillCreateRail, TeamSkillRail
 from openjiuwen.harness import create_deep_agent
+
+# 由应用持有、已经注册到 OpenTelemetry 的 processor。
+processor = runtime_processor
+review_runtime = EvolutionReviewRuntime()
 
 # 创建团队技能创建 Rail
 create_rail = TeamSkillCreateRail(
     skills_dir="/path/to/skills",
+    trajectory_span_processor=processor,
     min_team_members_for_create=2,
 )
-
-trajectory_registry = InMemoryTrajectoryRegistry()
 
 # 创建团队技能演进 Rail
 team_rail = TeamSkillRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
+    trajectory_span_processor=processor,
+    review_runtime=review_runtime,
     team_id="research-team",
-    trajectory_source=trajectory_registry,
-    trajectory_sink=trajectory_registry,
     auto_save=False,
     async_evolution=True,
 )

@@ -35,8 +35,7 @@ Unlike regular Skills, Team Skills:
 | `SkillExperienceOptimizer` | Shared optimizer used by the optional passive signal path with `profile="team"`. |
 | `evolution_reviewer` | Dedicated subagent used by Agent-decided active review through the rail-owned `evolve_review_task`. |
 | `ExperienceScorer` | Experience scoring and simplify maintenance |
-| `InMemoryTrajectoryRegistry` | Runtime source/sink for publishing member snapshots and aggregating team trajectory evidence |
-| `TeamTrajectoryAggregator` | Offline/debug aggregation utility for stored member trajectories |
+| `TrajectorySpanProcessor` | Shared in-process projection of completed observability spans into canonical trajectory evidence |
 
 ---
 
@@ -55,6 +54,7 @@ from openjiuwen.harness import create_deep_agent
 create_rail = TeamSkillCreateRail(
     skills_dir="/path/to/skills",
     language="en",
+    trajectory_span_processor=runtime_processor,
     min_team_members_for_create=2,  # trigger when spawn_member >= 2
 )
 
@@ -86,7 +86,6 @@ agent = create_deep_agent(
 ### TeamSkillRail Configuration
 
 ```python
-from openjiuwen.agent_evolving.trajectory import InMemoryTrajectoryRegistry
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.rails import (
     EvolutionInterruptRail,
@@ -94,7 +93,6 @@ from openjiuwen.harness.rails import (
     TeamSkillRail,
 )
 
-trajectory_registry = InMemoryTrajectoryRegistry()
 review_runtime = EvolutionReviewRuntime()
 
 team_rail = TeamSkillRail(
@@ -102,9 +100,8 @@ team_rail = TeamSkillRail(
     llm=model_client,
     model="gpt-4",
     language="en",
+    trajectory_span_processor=runtime_processor,
     team_id="research-team",
-    trajectory_source=trajectory_registry,
-    trajectory_sink=trajectory_registry,
     review_runtime=review_runtime,
     signal_trigger=False,      # opt in to passive signal generation if needed
     review_trigger=True,       # Agent decides after team completion
@@ -125,11 +122,12 @@ agent = create_deep_agent(
 )
 ```
 
-`trajectory_source` and `trajectory_sink` are the runtime integration points for team trajectory aggregation. Rails publish `MemberTrajectorySnapshot` values to the sink after invoke; `TeamSkillRail` reads the source when passive or user-requested evolution needs team-level evidence.
+`runtime_processor` is the application-owned `TrajectorySpanProcessor` already registered with the active OpenTelemetry
+provider. `TeamSkillRail` uses Team root-trace routing to build its canonical clean window directly from completed
+observability spans; all evolution/create Rails in the same runtime should share the processor object.
 
-To aggregate multiple members, every rail or agent that should contribute evidence must publish to the same `trajectory_sink`; `TeamSkillRail` then reads that shared registry through `trajectory_source`.
-
-`MemberTrajectorySnapshot` contains only published content: `team_id`, `session_id`, `member_id`, `member_role`, `trajectory`, and `recorded_at_ms`. Snapshot freshness ordering is owned by `InMemoryTrajectoryRegistry`: newer `recorded_at_ms` wins, and equal timestamps are resolved by the registry's receive order.
+This clean window is online evolution evidence, not a full Team runtime archive. The current API does not use a
+member snapshot source/sink registry.
 
 ### Trigger Timing
 

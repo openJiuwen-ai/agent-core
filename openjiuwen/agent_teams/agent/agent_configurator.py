@@ -576,7 +576,7 @@ class AgentConfigurator:
         if self.workspace_manager:
             team_rail_specs.append(RailSpec(type=TEAM_WORKSPACE, params={}))
 
-        is_coordinated_teammate = ctx.role == TeamRole.TEAMMATE and ctx.team_spec
+        is_coordinated_teammate = ctx.role.is_coordinated_member and ctx.team_spec
         approval_tools = agent_spec.approval_required_tools or []
         can_request_approval = is_coordinated_teammate and self.team_backend and self.messager
         # When team permissions are enabled the platform-mounted
@@ -750,9 +750,13 @@ class AgentConfigurator:
         team_rail_specs.append(observability_rail_spec)
         base_rails = _apply_team_worktree_shell_guard(
             list(build_spec.rails or []),
-            enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE},
+            enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI},
         )
-        if ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE} and not _has_team_worktree_shell_guard(base_rails):
+        if ctx.role in {
+            TeamRole.LEADER,
+            TeamRole.TEAMMATE,
+            TeamRole.EXTERNAL_CLI,
+        } and not _has_team_worktree_shell_guard(base_rails):
             team_logger.warning(
                 "Team-managed worktree shell guard was not applied for member {} because core.sys_operation is absent",
                 member_name,

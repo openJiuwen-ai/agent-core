@@ -742,6 +742,28 @@ def test_context_processor_rail_add_processors_appends_and_replaces_by_key():
     ]
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_compressor_affinity_policy_follows_owning_agent(enabled):
+    processors = ContextProcessorRail(preset=True)._build_preset_processors()
+
+    ContextProcessorRail._apply_compressor_affinity_policy(
+        processors,
+        enabled=enabled,
+    )
+
+    configs = dict(processors)
+    for name in (
+        "DialogueCompressor",
+        "CurrentRoundCompressor",
+        "RoundLevelCompressor",
+    ):
+        assert configs[name].enable_kv_cache_affinity is enabled
+    assert not hasattr(
+        configs["SessionMemoryCompressor"],
+        "enable_kv_cache_affinity",
+    )
+
+
 # =============================================================================
 # ContextProcessorRail - init/uninit Tests
 # =============================================================================

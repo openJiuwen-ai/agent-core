@@ -133,7 +133,7 @@ class SpawnTeammateTool(_SpawnToolBase):
     #: Fork properties and the description slot that documents them. Schema
     #: and prose are gated together — the model must never read about an
     #: argument it has no way to pass.
-    _FORK_PARAMS = ("fork", "fork_source", "compact")
+    _FORK_PARAMS = ("fork", "fork_source", "fork_mode")
     _FORK_SLOT = "fork_usage"
 
     def __init__(
@@ -204,9 +204,16 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "type": "string",
                     "description": t("spawn_teammate", "fork_source"),
                 },
-                "compact": {
-                    "type": "boolean",
-                    "description": t("spawn_teammate", "compact"),
+                "fork_mode": {
+                    "type": "string",
+                    "enum": [
+                        "full",
+                        "before",
+                        "after",
+                        "keep_before_compact_after",
+                        "keep_after_compact_before",
+                    ],
+                    "description": t("spawn_teammate", "fork_mode"),
                 },
             })
         self.card.input_params = {
@@ -266,7 +273,7 @@ class SpawnTeammateTool(_SpawnToolBase):
                 member_name,
                 fork_value,
                 fork_source=inputs.get("fork_source"),
-                compact=inputs.get("compact", False),
+                fork_mode=inputs.get("fork_mode") or "",
             )
         return self._from_result(
             result,

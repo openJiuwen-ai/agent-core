@@ -11,13 +11,11 @@ is a leader-identity mailbox message.
 
 from openjiuwen.agent_teams.agent.scheduling.scheduler import SchedulerHost, TeamScheduler
 from openjiuwen.agent_teams.agent.scheduling.review_feedback_evolution import (
-    GLOBAL_EVOLUTION_EVENTS,
     SKILL_CREATION_EVENTS,
     ReviewFeedbackEvolutionCoordinator,
 )
 
 __all__ = [
-    "GLOBAL_EVOLUTION_EVENTS",
     "SKILL_CREATION_EVENTS",
     "ReviewFeedbackEvolutionCoordinator",
     "SchedulerHost",

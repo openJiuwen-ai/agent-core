@@ -14,6 +14,7 @@ class McpClient(BaseClient):
         super().__init__()
         self._server_path = config.server_path
         self._include_image_content = bool(getattr(config, "include_image_content", False))
+        self._last_connect_error: Optional[BaseException] = None
 
     @abstractmethod
     async def connect(self, *, retry_times: int = 1, timeout: float = NO_TIMEOUT) -> bool:

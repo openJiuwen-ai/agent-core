@@ -295,6 +295,16 @@ class Error(Generic[E]):
         """
         return self._error
 
+    @property
+    def error_message(self) -> E:
+        """Property alias for the error value (mirrors ``msg()``/``error()``).
+
+        Downstream callers commonly probe a Result via ``getattr(result,
+        "error_message", None)``; expose the value through that name so the
+        underlying error is reachable without calling a method.
+        """
+        return self._error
+
 
 Result: TypeAlias = Ok[T] | Error[E]
 """
