@@ -245,8 +245,8 @@ class WorkspaceStore:
     # on first read so the next probe sees a stable value — the backfill
     # touches only the meta, never the body or baseline hash.
 
+    @staticmethod
     def read_member_updated_at(
-        self,
         team_name: str,
         member_name: str,
         field: Literal["card", "prompt"],
