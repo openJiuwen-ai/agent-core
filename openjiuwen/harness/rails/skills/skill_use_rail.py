@@ -381,6 +381,8 @@ class SkillUseRail(DeepAgentRail):
         """Prepare skills before invoke."""
         await self.refresh_skill_prompt(ctx)
         self._ensure_session_baseline(ctx)
+        if self.system_prompt_builder is not None:
+            await self._sync_skill_prompt_and_attachment(ctx)
 
     async def _fetch_evolution_texts(self, skills: Optional[List[Skill]] = None) -> None:
         """Fetch and cache evolution experience texts from EvolutionStore."""
@@ -422,6 +424,10 @@ class SkillUseRail(DeepAgentRail):
         if self.system_prompt_builder is None:
             return
 
+        await self._sync_skill_prompt_and_attachment(ctx)
+
+    async def _sync_skill_prompt_and_attachment(self, ctx: AgentCallbackContext) -> None:
+        """Refresh the stable skill section and the change-only attachment."""
         await self._refresh_skill_prompt_if_changed(ctx)
         # Evolution records can change without changing the Skill.md snapshot.
         # Refresh them independently so the attachment always contains the

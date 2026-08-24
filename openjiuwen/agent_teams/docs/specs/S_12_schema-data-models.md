@@ -778,8 +778,7 @@ CANCELLED    -> (terminal)
   冷恢复回填 `TeamBackend`。静态表迁移 `engine._ensure_team_info_capability_columns`。
 - **spec 配置**（`TeamAgentSpec`，仅 leader 侧消费）：`verify_vote_threshold: float = 2/3`
   （(0,1]）、`default_max_review_rounds: int = 3`（≥1）、`review_stall_timeout: int = 1800`
-  （秒，>0）、`enable_task_verification: bool = True`（提示词开关）；`dispatch_mode` 默认
-  为 `"scheduled"`，语义
+  （秒，>0）、`enable_task_verification: bool = False`（提示词开关）；`dispatch_mode` 语义
   升级为能力上限。校验在 `_validate_review_settings`。
 - **新事件** `TASK_REVIEW_VOTE`（`TaskReviewVoteEvent`）：`member_name`=author、`reviewer`=
   投票人、`decision`、`review_round`、`pass_count`/`fail_count`/`reviewer_count` 票数快照。

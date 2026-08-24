@@ -254,6 +254,21 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
             await rail3.after_tool_call(ctx_skip)
             mock_register3.assert_not_called()
 
+    async def test_register_task_tool_skips_when_subagent_runtime_enabled(self) -> None:
+        rail, _, agent = _make_ctx("enter_plan_mode", mode="plan")
+        agent.deep_config = SimpleNamespace(
+            subagents=[SimpleNamespace()],
+            enable_subagent_runtime=True,
+        )
+
+        with patch(
+            "openjiuwen.harness.rails.agent_mode_rail.create_task_tool",
+        ) as mock_create:
+            rail._register_task_tool(agent)
+
+        mock_create.assert_not_called()
+        self.assertFalse(rail._owns_task_tool)
+
     async def test_after_tool_call_restores_mode_when_still_in_plan(self) -> None:
         rail, ctx, agent = _make_ctx(
             "exit_plan_mode",
@@ -319,7 +334,7 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertTrue(ctx.extra.get("_skip_tool"))
         self.assertIn("not available in plan mode", ctx.inputs.tool_result["error"])
 
-    async def test_static_plan_note_uses_whitelist_and_hides_switch_mode(self) -> None:
+    async def test_legacy_static_plan_note_uses_attachment_and_whitelist(self) -> None:
         tools = [
             _ToolInfo("switch_mode"),
             _ToolInfo("todo_create"),
@@ -343,8 +358,10 @@ class TestAgentModeRail(IsolatedAsyncioTestCase):
         self.assertNotIn("todo_create", visible_tool_names)
         self.assertNotIn("non_whitelist_tool", visible_tool_names)
         self.assertIn("read_file", visible_tool_names)
-        section = rail.system_prompt_builder.added_sections[-1]
-        self.assertEqual(section.content["en"], "Static plan note")
+        self.assertEqual(rail.system_prompt_builder.added_sections, [])
+        item = await rail.attachment_manager.get_by_id("session.sess1.mode_instructions")
+        self.assertIsNotNone(item)
+        self.assertEqual(item.content, "Static plan note")
 
     async def test_static_plan_attachment_note_uses_whitelist_without_changing_system_prompt(self) -> None:
         tools = [
