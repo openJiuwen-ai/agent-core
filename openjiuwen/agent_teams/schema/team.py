@@ -468,6 +468,13 @@ class TeamSpec(BaseModel):
     evolution_enabled: bool = True
     """Self-evolution coverage switch — mirrors ``TeamAgentSpec.evolution_enabled``
     so spawn-time assembly reads the same switch from the runtime spec."""
+    member_workspace_prefix: bool = True
+    """Dynamic-only switch for member workspace isolation (block C).
+
+    Mirrors ``TeamAgentSpec.member_workspace_prefix`` so paths that only see a
+    ``TeamRuntimeContext`` / ``TeamSpec`` resolve the same real-directory
+    shape as in-process members.
+    """
 
 
 class TeamRuntimeContext(BaseModel):

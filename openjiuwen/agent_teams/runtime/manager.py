@@ -813,6 +813,18 @@ class TeamRuntimeManager:
         if not deleted:
             team_logger.info("Team {} already absent from team_info during delete", team_name)
 
+        # Block C: detach member links and release the team's dynamic real dirs
+        # (``.agent_teams/<team>#<member>``) before removing ``team_home`` —
+        # they live outside the team tree (siblings), so a bare rmtree of
+        # ``team_dir`` would otherwise leave them and their ``.refs.json`` refs
+        # behind, and a junction would be descended and delete shared contents.
+        try:
+            from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
+
+            MemberWorkspaceBinder().cleanup_team(team_name)
+        except OSError as exc:
+            team_logger.warning("Failed to clean member workspace links for {}: {}", team_name, exc)
+
         # Remove team filesystem directory (team_home) after database cleanup.
         # This covers the case where the caller has already stopped the runtime
         # (removing the pool entry) before calling delete_team, so we cannot

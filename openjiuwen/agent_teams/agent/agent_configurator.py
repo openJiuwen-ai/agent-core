@@ -41,7 +41,6 @@ from openjiuwen.agent_teams.skill.rail_spec import (
     complete_declared_team_skill_rails,
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.spawn.agent_config import (
     SpawnAgentConfig,
@@ -444,10 +443,25 @@ class AgentConfigurator:
             # its cwd initialisation off it.
             ws_spec = WorkspaceSpec(stable_base=True)
         if ws_spec.stable_base:
-            team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
-            ws_spec = ws_spec.model_copy(
-                update={"root_path": ensure_team_member_workspace_link(team_name, member_name)}
+            from openjiuwen.agent_teams.team_workspace.binder import (
+                prepare_member_workspace,
             )
+
+            team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
+            # Block C member-directory linker: flatten the member's real
+            # directory out of the team tree, expose it in-team via a link.
+            # The root returned is always the in-team ``team_member_workspace_dir``
+            # — A/B code never notices the link.
+            root_path = prepare_member_workspace(
+                team_name=team_name,
+                member_name=ctx.member_name or "",
+                role=ctx.role,
+                leader_member_name=(ctx.team_spec.leader_member_name if ctx.team_spec else None)
+                or spec.leader.member_name,
+                predefined_members={m.member_name for m in spec.predefined_members},
+                member_workspace_prefix=spec.member_workspace_prefix,
+            )
+            ws_spec = ws_spec.model_copy(update={"root_path": root_path})
 
         # cwd is a separate layer from the workspace. The workspace stays the
         # member's private artifact directory (memory, Skill visibility
