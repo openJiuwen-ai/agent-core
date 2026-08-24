@@ -72,6 +72,33 @@ async def test_reflect_creates_tips():
 
 
 @pytest.mark.asyncio
+async def test_reflect_default_tip_ids_are_unique_across_tasks():
+    llm = _FakeReflectorLLM(
+        reflect_json=(
+            '[{"action": "create", "label": "ENVIRONMENT",'
+            ' "content": "A reusable environment fact.", "source": "success"}]'
+        )
+    )
+    state = EvolveState()
+
+    for task_id in ("task_1", "task_2"):
+        await evolve_after_task(
+            llm,
+            task_id=task_id,
+            query=f"query for {task_id}",
+            trajectory="",
+            selected_tip_ids=[],
+            state=state,
+            threshold=3,
+        )
+
+    assert [tip.id for tip in state.tips] == [
+        "environment_task_1_0",
+        "environment_task_2_0",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_plan_counter_codify_fires_at_threshold():
     codify_json = (
         '[{"function_name": "fetch_all_pages", "docstring": "Fetch every page.",'

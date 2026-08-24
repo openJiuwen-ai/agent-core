@@ -105,33 +105,27 @@ def parse_unified_response(text: str) -> Tuple[List[str], List[str]]:
     """Parse ``{selected_tip_ids, selected_tool_ids}`` from the LLM output.
 
     Tolerant to fenced blocks and prose-before-JSON; either key may be absent.
-    On parse failure returns ``([], [])`` (treat as "no knowledge" rather than crash).
+    When multiple JSON objects are present, the last valid object containing a
+    selection key wins. On parse failure returns ``([], [])`` (treat as "no
+    knowledge" rather than crash).
     """
     candidates: List[dict] = []
+    consumed_until = 0
 
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-    if m:
+    for match in re.finditer(r"\{", text):
+        if match.start() < consumed_until:
+            continue
         try:
-            parsed = json.loads(m.group(1))
-            if isinstance(parsed, dict):
-                candidates.append(parsed)
+            parsed, consumed_until = _DECODER.raw_decode(text, match.start())
         except json.JSONDecodeError:
-            pass
-
-    if not candidates and ("selected_tip_ids" in text or "selected_tool_ids" in text):
-        for mm in re.finditer(r"\{", text):
-            try:
-                obj, _ = _DECODER.raw_decode(text, mm.start())
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and ("selected_tip_ids" in obj or "selected_tool_ids" in obj):
-                candidates.append(obj)
-                break
+            continue
+        if isinstance(parsed, dict) and ("selected_tip_ids" in parsed or "selected_tool_ids" in parsed):
+            candidates.append(parsed)
 
     if not candidates:
         return [], []
 
-    obj = candidates[0]
+    obj = candidates[-1]
     tip_ids = obj.get("selected_tip_ids") or []
     tool_ids = obj.get("selected_tool_ids") or []
     if not isinstance(tip_ids, list):

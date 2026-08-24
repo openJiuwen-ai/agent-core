@@ -13,6 +13,7 @@ from openjiuwen.agent_evolving.optimizer.context_evolve_call.metis import (
     MetisMemoryStore,
     MetisQueryService,
 )
+from openjiuwen.agent_evolving.optimizer.context_evolve_call.metis.manager_select import parse_unified_response
 from openjiuwen.agent_evolving.optimizer.context_evolve_call.metis.schema import (
     CodeTool,
     EnvironmentTip,
@@ -70,6 +71,29 @@ def _delta(user_id, tips=(), tools=(), recent=()):
 def _record(delta):
     """Wrap a delta in the dimension's commit envelope, as the rail does."""
     return ContextEvolveRecord(scope_id=delta.user_id, algorithm="metis", payload=delta)
+
+
+def test_parse_unified_response_uses_last_valid_selection_json():
+    response = """\
+Reasoning with an unrelated code block:
+```json
+{"stage": "analysis"}
+```
+An intermediate selection:
+```json
+{"selected_tip_ids": ["tip_old"], "selected_tool_ids": []}
+```
+Final answer:
+```json
+{"selected_tip_ids": ["tip_final"], "selected_tool_ids": ["tool_final"]}
+```
+Trailing malformed output:
+```json
+{"selected_tip_ids":
+```
+"""
+
+    assert parse_unified_response(response) == (["tip_final"], ["tool_final"])
 
 
 @pytest.mark.asyncio

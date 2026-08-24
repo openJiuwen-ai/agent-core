@@ -86,7 +86,7 @@ def parse_reflection(  # pylint: disable=too-many-locals
         if category is None or not content:
             logger.debug("[reflect] drop create: bad label/content")
             continue
-        tip_id = str(entry.get("id") or f"tip_{index}")
+        tip_id = str(entry.get("id") or f"{category}_{task_id}_{index}")
         tip_class = tip_class_for_category(category)
         if tip_class is ExecutionPlan:
             dependencies = [name for name in (entry.get("dependent_tools") or []) if name in existing]
