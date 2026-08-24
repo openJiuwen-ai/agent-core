@@ -1025,7 +1025,6 @@ class AgentSession:
                 correlation_id=correlation_id,
             )
 
-            cached = rt.journal.get_cached(ks, sig, rt.run_id)
             # Reserve the member identity on the FIRST turn regardless of cache
             # hit, so a fully-hit resume still knows this session's member name
             # (fork() needs it to locate the parent's persisted context). Only
@@ -1033,7 +1032,7 @@ class AgentSession:
             if self._member_name is None and not self._human:
                 await self._ensure_member_name(rt, opts)
 
-            cached = rt.journal.get_cached(ks, sig)
+            cached = rt.journal.get_cached(ks, sig, rt.run_id)
             if cached is not None:  # resume hit — no backend, no harness, no person
                 rt.log_sink(f"[wf] session {opts.get('label') or 'session'!r} key={ks} CACHE_HIT sig={sig[:12]}")
                 await rt.journal.use(ks, cached)
