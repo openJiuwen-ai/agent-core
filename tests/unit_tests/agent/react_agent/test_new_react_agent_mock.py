@@ -1017,6 +1017,7 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         tool.invoke.assert_awaited_once_with(
             {"todos": [{"step_id": 1, "status": "done"}]},
             session=None,
+            tool_call_id="call_repair",
         )
         self.assertEqual(
             json.loads(tool_call.arguments),
@@ -1043,7 +1044,11 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(tool_call.arguments, arguments)
-        tool.invoke.assert_awaited_once_with({"query": "hello"}, session=None)
+        tool.invoke.assert_awaited_once_with(
+            {"query": "hello"},
+            session=None,
+            tool_call_id="call_valid",
+        )
 
     async def test_execute_rejects_unrepairable_tool_call_arguments(self):
         self.ability_manager.add(ToolCard(id="bad_tool", name="bad_tool", description="bad"))
@@ -1062,6 +1067,32 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Invalid tool arguments JSON", str(exc_info.exception))
         self.assertEqual(tool_call.arguments, '{"query": "unterminated}')
+
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
+    async def test_fallback_tool_receives_tool_call_id(self, mock_get_tool):
+        tool = MagicMock()
+        tool.card = ToolCard(id="fallback_tool", name="fallback_tool", description="fallback")
+        tool.invoke = AsyncMock(return_value={"ok": True})
+        mock_get_tool.return_value = tool
+        tool_call = ToolCall(
+            id="call_fallback",
+            type="function",
+            name="fallback_tool",
+            arguments='{"query": "hello"}',
+        )
+
+        result, tool_message = await self.ability_manager._execute_single_tool_call(  # pylint: disable=protected-access
+            tool_call,
+            session=None,
+        )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(tool_message.tool_call_id, "call_fallback")
+        tool.invoke.assert_awaited_once_with(
+            {"query": "hello"},
+            session=None,
+            tool_call_id="call_fallback",
+        )
 
     @patch('openjiuwen.core.runner.Runner.resource_mgr.get_mcp_tool_infos')
     async def test_list_tool_info_adds_mcp_tools_to_tools_dict(self, mock_get_mcp_tool_infos):

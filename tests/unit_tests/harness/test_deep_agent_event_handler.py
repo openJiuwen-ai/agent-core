@@ -13,6 +13,7 @@ from openjiuwen.core.controller.modules.event_handler import (
     EventHandlerInput,
 )
 from openjiuwen.core.controller.schema.dataframe import (
+    JsonDataFrame,
     TextDataFrame,
 )
 from openjiuwen.core.controller.schema.event import (
@@ -251,6 +252,42 @@ async def test_handle_task_interaction() -> None:
     msgs = queues.drain_steering()
     assert len(msgs) == 1
     assert msgs[0] == "change plan"
+
+
+@pytest.mark.asyncio
+async def test_handle_task_interaction_resolves_interrupt_round() -> None:
+    """A task interrupt resolves the round without becoming steering text."""
+    agent = _make_agent()
+    handler = TaskLoopEventHandler(agent)
+    queues = LoopQueues()
+    handler.interaction_queues = queues
+    round_id = handler.prepare_round()
+    interrupt_result = {
+        "result_type": "interrupt",
+        "interrupt_ids": ["inner-call"],
+        "state": [],
+    }
+    event = TaskInteractionEvent(
+        interaction=[JsonDataFrame(data=interrupt_result)],
+        metadata={
+            "task_id": "interrupt-task",
+            "_handler_round_id": round_id,
+        },
+    )
+    inputs = EventHandlerInput.model_construct(
+        event=event,
+        session=FakeSession(),
+    )
+
+    result = await handler.handle_task_interaction(inputs)
+    round_result = await handler.wait_completion(timeout=0.1)
+
+    assert result == {
+        "status": "input_required",
+        "task_id": "interrupt-task",
+    }
+    assert round_result == interrupt_result
+    assert queues.drain_steering() == []
 
 
 @pytest.mark.asyncio

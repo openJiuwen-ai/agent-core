@@ -13,6 +13,7 @@ from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelReques
 from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
@@ -104,6 +105,80 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                 called_inputs["conversation_id"],
             ),
         )
+
+    async def test_task_tool_preserves_interrupt_and_resumes_subsession(self) -> None:
+        invoked_inputs: list[dict] = []
+        interrupt_result = {
+            "result_type": "interrupt",
+            "interrupt_ids": ["inner-call"],
+            "state": [],
+        }
+
+        class FakeSubAgent:
+            card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            def __init__(self) -> None:
+                self.invoke_count = 0
+                self.cleanup_count = 0
+
+            async def invoke(self, inputs):
+                invoked_inputs.append(inputs)
+                self.invoke_count += 1
+                if self.invoke_count == 1:
+                    return interrupt_result
+                return {"output": "resumed"}
+
+            async def cleanup_task_resources(self) -> None:
+                self.cleanup_count += 1
+
+        created_subagents: list[FakeSubAgent] = []
+
+        def create_subagent(*_args, **_kwargs):
+            subagent = FakeSubAgent()
+            created_subagents.append(subagent)
+            return subagent
+
+        parent_agent = SimpleNamespace(
+            create_subagent=create_subagent,
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+        session = Session(session_id="parent_session")
+
+        first_result = await tool.invoke(
+            {"subagent_type": "code", "task_description": "run task"},
+            session=session,
+            tool_call_id="outer-call",
+        )
+        self.assertIs(first_result, interrupt_result)
+        self.assertEqual(created_subagents[0].cleanup_count, 0)
+
+        approval = InteractiveInput()
+        approval.update("inner-call", {"approved": True})
+        result = await tool.invoke(
+            {
+                "subagent_type": "code",
+                "task_description": "run task",
+                "query": approval,
+            },
+            session=session,
+            tool_call_id="outer-call",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["output"], "resumed")
+        self.assertEqual(len(created_subagents), 1)
+        self.assertEqual(created_subagents[0].cleanup_count, 1)
+        self.assertEqual(
+            [item["conversation_id"] for item in invoked_inputs],
+            [
+                "parent_session_sub_code_outer-call",
+                "parent_session_sub_code_outer-call",
+            ],
+        )
+        self.assertIs(invoked_inputs[1]["query"], approval)
 
     async def test_task_tool_cleans_up_after_subagent_failure(self) -> None:
         cleanup_calls = 0

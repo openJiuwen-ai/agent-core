@@ -87,7 +87,9 @@ class FakeReactAgent:
     """Tracks invoke calls."""
 
     def __init__(
-        self, fail: bool = False
+        self,
+        fail: bool = False,
+        result: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.invoke_calls: List[
             Dict[str, Any]
@@ -96,6 +98,7 @@ class FakeReactAgent:
             FakeCallbackManager()
         )
         self._fail = fail
+        self._result = result
 
     async def invoke(
         self,
@@ -106,6 +109,8 @@ class FakeReactAgent:
         self.invoke_calls.append(inputs)
         if self._fail:
             raise RuntimeError("invoke failed")
+        if self._result is not None:
+            return self._result
         return {
             "output": (
                 f"done:{inputs['query']}"
@@ -161,6 +166,7 @@ def _make_deps(
 
 def _make_agent(
     fail: bool = False,
+    result: Optional[Dict[str, Any]] = None,
 ) -> DeepAgent:
     """Build a DeepAgent with fake react agent."""
     agent = DeepAgent(
@@ -169,7 +175,10 @@ def _make_agent(
     agent.configure(
         DeepAgentConfig(enable_task_loop=True)
     )
-    fake = FakeReactAgent(fail=fail)
+    fake = FakeReactAgent(
+        fail=fail,
+        result=result,
+    )
     agent.set_react_agent(
         fake, initialized=True
     )
@@ -250,6 +259,45 @@ async def test_execute_ability_yields_completion() \
 
     coord = agent.loop_coordinator
     assert coord is not None
+
+
+@pytest.mark.asyncio
+async def test_execute_ability_yields_interaction_for_interrupt() -> None:
+    """An interrupted round remains resumable instead of completing its task."""
+    interrupt_result = {
+        "result_type": "interrupt",
+        "interrupt_ids": ["inner-call"],
+        "state": [],
+    }
+    agent = _make_agent(result=interrupt_result)
+    deps, tm = _make_deps()
+    session = FakeSession()
+    core_task = CoreTask(
+        session_id="s1",
+        task_id="interrupt-task",
+        task_type=DEEP_TASK_TYPE,
+        description="run guarded command",
+        status=CoreTaskStatus.SUBMITTED,
+    )
+    await tm.add_task(core_task)
+    executor = TaskLoopEventExecutor(deps, agent)
+
+    chunks = [
+        chunk
+        async for chunk in executor.execute_ability(
+            "interrupt-task", session
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0].payload.type == EventType.TASK_INTERACTION
+    assert chunks[0].payload.data[0].data == interrupt_result
+    [updated_task] = await tm.get_task(
+        TaskLoopEventExecutor._make_filter("interrupt-task")
+    )
+    assert updated_task.input_required_fields == {
+        "interrupt_ids": ["inner-call"],
+    }
 
 
 @pytest.mark.asyncio

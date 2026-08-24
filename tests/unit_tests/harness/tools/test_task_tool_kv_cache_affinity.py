@@ -18,16 +18,26 @@ from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
 
 class _FakeSubAgent:
-    def __init__(self, agent_id: str, *, output: str = "done", error: Exception | None = None) -> None:
+    def __init__(
+            self,
+            agent_id: str,
+            *,
+            output: str = "done",
+            error: Exception | None = None,
+            result: dict | None = None,
+    ) -> None:
         self.card = AgentCard(id=agent_id, name=agent_id, description=agent_id)
         self.output = output
         self.error = error
+        self.result = result
         self.inputs: list[dict] = []
 
     async def invoke(self, inputs: dict) -> dict:
         self.inputs.append(dict(inputs))
         if self.error:
             raise self.error
+        if self.result is not None:
+            return self.result
         return {"output": self.output}
 
 
@@ -117,6 +127,49 @@ async def test_sticky_subagent_failure_evicts_and_keeps_original_exception() -> 
         parent_session_id="parent_session",
         enabled=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_sticky_subagent_interrupt_offloads_resumable_cache() -> None:
+    interrupt_result = {
+        "result_type": "interrupt",
+        "interrupt_ids": ["inner-call"],
+        "state": [],
+    }
+    subagent = _FakeSubAgent("browser", result=interrupt_result)
+    tool, model = _make_tool(subagent=subagent)
+
+    with patch(
+            "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal",
+        new=Mock(return_value=True),
+    ) as dispatch_mock, patch(
+            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
+        new=AsyncMock(return_value=True),
+    ) as evict_mock:
+        result = await tool.invoke(
+            {"subagent_type": "browser_agent", "task_description": "run task"},
+            session=Session(session_id="parent_session"),
+            tool_call_id="outer-call",
+        )
+
+    assert result is interrupt_result
+    assert dispatch_mock.call_args_list == [
+        call(
+            model,
+            "prefetch",
+            session_id="parent_session_sub_browser_agent",
+            parent_session_id="parent_session",
+            enabled=True,
+        ),
+        call(
+            model,
+            "offload",
+            session_id="parent_session_sub_browser_agent",
+            parent_session_id="parent_session",
+            enabled=True,
+        ),
+    ]
+    evict_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
