@@ -63,9 +63,9 @@ _LABELS: dict[str, dict[str, str]] = {
         ),
         "team_workspace_abs": "绝对路径",
         "team_workspace_symlink_note": (
-            "任务或消息里若出现 `.team/{team_name}/...`，它是指向该工作空间的符号链接"
-            "（等价于上面的绝对路径），不是子目录；写文件直接写到该工作空间根、"
-            "用文件名区分各成员产物，不要新建 `.team` 或 `{team_name}` 子目录"
+            "任务或消息里若出现 `.team/{team_name}/...`，它是指向该工作空间的符号链接，"
+            "等价于上面的绝对路径，而不是子目录。写文件请直接写到该工作空间根目录，"
+            "用文件名区分各成员的产物，不要新建 `.team` 或 `{team_name}` 子目录"
         ),
         "members_heading": "# 成员关系",
         "roster_change_heading": "# 成员变更",
@@ -108,9 +108,9 @@ _LABELS: dict[str, dict[str, str]] = {
         "team_workspace_abs": "Absolute path",
         "team_workspace_symlink_note": (
             "If `.team/{team_name}/...` appears in a task or message, it is a symlink to "
-            "this workspace (equivalent to the absolute path above), NOT a sub-directory; "
-            "write files directly to this workspace root, distinguishing members' outputs "
-            "by filename — do not create a `.team` or `{team_name}` sub-directory"
+            "this workspace, equivalent to the absolute path above, not a sub-directory. "
+            "Write files directly to the workspace root, distinguish members' outputs by "
+            "filename, and do not create a `.team` or `{team_name}` sub-directory"
         ),
         "members_heading": "# Relationships",
         "roster_change_heading": "# Roster Change",
