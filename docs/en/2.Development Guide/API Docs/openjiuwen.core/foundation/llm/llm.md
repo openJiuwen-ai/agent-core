@@ -287,7 +287,7 @@ Model parameter configuration data class for a single request.
 
 * **model_name** (str): Model name (alias `model`). Default value: `""`.
 * **temperature** (float): Temperature parameter, controlling output randomness. Value range [0, 1]. Default value: `0.95`.
-* **top_p** (float): top_p sampling parameter. Value range [0, 1]. Default value: `0.1`.
+* **top_p** (float): top_p sampling parameter. Value range [0, 1]. Default value: `0.95`.
 * **max_tokens** (int, optional): Maximum number of tokens to generate. Default value: `None`.
 * **stop** (str, optional): Stop sequence. Default value: `None`.
 

@@ -291,7 +291,7 @@ class openjiuwen.core.foundation.llm.model_clients.openai_account_model_client.O
 
 * **model_name**(str)：模型名称（别名 `model`）。默认值：`""`。
 * **temperature**(float)：温度参数，控制输出的随机性。取值范围为[0, 1]。默认值：`0.95`。
-* **top_p**(float)：top_p 采样参数。取值范围为[0, 1]。默认值：`0.1`。
+* **top_p**(float)：top_p 采样参数。取值范围为[0, 1]。默认值：`0.95`。
 * **max_tokens**(int，可选)：最大生成 token 数。默认值：`None`。
 * **stop**(str，可选)：停止序列。默认值：`None`。
 
