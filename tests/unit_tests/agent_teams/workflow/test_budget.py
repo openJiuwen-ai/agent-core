@@ -51,7 +51,8 @@ async def run(args):
 _POLLING_SCRIPT = '''
 from swarmflow import agent, budget
 
-META = {"name": "poll", "description": "wind down on remaining()", "phases": []}
+META = {"name": "poll", "description": "wind down on remaining()", "phases": [],
+        "workflow_token_limit": 100}
 
 async def run(args):
     done = 0
@@ -69,16 +70,28 @@ def _write(tmp_path, src: str) -> str:
 
 
 class _FixedCostBackend(AgentBackend):
-    """Bills a fixed number of tokens per call, like a real backend's rail would."""
+    """Bills a fixed number of tokens per call, like a real backend's rail would.
+
+    Bills **both** the session-wide ledger (``self.budget``) and, when bound,
+    the per-run ledger (``self._wf_budget``) — mirroring ``SwarmflowBudgetRail``
+    so a script polling ``budget.remaining()`` (which now reads the per-run
+    ledger) sees the spend it drives.
+    """
 
     def __init__(self, cost: int) -> None:
         super().__init__()
         self._cost = cost
         self.calls = 0
+        self._wf_budget: BudgetLedger | None = None
+
+    def bind_workflow_budget(self, ledger: BudgetLedger) -> None:
+        self._wf_budget = ledger
 
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         self.calls += 1
         self.budget.add(self._cost)
+        if self._wf_budget is not None:
+            self._wf_budget.add(self._cost)
         return AgentResult(text=f"ran {opts.get('label')}", tokens=self._cost)
 
 
@@ -154,7 +167,7 @@ def test_script_can_wind_down_on_remaining_before_the_gate_fires(tmp_path):
         run_workflow(
             _write(tmp_path, _POLLING_SCRIPT),
             backend=backend,
-            budget=BudgetLedger(total=100),
+            workflow_budget=BudgetLedger(total=100),
         )
     )
     # Stops once remaining() <= 30, i.e. after 4 calls (80 spent, 20 left).
