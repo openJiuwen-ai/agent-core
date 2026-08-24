@@ -16,10 +16,10 @@ from openjiuwen.core.retrieval.code_graph.models import (
     RelationKind,
 )
 from openjiuwen.core.retrieval.code_graph.query.search_code import search_code
+from tests.unit_tests.core.retrieval.code_graph.parser_guard import skip_unless_code_graph_parser
 
 pytestmark = pytest.mark.level0
-
-pytest.importorskip("tree_sitter_language_pack")
+skip_unless_code_graph_parser()
 
 BASE = """\
 class Base:

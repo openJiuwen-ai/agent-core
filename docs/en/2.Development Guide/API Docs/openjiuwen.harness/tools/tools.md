@@ -27,7 +27,7 @@ The tools of the [browser sub-agent](../subagents/browser_agent.md) (Playwright 
 
 ### Code Graph
 
-Registered on the Code Agent when `code_graph_profile="graph"`. Product default is `off`. Product mode locates then edits; `prompt_mode="locate"` (eval) also registers `submit_code_context`.
+Registered on the Code Agent when `code_graph_profile="graph"`. Product default is `off`. Install `openjiuwen[code-graph]` first (prebuilt wheel only). Product mode locates then edits; `prompt_mode="locate"` (eval) also registers `submit_code_context`.
 
 | Tool | Description |
 |---|---|

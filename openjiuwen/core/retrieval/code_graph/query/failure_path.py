@@ -232,7 +232,8 @@ def _repo_relative(raw: str, index: CodeGraphIndex) -> str:
     text = _normalize(raw)
     root = _normalize(index.repo_root).rstrip("/")
     if root and text.startswith(root + "/"):
-        return text[len(root) + 1 :]
+        offset = len(root) + 1
+        return text[offset:]
     # Containers run the same checkout under a different root (``/testbed``), so
     # a leading absolute path is matched by suffix instead of rejected.
     return text.lstrip("/") if text.startswith("/") else text
