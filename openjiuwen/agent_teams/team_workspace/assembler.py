@@ -46,6 +46,7 @@ from openjiuwen.agent_teams.team_workspace.frontmatter import (
 )
 from openjiuwen.agent_teams.team_workspace.layout import WorkspaceLayout
 from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -108,15 +109,16 @@ class WorkspaceAssembler:
         so the DB column stays NULL and ``write_team_prompt(None)`` is a
         no-op); the call stays for the day a prompt source is wired in.
 
-        Idempotent and evolution-safe: ``_evolved_body`` never overwrites an
-        evolved file. The final body is primed into the shared cache so the
-        read side does not re-read the file.
+        Idempotent and evolution-safe: ``_evolved_content`` never overwrites
+        an evolved file. The final file state (body *and* ``updated_at``) is
+        primed into the shared cache so the read side does not re-read the
+        file.
         """
-        desc_body = self._store.write_team_card(team_name, team_desc)
-        prompt_body = self._store.write_team_prompt(team_name, team_prompt)
+        desc_content = self._store.write_team_card(team_name, team_desc)
+        prompt_content = self._store.write_team_prompt(team_name, team_prompt)
         if self._cache is not None:
-            self._cache.fill_team_field("desc", desc_body)
-            self._cache.fill_team_field("prompt", prompt_body)
+            self._cache.fill_team_field("desc", desc_content)
+            self._cache.fill_team_field("prompt", prompt_content)
 
     def write_member_identity(
         self,
@@ -130,14 +132,14 @@ class WorkspaceAssembler:
 
         ``card.md`` (body = desc only) + ``member_prompt.md``, values from the
         member's DB row (ctx.desc / ctx.prompt). ``display_name`` never rides
-        the file. The final body is primed into the shared cache so the read
-        side does not re-read the file.
+        the file. The final file state (body *and* ``updated_at``) is primed
+        into the shared cache so the read side does not re-read the file.
         """
-        desc_body = self._store.write_card(team_name, member_name, member_desc)
-        prompt_body = self._store.write_member_prompt(team_name, member_name, member_prompt)
+        desc_content = self._store.write_card(team_name, member_name, member_desc)
+        prompt_content = self._store.write_member_prompt(team_name, member_name, member_prompt)
         if self._cache is not None:
-            self._cache.fill_member_field(member_name, "desc", desc_body)
-            self._cache.fill_member_field(member_name, "prompt", prompt_body)
+            self._cache.fill_member_field(member_name, "desc", desc_content)
+            self._cache.fill_member_field(member_name, "prompt", prompt_content)
 
     # ── write-side cache priming ──────────────────────────────────────────
     #
@@ -242,11 +244,12 @@ class WorkspaceAssembler:
         self._fill_template(name, framework_text)
 
     @staticmethod
-    def _file_meta(name: str, *, body: str, language: str) -> dict:
+    def _file_meta(name: str, *, body: str, language: str, now: int | None = None) -> dict:
         """Build the frontmatter meta for one A-class workspace file.
 
         ``language`` is stamped per A-class file (A/C classes split files
-        by language — ``<name>.<lang>.md``).
+        by language — ``<name>.<lang>.md``). ``now`` is the write timestamp
+        stamped into ``updated_at`` (defaults to current time).
         """
         return {
             "kind": "prompt",
@@ -254,6 +257,7 @@ class WorkspaceAssembler:
             "language": language,
             "baseline_sha256": body_sha256(body),
             "evolved": False,
+            "updated_at": now if now is not None else get_current_time(),
         }
 
     @staticmethod
@@ -351,13 +355,14 @@ class WorkspaceAssembler:
         self._fill_tool_md(desc_key, framework_body)
 
     @staticmethod
-    def _tool_md_meta(desc_key: str, body: str, language: str) -> dict:
+    def _tool_md_meta(desc_key: str, body: str, language: str, *, now: int | None = None) -> dict:
         return {
             "kind": "tool",
             "name": desc_key,
             "language": language,
             "baseline_sha256": body_sha256(body),
             "evolved": False,
+            "updated_at": now if now is not None else get_current_time(),
         }
 
     def _write_tool_params(self, tools_dir: Path, language: str) -> None:
@@ -404,6 +409,7 @@ class WorkspaceAssembler:
             "language": language,
             "baseline_sha256": body_sha256(body),
             "evolved": False,
+            "updated_at": get_current_time(),
         }
         atomic_write(target, write_frontmatter(meta, body))
         self._fill_tool_params(strings)

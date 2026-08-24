@@ -52,10 +52,8 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from openjiuwen.agent_teams.team_workspace.frontmatter import (
-    is_evolved,
-    read_frontmatter,
-)
+from openjiuwen.agent_teams.paths import team_member_workspace_dir
+from openjiuwen.agent_teams.team_workspace.file_content import FileContent, parse_file_content
 from openjiuwen.agent_teams.team_workspace.layout import WorkspaceLayout
 from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
 from openjiuwen.core.common.logging import team_logger
@@ -88,10 +86,15 @@ class WorkspaceCache:
         self._lang = language
         # A-class: template name → PromptTemplate (raw body).
         self._template_values: dict[str, PromptTemplate | None] = {}
-        # B-class: (member_name, field) → resident value (str | None).
-        self._member_values: dict[tuple[str, str], str | None] = {}
-        # B-class team: field → resident value.
-        self._team_values: dict[str, str | None] = {}
+        # B-class: (member_name, field) → FileContent | None. One object per
+        # file carries both the body (overlay value) and the frontmatter
+        # ``updated_at`` (roster mtime probe), so a single file read fills
+        # both concerns. ``None`` marks "no file value" (missing file) so
+        # the miss path is not retried per call (the caller falls back to
+        # the DB column / code default).
+        self._member_values: dict[tuple[str, str], FileContent | None] = {}
+        # B-class team: field → FileContent | None (same model as member).
+        self._team_values: dict[str, FileContent | None] = {}
         # C-class tool-level: desc_key → raw body (unrendered {{slot}}).
         self._tool_md_values: dict[str, str | None] = {}
         # C-class param-level: (desc_key, param) → text.
@@ -129,28 +132,80 @@ class WorkspaceCache:
 
         ``None`` means "no file value" — the caller falls back to the raw DB
         column. Lazy: first call reads the member's ``card.md`` /
-        ``member_prompt.md``; later calls are dict hits.
+        ``member_prompt.md`` once into a :class:`FileContent` (which carries
+        the body *and* ``updated_at``); later calls are dict hits. Only an
+        evolved file (body diverged from its baseline) returns a body — an
+        un-evolved file yields ``None`` so the raw DB column stands.
         """
         key = (member_name, field)
         if key in self._member_values:
-            return self._member_values[key]
-        if field == "desc":
-            value = self._store.read_card(self._team_name, member_name)
+            content = self._member_values[key]
         else:
-            value = self._store.read_member_prompt(self._team_name, member_name)
-        self._member_values[key] = value
-        return value
+            member_dir = team_member_workspace_dir(self._team_name, member_name)
+            if field == "desc":
+                path = WorkspaceLayout.member_card_file(member_dir)
+            else:
+                path = WorkspaceLayout.member_prompt_file(member_dir)
+            content = self._read_file_content(path)
+            self._member_values[key] = content
+        if content is None or not content.is_evolved():
+            return None
+        return content.body
 
     def get_team_field(self, field: Literal["desc", "prompt"]) -> str | None:
         """Return the resident file value for a team field. Lazy (same as member)."""
         if field in self._team_values:
-            return self._team_values[field]
-        if field == "desc":
-            value = self._store.read_team_card(self._team_name)
+            content = self._team_values[field]
         else:
-            value = self._store.read_team_prompt(self._team_name)
-        self._team_values[field] = value
-        return value
+            root = self._store.team_workspace_root(self._team_name)
+            if field == "desc":
+                path = WorkspaceLayout.team_card_file(root)
+            else:
+                path = WorkspaceLayout.team_prompt_file(root)
+            content = self._read_file_content(path)
+            self._team_values[field] = content
+        if content is None or not content.is_evolved():
+            return None
+        return content.body
+
+    # ── B-class updated_at probe ──────────────────────────────────────────
+
+    def get_member_updated_at(
+        self,
+        member_name: str,
+        field: Literal["desc", "prompt"],
+    ) -> int:
+        """Return the resident ``updated_at`` (ms) for a member B-class file.
+
+        Reads from the same :class:`FileContent` object as
+        :meth:`get_member_field` — one file read fills both the body overlay
+        and the mtime probe. ``0`` when the file is missing (does not
+        advance the probe). ``field`` is the same ``"desc"`` / ``"prompt"``
+        literal used by ``get_member_field`` and maps to ``card.md`` /
+        ``member_prompt.md``.
+        """
+        key = (member_name, field)
+        if key not in self._member_values:
+            member_dir = team_member_workspace_dir(self._team_name, member_name)
+            if field == "desc":
+                path = WorkspaceLayout.member_card_file(member_dir)
+            else:
+                path = WorkspaceLayout.member_prompt_file(member_dir)
+            self._member_values[key] = self._read_file_content(path)
+        content = self._member_values[key]
+        return content.updated_at if content is not None else 0
+
+    def get_team_updated_at(self, field: Literal["desc", "prompt"]) -> int:
+        """Return the resident ``updated_at`` (ms) for a team B-class file."""
+        if field not in self._team_values:
+            root = self._store.team_workspace_root(self._team_name)
+            if field == "desc":
+                path = WorkspaceLayout.team_card_file(root)
+            else:
+                path = WorkspaceLayout.team_prompt_file(root)
+            self._team_values[field] = self._read_file_content(path)
+        content = self._team_values[field]
+        return content.updated_at if content is not None else 0
 
     # ── C-class ────────────────────────────────────────────────────────────
 
@@ -188,14 +243,21 @@ class WorkspaceCache:
         self,
         member_name: str,
         field: Literal["desc", "prompt"],
-        body: str | None,
+        content: FileContent | None,
     ) -> None:
-        """Prime a B-class member field with the write-side latest body."""
-        self._member_values[(member_name, field)] = body
+        """Prime a B-class member field with the write-side file state.
 
-    def fill_team_field(self, field: Literal["desc", "prompt"], body: str | None) -> None:
-        """Prime a B-class team field with the write-side latest body."""
-        self._team_values[field] = body
+        ``content`` is the :class:`FileContent` the write path just produced
+        (or ``None`` when nothing was written); it carries both the overlay
+        body and the ``updated_at`` the probe reads — so a single write-side
+        prime fills both channels and the next ``get_member_field`` /
+        ``get_member_updated_at`` are dict hits with zero file IO.
+        """
+        self._member_values[(member_name, field)] = content
+
+    def fill_team_field(self, field: Literal["desc", "prompt"], content: FileContent | None) -> None:
+        """Prime a B-class team field with the write-side file state (see :meth:`fill_member_field`)."""
+        self._team_values[field] = content
 
     def fill_tool_md(self, desc_key: str, body: str | None) -> None:
         """Prime a C-class tool-level md with the write-side latest body."""
@@ -254,34 +316,41 @@ class WorkspaceCache:
             desc_key, param = str_key.split(".", 1)
             self._tool_params[(desc_key, param)] = text
 
-    # ── shared: evolution judgement (frontmatter primitives) ───────────────
+    # ── shared: single-read file content ─────────────────────────────────
 
     @staticmethod
-    def _read_body(path: Path) -> str | None:
-        """Return the file body regardless of evolution; ``None`` only when
-        missing or malformed.
+    def _read_file_content(path: Path) -> FileContent | None:
+        """Return the file's parsed state; ``None`` when missing.
 
-        The write side has already primed the cache with the latest value (an
-        un-evolved file's body equals the framework default), so the return
-        value no longer depends on evolution — any existing file's body is the
-        latest value. The evolution judgement is still logged for audit: an
-        ``evolved`` line means the workspace value diverged from its baseline.
+        A·C-class callers serve any existing file's body (the write side has
+        already primed the cache with the latest value, so an un-evolved file's
+        body equals the framework default); B-class callers gate on
+        :meth:`FileContent.is_evolved`. Both share one read per file via
+        :func:`parse_file_content`, which also backfills ``updated_at``.
         """
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            team_logger.info("[workspace] %s missing — framework default stands", path)
-            return None
-        try:
-            meta, body = read_frontmatter(text)
+            return parse_file_content(path)
         except ValueError:
             team_logger.info("[workspace] %s malformed frontmatter — framework default stands", path)
             return None
-        if is_evolved(meta, body):
+
+    @staticmethod
+    def _read_body(path: Path) -> str | None:
+        """Return the A·C-class body (any existing file); ``None`` when missing.
+
+        Thin wrapper over :meth:`_read_file_content` for A·C-class callers
+        that only want the body — the write side has primed the cache so the
+        body of an un-evolved file already equals the framework default.
+        """
+        content = WorkspaceCache._read_file_content(path)
+        if content is None:
+            team_logger.info("[workspace] %s missing — framework default stands", path)
+            return None
+        if content.is_evolved():
             team_logger.info("[workspace] %s evolved — workspace value wins", path)
         else:
             team_logger.info("[workspace] %s un-evolved — workspace value served", path)
-        return body
+        return content.body
 
     # ── invalidation ───────────────────────────────────────────────────────
 

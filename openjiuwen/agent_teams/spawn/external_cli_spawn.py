@@ -38,6 +38,7 @@ async def _build_member_system_prompt(
     member_name: str | None,
     *,
     hitt_enabled: bool,
+    ws_cache: Any = None,
 ) -> str | None:
     """Build the external CLI member's system prompt from team-rail sections.
 
@@ -52,11 +53,17 @@ async def _build_member_system_prompt(
         ctx: The external CLI member's runtime context (role / desc / language).
         member_name: The member's semantic identifier.
         hitt_enabled: Effective HITT flag for the team instance.
+        ws_cache: Optional team workspace cache. When the teammate shares the
+            leader's cache (``share_workspace_cache_with``), pass it here so
+            ``build_team_member_system_prompt`` reads evolved A-class templates
+            (teammate_policy, etc.) through the cache-bound loader instead of
+            the framework default. ``None`` keeps the framework read-only path.
 
     Returns:
         The rendered system prompt, or ``None`` when no section had content.
     """
     from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
+    from openjiuwen.agent_teams.prompts.loader import make_template_loader
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
     prompt = build_team_member_system_prompt(
@@ -72,6 +79,7 @@ async def _build_member_system_prompt(
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         workspace_prompt_variant="external",
+        loader=make_template_loader(ws_cache),
     )
     return prompt or None
 
@@ -217,11 +225,16 @@ async def external_cli_spawn(
     backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
     # Build the member's system prompt from the team-rail sections (the same
     # sections an in-process member gets), excluding the other DeepAgent rails.
+    # The leader's workspace cache is already built at this point (leader has
+    # configured), so we can bind it into the loader — evolved A-class
+    # templates (teammate_policy, ...) reach the CLI member's system prompt.
+    leader_workspace_cache = team_agent.team_backend.workspace_cache if team_agent.team_backend is not None else None
     system_prompt = await _build_member_system_prompt(
         spec,
         ctx,
         member_name,
         hitt_enabled=hitt_enabled,
+        ws_cache=leader_workspace_cache,
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
@@ -284,8 +297,19 @@ async def external_cli_spawn(
     # Injection must precede configure (see inprocess_spawn for the ordering
     # rationale).
     team_agent.share_workspace_cache_with(teammate)
+    team_logger.info(
+        "[external-cli] about to configure teammate {} member_runtime={} type={}",
+        member_name,
+        runtime is not None,
+        type(runtime).__name__ if runtime is not None else "None",
+    )
     teammate.configure(spec, ctx, member_runtime=runtime)
     teammate_backend = teammate.team_backend
+    team_logger.info(
+        "[external-cli] after configure teammate {} teammate_backend={}",
+        member_name,
+        teammate_backend is not None,
+    )
     runtime.bind_team_context_tracker(
         _build_team_context_tracker(
             teammate_backend,

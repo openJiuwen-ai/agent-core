@@ -19,6 +19,20 @@ from openjiuwen.agent_teams.spawn import external_cli_spawn as spawn_mod
 from openjiuwen.core.runner.runner import Runner
 
 
+def _team_agent_mock() -> Mock:
+    """A leader Mock whose ``team_backend`` is None.
+
+    ``external_cli_spawn`` reads ``team_agent.team_backend.workspace_cache``
+    to bind the evolved-template loader; a bare ``Mock()`` makes that a Mock,
+    which poisons the prompt builder (sections render Mock objects). A real
+    leader with no workspace cache yields ``None`` here, so the spawn falls
+    back to the framework read-only loader — the test path mirrors that.
+    """
+    m = Mock()
+    m.team_backend = None
+    return m
+
+
 class _FakeRuntime:
     def __init__(self) -> None:
         self.stopped = False
@@ -106,7 +120,7 @@ async def test_external_cli_spawn_stops_runtime_on_cancel(monkeypatch):
         team_spec=team_spec,
     )
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -159,7 +173,7 @@ async def test_external_cli_spawn_without_initial_message_uses_empty_query(monke
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -206,7 +220,7 @@ async def test_external_cli_spawn_binds_tracker_to_external_member_backend(monke
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -259,7 +273,7 @@ async def test_external_cli_spawn_resume_passes_backend_flag(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -318,7 +332,7 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -382,7 +396,7 @@ async def test_external_cli_spawn_resolves_worktree_cwd_and_add_dirs(monkeypatch
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -442,7 +456,7 @@ async def test_external_cli_spawn_explicit_cwd_wins_and_others_become_add_dirs(m
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
@@ -492,7 +506,7 @@ async def test_external_cli_spawn_keeps_explicit_initial_message(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        team_agent=Mock(),
+        team_agent=_team_agent_mock(),
         spec=spec,
         ctx=ctx,
         hitt_enabled=False,
