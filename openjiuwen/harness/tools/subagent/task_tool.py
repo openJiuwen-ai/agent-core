@@ -77,16 +77,26 @@ class TaskTool(Tool):
         super().__init__(card)
         self.parent_agent = parent_agent
         self.language = language
+        self._pending_subagents: dict[str, tuple[Any, bool]] = {}
 
     @staticmethod
-    def _build_sub_session_id(parent_session_id: str, subagent_type: str) -> str:
+    def _build_sub_session_id(
+        parent_session_id: str,
+        subagent_type: str,
+        tool_call_id: Optional[str] = None,
+    ) -> str:
         normalized_type = str(subagent_type or "").strip()
         if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        if normalized_tool_call_id:
+            # The interrupt handler retries the same outer tool call on resume.
+            # Reusing its ID keeps the retry attached to the interrupted child session.
+            return f"{parent_session_id}_sub_{normalized_type}_{normalized_tool_call_id}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
 
-    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput | dict[str, Any]:
         """Execute task by delegating to a subagent.
 
         Args:
@@ -138,27 +148,41 @@ class TaskTool(Tool):
                 )
 
         parent_session_id = parent_session.get_session_id()
-        sub_session_id = self._build_sub_session_id(parent_session_id, str(subagent_type))
-        logger.info(
-            f"[TaskTool] Creating subagent: {subagent_type}, "
-            f"parent_session={parent_session_id}, sub_session={sub_session_id}"
+        sub_session_id = self._build_sub_session_id(
+            parent_session_id,
+            str(subagent_type),
+            tool_call_id=kwargs.get("tool_call_id"),
         )
-
-        try:
-            if browser_capabilities is None:
-                subagent = self.parent_agent.create_subagent(subagent_type, sub_session_id)
-            else:
-                subagent = self.parent_agent.create_subagent(
-                    subagent_type,
-                    sub_session_id,
-                    browser_capabilities=browser_capabilities,
-                )
-        except Exception as exc:
-            logger.error(f"[TaskTool] Subagent creation failed: type={subagent_type}, error={exc}")
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=f"Subagent {subagent_type} creation failed: {exc}",
-            ) from exc
+        pending_subagent = self._pending_subagents.pop(sub_session_id, None)
+        if pending_subagent is None:
+            logger.info(
+                f"[TaskTool] Creating subagent: {subagent_type}, "
+                f"parent_session={parent_session_id}, sub_session={sub_session_id}"
+            )
+            try:
+                if browser_capabilities is None:
+                    subagent = self.parent_agent.create_subagent(subagent_type, sub_session_id)
+                else:
+                    subagent = self.parent_agent.create_subagent(
+                        subagent_type,
+                        sub_session_id,
+                        browser_capabilities=browser_capabilities,
+                    )
+            except Exception as exc:
+                logger.error(f"[TaskTool] Subagent creation failed: type={subagent_type}, error={exc}")
+                raise build_error(
+                    StatusCode.TOOL_TASK_TOOL_INVOKED,
+                    reason=f"Subagent {subagent_type} creation failed: {exc}",
+                ) from exc
+            affinity_enabled = False
+            resources_prepared = False
+        else:
+            subagent, affinity_enabled = pending_subagent
+            resources_prepared = True
+            logger.info(
+                f"[TaskTool] Resuming interrupted subagent: {subagent_type}, "
+                f"parent_session={parent_session_id}, sub_session={sub_session_id}"
+            )
 
         query_summary = _summarize_task_description(task_description)
         invoke_log = (
@@ -171,10 +195,11 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
-        affinity_enabled = False
+        interrupted = False
         try:
-            await prepare_subagent_task_resources(subagent)
-            affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+            if not resources_prepared:
+                await prepare_subagent_task_resources(subagent)
+                affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
             if affinity_enabled:
                 kv_cache_hooks.prefetch_sticky_subagent(
                     self.parent_agent,
@@ -183,14 +208,25 @@ class TaskTool(Tool):
                     parent_session_id=parent_session_id,
                 )
             # Invoke subagent with isolated session_id
+            query = inputs.get("query")
+            if query is None:
+                query = task_description
             subagent_inputs = {
-                "query": task_description,
+                "query": query,
                 "conversation_id": sub_session_id,
             }
             if affinity_enabled:
                 subagent_inputs["parent_session_id"] = parent_session_id
             result = await subagent.invoke(subagent_inputs)
             succeeded = True
+            if (
+                isinstance(result, dict)
+                and result.get("result_type") == "interrupt"
+                and "interrupt_ids" in result
+            ):
+                interrupted = True
+                self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
+                return result
             output = result.get("output", "")
             return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
         except Exception as e:
@@ -200,7 +236,8 @@ class TaskTool(Tool):
                 reason=f"Subagent {subagent_type} execution failed: {e}",
             ) from e
         finally:
-            await cleanup_subagent_task_resources(subagent)
+            if not interrupted:
+                await cleanup_subagent_task_resources(subagent)
             if affinity_enabled:
                 await kv_cache_hooks.finish_subagent(
                     self.parent_agent,

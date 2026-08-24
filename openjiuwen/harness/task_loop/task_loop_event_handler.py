@@ -344,12 +344,11 @@ class TaskLoopEventHandler(EventHandler):
         self,
         inputs: EventHandlerInput,
     ) -> Optional[Dict]:
-        """Handle a steer event.
+        """Handle an interrupt result or a steer event.
 
-        Pushes the steer message into the
-        interaction_queues.steering buffer so that
-        the executor can inject it before
-        the next inner invoke.
+        Interrupt results resolve the current round so the outer loop can
+        surface the interaction to its caller. Text interactions remain
+        steering messages for the running inner agent.
 
         Args:
             inputs: Contains TaskInteractionEvent.
@@ -360,8 +359,30 @@ class TaskLoopEventHandler(EventHandler):
         event = inputs.event
         msg = ""
         if isinstance(event, TaskInteractionEvent):
+            round_id = (
+                event.metadata.get(
+                    "_handler_round_id", self._round_id
+                )
+                if event.metadata
+                else self._round_id
+            )
+            task_id = (
+                event.metadata.get("task_id")
+                if event.metadata
+                else None
+            )
             if event.interaction:
                 first = event.interaction[0]
+                data = getattr(first, "data", None)
+                if (
+                    isinstance(data, dict)
+                    and data.get("result_type") == "interrupt"
+                ):
+                    self._resolve_future(data, round_id)
+                    return {
+                        "status": "input_required",
+                        "task_id": task_id,
+                    }
                 msg = getattr(
                     first, "text", str(first)
                 )
