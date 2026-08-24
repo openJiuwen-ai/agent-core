@@ -201,6 +201,16 @@ def _get_table_names(sync_conn) -> list[str]:
     return list(inspect(sync_conn).get_table_names())
 
 
+def _snapshot_existing_tables(sync_conn, table_names: list[str]) -> set[str]:
+    """Return the subset of ``table_names`` that already exist right now.
+
+    A single ``inspect().has_table`` call per name (no index/column PRAGMA),
+    cheap relative to the per-table ``get_indexes`` it lets the migration skip.
+    """
+    inspector = inspect(sync_conn)
+    return {name for name in table_names if inspector.has_table(name)}
+
+
 def _drop_table(sync_conn, table_name: str) -> None:
     """Drop one table with raw SQL to avoid reflection-order issues."""
     quoted_name = table_name.replace('"', '""')
@@ -357,7 +367,33 @@ def _ensure_message_meta_column(sync_conn) -> None:
         team_logger.info("Migrated legacy message table %s: added meta column", table_name)
 
 
-def _ensure_dynamic_table_indexes(sync_conn) -> None:
+def _current_session_migration_tables() -> list[str]:
+    """The current session's 3 migration-candidate dynamic table names.
+
+    Only ``team_task_*`` / ``team_task_dependency_*`` / ``team_message_*`` are
+    touched by ``_ensure_dynamic_table_indexes``; ``message_read_status_*`` and
+    ``team_review_vote_*`` have no legacy-structure gap (they are created on the
+    current scheme and never migrated), so they are deliberately excluded.
+
+    Returns an empty list when no session is bound — the migration then becomes
+    a no-op, same as before.
+    """
+    session_id = get_session_id()
+    if not session_id:
+        return []
+    suffix = _sanitize_session_id_for_table(session_id)
+    return [
+        f"team_task_{suffix}",
+        f"team_task_dependency_{suffix}",
+        f"team_message_{suffix}",
+    ]
+
+
+def _ensure_dynamic_table_indexes(
+    sync_conn,
+    candidates: list[str],
+    existing_before_create: set[str],
+) -> None:
     """Rebuild per-session dynamic-table indexes to the current scheme (A1/A2/D4).
 
     ``__table__.create(checkfirst=True)`` never alters an existing table, so a
@@ -377,13 +413,27 @@ def _ensure_dynamic_table_indexes(sync_conn) -> None:
 
     Every statement is idempotent (``IF EXISTS`` / ``IF NOT EXISTS``), so a
     table already on the new scheme is a cheap no-op.
+
+    Scope: ``candidates`` are the current session's tables (computed from
+    ``get_session_id``). ``existing_before_create`` is the snapshot of which of
+    them already existed *before* ``create(checkfirst=True)`` ran; tables not
+    in it were just created on the current scheme and are skipped entirely — no
+    ``get_indexes`` / ``get_columns`` PRAGMA round-trip at all. This replaces
+    the old ``inspector.get_table_names()`` full-DB scan: a fresh bind no
+    longer pays a PRAGMA call per historical dynamic table in the file, which
+    is what pushed bind-time DDL past the write-lock watchdog under concurrent
+    multi-process binds.
     """
     inspector = inspect(sync_conn)
-    for table_name in inspector.get_table_names():
+    for table_name in candidates:
         is_message = table_name.startswith("team_message_")
         is_dependency = table_name.startswith("team_task_dependency_")
         is_task = table_name.startswith("team_task_") and not is_dependency
         if not (is_message or is_dependency or is_task):
+            continue
+        if table_name not in existing_before_create:
+            # Created fresh this bind → already on the current scheme; touching
+            # it would only burn a ``get_indexes``/``get_columns`` PRAGMA lock.
             continue
 
         index_names = {idx["name"] for idx in inspector.get_indexes(table_name)}
@@ -726,11 +776,19 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     read_status_model = _get_message_read_status_model()
     review_vote_model = _get_review_vote_model()
     conn = await session.connection()
+    # Snapshot which migration-candidate tables already exist *before* create
+    # runs. ``create(checkfirst=True)`` leaves a pre-existing table untouched,
+    # so only those need migration; freshly-created ones are on the current
+    # scheme and can be skipped without a single ``get_indexes`` PRAGMA call.
+    candidates = _current_session_migration_tables()
+    existing_before_create = await conn.run_sync(_snapshot_existing_tables, candidates)
     for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
         await conn.run_sync(model.__table__.create, checkfirst=True)
     await conn.run_sync(_ensure_message_protocol_column)
     await conn.run_sync(_ensure_message_meta_column)
-    await conn.run_sync(_ensure_dynamic_table_indexes)
+    await conn.run_sync(
+        _ensure_dynamic_table_indexes, candidates, existing_before_create
+    )
 
 
 async def create_cur_session_tables(sessions: DbSessions) -> None:
@@ -744,17 +802,58 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
     crashes).
 
     The session_id is obtained from context via get_session_id().
+
+    Retries on transient errors: SQLite write contention
+    (``OperationalError``) and pool-exhaustion (``SATimeoutError``) as
+    ``retry_on_locked`` does, *plus* the ``asyncio.timeout`` watchdog
+    ``TimeoutError`` raised by ``DbSessions.write()`` when the driver thread
+    is wedged (e.g. multi-process binds racing the file lock at startup). A
+    failed retry budget does not raise: ``create_cur_session_tables`` returns
+    ``None`` on success-or-give-up and ``bind_session`` does not inspect the
+    return, so a bind-time DDL hiccup degrades to a logged warning rather than
+    crashing the member — the session's tables either got created/migrated on
+    a retry, or the next DAO write surfaces the real error in-band.
     """
     session_id = get_session_id()
     if not session_id:
         team_logger.warning("No session_id in context, cannot create session tables")
         return
 
-    async with sessions.write() as session:
-        await _ensure_session_tables(session)
-        await session.commit()
+    async def _ddl_once() -> None:
+        async with sessions.write() as session:
+            await _ensure_session_tables(session)
+            await session.commit()
 
-    team_logger.info("Session tables ready for session %s", session_id)
+    last_err: BaseException | None = None
+    for attempt in range(_DB_RETRY_ATTEMPTS):
+        try:
+            await _ddl_once()
+            team_logger.info("Session tables ready for session %s", session_id)
+            return
+        except (OperationalError, SATimeoutError, TimeoutError) as e:
+            last_err = e
+            if attempt >= _DB_RETRY_ATTEMPTS - 1:
+                break
+            delay = _DB_RETRY_BASE_DELAY * (2**attempt)
+            team_logger.warning(
+                "create_cur_session_tables hit a transient DB error (%s); "
+                "retrying in %ss (attempt %d)",
+                type(e).__name__,
+                delay,
+                attempt + 1,
+            )
+            await asyncio.sleep(delay)
+
+    # Budget exhausted — do not crash the member. A subsequent DAO write will
+    # either succeed on its own (tables are idempotent under checkfirst) or
+    # raise the real error in-band where the caller can handle it.
+    team_logger.error(
+        "create_cur_session_tables failed after %d attempts for session %s: %s",
+        _DB_RETRY_ATTEMPTS,
+        session_id,
+        last_err,
+    )
+    return
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:
