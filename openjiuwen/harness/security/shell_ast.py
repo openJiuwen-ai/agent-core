@@ -156,15 +156,16 @@ def _parse_with_conservative_fallback(command: str) -> ShellAstParseResult:
 
 
 def _scan_shell_structure(command: str) -> ShellStructureFlags:
-    has_pipeline = "|" in command
-    has_compound = any(token in command for token in ("&&", "||", ";", "\n", "\r"))
-    has_input_redirection = "<" in command
-    has_output_redirection = ">" in command
-    has_command_substitution = bool(_COMMAND_SUBSTITUTION_RE.search(command))
-    has_process_substitution = bool(_PROCESS_SUBSTITUTION_RE.search(command))
-    has_parameter_expansion = bool(_PARAM_EXPANSION_RE.search(command))
-    has_heredoc = bool(_HEREDOC_RE.search(command))
-    operators = _collect_operator_markers(command)
+    operator_text, expansion_text = _shell_sensitive_views(command)
+    has_pipeline = "|" in operator_text
+    has_compound = any(token in operator_text for token in ("&&", "||", ";", "\n", "\r"))
+    has_input_redirection = "<" in operator_text
+    has_output_redirection = ">" in operator_text
+    has_command_substitution = bool(_COMMAND_SUBSTITUTION_RE.search(expansion_text))
+    has_process_substitution = bool(_PROCESS_SUBSTITUTION_RE.search(operator_text))
+    has_parameter_expansion = bool(_PARAM_EXPANSION_RE.search(expansion_text))
+    has_heredoc = bool(_HEREDOC_RE.search(operator_text))
+    operators = _collect_operator_markers(operator_text, expansion_text)
     return ShellStructureFlags(
         has_compound_operators=has_compound,
         has_pipeline=has_pipeline,
@@ -178,10 +179,48 @@ def _scan_shell_structure(command: str) -> ShellStructureFlags:
     )
 
 
-def _collect_operator_markers(command: str) -> tuple[str, ...]:
+def _shell_sensitive_views(command: str) -> tuple[str, str]:
+    """Return quote-aware views for operators and shell expansions."""
+    operator_chars = [" "] * len(command)
+    expansion_chars = [" "] * len(command)
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            quote = None if quote == '"' else '"'
+            index += 1
+            continue
+        if quote == '"':
+            expansion_chars[index] = char
+            index += 1
+            continue
+        if char == "'":
+            quote = "'"
+            index += 1
+            continue
+        operator_chars[index] = char
+        expansion_chars[index] = char
+        index += 1
+    return "".join(operator_chars), "".join(expansion_chars)
+
+
+def _collect_operator_markers(operator_text: str, expansion_text: str | None = None) -> tuple[str, ...]:
+    expansion_text = operator_text if expansion_text is None else expansion_text
     markers: list[str] = []
-    for token in ("&&", "||", ";", "|", ">>", ">", "<", "$(", "`", "<(", ">(", "<<", "<<<"):
-        if token in command and token not in markers:
+    for token in ("&&", "||", ";", "|", ">>", ">", "<", "<(", ">(", "<<", "<<<"):
+        if token in operator_text and token not in markers:
+            markers.append(token)
+    for token in ("$(", "`", "${"):
+        if token in expansion_text and token not in markers:
             markers.append(token)
     return tuple(markers)
 
