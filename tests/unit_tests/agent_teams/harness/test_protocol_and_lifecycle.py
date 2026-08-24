@@ -265,7 +265,7 @@ async def test_evolution_rail_triggers_per_round_in_multi_round_mode() -> None:
         evolved: list = []
 
         class _CountingEvolutionRail(EvolutionRail):
-            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None):
+            async def run_evolution(self, trajectory, ctx=None, *, snapshot=None, trigger_point=None):
                 evolved.append(trajectory)
 
         # Default trigger is AFTER_INVOKE; sync evolution so the count is
