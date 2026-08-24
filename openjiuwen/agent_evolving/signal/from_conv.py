@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import warnings
+from collections.abc import Mapping
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from openjiuwen.agent_evolving.protocols import USER_INTENT_SIGNAL
@@ -15,12 +16,13 @@ from openjiuwen.agent_evolving.signal.base import (
     make_evolution_signal,
     make_signal_fingerprint,
 )
-from openjiuwen.agent_evolving.trajectory.types import (
-    LLMCallDetail,
-    ToolCallDetail,
-    Trajectory,
-    trajectory_steps,
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_messages,
+    read_tool_call,
 )
+from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.agent_evolving.trajectory.types import TrajectoryLike
 from openjiuwen.agent_evolving.utils import TuneUtils
 from openjiuwen.core.common.logging import logger
 
@@ -388,7 +390,7 @@ _EXEC_CONTENT_KEYS = (
     "shell_command",
 )
 
-DetectionInput = Union[Trajectory, List[dict]]
+DetectionInput = Union[TrajectoryLike, List[dict]]
 
 
 class ConversationSignalDetector:
@@ -421,9 +423,9 @@ class ConversationSignalDetector:
     ) -> List[EvolutionSignal]:
         try:
             messages = (
-                self.convert_trajectory_to_messages(input_data)
-                if isinstance(input_data, Trajectory)
-                else list(input_data)
+                list(input_data)
+                if isinstance(input_data, list)
+                else self.convert_trajectory_to_messages(input_data)
             )
             signals = self._detect_from_messages(messages)
         except Exception as exc:
@@ -450,7 +452,7 @@ class ConversationSignalDetector:
 
     def detect_trajectory_signals(
         self,
-        trajectory: Optional[Trajectory],
+        trajectory: Optional[TrajectoryLike],
         *,
         messages: Optional[List[dict]] = None,
         signal_types: Optional[Set[str]] = None,
@@ -514,9 +516,9 @@ class ConversationSignalDetector:
                 contains skill_tool / skill_complete records).
         """
         messages = (
-            self.convert_trajectory_to_messages(trajectory_or_messages)
-            if isinstance(trajectory_or_messages, Trajectory)
-            else list(trajectory_or_messages)
+            list(trajectory_or_messages)
+            if isinstance(trajectory_or_messages, list)
+            else self.convert_trajectory_to_messages(trajectory_or_messages)
         )
         prompt_inputs = _build_user_feedback_prompt_inputs(
             messages,
@@ -589,12 +591,12 @@ class ConversationSignalDetector:
         ]
 
     @staticmethod
-    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
-        """Convert trajectory steps (via ``trajectory_steps``) to message list format.
+    def convert_trajectory_to_messages(trajectory: TrajectoryLike) -> List[dict]:
+        """Convert canonical LLM/tool spans to message-list format.
 
         The message format matches what SignalDetector.detect() expects:
-        - LLM steps: messages from LLMCallDetail, including tool_calls
-        - Tool steps: tool result from ToolCallDetail.call_result
+        - LLM spans: indexed prompt/completion messages, including tool_calls
+        - Tool spans: canonical tool output and identity attributes
 
         Args:
             trajectory: Trajectory object to convert.
@@ -605,64 +607,40 @@ class ConversationSignalDetector:
         messages: List[dict] = []
         tool_call_id_to_name: Dict[str, str] = {}
 
-        for step in trajectory_steps(trajectory):
-            if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
-                for msg in step.detail.messages:
+        for span in iter_spans(trajectory):
+            category = span_category(span)
+            if category == "llm":
+                span_messages = read_llm_messages(span)
+                for msg in span_messages:
                     messages.append(msg)
-                    tool_calls = _get_field(msg, "tool_calls", [])
-                    if tool_calls:
-                        for tc in tool_calls:
-                            tc_id = _tool_call_field(tc, "id")
-                            tc_name = _tool_call_field(tc, "name")
-                            if tc_id and tc_name:
-                                tool_call_id_to_name[tc_id] = tc_name
+                    for tc in _get_field(msg, "tool_calls", []) or []:
+                        tc_id = _tool_call_field(tc, "id")
+                        tc_name = _tool_call_field(tc, "name")
+                        if tc_id and tc_name:
+                            tool_call_id_to_name[str(tc_id)] = str(tc_name)
+                continue
 
-                # Include the model response (assistant tool_calls live here, not only in inputs).
-                response = step.detail.response
-                resp_msg: Optional[dict] = None
-                if isinstance(response, dict):
-                    resp_msg = response
-                elif response is not None:
-                    resp_msg = {
-                        "role": str(getattr(response, "role", "") or "assistant"),
-                        "content": str(getattr(response, "content", "") or ""),
-                    }
-                    tool_calls = getattr(response, "tool_calls", None)
-                    if tool_calls:
-                        resp_msg["tool_calls"] = tool_calls
-                if resp_msg:
-                    has_payload = any(
-                        resp_msg.get(key) for key in ("role", "content", "tool_calls")
-                    )
-                    if has_payload:
-                        messages.append(resp_msg)
-                        for tc in resp_msg.get("tool_calls") or []:
-                            tc_id = _tool_call_field(tc, "id")
-                            tc_name = _tool_call_field(tc, "name")
-                            if tc_id and tc_name:
-                                tool_call_id_to_name[tc_id] = tc_name
+            if category != "tool":
+                continue
+            tool_call = read_tool_call(span)
+            tool_name = str(tool_call.get("name") or "")
+            tool_call_id = str(tool_call.get("id") or "")
+            if not tool_name and tool_call_id:
+                tool_name = tool_call_id_to_name.get(tool_call_id, "")
 
-            elif step.kind == "tool" and isinstance(step.detail, ToolCallDetail):
-                tool_name = step.detail.tool_name
-                tool_call_id = step.detail.tool_call_id or step.meta.get("tool_call_id", "")
-
-                if not tool_name and tool_call_id:
-                    tool_name = tool_call_id_to_name.get(tool_call_id, "")
-
-                result_content = ""
-                if step.detail.call_result is not None:
-                    result_content = str(step.detail.call_result)
-
-                tool_msg = {
-                    "role": "tool",
-                    "content": result_content,
-                }
-                if tool_call_id:
-                    tool_msg["tool_call_id"] = tool_call_id
-                if tool_name:
-                    tool_msg["name"] = tool_name
-
-                messages.append(tool_msg)
+            result = tool_call.get("output")
+            if result is None:
+                error = tool_call.get("error")
+                result = error.get("message", "") if isinstance(error, Mapping) else ""
+            tool_msg = {
+                "role": "tool",
+                "content": "" if result is None else str(result),
+            }
+            if tool_call_id:
+                tool_msg["tool_call_id"] = tool_call_id
+            if tool_name:
+                tool_msg["name"] = tool_name
+            messages.append(tool_msg)
 
         return messages
 

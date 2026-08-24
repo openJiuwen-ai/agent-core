@@ -24,7 +24,8 @@ from openjiuwen.agent_evolving.trajectory import (
     Trajectory,
     set_trajectory_resource_attributes,
 )
-from openjiuwen.agent_evolving.trajectory.semconv import CASE_ID, OJ_SESSION_ID, TRAJECTORY_SOURCE
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID
+from openjiuwen.agent_evolving.trajectory.semconv import CASE_ID, TRAJECTORY_SOURCE
 
 
 class TrajectoryCollector:
@@ -123,11 +124,11 @@ class TrajectoryCollector:
         # InMemoryTrajectoryStore stores in dict, so we get the last saved one
         trajectory = trajectories[-1]
 
-        set_trajectory_resource_attributes(
+        trajectory = set_trajectory_resource_attributes(
             trajectory,
             {
                 TRAJECTORY_SOURCE: source,
-                OJ_SESSION_ID: effective_session_id,
+                SESSION_ID: effective_session_id,
                 CASE_ID: effective_case_id,
             },
         )

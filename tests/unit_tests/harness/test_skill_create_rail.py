@@ -166,37 +166,26 @@ class TestSkillCreateRailPrompts:
         ctx = MagicMock()
         ctx.agent = agent
 
+        assert agent._registered_rails[0].skills[0].name == "skill-creator"
         await rail.before_model_call(ctx)
 
         section = agent.system_prompt_builder.get_section(SectionName.SKILL_CREATION_GUIDANCE)
         assert section is not None
         prompt = section.render("cn")
         assert "## 技能沉淀自检" in prompt
-        for heading in (
-            "### 判断场景",
-            "#### 应考虑创建",
-            "#### 不应创建",
-            "### 用户意图信号",
-            "### 回复与确认规则",
-            "#### 最终回复",
-            "#### 用户确认",
-            "#### 创建执行",
-        ):
-            assert heading in prompt
-        assert "### 核心原则" not in prompt
-        assert "Skill creation 只沉淀未来同类任务可复用的类别级经验" in prompt
-        assert "不需要创建时保持静默并正常回复" in prompt
-        assert "以后遇到 xxx 按这个流程处理。" in prompt
-        assert "下次做 xxx 时也这样检查 / 处理。" in prompt
-        assert "以后输出 xxx 时保持这种格式 / 判断标准。" in prompt
-        assert "刚才 xxx 出错后用 yyy 修好了" in prompt
-        assert "最多追加两句" in prompt
-        assert "skill-creator" in prompt
-        assert "兼容的技能创建能力" in prompt
-        assert "ask_user" in prompt
-        assert "prepare_skill_evolution" in prompt
-        assert "evolve_review_task" in prompt
-        assert "evolve_skill_experiences" in prompt
+        for heading in ("目标与边界", "决策顺序", "用户可见输出", "用户确认", "能力交接"):
+            assert prompt.count(f"### {heading}") == 1
+        assert "只沉淀未来同类任务可复用的新方法" in prompt
+        assert "高优先级用户意图" in prompt
+        assert "不要求同时存在复杂执行轨迹" in prompt
+        assert "自检不得打断任务" in prompt
+        assert "确认后交给技能创建能力" in prompt
+        assert "只在普通最终回复末尾追加一至两句" in prompt
+        assert "必须同时包含" in prompt
+        assert "创建确认不等于 Skill 演进确认" in prompt
+        assert "prepare_skill_evolution" not in prompt
+        assert "evolve_review_task" not in prompt
+        assert "evolve_skill_experiences" not in prompt
 
     def test_creation_guidance_overrides_evolution_confirmation_when_combined(self):
         builder = SystemPromptBuilder(language="cn")
@@ -206,9 +195,10 @@ class TestSkillCreateRailPrompts:
         prompt = builder.build()
 
         assert prompt.index("## 技能演进自检") < prompt.index("## 技能沉淀自检")
-        assert "用户确认创建后，使用 `skill-creator`" in prompt
-        assert "用户确认创建新 Skill 不是确认 Skill 演进" in prompt
-        assert "不要调用 `prepare_skill_evolution`、`evolve_review_task` 或 `evolve_skill_experiences`" in prompt
+        assert "确认后交给技能创建能力" in prompt
+        assert "只在普通最终回复末尾追加一至两句" in prompt
+        assert "创建确认不等于 Skill 演进确认" in prompt
+        assert "prepare_skill_evolution" not in prompt
 
     def test_english_creation_guidance_overrides_evolution_confirmation_when_combined(self):
         builder = SystemPromptBuilder(language="en")
@@ -218,10 +208,10 @@ class TestSkillCreateRailPrompts:
         prompt = builder.build()
 
         assert prompt.index("## Skill Evolution Self-Check") < prompt.index("## Skill Capture Self-Check")
-        assert "use `skill-creator` or a compatible skill creation capability" in prompt
-        assert "User confirmation to create a new Skill is not consent for Skill evolution" in prompt
-        assert "do not call" in prompt
-        assert "`prepare_skill_evolution`, `evolve_review_task`, or `evolve_skill_experiences`" in prompt
+        assert "After confirmation, hand the context to the Skill creation capability" in prompt
+        assert "append only one or two sentences" in prompt
+        assert "Creation confirmation is not Skill evolution confirmation" in prompt
+        assert "prepare_skill_evolution" not in prompt
 
     @pytest.mark.asyncio
     async def test_before_model_call_injects_stable_guidance_when_auto_trigger_false(self, tmp_path):
@@ -247,12 +237,11 @@ class TestSkillCreateRailPrompts:
         assert prompt.startswith("<auto_skill_creation_followup>\n")
         assert prompt.endswith("\n</auto_skill_creation_followup>")
         assert "不是用户的新需求" in prompt
-        assert "不需要重新判断是否达到自检触发门槛" in prompt
-        assert "最多追加两句" in prompt
-        assert "第二句询问用户是否创建 Skill" in prompt
-        assert "不要提及自检、沉淀、无需创建、已检查、内部判断或本提醒" in prompt
-        assert "自然承接刚完成的任务" in prompt
-        assert "不要重新总结任务结果" in prompt
+        assert "参考常驻“技能沉淀自检”规则" in prompt
+        assert "不重新判断运行时触发门槛" in prompt
+        assert "普通最终回复末尾追加一至两句" in prompt
+        assert "同时包含可复用方法和是否创建 Skill 的确认问题" in prompt
+        assert "是否创建 Skill" in prompt
         assert "ask_user" not in prompt
         assert "skill-creator" not in prompt
         assert "自动创建" not in prompt
@@ -454,7 +443,7 @@ class TestSkillCreateRailTriggering:
         _append_builder_tool_calling_iterations(builder, 2, tool_name="team.send_message", tool_call_id_prefix="send")
         _append_builder_tool_calling_iterations(builder, 2, tool_name="team.custom_tool", tool_call_id_prefix="custom")
 
-        metrics = _make_signal_detector().collect_metrics(builder)
+        metrics = _make_signal_detector().collect_metrics(builder.build())
 
         assert metrics.total_effective_tool_calling_iterations == 2
         assert metrics.total_effective_tool_calls == 2
@@ -466,7 +455,7 @@ class TestSkillCreateRailTriggering:
         detector = _make_signal_detector()
         builder = _make_builder()
         _append_builder_tool_calling_iterations(builder, 6)
-        prompt_signals = detector.detect(builder)
+        prompt_signals = detector.detect(builder.build())
 
         assert len(prompt_signals) == 1
         prompt_signal = prompt_signals[0]
@@ -474,7 +463,7 @@ class TestSkillCreateRailTriggering:
         assert prompt_signal.reason == "first_prompt_threshold"
 
         _append_builder_tool_call(builder, "team.skill_tool")
-        cover_signals = detector.detect(builder)
+        cover_signals = detector.detect(builder.build())
 
         assert len(cover_signals) == 1
         cover_signal = cover_signals[0]
@@ -485,9 +474,10 @@ class TestSkillCreateRailTriggering:
         detector = _make_signal_detector()
         builder = _make_builder()
         _append_builder_tool_calling_iterations(builder, 6)
-        metrics = detector.collect_metrics(builder)
+        trajectory = builder.build()
+        metrics = detector.collect_metrics(trajectory)
 
-        signals = detector.detect(builder, metrics=metrics)
+        signals = detector.detect(trajectory, metrics=metrics)
 
         assert len(signals) == 1
         assert signals[0].metrics is metrics

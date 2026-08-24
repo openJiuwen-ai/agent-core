@@ -64,6 +64,33 @@ class TestPipelineInitialization:
                 assert pipeline.config.evolution_mode is True
 
 
+class TestPipelineDockerfileConfiguration:
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_base_image_dockerfile_omits_legacy_evolution_env(tmp_path, monkeypatch):
+        from openjiuwen.agent_evolving.evaluator.evaluator_pipeline.pipeline import EvolutionPipeline
+
+        pipeline = EvolutionPipeline.__new__(EvolutionPipeline)
+        pipeline.config = PipelineConfig(agent_config={})
+        pipeline.agent = MagicMock()
+        pipeline.agent.name.return_value = "jiuwenswarm"
+        pipeline._base_image_tag = None
+        monkeypatch.chdir(tmp_path)
+
+        with patch(
+            "openjiuwen.agent_evolving.evaluator.evaluator_pipeline.pipeline.DockerEnvironment.build"
+        ):
+            await pipeline._build_base_image(
+                tmp_path,
+                "FROM python:3.11\n",
+                {"mode": "pypi", "packages": []},
+            )
+
+        dockerfile = (tmp_path / "Dockerfile.base").read_text(encoding="utf-8")
+        assert "EVOLUTION_AUTO_SCAN" not in dockerfile
+        assert "EVOLUTION_AUTO_SAVE" not in dockerfile
+
+
 class TestPipelineMetrics:
     """Test EvolutionPipeline metrics computation."""
 

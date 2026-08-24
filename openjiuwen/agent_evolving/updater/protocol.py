@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol, Union
 
-from openjiuwen.agent_evolving.trajectory.types import Trajectory
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 
 if TYPE_CHECKING:
     from openjiuwen.agent_evolving.signal.base import EvolutionSignal
