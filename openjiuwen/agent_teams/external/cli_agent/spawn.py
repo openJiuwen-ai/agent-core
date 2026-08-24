@@ -27,16 +27,32 @@ from openjiuwen.agent_teams.external.cli_agent.codex import build_codex_runtime
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
 from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTransport
-from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
+from openjiuwen.agent_teams.external.descriptor import OPENJIUWEN_HOME_ENV, TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_home
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRuntimeContext
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+
+
+def _with_home_env(env: dict[str, str]) -> dict[str, str]:
+    """Ensure the runtime home travels into the CLI subprocess.
+
+    The host platform configures the home via ``configure_openjiuwen_home``
+    (a process-global module variable), which does not cross process
+    boundaries. A spawned CLI (and the MCP server it in turn spawns) would
+    otherwise resolve the default ``~/.openjiuwen`` and miss session spill
+    files written under the configured root. Propagate the resolved home as
+    ``OPENJIUWEN_HOME`` so :func:`get_openjiuwen_home` (env fallback) and
+    Codex's ``mcp_servers.<key>.env_vars`` allow-list (which carries it one
+    hop further into the MCP server) keep the paths aligned.
+    """
+    env.setdefault(OPENJIUWEN_HOME_ENV, str(get_openjiuwen_home()))
+    return env
 
 
 def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
@@ -263,7 +279,7 @@ async def build_cli_runtime(
             base_env = strip_parent_claude_env(dict(os.environ))
         else:
             base_env = {}
-        env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
+        env = _with_home_env({**base_env, **(extra_env or {}), **descriptor.to_env()})
         team_logger.info(
             "[external-cli] preparing claude member {} cwd={} cli_path_configured={} inject_mcp={} "
             "mcp_server_name={} mcp_server_command={} team_join_env_present={} ssh_transport_configured={}",
@@ -306,7 +322,7 @@ async def build_cli_runtime(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason="ssh transport is not yet supported for Codex SDK members",
             )
-        env = {**dict(os.environ), **(extra_env or {}), **descriptor.to_env()}
+        env = _with_home_env({**dict(os.environ), **(extra_env or {}), **descriptor.to_env()})
         team_logger.info(
             "[external-cli] preparing codex member {} cwd={} cli_path_configured={} codex_bin_configured={} "
             "inject_mcp={} mcp_server_name={} mcp_server_command={} team_join_env_present={}",
@@ -377,7 +393,7 @@ async def build_cli_runtime(
         for key, value in os.environ.items()
         if not any(key.startswith(prefix) for prefix in adapter.env_strip_prefixes)
     }
-    env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
+    env = _with_home_env({**base_env, **(extra_env or {}), **descriptor.to_env()})
 
     # System prompt as a launch arg. CLIs without a flag return [] here and get
     # the prompt prepended to their first user message by the caller instead.

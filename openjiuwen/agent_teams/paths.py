@@ -40,9 +40,20 @@ def reset_openjiuwen_home() -> None:
 
 
 def get_openjiuwen_home() -> Path:
-    """Return the root directory for openJiuWen local state."""
+    """Return the root directory for openJiuWen local state.
+
+    Resolution order: an explicit :func:`configure_openjiuwen_home` override
+    (process-global, set by the host platform at startup), then the
+    ``OPENJIUWEN_HOME`` environment variable (the only channel a spawned
+    subprocess — e.g. a Codex MCP server — can inherit, since the in-memory
+    override does not cross process boundaries), then the default
+    ``~/.openjiuwen``.
+    """
     if _configured_openjiuwen_home is not None:
         return _configured_openjiuwen_home
+    env_home = os.environ.get("OPENJIUWEN_HOME")
+    if env_home:
+        return Path(env_home)
     return Path.home() / ".openjiuwen"
 
 
