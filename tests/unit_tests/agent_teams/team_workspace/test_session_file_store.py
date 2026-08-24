@@ -9,6 +9,8 @@ and the DAOs dereference placeholder rows transparently (design-v5
 30-block-b, §13 acceptance matrix).
 """
 
+import pathlib
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -20,8 +22,8 @@ from openjiuwen.agent_teams.context import (
 from openjiuwen.agent_teams.paths import (
     configure_openjiuwen_home,
     reset_openjiuwen_home,
-    team_session_dir,
 )
+from openjiuwen.agent_teams.team_workspace.paths import TeamWorkspacePaths
 from openjiuwen.agent_teams.team_workspace.session_file_store import (
     CONTENT_IN_FILE,
     FileAddress,
@@ -36,6 +38,17 @@ from openjiuwen.agent_teams.tools.models import (
     _get_message_model,
     _get_task_model,
 )
+from openjiuwen.agent_teams.schema.task import NewTaskSpec
+
+
+class _FakePaths:
+    """Minimal TeamWorkspacePaths stand-in for store-level tests."""
+
+    def __init__(self, root: pathlib.Path) -> None:
+        self._root = root
+
+    def session_root(self, team_name: str, session_id: str) -> pathlib.Path:
+        return self._root / team_name / "sessions" / session_id
 
 
 class TestSessionFileStore:
@@ -43,11 +56,7 @@ class TestSessionFileStore:
 
     @pytest.fixture
     def store(self, tmp_path):
-        configure_openjiuwen_home(str(tmp_path))
-        try:
-            yield SessionFileStore()
-        finally:
-            reset_openjiuwen_home()
+        return SessionFileStore(_FakePaths(tmp_path))
 
     def _addr(self, **overrides):
         base = dict(
@@ -64,7 +73,7 @@ class TestSessionFileStore:
         """put() stores the body at the derived path and returns ``#file#``."""
         addr = self._addr(kind="direct", object_id="m1", to_member="a")
         assert store.put("hello a", addr) == CONTENT_IN_FILE
-        target = tmp_path / ".agent_teams" / "T" / "sessions" / "S1" / "messages" / "to_a" / "m1.md"
+        target = tmp_path / "T" / "sessions" / "S1" / "messages" / "to_a" / "m1.md"
         assert target.read_text(encoding="utf-8") == "hello a"
 
     def test_get_derives_direct_broadcast_task_paths(self, store, tmp_path):
@@ -75,9 +84,9 @@ class TestSessionFileStore:
         assert store.get(self._addr(kind="direct", object_id="d1", to_member="a")) == "d"
         assert store.get(self._addr(kind="broadcast", object_id="b1")) == "b"
         assert store.get(self._addr(kind="task", object_id="t1")) == "t"
-        assert (tmp_path / ".agent_teams" / "T" / "sessions" / "S1" / "messages" / "to_a" / "d1.md").exists()
-        assert (tmp_path / ".agent_teams" / "T" / "sessions" / "S1" / "messages" / "broadcast" / "b1.md").exists()
-        assert (tmp_path / ".agent_teams" / "T" / "sessions" / "S1" / "tasks" / "t1.md").exists()
+        assert (tmp_path / "T" / "sessions" / "S1" / "messages" / "to_a" / "d1.md").exists()
+        assert (tmp_path / "T" / "sessions" / "S1" / "messages" / "broadcast" / "b1.md").exists()
+        assert (tmp_path / "T" / "sessions" / "S1" / "tasks" / "t1.md").exists()
 
     def test_overwrite_same_object_id(self, store):
         """update_task semantics: rewriting the same task id overwrites in place."""
@@ -104,8 +113,8 @@ class TestSessionFileStore:
         store.put("d", self._addr(kind="direct", object_id="d1", to_member="a"))
         store.put("t", self._addr(kind="task", object_id="t1"))
         store.remove_session(team_name="T", session_id="S1")
-        assert not (tmp_path / ".agent_teams" / "T" / "sessions" / "S1" / "messages").exists()
-        assert not (tmp_path / ".agent_teams" / "T" / "sessions" / "S1" / "tasks").exists()
+        assert not (tmp_path / "T" / "sessions" / "S1" / "messages").exists()
+        assert not (tmp_path / "T" / "sessions" / "S1" / "tasks").exists()
 
 
 @pytest_asyncio.fixture
@@ -176,7 +185,7 @@ class TestDaoPlaceholderIntegration:
             assert [r.message_id for r in rows] == ["id_a", "id_b", "id_c"]
             assert all(r.content == CONTENT_IN_FILE for r in rows)
 
-        session_root = team_session_dir("T3", "fds_session")
+        session_root = TeamWorkspacePaths().session_root("T3", "fds_session")
         msgs_dir = session_root / "messages"
         for member, msg_id in (("a", "id_a"), ("b", "id_b"), ("c", "id_c")):
             target = msgs_dir / f"to_{member}" / f"{msg_id}.md"
@@ -208,12 +217,12 @@ class TestDaoPlaceholderIntegration:
             content="dup test", recipients=[("id_a", "a"), ("id_c", "c")],
         ) == 0
 
-        session_root = team_session_dir("T6", "fds_session")
+        session_root = TeamWorkspacePaths().session_root("T6", "fds_session")
         msgs_dir = session_root / "messages"
         # Orphan file from the failed batch still exists on disk.
         assert (msgs_dir / "to_c" / "id_c.md").exists()
         # And is reclaimed when the session is torn down.
-        SessionFileStore().remove_session(team_name="T6", session_id="fds_session")
+        SessionFileStore(TeamWorkspacePaths()).remove_session(team_name="T6", session_id="fds_session")
         assert not (msgs_dir / "to_c").exists()
         assert not (msgs_dir / "to_a").exists()
 
@@ -245,7 +254,7 @@ class TestDaoPlaceholderIntegration:
             assert row.content != CONTENT_IN_FILE
 
         # No session file exists for this message.
-        session_root = team_session_dir("T4", "fds_session")
+        session_root = TeamWorkspacePaths().session_root("T4", "fds_session")
         assert not (session_root / "messages" / "to_worker-a" / "tpl1.md").exists()
 
     @pytest.mark.asyncio
@@ -269,3 +278,59 @@ class TestDaoPlaceholderIntegration:
             result = await session.execute(select(task_model).where(task_model.task_id == "task1"))
             row = result.scalar_one()
             assert row.content == CONTENT_IN_FILE
+
+    @pytest.mark.asyncio
+    async def test_mutate_dependency_graph_spills_task_content(self, db):
+        """The graph-mutation path (add_graph / leader create_task tool /
+        external client create_task) must spill content too — not just the
+        single-task ``create_task`` method.
+
+        Before the fix, spill was wired only into ``TaskDao.create_task``,
+        which every production entry point bypasses (they go through
+        ``mutate_dependency_graph`` → ``_stage_new_tasks``). This test pins
+        the graph path to the same invariant: the DB row keeps ``#file#``,
+        the body lives at ``tasks/<task_id>.md``, and ``get_task``
+        dereferences it transparently. Empty content stays inline (no file).
+        """
+        await db.team.create_team(team_name="T7", display_name="T7", leader_member_name="lead")
+
+        result = await db.task.mutate_dependency_graph(
+            team_name="T7",
+            new_tasks=[
+                NewTaskSpec(
+                    task_id="g1",
+                    title="graph task",
+                    content="body via mutate_dependency_graph",
+                    initial_status="pending",
+                ),
+                NewTaskSpec(
+                    task_id="g2",
+                    title="empty body",
+                    content="",
+                    initial_status="pending",
+                ),
+            ],
+        )
+        assert result.ok is True
+
+        # Non-empty body → placeholder in the DB + a backing file.
+        task_model = _get_task_model()
+        async with db.session_local() as session:
+            row = (
+                await session.execute(select(task_model).where(task_model.task_id == "g1"))
+            ).scalar_one()
+            assert row.content == CONTENT_IN_FILE
+            row2 = (
+                await session.execute(select(task_model).where(task_model.task_id == "g2"))
+            ).scalar_one()
+            assert row2.content == ""  # empty stays inline, no placeholder
+
+        session_root = TeamWorkspacePaths().session_root("T7", "fds_session")
+        assert (session_root / "tasks" / "g1.md").exists()
+        assert (session_root / "tasks" / "g1.md").read_text(encoding="utf-8") == "body via mutate_dependency_graph"
+        assert not (session_root / "tasks" / "g2.md").exists()
+
+        # get_task dereferences the placeholder transparently.
+        g1 = await db.task.get_task("g1")
+        assert g1 is not None
+        assert g1.content == "body via mutate_dependency_graph"
