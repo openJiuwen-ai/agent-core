@@ -240,11 +240,21 @@ class DeepAgent(BaseAgent):
         self._interaction_send_lock = asyncio.Lock()
         self._interaction_wakeup = asyncio.Event()
         self._interaction_started = False
+        self._agent_ras_setting: Any = None
         super().__init__(card)
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
         self._session_toolkit = toolkit
+
+    def set_agent_ras_setting(self, value: Any) -> None:
+        """Set the raw ``agent_ras`` value for sub-agent passthrough.
+
+        Stores the original ``create_deep_agent(agent_ras=...)`` argument so
+        child agents created by this one inherit the same setting. ``False``
+        must survive as ``False`` (do not normalize to ``None``).
+        """
+        self._agent_ras_setting = value
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
@@ -1244,6 +1254,7 @@ class DeepAgent(BaseAgent):
             "enable_plan_mode": spec.enable_plan_mode,
             "parallel_tool_calls": spec.parallel_tool_calls,
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
+            "agent_ras": getattr(self, "_agent_ras_setting", None),
         }
 
         if spec.factory_name:
