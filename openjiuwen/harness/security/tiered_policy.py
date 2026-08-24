@@ -29,6 +29,7 @@ _STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLeve
 
 # 规则内 tools 必须同类（与产品设计一致）
 _SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SAFE_COMPOUND_OPERATORS = frozenset({"&&", "||", ";", "|"})
 _PATH_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",
@@ -433,20 +434,42 @@ def _shell_ast_floor(
     return None, None
 
 
-def _apply_shell_ast_floor(
+def _is_reliably_split_safe_compound(shell_parse: ShellAstParseResult) -> bool:
+    flags = shell_parse.flags
+    operators = frozenset(flags.operators)
+    return (
+        shell_parse.kind == "simple"
+        and len(shell_parse.subcommands) > 1
+        and flags.has_actual_operator_nodes
+        and bool(operators)
+        and operators.issubset(_SAFE_COMPOUND_OPERATORS)
+        and not any((
+            flags.has_subshell,
+            flags.has_command_group,
+            flags.has_command_substitution,
+            flags.has_process_substitution,
+            flags.has_parameter_expansion,
+            flags.has_heredoc,
+            flags.has_input_redirection,
+            flags.has_output_redirection,
+        ))
+    )
+
+
+def _apply_permission_floor(
         permission: PermissionLevel,
         matched_rule: str,
-        shell_floor: PermissionLevel | None,
-        shell_floor_rule: str | None,
+        floor: PermissionLevel | None,
+        floor_rule: str | None,
 ) -> tuple[PermissionLevel, str]:
-    if shell_floor is None:
+    if floor is None:
         return permission, matched_rule
-    final = strictest(permission, shell_floor)
+    final = strictest(permission, floor)
     if final == permission:
         return permission, matched_rule
-    if matched_rule and shell_floor_rule:
-        return final, f"{shell_floor_rule}|{matched_rule}"
-    return final, shell_floor_rule or matched_rule
+    if matched_rule and floor_rule:
+        return final, f"{floor_rule}|{matched_rule}"
+    return final, floor_rule or matched_rule
 
 
 def _with_shell_command(tool_args: dict[str, Any], command: str) -> dict[str, Any]:
@@ -508,6 +531,32 @@ def _evaluate_single_invocation(
             )
 
     return PermissionLevel.ASK, f"{_MR}:fallback(no_config)"
+
+
+def _collect_whole_shell_floor(
+        tool_name: str,
+        tool_args: dict[str, Any],
+        ctx: _TieredInvocationContext,
+) -> tuple[PermissionLevel | None, str | None]:
+    builtin_hits = _collect_param_rule_hits(
+        ctx.builtin_rules, tool_name, tool_args, ctx.mode, "builtin"
+    )
+    if any(level == PermissionLevel.DENY for level, _ in builtin_hits):
+        return _finalize_hits(builtin_hits, "whole_command_builtin")
+
+    user_hits = _collect_param_rule_hits(
+        ctx.rules, tool_name, tool_args, ctx.mode, "rules"
+    )
+    if any(level == PermissionLevel.DENY for level, _ in user_hits):
+        return _finalize_hits(user_hits, "whole_command_rules")
+
+    if _collect_approval_override_hits(ctx.approval_overrides, tool_name, tool_args):
+        return None, None
+    if builtin_hits:
+        return _finalize_hits(builtin_hits, "whole_command_builtin")
+    if user_hits:
+        return _finalize_hits(user_hits, "whole_command_rules")
+    return None, None
 
 
 def _aggregate_subcommand_results(
@@ -581,6 +630,14 @@ def evaluate_tiered_policy(
     )
 
     if _tool_category(tool_name) == "shell" and shell_parse is not None and shell_parse.kind == "simple":
+        whole_floor: PermissionLevel | None = None
+        whole_floor_rule: str | None = None
+        if len(shell_parse.subcommands) > 1:
+            whole_floor, whole_floor_rule = _collect_whole_shell_floor(
+                tool_name,
+                tool_args,
+                invocation_ctx,
+            )
         subcommand_results: list[tuple[str, PermissionLevel, str]] = []
         for subcommand in shell_parse.subcommands:
             if not subcommand.text:
@@ -596,14 +653,15 @@ def evaluate_tiered_policy(
                 break
 
         aggregated = _aggregate_subcommand_results(subcommand_results)
-        return _apply_shell_ast_floor(*aggregated, shell_floor, shell_floor_rule)
+        with_whole_floor = _apply_permission_floor(*aggregated, whole_floor, whole_floor_rule)
+        return _apply_permission_floor(*with_whole_floor, shell_floor, shell_floor_rule)
 
     result = _evaluate_single_invocation(
         tool_name,
         tool_args,
         invocation_ctx,
     )
-    return _apply_shell_ast_floor(*result, shell_floor, shell_floor_rule)
+    return _apply_permission_floor(*result, shell_floor, shell_floor_rule)
 
 
 def maybe_escalate_shell_operators(
@@ -619,9 +677,15 @@ def maybe_escalate_shell_operators(
     from openjiuwen.harness.security.checker import _SHELL_OPERATORS_RE
 
     cmd = _command_text(tool_args)
-    if cmd and _SHELL_OPERATORS_RE.search(cmd):
-        return PermissionLevel.ASK
-    return permission
+    if not cmd or not _SHELL_OPERATORS_RE.search(cmd):
+        return permission
+
+    shell_parse = parse_shell_for_permission(cmd)
+    if shell_parse.kind == "simple" and not shell_parse.flags.has_actual_operator_nodes:
+        return permission
+    if _is_reliably_split_safe_compound(shell_parse):
+        return permission
+    return PermissionLevel.ASK
 
 
 def matched_rule_uses_approval_override(matched_rule: str | None) -> bool:

@@ -190,6 +190,7 @@ openjiuwen = [
     "**/locales/**/*.md",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
+    "**/harness/resources/*.yaml",
 ]
 
 [tool.coverage.run]
