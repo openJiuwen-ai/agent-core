@@ -368,7 +368,8 @@ class TaskDao:
         self._sessions = sessions
         self._file_store = file_store
 
-    def _session_id(self) -> Optional[str]:
+    @staticmethod
+    def _session_id() -> Optional[str]:
         from openjiuwen.agent_teams.context import get_session_id
 
         return get_session_id()
@@ -440,7 +441,7 @@ class TaskDao:
                     to_member=None,
                 )
             )
-        except (ValueError, FileNotFoundError, OSError) as exc:
+        except (ValueError, OSError) as exc:
             team_logger.warning("task content deref failed for %s: %s", row.task_id, exc)
             return row.content
 

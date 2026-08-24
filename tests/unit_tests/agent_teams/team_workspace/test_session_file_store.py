@@ -9,8 +9,6 @@ and the DAOs dereference placeholder rows transparently (design-v5
 30-block-b, §13 acceptance matrix).
 """
 
-import pathlib
-
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
@@ -22,8 +20,8 @@ from openjiuwen.agent_teams.context import (
 from openjiuwen.agent_teams.paths import (
     configure_openjiuwen_home,
     reset_openjiuwen_home,
+    team_session_dir,
 )
-from openjiuwen.agent_teams.team_workspace.paths import TeamWorkspacePaths
 from openjiuwen.agent_teams.team_workspace.session_file_store import (
     CONTENT_IN_FILE,
     FileAddress,
@@ -41,22 +39,17 @@ from openjiuwen.agent_teams.tools.models import (
 from openjiuwen.agent_teams.schema.task import NewTaskSpec
 
 
-class _FakePaths:
-    """Minimal TeamWorkspacePaths stand-in for store-level tests."""
-
-    def __init__(self, root: pathlib.Path) -> None:
-        self._root = root
-
-    def session_root(self, team_name: str, session_id: str) -> pathlib.Path:
-        return self._root / team_name / "sessions" / session_id
-
-
 class TestSessionFileStore:
     """Store-level behavior: placeholder round-trip, derivation, safety."""
 
     @pytest.fixture
     def store(self, tmp_path):
-        return SessionFileStore(_FakePaths(tmp_path))
+        # SessionFileStore resolves paths through the shared ``agent_teams.paths``
+        # helpers (no paths parameter); isolate FS state by pointing the global
+        # home at ``tmp_path`` for the duration of the test.
+        configure_openjiuwen_home(str(tmp_path))
+        yield SessionFileStore()
+        reset_openjiuwen_home()
 
     def _addr(self, **overrides):
         base = dict(
@@ -73,7 +66,7 @@ class TestSessionFileStore:
         """put() stores the body at the derived path and returns ``#file#``."""
         addr = self._addr(kind="direct", object_id="m1", to_member="a")
         assert store.put("hello a", addr) == CONTENT_IN_FILE
-        target = tmp_path / "T" / "sessions" / "S1" / "messages" / "to_a" / "m1.md"
+        target = team_session_dir("T", "S1") / "messages" / "to_a" / "m1.md"
         assert target.read_text(encoding="utf-8") == "hello a"
 
     def test_get_derives_direct_broadcast_task_paths(self, store, tmp_path):
@@ -84,9 +77,10 @@ class TestSessionFileStore:
         assert store.get(self._addr(kind="direct", object_id="d1", to_member="a")) == "d"
         assert store.get(self._addr(kind="broadcast", object_id="b1")) == "b"
         assert store.get(self._addr(kind="task", object_id="t1")) == "t"
-        assert (tmp_path / "T" / "sessions" / "S1" / "messages" / "to_a" / "d1.md").exists()
-        assert (tmp_path / "T" / "sessions" / "S1" / "messages" / "broadcast" / "b1.md").exists()
-        assert (tmp_path / "T" / "sessions" / "S1" / "tasks" / "t1.md").exists()
+        root = team_session_dir("T", "S1")
+        assert (root / "messages" / "to_a" / "d1.md").exists()
+        assert (root / "messages" / "broadcast" / "b1.md").exists()
+        assert (root / "tasks" / "t1.md").exists()
 
     def test_overwrite_same_object_id(self, store):
         """update_task semantics: rewriting the same task id overwrites in place."""
@@ -113,8 +107,9 @@ class TestSessionFileStore:
         store.put("d", self._addr(kind="direct", object_id="d1", to_member="a"))
         store.put("t", self._addr(kind="task", object_id="t1"))
         store.remove_session(team_name="T", session_id="S1")
-        assert not (tmp_path / "T" / "sessions" / "S1" / "messages").exists()
-        assert not (tmp_path / "T" / "sessions" / "S1" / "tasks").exists()
+        root = team_session_dir("T", "S1")
+        assert not (root / "messages").exists()
+        assert not (root / "tasks").exists()
 
 
 @pytest_asyncio.fixture
@@ -185,7 +180,7 @@ class TestDaoPlaceholderIntegration:
             assert [r.message_id for r in rows] == ["id_a", "id_b", "id_c"]
             assert all(r.content == CONTENT_IN_FILE for r in rows)
 
-        session_root = TeamWorkspacePaths().session_root("T3", "fds_session")
+        session_root = team_session_dir("T3", "fds_session")
         msgs_dir = session_root / "messages"
         for member, msg_id in (("a", "id_a"), ("b", "id_b"), ("c", "id_c")):
             target = msgs_dir / f"to_{member}" / f"{msg_id}.md"
@@ -217,12 +212,12 @@ class TestDaoPlaceholderIntegration:
             content="dup test", recipients=[("id_a", "a"), ("id_c", "c")],
         ) == 0
 
-        session_root = TeamWorkspacePaths().session_root("T6", "fds_session")
+        session_root = team_session_dir("T6", "fds_session")
         msgs_dir = session_root / "messages"
         # Orphan file from the failed batch still exists on disk.
         assert (msgs_dir / "to_c" / "id_c.md").exists()
         # And is reclaimed when the session is torn down.
-        SessionFileStore(TeamWorkspacePaths()).remove_session(team_name="T6", session_id="fds_session")
+        SessionFileStore().remove_session(team_name="T6", session_id="fds_session")
         assert not (msgs_dir / "to_c").exists()
         assert not (msgs_dir / "to_a").exists()
 
@@ -254,7 +249,7 @@ class TestDaoPlaceholderIntegration:
             assert row.content != CONTENT_IN_FILE
 
         # No session file exists for this message.
-        session_root = TeamWorkspacePaths().session_root("T4", "fds_session")
+        session_root = team_session_dir("T4", "fds_session")
         assert not (session_root / "messages" / "to_worker-a" / "tpl1.md").exists()
 
     @pytest.mark.asyncio
@@ -325,7 +320,7 @@ class TestDaoPlaceholderIntegration:
             ).scalar_one()
             assert row2.content == ""  # empty stays inline, no placeholder
 
-        session_root = TeamWorkspacePaths().session_root("T7", "fds_session")
+        session_root = team_session_dir("T7", "fds_session")
         assert (session_root / "tasks" / "g1.md").exists()
         assert (session_root / "tasks" / "g1.md").read_text(encoding="utf-8") == "body via mutate_dependency_graph"
         assert not (session_root / "tasks" / "g2.md").exists()
