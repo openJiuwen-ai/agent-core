@@ -559,18 +559,27 @@ class ReActAgent(BaseAgent):
     @classmethod
     def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
         context_config = config.context_engine_config
-        if getattr(context_config, "model_name", None):
-            return config
+        updates: Dict[str, Any] = {}
 
-        model_name = cls._resolve_context_engine_model_name(config)
-        if not model_name:
+        if not getattr(context_config, "model_name", None):
+            model_name = cls._resolve_context_engine_model_name(config)
+            if model_name:
+                updates["model_name"] = model_name
+
+        max_input_tokens = getattr(
+            getattr(config, "model_config_obj", None),
+            "max_input_tokens",
+            None,
+        )
+        if isinstance(max_input_tokens, int) and max_input_tokens > 0:
+            updates["context_window_tokens"] = max_input_tokens
+
+        if not updates:
             return config
 
         return config.model_copy(
             update={
-                "context_engine_config": context_config.model_copy(
-                    update={"model_name": model_name}
-                )
+                "context_engine_config": context_config.model_copy(update=updates)
             }
         )
 

@@ -5,7 +5,7 @@ Different models have their own strengths in reasoning ability, conversational f
 openJiuwen provides a unified **model client + configuration** system through `openjiuwen.core.foundation.llm`. The recommended integration approach is:
 
 - Use `ModelClientConfig` to describe "how to connect to the model service" (client_provider/api_base/api_key/custom_headers/SSL, etc.);
-- Use `ModelRequestConfig` to describe "which model to use for this call + call parameters" (model/temperature/top_p, etc.);
+- Use `ModelRequestConfig` to describe "which model to use for this call + call parameters" (model/temperature/top_p/max_tokens/max_input_tokens, etc.);
 - Use the unified entry class `Model`, and call via `invoke/stream`. The framework picks a protocol implementation from `client_provider`: OpenAI-compatible or Anthropic. Legacy vendor names stay valid as aliases.
 
 ## Using Model to Call Models
@@ -50,6 +50,7 @@ model = Model(
 > **Note**
 > - Users need to register accounts on SiliconFlow or OpenAI vendor websites to obtain available model `api_key` and model invocation URL address `api_base`.
 > - `client_provider` currently has built-in support for the `ProviderType` values `OpenAI`, `OpenAIAccount`, `OpenRouter`, `Anthropic`, `SiliconFlow`, `DashScope`, `DeepSeek`, `InferenceAffinity`, `AscendAffinity`, and `IntelliRouter`. Protocol implementations are OpenAI-compatible and Anthropic. `DeepSeek`, `OpenRouter`, `SiliconFlow`, `DashScope`, `InferenceAffinity`, and `AscendAffinity` are legacy aliases mapped to `endpoint_profile` / `extensions` when a client is created. See [LLM Protocol Consolidation](LLM%20Protocol%20Consolidation.md).
+> - `ModelRequestConfig.max_tokens` is the per-call output cap (alias `max_output_tokens`) and is sent to the provider. `max_input_tokens` is the declared input budget and is not sent to the provider. When set, agent assembly writes it to `ContextEngineConfig.context_window_tokens` with higher priority; otherwise an explicit `context_window_tokens` is used, then the original `ContextUtils.resolve_context_max` chain.
 
 ### Sign In with OpenAI Account OAuth
 

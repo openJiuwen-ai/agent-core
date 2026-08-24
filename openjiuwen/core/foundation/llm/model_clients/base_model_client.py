@@ -443,7 +443,15 @@ class BaseModelClient(ABC):
 
         # Get all fields from model_config (including extra fields)
         extra_params = self.model_config.model_dump(
-            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude={
+                "model_name",
+                "model",
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "max_input_tokens",
+                "stop",
+            },
             exclude_none=True
         )
         params.update(extra_params)
