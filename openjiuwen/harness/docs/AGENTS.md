@@ -62,6 +62,7 @@ features/ F_NN_<slug>.md
 ## 与其它 AGENTS.md 的关系
 
 - 仓库根 `AGENTS.md`：仓库级入口 + 公共 API + 提交约定。
+- `openjiuwen/harness/AGENTS.md`：harness 模块入口索引 + 公开 API + 架构铁律 + **本目录的归档强制约束**。
 - `openjiuwen/harness/rails/AGENTS.md`：rails 子模块本地规则（rail 基类、事件路由、priority）。
 - 本 `docs/AGENTS.md`：只讲归档结构与命名规约，**不重复模块设计内容**——内容写在对应 `S_*` / `F_*` 文档里。
 
@@ -72,3 +73,4 @@ features/ F_NN_<slug>.md
 - **不更新 specs**：模块契约改了但对应 spec 没改，下次重构时读 spec 的人会被误导。
 - **N 多个小 feature 文档**：一次连贯的设计变动归档为**一份** feature 文档，不要拆碎。
 - **在元信息里写 commit hash**：spec / feature 元信息只写日期（`YYYY-MM-DD`）。
+
