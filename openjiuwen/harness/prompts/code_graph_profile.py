@@ -40,8 +40,9 @@ These tools index the repository so you can find code before you edit it.
   Do not look for a submit tool — keep going with edit_file / write_file.
 - A truncated or timed-out query is one query cut short: narrow the symbol or
   path and continue, or move to read_file.
-- If a Code Graph tool returns UNAVAILABLE or ERROR, fall back to grep and
-  read_file and keep going.
+- If a Code Graph tool returns UNAVAILABLE, grep and glob are restored. Use
+  them (and read_file) and keep going. A single ERROR is not that: narrow the
+  query and retry the graph, or read_file.
 """
 
 GRAPH_PROFILE_PROMPT_CN = """\
@@ -62,7 +63,9 @@ Code Graph（profile: graph）：
   源码并跑相关测试。没有 submit 工具：继续用 edit_file / write_file。
 - 单次查询被截断或超时只是这一次被裁剪：缩小 symbol 或路径后继续，或改用
   read_file。
-- 若 Code Graph 工具返回 UNAVAILABLE 或 ERROR，回退到 grep/read_file 继续做。
+- 若 Code Graph 工具返回 UNAVAILABLE，会恢复 grep/glob。用它们（以及
+  read_file）继续做。单次 ERROR 不是这种失败：缩小查询再试图工具，或改用
+  read_file。
 """
 
 LOCATE_EXAM_PROMPT_EN = """\

@@ -8,11 +8,14 @@ cache lock), the service reports ``UNAVAILABLE`` and callers fall back to grep.
 
 ``tree-sitter-language-pack`` 1.x downloads parser binaries on first
 ``get_parser()``. That must happen at most once: a failed download is cached
-so ``build_index`` does not retry GitHub for every file.
+so ``build_index`` does not retry GitHub for every file. Unit tests never
+call ``get_parser`` when the grammar is missing from the local cache.
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,9 @@ from openjiuwen.core.retrieval.code_graph.indexing.language_registry import (
 _PARSER_IMPORT_ERROR: str | None = None
 _BACKEND_UNAVAILABLE: str | None = None
 _DOWNLOAD_ERROR_NAMES = frozenset({"DownloadError", "CacheLockError"})
+_DOWNLOAD_DENIED = frozenset({"0", "false", "no"})
+_DOWNLOAD_ALLOWED = frozenset({"1", "true", "yes"})
+_CACHE_WALK_DEPTH = 3
 
 
 def parser_available() -> bool:
@@ -53,6 +59,10 @@ def python_grammar_is_cached() -> bool | None:
     Returns ``None`` for older wheels that bundle grammars and expose no cache
     directory API — callers may then call ``get_parser`` without a download.
     """
+    return _grammar_is_cached("python")
+
+
+def _grammar_is_cached(lang_id: str) -> bool | None:
     if _load_get_parser() is None:
         return False
     try:
@@ -65,16 +75,43 @@ def python_grammar_is_cached() -> bool | None:
         return False
     if not root.is_dir():
         return False
-    return _dir_has_python_parser(root)
+    return _dir_has_language_parser(root, lang_id)
 
 
-def _dir_has_python_parser(root: Path) -> bool:
-    for path in root.iterdir():
-        if "python" not in path.name.lower():
-            continue
-        if _looks_like_parser_lib(path):
+def _dir_has_language_parser(root: Path, lang_id: str) -> bool:
+    for path in _iter_cache_files(root, _CACHE_WALK_DEPTH):
+        if _is_language_parser_lib(path, lang_id):
             return True
     return False
+
+
+def _iter_cache_files(root: Path, max_depth: int) -> Iterator[Path]:
+    stack = [(root, 0)]
+    while stack:
+        current, depth = stack.pop()
+        try:
+            children = current.iterdir()
+        except OSError:
+            continue
+        for path in children:
+            if path.is_file():
+                yield path
+                continue
+            if not path.is_dir():
+                continue
+            if depth < max_depth:
+                stack.append((path, depth + 1))
+
+
+def _is_language_parser_lib(path: Path, lang_id: str) -> bool:
+    if not _looks_like_parser_lib(path):
+        return False
+    prefix = f"libtree_sitter_{lang_id.lower()}"
+    name = path.name.lower()
+    if not name.startswith(prefix):
+        return False
+    rest = name[len(prefix) :]
+    return rest.startswith(".")
 
 
 def _looks_like_parser_lib(path: Path) -> bool:
@@ -132,11 +169,41 @@ def _parser_for(lang_id: str) -> Any | None:
     get_parser = _load_get_parser()
     if get_parser is None:
         return None
+    if _should_avoid_uncached_fetch(lang_id):
+        _disable_backend_for_uncached_grammar(lang_id)
+        return None
     try:
         return get_parser(lang_id)
     except Exception as exc:  # noqa: BLE001 — rust downloader raises pack-specific types
         _mark_backend_failure(lang_id, exc)
         return None
+
+
+def _should_avoid_uncached_fetch(lang_id: str) -> bool:
+    if _network_fetch_allowed():
+        return False
+    return _grammar_is_cached(lang_id) is False
+
+
+def _network_fetch_allowed() -> bool:
+    """Product may download grammars; unit tests must not hit GitHub."""
+    flag = os.environ.get("OPENJIUWEN_CODE_GRAPH_ALLOW_PARSER_DOWNLOAD", "").strip().lower()
+    if flag in _DOWNLOAD_DENIED:
+        return False
+    if flag in _DOWNLOAD_ALLOWED:
+        return True
+    return not os.environ.get("PYTEST_CURRENT_TEST")
+
+
+def _disable_backend_for_uncached_grammar(lang_id: str) -> None:
+    global _BACKEND_UNAVAILABLE, _PARSER_IMPORT_ERROR
+    _BACKEND_UNAVAILABLE = (
+        f"tree-sitter grammar {lang_id!r} is not in the local cache; "
+        "refusing to download from GitHub during tests. "
+        "Pre-download parsers or use a host that can reach GitHub releases."
+    )
+    _PARSER_IMPORT_ERROR = _BACKEND_UNAVAILABLE
+    logger.info("code_graph parser skipped uncached grammar %s", lang_id)
 
 
 def _mark_backend_failure(lang_id: str, exc: BaseException) -> None:

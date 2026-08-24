@@ -8,9 +8,11 @@ from typing import Any
 from uuid import uuid4
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus
 from openjiuwen.core.retrieval.code_graph.models import CodeGraphConfig
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+    ToolCallInputs,
     UserMessageInputs,
 )
 from openjiuwen.harness.prompts.builder import PromptSection
@@ -18,6 +20,7 @@ from openjiuwen.harness.prompts.code_graph_profile import build_code_graph_profi
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.code_graph import (
+    PROMPT_MODE_LOCATE,
     PROMPT_MODE_PRODUCT,
     CodeGraphBudget,
     CodeGraphProfile,
@@ -28,10 +31,18 @@ from openjiuwen.harness.schema.code_graph import (
     resolve_code_graph_profile,
 )
 from openjiuwen.harness.tools.code_graph import (
+    LOCATE_EXAM_TOOL_NAMES,
     build_code_graph_profile_tools,
     resolve_repo_root,
 )
 from openjiuwen.harness.tools.code_graph._base import CodeGraphToolContext
+
+# Product ``profile: graph`` replaces text search while the index works.
+# Parser missing or UNAVAILABLE puts grep/glob back. Edit / bash stay so the
+# host can patch. ContextBench locate exam keeps its own hide list and must
+# not restore grep (that would contaminate the ablation).
+GRAPH_HIDDEN_SEARCH_TOOLS = ("grep", "glob")
+_GRAPH_TOOL_NAMES = frozenset(LOCATE_EXAM_TOOL_NAMES)
 
 # The graph profile has no total graph-call budget: the host agent's iteration,
 # token, and time limits already stop the task, and a second cap only left it
@@ -45,8 +56,12 @@ class CodeGraphProfileRail(DeepAgentRail):
     """Register the tools, prompt, and run state for one Code Graph profile.
 
     Priority 99 runs after ``SysOperationRail`` (100), so grep and the write
-    tools already exist when this rail registers find_* tools. Localization
-    does not finish the host agent: the same agent owns the later edit.
+    tools already exist when this rail registers find_* tools. When the
+    parser can index, it then drops grep/glob so the model cannot ignore the
+    graph. If the parser is missing, or a graph tool later returns
+    ``UNAVAILABLE``, those search tools stay (or come back). Locate-exam
+    mode never restores them. Localization does not finish the host agent:
+    the same agent owns the later edit.
     """
 
     priority = 99
@@ -67,6 +82,7 @@ class CodeGraphProfileRail(DeepAgentRail):
         self.session_id = ""
         self.run_state: CodeGraphRunState | None = None
         self._tools: list[Any] = []
+        self._hidden_search: list[tuple[Any, Any]] = []
         self._section: PromptSection | None = None
         self._agent: Any = None
 
@@ -134,15 +150,19 @@ class CodeGraphProfileRail(DeepAgentRail):
                 agent.ability_manager.add_ability(tool.card, tool)
                 self._tools.append(tool)
             self._inject_prompt(agent)
+            if self._tools and _parser_ready():
+                self._hidden_search = _hide_text_search_tools(agent)
             logger.info(
-                "CodeGraphProfileRail: profile=%s tools=%d repo=%s",
+                "CodeGraphProfileRail: profile=%s tools=%d repo=%s hidden_search=%d",
                 self.profile.value,
                 len(self._tools),
                 repo_root,
+                len(self._hidden_search),
             )
         except Exception as exc:  # noqa: BLE001 — never fail agent creation
             logger.warning("CodeGraphProfileRail: registration failed: %s", exc)
             self._tools = []
+            self._hidden_search = []
 
     def _new_run_state(self) -> CodeGraphRunState:
         budget = CodeGraphBudget(
@@ -186,6 +206,29 @@ class CodeGraphProfileRail(DeepAgentRail):
         if not text:
             return
         self._bind_task(text)
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Put grep/glob back when the graph cannot run. Locate exam does not."""
+        if not self._hidden_search:
+            return
+        if self._is_locate_exam():
+            return
+        if not _graph_tool_returned_unavailable(ctx):
+            return
+        agent = ctx.agent if ctx.agent is not None else self._agent
+        if agent is None:
+            return
+        restored = _restore_text_search_tools(agent, self._hidden_search)
+        self._hidden_search = []
+        if restored:
+            logger.warning(
+                "CodeGraphProfileRail: graph UNAVAILABLE; restored %s",
+                ",".join(GRAPH_HIDDEN_SEARCH_TOOLS),
+            )
+
+    def _is_locate_exam(self) -> bool:
+        mode = (self.prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
+        return mode == PROMPT_MODE_LOCATE
 
     def _bind_task(self, text: str) -> None:
         """Attach the issue text to the run state this rail already created.
@@ -235,6 +278,7 @@ class CodeGraphProfileRail(DeepAgentRail):
                     "CodeGraphProfileRail: failed to remove %s: %s", tool.card.name, exc
                 )
         self._tools = []
+        self._hidden_search = []
         self._agent = agent
         builder = getattr(agent, "system_prompt_builder", None)
         if builder is not None and self._section is not None:
@@ -248,18 +292,94 @@ class CodeGraphProfileRail(DeepAgentRail):
         self._agent = None
 
 
+def _hide_text_search_tools(agent: Any) -> list[tuple[Any, Any]]:
+    """Detach grep/glob and keep (card, tool) so UNAVAILABLE can restore them."""
+    manager = getattr(agent, "ability_manager", None)
+    if manager is None:
+        return []
+    hidden: list[tuple[Any, Any]] = []
+    for name in GRAPH_HIDDEN_SEARCH_TOOLS:
+        pair = _detach_named_ability(manager, name)
+        if pair is not None:
+            hidden.append(pair)
+    return hidden
+
+
+def _restore_text_search_tools(agent: Any, hidden: list[tuple[Any, Any]]) -> int:
+    manager = getattr(agent, "ability_manager", None)
+    if manager is None:
+        return 0
+    restored = 0
+    for card, resource in hidden:
+        name = getattr(card, "name", None)
+        if not name or manager.get(name) is not None:
+            continue
+        try:
+            manager.add_ability(card, resource)
+            restored += 1
+        except Exception as exc:  # noqa: BLE001 — host must keep running
+            logger.warning("CodeGraphProfileRail: failed to restore %s: %s", name, exc)
+    return restored
+
+
+def _detach_named_ability(manager: Any, name: str) -> tuple[Any, Any] | None:
+    try:
+        card = manager.get(name)
+        if card is None:
+            return None
+        resource = _lookup_tool_resource(card)
+        manager.remove_ability(name)
+        if resource is None:
+            return None
+        return (card, resource)
+    except Exception as exc:  # noqa: BLE001 — graph host must still start
+        logger.warning("CodeGraphProfileRail: failed to hide %s: %s", name, exc)
+        return None
+
+
+def _lookup_tool_resource(card: Any) -> Any:
+    from openjiuwen.core.runner import Runner
+
+    tool_id = getattr(card, "id", None) or getattr(card, "name", None)
+    if not tool_id:
+        return None
+    return Runner.resource_mgr.get_tool(tool_id)
+
+
+def _graph_tool_returned_unavailable(ctx: AgentCallbackContext) -> bool:
+    inputs = ctx.inputs
+    if not isinstance(inputs, ToolCallInputs):
+        return False
+    name = (inputs.tool_name or "").strip()
+    if name not in _GRAPH_TOOL_NAMES:
+        return False
+    return _tool_status(inputs.tool_result) == CodeGraphStatus.UNAVAILABLE.value
+
+
+def _tool_status(result: Any) -> str:
+    if isinstance(result, dict):
+        return str(result.get("status") or "")
+    data = getattr(result, "data", None)
+    if isinstance(data, dict):
+        return str(data.get("status") or "")
+    return ""
+
+
+def _parser_ready() -> bool:
+    from openjiuwen.core.retrieval.code_graph.indexing.parser import parser_available
+
+    return parser_available()
+
+
 def _warn_if_parser_missing() -> None:
     """Yaml ``profile: graph`` is not enough without the language-pack extra."""
-    from openjiuwen.core.retrieval.code_graph.indexing.parser import (
-        parser_available,
-        parser_unavailable_reason,
-    )
+    from openjiuwen.core.retrieval.code_graph.indexing.parser import parser_unavailable_reason
 
-    if parser_available():
+    if _parser_ready():
         return
     logger.warning(
         "CodeGraphProfileRail: profile=graph but the parser is unavailable (%s). "
-        "Install openjiuwen[code-graph] with a prebuilt wheel "
+        "Keeping grep/glob. Install openjiuwen[code-graph] with a prebuilt wheel "
         "(do not source-build; rustup times out on restricted networks).",
         parser_unavailable_reason(),
     )
