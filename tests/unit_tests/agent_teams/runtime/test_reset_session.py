@@ -11,6 +11,9 @@ kernel.py:802) instead of letting the leader re-plan on the new query.
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
@@ -20,6 +23,7 @@ from openjiuwen.agent_teams.runtime.metadata import (
     merge_team_namespace,
     read_pending_resume,
 )
+from openjiuwen.agent_teams.runtime.pool import ActiveTeam
 from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 from openjiuwen.core.session.agent_team import create_agent_team_session
@@ -152,10 +156,15 @@ async def test_reset_session_idempotent(isolated_checkpointer):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_reset_session_flush_failure_does_not_break_reset(
-    isolated_checkpointer, monkeypatch
-):
-    """flush_checkpoint raising -> reset still True, pending_resume survives (no regression)."""
+async def test_reset_session_flush_failure_returns_false_marker_survives(isolated_checkpointer, monkeypatch):
+    """flush_checkpoint raising -> reset returns False, pending_resume survives.
+
+    Clearing the marker is the core semantic of reset, so a flush failure must
+    surface to the caller as a failed reset (return False) instead of being
+    masked as success. The checkpoint stays byte-identical to the pre-reset
+    state (the in-memory clear never reached disk), so the marker survives and
+    a retry of reset can still clear it.
+    """
     session_id = "sess-reset-flushfail-1"
     team_name = "oc_team_test_flushfail"
     token = set_session_id(session_id)
@@ -181,18 +190,89 @@ async def test_reset_session_flush_failure_does_not_break_reset(
         monkeypatch.setattr(TeamRuntimeManager, "_build_session", raising_build)
 
         manager = TeamRuntimeManager()
-        result = await manager.reset_session(
-            team_name=team_name, session_id=session_id, force=True
-        )
-        assert result is True  # best-effort: reset did not raise
+        result = await manager.reset_session(team_name=team_name, session_id=session_id, force=True)
+        # marker clear is core semantic: flush failure surfaces as failed reset
+        # (reset did not raise, but it reports failure so the host can retry).
+        assert result is False
     finally:
         reset_session_id(token)
         # monkeypatch teardown restores _build_session. The clear inside reset used
         # the patched session whose flush raised, so the marker survives in the
         # checkpointer. Verify via a fresh (unpatched) session — this is the
-        # no-regression guarantee (Design Failure And Performance #3): a failed
-        # flush leaves the checkpoint byte-identical to the pre-reset state.
+        # no-regression guarantee: a failed flush leaves the checkpoint
+        # byte-identical to the pre-reset state, so a retry can still clear it.
         assert await _read_resume(session_id, team_name) == {"query": "minesweeper"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reset_session_task_board_clear_failure_returns_false(isolated_checkpointer, monkeypatch):
+    """Risk A: a task-board clear failure must surface as ``False`` (not raise),
+    unified with the marker-clear failure path. Callers must handle ONE failure
+    mode (``False``), not two (``False`` for marker + ``Exception`` for task
+    board). stop_team already ran; the marker clear is an independent step so
+    it may still succeed -- but reset reports ``False`` because a core step
+    (task board) failed, and the caller retries (both steps idempotent).
+    """
+    session_id = "sess-reset-tbfail-1"
+    team_name = "oc_team_test_tbfail"
+    token = set_session_id(session_id)
+    try:
+        await _seed_bucket(session_id, team_name, with_resume=True, query="minesweeper")
+
+        from openjiuwen.agent_teams.tools.database import TeamDatabase
+
+        async def _boom(self, sid):  # noqa: ARG001
+            raise RuntimeError("task board boom")
+
+        monkeypatch.setattr(TeamDatabase, "clear_session_task_board_by_id", _boom)
+
+        manager = TeamRuntimeManager()
+        result = await manager.reset_session(team_name=team_name, session_id=session_id, force=True)
+        # task-board clear failed -> reset reports failure, does NOT raise
+        assert result is False
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reset_session_propagates_cancel_during_member_abort(isolated_checkpointer):
+    """C3: an outer cancel during _clear_inprocess_members_inflight must
+    propagate, not be swallowed. Without this, a cancelled reset keeps running
+    stop_team / task-board clear / checkpoint mutation after the caller already
+    aborted. ``asyncio.wait_for`` raises ``TimeoutError`` on timeout (caught
+    inside the helper); a ``CancelledError`` escaping it means the outer reset
+    task itself was cancelled, which must reach the caller.
+    """
+    session_id = "sess-reset-cancel-1"
+    team_name = "oc_team_test_cancel"
+    token = set_session_id(session_id)
+    try:
+        cancel_started = asyncio.Event()
+
+        class _Ctl:
+            async def cancel_agent(self):
+                cancel_started.set()
+                await asyncio.sleep(3600)  # block until the outer task is cancelled
+
+        handle = SimpleNamespace(agent_ref=SimpleNamespace(stream_controller=_Ctl()))
+        agent = SimpleNamespace(spawn_manager=SimpleNamespace(spawned_handles={"m1": handle}))
+        # Inject a pool entry so reset_session(force=True) enters the
+        # has_active branch and reaches _clear_inprocess_members_inflight.
+        entry = ActiveTeam(team_name=team_name, agent=agent, current_session_id=session_id)
+        manager = TeamRuntimeManager()
+        manager._pool._teams[team_name] = entry  # test-only direct inject
+
+        task = asyncio.create_task(manager.reset_session(team_name=team_name, session_id=session_id, force=True))
+        await cancel_started.wait()  # inside cancel_agent -> wait_for
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Cancel propagated before stop_team, so the entry is still pooled.
+        assert team_name in manager._pool._teams
+    finally:
+        reset_session_id(token)
 
 
 @pytest.mark.asyncio

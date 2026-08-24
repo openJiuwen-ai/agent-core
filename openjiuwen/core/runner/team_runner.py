@@ -586,6 +586,13 @@ class _TeamRunnerMixin:
         the same session_id hits ``COLD_RECOVER`` (preserved team memory +
         history, empty task board, leader re-plans fresh -- no paused-round
         resume).
+
+        Returns ``True`` on full success (or idempotent no-op when the session
+        has no checkpoint). Returns ``False`` if either core clear step failed
+        inside ``TeamRuntimeManager.reset_session`` -- callers MUST retry reset
+        before the next chat.send (the marker/task-board may otherwise survive
+        and a stale paused round resumes); the kv_cache evict is skipped on
+        ``False``.
         """
         from openjiuwen.agent_teams.kv_cache import kv_cache_team_actions
 

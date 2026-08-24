@@ -145,16 +145,16 @@ async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
                 member_name,
             )
             continue
+        # Do NOT catch asyncio.CancelledError here: a cancel escaping
+        # wait_for means the outer reset task itself was cancelled (a
+        # timeout raises TimeoutError, caught below). Swallowing it would
+        # keep reset running stop_team / task-board clear / checkpoint
+        # mutation after the caller already aborted -- breaking cancel
+        # semantics. Let it propagate.
         try:
             await asyncio.wait_for(
                 stream_controller.cancel_agent(),
                 timeout=_RESET_ABORT_TIMEOUT_SECONDS,
-            )
-        except asyncio.CancelledError as e:
-            team_logger.warning(
-                "reset_session: member {} abort cancelled: {}",
-                member_name,
-                e,
             )
         except asyncio.TimeoutError:
             team_logger.warning(
@@ -930,6 +930,21 @@ class TeamRuntimeManager:
         roster), SKIPS ``team_home`` rmtree and ``remove_session_worktrees``
         (keeps the team directory + session worktrees, same as stop_team), and
         SKIPS the agent_ws_server session_dir/binding teardown.
+
+        Returns:
+            ``True`` if the session had no checkpoint (idempotent early return)
+            OR every core clear step succeeded (task board rows + the leader's
+            ``pending_resume`` marker both cleared and flushed).
+            ``False`` if any core clear step failed (a DB error on the task
+            board, or a checkpoint load/clear/flush error on the marker).
+            ``stop_team`` already ran before the clears, and every clear step
+            is idempotent, so the surviving state is retriable. Callers MUST
+            treat ``False`` as "retry ``reset_session`` before the next
+            ``chat.send``": proceeding on a ``False`` reset re-opens the
+            stale paused-round resume this method prevents (the marker
+            survives) and the kv_cache layer short-circuits its evict on
+            ``False``. ``asyncio.CancelledError`` is never swallowed here --
+            an outer cancel propagates (see ``_clear_inprocess_members_inflight``).
         """
         if await self._pool.has_active(team_name):
             entry = await self._pool.get(team_name)
@@ -987,7 +1002,28 @@ class TeamRuntimeManager:
         # No checkpointer.release: keep the bucket so the next chat.send routes
         # through COLD_RECOVER (recover_from_session) with full team memory,
         # not NEW_TEAM_IN_SESSION (spec.build, fresh, no history).
-        cleared = await db.clear_session_task_board_by_id(session_id)
+        #
+        # Both the task-board clear and the pending_resume clear below are CORE
+        # semantics of reset (the former makes members idle on the new query;
+        # the latter stops the next cold-recover resuming the paused round). A
+        # failure in EITHER surfaces to the caller as a failed reset (return
+        # False) -- not raised mid-way and not masked as success: stop_team
+        # (above) already ran, and every clear step here is idempotent so the
+        # surviving state is retriable. The caller MUST treat False as "retry
+        # reset before chat.send" (see Returns); proceeding on a False reset
+        # re-opens the stale paused-round resume this method exists to prevent.
+        reset_failed = False
+        cleared = 0
+        try:
+            cleared = await db.clear_session_task_board_by_id(session_id)
+        except Exception as e:  # noqa: BLE001
+            reset_failed = True
+            team_logger.warning(
+                "reset_session: failed to clear task board team={} session={}: {}",
+                team_name,
+                session_id,
+                e,
+            )
 
         # Also drop the leader's cold-resume marker (pending_resume) from the
         # team checkpoint bucket. reset_session is the explicit "fresh start"
@@ -1005,6 +1041,7 @@ class TeamRuntimeManager:
             if cleared_resume:
                 await resume_session.flush_checkpoint()
         except Exception as e:  # noqa: BLE001
+            reset_failed = True
             team_logger.warning(
                 "reset_session: failed to clear pending_resume team={} session={}: {}",
                 team_name,
@@ -1019,6 +1056,8 @@ class TeamRuntimeManager:
             team_name,
             session_id,
         )
+        if reset_failed:
+            return False
         return True
 
     async def release_session(
