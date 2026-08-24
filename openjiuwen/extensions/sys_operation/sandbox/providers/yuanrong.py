@@ -332,9 +332,12 @@ class _YuanrongProviderMixin:
 
     def _sandbox_create_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"idle_timeout": YUANRONG_IDLE_TIMEOUT}
+        extra = self._launcher_extra_params()
+        user = extra.get("user")
+        if isinstance(user, str) and user.strip():
+            kwargs["user"] = user.strip()
         if self._executor != "docker":
             return kwargs
-        extra = self._launcher_extra_params()
         kwargs["sandbox_type"] = "docker"
         kwargs["rootfs"] = self._normalize_docker_rootfs(extra)
         kwargs["cpu"] = int(extra.get("cpu", DEFAULT_DOCKER_CPU))
