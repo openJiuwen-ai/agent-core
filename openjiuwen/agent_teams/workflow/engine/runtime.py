@@ -26,6 +26,26 @@ def _noop_log(message: str) -> None:
 
 
 @dataclass
+class AbortSignal:
+    """Cooperative abort flag that carries the control reason (pause vs stop).
+
+    Wraps an ``asyncio.Event`` so the engine's abort checkpoints keep their
+    wait/set semantics, while the ``reason`` lets the unwind site distinguish a
+    pause (relaunch on resume) from a terminal stop (never relaunch).
+    """
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    reason: str = "pause"
+
+    def set(self, reason: str = "pause") -> None:
+        self.reason = reason
+        self.event.set()
+
+    def is_set(self) -> bool:
+        return self.event.is_set()
+
+
+@dataclass
 class Runtime:
     backend: AgentBackend
     journal: Journal
@@ -43,15 +63,26 @@ class Runtime:
     strict: bool = False
     spawn_limit: int = 1000
     budget: BudgetLedger = field(default_factory=BudgetLedger)
-    """The run's token ledger, shared by reference with the backend (which
-    reports real usage into it). Default: an unbounded ledger. The engine only
-    reads it — at the ``agent()`` / ``send()`` budget gates and via ``budget.*``."""
+    """Session-wide token ledger, shared with the backend (which reports real
+    usage into it); never resets. The engine only reads it (budget gates,
+    ``budget.*``)."""
+    workflow_budget: BudgetLedger = field(default_factory=BudgetLedger)
+    """Per-run token ledger, reset to ``spent=0`` on each ``swarmflow``
+    invocation; ``total`` is the script-declared ``workflow_token_limit``.
+    Hitting it is retryable by revising the workflow, unlike the session
+    ceiling."""
     cap_override: int | None = None  # force the concurrency cap (tests)
-    abort_event: asyncio.Event | None = field(default=None, repr=False)
-    """External cooperative pause signal. When set, the ``agent()`` /
-    ``AgentSession.send()`` abort checkpoints raise ``WorkflowAborted`` — the
-    in-flight call does not journal and the run unwinds (resume reruns it).
-    ``None`` disables the checkpoints (default; full back-compat)."""
+    abort_event: AbortSignal | None = field(default=None, repr=False)
+    """External pause/stop signal: when set, the abort checkpoints raise
+    ``WorkflowAborted`` carrying its ``reason``; the in-flight call does not
+    journal (a resume reruns it). ``None`` disables the checkpoints."""
+    run_id: str | None = field(default=None, repr=False)
+    """Run identifier threaded into journal records as a cache-isolation key
+    (``get_cached`` checks ``sig`` AND ``run_id``): a fresh run never hits the
+    prior run's cache; a resume keeps the same id."""
+    current_agent: "dict | None" = field(default=None, repr=False)
+    """The in-flight agent (``{"agent_id", "label", "started_spent"}``); a
+    pause/stop mid-agent reads this to record which agent was interrupted."""
 
     # Mutable run state (created/advanced inside the running loop).
     agent_gate: AgentAdmission | None = field(default=None, repr=False)

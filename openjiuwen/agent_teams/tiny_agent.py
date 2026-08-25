@@ -128,6 +128,7 @@ class TinyAgent:
         *,
         default_schema: Any = None,
         language: str = "cn",
+        budget: Any = None,
     ) -> None:
         """Initialize a tiny agent from a resolved minimal spec.
 
@@ -136,10 +137,15 @@ class TinyAgent:
             default_schema: Optional schema (dict / pydantic model) used by
                 ``run`` / ``chat`` when the call passes no explicit ``schema``.
             language: Prompt language for the structured-output tool i18n.
+            budget: Optional session-wide ``BudgetLedger`` — when set, this agent's
+                model calls bill it (session scope only, never a per-run ledger).
+                Used by the swarmflow intent classifier so its TinyAgent tokens
+                count against the team budget.
         """
         self._spec = spec
         self._default_schema = default_schema
         self._language = _normalize_language(language)
+        self._budget = budget
         self._t: Translator = make_translator(self._language)
         # Per-call card-id suffix so concurrent run() harnesses never share an
         # owner id (the ability manager qualifies tool ids per owner).
@@ -175,6 +181,10 @@ class TinyAgent:
         harness = NativeHarness(spec)
         if json_schema is not None:
             harness.add_rail(StructuredOutputFinishRail())
+        if self._budget is not None:
+            from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
+
+            harness.add_rail(SwarmflowBudgetRail(self._budget, workflow_budget=None))
         prompt = content
         capture: StructuredOutputTool | None = None
         if json_schema is not None:
@@ -378,6 +388,7 @@ def create_tiny_agent(
     language: str = "cn",
     max_iterations: int = 6,
     enable_security_rail: bool = False,
+    budget: Any = None,
 ) -> TinyAgent:
     """Create a tiny agent from a system prompt + a resolvable model name.
 
@@ -426,7 +437,7 @@ def create_tiny_agent(
         # so do not register a sys_operation's tool resources for it either.
         enable_sys_operation=False,
     )
-    return TinyAgent(spec, default_schema=default_schema, language=language)
+    return TinyAgent(spec, default_schema=default_schema, language=language, budget=budget)
 
 
 # ---------------------------------------------------------------------------

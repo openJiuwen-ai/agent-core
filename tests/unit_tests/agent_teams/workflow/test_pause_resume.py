@@ -20,6 +20,7 @@ import pytest
 from openjiuwen.agent_teams.workflow.engine import run_workflow
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import WorkflowAborted
+from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 
 _ABC_SCRIPT = '''
 from swarmflow import agent
@@ -68,7 +69,7 @@ def _write(tmp_path, name: str, src: str) -> str:
 
 
 def _wal_labels(journal_path: str) -> list[str]:
-    """Labels persisted in the WAL sidecar, in append order."""
+    """Labels persisted in the WAL sidecar, in append order (call records only)."""
     wal = Path(f"{journal_path}.wal")
     if not wal.exists():
         return []
@@ -77,7 +78,10 @@ def _wal_labels(journal_path: str) -> list[str]:
         line = line.strip()
         if not line:
             continue
-        labels.append(json.loads(line).get("label"))
+        rec = json.loads(line)
+        if rec.get("type") in ("pause", "seal"):
+            continue  # run-level record, not an agent call
+        labels.append(rec.get("label"))
     return labels
 
 
@@ -86,7 +90,7 @@ def test_abort_event_blocks_new_agents(tmp_path):
     script = _write(tmp_path, "abc.py", _ABC_SCRIPT)
     journal_path = str(tmp_path / "j.jsonl")
     backend = _GatedBackend()
-    ev = asyncio.Event()
+    ev = AbortSignal()
     ev.set()
 
     async def _scenario() -> str:
@@ -107,7 +111,7 @@ def test_in_flight_agent_not_journaled(tmp_path):
     journal_path = str(tmp_path / "j.jsonl")
     backend = _GatedBackend()
     b_gate = backend.gate("B")
-    ev = asyncio.Event()
+    ev = AbortSignal()
 
     async def _scenario() -> None:
         task = asyncio.create_task(
@@ -132,7 +136,7 @@ def test_resume_cache_hit_prefix(tmp_path):
     # First run: A completes, B interrupted by the pause.
     backend1 = _GatedBackend()
     b_gate = backend1.gate("B")
-    ev = asyncio.Event()
+    ev = AbortSignal()
 
     async def _first() -> None:
         task = asyncio.create_task(
