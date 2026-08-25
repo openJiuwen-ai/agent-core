@@ -431,10 +431,12 @@ class AgentConfigurator:
         if member_runtime is not None:
             self.harness = member_runtime
             self.memory_manager = None
-            # External CLI 成员（claude/codex）：evolution 开启时也建 in-team
-            # workspace 目录 + 写 B-class identity md（不 link 出去），与
-            # in-process 成员对称，使演进值经共享 cache 可达、session 重启
-            # 可加载。evolution 关闭或无共享 workspace_manager 时静默跳过。
+            # External CLI members (claude/codex): when evolution is on, also
+            # build the in-team workspace dir + write B-class identity md (no
+            # symlink out of the team tree), mirroring in-process members so
+            # evolved values reach the model via the shared cache and survive
+            # a session restart. Silently skipped when evolution is off or no
+            # shared workspace_manager is wired.
             self._prepare_external_cli_workspace(spec, ctx)
             return member_runtime
 
@@ -1129,7 +1131,7 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
     ) -> None:
         """Ensure the external CLI member's in-team workspace exists and seed
-        B-class identity md (不 link 出去).
+        B-class identity md (no symlink out of the team tree).
 
         Mirrors what ``_assemble_member_workspace`` does for an in-process
         teammate, but the CLI member's workspace is a pure in-team directory
