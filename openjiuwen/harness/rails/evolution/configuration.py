@@ -7,11 +7,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Union
 
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
-from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
 
 
 @dataclass(frozen=True)
@@ -30,9 +31,10 @@ def configure_skill_evolution(
     skills_dir: Union[str, list[str]],
     llm: Model,
     model: str,
+    trajectory_span_processor: TrajectorySpanProcessor,
     team: bool = False,
     review_runtime: EvolutionReviewRuntime | None = None,
-    auto_save: bool = True,
+    auto_save: bool = False,
     language: str = "cn",
     **rail_kwargs,
 ):
@@ -47,10 +49,12 @@ def configure_skill_evolution(
         skills_dir: Directory or list of directories containing skill definitions.
         llm: LLM client for experience generation.
         model: Model name for experience generation.
+        trajectory_span_processor: Shared observability processor for all rails
+            attached to this runtime.
         team: When True, configure TeamSkillEvolutionRail (for team/swarm skills).
             When False (default), configure regular SkillEvolutionRail.
         review_runtime: Optional shared review runtime. Created fresh if omitted.
-        auto_save: Whether to auto-save generated experiences (default True).
+        auto_save: Whether to auto-save generated experiences.
         language: Language for experience generation ("cn" or "en").
         **rail_kwargs: Additional keyword arguments forwarded to the evolution rail.
 
@@ -74,6 +78,7 @@ def configure_skill_evolution(
         runtime=runtime,
         auto_save=auto_save,
         language=language,
+        trajectory_span_processor=trajectory_span_processor,
         rail_kwargs=rail_kwargs,
     )
 
@@ -98,9 +103,10 @@ async def configure_skill_evolution_runtime(
     skills_dir: Union[str, list[str]],
     llm: Model,
     model: str,
+    trajectory_span_processor: TrajectorySpanProcessor,
     team: bool = False,
     review_runtime: EvolutionReviewRuntime | None = None,
-    auto_save: bool = True,
+    auto_save: bool = False,
     language: str = "cn",
     **rail_kwargs,
 ):
@@ -115,6 +121,7 @@ async def configure_skill_evolution_runtime(
         skills_dir=skills_dir,
         llm=llm,
         model=model,
+        trajectory_span_processor=trajectory_span_processor,
         team=team,
         review_runtime=review_runtime,
         auto_save=auto_save,
@@ -215,6 +222,7 @@ def _get_or_create_evolution_rail(
     runtime,
     auto_save,
     language,
+    trajectory_span_processor,
     rail_kwargs,
 ):
     """Return existing rail if config matches, create new rail otherwise."""
@@ -223,6 +231,7 @@ def _get_or_create_evolution_rail(
             existing,
             auto_save=auto_save,
             language=language,
+            trajectory_span_processor=trajectory_span_processor,
             rail_kwargs=rail_kwargs,
         )
         return existing, False
@@ -235,6 +244,7 @@ def _get_or_create_evolution_rail(
             review_runtime=runtime,
             auto_save=auto_save,
             language=language,
+            trajectory_span_processor=trajectory_span_processor,
             **rail_kwargs,
         )
     else:
@@ -245,6 +255,7 @@ def _get_or_create_evolution_rail(
             review_runtime=runtime,
             auto_save=auto_save,
             language=language,
+            trajectory_span_processor=trajectory_span_processor,
             **rail_kwargs,
         )
     return rail, True
@@ -277,7 +288,14 @@ def _make_approval_binding(
     )
 
 
-def _validate_evolution_rail_config(existing, *, auto_save, language, rail_kwargs) -> None:
+def _validate_evolution_rail_config(
+    existing,
+    *,
+    auto_save,
+    language,
+    trajectory_span_processor,
+    rail_kwargs,
+) -> None:
     """Validate that an existing rail's config matches the requested config.
 
     Only checks storable attributes. skills_dir, llm, and model are forwarded to
@@ -288,13 +306,18 @@ def _validate_evolution_rail_config(existing, *, auto_save, language, rail_kwarg
         mismatches.append(f"auto_save: {getattr(existing, 'auto_save', None)!r} != {auto_save!r}")
     if getattr(existing, "_language", None) != language:
         mismatches.append(f"language: {getattr(existing, '_language', None)!r} != {language!r}")
+    if existing.trajectory_span_processor is not trajectory_span_processor:
+        mismatches.append("trajectory_span_processor: object identity differs")
 
-    review_old_name = "completion_followup_enabled" if isinstance(existing, TeamSkillEvolutionRail) else "fuzzy_review"
+    requested_signal_trigger = rail_kwargs.get("signal_trigger")
+    expected_signal_trigger = bool(requested_signal_trigger)
+    if getattr(existing, "signal_trigger", None) != expected_signal_trigger:
+        mismatches.append(
+            f"signal_trigger: {getattr(existing, 'signal_trigger', None)!r} != {expected_signal_trigger!r}"
+        )
+
     requested_review_trigger = rail_kwargs.get("review_trigger")
-    requested_legacy_review_trigger = rail_kwargs.get(review_old_name)
-    expected_review_trigger = bool(
-        requested_review_trigger if requested_review_trigger is not None else requested_legacy_review_trigger or False
-    )
+    expected_review_trigger = bool(requested_review_trigger)
     if getattr(existing, "review_trigger", None) != expected_review_trigger:
         mismatches.append(
             f"review_trigger: {getattr(existing, 'review_trigger', None)!r} != {expected_review_trigger!r}"

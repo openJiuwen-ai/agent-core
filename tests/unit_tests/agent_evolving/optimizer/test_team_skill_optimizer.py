@@ -15,7 +15,10 @@ from openjiuwen.agent_evolving.experience.types import EvolutionContext
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 from openjiuwen.agent_evolving.signal.base import EvolutionTarget, make_evolution_signal
-from openjiuwen.agent_evolving.trajectory.types import ToolCallDetail, TrajectoryStep, trajectory_from_steps
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
 
 
 def _make_signal(signal_type: str = "execution_failure"):
@@ -41,6 +44,37 @@ def _make_record(record_id: str, *, target: EvolutionTarget = EvolutionTarget.BO
             target=target,
         ),
         applied=False,
+    )
+
+
+def _tool_trajectory() -> Trajectory:
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "exec-1"})},
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "test"},
+                            "spans": [
+                                {
+                                    "traceId": "1" * 32,
+                                    "spanId": "2" * 16,
+                                    "name": "tool.send_message",
+                                    "attributes": attributes_from_map(
+                                        {
+                                            semconv.GEN_AI_TOOL_NAME: "send_message",
+                                            semconv.GEN_AI_TOOL_INPUT: {"to": "reviewer"},
+                                            semconv.GEN_AI_TOOL_OUTPUT: "sent",
+                                        }
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
     )
 
 
@@ -86,19 +120,7 @@ async def test_team_profile_prompt_contains_trajectory_sections_and_existing_scr
         existing_desc_records=[_make_record("ev_desc", target=EvolutionTarget.DESCRIPTION)],
         existing_body_records=[_make_record("ev_body")],
         existing_script_records=[_make_record("ev_script", target=EvolutionTarget.SCRIPT)],
-        trajectory=trajectory_from_steps(
-            execution_id="exec-1",
-            steps=[
-                TrajectoryStep(
-                    kind="tool",
-                    detail=ToolCallDetail(
-                        tool_name="send_message",
-                        call_args={"to": "reviewer"},
-                        call_result="sent",
-                    ),
-                )
-            ],
-        ),
+        trajectory=_tool_trajectory(),
     )
 
     records = await optimizer.generate_records(ctx)

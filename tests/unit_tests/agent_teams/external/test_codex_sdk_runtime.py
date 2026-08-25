@@ -388,7 +388,7 @@ async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
         init_observability,
         shutdown_observability,
     )
-    from openjiuwen.agent_teams.observability.semconv import (
+    from openjiuwen.extensions.observability.semconv import (
         GEN_AI_TOOL_INPUT,
         GEN_AI_TOOL_OUTPUT,
         LANGFUSE_OBSERVATION_INPUT,
@@ -481,7 +481,7 @@ async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
         init_observability,
         shutdown_observability,
     )
-    from openjiuwen.agent_teams.observability.semconv import (
+    from openjiuwen.extensions.observability.semconv import (
         GEN_AI_USAGE_COMPLETION_TOKENS,
         GEN_AI_USAGE_PROMPT_TOKENS,
         GEN_AI_USAGE_TOTAL_TOKENS,

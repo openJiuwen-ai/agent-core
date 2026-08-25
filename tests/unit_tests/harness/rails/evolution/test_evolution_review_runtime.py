@@ -4,6 +4,9 @@
 
 from datetime import datetime, timedelta, timezone
 
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 
 
@@ -75,20 +78,44 @@ def _resolve_record_source(
 
 def test_create_scope_returns_ref_and_subject():
     runtime = EvolutionReviewRuntime()
+    payload = {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": attributes_from_map({TRAJECTORY_ID: "review-runtime-test"}),
+                },
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": "trace-1",
+                                "spanId": "span-1",
+                                "name": "llm.call",
+                            }
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    trajectory = Trajectory.from_otlp(payload)
 
     created = runtime.create_scope(
         source="explicit_command",
         subject={"kind": "skill", "name": "skill-a"},
         session_id="session-1",
         user_intent="capture parser lesson",
-        scoped_materials={"trajectory_steps": [{"ref": "step-1"}]},
+        trajectory=trajectory,
     )
 
     assert created.evolution_review_ref.startswith("evrr_")
     assert created.subject == {"kind": "skill", "name": "skill-a"}
     scope = runtime.resolve_scope(created.evolution_review_ref, session_id="session-1")
     assert scope.scope_id == created.scope_id
-    assert scope.scoped_materials == {"trajectory_steps": [{"ref": "step-1"}]}
+    assert scope.trajectory is not trajectory
+    assert scope.trajectory.to_otlp() == payload
+    payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"] = "mutated"
+    assert scope.trajectory.to_otlp()["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"] == "llm.call"
 
 
 def test_swarm_runtime_normalizes_legacy_team_skill_subject():
@@ -166,7 +193,7 @@ def test_blank_session_scope_binds_to_first_concrete_session():
         raise AssertionError("bound evolution review scope accepted another session")
 
 
-def test_prune_scopes_removes_expired_scope():
+def test_prune_scopes_keeps_active_scope_regardless_of_age():
     runtime = EvolutionReviewRuntime()
     created = runtime.create_scope(
         source="explicit_command",
@@ -174,11 +201,11 @@ def test_prune_scopes_removes_expired_scope():
         session_id="session-1",
     )
     scope = runtime.resolve_scope(created.evolution_review_ref, session_id="session-1")
-    scope.expires_at = datetime.now(tz=timezone.utc) - timedelta(seconds=1)
+    scope.created_at = datetime.now(tz=timezone.utc) - timedelta(days=1)
 
     runtime.prune_scopes()
 
-    assert not runtime.has_scope(created.evolution_review_ref)
+    assert runtime.has_scope(created.evolution_review_ref)
 
 
 def test_record_review_result_accepts_proposals():

@@ -29,8 +29,12 @@ from openjiuwen.harness.rails.security.tool_security_rail import PermissionInter
 
 
 class _StateSession:
-    def __init__(self, state=None):
+    def __init__(self, state=None, *, session_id="session-1"):
         self.state = dict(state or {})
+        self.session_id = session_id
+
+    def get_session_id(self):
+        return self.session_id
 
     def get_state(self, key):
         return self.state.get(key)
@@ -196,8 +200,11 @@ def _evolve_ctx(
             arguments="{}",
         ),
     )
-    inputs.conversation_id = session_id
-    return AgentCallbackContext(agent=object(), session=session or _StateSession(), inputs=inputs)
+    return AgentCallbackContext(
+        agent=object(),
+        session=session or _StateSession(session_id=session_id),
+        inputs=inputs,
+    )
 
 
 @pytest.mark.asyncio
@@ -236,6 +243,19 @@ async def test_evolve_interrupt_uses_generic_request_message():
     assert interrupted_args["selected_proposal_ids"] == ["prop_1"]
     assert "experiences" not in interrupted_args
     submission.validate_experience_drafts.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_evolve_interrupt_rejects_unrelated_context_session():
+    runtime, review_ref = _runtime_with_completed_proposal()
+    rail = _make_rail(runtime)
+    ctx = _evolve_ctx(review_ref, session_id="session-2")
+
+    await rail.before_tool_call(ctx)
+
+    assert ctx.extra["_skip_tool"] is True
+    assert ctx.inputs.tool_result.success is False
+    assert ctx.inputs.tool_result.error == "unknown evolution_review_ref"
 
 
 @pytest.mark.asyncio
@@ -638,8 +658,8 @@ async def test_evolve_unknown_review_ref_returns_stable_error_before_approval():
 
     assert ctx.extra["_skip_tool"] is True
     assert ctx.inputs.tool_result.success is False
-    assert ctx.inputs.tool_result.error == "unknown or expired evolution_review_ref"
-    assert ctx.inputs.tool_msg.content == "unknown or expired evolution_review_ref"
+    assert ctx.inputs.tool_result.error == "unknown evolution_review_ref"
+    assert ctx.inputs.tool_msg.content == "unknown evolution_review_ref"
 
 
 @pytest.mark.asyncio

@@ -8,9 +8,11 @@ import json
 import os
 import posixpath
 import re
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
@@ -47,7 +49,8 @@ from openjiuwen.agent_evolving.skill_self_evolution import (
     resolve_skill_evolution_action,
 )
 from openjiuwen.agent_evolving.tools import create_main_evolution_tools
-from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
 from openjiuwen.core.common.logging import logger
@@ -56,6 +59,7 @@ from openjiuwen.core.operator.skill_call import SkillExperienceOperator
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind, ToolCallInputs
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
@@ -70,8 +74,11 @@ from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionRequestResult,
     SimplifyRequestResult,
 )
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
-from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
+from openjiuwen.harness.rails.evolution.evolution_rail import (
+    EvolutionRail,
+    EvolutionTriggerPoint,
+    PreparedEvolutionInput,
+)
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.subagent import (
     EVOLUTION_REVIEW_AGENT_NAME,
@@ -85,16 +92,23 @@ _MAX_PROCESSED_SIGNAL_KEYS = 500
 _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS = 600.0
 _NON_REGULAR_SKILL_KINDS = {"team-skill", "swarm-skill"}
 _AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG = "auto_skill_evolution_review_followup"
-_FUZZY_REVIEW_PROMPT_CN = (
-    "这是运行时自动插入的 Skill 演进 follow-up，不是用户的新需求。\n"
-    "请参考“技能演进自检”规则，基于当前可见上下文和刚完成的执行过程，判断是否暴露了已使用 Skill 需要更新。"
+_REVIEW_FOLLOWUP_PROMPT_CN = (
+    "这是运行时插入的 Skill 演进自检，不是用户的新需求。\n"
+    "参考常驻“技能演进自检”规则，只判断本轮是否存在可复用更新，不重新判断运行时触发门槛。\n"
+    "如需建议，只在普通最终回复末尾追加一至两句，并同时包含可复用更新点和是否发起 Skill 演进的确认问题；"
+    "否则自然回复，不提本提醒或内部判断。"
 )
-_FUZZY_REVIEW_PROMPT_EN = (
-    "This is a runtime-inserted Skill evolution follow-up; it is not a new user request.\n"
-    'Refer to the "Skill Evolution Self-Check" rules and, based on the visible context\n'
-    "and the recently completed execution,\n"
-    "decide whether it exposed that a used Skill needs updating."
+_REVIEW_FOLLOWUP_PROMPT_EN = (
+    "This runtime-inserted Skill evolution self-check is not a new user request.\n"
+    'Refer to the standing "Skill Evolution Self-Check" rules and judge only whether this round contains a reusable '
+    "update; do not re-evaluate the runtime trigger threshold.\n"
+    "If suggesting, append only one or two sentences to the normal final reply and include both the reusable update "
+    "and the Skill evolution question; otherwise reply naturally without mentioning this reminder or internal judgment."
 )
+# Private names retained for source-level compatibility with historical tests
+# and integrations; public constructor/property aliases remain removed.
+_FUZZY_REVIEW_PROMPT_CN = _REVIEW_FOLLOWUP_PROMPT_CN
+_FUZZY_REVIEW_PROMPT_EN = _REVIEW_FOLLOWUP_PROMPT_EN
 _EVAL_SNIPPET_MAX_MESSAGES = 20
 _EVAL_SNIPPET_POST_PRESENT_MAX_CHARS = 800
 
@@ -114,20 +128,12 @@ def _normalize_skill_relative_file_path(relative_file_path: str) -> str:
     return raw
 
 
-class EvolutionReviewScopeBuilder:
-    """Build bounded review materials for active evolution review scopes."""
+@dataclass(frozen=True)
+class _SkillPreparedEvolutionInput(PreparedEvolutionInput):
+    """Detached Skill evolution input with rail-local evaluation state."""
 
-    def __init__(
-        self,
-        *,
-        trajectory_provider: Callable[[], Trajectory | None],
-        materials_builder: Callable[[Trajectory | None], dict[str, Any]],
-    ) -> None:
-        self._trajectory_provider = trajectory_provider
-        self._materials_builder = materials_builder
-
-    def build_scoped_materials(self) -> dict[str, Any]:
-        return self._materials_builder(self._trajectory_provider())
+    presented_entries: tuple[tuple[str, Any, str], ...] = ()
+    incremental_messages: tuple[dict[str, Any], ...] = ()
 
 
 def _utcnow_iso() -> str:
@@ -141,9 +147,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     Evolution logic runs in after_invoke (after complete conversation) because
     skill evolution needs full conversation context for signal detection.
 
-    Note: This class uses two stores:
-    - trajectory_store (from EvolutionRail): stores execution trajectories
-    - evolution_store (EvolutionStore): stores skill evolution data (experiences, SKILL.md)
+    The rail receives a shared span processor for execution capture and keeps
+    the evolution store for skill data (experiences, SKILL.md).
     """
 
     priority = 80
@@ -165,26 +170,26 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         *,
         llm: Model,
         model: str,
-        auto_save: bool = True,
+        signal_trigger: Optional[bool] = None,
+        auto_save: bool = False,
         review_runtime: EvolutionReviewRuntime,
         language: str = "cn",
         subject_kind: str = "skill",
-        trajectory_store: Optional[TrajectoryStore] = None,
+        trajectory_span_processor: TrajectorySpanProcessor,
         eval_interval: int = 5,
         evolution_total_timeout_secs: float = _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS,
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
-        two_stage: bool = True,
+        two_stage: bool = False,
         review_agent_max_iterations: int = 25,
         sharing_config: Optional[Dict[str, Any]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_trigger: EvolutionTriggerPoint = EvolutionTriggerPoint.AFTER_INVOKE,
         async_evolution: bool = True,
         max_concurrent_evolution: int = 1,
-        fuzzy_review: Optional[bool] = None,
         review_trigger: Optional[bool] = None,
-        fuzzy_review_interval: int = 5,
+        review_interval: int = 5,
     ) -> None:
         """Initialize SkillEvolutionRail.
 
@@ -192,32 +197,32 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             skills_dir: Directory or list of directories containing skill definitions
             llm: LLM client for experience generation
             model: Model name for experience generation
-            auto_save: Whether to auto-save generated experiences (default True)
+            signal_trigger: Whether to trigger deterministic signal-based evolution.
+            auto_save: Whether to auto-save generated experiences
             review_runtime: Externally-managed active-review runtime. Required. Shared instances enable
                 cross-rail review state and keep rail-local orchestration stateless.
             language: Language for experience generation ("cn" or "en")
-            trajectory_store: Optional trajectory store (inherited from EvolutionRail)
+            trajectory_span_processor: Shared observability span processor used for execution capture.
             eval_interval: Number of conversations between async evaluations
             sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
             disabled_skills: Optional deny-list of skill names excluded from self-optimization.
                 Supports a single skill name (str) or multiple names (list[str]).
             review_trigger: Whether to periodically enqueue review self-check follow-ups.
-            fuzzy_review: Backward-compatible alias for review_trigger.
-            fuzzy_review_interval: Number of non-follow-up task iterations between fuzzy review checks.
+            review_interval: Number of non-follow-up task iterations between review checks.
         """
         if eval_interval < 1:
             raise ValueError("eval_interval must be >= 1")
-        if fuzzy_review_interval < 1:
-            raise ValueError("fuzzy_review_interval must be >= 1")
+        if review_interval < 1:
+            raise ValueError("review_interval must be >= 1")
         if review_agent_max_iterations < 1:
             raise ValueError("review_agent_max_iterations must be >= 1")
 
         super().__init__(
-            trajectory_store=trajectory_store,
             evolution_trigger=evolution_trigger,
             async_evolution=async_evolution,
             max_concurrent_evolution=max_concurrent_evolution,
             disabled_skills=disabled_skills,
+            trajectory_span_processor=trajectory_span_processor,
         )
         self._subject_kind_value = normalize_evolution_subject_kind(subject_kind)
         self._evolution_store = self._make_evolution_store(skills_dir)
@@ -235,6 +240,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             evaluate_llm_policy=evaluate_llm_policy,
             simplify_llm_policy=simplify_llm_policy,
         )
+        self._signal_trigger = bool(signal_trigger)
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
@@ -250,13 +256,13 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._pending_governance: Dict[str, Dict[str, Any]] = {}
         self._language = language
         self._review_runtime = review_runtime
-        self._review_scope_builder = self._make_review_scope_builder()
         self._evolution_tools: list[Any] = []
         self._agent: Any | None = None
-        self._skip_passive_evolution_this_invoke = False
-        self._review_trigger = bool(review_trigger if review_trigger is not None else fuzzy_review or False)
-        self._fuzzy_review_interval = fuzzy_review_interval
-        self._fuzzy_review_non_followup_count = 0
+        self._skip_signal_trigger_this_invoke = False
+        self._review_trigger = bool(review_trigger)
+        self._review_interval = review_interval
+        self._review_non_followup_count = 0
+        self._system_prompt_builder = None
         self._review_agent_max_iterations = review_agent_max_iterations
         self._manager = self._make_experience_manager()
         self._approval_runtime = EvolutionApprovalRuntime(
@@ -279,9 +285,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             language=language,
             evolution_store=self._evolution_store,
         )
-        # In-memory snapshot: session_id → skills used in this chat (cross-turn;
-        # Session objects are recreated per request so setattr on session is lost).
-        self._used_skills_by_session: Dict[str, Set[str]] = {}
 
     @property
     def subject_kind(self) -> str:
@@ -351,13 +354,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             subject_kind=self.subject_kind,
         )
 
-    def _make_review_scope_builder(self) -> EvolutionReviewScopeBuilder:
-        """Build the active review material builder for this rail subject."""
-        return EvolutionReviewScopeBuilder(
-            trajectory_provider=lambda: self._build_trajectory(),
-            materials_builder=build_review_scoped_materials,
-        )
-
     def _online_request_id_prefix(self) -> str | None:
         """Return an optional request id prefix for staged online evolution."""
         return None
@@ -381,6 +377,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         """Register evolution tools and the stable review agent."""
         super().init(agent)
         self._agent = agent
+        self._system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self._evolution_tools = self._register_evolution_tools(agent)
         self._register_evolution_review_agent(agent)
 
@@ -389,6 +386,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         self._unregister_runtime_tools(agent, self._evolution_tools)
         self._evolution_tools = []
         self._unregister_evolution_review_agent(agent)
+        if self._system_prompt_builder is not None:
+            self._system_prompt_builder.remove_section(SectionName.EVOLUTION_PROTOCOL)
+            self._system_prompt_builder.remove_section(SectionName.EVOLUTION_TEAM_PROTOCOL)
+        self._system_prompt_builder = None
         self._agent = None
         super().uninit(agent)
 
@@ -421,7 +422,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         if deep_config is None:
             return
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        subagents = remove_evolution_review_agent_config(list(getattr(deep_config, "subagents", None) or []))
+        subagents = list(getattr(deep_config, "subagents", None) or [])
         deep_config.subagents = ensure_evolution_review_agent_config(
             subagents,
             build_evolution_review_agent_config(
@@ -459,17 +460,40 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         source: str,
         subject: dict[str, Any],
         session_id: str,
+        member_id: str | None = None,
+        team_id: str | None = None,
         user_intent: str = "",
     ):
-        """Create a review scope with rail-owned bounded review materials."""
-        self._skip_passive_evolution_this_invoke = True
-        return self._review_runtime.create_scope(
+        """Create a review scope with the current clean trajectory window."""
+        capture = self._resolve_capture(
+            session_id=session_id,
+            member_id=member_id,
+            team_id=team_id,
+        )
+        if capture is None:
+            with self._subscription_lock:
+                has_active_capture = bool(self._active_captures)
+            if has_active_capture:
+                raise RuntimeError("review session does not match the active trajectory scope")
+            raise RuntimeError("evolution review must be prepared during an active invoke")
+
+        trajectory = self.get_trajectory(
+            session_id=capture.session_id,
+            member_id=capture.member_id,
+            team_id=capture.team_id,
+        )
+        if trajectory is None:
+            raise RuntimeError("no clean trajectory is available for evolution review")
+
+        scope = self._review_runtime.create_scope(
             source=source,
             subject=subject,
-            session_id=session_id,
+            session_id=capture.session_id,
             user_intent=user_intent,
-            scoped_materials=self._review_scope_builder.build_scoped_materials(),
+            trajectory=trajectory,
         )
+        self._skip_signal_trigger_this_invoke = True
+        return scope
 
     @property
     def store(self) -> EvolutionStore:
@@ -540,33 +564,38 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         trigger_point,
         ctx: AgentCallbackContext,
     ) -> bool:
+        if not self._signal_trigger:
+            return False
         if self._is_background_run(ctx):
             return False
-        if self._skip_passive_evolution_this_invoke:
-            logger.info(
-                "[SkillEvolutionRail] active evolution activity detected, skip passive evolution"
-            )
+        if self._skip_signal_trigger_this_invoke:
+            logger.info("[SkillEvolutionRail] active evolution activity detected, skip passive signal scan")
             return False
         return True
 
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset per-invoke active evolution state."""
-        self._skip_passive_evolution_this_invoke = False
+        del ctx
+        self._skip_signal_trigger_this_invoke = False
 
-    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_task_iteration(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Periodically enqueue a fuzzy active-review self-check follow-up."""
         if not self._review_trigger:
             return
         if self._task_iteration_followup_blocked(ctx):
             return
-        self._fuzzy_review_non_followup_count += 1
-        if self._fuzzy_review_non_followup_count < self._fuzzy_review_interval:
+        self._review_non_followup_count += 1
+        if self._review_non_followup_count < self._review_interval:
             return
-        self._fuzzy_review_non_followup_count = 0
+        self._review_non_followup_count = 0
 
         self._enqueue_task_iteration_followup(
             ctx,
-            self._build_fuzzy_review_followup_prompt(),
+            self._build_review_followup_prompt(),
             log_prefix="fuzzy review",
         )
 
@@ -619,13 +648,13 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         conversation_id = getattr(inputs, "conversation_id", None)
         return isinstance(conversation_id, str) and conversation_id.startswith(("heartbeat", "cron"))
 
-    def _build_fuzzy_review_followup_prompt(self) -> str:
+    def _build_review_followup_prompt(self) -> str:
         """Build the active fuzzy review self-check follow-up prompt."""
-        prompt = _FUZZY_REVIEW_PROMPT_EN if self._language == "en" else _FUZZY_REVIEW_PROMPT_CN
-        return self._wrap_fuzzy_review_followup_prompt(prompt)
+        prompt = _REVIEW_FOLLOWUP_PROMPT_EN if self._language == "en" else _REVIEW_FOLLOWUP_PROMPT_CN
+        return self._wrap_review_followup_prompt(prompt)
 
     @staticmethod
-    def _wrap_fuzzy_review_followup_prompt(prompt: str) -> str:
+    def _wrap_review_followup_prompt(prompt: str) -> str:
         return f"<{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>\n{prompt}\n</{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>"
 
     @property
@@ -669,13 +698,13 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         return runtime
 
     @property
-    def fuzzy_review(self) -> bool:
-        """Backward-compatible alias for review_trigger."""
-        return self._review_trigger
+    def signal_trigger(self) -> bool:
+        """Whether deterministic signal-based evolution is enabled."""
+        return self._signal_trigger
 
-    @fuzzy_review.setter
-    def fuzzy_review(self, value: bool) -> None:
-        self._review_trigger = bool(value)
+    @signal_trigger.setter
+    def signal_trigger(self, value: bool) -> None:
+        self._signal_trigger = bool(value)
 
     @property
     def review_trigger(self) -> bool:
@@ -739,7 +768,11 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             presentation_snippet=presentation_snippet,
         )
 
-    async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Track experiences exposed to the agent without modifying tool results.
 
         Presentation sources (either counts as presented for later scoring):
@@ -750,14 +783,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
-        tracked = self._resolve_tracked_skill_name(
-            str(inputs.tool_name or ""),
-            inputs.tool_args,
-            inputs.tool_msg,
-        )
-        if tracked:
-            session = ctx.session if hasattr(ctx, "session") else None
-            self._remember_session_used_skill(session, tracked)
         await self._track_presented_from_tool_call(ctx, inputs)
 
     async def _track_presented_from_tool_call(
@@ -808,50 +833,17 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             build_snippet=self._build_evaluation_snippet,
         )
 
-    async def run_evolution(
-        self,
-        trajectory: Trajectory,
-        ctx: Optional[AgentCallbackContext] = None,
-        *,
-        snapshot: Optional[dict] = None,
-    ) -> None:
-        """Run skill evolution based on the collected trajectory.
-
-        In async mode: ctx=None, snapshot contains data captured by _snapshot_for_evolution.
-        In sync mode: ctx is active, snapshot=None (backward-compatible).
-        """
-        logger.info("[SkillEvolutionRail] run_evolution called")
+    async def run_evolution(self, prepared: _SkillPreparedEvolutionInput) -> None:
+        """Run skill evolution from one detached, immutable input."""
+        logger.info("[SkillEvolutionRail] run_evolution called, signal_trigger=%s", self._signal_trigger)
+        if not self._signal_trigger:
+            logger.info("[SkillEvolutionRail] signal_trigger disabled, skipping")
+            return
 
         try:
-            # Async path: read from snapshot
-            session = None
-            session_skills: Set[str] = set()
-            snapshot_session_id = ""
-            if snapshot is not None:
-                trajectory = snapshot.get("trajectory", trajectory)
-                messages = snapshot["messages"]
-                presented_entries = snapshot.get("presented_entries", [])
-                session_skills = {
-                    str(name).strip()
-                    for name in (snapshot.get("session_used_skills") or [])
-                    if str(name).strip()
-                }
-                snapshot_session_id = str(snapshot.get("session_id") or "").strip()
-                if snapshot_session_id:
-                    session_skills |= {
-                        str(name).strip()
-                        for name in (self._used_skills_by_session.get(snapshot_session_id) or set())
-                        if str(name).strip()
-                    }
-            # Sync path: read from ctx (backward-compatible)
-            elif ctx is not None:
-                messages = self._collect_messages_from_trajectory(trajectory)
-                session = ctx.session if hasattr(ctx, "session") else None
-                presented_entries = self._experience_tracker.consume_eval_state(session)
-                session_skills = self._get_session_used_skills(session)
-            else:
-                logger.warning("[SkillEvolutionRail] run_evolution abort: no snapshot and no ctx")
-                return
+            trajectory = prepared.trajectory
+            messages = [deepcopy(message) for message in prepared.messages]
+            presented_entries = [deepcopy(entry) for entry in prepared.presented_entries]
 
             logger.info("[SkillEvolutionRail] collected %d messages", len(messages))
             self._emit_progress(
@@ -889,46 +881,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 model=self._evolver.model,
                 language=self._language,
             )
-            traj_skills = detector.collect_skills_from_messages(messages)
-            for name in traj_skills:
-                self._remember_session_used_skill(session, name)
-                if snapshot_session_id:
-                    used = self._used_skills_by_session.get(snapshot_session_id)
-                    if not isinstance(used, set):
-                        used = set()
-                        self._used_skills_by_session[snapshot_session_id] = used
-                    used.add(name)
-                session_skills.add(name)
-            session_skills |= self._get_session_used_skills(session)
-            logger.info(
-                "[SkillEvolutionRail] session used skills=%s (traj=%s)",
-                sorted(session_skills),
-                traj_skills,
-            )
-
             detected = detector.detect_trajectory_signals(
                 trajectory,
                 signal_types={"execution_failure", "script_artifact"},
             )
-            try:
-                feedback_signals = await detector.detect_user_intent(
-                    messages,
-                    extra_skills=sorted(session_skills),
-                )
-            except Exception as _fb_exc:
-                logger.warning(
-                    "[SkillEvolutionRail] user feedback signal detection failed: %s",
-                    _fb_exc,
-                )
-                feedback_signals = []
-            if feedback_signals:
-                logger.info(
-                    "[SkillEvolutionRail] detected %d user feedback signal(s), skills=%s",
-                    len(feedback_signals),
-                    sorted({s.skill_name for s in feedback_signals if getattr(s, "skill_name", None)}),
-                )
-                detected = [*detected, *feedback_signals]
-
             signals: List[EvolutionSignal] = []
             for signal in detected:
                 fp = make_signal_fingerprint(signal)
@@ -976,7 +932,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             )
 
             # Download hub experiences before local generation
-            incremental_messages = self._resolve_incremental_messages(messages, ctx, snapshot)
+            incremental_messages = list(prepared.incremental_messages) or messages
             downloaded_per_skill: dict[str, List[EvolutionRecord]] = {}
             if self.is_sharing_enabled and skill_groups:
                 downloaded_per_skill = await self._download_shared_experiences(
@@ -1011,7 +967,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     skill_signals=skill_signals,
                     messages=messages,
                     trajectory=trajectory,
-                    ctx=ctx,
+                    ctx=None,
                     shared_records=downloaded_per_skill.get(skill_name, []),
                     requires_approval=False,
                     # Same as enterprise-dev: review_status mirrors selfEvolution action.
@@ -1042,6 +998,61 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 self._emit_progress("cancelled", message, skill_name=skill_name)
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
+
+    async def evolve_from_external_signals(
+        self,
+        *,
+        signals: List[EvolutionSignal],
+        messages: Optional[List[dict]] = None,
+        trajectory: Optional[Trajectory] = None,
+        user_query: str = "",
+        requires_approval: Optional[bool] = None,
+    ) -> OnlineEvolutionResult:
+        """Evolve one regular Skill from already-attributed external signals.
+
+        This entry point deliberately bypasses passive ``signal_trigger``
+        detection. The caller is responsible for attribution and evidence
+        policy; the rail still validates the target, generates records through
+        the standard optimizer, and uses the normal approval/persistence path.
+        """
+
+        normalized_signals = list(signals or [])
+        skill_names = {signal.skill_name for signal in normalized_signals if signal.skill_name}
+        if not normalized_signals or len(skill_names) != 1:
+            return OnlineEvolutionResult(
+                skill_name=next(iter(skill_names), ""),
+                status="skipped_no_input",
+                message="external evolution requires signals attributed to exactly one Skill",
+            )
+
+        skill_name = next(iter(skill_names))
+        if self._disabled_skills and skill_name in self._disabled_skills:
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=f"external evolution skipped because skill '{skill_name}' is disabled",
+            )
+        if not self._evolution_store.skill_exists(skill_name) or not self._is_regular_skill(skill_name):
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=f"external evolution skipped because regular skill '{skill_name}' does not exist",
+            )
+
+        approval_required = not self._auto_save if requires_approval is None else bool(requires_approval)
+        # External producers (for example multiple task-review callbacks) can
+        # arrive concurrently.  Use the same per-rail gate as automatic
+        # evolution so optimizer calls and evolution-store writes stay ordered.
+        async with self._evolution_sem:
+            return await self._handle_evolution_from_signals(
+                skill_name=skill_name,
+                signals=normalized_signals,
+                messages=list(messages or []),
+                trajectory=trajectory,
+                ctx=None,
+                user_query=user_query,
+                requires_approval=approval_required,
+            )
 
     async def generate_and_emit_experience(
         self,
@@ -1362,6 +1373,16 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             return frontmatter.get("kind") not in _NON_REGULAR_SKILL_KINDS
         except Exception:
             return True
+
+    def _resolve_skills_dirs_for_self_evolution(self) -> Optional[List[Any]]:
+        """Return EvolutionStore base dirs for capabilities.json lookup, if available."""
+        raw = getattr(self._evolution_store, "base_dirs", None)
+        if raw is None:
+            return None
+        try:
+            return list(raw)
+        except TypeError:
+            return None
 
     async def _stage_evolution_from_signals(
         self,
@@ -1753,118 +1774,34 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     def _parse_messages(cls, messages: List[Any]) -> List[dict]:
         return cls._normalize_callback_messages(messages)
 
-    async def _snapshot_for_evolution(
+    async def _prepare_evolution_input(
         self,
         trajectory: Trajectory,
         ctx: AgentCallbackContext,
-    ) -> Optional[dict]:
-        """Phase 1: Collect messages while ctx is alive."""
-        snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
-        if snapshot is None:
+    ) -> Optional[_SkillPreparedEvolutionInput]:
+        """Capture messages and presented experiences while ctx is alive."""
+        if not self._signal_trigger:
             return None
 
-        messages = snapshot["messages"]
+        prepared = await super()._prepare_evolution_input(trajectory, ctx)
+        if prepared is None:
+            return None
+
+        messages = list(prepared.messages)
         if not messages:
             return None
 
-        session_id = ctx.inputs.conversation_id if ctx.inputs else ""
         session = ctx.session if hasattr(ctx, "session") else None
         presented_entries = self._experience_tracker.consume_eval_state(session)
 
-        # Refresh session-used skills while ctx/session is still alive.
-        detector = SignalDetector()
-        for name in detector.collect_skills_from_messages(messages):
-            self._remember_session_used_skill(session, name)
-        session_key = self._resolve_used_skills_session_key(session) or str(session_id or "").strip()
-        session_used_skills = sorted(self._get_session_used_skills(session))
-        if session_key and not session_used_skills:
-            session_used_skills = sorted(
-                str(name).strip()
-                for name in (self._used_skills_by_session.get(session_key) or set())
-                if str(name).strip()
-            )
-
-        snapshot.update(
-            {
-                "session_id": session_key or session_id,
-                "presented_entries": presented_entries,
-                "skill_name": "skill-evolution",
-                "incremental_messages": self._resolve_incremental_messages(messages, ctx, None),
-                "session_used_skills": session_used_skills,
-            }
+        incremental_messages = self._resolve_incremental_messages(messages, ctx, None) or messages
+        return _SkillPreparedEvolutionInput(
+            trajectory=prepared.trajectory,
+            messages=tuple(messages),
+            skill_name="skill-evolution",
+            presented_entries=tuple(deepcopy(presented_entries)),
+            incremental_messages=tuple(deepcopy(incremental_messages)),
         )
-        return snapshot
-
-    def _resolve_skills_dirs_for_self_evolution(self) -> Optional[List[Any]]:
-        """Return EvolutionStore base dirs for capabilities.json lookup, if available."""
-        raw = getattr(self._evolution_store, "base_dirs", None)
-        if raw is None:
-            return None
-        try:
-            return list(raw)
-        except TypeError:
-            return None
-
-    @staticmethod
-    def _resolve_used_skills_session_key(session: Any) -> Optional[str]:
-        """Resolve stable key for in-memory used-skills snapshot (no disk)."""
-        if session is None:
-            return None
-        getter = getattr(session, "get_session_id", None)
-        if callable(getter):
-            try:
-                sid = str(getter() or "").strip()
-            except Exception:
-                sid = ""
-            if sid:
-                return sid
-        # Tests / callers without get_session_id: same object only.
-        return f"__obj__:{id(session)}"
-
-    def _get_session_used_skills(self, session: Any) -> Set[str]:
-        """Return skill names used earlier for this session_id (cross-turn)."""
-        key = self._resolve_used_skills_session_key(session)
-        if not key:
-            return set()
-        raw = self._used_skills_by_session.get(key)
-        if not isinstance(raw, set):
-            return set()
-        return {str(name).strip() for name in raw if str(name).strip()}
-
-    def _remember_session_used_skill(self, session: Any, skill_name: str) -> None:
-        """Record a skill as used for this session_id (in-memory, no disk)."""
-        name = (skill_name or "").strip()
-        key = self._resolve_used_skills_session_key(session)
-        if not key or not name:
-            return
-        used = self._used_skills_by_session.get(key)
-        if not isinstance(used, set):
-            used = set()
-            self._used_skills_by_session[key] = used
-        if name not in used:
-            used.add(name)
-            logger.info(
-                "[SkillEvolutionRail] remember session used skill=%s session_id=%s total=%d",
-                name,
-                key,
-                len(used),
-            )
-
-    @classmethod
-    def _resolve_tracked_skill_name(
-        cls,
-        tool_name: str,
-        tool_args: Any,
-        tool_msg: Any = None,
-    ) -> Optional[str]:
-        """Resolve skill name from skill_tool / skill_complete for session tracking."""
-        name = (tool_name or "").lower()
-        args = cls._parse_tool_args_dict(tool_args)
-        if name in ("skill_tool", "skill_complete") or name.endswith(".skill_tool"):
-            skill = str(args.get("skill_name") or "").strip()
-            if skill:
-                return skill
-        return None
 
     # ── Governance commands (shared by 1D and team skills) ──
 
@@ -1906,30 +1843,50 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         )
 
     async def rollback_skill(self, skill_name: str, version: Optional[str] = None) -> bool:
-        """Rollback skill to an archived SemVer pair (no approval required).
-
-        Restores the archived ``SKILL.md`` body and always clears live
-        ``evolutions.json`` (empty entries, retained version). The
-        pre-rollback snapshot archives an empty paired ``evolutions.v*.json``
-        (all evolution archives are empty by design).
-        """
-        from openjiuwen.agent_evolving.experience.archive import EvolutionArchiveService
-
+        """Rollback skill to an archived version (no approval required)."""
         store = self._evolution_store
-        if not store.skill_exists(skill_name):
+        skill_dir = store.resolve_skill_dir(skill_name)
+        if skill_dir is None:
             return False
 
-        archive_service = EvolutionArchiveService(store=store)
-        target = version or "latest"
-        restored = await archive_service.rollback_to_pair(skill_name, target, prune=False)
-        if not restored:
-            logger.warning(
-                "[SkillEvolutionRail] rollback failed for %s -> %s",
-                skill_name,
-                target,
-            )
+        archive = skill_dir / "archive"
+        if not archive.is_dir():
+            logger.warning("[SkillEvolutionRail] no archive dir for %s", skill_name)
             return False
-        logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, target)
+
+        if version:
+            body_archive = archive / version
+            evo_version = version.replace("SKILL.", "evolutions.").replace(".md", ".json")
+            evo_archive = archive / evo_version
+        else:
+            body_files = sorted(
+                [f for f in archive.iterdir() if f.name.startswith("SKILL.v")],
+                key=lambda p: p.name,
+                reverse=True,
+            )
+            if not body_files:
+                logger.warning("[SkillEvolutionRail] no archived body for %s", skill_name)
+                return False
+            body_archive = body_files[0]
+            evo_version = body_archive.name.replace("SKILL.", "evolutions.").replace(".md", ".json")
+            evo_archive = archive / evo_version
+
+        # Archive current state first
+        await store.archive_skill_body(skill_name)
+        await store.archive_evolutions(skill_name)
+
+        old_body = await store.read_file_text(body_archive)
+        await store.write_skill_content(skill_name, old_body)
+
+        if evo_archive.is_file():
+            evo_content = await store.read_file_text(evo_archive)
+            evo_path = skill_dir / "evolutions.json"
+            await store.write_file_text(evo_path, evo_content)
+        else:
+            await store.clear_evolutions(skill_name)
+
+        await store.render_evolution_markdown(skill_name)
+        logger.info("[SkillEvolutionRail] rollback completed for %s -> %s", skill_name, body_archive.name)
         return True
 
     def should_hint_simplify_or_rebuild(self, skill_name: str) -> bool:

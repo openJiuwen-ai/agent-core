@@ -9,6 +9,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Optional
 
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+
 if TYPE_CHECKING:
     from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
 
@@ -20,7 +22,10 @@ def is_rl_online_rail_enabled_from_env() -> bool:
     return os.getenv("USE_RL_ONLINE_RAIL", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
+def build_rl_online_rail_from_env(
+    *,
+    trajectory_span_processor: TrajectorySpanProcessor,
+) -> Optional["RLOnlineRail"]:
     """Instantiate :class:`RLOnlineRail` + :class:`TrajectoryUploader` from env, or return None.
 
     Environment variables:
@@ -28,12 +33,17 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
     - ``USE_RL_ONLINE_RAIL`` — must be truthy to build (otherwise returns None without error).
     - ``TRAJECTORY_GATEWAY_URL`` — default ``http://127.0.0.1:18080``.
     - ``TRAJECTORY_GATEWAY_API_KEY`` — optional Bearer token for the gateway.
+    - ``TRAJECTORY_WAL_DIR`` — optional local WAL directory for failed async uploads.
     - ``RL_ONLINE_TENANT_ID`` — optional tenant / user namespace for LoRA routing.
+    - ``LORA_DEFAULT_POLICY`` — optional; ``latest_by_user`` makes Rail ask the gateway for the
+      effective LoRA. The gateway owns latest-version lookup and vLLM runtime loading.
 
     On import failure (optional extras not installed), logs a warning and returns None.
     """
     if not is_rl_online_rail_enabled_from_env():
         return None
+    if not isinstance(trajectory_span_processor, TrajectorySpanProcessor):
+        raise TypeError("trajectory_span_processor must be a TrajectorySpanProcessor")
     try:
         from .online_rail import RLOnlineRail
         from .uploader import TrajectoryUploader
@@ -46,15 +56,24 @@ def build_rl_online_rail_from_env() -> Optional["RLOnlineRail"]:
 
     gw = os.getenv("TRAJECTORY_GATEWAY_URL", "http://127.0.0.1:18080").rstrip("/")
     api_key = os.getenv("TRAJECTORY_GATEWAY_API_KEY", "") or ""
+    wal_dir = os.getenv("TRAJECTORY_WAL_DIR", "records/rail_v1_wal").strip() or "records/rail_v1_wal"
     tenant_raw = os.getenv("RL_ONLINE_TENANT_ID", "").strip()
     tenant_id: str | None = tenant_raw or None
+    lora_default_policy = os.getenv("LORA_DEFAULT_POLICY", "disabled").strip() or "disabled"
 
-    uploader = TrajectoryUploader(gw, api_key=api_key)
+    uploader = TrajectoryUploader(gw, api_key=api_key, wal_dir=wal_dir)
     rail = RLOnlineRail(
         session_id="",
         gateway_endpoint=gw,
         tenant_id=tenant_id,
         uploader=uploader,
+        lora_default_policy=lora_default_policy,
+        gateway_api_key=api_key,
+        trajectory_span_processor=trajectory_span_processor,
     )
-    logger.info("build_rl_online_rail_from_env: RLOnlineRail ready (rail-v1), gateway=%s", gw)
+    logger.info(
+        "build_rl_online_rail_from_env: RLOnlineRail ready (rail-v1), gateway=%s, lora_policy=%s",
+        gw,
+        lora_default_policy,
+    )
     return rail

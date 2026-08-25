@@ -4,8 +4,8 @@
 """Extract token-level fields from LLM responses for online Rail (rail-v1).
 
 Single source of truth for:
-- :class:`RLOnlineRail` (step hook: fill ``TrajectoryStep`` / ``LLMCallDetail.meta``)
-- :class:`OnlineTrajectoryConverter` (fallback when step fields are empty)
+- :class:`RLOnlineRail` (runtime response extraction before span annotation)
+- :class:`OnlineTrajectoryConverter` (provider metadata fallback)
 
 See ``docs/zh/.../AgentRL在线Rail复用方案.md`` (token 级数据 / 端云对齐).
 """
@@ -13,7 +13,6 @@ See ``docs/zh/.../AgentRL在线Rail复用方案.md`` (token 级数据 / 端云�
 from __future__ import annotations
 
 from typing import Any, Optional
-
 
 
 def _provider_response_json(response: Any) -> dict[str, Any] | None:

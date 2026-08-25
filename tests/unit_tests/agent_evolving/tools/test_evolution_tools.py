@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.agent_evolving.tools import (
     EvolveReviewTaskTool,
@@ -60,12 +64,12 @@ def test_main_and_review_evolution_tool_names_are_distinct_surfaces():
     assert REVIEW_EVOLUTION_TOOL_NAMES == (
         "list_skill_experiences",
         "read_skill_experiences",
-        "list_trajectory_steps",
-        "read_trajectory_steps",
+        "list_trajectory_spans",
+        "read_trajectory_spans",
         "submit_evolution_review",
     )
-    assert "list_trajectory_steps" not in MAIN_EVOLUTION_TOOL_NAMES
-    assert "read_trajectory_steps" not in MAIN_EVOLUTION_TOOL_NAMES
+    assert "list_trajectory_spans" not in MAIN_EVOLUTION_TOOL_NAMES
+    assert "read_trajectory_spans" not in MAIN_EVOLUTION_TOOL_NAMES
     assert "submit_evolution_review" not in MAIN_EVOLUTION_TOOL_NAMES
     assert "evolve_skill_experiences" not in REVIEW_EVOLUTION_TOOL_NAMES
 
@@ -90,32 +94,66 @@ def test_evolve_review_task_description_hardens_intent_and_evidence_rules():
 
 
 @pytest.mark.asyncio
+async def test_evolve_review_task_fails_when_reviewer_does_not_submit(monkeypatch):
+    runtime = EvolutionReviewRuntime()
+    launch = runtime.create_scope(
+        source="explicit_command",
+        subject={"kind": "skill", "name": "skill-a"},
+        session_id="session-1",
+    )
+
+    async def fake_invoke(self, inputs, **kwargs):
+        del self, inputs, kwargs
+        return SimpleNamespace(
+            success=True,
+            data={"output": launch.evolution_review_ref, "agent_id": "subagent-1"},
+        )
+
+    monkeypatch.setattr("openjiuwen.agent_evolving.tools.skill.TaskTool.invoke", fake_invoke)
+    tool = EvolveReviewTaskTool(
+        parent_agent=Mock(),
+        review_runtime=runtime,
+        language="cn",
+        agent_id="agent-1",
+    )
+
+    result = await tool.invoke(
+        {"evolution_review_ref": launch.evolution_review_ref},
+        conversation_id="session-1",
+    )
+
+    assert result.success is False
+    assert "did not submit a review result" in result.error
+
+
+@pytest.mark.asyncio
 async def test_prepare_tool_is_thin_wrapper_over_review_runtime():
     runtime = EvolutionReviewRuntime()
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map({TRAJECTORY_ID: "prepare-tool-test"}),
+                    },
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": "trace-1",
+                                    "spanId": "tool-1",
+                                    "name": "tool.bash",
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+    )
 
     def prepare_scope(**kwargs):
-        return runtime.create_scope(
-            **kwargs,
-            scoped_materials={
-                "trajectory_steps": [
-                    {
-                        "ref": "step-1",
-                        "index": 0,
-                        "kind": "tool",
-                        "summary": "tool=bash result_preview=from rail",
-                        "has_error": False,
-                    }
-                ],
-                "trajectory_step_details": {
-                    "step-1": {
-                        "ref": "step-1",
-                        "index": 0,
-                        "kind": "tool",
-                        "detail": {"tool_name": "bash", "call_result": "from rail"},
-                    }
-                },
-            },
-        )
+        return runtime.create_scope(**kwargs, trajectory=trajectory)
 
     tools = _create_main_tools(prepare_scope=prepare_scope)
 
@@ -135,25 +173,8 @@ async def test_prepare_tool_is_thin_wrapper_over_review_runtime():
     scope = runtime.resolve_scope(result.data["evolution_review_ref"], session_id="session-1")
     assert scope.subject == {"kind": "skill", "name": "skill-a"}
     assert scope.user_intent == "capture parser feedback"
-    assert scope.scoped_materials == {
-        "trajectory_steps": [
-            {
-                "ref": "step-1",
-                "index": 0,
-                "kind": "tool",
-                "summary": "tool=bash result_preview=from rail",
-                "has_error": False,
-            }
-        ],
-        "trajectory_step_details": {
-            "step-1": {
-                "ref": "step-1",
-                "index": 0,
-                "kind": "tool",
-                "detail": {"tool_name": "bash", "call_result": "from rail"},
-            }
-        },
-    }
+    assert scope.trajectory is not trajectory
+    assert scope.trajectory.to_otlp() == trajectory.to_otlp()
 
 
 @pytest.mark.asyncio
@@ -170,6 +191,40 @@ async def test_prepare_tool_requires_user_confirmation():
 
     assert result.success is False
     assert "user_confirmed must be true" in result.error
+
+
+@pytest.mark.asyncio
+async def test_prepare_tool_passes_runtime_session_scope_to_rail():
+    prepare_scope = Mock(
+        return_value=SimpleNamespace(
+            scope_id="scope-1",
+            evolution_review_ref="evrr_1",
+            subject={"kind": "skill", "name": "skill-a"},
+        )
+    )
+    tools = _create_main_tools(prepare_scope=prepare_scope)
+    session = SimpleNamespace(
+        get_session_id=lambda: "session-1",
+        get_agent_id=lambda: "agent-1",
+    )
+
+    result = await tools["prepare_skill_evolution"].invoke(
+        {
+            "subject": {"kind": "skill", "name": "skill-a"},
+            "user_confirmed": True,
+            "user_intent": "capture parser feedback",
+        },
+        session=session,
+    )
+
+    assert result.success is True
+    prepare_scope.assert_called_once_with(
+        source="agent_detected_signal",
+        subject={"kind": "skill", "name": "skill-a"},
+        session_id="session-1",
+        member_id="agent-1",
+        user_intent="capture parser feedback",
+    )
 
 
 @pytest.mark.asyncio

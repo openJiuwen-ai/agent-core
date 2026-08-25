@@ -532,6 +532,7 @@ async def test_list_skill_tool_returns_all_skills_when_query_empty(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
     """SkillUseRail should reuse cached skills across invokes when no skill is changed."""
+    SkillUseRail.clear_process_skill_index()
     skills_root = tmp_path / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
 
@@ -564,6 +565,126 @@ async def test_skill_rail_reuses_cached_skills_across_invokes(tmp_path: Path):
     )
     await skill_rail.before_invoke(ctx2)
     assert skill_rail.load_calls == []
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_process_index_reused_across_rail_instances(tmp_path: Path):
+    """Process-level skill index should survive SkillUseRail rebuild (new session)."""
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+    _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
+
+    sys_operation = _make_sys_operation(tmp_path)
+
+    rail_a = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    rail_a.set_workspace(Workspace(root_path=str(tmp_path)))
+    rail_a.set_sys_operation(sys_operation)
+    await rail_a.before_invoke(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ModelCallInputs(messages=[SystemMessage(content="x")], tools=[]),
+            session=None,
+        )
+    )
+    assert sorted(rail_a.load_calls) == ["invoice-parser", "xlsx-writer"]
+
+    rail_b = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    rail_b.set_workspace(Workspace(root_path=str(tmp_path)))
+    rail_b.set_sys_operation(sys_operation)
+    await rail_b.before_invoke(
+        AgentCallbackContext(
+            agent=None,
+            inputs=ModelCallInputs(messages=[SystemMessage(content="x")], tools=[]),
+            session=None,
+        )
+    )
+    assert rail_b.load_calls == []
+    assert sorted(s.name for s in rail_b.skills) == ["invoice-parser", "xlsx-writer"]
+
+
+def test_warmup_process_skill_index_fills_without_sysop(tmp_path: Path):
+    """AgentServer-style warmup should populate process index via local frontmatter."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import warmup_process_skill_index
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+    _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 2
+    assert stats["filled"] == 2
+    assert stats["hits"] == 0
+
+    stats2 = warmup_process_skill_index(str(skills_root))
+    assert stats2["filled"] == 0
+    assert stats2["hits"] == 2
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_hits_warmup_process_index(tmp_path: Path):
+    """First rail after warmup should not call _load_skill (process hit)."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import warmup_process_skill_index
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    warmup_process_skill_index(str(skills_root))
+
+    sys_operation = _make_sys_operation(tmp_path)
+    rail = _TrackingSkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    rail.set_sys_operation(sys_operation)
+    await rail.before_invoke(
+        AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
+    assert rail.load_calls == []
+    assert rail.skills[0].description == "Parse invoice pdf files"
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_load_description_frontmatter_only(tmp_path: Path, monkeypatch):
+    """Catalog path should not require SysOp full-file read when local frontmatter works."""
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
+
+    async def _boom(*_a, **_k):
+        raise AssertionError("catalog path must not call SysOp _read_skill_text when local read works")
+
+    monkeypatch.setattr(skill_rail, "_read_skill_text", _boom)
+    await skill_rail.before_invoke(
+        AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
+    assert skill_rail.skills[0].description == "Parse invoice pdf files"
 
 
 @pytest.mark.asyncio

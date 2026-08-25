@@ -13,13 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from openjiuwen.agent_evolving.trajectory.legacy_semconv import (
+    LEGACY_GEN_AI_INPUT_MESSAGES,
+    LEGACY_GEN_AI_OUTPUT_MESSAGES,
+    LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS,
+    LEGACY_GEN_AI_TOOL_CALL_RESULT,
+    LEGACY_TRAJECTORY_STEP_KIND,
+)
 from openjiuwen.agent_evolving.trajectory.semconv import (
     CASE_ID,
-    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_OUTPUT_MESSAGES,
-    GEN_AI_TOOL_CALL_ARGUMENTS,
-    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
     OJ_AGENT_INVOKE_TYPE,
     OJ_SESSION_ID,
@@ -31,7 +34,6 @@ from openjiuwen.agent_evolving.trajectory.semconv import (
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SCOPE_NAME,
     TRAJECTORY_SOURCE,
-    TRAJECTORY_STEP_KIND,
 )
 from openjiuwen.agent_evolving.trajectory.span_codec import (
     attributes_to_otlp,
@@ -51,6 +53,7 @@ from openjiuwen.agent_evolving.trajectory.types import (
     trajectory_session_id,
     trajectory_source,
     trajectory_steps,
+    trajectory_otlp,
 )
 
 TrajectoryRecord = Trajectory
@@ -359,7 +362,7 @@ def _filter_trajectory_step_spans(
     trajectory: Trajectory,
     keep_step: Callable[[TrajectoryStep], bool],
 ) -> Trajectory:
-    trace = deepcopy(trajectory.otlp_trace or {})
+    trace = trajectory_otlp(trajectory)
     steps = iter(trajectory_steps(trajectory))
     for resource_span in trace.get("resourceSpans") or []:
         for scope_span in resource_span.get("scopeSpans") or []:
@@ -376,7 +379,7 @@ def _filter_trajectory_step_spans(
 
 def _trajectory_spans(trajectory: Trajectory) -> list[dict[str, Any]]:
     spans: list[dict[str, Any]] = []
-    trace = trajectory.otlp_trace if isinstance(trajectory.otlp_trace, dict) else {}
+    trace = trajectory_otlp(trajectory)
     for resource_span in trace.get("resourceSpans") or []:
         for scope_span in resource_span.get("scopeSpans") or []:
             spans.extend(deepcopy(scope_span.get("spans") or []))
@@ -404,12 +407,12 @@ def _span_has_step_projection(span: dict[str, Any]) -> bool:
     operation_name = str(attrs.get(GEN_AI_OPERATION_NAME) or "").lower()
     if operation_name in ("chat", "text_completion", "generate_content", "execute_tool"):
         return True
-    if attrs.get(GEN_AI_INPUT_MESSAGES) is not None or attrs.get(GEN_AI_OUTPUT_MESSAGES) is not None:
+    if attrs.get(LEGACY_GEN_AI_INPUT_MESSAGES) is not None or attrs.get(LEGACY_GEN_AI_OUTPUT_MESSAGES) is not None:
         return True
     if (
         attrs.get(GEN_AI_TOOL_NAME) is not None
-        or attrs.get(GEN_AI_TOOL_CALL_ARGUMENTS) is not None
-        or attrs.get(GEN_AI_TOOL_CALL_RESULT) is not None
+        or attrs.get(LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS) is not None
+        or attrs.get(LEGACY_GEN_AI_TOOL_CALL_RESULT) is not None
     ):
         return True
     invoke_type = str(
@@ -420,7 +423,7 @@ def _span_has_step_projection(span: dict[str, Any]) -> bool:
     component_type = str(attrs.get(OJ_WORKFLOW_COMPONENT_TYPE) or "").lower()
     if invoke_type in ("llm", "plugin", "tool") or component_type in ("llm", "tool", "plugin"):
         return True
-    if attrs.get(TRAJECTORY_STEP_KIND) in ("llm", "tool"):
+    if attrs.get(LEGACY_TRAJECTORY_STEP_KIND) in ("llm", "tool"):
         return True
     span_name = str(span.get("name") or "").lower()
     return (
