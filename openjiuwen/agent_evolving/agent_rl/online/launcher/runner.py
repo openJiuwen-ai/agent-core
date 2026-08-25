@@ -202,12 +202,13 @@ def run_online_rl_loop(
         log.info('  Gateway ready at %s', runtime.gateway_base_url)
 
         log.info(
-            '[3/5] Starting OnlineTrainingScheduler (PPO task-driven, min_samples=%d, interval=%ds) ...',
+            '[3/5] Starting OnlineTrainingScheduler (%s, threshold=%d, interval=%ds) ...',
+            cfg.training.backend,
             cfg.training.threshold,
             cfg.training.scan_interval,
         )
         training_scheduler = start_online_training_scheduler(cfg=cfg, runtime=runtime)
-        log.info('  OnlineTrainingScheduler running (task-driven PPO, train GPU: [%s])', cfg.training.gpu_ids)
+        log.info('  OnlineTrainingScheduler running (%s, train GPU: [%s])', cfg.training.backend, cfg.training.gpu_ids)
 
         if not cfg.jiuwen.enabled:
             log.info('[4/5] Skip JiuwenClaw startup (jiuwen.enabled=false)')
@@ -220,6 +221,10 @@ def run_online_rl_loop(
                 trajectory_mode=cfg.trajectory.mode,
                 trajectory_gateway_url=runtime.gateway_base_url,
                 trajectory_batch_size=cfg.trajectory.batch_size,
+                capture_mode=cfg.trajectory.capture_mode,
+                sft_scenario=cfg.trajectory.sft_scenario,
+                session_done_on_invoke_end=cfg.trajectory.session_done_on_invoke_end,
+                session_flush_token_threshold_k=cfg.trajectory.session_flush_token_threshold_k,
                 lora_repo_root=runtime.lora_repo,
                 lora_default_policy=cfg.gateway.lora_default_policy,
             )
@@ -232,6 +237,10 @@ def run_online_rl_loop(
                 model_path=cfg.inference.model_path,
                 trajectory_mode=cfg.trajectory.mode,
                 trajectory_batch_size=cfg.trajectory.batch_size,
+                capture_mode=cfg.trajectory.capture_mode,
+                sft_scenario=cfg.trajectory.sft_scenario,
+                session_done_on_invoke_end=cfg.trajectory.session_done_on_invoke_end,
+                session_flush_token_threshold_k=cfg.trajectory.session_flush_token_threshold_k,
                 app_host=cfg.jiuwen.app_host,
                 ws_port=cfg.jiuwen.ws_port,
                 web_host=cfg.jiuwen.web_host,

@@ -188,6 +188,7 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
     from openjiuwen.agent_evolving.agent_rl.storage.local_store import (
         LocalPendingJudgeStore,
+        LocalSFTStore,
         LocalTrajectoryStore,
     )
 
@@ -195,6 +196,7 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
     runtime = GatewayTrajectoryRuntime(
         GatewayConfig(port=18080, model_id="dummy-model", record_dir=str(tmp_path)),
         trajectory_store=LocalTrajectoryStore(store_dir),
+        sft_store=LocalSFTStore(store_dir),
         pending_judge_store=LocalPendingJudgeStore(store_dir),
     )
 
