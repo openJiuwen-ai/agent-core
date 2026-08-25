@@ -45,6 +45,12 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
 - link 成功 → team 内路径是 link，透明映射到 team 外。
 - link 失败 → 真实目录建在 team 内，team 内路径就是真实目录。
 - **两种情况下 `team_member_workspace_dir` 都有效 → A/B 零感知、零改动。**
+- **按成员 role 白名单判定是否 link 出去**（`binder.prepare_member_workspace`）：
+  只有 `TEAMMATE` 与 `HUMAN_AGENT` 走 dynamic（link 出去）；`LEADER`（含按名判定的
+  leader）留 team 内、`predefined` 走跨 team 共享、其余 role（`EXTERNAL_CLI`、
+  `BRIDGE_AGENT`、`WORKER`、未知）一律退回 team 内真实目录，不 link 出去。外部 CLI 成员
+  另有 `setup_agent` 的 `member_runtime is not None` 提前返回兜底，根本不触达装配段；
+  白名单是 binder 直接看到任意 role 时的纵深防御。
 
 ## 为什么这样长这样（决策记录）
 
@@ -60,10 +66,20 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
 - **链接感知清理**：junction 若被 `shutil.rmtree` 会下钻删 target 内容（共享资产）。
   `_remove_cleanup_paths` 先 `is_dir_link` → `remove_dir_link`，非链接才 rmtree。
 - **迁移器回滚**：旧布局真实目录 rename 到 team 外后 link 失败，回滚回 team 内。
+- **去掉全队扫描 + 黑名单，改每成员按 role 自判**：原 `prepare_member_workspace`
+  寄生调用 `TeamWorkspaceMigrator().migrate(team)` 做全队扫描，每个成员 configure 时
+  都扫一遍 `<team>/workspaces/`，把非 leader / 非 predefined 的真实目录一律当 dynamic
+  rename 出去 + link。这会把外部 CLI 成员的 in-team 真实目录也搬出去（外部 CLI 成员走
+  early-return 不经装配段，但其目录已由 A 块 `_prepare_external_cli_workspace` 建在 team
+  内，扫描时被当 dynamic 误搬）。此前用 `external_cli_members` 黑名单（依赖
+  `_external_cli_specs` 内存缓存）补救，但该缓存在 fresh build + 预定义外部 CLI 成员路径下
+  为空，仍误搬。重构后 binder 只对**当前 configure 的成员**按 role 白名单判定：该成员是
+  `TEAMMATE`/`HUMAN_AGENT` 才建 team 外真实目录 + link，否则一律 team 内，不再扫别人的目录。
+  migrator 类本体保留（一次性 legacy 迁移语义不变，只是不再由装配段寄生调用）。
 
 ## 验证基线
 
-- 单测 28 个（`team_workspace/` 5 文件 + `test_team.py` 链接感知 2 个）。
+- 单测 28 个（`team_workspace/` 5 文件 + `test_team.py` 链接感知 2 个；含 role 白名单 + 外部 CLI 不被 link 出去回归 2 项）。
 - 装配级 ST 17 项（真实 `TeamAgentSpec` 数据流 → 真实装配 → 文件系统断言，无 API key）。
 - 冒烟 35 checks（隔离 home，覆盖建链 / 复用 / 释放 / 清理 / 迁移全链路）。
 
@@ -71,6 +87,7 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
 
 1. 兜底（link 建不出）下预配置成员失去跨 team 复用，退化为 team 内私有目录（可接受）。
 2. 外部 CLI 成员（codex / claude）无 link：`setup_agent` 对 `member_runtime is not None`
-   提前返回，不触达装配段，Block C 对其零影响。
+   提前返回，不触达装配段；即便绕过早返回，binder 的 role 白名单也会把 `EXTERNAL_CLI`
+   归入 team 内真实目录（兜底退回），不会被别的成员 configure 扫描时 link 出去。
 3. WORKER（swarmflow）保持现役 `ensure_team_member_workspace_link`，不参与 binder/refs。
 4. distributed workspace（git push/pull）跨节点一致性只保证 LOCAL 模式。

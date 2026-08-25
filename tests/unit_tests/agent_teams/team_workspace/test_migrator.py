@@ -51,38 +51,6 @@ def test_leader_never_migrated() -> None:
 
 
 @pytest.mark.level0
-def test_external_cli_member_never_migrated() -> None:
-    """External CLI member's in-team real dir (A 块) is never flattened/linked.
-
-    ``_prepare_external_cli_workspace`` creates the CLI member's workspace as
-    a pure in-team real directory (no link out). The migrator must skip it
-    like the leader — flattening it to ``.agent_teams/<team>#<member>`` + link
-    would break the A-block invariant and resurface the WinError 5 link
-    failure seen in session resume.
-    """
-    cli_dir = _legacy_dir("teamA", "claude-1")
-    cli_dir.mkdir(parents=True)
-    (cli_dir / "card.md").write_text("identity", encoding="utf-8")
-    moved = TeamWorkspaceMigrator().migrate(
-        "teamA", external_cli_members={"claude-1"}
-    )
-    assert moved is False
-    assert cli_dir.is_dir() and not is_dir_link(cli_dir), "CLI dir stays in-team, no link"
-    assert not member_real_dir(
-        "teamA", "claude-1", MEMBER_MODE_DYNAMIC
-    ).exists(), "no team#member real dir created"
-    # A dynamic peer in the same team is still migrated normally.
-    peer = _legacy_dir("teamA", "memX")
-    peer.mkdir(parents=True)
-    moved = TeamWorkspaceMigrator().migrate(
-        "teamA", external_cli_members={"claude-1"}
-    )
-    assert moved is True
-    assert is_dir_link(apaths.team_member_workspace_dir("teamA", "memX"))
-    assert cli_dir.is_dir() and not is_dir_link(cli_dir), "CLI dir still untouched"
-
-
-@pytest.mark.level0
 def test_predefined_member_moves_to_independent() -> None:
     legacy = _legacy_dir("teamA", "shared")
     legacy.mkdir(parents=True)

@@ -124,6 +124,7 @@ def test_release_and_delete_if_zero_per_mode() -> None:
 @pytest.mark.level0
 def test_prepare_member_workspace_classifies_modes() -> None:
     team = "teamA"
+    # leader (by role or name) → in-team real dir, no link.
     assert (
         prepare_member_workspace(
             team_name=team,
@@ -134,6 +135,8 @@ def test_prepare_member_workspace_classifies_modes() -> None:
         )
         == str(apaths.team_member_workspace_dir(team, "leader"))
     )
+    assert not is_dir_link(apaths.team_member_workspace_dir(team, "leader"))
+    # predefined → shared independent workspace + link.
     assert (
         prepare_member_workspace(
             team_name=team,
@@ -144,6 +147,8 @@ def test_prepare_member_workspace_classifies_modes() -> None:
         )
         == str(apaths.team_member_workspace_dir(team, "shared"))
     )
+    assert is_dir_link(apaths.team_member_workspace_dir(team, "shared"))
+    # teammate → dynamic real dir + link out of the team tree.
     assert (
         prepare_member_workspace(
             team_name=team,
@@ -153,6 +158,60 @@ def test_prepare_member_workspace_classifies_modes() -> None:
             predefined_members={"shared"},
         )
         == str(apaths.team_member_workspace_dir(team, "worker"))
+    )
+    assert is_dir_link(apaths.team_member_workspace_dir(team, "worker"))
+    # human_agent → dynamic real dir + link out of the team tree.
+    assert (
+        prepare_member_workspace(
+            team_name=team,
+            member_name="human-1",
+            role=TeamRole.HUMAN_AGENT,
+            leader_member_name="leader",
+            predefined_members={"shared"},
+        )
+        == str(apaths.team_member_workspace_dir(team, "human-1"))
+    )
+    assert is_dir_link(apaths.team_member_workspace_dir(team, "human-1"))
+    # external_cli → stays in-team (role whitelist fallback), no link out.
+    ext_root = apaths.team_member_workspace_dir(team, "claude-1")
+    assert (
+        prepare_member_workspace(
+            team_name=team,
+            member_name="claude-1",
+            role=TeamRole.EXTERNAL_CLI,
+            leader_member_name="leader",
+            predefined_members={"shared"},
+        )
+        == str(ext_root)
+    )
+    assert not is_dir_link(ext_root), "external CLI member stays in-team, no link"
+
+
+@pytest.mark.level0
+def test_external_cli_member_not_linked_out_by_others(tmp_path: Path) -> None:
+    """A teammate's configure pass must not link out an external CLI member's
+    in-team workspace. Regression for the role-whitelist change: the old
+    full-team migrator scan treated every non-leader/non-predefined member as
+    dynamic and linked it out; the whitelist keeps EXTERNAL_CLI in-team.
+    """
+    team = "teamB"
+    # Pre-create the external CLI member's in-team real dir + content, as the
+    # A-block _prepare_external_cli_workspace path would.
+    ext_dir = apaths.team_member_workspace_dir(team, "claude-1")
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "cli_marker.txt").write_text("in-team", encoding="utf-8")
+    # A plain teammate is configured afterwards — it must not touch claude-1.
+    prepare_member_workspace(
+        team_name=team,
+        member_name="mate",
+        role=TeamRole.TEAMMATE,
+        leader_member_name="leader",
+        predefined_members=set(),
+    )
+    assert not is_dir_link(ext_dir), "external CLI dir not linked out by mate's configure"
+    assert (ext_dir / "cli_marker.txt").read_text(encoding="utf-8") == "in-team"
+    assert not member_real_dir(team, "claude-1", MEMBER_MODE_DYNAMIC).exists(), (
+        "no team-external real dir created for the external CLI member"
     )
 
 

@@ -36,7 +36,6 @@ from openjiuwen.agent_teams.team_workspace.paths import (
     MEMBER_MODE_PREDEFINED,
     member_real_dir,
 )
-from openjiuwen.agent_teams.team_workspace.migrator import TeamWorkspaceMigrator
 from openjiuwen.agent_teams.team_workspace.ref_store import MemberRefStore
 from openjiuwen.core.common.logging import team_logger
 
@@ -273,41 +272,36 @@ def prepare_member_workspace(
     role: TeamRole,
     leader_member_name: str | None,
     predefined_members: set[str],
-    external_cli_members: set[str] | None = None,
     member_workspace_prefix: bool = True,
 ) -> str:
     """Ensure the member workspace exists; return the in-team root path.
 
-    Classification: a leader (by role or name) keeps its real directory
-    in-team; a predefined member shares the independent workspace across
-    teams; everything else is a dynamic member (``.agent_teams/<team>#<m>/``).
-    The legacy in-team layout is migrated first (idempotent), then the binder
-    creates the real directory + link. The returned path is always
-    ``team_member_workspace_dir`` — when the link exists it is transparent;
-    when link creation fails the real directory retreats into the team tree
-    (v3 R2). A/B code never notices the link.
+    Classification is a **role whitelist**: only a ``TEAMMATE`` or
+    ``HUMAN_AGENT`` is flattened into a dynamic real directory
+    (``.agent_teams/<team>#<m>/``) and linked out of the team tree; a leader
+    (by role or name) keeps its real directory in-team; a predefined member
+    shares the independent workspace across teams. Every other role — notably
+    ``EXTERNAL_CLI`` — stays in-team like a leader, so an external CLI member's
+    workspace is never linked out by another member's configure pass. External
+    CLI members additionally take the ``member_runtime is not None`` early
+    return in ``setup_agent`` and never reach this function; the whitelist is
+    the defence-in-depth for any role the binder sees directly.
 
-    ``external_cli_members`` is the set of external CLI member names
-    (claude/codex) currently in the team. The migrator skips their in-team
-    real directories (created by ``_prepare_external_cli_workspace``, A 块)
-    so they are not flattened/linked out — flattening would break the
-    A-block invariant and resurface the ``WinError 5`` link failure. The
-    caller (``setup_agent``) resolves it from ``team_backend`` when available.
+    The returned path is always ``team_member_workspace_dir`` — when the link
+    exists it is transparent; when link creation fails the real directory
+    retreats into the team tree (v3 R2). A/B code never notices the link.
     """
     if role == TeamRole.LEADER or member_name == leader_member_name:
         mode = MEMBER_MODE_LEADER
     elif member_name in predefined_members:
         mode = MEMBER_MODE_PREDEFINED
-    else:
+    elif role in (TeamRole.TEAMMATE, TeamRole.HUMAN_AGENT):
         mode = MEMBER_MODE_DYNAMIC
-
-    TeamWorkspaceMigrator().migrate(
-        team_name,
-        leader_member_name=leader_member_name,
-        predefined_members=predefined_members,
-        external_cli_members=external_cli_members,
-        member_workspace_prefix=member_workspace_prefix,
-    )
+    else:
+        # Unknown / non-dynamic role (EXTERNAL_CLI, BRIDGE_AGENT, WORKER, …):
+        # stay in-team like a leader — never link another member's workspace
+        # out on someone else's configure pass (conservative default).
+        mode = MEMBER_MODE_LEADER
 
     root = MemberWorkspaceBinder().setup(
         TeamMemberBinding(
