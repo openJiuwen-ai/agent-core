@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import hashlib
 
-from openjiuwen.agent_teams.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.config import ObservabilityConfig
 
 
 _REDACTED_PREFIX = "sha256:"
 
 
-def _truncate(value: str, max_length: int) -> str:
+def truncate(value: str, max_length: int) -> str:
     """Hard-cap string length and signal truncation."""
     if max_length <= 0 or len(value) <= max_length:
         return value
@@ -44,7 +44,7 @@ def redact_prompt(value: object, config: ObservabilityConfig) -> str:
     text = "" if value is None else str(value)
     if config.redact_prompts:
         return _hash(text)
-    return _truncate(text, config.attribute_value_max_length)
+    return truncate(text, config.attribute_value_max_length)
 
 
 def redact_completion(value: object, config: ObservabilityConfig) -> str:
@@ -57,4 +57,4 @@ def redact_completion(value: object, config: ObservabilityConfig) -> str:
     text = "" if value is None else str(value)
     if config.redact_completions:
         return _hash(text)
-    return _truncate(text, config.attribute_value_max_length)
+    return truncate(text, config.attribute_value_max_length)

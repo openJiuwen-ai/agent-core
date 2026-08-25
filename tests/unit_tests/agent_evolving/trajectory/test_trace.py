@@ -9,15 +9,18 @@ from datetime import datetime, timezone
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory.legacy_semconv import (
+    LEGACY_GEN_AI_INPUT_MESSAGES,
+    LEGACY_GEN_AI_OUTPUT_MESSAGES,
+    LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS,
+    LEGACY_GEN_AI_TOOL_CALL_RESULT,
+    LEGACY_GEN_AI_USAGE_INPUT_TOKENS,
+    LEGACY_TRAJECTORY_STEP_KIND,
+)
 from openjiuwen.agent_evolving.trajectory.semconv import (
-    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_TOOL_CALL_ARGUMENTS,
-    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_INPUT_TOKENS,
     OJ_SESSION_ID,
     OJ_RL_COMPLETION_TOKEN_IDS,
     OJ_RL_LOGPROBS,
@@ -29,7 +32,6 @@ from openjiuwen.agent_evolving.trajectory.semconv import (
     TRAJECTORY_SCHEMA_VERSION,
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SCOPE_NAME,
-    TRAJECTORY_STEP_KIND,
     TRAJECTORY_TRACE_ID,
 )
 from openjiuwen.agent_evolving.trajectory.trace import (
@@ -138,13 +140,13 @@ async def test_agent_handler_builds_otlp_trace_and_legacy_steps():
     llm_attrs = otlp_attrs(spans[0]["attributes"])
     tool_attrs = otlp_attrs(spans[1]["attributes"])
     assert llm_attrs[GEN_AI_OPERATION_NAME] == "chat"
-    assert llm_attrs[GEN_AI_INPUT_MESSAGES] == [{"role": "user", "content": "hello"}]
-    assert llm_attrs[GEN_AI_OUTPUT_MESSAGES][0]["content"] == "hi"
-    assert llm_attrs[GEN_AI_USAGE_INPUT_TOKENS] == 2
+    assert llm_attrs[LEGACY_GEN_AI_INPUT_MESSAGES] == [{"role": "user", "content": "hello"}]
+    assert llm_attrs[LEGACY_GEN_AI_OUTPUT_MESSAGES][0]["content"] == "hi"
+    assert llm_attrs[LEGACY_GEN_AI_USAGE_INPUT_TOKENS] == 2
     assert tool_attrs[GEN_AI_OPERATION_NAME] == "execute_tool"
     assert tool_attrs[GEN_AI_TOOL_NAME] == "read_file"
-    assert tool_attrs[GEN_AI_TOOL_CALL_ARGUMENTS] == {"path": "README.md"}
-    assert tool_attrs[GEN_AI_TOOL_CALL_RESULT] == {"content": "ok"}
+    assert tool_attrs[LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS] == {"path": "README.md"}
+    assert tool_attrs[LEGACY_GEN_AI_TOOL_CALL_RESULT] == {"content": "ok"}
     assert [step.kind for step in legacy.steps] == ["llm", "tool"]
     assert legacy.steps[0].detail.model == "test-model"
     assert legacy.steps[1].detail.tool_name == "read_file"
@@ -320,7 +322,7 @@ async def test_explicit_step_kind_projects_workflow_span_to_legacy_steps():
             "component_id": "custom-tool",
             "component_type": "CHAIN",
             "component_name": "custom-tool",
-            TRAJECTORY_STEP_KIND: "tool",
+            LEGACY_TRAJECTORY_STEP_KIND: "tool",
             TRAJECTORY_TRACE_ID: trace_id,
         },
         inputs={"arg": 1},
