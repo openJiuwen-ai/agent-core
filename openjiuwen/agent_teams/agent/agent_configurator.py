@@ -431,6 +431,11 @@ class AgentConfigurator:
         if member_runtime is not None:
             self.harness = member_runtime
             self.memory_manager = None
+            # External CLI 成员（claude/codex）：evolution 开启时也建 in-team
+            # workspace 目录 + 写 B-class identity md（不 link 出去），与
+            # in-process 成员对称，使演进值经共享 cache 可达、session 重启
+            # 可加载。evolution 关闭或无共享 workspace_manager 时静默跳过。
+            self._prepare_external_cli_workspace(spec, ctx)
             return member_runtime
 
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
@@ -1118,6 +1123,45 @@ class AgentConfigurator:
         if self.team_backend is not None:
             self.team_backend.attach_workspace_manager(self.workspace_manager)
 
+    def _prepare_external_cli_workspace(
+        self,
+        spec: TeamAgentSpec,
+        ctx: TeamRuntimeContext,
+    ) -> None:
+        """Ensure the external CLI member's in-team workspace exists and seed
+        B-class identity md (不 link 出去).
+
+        Mirrors what ``_assemble_member_workspace`` does for an in-process
+        teammate, but the CLI member's workspace is a pure in-team directory
+        (``workspaces/<m>_workspace/``) — no symlink out of the team tree, no
+        ref count. The identity md is primed into the shared workspace cache
+        (the leader's, injected via ``share_workspace_cache_with`` before
+        ``configure``), so evolved values reach the leader's roster overlay
+        and survive a session restart re-read.
+
+        Skips silently when evolution is disabled or the member has no shared
+        workspace manager (``spec.workspace`` not enabled) — in those cases the
+        CLI member keeps its lightweight behaviour and identity lives in the DB
+        only.
+        """
+        if not spec.evolution_enabled:
+            return
+        if self.workspace_manager is None:
+            return
+        member_name = ctx.member_name
+        if not member_name:
+            return
+        team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
+        # Pure in-team directory (same layout as the leader's): mkdir, no link.
+        from openjiuwen.agent_teams.paths import team_member_workspace_dir
+
+        team_member_workspace_dir(team_name, member_name).mkdir(
+            parents=True, exist_ok=True
+        )
+        # B-class identity md write + cache prime. ``resolved_language`` is
+        # unused for member identity (no lang suffix); pass empty string.
+        self._assemble_member_workspace(spec, ctx, "")
+
     def _assemble_member_workspace(
         self,
         spec: TeamAgentSpec,
@@ -1133,9 +1177,8 @@ class AgentConfigurator:
         only writes the B-class member identity files and primes the shared
         cache with the final bodies.
 
-        Skips silently when the member has no team context (single-agent or
-        external CLI members without a team spec) or when the evolution
-        mechanism is disabled.
+        Skips silently when the member has no team context (single-agent)
+        or when the evolution mechanism is disabled.
         """
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
         member_name = ctx.member_name
