@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
@@ -134,7 +135,7 @@ def log_llm_request(
     """Log LLM request messages and tools."""
     msgs = messages or []
     tool_count = len(tools) if tools else 0
-    log.info(
+    log.debug(
         f"[LLM] >>> request: msg_count={len(msgs)}, "
         f"tool_count={tool_count}"
     )
@@ -159,7 +160,7 @@ def log_llm_request(
             parts.append(f"tool_calls=[{', '.join(tc_summary)}]")
         if tool_call_id:
             parts.append(f"tool_call_id={tool_call_id}")
-        log.info(", ".join(parts))
+        log.debug(", ".join(parts))
 
 
 def log_llm_response(log: Any, ai_message: Any) -> None:
@@ -179,13 +180,13 @@ def log_llm_response(log: Any, ai_message: Any) -> None:
             f"tool_call_count={tc_count}{usage_str}"
         )
     else:
-        log.info(
+        log.debug(
             f"[LLM] <<< response: "
             f"content={ai_message.content or ''}{usage_str}"
         )
         if ai_message.tool_calls:
             for tc in ai_message.tool_calls:
-                log.info(
+                log.debug(
                     f"[LLM]   tool_call: "
                     f"{tc.name}({tc.arguments})"
                 )
@@ -855,11 +856,21 @@ class ReActAgent(BaseAgent):
         Returns:
             AssistantMessage from LLM
         """
+        preview_started_at = time.monotonic()
         ctx.inputs = ModelCallInputs(
             messages=self._build_preview_messages(context),
             tools=list(tools) if tools else None,
             model_context=context,
         )
+        if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            logger.debug(
+                "[TTFT] model preview ready: session_id=%s epoch_ms=%.3f preview_ms=%.1f",
+                ctx.session.get_session_id() if ctx.session is not None else ctx.context.session_id(),
+                time.time_ns() / 1_000_000,
+                (time.monotonic() - preview_started_at) * 1000,
+            )
 
         ai_message = await self._railed_model_call(ctx)
 
@@ -916,12 +927,23 @@ class ReActAgent(BaseAgent):
         falls back to llm.invoke() otherwise.
         """
         # --- Finalize system message and context window (post-rails) ---
+        if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            logger.debug(
+                "[TTFT] before-model rails complete: session_id=%s epoch_ms=%.3f",
+                ctx.session.get_session_id() if ctx.session is not None else ctx.context.session_id(),
+                time.time_ns() / 1_000_000,
+            )
+        model_front_started_at = time.monotonic()
         final_system = [SystemMessage(content=self.prompt_builder.build())]
+        prompt_ready_at = time.monotonic()
         llm = self._get_llm()
         kv_runtime = self._kv_cache_model_call_hook.resolve_runtime(
             llm,
             self._config.kv_cache_affinity_config,
         )
+        runtime_ready_at = time.monotonic()
 
         context_window = await ctx.context.get_context_window(
             **self._build_context_window_kwargs(
@@ -929,6 +951,7 @@ class ReActAgent(BaseAgent):
                 final_system,
             )
         )
+        context_window_ready_at = time.monotonic()
         # Update ctx.inputs: after_model_call hooks inspect these to see
         # what was actually sent. (LLM call uses them too, but could
         # equally pass context_window.get_*() directly.)
@@ -936,6 +959,7 @@ class ReActAgent(BaseAgent):
         ctx.inputs.tools = context_window.get_tools()
 
         log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
+        request_logged_at = time.monotonic()
         # --- End context window finalization ---
 
         session = ctx.session
@@ -955,6 +979,7 @@ class ReActAgent(BaseAgent):
             parent_session_id=parent_session_id,
             model_name=self._config.model_name,
         )
+        kv_hook_ready_at = time.monotonic()
         extra_kwargs = self._kv_cache_model_call_hook.build_invoke_kwargs(
             runtime=kv_runtime,
             llm=llm,
@@ -997,6 +1022,30 @@ class ReActAgent(BaseAgent):
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
+        if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            session_id = ""
+            if ctx.session is not None:
+                try:
+                    session_id = str(ctx.session.get_session_id() or "")
+                except Exception:
+                    session_id = ""
+            provider_ready_at = time.monotonic()
+            logger.info(
+                "[TTFT] model provider request start: session_id=%s epoch_ms=%.3f "
+                "model_front_ms=%.1f prompt_build_ms=%.1f runtime_resolve_ms=%.1f "
+                "context_window_ms=%.1f request_log_ms=%.1f kv_hook_ms=%.1f kwargs_ms=%.1f",
+                session_id,
+                time.time_ns() / 1_000_000,
+                (provider_ready_at - model_front_started_at) * 1000,
+                (prompt_ready_at - model_front_started_at) * 1000,
+                (runtime_ready_at - prompt_ready_at) * 1000,
+                (context_window_ready_at - runtime_ready_at) * 1000,
+                (request_logged_at - context_window_ready_at) * 1000,
+                (kv_hook_ready_at - request_logged_at) * 1000,
+                (provider_ready_at - kv_hook_ready_at) * 1000,
+            )
         accumulated_chunk = None
         chunk_index = 0
         call_start_time = time.monotonic()
@@ -1019,6 +1068,14 @@ class ReActAgent(BaseAgent):
 
                 if call_first_token_time is None:
                     call_first_token_time = time.monotonic()
+                    if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                        "1", "true", "yes", "on",
+                    }:
+                        logger.info(
+                            "[TTFT] model first token: epoch_ms=%.3f ttft_ms=%.1f",
+                            time.time_ns() / 1_000_000,
+                            (call_first_token_time - call_start_time) * 1000,
+                        )
                 call_last_token_time = time.monotonic()
                 call_chunk_count += 1
 
@@ -2118,20 +2175,34 @@ class ReActAgent(BaseAgent):
                         tools=ctx.extra.get("_active_tools") or [],
                     )
 
-                prep_elapsed = tools_ready_at - prep_started_at
-                if prep_elapsed >= SLOW_INVOKE_PREP_SECONDS:
-                    logger.info(
-                        "[InvokePrep] slow invoke preparation, total_ms=%.1f "
+                background_ready_at = time.monotonic()
+                prep_elapsed = background_ready_at - prep_started_at
+                perf_timing_enabled = os.getenv(
+                    "JIUWEN_PERF_TIMING_LOG", ""
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if prep_elapsed >= SLOW_INVOKE_PREP_SECONDS or perf_timing_enabled:
+                    log_preparation = (
+                        logger.info
+                        if prep_elapsed >= SLOW_INVOKE_PREP_SECONDS
+                        else logger.debug
+                    )
+                    log_preparation(
+                        "[TTFT] invoke preparation complete: session_id=%s "
+                        "epoch_ms=%.3f total_ms=%.1f "
                         "(interruption_state=%.1f context=%.1f system_prompt=%.1f "
-                        "skills=%.1f tools=%.1f)",
+                        "skills=%.1f tools=%.1f background_messages=%.1f)",
+                        session.get_session_id(),
+                        time.time_ns() / 1_000_000,
                         prep_elapsed * 1000,
                         (state_loaded_at - prep_started_at) * 1000,
                         (context_ready_at - state_loaded_at) * 1000,
                         (system_prompt_ready_at - context_ready_at) * 1000,
                         (skills_ready_at - system_prompt_ready_at) * 1000,
                         (tools_ready_at - skills_ready_at) * 1000,
+                        (background_ready_at - tools_ready_at) * 1000,
                     )
 
+                admission_started_at = time.monotonic()
                 start_iteration = 0
                 if interruption_state is not None:
                     is_tool_interruption = isinstance(interruption_state, ToolInterruptionState)
@@ -2165,10 +2236,20 @@ class ReActAgent(BaseAgent):
                         source="query",
                     )
 
+                admission_ready_at = time.monotonic()
+                if perf_timing_enabled:
+                    logger.debug(
+                        "[TTFT] user message admission complete: session_id=%s "
+                        "epoch_ms=%.3f admission_ms=%.1f",
+                        session.get_session_id(),
+                        time.time_ns() / 1_000_000,
+                        (admission_ready_at - admission_started_at) * 1000,
+                    )
+
                 if invoke_inputs.result is None:
                     _truncation_retry_count = 0
                     for iteration in range(start_iteration, self._config.max_iterations):
-                        logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+                        logger.debug(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
                         # Honor force_finish requests set at iteration boundary
                         # (e.g. by rails on AFTER_REACT_ITERATION). This lets a
@@ -2193,6 +2274,14 @@ class ReActAgent(BaseAgent):
                             )
 
                         async with AbilityManager.tool_batch_scope(session):
+                            if perf_timing_enabled and iteration == start_iteration:
+                                logger.debug(
+                                    "[TTFT] first model-call dispatch: session_id=%s "
+                                    "epoch_ms=%.3f iteration_setup_ms=%.1f",
+                                    session.get_session_id(),
+                                    time.time_ns() / 1_000_000,
+                                    (time.monotonic() - admission_ready_at) * 1000,
+                                )
                             ai_message = await self._call_model(
                                 ctx,
                                 context,

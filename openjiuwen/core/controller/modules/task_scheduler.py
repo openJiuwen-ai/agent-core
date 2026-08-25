@@ -404,7 +404,7 @@ class TaskScheduler:
             )
         task = tasks[0]
 
-        logger.info(f"Executing task {task_id} (type: {task.task_type})")
+        logger.debug(f"Executing task {task_id} (type: {task.task_type})")
 
         # 2. Create TaskExecutor
         dependencies = TaskExecutorDependencies(
@@ -815,6 +815,13 @@ class TaskScheduler:
         logger.info("TaskScheduler schedule loop started")
         while self._running:
             try:
+                # Clear before scanning.  Clearing after the scan loses a
+                # submission notification that arrives between get_task() and
+                # clear(), forcing the just-submitted task to wait for the
+                # schedule_interval timeout.  With interactive chat this race
+                # sits directly on the first-token path.
+                self._submit_event.clear()
+
                 # 1. Get tasks to execute
                 submitted_tasks = await self._task_manager.get_task(task_filter=TaskFilter(status=TaskStatus.SUBMITTED))
 
@@ -847,13 +854,12 @@ class TaskScheduler:
                         self._running_tasks[task.task_id] = (None, exec_task)
 
                     running_ids = list(self._running_tasks.keys())
-                    logger.info(
+                    logger.debug(
                         f"Task {task.task_id} ({task.task_type}) started, "
                         f"running_tasks={running_ids}"
                     )
 
                 # 3. Wait for new SUBMITTED task or timeout
-                self._submit_event.clear()
                 try:
                     await asyncio.wait_for(
                         self._submit_event.wait(),

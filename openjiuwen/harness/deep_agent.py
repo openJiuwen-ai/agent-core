@@ -9,6 +9,7 @@ import dataclasses
 import importlib
 import os
 import sys
+import time
 import uuid
 from contextlib import suppress
 import warnings
@@ -2742,6 +2743,7 @@ class DeepAgent(BaseAgent):
         session: Session,
     ) -> RoundOutcome:
         """Execute one interaction work item and optionally propose follow-up work."""
+        round_started_at = time.monotonic()
         self._invoke_active = True
         try:
             coordinator, controller = await self.prepare_interaction_task_loop(session)
@@ -2777,6 +2779,17 @@ class DeepAgent(BaseAgent):
                         run_context=invoke_inputs.run_context,
                         task_id=task_id,
                     )
+                    if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                        "1", "true", "yes", "on",
+                    }:
+                        logger.debug(
+                            "[TTFT] task loop round submitted: session_id=%s task_id=%s "
+                            "epoch_ms=%.3f submit_ms=%.1f",
+                            session.get_session_id(),
+                            task_id,
+                            time.time_ns() / 1_000_000,
+                            (time.monotonic() - round_started_at) * 1000,
+                        )
                     timeout = (
                         self._deep_config.completion_timeout
                         if self._deep_config
@@ -3076,6 +3089,14 @@ class DeepAgent(BaseAgent):
                 RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
             )
             self._notify_work()
+            if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+                "1", "true", "yes", "on",
+            }:
+                logger.debug(
+                    "[TTFT] interaction work enqueued: request_id=%s epoch_ms=%.3f",
+                    request.request_id,
+                    time.time_ns() / 1_000_000,
+                )
 
     async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
         lease = await self._interaction_output.attach()
@@ -3337,6 +3358,16 @@ class DeepAgent(BaseAgent):
     async def _execute_round(self, work: RoundWorkItem) -> None:
         session = self._interaction_session
         task_id = uuid.uuid4().hex
+        if os.getenv("JIUWEN_PERF_TIMING_LOG", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }:
+            logger.debug(
+                "[TTFT] interaction round dequeued: request_id=%s task_id=%s "
+                "epoch_ms=%.3f",
+                work.request_id,
+                task_id,
+                time.time_ns() / 1_000_000,
+            )
         forwarded = asyncio.Event()
         self._interaction_round_forwarded = forwarded
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
