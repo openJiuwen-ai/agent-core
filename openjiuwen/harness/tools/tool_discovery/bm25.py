@@ -45,6 +45,41 @@ def _tool_text(tool: ToolInfo) -> str:
     )
 
 
+def _is_tool_name_boundary_char(value: str) -> bool:
+    """Return whether a character can be part of an ASCII tool identifier."""
+    return bool(value) and value.isascii() and (value.isalnum() or value in "_.-")
+
+
+def _contains_exact_tool_name(query: str, tool_name: str) -> bool:
+    """Check whether ``query`` contains ``tool_name`` as a complete identifier.
+
+    Tool names are normally ASCII identifiers such as ``search_skill``. Treat
+    Chinese characters and punctuation as boundaries so natural-language
+    queries like ``请调用search_skill搜索技能`` still match, while avoiding
+    false positives inside names such as ``search_skill_extra``.
+    """
+    normalized_query = str(query or "").casefold()
+    normalized_name = str(tool_name or "").strip().casefold()
+    if not normalized_query or not normalized_name:
+        return False
+
+    start = 0
+    while start < len(normalized_query):
+        match_index = normalized_query.find(normalized_name, start)
+        if match_index < 0:
+            return False
+
+        before = normalized_query[match_index - 1] if match_index else ""
+        end_index = match_index + len(normalized_name)
+        after = normalized_query[end_index] if end_index < len(normalized_query) else ""
+        if not _is_tool_name_boundary_char(before) and not _is_tool_name_boundary_char(after):
+            return True
+
+        start = match_index + 1
+
+    return False
+
+
 class BM25ToolIndex:
     """In-memory BM25 index over model-facing tool schemas.
 
@@ -83,20 +118,26 @@ class BM25ToolIndex:
         if not query or not self._documents:
             return []
 
-        scored = [
-            (score, index, self._documents[index])
-            for index, score in enumerate(self._index.scores(query))
-            if score > 0.0
-        ]
+        scored = []
+        for index, score in enumerate(self._index.scores(query)):
+            document = self._documents[index]
+            exact_name_match = _contains_exact_tool_name(
+                query,
+                str(getattr(document, "name", "") or ""),
+            )
+            if score <= 0.0 and not exact_name_match:
+                continue
+            scored.append((exact_name_match, score, index, document))
 
         scored.sort(
             key=lambda item: (
-                -item[0],
-                str(getattr(item[2], "name", "") or ""),
-                item[1],
+                not item[0],
+                -item[1],
+                str(getattr(item[3], "name", "") or ""),
+                item[2],
             )
         )
-        return [document for _, _, document in scored[:limit]]
+        return [document for _, _, _, document in scored[:limit]]
 
 
 __all__ = ["BM25ToolIndex"]

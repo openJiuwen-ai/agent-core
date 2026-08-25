@@ -1154,6 +1154,17 @@ async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     assert agent.ability_manager.get("task_tool") is not None
 
 
+def test_refresh_subagent_tool_descriptions_updates_retained_rails() -> None:
+    """Hot reload refreshes dynamic tool names without rebuilding task_tool."""
+    agent = DeepAgent(AgentCard(name="refresh_test"))
+    rail = MagicMock()
+    agent._registered_rails = [rail]
+
+    agent._refresh_subagent_tool_descriptions()
+
+    rail.refresh_available_agents.assert_called_once_with(agent)
+
+
 def test_create_deep_agent_auto_add_skill_rail(tmp_path) -> None:
     """Test that SkillUseRail is auto-added when skills parameter is provided."""
     skills = ["name", "test_skill", "description", "test"]

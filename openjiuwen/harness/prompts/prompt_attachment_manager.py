@@ -9,13 +9,13 @@ import json
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Iterable
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
+from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.foundation.llm import SystemMessage
 
 
 class PromptAttachmentKind(str, Enum):
@@ -485,6 +485,22 @@ class PromptAttachmentManager:
                         self._items.pop(expired_session_id, None)
         return self._stable_sort(result)
 
+    def has_history_snapshot(
+        self,
+        context: ModelContext,
+        session_id: str,
+    ) -> bool:
+        """Return whether ``context`` contains this session's full snapshot.
+
+        Runtime rails use this before replacing an attachment section with a
+        delta.  If context compaction or recreation removed the historical
+        snapshot, the next update must be rendered as a full snapshot so the
+        model does not receive an orphaned delta.
+        """
+
+        _, has_snapshot = self._read_history_state(context, session_id)
+        return has_snapshot
+
     async def sync_to_context(
         self,
         context: ModelContext,
@@ -538,93 +554,9 @@ class PromptAttachmentManager:
             )
             return message
 
-    def make_window_mutator(
-        self,
-        session_id: str,
-    ) -> Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]:
-        """Build the final-window mutator for prompt attachment history.
-
-        ``sync_to_context`` persists attachment messages in append-only
-        context history.  The first full snapshot is the baseline for all
-        later deltas, so it must be placed immediately after the fixed system
-        prompt in the final model window.  Later delta messages stay in their
-        historical position, which keeps changes at the end of the
-        conversation (and after browser state/tool messages when applicable).
-        """
-
-        async def mutator(context: ModelContext, window: ContextWindow) -> ContextWindow:
-            context_history_messages = []
-            for message in context.get_messages(with_history=True):
-                if self._is_history_message(message):
-                    context_history_messages.append(message)
-
-            snapshot_message = None
-            candidate_message_groups = (
-                window.system_messages,
-                window.context_messages,
-                context_history_messages,
-            )
-            for messages in candidate_message_groups:
-                for message in messages:
-                    if self._is_snapshot_history_message(message):
-                        snapshot_message = message
-                        break
-                if snapshot_message is not None:
-                    break
-
-            if snapshot_message is not None:
-                context_messages = []
-                for message in window.context_messages:
-                    if not self._is_snapshot_history_message(message):
-                        context_messages.append(message)
-
-                system_messages = []
-                for message in window.system_messages:
-                    if not self._is_snapshot_history_message(message):
-                        system_messages.append(message)
-
-                logger.info(
-                    "[PromptAttachmentManager] promoted prompt attachment snapshot "
-                    "after fixed system: session_id=%s",
-                    session_id,
-                )
-                return window.model_copy(
-                    update={
-                        "system_messages": [*system_messages, snapshot_message],
-                        "context_messages": context_messages,
-                    }
-                )
-
-            if context_history_messages:
-                logger.info(
-                    "[PromptAttachmentManager] retained prompt attachment history order: "
-                    "session_id=%s, messages=%s",
-                    session_id,
-                    len(context_history_messages),
-                )
-            return window
-
-        return mutator
-
     @staticmethod
     def _state_by_section(prompt_attachments: Iterable[PromptAttachment]) -> dict[str, str]:
         return {item.section: hash_prompt_attachment(item) for item in prompt_attachments}
-
-    @staticmethod
-    def _is_history_message(message: BaseMessage) -> bool:
-        metadata = getattr(message, "metadata", {}) or {}
-        return isinstance(message, SystemMessage) and bool(
-            metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY)
-        )
-
-    @staticmethod
-    def _is_snapshot_history_message(message: BaseMessage) -> bool:
-        metadata = getattr(message, "metadata", {}) or {}
-        return (
-            PromptAttachmentManager._is_history_message(message)
-            and metadata.get(_PROMPT_ATTACHMENT_HISTORY_MODE_KEY)
-            == _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT
-        )
 
     @staticmethod
     def _read_history_state(context: ModelContext, session_id: str) -> tuple[dict[str, str], bool]:
