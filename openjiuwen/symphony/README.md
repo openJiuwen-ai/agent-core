@@ -321,26 +321,30 @@ fingerprint_artifact_root/
 
 Symphony 直接使用上例中 agent-core 的 `Model`，复用统一的 provider、连接池和回调，不增加额外 LLM 包装层。Symphony 内部统一将编排请求转换为 `Model.invoke()`，并处理 timeout、请求覆盖、错误上下文和 JSON 修复；模型账号及默认模型的选择仍由使用方显式注入。
 
-### OrchestrationService
+### SymphonyGraphEngine
 
-当前服务接口为：
+`SymphonyGraphEngine` 是统一的公开图谱入口。当前静态图生命周期由其内部的 `OrchestrationService`
+实现，使用 `SymphonyRuntime` 时通过 `runtime.graph_engine` 访问：
 
 ```python
-status = service.status(expected_snapshot=None)
-build_result = await service.build(
+engine = runtime.graph_engine
+status = engine.status(expected_snapshot=None)
+build_result = await engine.build(
     force=False,
     progress=on_progress,
     prepare_artifact=None,
 )
-cancel_status = await service.cancel_build()
-graph = service.read(version=None)
-plan = await service.plan(
+cancel_status = await engine.cancel_build()
+graph = engine.read(version=None)
+plan = await engine.plan(
     query,
     candidate_ids,
     language="cn",
     progress=on_progress,
     disabled_capability_ids=None,
-    dynamic_overlay=None,
+    graph_scope_id="default",
+    merged_revision=None,
+    task_cluster_id=None,
     mode=None,
 )
 ```
@@ -349,10 +353,41 @@ plan = await service.plan(
 - `build()` 返回 `GraphBuildResult`，完成暂存后才原子切换 `current.json`。
 - `cancel_build()` 请求取消当前构建，并返回取消请求后的图产物状态。
 - `read()` 返回映射兼容的 `CapabilityGraph`；传入 `version` 可读取指定的不可变版本。
-- `plan()` 返回映射兼容的 `OrchestrationPlan`。
+- `plan()` 返回映射兼容的 `OrchestrationPlan`。每次规划固定一对静态图与 observation revision，
+  Fast 和 Beam 均读取同一 merged snapshot；传入 `merged_revision` 可让重试继续使用原快照。
 - `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
 - `graph.resolve.progress` 保留当前匹配窗口的 `current/total`，并通过 `completed_candidate_count`、`total_candidate_count` 和 `reused_candidate_count` 提供跨窗口的全局候选关系进度；缓存复用的候选关系计入已完成数量。
 - `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
+
+Skill 安装、卸载或审核通过的自演进提交可以使用三个批量接口同步静态图谱。调用方先持久化整批 Skill
+变更，然后只提交变更 ID、幂等请求 ID 和持久化结果的 revision：
+
+```python
+result = await engine.add_skills(
+    ["ocr_invoice", "verify_invoice"],
+    request_id="install-batch-42",
+    source_revision="skill-inventory-v18",
+)
+```
+
+| 接口 | 适用场景 | 图谱处理 |
+|---|---|---|
+| `add_skills()` | 一批新 Skill 已持久化 | 新增节点，计算存量与新增、新增与新增之间的关系 |
+| `update_skills()` | 一批现有 Skill 内容已变化 | 替换节点，失效旧入边和出边，按新 fingerprint 重算受影响关系 |
+| `delete_skills()` | 一批 Skill 已从目标 inventory 删除 | 删除节点、关联边以及 neighbor、I/O 和文本 lookup 引用 |
+
+`add_skills()`、`update_skills()` 和 `delete_skills()` 均以整批为事务，只发布一个不可变图版本。
+一次调用只能包含一种操作；Skill 身份变化应显式执行 delete 后再 add，不使用 update 隐式改 ID。
+`source_revision` 必须标识持久化后的不可变 Skill inventory。服务内部通过 `FingerprintService` 或
+`AtomicCapabilityProvider` 读取目标 `SourceSnapshot` 和完整 fingerprint，并自行读取当前图版本与旧
+content hash；`request_id` 支持响应丢失后的幂等重试。服务会核对 provider 的真实变更集，复用未变化
+关系的 matcher 缓存，并以与全量构建相同的 registry、候选生成、图物化和 lookup 流程生成目标版本；
+任一校验、matcher 或发布步骤失败时，`current.json` 仍指向完整旧版本。自演进模块只依赖
+`SkillGraphUpdater` 协议，无需读取图谱目录、预先生成 fingerprint 或了解 matcher 实现。运行时的具体
+对象是 `SymphonyGraphEngine`；它作为统一图谱入口把当前静态图操作委托给内部
+`OrchestrationService`。`runtime.orchestration` 仅兼容 PR 之前已有的 `status()`、`read()`、
+`build()`、`cancel_build()` 和 `plan()` 调用；新增的三个批量 mutation 接口只从
+`runtime.graph_engine` 暴露，不形成第二套公共入口。
 
 ### 图产物生命周期
 
@@ -363,6 +398,8 @@ graph_artifact_root/
 ├── cache/
 │   └── relation_matches.json
 ├── current.json
+├── mutation_requests.json
+├── .publish.lock
 ├── versions/
 │   └── <version>/
 │       └── graph.json
@@ -376,6 +413,8 @@ graph_artifact_root/
 - `force=False` 且 source snapshot 未变化时复用当前产物；能力清单变化后状态会标记为不新鲜。
 - `force=False` 时可复用 `cache/relation_matches.json` 中身份匹配的关系判断；`force=True` 完全绕过该缓存。缓存不属于已发布的版本化图产物。
 - 同一服务实例的构建互斥，避免并发发布互相覆盖。
+- 全量构建和批量变更在发布时共享进程锁与版本 CAS；批量请求的幂等结果保存在
+  `mutation_requests.json`，每个已发布 `graph.json` 也保留对应 mutation 摘要以支持中断恢复。
 
 ### 图构建配置
 
@@ -409,7 +448,31 @@ service = OrchestrationService(
 - 分析缺失输入并生成稳定的执行图；
 - 通过进度回调报告构建、关系匹配和规划阶段事件。
 
-动态 overlay 默认关闭。只有 `OrchestrationConfig(dynamic_graph_enabled=True)` 时，传给 `plan(dynamic_overlay=...)` 的运行时边权覆盖才会参与 Fast 规划；overlay 不改写离线图产物。
+动态 observation 默认关闭。启用 `OrchestrationConfig(dynamic_graph_enabled=True)` 后，
+`SymphonyGraphEngine` 自动把当前 merged snapshot 交给 Fast 或 Beam，不要求业务调用方读取或传递
+overlay 文件。运行证据只生成独立 observation revision，不改写静态 `graph.json`。
+
+轨迹侧通过 `SymphonyGraphEvolutionRail` 将 canonical `Trajectory` 和 evaluator/业务终态转换成
+`GraphEvolutionInput`，再调用 `engine.submit_observation(...)`。GraphEngine 不解析 Session JSON，
+也不会在缺少边级证据时猜测失败边。只有强验证成功，或带明确 evidence reference 且归因于
+`orchestration` 的边级失败，才更新权重；弱证据、外部服务错误、权限错误、网络错误和截断轨迹仅留作审计。
+
+```python
+receipt = engine.submit_observation(graph_evolution_input)
+engine.flush_observations(timeout=30)
+snapshot = engine.get_snapshot(graph_scope_id="default")
+plan = await engine.plan(
+    query,
+    candidate_ids,
+    graph_scope_id="default",
+    merged_revision=snapshot.merged_revision,
+    task_cluster_id=task_cluster_id,
+)
+```
+
+请求线程只完成 evidence append；单 worker 在后台增量聚合并原子发布不可变 observation/merged
+revision，通常由下一次规划读取。`flush_observations()` 只用于测试、管理命令或要求 read-after-write
+的流程，不应放在普通在线规划热路径。
 
 ## 最终 Runtime 与统一接口蓝图（部分尚未接入）
 
@@ -580,7 +643,13 @@ graph_artifact_root/
 ├── cache/relation_matches.json
 ├── current.json
 ├── versions/<version>/graph.json
-└── .build_runs/
+├── .build_runs/
+└── evolution/
+    ├── evidence.sqlite3
+    └── scopes/<scope-hash>/
+        ├── current.json
+        ├── observations/<observation-revision>/overlay.json
+        └── merged/<merged-revision>/manifest.json
 
 experience_kb/
 ├── meta.json
@@ -589,15 +658,14 @@ experience_kb/
     ├── faiss_index.bin
     └── embeddings.npy
 
-<session-parent>/trace_store/
-├── processed_index.json
-└── records.jsonl
 ```
 
 - `fingerprint.json` 当前保存标准化能力指纹、质量结果、诊断和 source snapshot。
 - `tree.json` 最终保存能力树索引、能力资产清单快照和版本信息。
 - `graph.json` 当前已保存能力节点、关系边、在线规划 lookup 和版本信息。
-- `experience_kb` 是当前独立经验库的调用方指定目录；`trace_store` 位于调用方传入的 session 目录同级。
+- `evolution/evidence.sqlite3` 是 append-only 规范证据日志；`observations` 与 `merged` 保存不可变派生版本。
+- `experience_kb` 是当前独立经验库的调用方指定目录；canonical Trajectory 的归档仍由 Harness 管理，
+  GraphEngine 只持久化脱敏后的规范边证据。
 - 机器读写产物使用 JSON；YAML 用于配置、prompt 或人工维护的说明文件。
 
 ## 开发与验证

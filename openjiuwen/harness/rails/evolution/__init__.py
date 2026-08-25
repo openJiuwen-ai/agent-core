@@ -41,6 +41,11 @@ from openjiuwen.harness.rails.evolution.review.subagent import (
     remove_evolution_review_agent_config,
 )
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
+from openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail import (
+    GraphEvolutionInputBuilder,
+    GraphObservationSink,
+    SymphonyGraphEvolutionRail,
+)
 from openjiuwen.harness.rails.evolution.member_skill_evolution_rail import (
     MemberSkillEvolutionRail,
 )
@@ -67,9 +72,12 @@ __all__ = [
     "EvolutionReviewRuntime",
     "EvolutionTriggerPoint",
     "PreparedEvolutionInput",
+    "GraphEvolutionInputBuilder",
+    "GraphObservationSink",
     "SimplifyRequestResult",
     "SkillCreateRail",
     "SkillEvolutionRail",
+    "SymphonyGraphEvolutionRail",
     "MemberSkillEvolutionRail",
     "SkillEvolutionSharingMixin",
     "TeamSkillCreateRail",

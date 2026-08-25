@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -14,6 +15,18 @@ from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.agent_evolving.trajectory.store import InMemoryTrajectoryStore
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, PreparedEvolutionInput
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
+from openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail import SymphonyGraphEvolutionRail
+from openjiuwen.symphony.observation import (
+    EvidenceStrength,
+    EvolutionGraph,
+    GraphEvolutionInput,
+    GraphSnapshotRef,
+    ObservationReceipt,
+    TaskEvidence,
+    TaskOutcome,
+    TaskOutcomeLabel,
+    TraceEvidence,
+)
 from openjiuwen.extensions.observability import semconv
 
 
@@ -23,9 +36,7 @@ def _trajectory() -> Trajectory:
             "resourceSpans": [
                 {
                     "resource": {
-                        "attributes": attributes_from_map(
-                            {TRAJECTORY_ID: "trajectory-1", SESSION_ID: "session-1"}
-                        )
+                        "attributes": attributes_from_map({TRAJECTORY_ID: "trajectory-1", SESSION_ID: "session-1"})
                     },
                     "scopeSpans": [{"scope": {"name": "test"}, "spans": []}],
                 }
@@ -145,3 +156,49 @@ def test_subclass_can_explicitly_select_trajectory_message_fields() -> None:
     )
 
     assert messages == [{"role": "user", "name": "caller"}]
+
+
+@pytest.mark.asyncio
+async def test_symphony_graph_evolution_rail_submits_only_canonical_input() -> None:
+    submitted = []
+
+    class _Sink:
+        def submit_observation(self, value: GraphEvolutionInput) -> ObservationReceipt:
+            submitted.append(value)
+            return ObservationReceipt(
+                evidence_id=value.evidence_id,
+                graph_scope_id=value.graph_scope_id,
+                sequence=1,
+                status="accepted",
+            )
+
+    value = GraphEvolutionInput(
+        evidence_id="evidence-1",
+        observed_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        graph_snapshot=GraphSnapshotRef(
+            static_revision="static-v1",
+            observation_revision="observation-v1",
+        ),
+        trace=TraceEvidence(
+            trajectory_id="trajectory-1",
+            session_id="session-1",
+            capture_mode="rail",
+        ),
+        task=TaskEvidence(
+            outcome=TaskOutcome(
+                label=TaskOutcomeLabel.VERIFIED_SUCCESS,
+                evidence_strength=EvidenceStrength.STRONG,
+            ),
+        ),
+        capabilities={},
+        execution_graph=EvolutionGraph(type="execution_graph"),
+    )
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        graph_engine=_Sink(),
+        input_builder=lambda prepared: value if prepared.trajectory.trajectory_id == "trajectory-1" else None,
+    )
+
+    await rail.run_evolution(_prepared())
+
+    assert submitted == [value]
