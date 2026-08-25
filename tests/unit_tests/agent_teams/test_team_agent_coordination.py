@@ -2215,6 +2215,11 @@ def _external_backend() -> MagicMock:
     # External backend serves no real member_prompt.md, so the probe reports 0
     # (missing file / evolution off) -- matching real WorkspaceCache behaviour.
     backend.get_member_updated_at = AsyncMock(return_value=0)
+    # Single-member mtime probe + stamper the identity-body first-emit path
+    # calls (records member_prompt_mtime). ``(0, True)`` mirrors a missing
+    # file: no "must update" signal, so the re-announce path does not fire.
+    backend.get_member_updated_at_state = AsyncMock(return_value=(0, True))
+    backend.stamp_member_prompt_updated_at = AsyncMock(return_value=None)
     backend.get_member = AsyncMock(
         return_value=SimpleNamespace(
             member_name="claude-1",
