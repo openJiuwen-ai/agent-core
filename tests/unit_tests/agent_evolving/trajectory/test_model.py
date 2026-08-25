@@ -83,6 +83,46 @@ def test_from_otlp_requires_non_empty_trajectory_id(trajectory_id: str | None) -
         Trajectory.from_otlp(payload)
 
 
+def test_trajectory_root_exports_only_canonical_contract() -> None:
+    import openjiuwen.agent_evolving.trajectory as trajectory
+
+    assert set(trajectory.__all__) == {
+        "Trajectory",
+        "TrajectorySpanProcessor",
+        "TrajectoryStore",
+        "InMemoryTrajectoryStore",
+        "FileTrajectoryStore",
+    }
+    assert not hasattr(trajectory, "TrajectoryStep")
+    assert not hasattr(trajectory, "TrajectoryBuilder")
+    assert not hasattr(Trajectory.from_otlp(_payload()), "otlp_trace")
+
+
+@pytest.mark.parametrize(
+    ("name", "hint"),
+    [
+        ("TrajectoryStep", "canonical Trajectory spans"),
+        ("TrajectoryBuilder", "trajectory.offline.TrajectoryBuilder"),
+        ("TrajectoryExtractor", "trajectory.offline.TrajectoryExtractor"),
+        ("TracerTrajectoryExtractor", "trajectory.offline.TrajectoryExtractor"),
+        ("UpdateKey", "agent_evolving.types.UpdateKey"),
+        ("Updates", "agent_evolving.types.Updates"),
+    ],
+)
+def test_removed_trajectory_exports_provide_migration_hints(name: str, hint: str) -> None:
+    import openjiuwen.agent_evolving.trajectory as trajectory
+
+    with pytest.raises(AttributeError, match=hint):
+        getattr(trajectory, name)
+
+
+def test_unknown_trajectory_export_uses_standard_attribute_error() -> None:
+    import openjiuwen.agent_evolving.trajectory as trajectory
+
+    with pytest.raises(AttributeError, match="has no attribute 'unknown'"):
+        getattr(trajectory, "unknown")
+
+
 def test_schema_exposes_canonical_and_rl_fields_only() -> None:
     import openjiuwen.agent_evolving.trajectory.schema as schema
 
@@ -116,7 +156,7 @@ def test_schema_exposes_canonical_and_rl_fields_only() -> None:
 
 
 def test_migration_semantic_keys_are_isolated_from_current_conventions() -> None:
-    from openjiuwen.agent_evolving.trajectory import legacy_semconv, semconv
+    from openjiuwen.agent_evolving.trajectory import legacy_semconv
     from openjiuwen.extensions.observability import semconv as observability_semconv
 
     migration_keys = (
@@ -131,7 +171,6 @@ def test_migration_semantic_keys_are_isolated_from_current_conventions() -> None
         "LEGACY_STEP_META",
     )
     assert all(hasattr(legacy_semconv, name) for name in migration_keys)
-    assert all(not hasattr(semconv, name) for name in migration_keys)
     assert all(not hasattr(observability_semconv, name) for name in migration_keys)
 
 

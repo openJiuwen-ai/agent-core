@@ -7,13 +7,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from openjiuwen.agent_evolving.trajectory.messages import (
+    tool_call_id as get_tool_call_id,
+    tool_call_name,
+)
 from openjiuwen.agent_evolving.trajectory.spans import (
     iter_spans,
     read_llm_exchange,
     read_tool_call,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
-from openjiuwen.agent_evolving.trajectory.types import TrajectoryLike
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 
 SKILL_CREATION_SIGNAL_PROMPT_ELIGIBLE = "prompt_eligible"
 SKILL_CREATION_SIGNAL_SKILL_TOOL_COVER = "skill_tool_cover"
@@ -71,7 +75,7 @@ class SkillCreationSignalDetector:
 
     @staticmethod
     def collect_metrics(
-        trajectory: TrajectoryLike | None,
+        trajectory: Trajectory | None,
         *,
         raw_tool_call_watermark: int = 0,
     ) -> SkillCreationWindowMetrics:
@@ -119,7 +123,7 @@ class SkillCreationSignalDetector:
 
     def detect(
         self,
-        trajectory: TrajectoryLike | None,
+        trajectory: Trajectory | None,
         *,
         raw_tool_call_watermark: int = 0,
         prompted_snapshot: tuple[int, int] | None = None,
@@ -195,7 +199,7 @@ def is_effective_task_tool(tool_name: str) -> bool:
     return not any(keyword in tool for keyword in _EXCLUDED_TOOL_KEYWORDS)
 
 
-def count_tool_calling_iterations(trajectory: TrajectoryLike | None) -> int:
+def count_tool_calling_iterations(trajectory: Trajectory | None) -> int:
     """Count LLM iterations that requested at least one effective task tool."""
     if trajectory is None:
         return 0
@@ -210,7 +214,7 @@ def count_tool_calling_iterations(trajectory: TrajectoryLike | None) -> int:
 
 
 def _count_new_effective_tool_calling_iterations(
-    trajectory: TrajectoryLike,
+    trajectory: Trajectory,
     effective_call_ids_after_watermark: set[str],
     new_tool_spans: list[Any],
 ) -> int:
@@ -257,13 +261,16 @@ def _span_tool_calls(span: dict[str, Any]) -> list[Any]:
 
 
 def _response_has_effective_tool_calls(response: Any) -> bool:
-    return any(is_effective_task_tool(_tool_call_name(tool_call)) for tool_call in _iter_tool_calls(response))
+    return any(
+        is_effective_task_tool(str(tool_call_name(tool_call) or ""))
+        for tool_call in _iter_tool_calls(response)
+    )
 
 
 def _response_has_tool_call_id(response: Any, tool_call_ids: set[str]) -> bool:
     for tool_call in _iter_tool_calls(response):
-        tool_call_id = _tool_call_id(tool_call)
-        if tool_call_id is not None and str(tool_call_id) in tool_call_ids:
+        call_id = get_tool_call_id(tool_call)
+        if call_id is not None and str(call_id) in tool_call_ids:
             return True
     return False
 
@@ -276,32 +283,6 @@ def _iter_tool_calls(response: Any) -> list[Any]:
     if isinstance(response, dict):
         return list(response.get("tool_calls") or [])
     return list(getattr(response, "tool_calls", None) or [])
-
-
-def _tool_call_name(tool_call: Any) -> str:
-    if isinstance(tool_call, dict):
-        function = tool_call.get("function")
-        if isinstance(function, dict) and function.get("name"):
-            return str(function.get("name"))
-        return str(tool_call.get("name") or "")
-
-    function = getattr(tool_call, "function", None)
-    function_name = getattr(function, "name", None)
-    if function_name:
-        return str(function_name)
-    return str(getattr(tool_call, "name", "") or "")
-
-
-def _tool_call_id(tool_call: Any) -> str | None:
-    if isinstance(tool_call, dict):
-        value = tool_call.get("id")
-        if value is None and isinstance(tool_call.get("function"), dict):
-            value = tool_call["function"].get("id")
-    else:
-        value = getattr(tool_call, "id", None)
-    if value is None:
-        return None
-    return str(value)
 
 
 __all__ = [

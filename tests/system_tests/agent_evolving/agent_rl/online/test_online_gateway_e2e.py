@@ -27,7 +27,7 @@ TrajectoryUploader = importlib.import_module(
     "openjiuwen.agent_evolving.agent_rl.online.rail.uploader"
 ).TrajectoryUploader
 trajectory_module = importlib.import_module("openjiuwen.agent_evolving.trajectory")
-Trajectory = importlib.import_module("openjiuwen.agent_evolving.trajectory.model").Trajectory
+Trajectory = trajectory_module.Trajectory
 TrajectorySpanProcessor = trajectory_module.TrajectorySpanProcessor
 trajectory_spans = importlib.import_module("openjiuwen.agent_evolving.trajectory.spans")
 trajectory_schema = importlib.import_module("openjiuwen.agent_evolving.trajectory.schema")
