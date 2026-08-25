@@ -89,15 +89,24 @@ def parse_file_content(path: Path) -> FileContent | None:
     except OSError as exc:
         team_logger.warning("[workspace] %s unreadable: %s", path, exc)
         return None
+    # A file without a ``---`` block is hand-written — its body always wins
+    # but the backfill must never touch it (S_24 invariant 2: hand-written
+    # files are not stamped, updated_at stays 0). read_frontmatter collapses
+    # "no block" and "empty block" to the same empty dict, so block presence
+    # is checked on the raw text before parsing.
+    has_frontmatter_block = text.startswith("---")
     meta, body = read_frontmatter(text)
-    updated_at = meta.get("updated_at")
-    if not isinstance(updated_at, int) or updated_at < 0:
-        updated_at = get_current_time()
-        meta["updated_at"] = updated_at
-        try:
-            atomic_write(path, write_frontmatter(meta, body))
-        except OSError as exc:
-            team_logger.warning("[workspace] %s updated_at backfill failed: %s", path, exc)
+    if has_frontmatter_block:
+        updated_at = meta.get("updated_at")
+        if not isinstance(updated_at, int) or updated_at < 0:
+            updated_at = get_current_time()
+            meta["updated_at"] = updated_at
+            try:
+                atomic_write(path, write_frontmatter(meta, body))
+            except OSError as exc:
+                team_logger.warning("[workspace] %s updated_at backfill failed: %s", path, exc)
+    else:
+        updated_at = 0
     return FileContent(
         kind=meta.get("kind", ""),
         name=meta.get("name", ""),
