@@ -77,6 +77,10 @@ class ContextProcessorStateRecorder:
     def load_history(self, history: list[dict[str, Any]] | None) -> None:
         self._history = list(history or [])[-self._history_limit:]
 
+    def set_token_counter(self, token_counter: TokenCounter = None) -> None:
+        """Use the active context model's counter for future diagnostics."""
+        self._token_counter = token_counter
+
     async def emit(self, context: Any, state: ContextCompressionState) -> None:
         self._record(state)
         logger.info(

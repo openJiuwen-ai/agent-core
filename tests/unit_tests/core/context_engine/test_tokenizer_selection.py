@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from pathlib import Path
+import base64
+import json
 
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -15,8 +17,8 @@ from openjiuwen.core.context_engine import (
     TokenizerRegistry,
     TokenizerSelector,
     TokenizerSpec,
+    TiktokenModelCounter,
 )
-from openjiuwen.core.context_engine.token import tokenizer_manager as tokenizer_manager_module
 
 
 def _write_tokenizer(path: Path) -> None:
@@ -28,6 +30,28 @@ def _write_tokenizer(path: Path) -> None:
     )
     tokenizer.pre_tokenizer = Whitespace()
     tokenizer.save(str(path))
+
+
+def _write_tiktoken_model(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "tiktoken.model"
+    path.write_text(
+        "\n".join(f"{base64.b64encode(bytes([value])).decode()} {value}" for value in range(256)),
+        encoding="ascii",
+    )
+    (directory / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "added_tokens_decoder": {
+                    "256": {"content": "[BOS]"},
+                    "257": {"content": "[EOS]"},
+                    "258": {"content": "<|end_of_msg|>"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def test_exact_native_tokenizer_is_selected(tmp_path: Path) -> None:
@@ -51,6 +75,29 @@ def test_exact_native_tokenizer_is_selected(tmp_path: Path) -> None:
     assert measurement.tokenizer == "deepseek-native"
     assert measurement.estimated is False
     assert measurement.tokens == 2
+
+
+def test_exact_tiktoken_model_is_selected(tmp_path: Path) -> None:
+    artifact = _write_tiktoken_model(tmp_path / "kimi-k2.6")
+
+    counter = TokenizerSelector(
+        provider="kimi",
+        model="kimi-k2.6",
+        spec=TokenizerSpec(
+            provider="kimi",
+            model="kimi-k2.6",
+            tokenizer_id="moonshotai/Kimi-K2.6",
+            engine="tiktoken",
+            artifact_path=str(artifact),
+        ),
+    ).select()
+
+    assert isinstance(counter, TiktokenModelCounter)
+    measurement = counter.measure("hello")
+    assert measurement.source == "native_tokenizer"
+    assert measurement.tokenizer == "moonshotai/Kimi-K2.6"
+    assert measurement.estimated is False
+    assert measurement.tokens == 5
 
 
 def test_registry_matches_model_variants_case_insensitively(tmp_path: Path) -> None:
@@ -132,6 +179,57 @@ def test_explicit_family_fallback_is_used_for_missing_target(tmp_path: Path) -> 
     assert measurement.tokenizer == "kimi-k2.6"
 
 
+def test_tiktoken_family_fallback_is_used_once(tmp_path: Path) -> None:
+    fallback_artifact = _write_tiktoken_model(tmp_path / "kimi-k2.7")
+
+    counter = TokenizerSelector(
+        provider="kimi",
+        model="kimi-k3",
+        spec=TokenizerSpec(
+            provider="kimi",
+            model="kimi-k3",
+            tokenizer_id="moonshotai/Kimi-K3",
+            engine="tiktoken",
+            artifact_path=str(tmp_path / "missing-k3"),
+            compatible_fallbacks=[
+                CompatibleTokenizerSpec(
+                    model="kimi-k2.7",
+                    tokenizer_id="moonshotai/Kimi-K2.7-Code",
+                    engine="tiktoken",
+                    artifact_path=str(fallback_artifact),
+                )
+            ],
+        ),
+    ).select()
+
+    measurement = counter.measure("hello")
+    assert isinstance(counter, TiktokenModelCounter)
+    assert measurement.source == "family_tokenizer_fallback"
+    assert measurement.fallback_tokenizer_model == "kimi-k2.7"
+    assert measurement.tokenizer == "moonshotai/Kimi-K2.7-Code"
+
+
+def test_only_one_configured_family_fallback_is_attempted(tmp_path: Path) -> None:
+    first = tmp_path / "missing-first"
+    second = _write_tokenizer(tmp_path / "second.json")
+    counter = TokenizerSelector(
+        provider="glm",
+        model="glm-5.2",
+        spec=TokenizerSpec(
+            provider="glm",
+            model="glm-5.2",
+            artifact_path=str(tmp_path / "missing-target"),
+            compatible_fallbacks=[
+                CompatibleTokenizerSpec(model="glm-5", artifact_path=str(first)),
+                CompatibleTokenizerSpec(model="glm-5.1", artifact_path=str(second)),
+            ],
+        ),
+        allow_tiktoken_fallback=False,
+    ).select()
+
+    assert isinstance(counter, StringLengthCounter)
+
+
 def test_unknown_native_model_uses_tiktoken_fallback(monkeypatch) -> None:
     monkeypatch.setattr(TokenizerSelector, "_tiktoken_available", staticmethod(lambda: True))
     counter = TokenizerSelector(provider="deepseek", model="deepseek-chat").select()
@@ -199,22 +297,6 @@ def test_network_download_error_is_not_misclassified_as_revision_failure() -> No
     )
 
     assert TokenizerArtifactManager._error_reason(error) == "tokenizer_network_unavailable"
-
-
-def test_huggingface_proxy_routes_respect_explicit_proxy(monkeypatch) -> None:
-    monkeypatch.setattr(
-        tokenizer_manager_module,
-        "_discover_system_proxy",
-        lambda: "http://system-proxy:8080",
-    )
-
-    assert tokenizer_manager_module._huggingface_proxy_routes(
-        "http://configured-proxy:7890"
-    ) == ("http://configured-proxy:7890",)
-    assert tokenizer_manager_module._huggingface_proxy_routes(None) == (
-        "http://system-proxy:8080",
-        None,
-    )
 
 
 def test_tokenizer_spec_accepts_frontend_id_alias() -> None:

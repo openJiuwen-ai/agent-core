@@ -1209,6 +1209,29 @@ class ReActAgent(BaseAgent):
             "cache_scope": values.get("cache_scope") or "session",
         }
 
+    def _begin_context_usage_request(self, ctx: AgentCallbackContext) -> tuple[str, int]:
+        """Create the identity for one actual provider request.
+
+        The usage event is emitted after the provider returns, but request IDs
+        must be allocated before the call so debug records, retries, and the
+        post-call event all refer to the same request.  Calling this once at
+        the start of ``_railed_model_call`` also makes a recovery retry a new
+        request instead of reusing the failed attempt's sequence.
+        """
+        session = ctx.session
+        if session is None:
+            return "", 0
+        request_id = uuid.uuid4().hex
+        session_id = session.get_session_id()
+        sequence = self._context_usage_sequences.get(session_id, 0)
+        self._context_usage_sequences[session_id] = sequence + 1
+        ctx.context_usage_request_id = request_id
+        ctx.context_usage_sequence = sequence
+        if isinstance(ctx.inputs, ModelCallInputs):
+            ctx.inputs.context_usage_request_id = request_id
+            ctx.inputs.context_usage_sequence = sequence
+        return request_id, sequence
+
     async def _emit_context_usage(
         self,
         ctx: AgentCallbackContext,
@@ -1231,15 +1254,16 @@ class ReActAgent(BaseAgent):
         )
 
         if phase == "pre_call":
-            request_id = uuid.uuid4().hex
-            ctx.context_usage_request_id = request_id
-            session_id = session.get_session_id()
-            sequence = self._context_usage_sequences.get(session_id, 0)
-            self._context_usage_sequences[session_id] = sequence + 1
-            ctx.context_usage_sequence = sequence
-        else:
-            request_id = ctx.context_usage_request_id or uuid.uuid4().hex
+            # Kept for callers that used the old helper directly.  The
+            # built-in model-call path no longer emits this phase.
+            request_id, sequence = self._begin_context_usage_request(ctx)
+        elif ctx.context_usage_request_id:
+            request_id = ctx.context_usage_request_id
             sequence = int(ctx.context_usage_sequence or 0)
+        else:
+            # Compatibility for integrations calling the post helper without
+            # the new explicit begin step.
+            request_id, sequence = self._begin_context_usage_request(ctx)
 
         attribution = self._context_usage_attribution(ctx, session)
         ctx.context_usage_attribution.clear()
@@ -1353,6 +1377,11 @@ class ReActAgent(BaseAgent):
                     payload=snapshot.model_dump(mode="json"),
                 )
             )
+            # Swarm's compatibility rail can emit a legacy snapshot for older
+            # core versions.  Mark the callback context after the complete
+            # core event is actually accepted by the session writer so that
+            # the compatibility rail never adds a second event.
+            ctx.extra["_context_usage_event_emitted"] = True
         except Exception as exc:  # telemetry must never fail an LLM call
             logger.warning("Failed to emit context usage snapshot: %s", exc)
 
@@ -1405,7 +1434,13 @@ class ReActAgent(BaseAgent):
         usage_attribution = self._context_usage_attribution(ctx, ctx.session)
         ctx.context_usage_attribution.clear()
         ctx.context_usage_attribution.update(usage_attribution)
+        self._begin_context_usage_request(ctx)
         usage_context_config = self._config.context_engine_config
+        usage_model_name = str(
+            getattr(usage_context_config, "model_name", None)
+            or self._config.model_name
+            or ""
+        )
         usage_model_provider = str(
             getattr(usage_context_config, "model_provider", None)
             or self._resolve_context_engine_model_provider(self._config)
@@ -1417,7 +1452,7 @@ class ReActAgent(BaseAgent):
                 ctx.context_usage_report = build_report(
                     context_window,
                     system_prompt_sections=usage_prompt_sections,
-                    model=self._config.model_name,
+                    model=usage_model_name,
                     provider=usage_model_provider or None,
                     deployment=str(self._config.api_base or "") or None,
                     attribution=usage_attribution,
@@ -1430,8 +1465,6 @@ class ReActAgent(BaseAgent):
                 logger.debug("ModelContext does not provide a context usage report")
             except Exception:
                 logger.warning("Failed to build context usage report; using compatibility analyzer path", exc_info=True)
-
-        await self._emit_context_usage(ctx, context_window, phase="pre_call")
 
         _write_llm_request_debug_record(
             ctx.context,

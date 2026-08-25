@@ -18,11 +18,12 @@ class CompatibleTokenizerSpec(BaseModel):
     model: str
     tokenizer_id: str | None = Field(default=None, alias="id")
     source: Literal["huggingface", "modelscope", "provider_official", "local"] = "local"
+    engine: Literal["auto", "tiktoken", "tokenizers"] = "auto"
     revision: str | None = None
     artifact_path: str | None = None
     sha256: str | None = None
 
-    @field_validator("source", mode="before")
+    @field_validator("source", "engine", mode="before")
     @classmethod
     def _normalize_source(cls, value: str | None) -> str | None:
         if value is None:

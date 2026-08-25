@@ -57,10 +57,11 @@ class ContextEngineConfig(BaseModel):
         conversation, and offloaded content is never automatically restored.
 
     enable_tiktoken_counter : bool, default False
-        Enable the historical tiktoken fallback for contexts without a
-        configured model. Configured model contexts use an already available
-        native artifact when present and otherwise fall back to Unicode string
-        length. Context creation never downloads a tokenizer.
+        Enable application-level tokenizer warm-up. When a configured model has
+        a native tokenizer spec, warm-up downloads its artifact and at most one
+        configured family fallback. With the switch off, no warm-up/download
+        occurs, but a tokenizer already present in the local cache can still be
+        used. Context creation never downloads a tokenizer.
 
     context_window_tokens : int, optional
         Total context window supported by the runtime model, including input and

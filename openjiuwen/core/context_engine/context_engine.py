@@ -99,6 +99,46 @@ class ContextEngine:
         """Clear instance-level final-window mutators."""
         self._window_mutators.clear()
 
+    def _select_token_counter(self, config: ContextEngineConfig) -> TokenCounter:
+        """Select a local-only counter for a context-engine configuration."""
+        has_model_tokenizer_target = bool(
+            config.model_name
+            or config.model_provider
+            or config.tokenizer_spec
+            or config.tokenizer_registry
+        )
+        try:
+            return TokenizerSelector(
+                provider=config.model_provider or "",
+                model=config.model_name or "",
+                spec=config.tokenizer_spec,
+                registry=TokenizerRegistry(config.tokenizer_registry),
+                # Context creation and model rebinding are deliberately
+                # read-only.  The application warm-up service owns downloads.
+                manager=TokenizerArtifactManager(
+                    cache_dir=config.tokenizer_cache_dir,
+                    enable_download=False,
+                    offline=True,
+                ),
+                # This switch is only meaningful for a model-less historical
+                # context. Configured model contexts use native-or-string
+                # resolution and never initialize a remote/default tiktoken
+                # counter here.
+                allow_tiktoken_fallback=(
+                    config.enable_tiktoken_counter
+                    and not has_model_tokenizer_target
+                ),
+            ).select()
+        except Exception as exc:  # noqa: BLE001 - context must fail open
+            context_engine_logger.warning(
+                "local tokenizer selection failed; using string-length fallback: %s",
+                exc,
+            )
+            return StringLengthCounter(
+                model=config.model_name or "",
+                fallback_reason="local_tokenizer_selection_failed",
+            )
+
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
             self,
@@ -152,43 +192,7 @@ class ContextEngine:
         ]
 
         if token_counter is None:
-            has_model_tokenizer_target = bool(
-                self._config.model_name
-                or self._config.model_provider
-                or self._config.tokenizer_spec
-                or self._config.tokenizer_registry
-            )
-            try:
-                token_counter = TokenizerSelector(
-                    provider=self._config.model_provider or "",
-                    model=self._config.model_name or "",
-                    spec=self._config.tokenizer_spec,
-                    registry=TokenizerRegistry(self._config.tokenizer_registry),
-                    # Context creation is deliberately read-only. Remote
-                    # tokenizer downloads belong to the application-level
-                    # warm-up path and must never be retried here.
-                    manager=TokenizerArtifactManager(
-                        cache_dir=self._config.tokenizer_cache_dir,
-                        enable_download=False,
-                        offline=True,
-                    ),
-                    # The switch only controls the model-less compatibility
-                    # path. Configured model contexts always use strict
-                    # native-or-string resolution, regardless of the switch.
-                    allow_tiktoken_fallback=(
-                        self._config.enable_tiktoken_counter
-                        and not has_model_tokenizer_target
-                    ),
-                ).select()
-            except Exception as exc:  # noqa: BLE001 - context creation must fail open
-                context_engine_logger.warning(
-                    "local tokenizer selection failed; using string-length fallback: %s",
-                    exc,
-                )
-                token_counter = StringLengthCounter(
-                    model=self._config.model_name or "",
-                    fallback_reason="local_tokenizer_selection_failed",
-                )
+            token_counter = self._select_token_counter(self._config)
 
         if self._config.enable_openrouter_model_context_window_tokens:
             # Scheduled, not awaited: this is the first-turn critical path and the
@@ -213,6 +217,50 @@ class ContextEngine:
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context
         return context
+
+    def rebind_context_model(
+        self,
+        config: ContextEngineConfig,
+        *,
+        session_id: str | None = None,
+        context_id: str | None = None,
+    ) -> int:
+        """Apply a new model binding to cached contexts without losing history.
+
+        ``config`` becomes the configuration for contexts created after this
+        call.  Existing contexts can be narrowed by ``session_id`` and/or
+        ``context_id``; only contexts that implement the built-in rebinding
+        contract are updated.  The return value is the number of contexts
+        successfully rebound.
+        """
+        if not isinstance(config, ContextEngineConfig):
+            raise TypeError("config must be a ContextEngineConfig")
+
+        self._config = config
+        normalized_context_id = (
+            self._process_context_id(context_id) if context_id is not None else None
+        )
+        token_counter = self._select_token_counter(config)
+        rebound = 0
+        for context in self._context_pool.values():
+            if session_id is not None and context.session_id() != session_id:
+                continue
+            if normalized_context_id is not None and context.context_id() != normalized_context_id:
+                continue
+            rebind = getattr(context, "rebind_model", None)
+            if not callable(rebind):
+                continue
+            try:
+                if rebind(config, token_counter=token_counter):
+                    rebound += 1
+            except Exception:  # noqa: BLE001 - one custom context must not block switching
+                context_engine_logger.warning(
+                    "failed to rebind context model, session_id=%s context_id=%s",
+                    context.session_id(),
+                    context.context_id(),
+                    exc_info=True,
+                )
+        return rebound
 
     def get_context(
             self,

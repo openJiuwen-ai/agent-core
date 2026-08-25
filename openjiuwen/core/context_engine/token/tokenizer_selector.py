@@ -9,6 +9,7 @@ from openjiuwen.core.context_engine.token.base import TokenCounter
 from openjiuwen.core.context_engine.token.native_tokenizer_counter import NativeTokenizerCounter
 from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
 from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
+from openjiuwen.core.context_engine.token.tiktoken_model_counter import TiktokenModelCounter
 from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
 from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
 from openjiuwen.core.context_engine.token.tokenizer_spec import CompatibleTokenizerSpec, TokenizerSpec
@@ -48,12 +49,7 @@ class TokenizerSelector:
 
     def select(self) -> TokenCounter:
         exact_spec = self.spec
-        if (
-            self.allow_tiktoken_fallback
-            and exact_spec is None
-            and not self.provider
-            and not self.model
-        ):
+        if self.allow_tiktoken_fallback and exact_spec is None and not self.provider and not self.model:
             # Preserve the historical default for contexts that have no model
             # configuration at all.
             return TiktokenCounter()
@@ -69,7 +65,10 @@ class TokenizerSelector:
             if exact is not None:
                 return exact
 
-            for candidate in exact_spec.compatible_fallbacks:
+            # The application-level model maps intentionally provide one
+            # canonical family fallback. Keep selection one-hop even if an
+            # older configuration accidentally contains a longer list.
+            for candidate in exact_spec.compatible_fallbacks[:1]:
                 family = self._native_counter(
                     candidate,
                     source="family_tokenizer_fallback",
@@ -91,11 +90,7 @@ class TokenizerSelector:
                 fallback_reason="native_tokenizer_unavailable",
             )
 
-        if (
-            exact_spec is None
-            and not (self.provider or self.model)
-            and not self.allow_tiktoken_fallback
-        ):
+        if exact_spec is None and not (self.provider or self.model) and not self.allow_tiktoken_fallback:
             fallback_reason = "tiktoken_disabled"
         elif exact_spec is None and (self.provider or self.model):
             fallback_reason = "model_tokenizer_spec_missing"
@@ -115,8 +110,6 @@ class TokenizerSelector:
         fallback_reason: str | None = None,
         fallback_tokenizer_model: str | None = None,
     ) -> TokenCounter | None:
-        if str(getattr(spec, "engine", "auto") or "auto").strip().casefold() == "tiktoken":
-            return None
         # Artifact resolution is an optional telemetry path.  A broken cache,
         # permission error, or optional backend failure must not prevent the
         # selector from reaching its fallback chain.
@@ -127,6 +120,16 @@ class TokenizerSelector:
         if artifact_path is None:
             return None
         try:
+            engine = str(getattr(spec, "engine", "auto") or "auto").strip().casefold()
+            if engine == "tiktoken":
+                return TiktokenModelCounter(
+                    artifact_path,
+                    model=self.model,
+                    tokenizer_model=getattr(spec, "tokenizer_id", None) or getattr(spec, "model", None),
+                    measurement_source=source,
+                    fallback_reason=fallback_reason,
+                    fallback_tokenizer_model=fallback_tokenizer_model,
+                )
             return NativeTokenizerCounter(
                 artifact_path,
                 model=self.model,

@@ -7,9 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import threading
-import urllib.request
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +16,7 @@ from openjiuwen.core.context_engine.token.tokenizer_spec import (
 )
 
 
-_HF_NETWORK_LOCK = threading.RLock()
-_HF_CLIENT_UNCONFIGURED = object()
-_HF_CLIENT_ROUTE: object = _HF_CLIENT_UNCONFIGURED
-_PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
-_NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
-_AUTO_PROXY_VALUES = frozenset({"", "auto"})
-_DIRECT_PROXY_VALUES = frozenset({"direct", "none", "off", "disabled"})
+_HUGGINGFACE_ENDPOINT = "https://hf-mirror.com"
 
 
 class TokenizerArtifactManager:
@@ -43,7 +34,6 @@ class TokenizerArtifactManager:
         cache_dir: str | Path | None = None,
         enable_download: bool = False,
         offline: bool = False,
-        proxy: str | None = None,
     ) -> None:
         configured_cache_dir = cache_dir or os.getenv(
             "OPENJIUWEN_TOKENIZER_CACHE_DIR",
@@ -52,14 +42,15 @@ class TokenizerArtifactManager:
         self.cache_dir = Path(configured_cache_dir).expanduser()
         self.enable_download = enable_download
         self.offline = offline
-        self.proxy = str(proxy).strip() if proxy is not None else None
         self.last_error: str | None = None
 
     def resolve(self, spec: TokenizerSpec | CompatibleTokenizerSpec) -> Path | None:
-        """Return a validated local ``tokenizer.json`` path for ``spec``.
+        """Return a validated local tokenizer artifact path for ``spec``.
 
         A missing or invalid artifact returns ``None`` and records a compact
-        reason. Callers can then continue with the configured fallback chain.
+        reason. The artifact is ``tokenizer.json`` for the tokenizers engine
+        and ``tiktoken.model`` for the tiktoken engine. Callers can then
+        continue with the configured one-hop fallback.
         """
         self.last_error = None
         try:
@@ -98,22 +89,41 @@ class TokenizerArtifactManager:
         raw_path = getattr(spec, "artifact_path", None)
         if raw_path:
             path = Path(raw_path).expanduser()
-            return self._tokenizer_file(path)
+            return self._artifact_file(path, spec)
 
         tokenizer_id = getattr(spec, "tokenizer_id", None)
         if tokenizer_id:
             candidate = Path(tokenizer_id).expanduser()
-            return self._tokenizer_file(candidate) if candidate.exists() else None
+            return self._artifact_file(candidate, spec) if candidate.exists() else None
         return None
 
-    @staticmethod
-    def _tokenizer_file(path: Path) -> Path | None:
+    @classmethod
+    def _artifact_file(
+        cls,
+        path: Path,
+        spec: TokenizerSpec | CompatibleTokenizerSpec,
+    ) -> Path | None:
         if path.is_file():
             return path
         if path.is_dir():
-            candidate = path / "tokenizer.json"
+            candidate = path / cls._artifact_name(spec)
             return candidate if candidate.is_file() else None
         return None
+
+    @staticmethod
+    def _artifact_name(spec: TokenizerSpec | CompatibleTokenizerSpec) -> str:
+        engine = str(getattr(spec, "engine", "auto") or "auto").strip().casefold()
+        return "tiktoken.model" if engine == "tiktoken" else "tokenizer.json"
+
+    @classmethod
+    def _allow_patterns(cls, spec: TokenizerSpec | CompatibleTokenizerSpec) -> list[str]:
+        if cls._artifact_name(spec) == "tiktoken.model":
+            # Kimi's tiktoken vocabulary needs the repository's special-token
+            # IDs. Keep this metadata beside the vocabulary when available;
+            # the counter also has a reserved-token fallback for local files
+            # that contain only tiktoken.model.
+            return ["tiktoken.model", "tokenizer_config.json"]
+        return ["tokenizer.json"]
 
     def _resolve_huggingface(self, spec: TokenizerSpec | CompatibleTokenizerSpec) -> Path | None:
         try:
@@ -131,13 +141,14 @@ class TokenizerArtifactManager:
                     snapshot_download,
                     spec,
                 )
+                self.last_error = None
         except Exception as exc:  # remote libraries expose several exception types
             self.last_error = self._error_reason(exc)
             return None
 
-        artifact = self._find_tokenizer_file(Path(snapshot_path))
+        artifact = self._find_artifact_file(Path(snapshot_path), spec)
         if artifact is None:
-            self.last_error = "tokenizer_json_missing"
+            self.last_error = self._missing_artifact_reason(spec)
             return None
         return self._validate(artifact, spec)
 
@@ -146,59 +157,17 @@ class TokenizerArtifactManager:
         snapshot_download: Any,
         spec: TokenizerSpec | CompatibleTokenizerSpec,
     ) -> str:
-        """Download through an explicit or automatically discovered route.
-
-        The process may carry a ``NO_PROXY`` value for local services while
-        the operating system has a proxy configured for external traffic. In
-        that situation Hugging Face can incorrectly go direct and fail before
-        reaching the Hub. Resolve the route once for the Hub client, without
-        changing the caller's environment for the rest of the process.
-        """
-        if self.offline or not self.enable_download:
-            return snapshot_download(
-                repo_id=str(spec.tokenizer_id),
-                revision=getattr(spec, "revision", None),
-                cache_dir=str(self.cache_dir),
-                allow_patterns=["tokenizer.json"],
-                local_files_only=True,
-            )
-
-        routes = _huggingface_proxy_routes(self.proxy)
-        last_error: Exception | None = None
-        for index, proxy in enumerate(routes):
-            try:
-                with _HF_NETWORK_LOCK:
-                    if not _configure_huggingface_client(proxy):
-                        with _temporary_huggingface_network(proxy):
-                            return snapshot_download(
-                                repo_id=str(spec.tokenizer_id),
-                                revision=getattr(spec, "revision", None),
-                                cache_dir=str(self.cache_dir),
-                                allow_patterns=["tokenizer.json"],
-                                local_files_only=self.offline or not self.enable_download,
-                            )
-                    return snapshot_download(
-                        repo_id=str(spec.tokenizer_id),
-                        revision=getattr(spec, "revision", None),
-                        cache_dir=str(self.cache_dir),
-                        allow_patterns=["tokenizer.json"],
-                        local_files_only=self.offline or not self.enable_download,
-                    )
-            except Exception as exc:  # remote libraries expose several exception types
-                last_error = exc
-                self.last_error = self._error_reason(exc)
-                # If the automatically discovered system route is unavailable,
-                # make one direct attempt. An explicitly configured proxy is
-                # authoritative and is not silently bypassed.
-                if (
-                    index + 1 < len(routes)
-                    and self.last_error == "tokenizer_network_unavailable"
-                ):
-                    continue
-                raise
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("tokenizer_download_failed")
+        """Download from the fixed Hugging Face mirror."""
+        if self.enable_download and not self.offline:
+            _configure_huggingface_direct_client()
+        return snapshot_download(
+            repo_id=str(spec.tokenizer_id),
+            revision=getattr(spec, "revision", None),
+            cache_dir=str(self.cache_dir),
+            allow_patterns=self._allow_patterns(spec),
+            local_files_only=self.offline or not self.enable_download,
+            endpoint=_HUGGINGFACE_ENDPOINT,
+        )
 
     def _resolve_modelscope(self, spec: TokenizerSpec | CompatibleTokenizerSpec) -> Path | None:
         cached = self._find_modelscope_cached_artifact(spec)
@@ -232,9 +201,9 @@ class TokenizerArtifactManager:
             self.last_error = self._error_reason(exc)
             return None
 
-        artifact = self._find_tokenizer_file(Path(snapshot_path))
+        artifact = self._find_artifact_file(Path(snapshot_path), spec)
         if artifact is None:
-            self.last_error = "tokenizer_json_missing"
+            self.last_error = self._missing_artifact_reason(spec)
             return None
         return self._validate(artifact, spec)
 
@@ -261,14 +230,14 @@ class TokenizerArtifactManager:
             self.cache_dir / "hub" / "models" / model_path,
         )
         for candidate in candidates:
-            artifact = self._find_tokenizer_file(candidate)
+            artifact = self._find_artifact_file(candidate, spec)
             if artifact is not None:
                 return artifact
         return None
 
     def _validate(self, path: Path, spec: TokenizerSpec | CompatibleTokenizerSpec) -> Path | None:
         if not path.is_file():
-            self.last_error = "tokenizer_json_missing"
+            self.last_error = self._missing_artifact_reason(spec)
             return None
         expected = getattr(spec, "sha256", None)
         if expected and self._sha256(path) != expected.lower():
@@ -276,17 +245,27 @@ class TokenizerArtifactManager:
             return None
         return path
 
-    @staticmethod
-    def _find_tokenizer_file(root: Path) -> Path | None:
-        direct = TokenizerArtifactManager._tokenizer_file(root)
+    @classmethod
+    def _find_artifact_file(
+        cls,
+        root: Path,
+        spec: TokenizerSpec | CompatibleTokenizerSpec,
+    ) -> Path | None:
+        direct = cls._artifact_file(root, spec)
         if direct is not None:
             return direct
         if not root.exists():
             return None
+        artifact_name = cls._artifact_name(spec)
         try:
-            return next((path for path in root.rglob("tokenizer.json") if path.is_file()), None)
+            return next((path for path in root.rglob(artifact_name) if path.is_file()), None)
         except OSError:
             return None
+
+    @staticmethod
+    def _missing_artifact_reason(spec: TokenizerSpec | CompatibleTokenizerSpec) -> str:
+        engine = str(getattr(spec, "engine", "auto") or "auto").strip().casefold()
+        return "tiktoken_model_missing" if engine == "tiktoken" else "tokenizer_json_missing"
 
     @staticmethod
     def _sha256(path: Path) -> str:
@@ -330,103 +309,29 @@ class TokenizerArtifactManager:
         return "tokenizer_download_failed"
 
 
-def _huggingface_proxy_routes(proxy: str | None) -> tuple[str | None, ...]:
-    """Return the configured route and an automatic direct fallback."""
-    configured = str(proxy or "").strip()
-    normalized = configured.casefold()
-    if normalized in _DIRECT_PROXY_VALUES:
-        return (None,)
-    if normalized not in _AUTO_PROXY_VALUES:
-        return (configured,)
-
-    with _HF_NETWORK_LOCK:
-        system_proxy = _discover_system_proxy()
-    if system_proxy:
-        return (system_proxy, None)
-    return (None,)
-
-
-def _discover_system_proxy() -> str | None:
-    """Discover environment/OS proxy settings without honoring NO_PROXY.
-
-    On macOS, ``urllib.request.getproxies`` can expose the system proxy only
-    when ``NO_PROXY`` is absent. The temporary removal is limited to this
-    short discovery call and the original environment is restored immediately.
-    """
-    previous = {key: os.environ.get(key) for key in _NO_PROXY_ENV_KEYS}
+def _configure_huggingface_direct_client() -> None:
+    """Use a direct HTTP client so mirror requests ignore inherited settings."""
     try:
-        for key in _NO_PROXY_ENV_KEYS:
-            os.environ.pop(key, None)
-        proxies = urllib.request.getproxies()
-    except Exception:  # noqa: BLE001 - proxy discovery is best effort
-        proxies = {}
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+        import httpx
+        import huggingface_hub
+    except ImportError:
+        return
 
-    for key in ("https", "http", "all"):
-        value = str(proxies.get(key) or "").strip()
-        if value:
-            return value
-    return None
-
-
-def _configure_huggingface_client(proxy: str | None) -> bool:
-    """Configure Hugging Face's shared client for one route if supported."""
-    global _HF_CLIENT_ROUTE
-    with _HF_NETWORK_LOCK:
-        if _HF_CLIENT_ROUTE == proxy:
-            return True
+    set_client_factory = getattr(huggingface_hub, "set_client_factory", None)
+    if not callable(set_client_factory):
         try:
-            import httpx
-            import huggingface_hub
+            from huggingface_hub.utils._http import set_client_factory
         except ImportError:
-            return False
+            return
 
-        set_client_factory = getattr(huggingface_hub, "set_client_factory", None)
-        if not callable(set_client_factory):
-            try:
-                from huggingface_hub.utils._http import set_client_factory
-            except ImportError:
-                return False
+    def client_factory() -> httpx.Client:
+        return httpx.Client(
+            follow_redirects=True,
+            timeout=None,
+            trust_env=False,
+        )
 
-        def client_factory() -> httpx.Client:
-            kwargs: dict[str, Any] = {
-                "follow_redirects": True,
-                "timeout": None,
-                "trust_env": False,
-            }
-            if proxy:
-                kwargs["proxy"] = proxy
-            return httpx.Client(**kwargs)
-
-        set_client_factory(client_factory)
-        _HF_CLIENT_ROUTE = proxy
-        return True
-
-
-@contextmanager
-def _temporary_huggingface_network(proxy: str | None):
-    """Fallback environment route for older Hugging Face Hub versions."""
-    previous = {key: os.environ.get(key) for key in (*_PROXY_ENV_KEYS, *_NO_PROXY_ENV_KEYS)}
-    try:
-        for key in _PROXY_ENV_KEYS:
-            if proxy:
-                os.environ[key] = proxy
-            else:
-                os.environ.pop(key, None)
-        for key in _NO_PROXY_ENV_KEYS:
-            os.environ.pop(key, None)
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+    set_client_factory(client_factory)
 
 
 __all__ = ["TokenizerArtifactManager"]

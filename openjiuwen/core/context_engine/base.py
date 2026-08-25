@@ -220,6 +220,20 @@ class ModelContext(ABC):
         for the model family used by this context.
         """
 
+    def rebind_model(
+        self,
+        config: "ContextEngineConfig",
+        *,
+        token_counter: TokenCounter = None,
+    ) -> bool:
+        """Rebind model-specific context state without replacing messages.
+
+        The built-in session context implements this operation.  The default
+        is a no-op so third-party ``ModelContext`` implementations remain
+        source-compatible when a runtime switches models.
+        """
+        return False
+
     def message_revision(self) -> int:
         """Return the current monotonic message revision, when supported."""
         return 0

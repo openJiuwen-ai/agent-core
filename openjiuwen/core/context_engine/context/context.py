@@ -134,6 +134,78 @@ class SessionModelContext(ModelContext):
             model_context_window_tokens=self._model_context_window_tokens,
         )
 
+    def rebind_model(
+        self,
+        config: ContextEngineConfig,
+        *,
+        token_counter: TokenCounter = None,
+    ) -> bool:
+        """Switch model-specific state while retaining this context history.
+
+        A ``ContextEngine`` caches ``SessionModelContext`` instances by
+        session/context ID.  Replacing the model on the owning agent must not
+        leave that cached context counting with the previous model's tokenizer
+        or context window.  Message history, processors and session identity
+        are intentionally preserved.
+        """
+        if not isinstance(config, ContextEngineConfig):
+            raise TypeError("config must be a ContextEngineConfig")
+
+        next_model_context_window_tokens = ContextUtils.build_model_context_window_tokens(
+            config.model_context_window_tokens,
+            enable_openrouter_model_context_window_tokens=config.enable_openrouter_model_context_window_tokens,
+            openrouter_request_timeout=config.openrouter_request_timeout,
+        )
+        if (
+            self._default_window_size == config.default_window_message_num
+            and self._context_window_tokens == config.context_window_tokens
+            and self._model_name == config.model_name
+            and self._model_context_window_tokens == next_model_context_window_tokens
+            and self._default_dialogue_round == config.default_window_round_num
+            and self._compression_recall_config == config.compression_recall_config
+            and self._token_counter_binding(self._token_counter)
+            == self._token_counter_binding(token_counter)
+        ):
+            return False
+
+        self._default_window_size = config.default_window_message_num
+        self._context_window_tokens = config.context_window_tokens
+        self._model_name = config.model_name
+        self._model_context_window_tokens = next_model_context_window_tokens
+        self._default_dialogue_round = config.default_window_round_num
+        self._compression_recall_config = config.compression_recall_config.model_copy(deep=True)
+        self._token_counter = token_counter
+        self._processor_state_recorder.set_token_counter(token_counter)
+
+        # Cached token measurements/report snapshots are model-dependent.  The
+        # retained messages remain valid, but every usage report must be
+        # measured under the new model binding.
+        self._usage_measurement_cache.clear()
+        self._usage_report_cache.clear()
+        self._last_usage_report = None
+        self._last_llm_bound_context_window = None
+        ContextUtils.invalidate_usage_metadata(self._message_buffer.get_back())
+        return True
+
+    @staticmethod
+    def _token_counter_binding(token_counter: TokenCounter = None) -> tuple[Any, ...]:
+        """Return stable provenance for deciding whether a counter changed."""
+        if token_counter is None:
+            return (None,)
+        values = (
+            type(token_counter),
+            getattr(token_counter, "measurement_source", None),
+            getattr(token_counter, "measurement_tokenizer", None),
+            getattr(token_counter, "measurement_fallback_reason", None),
+            getattr(token_counter, "measurement_fallback_tokenizer_model", None),
+        )
+        if all(value is None or isinstance(value, (str, int, float, bool)) for value in values[1:]):
+            return values
+        # Test/custom counters may expose dynamic metadata objects.  Preserve
+        # their normal object-identity semantics instead of treating two
+        # unrelated counters as equivalent.
+        return (type(token_counter), id(token_counter))
+
     def workspace_dir(self) -> str:
         if self._workspace:
             return self._workspace.root_path

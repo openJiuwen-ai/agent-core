@@ -150,24 +150,19 @@ class TestContextEngine:
         assert ctx1 is ctx2
 
     @pytest.mark.asyncio
-    async def test_create_context_does_not_create_default_tiktoken_counter(self, session):
+    async def test_create_context_uses_string_counter_when_tiktoken_is_disabled(self, session):
         engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=False))
 
-        with patch("openjiuwen.core.context_engine.context_engine.context_engine_logger") as logger:
-            context = await engine.create_context(context_id="ctx", session=session)
+        context = await engine.create_context(context_id="ctx", session=session)
 
-        assert context.token_counter() is None
-        logger.info.assert_called_once_with(
-            "tiktoken counter disabled; using character-based token estimation, session_id=%s context_id=%s",
-            session.get_session_id(),
-            "ctx",
-        )
+        assert isinstance(context.token_counter(), StringLengthCounter)
+        assert context.token_counter().measurement_fallback_reason == "tiktoken_disabled"
 
     @pytest.mark.asyncio
     async def test_create_context_creates_default_tiktoken_counter_when_enabled(self, session):
         engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=True))
 
-        with patch("openjiuwen.core.context_engine.token.tiktoken_counter.TiktokenCounter") as counter_cls:
+        with patch("openjiuwen.core.context_engine.token.tokenizer_selector.TiktokenCounter") as counter_cls:
             counter = MagicMock()
             counter_cls.return_value = counter
             context = await engine.create_context(context_id="ctx", session=session)
@@ -409,6 +404,51 @@ class TestContextEngine:
             context_id="ctx", session=session, token_counter=token_counter
         )
         assert context.token_counter() is token_counter
+
+    @pytest.mark.asyncio
+    async def test_rebind_context_model_preserves_history_and_refreshes_binding(
+        self, session, another_session
+    ):
+        old_counter = MagicMock()
+        new_counter = MagicMock()
+        engine = ContextEngine(
+            ContextEngineConfig(
+                model_name="old-model",
+                model_provider="old-provider",
+                context_window_tokens=100,
+            )
+        )
+        old_context = await engine.create_context(
+            context_id="ctx", session=session, token_counter=old_counter
+        )
+        untouched_context = await engine.create_context(
+            context_id="ctx", session=another_session, token_counter=old_counter
+        )
+        await old_context.add_messages(UserMessage(content="history"))
+        old_context._usage_measurement_cache["cached"] = object()
+        old_context._usage_report_cache["cached"] = object()
+
+        new_config = ContextEngineConfig(
+            model_name="new-model",
+            model_provider="new-provider",
+            context_window_tokens=200,
+        )
+        with patch.object(engine, "_select_token_counter", return_value=new_counter):
+            rebound = engine.rebind_context_model(
+                new_config,
+                session_id=session.get_session_id(),
+            )
+
+        assert rebound == 1
+        assert engine.get_context("ctx", session.get_session_id()) is old_context
+        assert old_context.get_messages()[-1].content == "history"
+        assert old_context.token_counter() is new_counter
+        assert old_context.context_window_tokens() == 200
+        assert old_context._model_name == "new-model"
+        assert old_context._usage_measurement_cache == {}
+        assert old_context._usage_report_cache == {}
+        assert untouched_context.token_counter() is old_counter
+        assert untouched_context._model_name == "old-model"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
