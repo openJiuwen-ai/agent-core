@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -148,6 +149,34 @@ def test_normal_affinity_request_keeps_explicit_max_tokens():
         parent_session_id="parent",
     )
     assert params["max_tokens"] == 512
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["evict_kvc", "offload_kvc", "prefetch_kvc"])
+async def test_session_affinity_action_builds_one_messages_argument(action):
+    client = _affinity_client()
+    sdk_client = AsyncMock()
+    sdk_client.chat.completions.create = AsyncMock(return_value=_Obj())
+
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        result = await getattr(client, action)(
+            session_id="child",
+            parent_session_id="parent",
+            messages=None,
+            tools=None,
+        )
+
+    assert result is True
+    sent = sdk_client.chat.completions.create.call_args.kwargs
+    assert sent["messages"] == []
+    assert sent["extra_body"]["agent_hint"] == {
+        "session_id": "child",
+        "parent_session_id": "parent",
+        "context_management": {
+            "edits": [{"type": action.removesuffix("_kvc"), "target": "session"}],
+            "manage_request": True,
+        },
+    }
 
 
 def test_gateway_parser_accepts_token_text_and_reasoning():

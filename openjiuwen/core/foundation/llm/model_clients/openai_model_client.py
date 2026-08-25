@@ -861,6 +861,8 @@ class OpenAIModelClient(BaseModelClient):
             session_id: str,
             parent_session_id: Optional[str] = None,
             target: str = "session",
+            messages: Union[str, List[BaseMessage], List[dict], None] = None,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
             model: Optional[str] = None,
             msg_start: Optional[int] = None,
             msg_end: Optional[int] = None,
@@ -875,8 +877,12 @@ class OpenAIModelClient(BaseModelClient):
             return False
 
         params = self._build_request_params(
-            messages=[{"role": "user", "content": ""}],
-            tools=None,
+            messages=(
+                messages
+                if messages is not None
+                else [{"role": "user", "content": ""}]
+            ),
+            tools=tools,
             temperature=None,
             top_p=None,
             model=model,
