@@ -19,12 +19,16 @@ from openjiuwen.agent_evolving.constant import TuneConstant
 from openjiuwen.agent_evolving.updater import Updater
 from openjiuwen.agent_evolving.evaluator import BaseEvaluator
 from openjiuwen.agent_evolving.trainer.progress import Progress, Callbacks
-from openjiuwen.agent_evolving.trajectory import Trajectory, Updates, TracerTrajectoryExtractor
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.offline import TrajectoryExtractor
 from openjiuwen.agent_evolving.checkpointing import FileCheckpointStore, DefaultCheckpointManager
 from openjiuwen.core.operator import Operator
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent import BaseAgent
+
+
+Updates = Dict[Tuple[str, str], Any]
 
 
 class Trainer:
@@ -39,7 +43,7 @@ class Trainer:
         *,
         updater: Updater,
         evaluator: BaseEvaluator,
-        extractor: Optional[TracerTrajectoryExtractor] = None,
+        extractor: Optional[TrajectoryExtractor] = None,
         callbacks: Optional[Callbacks] = None,
         num_parallel: int = TuneConstant.default_parallel_num,
         early_stop_score: float = TuneConstant.default_early_stop_score,
@@ -54,7 +58,7 @@ class Trainer:
         Args:
             updater: Generates parameter updates from trajectory and evaluation.
             evaluator: Scores model output against expected answers.
-            extractor: Extracts Trajectory from Session; defaults to TracerTrajectoryExtractor.
+            extractor: Extracts Trajectory from Session; defaults to the canonical offline extractor.
             callbacks: Lifecycle hooks (on_train_begin/end, etc).
             num_parallel: Parallelism for inference and evaluation.
             early_stop_score: Stop training when validation score reaches this value.
@@ -66,7 +70,7 @@ class Trainer:
         """
         self._updater = updater
         self._evaluator = evaluator
-        self._extractor = extractor or TracerTrajectoryExtractor()
+        self._extractor = extractor or TrajectoryExtractor()
         self._callbacks = callbacks or Callbacks()
 
         self._num_parallel = int(num_parallel)

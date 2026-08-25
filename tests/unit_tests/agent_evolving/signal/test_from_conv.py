@@ -8,12 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.agent_evolving.signal.base import make_signal_fingerprint
-from openjiuwen.agent_evolving.signal.from_conv import (
-    ConversationSignalDetector,
-    _is_feedback_context_noise,
-    _prepare_feedback_dialog_turns,
-    _unwrap_channel_user_message,
-)
+from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
+from openjiuwen.agent_evolving.trajectory.messages import trajectory_to_messages
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.extensions.observability import semconv
@@ -475,7 +471,7 @@ class TestConversationSignalDetector:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_detect_user_intent_accepts_trajectory() -> None:
+    async def test_detect_user_intent_rejects_raw_trajectory() -> None:
         messages = [
             {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
             {"role": "user", "content": "不对，你应该先检查文件是否存在"},
@@ -483,7 +479,20 @@ class TestConversationSignalDetector:
         trajectory = _build_trajectory_from_messages(messages)
         detector = ConversationSignalDetector(existing_skills={"my_skill"})
 
-        signals = await detector.detect_user_intent(trajectory)
+        with pytest.raises(TypeError, match="trajectory_to_messages"):
+            await detector.detect_user_intent(trajectory)
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_accepts_messages_from_trajectory() -> None:
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [{"arguments": "/skills/my_skill/SKILL.md"}]},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        trajectory = _build_trajectory_from_messages(messages)
+        detector = ConversationSignalDetector(existing_skills={"my_skill"})
+
+        signals = await detector.detect_user_intent(trajectory_to_messages(trajectory))
 
         assert len(signals) == 1
         assert signals[0].signal_type == "user_intent"
@@ -596,83 +605,3 @@ class TestConversationSignalDetectorCollaborationBoundary:
 
         assert [signal.signal_type for signal in signals] == ["execution_failure"]
         assert signals[0].context.get("tool_name") == "send_message"
-
-
-class TestFeedbackDialogHelpers:
-    """Unit tests for channel unwrap / noise filter / dialog prep helpers."""
-
-    def test_unwrap_channel_user_message_extracts_inner_content(self) -> None:
-        wrapped = (
-            '你收到一条消息：\n'
-            '{"source": "wecom", "content": "使用 tianqi 技能 杭州的天气", '
-            '"type": "user input", "supplementary_info": "noise"}'
-        )
-        assert _unwrap_channel_user_message(wrapped) == "使用 tianqi 技能 杭州的天气"
-
-    def test_unwrap_channel_user_message_supports_english_lead_in(self) -> None:
-        wrapped = 'You receive a new message:\n{"content": "fix the weather skill"}'
-        assert _unwrap_channel_user_message(wrapped) == "fix the weather skill"
-
-    def test_unwrap_channel_user_message_returns_plain_text_unchanged(self) -> None:
-        assert _unwrap_channel_user_message("你好") == "你好"
-
-    def test_unwrap_channel_user_message_returns_invalid_json_unchanged(self) -> None:
-        text = "你收到一条消息：\n{not-json"
-        assert _unwrap_channel_user_message(text) == text
-
-    def test_unwrap_channel_user_message_returns_envelope_without_content_unchanged(self) -> None:
-        text = '你收到一条消息：\n{"source": "wecom", "type": "user input"}'
-        assert _unwrap_channel_user_message(text) == text
-
-    def test_unwrap_channel_user_message_empty_returns_original(self) -> None:
-        assert _unwrap_channel_user_message("") == ""
-        assert _unwrap_channel_user_message("   ") == "   "
-
-    def test_is_feedback_context_noise_true_for_empty_or_reminder_only(self) -> None:
-        assert _is_feedback_context_noise("") is True
-        assert _is_feedback_context_noise("   ") is True
-        assert (
-            _is_feedback_context_noise(
-                "<system-reminder>\nruntime setting\n</system-reminder>"
-            )
-            is True
-        )
-        assert (
-            _is_feedback_context_noise(
-                '<prompt-attachment id="x">git status</prompt-attachment>'
-            )
-            is True
-        )
-
-    def test_is_feedback_context_noise_false_when_real_text_remains(self) -> None:
-        assert _is_feedback_context_noise("不对，应该查上海") is False
-        mixed = (
-            "<system-reminder>meta</system-reminder>\n"
-            "不对，应该查上海"
-        )
-        assert _is_feedback_context_noise(mixed) is False
-
-    def test_prepare_feedback_dialog_turns_unwraps_filters_and_dedupes(self) -> None:
-        wrapped = (
-            '你收到一条消息：\n'
-            '{"content": "使用 tianqi 技能 杭州的天气", "source": "wecom"}'
-        )
-        messages = [
-            {"role": "user", "content": wrapped},
-            {"role": "assistant", "content": "杭州今天多云。"},
-            {
-                "role": "user",
-                "content": "<system-reminder>only noise</system-reminder>",
-            },
-            {"role": "user", "content": "不对，应该是上海"},
-            {"role": "user", "content": "不对，应该是上海"},
-            {"role": "tool", "content": "ignored tool payload"},
-        ]
-
-        turns = _prepare_feedback_dialog_turns(messages)
-
-        assert turns == [
-            ("user", "使用 tianqi 技能 杭州的天气"),
-            ("assistant", "杭州今天多云。"),
-            ("user", "不对，应该是上海"),
-        ]

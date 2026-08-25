@@ -9,7 +9,7 @@ that the ``AgentConfigurator`` constructs at setup time, not platform-supplied
 spec data. Those handles ride on the per-member ``BuildContext.extras`` under
 the ``TeamHandleKey`` namespace; team rail provider factories read them directly
 (they are runtime plumbing, not serializable construction params — mirroring how
-swarm passes ``trajectory_registry`` / ``_parent_model`` through extras).
+swarm passes runtime-specific handles such as ``_parent_model`` through extras).
 
 ``inject_team_handles`` is the single writer (the configurator); the ``get_*``
 accessors are the readers (the provider factories). Rails are never cached:
