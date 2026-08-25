@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 import warnings
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from openjiuwen.agent_evolving.protocols import USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal.base import (
@@ -22,6 +22,7 @@ from openjiuwen.agent_evolving.trajectory.messages import (
     trajectory_to_messages,
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.utils import TuneUtils
 from openjiuwen.core.common.logging import logger
 
 
@@ -86,23 +87,245 @@ _CORRECTION_PATTERN = re.compile("|".join(_CORRECTION_PATTERNS), re.IGNORECASE)
 
 _SKILL_MD_PATTERN = re.compile(r"[/\\]+([^/\\]+)[/\\]+SKILL\.md", re.IGNORECASE)
 _TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\n]+\\ndescription:")
+_USER_FEEDBACK_MAX_TURNS = 9
+_USER_FEEDBACK_CONTEXT_CHAR_LIMIT = 3000
+_USER_FEEDBACK_LAST_USER_CHAR_LIMIT = 1000
+
 _USER_FEEDBACK_PROMPT_CN = (
-    "判断以下用户消息是否包含对当前 skill 的被动纠正或可沉淀的改进反馈。\n"
-    "只有当用户消息明确指出 agent 的理解、步骤、顺序或工具使用需要调整时，"
-    "才认为值得转成演进信号。\n\n"
-    "当前 skill：{skill_name}\n"
-    "最近用户消息：{user_messages}\n\n"
-    '输出 JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+    "判断「待判定的用户消息」是否包含对对话中已使用 skill 的被动纠正或可沉淀的改进反馈。\n"
+    "结合对话上下文中的助手回复理解用户在纠正什么；"
+    "只有当【待判定的用户消息】明确指出 agent 的理解、步骤、顺序、输出内容或工具使用需要调整时，"
+    "才认为值得转成演进信号。\n"
+    "不要仅因更早的用户消息含纠正词就判定为反馈。\n"
+    "若用户一次反馈涉及多个 skill，请按 skill 拆成多条；每条只写与该 skill 相关的 excerpt。\n"
+    "不要把无关 skill 硬塞进 items。\n\n"
+    "候选 skill（本轮对话中出现过）：{skill_names}\n\n"
+    f"对话上下文（带角色标识，最近最多 {_USER_FEEDBACK_MAX_TURNS} 轮问答）：\n"
+    "{conversation_context}\n\n"
+    "待判定的用户消息：\n"
+    "{last_user_message}\n\n"
+    "输出 JSON（二选一）：\n"
+    '1) 多 skill: {{"is_feedback": true/false, "items": [{{"skill_name": "str", "excerpt": "str"}}]}}\n'
+    '2) 兼容单条: {{"is_feedback": true/false, "excerpt": "str", "skill_name": "str可选"}}\n'
 )
 _USER_FEEDBACK_PROMPT_EN = (
-    "Determine whether the following user messages contain passive corrective feedback "
-    "or reusable improvement guidance for the current skill.\n"
-    "Only treat the messages as an evolution signal when the user is clearly correcting "
-    "the agent's understanding, ordering, steps, or tool usage.\n\n"
-    "Current skill: {skill_name}\n"
-    "Recent user messages: {user_messages}\n\n"
-    'Output JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+    "Determine whether the LAST user message (to judge) contains passive corrective feedback "
+    "or reusable improvement guidance for skills used in this conversation.\n"
+    "Use the labeled conversation context (including assistant replies) to understand what "
+    "the user is correcting. Only treat it as an evolution signal when the LAST user message "
+    "clearly corrects the agent's understanding, ordering, steps, output content, or tool usage.\n"
+    "Do not treat earlier user messages alone as sufficient evidence of feedback.\n"
+    "If one user message covers multiple skills, split into multiple items; "
+    "each excerpt must relate only to that skill. Do not force unrelated skills.\n\n"
+    "Candidate skills (seen in this conversation): {skill_names}\n\n"
+    f"Conversation context (role-labeled, up to {_USER_FEEDBACK_MAX_TURNS} recent Q&A turns):\n"
+    "{conversation_context}\n\n"
+    "Last user message (to judge):\n"
+    "{last_user_message}\n\n"
+    "Output JSON (either form):\n"
+    '1) Multi-skill: {{"is_feedback": true/false, "items": [{{"skill_name": "str", "excerpt": "str"}}]}}\n'
+    '2) Legacy single: {{"is_feedback": true/false, "excerpt": "str", "skill_name": "str optional"}}\n'
 )
+
+
+def _extract_dialog_turns(messages: Sequence[object]) -> List[Tuple[str, str]]:
+    """Return ``[(role, content), ...]`` for user/assistant messages with non-empty content."""
+    turns: List[Tuple[str, str]] = []
+    for msg in messages:
+        role = str(_get_field(msg, "role") or "")
+        if role not in ("user", "assistant"):
+            continue
+        content = str(_get_field(msg, "content") or "").strip()
+        if content:
+            turns.append((role, content))
+    return turns
+
+
+def _unwrap_channel_user_message(text: str) -> str:
+    """Extract real user text from channel ``lead-in + JSON`` envelopes.
+
+    Inbound wrappers look like ``你收到一条消息：\\n{"content": "...", ...}``.
+    Feedback detection only needs the inner ``content``; envelope metadata
+    (source/timezone/supplementary_info) is noise for intent classification.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return text
+    head, sep, payload = stripped.partition("\n")
+    payload = payload.strip()
+    if not sep or head.lstrip().startswith("{") or not payload.startswith("{"):
+        return text
+    try:
+        envelope = json.loads(payload)
+    except json.JSONDecodeError:
+        return text
+    if isinstance(envelope, dict):
+        inner = envelope.get("content")
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip()
+    return text
+
+
+def _is_feedback_context_noise(content: str) -> bool:
+    """Return True for injected reminders / attachments with no real user text."""
+    text = (content or "").strip()
+    if not text:
+        return True
+    lower = text.lower()
+    if "<system-reminder>" not in lower and "<prompt-attachment" not in lower:
+        return False
+    without = re.sub(
+        r"<system-reminder>[\s\S]*?</system-reminder>",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    without = re.sub(
+        r"<prompt-attachment\b[^>]*>[\s\S]*?</prompt-attachment>",
+        "",
+        without,
+        flags=re.IGNORECASE,
+    ).strip()
+    return not without
+
+
+def _prepare_feedback_dialog_turns(
+    messages: Sequence[object],
+) -> List[Tuple[str, str]]:
+    """Build cleaned user/assistant turns for feedback prompts.
+
+    - Unwrap channel JSON envelopes for user turns
+    - Drop system-reminder / prompt-attachment-only noise
+    - Collapse consecutive duplicate (role, content) pairs
+    """
+    cleaned: List[Tuple[str, str]] = []
+    for role, content in _extract_dialog_turns(messages):
+        if role == "user":
+            content = _unwrap_channel_user_message(content)
+        content = str(content or "").strip()
+        if not content or _is_feedback_context_noise(content):
+            continue
+        if cleaned and cleaned[-1][0] == role and cleaned[-1][1] == content:
+            continue
+        cleaned.append((role, content))
+    return cleaned
+
+
+def _format_feedback_dialog_line(role: str, content: str, *, language: str) -> str:
+    if language == "cn":
+        label = "用户" if role == "user" else "助手"
+    else:
+        label = "User" if role == "user" else "Assistant"
+    return f"[{label}] {content}"
+
+
+def _build_user_feedback_prompt_inputs(
+    messages: Sequence[object],
+    *,
+    language: str,
+    max_turns: int = _USER_FEEDBACK_MAX_TURNS,
+) -> Optional[Tuple[str, str]]:
+    """Build ``(conversation_context, last_user_message)`` for feedback detection."""
+    dialog = _prepare_feedback_dialog_turns(messages)
+    last_user_idx: Optional[int] = None
+    for idx in range(len(dialog) - 1, -1, -1):
+        if dialog[idx][0] == "user":
+            last_user_idx = idx
+            break
+    if last_user_idx is None:
+        return None
+
+    last_user_message = dialog[last_user_idx][1][:_USER_FEEDBACK_LAST_USER_CHAR_LIMIT]
+
+    user_seen = 0
+    start = 0
+    for idx in range(last_user_idx, -1, -1):
+        if dialog[idx][0] == "user":
+            user_seen += 1
+            if user_seen >= max_turns:
+                start = idx
+                break
+
+    context_lines = [
+        _format_feedback_dialog_line(role, content, language=language)
+        for role, content in dialog[start:last_user_idx]
+    ]
+    conversation_context = "\n".join(context_lines)[:_USER_FEEDBACK_CONTEXT_CHAR_LIMIT]
+    if not conversation_context:
+        conversation_context = "(无)" if language == "cn" else "(none)"
+    return conversation_context, last_user_message
+
+
+def _parse_llm_feedback_response(raw: str) -> Optional[object]:
+    """Parse LLM feedback JSON (dict or list), tolerating markdown code fences."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = TuneUtils.parse_json_from_llm_response(text)
+    if isinstance(parsed, (dict, list)):
+        return parsed
+    return None
+
+
+def _normalize_feedback_items(
+    parsed: object,
+    *,
+    candidate_skills: List[str],
+    default_excerpt: str,
+) -> List[Tuple[str, str]]:
+    """Normalize LLM / legacy feedback JSON into ``[(skill_name, excerpt), ...]``."""
+    if not candidate_skills:
+        return []
+
+    allowed = set(candidate_skills)
+    default_skill = candidate_skills[-1]
+
+    def _accept(skill: object, excerpt: object) -> Optional[Tuple[str, str]]:
+        name = str(skill or "").strip()
+        text = str(excerpt or "").strip() or default_excerpt
+        if not name or name not in allowed or not text:
+            return None
+        return name, text[:600]
+
+    items: List[Tuple[str, str]] = []
+    if isinstance(parsed, list):
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            accepted = _accept(entry.get("skill_name"), entry.get("excerpt"))
+            if accepted:
+                items.append(accepted)
+        return items
+
+    if not isinstance(parsed, dict):
+        return []
+
+    if not parsed.get("is_feedback", True):
+        return []
+
+    raw_items = parsed.get("items")
+    if isinstance(raw_items, list):
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                continue
+            accepted = _accept(entry.get("skill_name"), entry.get("excerpt"))
+            if accepted:
+                items.append(accepted)
+        if items:
+            return items
+
+    excerpt = str(parsed.get("excerpt") or default_excerpt).strip()
+    if not excerpt:
+        return []
+    skill = str(parsed.get("skill_name") or "").strip()
+    if skill and skill in allowed:
+        return [(skill, excerpt[:600])]
+    if len(candidate_skills) == 1:
+        return [(default_skill, excerpt[:600])]
+    return [(name, excerpt[:600]) for name in candidate_skills]
 
 # Tools whose output is fetched content (web pages, files, search results).
 _DATA_FETCH_TOOLS = frozenset(
@@ -247,31 +470,54 @@ class ConversationSignalDetector:
     async def detect_user_intent(
         self,
         messages: List[dict],
+        *,
+        extra_skills: Optional[Sequence[str]] = None,
     ) -> List[EvolutionSignal]:
-        """Use LLM judgment to turn passive user messages into standard signals."""
+        """Use LLM judgment to turn passive user messages into standard signals.
+
+        May return multiple signals when the conversation used multiple skills and
+        the user feedback covers more than one of them.
+
+        Judgment is based on the **last** user message. Recent user/assistant turns
+        (role-labeled, up to 9 Q&A) are provided as context only.
+        """
         if hasattr(messages, "to_otlp") or hasattr(messages, "otlp_trace"):
             raise TypeError(
                 "detect_user_intent() expects normalized messages; call trajectory_to_messages() first."
             )
-        user_messages = [
-            str(_get_field(msg, "content")).strip()
-            for msg in messages
-            if str(_get_field(msg, "role")) == "user" and str(_get_field(msg, "content")).strip()
-        ][-5:]
-        if not user_messages:
+        prompt_inputs = _build_user_feedback_prompt_inputs(
+            messages,
+            language=self._language,
+        )
+        if prompt_inputs is None:
             return []
+        conversation_context, last_user_message = prompt_inputs
+        logger.info(
+            "[detect_user_intent] last_user_message=%s",
+            last_user_message,
+        )
 
-        skill_name = self._infer_skill_from_messages(messages)
-        if not skill_name:
+        traj_skills = self.collect_skills_from_messages(messages)
+        session_used_skills = [
+            str(s).strip() for s in (extra_skills or []) if str(s).strip()
+        ]
+        skill_names = list(dict.fromkeys(session_used_skills or traj_skills))
+        logger.info(
+            "[detect_user_intent] session used skills=%s (traj=%s)",
+            skill_names,
+            traj_skills,
+        )
+        if not skill_names:
             return []
 
         if self._llm is None or not self._model:
-            return self._fallback_user_feedback_signals(user_messages, skill_name)
+            return self._fallback_user_feedback_signals(last_user_message, skill_names)
 
         prompt_template = _USER_FEEDBACK_PROMPT_CN if self._language == "cn" else _USER_FEEDBACK_PROMPT_EN
         prompt = prompt_template.format(
-            skill_name=skill_name,
-            user_messages="\n".join(user_messages)[:2000],
+            skill_names=", ".join(skill_names),
+            conversation_context=conversation_context,
+            last_user_message=last_user_message,
         )
 
         try:
@@ -283,20 +529,27 @@ class ConversationSignalDetector:
             raw = _response_to_text(response)
         except Exception as exc:
             logger.warning("[ConversationSignalDetector] user feedback detection failed: %s", exc)
-            return self._fallback_user_feedback_signals(user_messages, skill_name)
+            return self._fallback_user_feedback_signals(last_user_message, skill_names)
 
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return self._fallback_user_feedback_signals(user_messages, skill_name)
-        if not isinstance(parsed, dict):
-            return self._fallback_user_feedback_signals(user_messages, skill_name)
+        parsed = _parse_llm_feedback_response(raw)
+        if parsed is None:
+            return self._fallback_user_feedback_signals(last_user_message, skill_names)
 
-        if not parsed.get("is_feedback"):
+        if isinstance(parsed, dict) and not parsed.get("is_feedback", True) and "items" not in parsed:
             return []
 
-        excerpt = str(parsed.get("excerpt") or user_messages[-1]).strip()
-        return [self._make_user_feedback_signal(excerpt, skill_name)]
+        pairs = _normalize_feedback_items(
+            parsed,
+            candidate_skills=skill_names,
+            default_excerpt=last_user_message,
+        )
+        if not pairs:
+            return self._fallback_user_feedback_signals(last_user_message, skill_names)
+
+        return [
+            self._make_user_feedback_signal(excerpt, skill_name)
+            for skill_name, excerpt in pairs
+        ]
 
     def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
         """Scan messages and return deduplicated signals.
@@ -422,14 +675,31 @@ class ConversationSignalDetector:
                     skill_read_history.append((msg_idx, detected))
         return self._resolve_active_skill(len(messages), skill_read_history)
 
+    def collect_skills_from_messages(self, messages: List[dict]) -> List[str]:
+        """Collect unique skill names used in the conversation (order preserved)."""
+        skill_read_history: List[Tuple[int, str]] = []
+        for msg_idx, msg in enumerate(messages):
+            role = str(_get_field(msg, "role"))
+            tool_calls = _get_field(msg, "tool_calls", [])
+            if role == "assistant" and tool_calls:
+                detected = self._detect_skill_from_tool_calls(tool_calls)
+                if detected:
+                    skill_read_history.append((msg_idx, detected))
+        return list(dict.fromkeys(name for _, name in skill_read_history))
+
     def _fallback_user_feedback_signals(
         self,
-        user_messages: List[str],
-        skill_name: str,
+        last_user_message: str,
+        skill_names: Union[str, List[str]],
     ) -> List[EvolutionSignal]:
-        for message in reversed(user_messages):
-            if _CORRECTION_PATTERN.search(message):
-                return [self._make_user_feedback_signal(message, skill_name)]
+        """Rule fallback: only the last user message may trigger correction signals."""
+        names = [skill_names] if isinstance(skill_names, str) else list(skill_names)
+        names = [n for n in names if n]
+        text = str(last_user_message or "").strip()
+        if not names or not text:
+            return []
+        if _CORRECTION_PATTERN.search(text):
+            return [self._make_user_feedback_signal(text, name) for name in names]
         return []
 
     @staticmethod

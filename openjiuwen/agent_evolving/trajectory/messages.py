@@ -88,6 +88,14 @@ def _normalize_tool_call(tool_call: object) -> dict[str, Any]:
 def _normalize_message(message: Mapping[str, Any]) -> dict[str, Any]:
     result = deepcopy(dict(message))
     tool_calls = result.get("tool_calls")
+    if isinstance(tool_calls, str):
+        stripped = tool_calls.strip()
+        if stripped.startswith("["):
+            try:
+                tool_calls = json.loads(stripped)
+            except ValueError:
+                tool_calls = []
+            result["tool_calls"] = tool_calls
     if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes)):
         result["tool_calls"] = [_normalize_tool_call(tool_call) for tool_call in tool_calls]
     return result
