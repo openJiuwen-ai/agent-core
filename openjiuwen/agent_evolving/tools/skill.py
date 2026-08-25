@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import Any, Callable, Optional
 
@@ -49,6 +50,7 @@ def create_main_evolution_tools(
         ),
         EvolveReviewTaskTool(
             parent_agent=parent_agent,
+            review_runtime=review_runtime,
             language=language,
             agent_id=agent_id,
         ),
@@ -79,6 +81,7 @@ def create_main_evolution_tools(
 def create_evolve_review_task_tool(
     *,
     parent_agent: Any,
+    review_runtime: Any,
     language: str = "cn",
     agent_id: Optional[str] = None,
 ) -> list[Tool]:
@@ -86,6 +89,7 @@ def create_evolve_review_task_tool(
     return [
         EvolveReviewTaskTool(
             parent_agent=parent_agent,
+            review_runtime=review_runtime,
             language=language,
             agent_id=agent_id,
         )
@@ -128,7 +132,29 @@ class _EvolutionTool(BaseEvolutionTool):
 
     @staticmethod
     def _session_id(kwargs: dict[str, Any]) -> str:
-        return str(kwargs.get("conversation_id") or kwargs.get("session_id") or "")
+        session_id = kwargs.get("conversation_id") or kwargs.get("session_id")
+        if session_id:
+            return str(session_id)
+        session = kwargs.get("session")
+        get_session_id = getattr(session, "get_session_id", None)
+        return str(get_session_id()) if callable(get_session_id) else ""
+
+    @staticmethod
+    def _session_scope(kwargs: dict[str, Any]) -> dict[str, str]:
+        """Return optional Agent/Team locators exposed by the runtime Session."""
+
+        session = kwargs.get("session")
+        scope: dict[str, str] = {}
+        for key, getter_name in (
+            ("member_id", "get_agent_id"),
+            ("team_id", "get_team_id"),
+        ):
+            getter = getattr(session, getter_name, None)
+            if callable(getter):
+                value = getter()
+                if value:
+                    scope[key] = str(value)
+        return scope
 
 
 class PrepareSkillEvolutionReviewTool(_EvolutionTool):
@@ -159,7 +185,8 @@ class PrepareSkillEvolutionReviewTool(_EvolutionTool):
             launch = self._prepare_scope(
                 source="agent_detected_signal",
                 subject=subject,
-                session_id=str(kwargs.get("conversation_id") or kwargs.get("session_id") or ""),
+                session_id=self._session_id(kwargs),
+                **self._session_scope(kwargs),
                 user_intent=str(args.get("user_intent") or ""),
             )
             result = {
@@ -184,11 +211,21 @@ class EvolveReviewTaskTool(BaseEvolutionTool):
         self,
         *,
         parent_agent: Any | None,
+        review_runtime: Any,
         language: str,
         agent_id: Optional[str],
     ) -> None:
         super().__init__(build_evolution_tool_card(self.tool_name, self.tool_id, language, agent_id=agent_id))
         self._task_tool = TaskTool(card=self.card, parent_agent=parent_agent, language=language)
+        self._review_runtime = review_runtime
+
+    @staticmethod
+    def _session_id(kwargs: dict[str, Any]) -> str:
+        session = kwargs.get("session")
+        get_session_id = getattr(session, "get_session_id", None)
+        if callable(get_session_id):
+            return str(get_session_id() or "")
+        return str(kwargs.get("conversation_id") or kwargs.get("session_id") or "")
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         from openjiuwen.harness.rails.evolution.review.subagent import EVOLUTION_REVIEW_AGENT_NAME
@@ -200,13 +237,32 @@ class EvolveReviewTaskTool(BaseEvolutionTool):
                 raise ValueError("evolution_review_ref is required")
             if self._task_tool.parent_agent is None:
                 raise ValueError("parent_agent is required to run evolve_review_task")
-            return await self._task_tool.invoke(
+            task_result = await self._task_tool.invoke(
                 {
                     "subagent_type": EVOLUTION_REVIEW_AGENT_NAME,
                     "task_description": self._build_task_description(args, ref),
                 },
                 **kwargs,
             )
+            if not task_result.success:
+                return task_result
+
+            scope = self._review_runtime.resolve_scope(
+                ref,
+                session_id=self._session_id(kwargs),
+            )
+            if scope.status not in {"review_completed", "no_evolution"} or scope.result is None:
+                raise RuntimeError(f"evolution reviewer did not submit a review result; scope status is {scope.status}")
+
+            review_result = {
+                **scope.result,
+                "evolution_review_ref": ref,
+                "status": scope.status,
+            }
+            data = dict(task_result.data or {})
+            data["output"] = json.dumps(review_result, ensure_ascii=False)
+            data["review_result"] = review_result
+            return ToolOutput(success=True, data=data)
         except Exception as exc:
             return self.failure(exc)
 
@@ -312,7 +368,7 @@ class EvolveSkillExperiencesTool(_EvolutionTool):
                     session_id=session_id,
                 )
             except KeyError as exc:
-                raise ValueError("unknown or expired evolution_review_ref") from exc
+                raise ValueError("unknown evolution_review_ref") from exc
             result = await self._submission_service.apply_prepared_evolve_submission(prepared)
             if bool(result.get("success", True)):
                 self._review_runtime.consume_prepared_submission(prepared, session_id=session_id)
