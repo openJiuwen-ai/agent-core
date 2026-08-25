@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.prompts.sections import (
     build_skill_creation_guidance_section,
 )
@@ -58,11 +60,13 @@ class SkillCreateRail(EvolutionRail):
         self,
         skills_dir: str,
         *,
+        trajectory_span_processor: TrajectorySpanProcessor,
         language: str = "cn",
         auto_trigger: bool = True,
     ) -> None:
         super().__init__(
             evolution_trigger=EvolutionTriggerPoint.NONE,
+            trajectory_span_processor=trajectory_span_processor,
         )
         self._skills_dir = skills_dir
         self._auto_trigger = auto_trigger
@@ -71,6 +75,7 @@ class SkillCreateRail(EvolutionRail):
         self._skill_tool_seen_this_invoke = False
         self._last_followed_tool_call_counts: dict[str, int] = {}
         self._last_prompted_tool_totals: dict[str, tuple[int, int]] = {}
+        self._trajectory: Trajectory | None = None
         self._signal_detector = SkillCreationSignalDetector()
         self._system_prompt_builder = None
 
@@ -81,9 +86,13 @@ class SkillCreateRail(EvolutionRail):
     def uninit(self, agent) -> None:
         """Remove prompt sections owned by this rail."""
         _ = agent
-        if self._system_prompt_builder is not None:
-            self._system_prompt_builder.remove_section(SectionName.SKILL_CREATION_GUIDANCE)
-        self._system_prompt_builder = None
+        try:
+            if self._system_prompt_builder is not None:
+                self._system_prompt_builder.remove_section(SectionName.SKILL_CREATION_GUIDANCE)
+        finally:
+            self._system_prompt_builder = None
+            self._trajectory = None
+            super().uninit(agent)
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject stable skill creation guidance."""
@@ -96,11 +105,19 @@ class SkillCreateRail(EvolutionRail):
 
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset per-invoke follow-up flags."""
+        del ctx
         self._follow_up_sent = False
         self._skill_tool_seen_this_invoke = False
+        self._trajectory = None
 
-    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_task_iteration(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Enqueue a one-shot follow-up when deterministic strong signals appear."""
+        if trajectory is not None:
+            self._trajectory = trajectory
         self._maybe_enqueue_creation_follow_up(ctx)
 
     def _maybe_enqueue_creation_follow_up(self, ctx: AgentCallbackContext) -> bool:
@@ -145,15 +162,14 @@ class SkillCreateRail(EvolutionRail):
         if not self._auto_trigger:
             logger.debug("[SkillCreateRail] skill creation follow-up skipped: auto trigger disabled")
             return None
-        trajectory = self._build_trajectory(ctx)
-        if trajectory is None:
+        if self._trajectory is None:
             logger.debug("[SkillCreateRail] skill creation follow-up skipped: no trajectory")
             return None
 
         session_id = self._current_session_id()
         raw_tool_call_watermark = self._last_followed_tool_call_counts.get(session_id, 0)
         metrics = self._signal_detector.collect_metrics(
-            trajectory,
+            self._trajectory,
             raw_tool_call_watermark=raw_tool_call_watermark,
         )
         if self._follow_up_blocked_by_context(ctx):
@@ -162,7 +178,7 @@ class SkillCreateRail(EvolutionRail):
             return None
 
         signals = self._signal_detector.detect(
-            trajectory,
+            self._trajectory,
             raw_tool_call_watermark=raw_tool_call_watermark,
             prompted_snapshot=self._last_prompted_tool_totals.get(session_id),
             metrics=metrics,
@@ -261,9 +277,7 @@ class SkillCreateRail(EvolutionRail):
         return ""
 
     def _current_session_id(self) -> str:
-        if self._builder is None:
-            return ""
-        return self._builder.session_id
+        return self._trajectory.session_id if self._trajectory is not None and self._trajectory.session_id else ""
 
     def _refresh_follow_up_watermark(self, metrics: SkillCreationWindowMetrics) -> None:
         """Advance the session watermark to the metrics snapshot."""

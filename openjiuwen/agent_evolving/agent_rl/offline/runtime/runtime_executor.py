@@ -6,7 +6,7 @@ RuntimeExecutor
 ---------------
 
 Executes a single rollout task:
-1. Runs the agent via TrajectoryCollector (RAIL mode).
+1. Runs the agent and collects its trajectory through an RLRail.
 2. Optionally applies a reward function.
 3. Returns a fully populated RolloutMessage.
 
@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
@@ -31,18 +32,22 @@ TaskDataFn = Callable[[Dict[str, Any]], Dict[str, Any]]
 class RuntimeExecutor:
     """Self-contained single-task executor.
 
-    Uses ``agent_factory`` + ``TrajectoryCollector`` (RAIL-based)
-    to run the agent and collect structured trajectory data.
+    Uses an agent factory and an injected trajectory processor to run the
+    agent and collect structured trajectory data.
     """
 
     def __init__(
         self,
         *,
+        trajectory_span_processor: TrajectorySpanProcessor,
         agent_factory: Optional[Callable[[RLTask], Any]] = None,
         task_data_fn: Optional[TaskDataFn] = None,
         reward_fn: Optional[Callable[[RolloutMessage], Any]] = None,
     ) -> None:
-        """Initialize the runtime executor with optional agent factory and helpers."""
+        """Initialize the runtime executor with a shared trajectory processor."""
+        if not isinstance(trajectory_span_processor, TrajectorySpanProcessor):
+            raise TypeError("trajectory_span_processor must be a TrajectorySpanProcessor")
+        self._trajectory_span_processor = trajectory_span_processor
         self._agent_factory = agent_factory
         self._task_data_fn = task_data_fn
         self._reward_fn = reward_fn
@@ -106,8 +111,10 @@ class RuntimeExecutor:
     async def _execute_with_agent(
         self, rl_task: RLTask, rollout_message: RolloutMessage
     ) -> RolloutMessage:
-        """Run agent with TrajectoryCollector (RAIL mode) and build RolloutMessage."""
-        from openjiuwen.agent_evolving.agent_rl.offline.runtime.collector import TrajectoryCollector
+        """Run the agent with an RLRail and build its rollout message."""
+        from openjiuwen.agent_evolving.agent_rl.offline.runtime.collector import (
+            run_agent_and_collect_trajectory,
+        )
 
         if inspect.iscoroutinefunction(self._agent_factory):
             agent = await self._agent_factory(rl_task)
@@ -115,9 +122,10 @@ class RuntimeExecutor:
             agent = self._agent_factory(rl_task)
 
         inputs = self._build_agent_inputs(rl_task)
-        collector = TrajectoryCollector()
-        trajectory = await collector.collect(
-            agent, inputs,
+        trajectory = await run_agent_and_collect_trajectory(
+            agent,
+            inputs,
+            trajectory_span_processor=self._trajectory_span_processor,
             session_id=rl_task.task_id,
             source="offline",
             case_id=rl_task.origin_task_id,

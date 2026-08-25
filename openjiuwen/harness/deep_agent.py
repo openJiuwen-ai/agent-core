@@ -124,9 +124,6 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 )
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.identity import build_identity_section
-from openjiuwen.harness.prompts.sections.prompt_attachments import (
-    build_prompt_attachments_section,
-)
 from openjiuwen.harness.resources import (
     LoadRecord,
     find_expert_harness_manifest,
@@ -499,7 +496,6 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
-        prompt_builder.add_section(build_prompt_attachments_section(language))
         new_react_config = self._react_agent.config.model_copy()
         new_react_config.prompt_template = [
             {"role": "system", "content": _render_identity_prompt(prompt_builder, language)}
@@ -863,6 +859,7 @@ class DeepAgent(BaseAgent):
             )
 
         inner_card = AgentCard(
+            id=self.card.id,
             name=f"{self.card.name}_react",
             description=self.card.description or "",
         )
@@ -896,7 +893,6 @@ class DeepAgent(BaseAgent):
             ))
         else:
             prompt_builder.add_section(build_identity_section(language))
-        prompt_builder.add_section(build_prompt_attachments_section(language))
         react_config.prompt_template = [
             {"role": "system", "content": _render_identity_prompt(prompt_builder, language)}
         ]
@@ -1256,6 +1252,21 @@ class DeepAgent(BaseAgent):
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
             "agent_ras": getattr(self, "_agent_ras_setting", None),
         }
+
+        # Inherit the parent's image-modality decision only when the child
+        # reuses (or derives from) the parent model. A distinct model keeps
+        # auto-probe by omitting the kwarg.
+        shares_parent_model = (
+            spec.model is None
+            or spec.model is self._deep_config.model
+            or getattr(spec.model, "_browser_agent_parent_model", None) is self._deep_config.model
+        )
+        if spec.enable_read_image_multimodal is not None:
+            create_kwargs["enable_read_image_multimodal"] = spec.enable_read_image_multimodal
+        elif shares_parent_model:
+            create_kwargs["enable_read_image_multimodal"] = (
+                self._deep_config.enable_read_image_multimodal
+            )
 
         if spec.factory_name:
             normalized_factory = (spec.factory_name or "").strip().lower()

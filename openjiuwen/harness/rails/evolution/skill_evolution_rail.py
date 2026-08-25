@@ -8,6 +8,8 @@ import json
 import os
 import posixpath
 import re
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -47,7 +49,8 @@ from openjiuwen.agent_evolving.skill_self_evolution import (
     resolve_skill_evolution_action,
 )
 from openjiuwen.agent_evolving.tools import create_main_evolution_tools
-from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectoryStore
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
 from openjiuwen.core.common.logging import logger
@@ -71,7 +74,11 @@ from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionRequestResult,
     SimplifyRequestResult,
 )
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.evolution_rail import (
+    EvolutionRail,
+    EvolutionTriggerPoint,
+    PreparedEvolutionInput,
+)
 from openjiuwen.harness.rails.evolution.review.materials import build_review_scoped_materials
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.subagent import (
@@ -128,14 +135,20 @@ class EvolutionReviewScopeBuilder:
     def __init__(
         self,
         *,
-        trajectory_provider: Callable[[], Trajectory | None],
         materials_builder: Callable[[Trajectory | None], dict[str, Any]],
     ) -> None:
-        self._trajectory_provider = trajectory_provider
         self._materials_builder = materials_builder
 
-    def build_scoped_materials(self) -> dict[str, Any]:
-        return self._materials_builder(self._trajectory_provider())
+    def build_scoped_materials(self, trajectory: Trajectory) -> dict[str, Any]:
+        return self._materials_builder(trajectory)
+
+
+@dataclass(frozen=True)
+class _SkillPreparedEvolutionInput(PreparedEvolutionInput):
+    """Detached Skill evolution input with rail-local evaluation state."""
+
+    presented_entries: tuple[tuple[str, Any, str], ...] = ()
+    incremental_messages: tuple[dict[str, Any], ...] = ()
 
 
 def _utcnow_iso() -> str:
@@ -149,9 +162,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     Evolution logic runs in after_invoke (after complete conversation) because
     skill evolution needs full conversation context for signal detection.
 
-    Note: This class uses two stores:
-    - trajectory_store (from EvolutionRail): stores execution trajectories
-    - evolution_store (EvolutionStore): stores skill evolution data (experiences, SKILL.md)
+    The rail receives a shared span processor for execution capture and keeps
+    the evolution store for skill data (experiences, SKILL.md).
     """
 
     priority = 80
@@ -178,7 +190,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         review_runtime: EvolutionReviewRuntime,
         language: str = "cn",
         subject_kind: str = "skill",
-        trajectory_store: Optional[TrajectoryStore] = None,
+        trajectory_span_processor: TrajectorySpanProcessor,
         eval_interval: int = 5,
         evolution_total_timeout_secs: float = _DEFAULT_EVOLUTION_TOTAL_TIMEOUT_SECS,
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
@@ -205,7 +217,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             review_runtime: Externally-managed active-review runtime. Required. Shared instances enable
                 cross-rail review state and keep rail-local orchestration stateless.
             language: Language for experience generation ("cn" or "en")
-            trajectory_store: Optional trajectory store (inherited from EvolutionRail)
+            trajectory_span_processor: Shared observability span processor used for execution capture.
             eval_interval: Number of conversations between async evaluations
             sharing_config: Optional cross-user sharing settings (enabled, hub_path, etc.)
             disabled_skills: Optional deny-list of skill names excluded from self-optimization.
@@ -221,11 +233,11 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             raise ValueError("review_agent_max_iterations must be >= 1")
 
         super().__init__(
-            trajectory_store=trajectory_store,
             evolution_trigger=evolution_trigger,
             async_evolution=async_evolution,
             max_concurrent_evolution=max_concurrent_evolution,
             disabled_skills=disabled_skills,
+            trajectory_span_processor=trajectory_span_processor,
         )
         self._subject_kind_value = normalize_evolution_subject_kind(subject_kind)
         self._evolution_store = self._make_evolution_store(skills_dir)
@@ -361,7 +373,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     def _make_review_scope_builder(self) -> EvolutionReviewScopeBuilder:
         """Build the active review material builder for this rail subject."""
         return EvolutionReviewScopeBuilder(
-            trajectory_provider=lambda: self._build_trajectory(),
             materials_builder=build_review_scoped_materials,
         )
 
@@ -473,15 +484,30 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         session_id: str,
         user_intent: str = "",
     ):
-        """Create a review scope with rail-owned bounded review materials."""
-        self._skip_signal_trigger_this_invoke = True
-        return self._review_runtime.create_scope(
+        """Create review materials from the current clean trajectory window."""
+        capture = self._current_capture()
+        if capture is None:
+            raise RuntimeError("evolution review must be prepared during an active invoke")
+        if session_id and session_id != capture.session_id:
+            raise RuntimeError("review session does not match the active trajectory scope")
+
+        trajectory = self.get_trajectory(
+            session_id=capture.session_id,
+            member_id=capture.member_id,
+            team_id=capture.team_id,
+        )
+        if trajectory is None:
+            raise RuntimeError("no clean trajectory is available for evolution review")
+
+        scope = self._review_runtime.create_scope(
             source=source,
             subject=subject,
-            session_id=session_id,
+            session_id=capture.session_id,
             user_intent=user_intent,
-            scoped_materials=self._review_scope_builder.build_scoped_materials(),
+            scoped_materials=self._review_scope_builder.build_scoped_materials(trajectory),
         )
+        self._skip_signal_trigger_this_invoke = True
+        return scope
 
     @property
     def store(self) -> EvolutionStore:
@@ -563,9 +589,14 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Reset per-invoke active evolution state."""
+        del ctx
         self._skip_signal_trigger_this_invoke = False
 
-    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_task_iteration(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Periodically enqueue a fuzzy active-review self-check follow-up."""
         if not self._review_trigger:
             return
@@ -751,7 +782,11 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             presentation_snippet=presentation_snippet,
         )
 
-    async def _on_after_tool_call(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_tool_call(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Track experiences exposed to the agent without modifying tool results.
 
         Presentation sources (either counts as presented for later scoring):
@@ -812,37 +847,17 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             build_snippet=self._build_evaluation_snippet,
         )
 
-    async def run_evolution(
-        self,
-        trajectory: Trajectory,
-        ctx: Optional[AgentCallbackContext] = None,
-        *,
-        snapshot: Optional[dict] = None,
-    ) -> None:
-        """Run skill evolution based on the collected trajectory.
-
-        In async mode: ctx=None, snapshot contains data captured by _snapshot_for_evolution.
-        In sync mode: ctx is active, snapshot=None (backward-compatible).
-        """
+    async def run_evolution(self, prepared: _SkillPreparedEvolutionInput) -> None:
+        """Run skill evolution from one detached, immutable input."""
         logger.info("[SkillEvolutionRail] run_evolution called, signal_trigger=%s", self._signal_trigger)
         if not self._signal_trigger:
             logger.info("[SkillEvolutionRail] signal_trigger disabled, skipping")
             return
 
         try:
-            # Async path: read from snapshot
-            if snapshot is not None:
-                trajectory = snapshot.get("trajectory", trajectory)
-                messages = snapshot["messages"]
-                presented_entries = snapshot.get("presented_entries", [])
-            # Sync path: read from ctx (backward-compatible)
-            elif ctx is not None:
-                messages = self._collect_messages_from_trajectory(trajectory)
-                session = ctx.session if hasattr(ctx, "session") else None
-                presented_entries = self._experience_tracker.consume_eval_state(session)
-            else:
-                logger.warning("[SkillEvolutionRail] run_evolution abort: no snapshot and no ctx")
-                return
+            trajectory = prepared.trajectory
+            messages = [deepcopy(message) for message in prepared.messages]
+            presented_entries = [deepcopy(entry) for entry in prepared.presented_entries]
 
             logger.info("[SkillEvolutionRail] collected %d messages", len(messages))
             self._emit_progress(
@@ -931,7 +946,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             )
 
             # Download hub experiences before local generation
-            incremental_messages = self._resolve_incremental_messages(messages, ctx, snapshot)
+            incremental_messages = list(prepared.incremental_messages) or messages
             downloaded_per_skill: dict[str, List[EvolutionRecord]] = {}
             if self.is_sharing_enabled and skill_groups:
                 downloaded_per_skill = await self._download_shared_experiences(
@@ -966,7 +981,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     skill_signals=skill_signals,
                     messages=messages,
                     trajectory=trajectory,
-                    ctx=ctx,
+                    ctx=None,
                     shared_records=downloaded_per_skill.get(skill_name, []),
                     requires_approval=False,
                     # Same as enterprise-dev: review_status mirrors selfEvolution action.
@@ -997,6 +1012,61 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 self._emit_progress("cancelled", message, skill_name=skill_name)
         except Exception as exc:
             logger.warning("[SkillEvolutionRail] auto evolution failed: %s", exc)
+
+    async def evolve_from_external_signals(
+        self,
+        *,
+        signals: List[EvolutionSignal],
+        messages: Optional[List[dict]] = None,
+        trajectory: Optional[Trajectory] = None,
+        user_query: str = "",
+        requires_approval: Optional[bool] = None,
+    ) -> OnlineEvolutionResult:
+        """Evolve one regular Skill from already-attributed external signals.
+
+        This entry point deliberately bypasses passive ``signal_trigger``
+        detection. The caller is responsible for attribution and evidence
+        policy; the rail still validates the target, generates records through
+        the standard optimizer, and uses the normal approval/persistence path.
+        """
+
+        normalized_signals = list(signals or [])
+        skill_names = {signal.skill_name for signal in normalized_signals if signal.skill_name}
+        if not normalized_signals or len(skill_names) != 1:
+            return OnlineEvolutionResult(
+                skill_name=next(iter(skill_names), ""),
+                status="skipped_no_input",
+                message="external evolution requires signals attributed to exactly one Skill",
+            )
+
+        skill_name = next(iter(skill_names))
+        if self._disabled_skills and skill_name in self._disabled_skills:
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=f"external evolution skipped because skill '{skill_name}' is disabled",
+            )
+        if not self._evolution_store.skill_exists(skill_name) or not self._is_regular_skill(skill_name):
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=f"external evolution skipped because regular skill '{skill_name}' does not exist",
+            )
+
+        approval_required = not self._auto_save if requires_approval is None else bool(requires_approval)
+        # External producers (for example multiple task-review callbacks) can
+        # arrive concurrently.  Use the same per-rail gate as automatic
+        # evolution so optimizer calls and evolution-store writes stay ordered.
+        async with self._evolution_sem:
+            return await self._handle_evolution_from_signals(
+                skill_name=skill_name,
+                signals=normalized_signals,
+                messages=list(messages or []),
+                trajectory=trajectory,
+                ctx=None,
+                user_query=user_query,
+                requires_approval=approval_required,
+            )
 
     async def generate_and_emit_experience(
         self,
@@ -1718,36 +1788,34 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
     def _parse_messages(cls, messages: List[Any]) -> List[dict]:
         return cls._normalize_callback_messages(messages)
 
-    async def _snapshot_for_evolution(
+    async def _prepare_evolution_input(
         self,
         trajectory: Trajectory,
         ctx: AgentCallbackContext,
-    ) -> Optional[dict]:
-        """Phase 1: Collect messages while ctx is alive."""
+    ) -> Optional[_SkillPreparedEvolutionInput]:
+        """Capture messages and presented experiences while ctx is alive."""
         if not self._signal_trigger:
             return None
 
-        snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
-        if snapshot is None:
+        prepared = await super()._prepare_evolution_input(trajectory, ctx)
+        if prepared is None:
             return None
 
-        messages = snapshot["messages"]
+        messages = list(prepared.messages)
         if not messages:
             return None
 
-        session_id = ctx.inputs.conversation_id if ctx.inputs else ""
         session = ctx.session if hasattr(ctx, "session") else None
         presented_entries = self._experience_tracker.consume_eval_state(session)
 
-        snapshot.update(
-            {
-                "session_id": session_id,
-                "presented_entries": presented_entries,
-                "skill_name": "skill-evolution",
-                "incremental_messages": self._resolve_incremental_messages(messages, ctx, None),
-            }
+        incremental_messages = self._resolve_incremental_messages(messages, ctx, None) or messages
+        return _SkillPreparedEvolutionInput(
+            trajectory=prepared.trajectory,
+            messages=tuple(messages),
+            skill_name="skill-evolution",
+            presented_entries=tuple(deepcopy(presented_entries)),
+            incremental_messages=tuple(deepcopy(incremental_messages)),
         )
-        return snapshot
 
     # ── Governance commands (shared by 1D and team skills) ──
 
