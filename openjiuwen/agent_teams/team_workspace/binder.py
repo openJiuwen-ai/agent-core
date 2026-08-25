@@ -273,6 +273,7 @@ def prepare_member_workspace(
     role: TeamRole,
     leader_member_name: str | None,
     predefined_members: set[str],
+    external_cli_members: set[str] | None = None,
     member_workspace_prefix: bool = True,
 ) -> str:
     """Ensure the member workspace exists; return the in-team root path.
@@ -285,6 +286,13 @@ def prepare_member_workspace(
     ``team_member_workspace_dir`` — when the link exists it is transparent;
     when link creation fails the real directory retreats into the team tree
     (v3 R2). A/B code never notices the link.
+
+    ``external_cli_members`` is the set of external CLI member names
+    (claude/codex) currently in the team. The migrator skips their in-team
+    real directories (created by ``_prepare_external_cli_workspace``, A 块)
+    so they are not flattened/linked out — flattening would break the
+    A-block invariant and resurface the ``WinError 5`` link failure. The
+    caller (``setup_agent``) resolves it from ``team_backend`` when available.
     """
     if role == TeamRole.LEADER or member_name == leader_member_name:
         mode = MEMBER_MODE_LEADER
@@ -297,6 +305,7 @@ def prepare_member_workspace(
         team_name,
         leader_member_name=leader_member_name,
         predefined_members=predefined_members,
+        external_cli_members=external_cli_members,
         member_workspace_prefix=member_workspace_prefix,
     )
 

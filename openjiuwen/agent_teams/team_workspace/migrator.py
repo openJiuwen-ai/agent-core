@@ -48,6 +48,7 @@ class TeamWorkspaceMigrator:
         leader_member_name: str | None = None,
         predefined_members: set[str] | None = None,
         persistent_members: set[str] | None = None,
+        external_cli_members: set[str] | None = None,
         member_workspace_prefix: bool = True,
     ) -> bool:
         """Run the filesystem migration for one team.
@@ -65,6 +66,13 @@ class TeamWorkspaceMigrator:
                 executors never enter the roster) — they are skipped. ``None``
                 falls back to classifying everything non-leader/non-predefined
                 as dynamic.
+            external_cli_members: Names of external CLI members (claude/codex).
+                Their in-team real directory is created by
+                ``_prepare_external_cli_workspace`` (A 块, 不 link 出去) and must
+                stay in-team — flattening it to ``.agent_teams/<team>#<member>``
+                + link would both break the A-block invariant and trigger the
+                ``WinError 5`` link failure seen in session resume. Treated
+                like the leader: never moved, never linked.
             member_workspace_prefix: Passed through to the dynamic real-dir
                 formula; must match the value the binder will use, otherwise
                 migrated content and the reference count land in different
@@ -83,6 +91,7 @@ class TeamWorkspaceMigrator:
             return False
         predefined = predefined_members or set()
         persistent = persistent_members or set()
+        external_cli = external_cli_members or set()
         for entry in entries:
             if entry.name.startswith(".") or is_dir_link(entry):
                 continue
@@ -95,6 +104,10 @@ class TeamWorkspaceMigrator:
             if member_name == leader_member_name:
                 # Leader real dir already lives at the in-team link position
                 # (``workspaces/<member>_workspace``) — nothing to flatten.
+                continue
+            if member_name in external_cli:
+                # External CLI member (A 块): in-team real dir, must not be
+                # flattened/linked out. Same invariant as the leader.
                 continue
             if persistent and member_name not in persistent:
                 team_logger.warning(

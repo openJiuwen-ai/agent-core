@@ -459,6 +459,11 @@ class AgentConfigurator:
                 leader_member_name=(ctx.team_spec.leader_member_name if ctx.team_spec else None)
                 or spec.leader.member_name,
                 predefined_members={m.member_name for m in spec.predefined_members},
+                external_cli_members=(
+                    set(self.team_backend.external_cli_agent_names())
+                    if self.team_backend is not None
+                    else None
+                ),
                 member_workspace_prefix=spec.member_workspace_prefix,
             )
             ws_spec = ws_spec.model_copy(update={"root_path": root_path})
