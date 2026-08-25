@@ -1,12 +1,16 @@
 ## 上下文继承（Fork）
 
-通过 `fork` / `fork_source` / `fork_mode` 从已有成员继承上下文：
+**默认该用**：多个成员需要相同基础理解时，默认应**继承而非重读**——先让源成员调 `checkpoint(name="xxx")` 打快照，再在 `spawn_teammate` 里用 `fork="xxx" fork_source="<源成员>"` 继承。成员创建前先自问：它是否依赖某个成员已有的理解？若是，就用 fork，不要为每个成员各自从头重读。
 
-| 参数 | 用法 |
-|------|------|
-| **fork** | true：继承调用者当前全部上下文。字符串（如 `code-ready`）：从命名的 checkpoint 快照继承 |
-| **fork_source** | 上下文来源成员名。默认 leader。必须是已拉起的 in-process teammate |
-| **fork_mode** | 保留 checkpoint 的哪一侧：`full` \| `before`（默认）\| `after` \| `keep_before_compact_after` \| `keep_after_compact_before`。见「Fork 语义」 |
+### 编排顺序（关键时序）
+
+快照**必须先于依赖它的成员存在**，且快照记录的是**源成员自己**的上下文——只能由源成员（不是 leader）调 `checkpoint`：
+
+1. **spawn 分析成员时就埋好打快照的指令**：在它的 `desc` 或首轮任务里写明「读透模块后调 `checkpoint(name="xxx")`」——不要等之后补
+2. 该成员读完并打完快照后，用 `list_checkpoints` 核对快照确实已建立
+3. **在快照存在之后**再 spawn 依赖它的成员，传 `fork="xxx" fork_source="<分析成员>"`
+
+若已 spawn 的分析成员还没打快照，先 `send_message` 让它读完调 `checkpoint`，`list_checkpoints` 确认后再 fork。若依赖成员与分析成员**同批 spawn**（快照尚不存在），fork 无可继承——先让分析成员跑完一轮、打了快照，再建依赖成员。
 
 ### 使用场景
 
@@ -14,9 +18,17 @@
 |------|------|
 | 基类已读，需要 N 个同质执行者实现派生类 | `fork="base-ready" fork_source="reader"` |
 | 理解者已分析项目，多个执行者直接开工 | `fork="code-ready" fork_source="reader"` |
-| 上下文很大，压缩旧分析、保留近期工作 | `fork="code-ready" fork_source="reader" fork_mode="keep_after_compact_before"` |
+| 刚分析完就建执行者，立即同步 leader 当前推理 | `fork=true` |
+| 从 leader 自身快照继承（省略 `fork_source` 即默认 leader） | `fork="code-ready"` |
+| 不同专长成员各带同一项目理解，管各自领域 | `fork="code-ready" fork_source="arch"` |
+| 同一分析快照给两个成员分别推方案 X / 方案 Y，结果可比 | `fork="analysis" fork_source="analyst"` |
+| 阶段 A 的产出作为阶段 B 的输入（流水线接力） | `fork="stage-a-done" fork_source="stage-a"` |
+| 成员停摆 / 换人，新成员继承其 checkpoint 接手 | `fork="mid-work" fork_source="<旧成员>"` |
+| 复核：fork 执行者同一快照，以相同理解 cross-check | `fork="code-ready" fork_source="executor"` |
+| 只继承 checkpoint 之后的近期工作态，不拖入旧历史 | `fork="code-ready" fork_source="reader" fork_mode="after"` |
+| 保留定型分析、压缩近期细节后动手 | `fork="code-ready" fork_source="reader" fork_mode="keep_before_compact_after"` |
+| 上下文很大：压缩旧分析、保留近期工作 | `fork="code-ready" fork_source="reader" fork_mode="keep_after_compact_before"` |
 | 完整保留已定型的分析，丢弃尾部噪音 | `fork="code-ready" fork_source="reader" fork_mode="before"` |
-| 只要 checkpoint 之后的工作状态，丢弃之前全部 | `fork="code-ready" fork_source="reader" fork_mode="after"` |
 | 不相关的新任务 | 不传 fork |
 
 ### Fork 语义
