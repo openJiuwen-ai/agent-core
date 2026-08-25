@@ -189,6 +189,7 @@ _SUB_AGENTS_DIR = "sub_agents"
 _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
     {
         "tool_search",
+        "tool_call",
         "read_file",
         "write_file",
         "edit_file",
@@ -466,6 +467,27 @@ class DeepAgent(BaseAgent):
 
         self._queue_pending_rails(config)
         self._sync_prompt_builder_references()
+        # SubagentRail is intentionally retained across partial hot reloads so
+        # its task/session tools and running subagents survive. Refresh the
+        # model-facing available-agents text after the parent registry and
+        # subagent configuration have changed, otherwise task_tool can keep
+        # advertising a stale tool-name snapshot.
+        self._refresh_subagent_tool_descriptions()
+
+    def _refresh_subagent_tool_descriptions(self) -> None:
+        """Refresh dynamic tool names embedded in subagent tool metadata."""
+
+        for rail in (*self._pending_rails, *self._registered_rails):
+            refresh = getattr(rail, "refresh_available_agents", None)
+            if not callable(refresh):
+                continue
+            try:
+                refresh(self)
+            except Exception as exc:
+                logger.warning(
+                    "[DeepAgent] Failed to refresh subagent tool descriptions: %s",
+                    exc,
+                )
 
     def _hot_reload_rails(self, config: DeepAgentConfig) -> None:
         """Cycle stale rails out and prepare replacement rails during hot-reconfigure.

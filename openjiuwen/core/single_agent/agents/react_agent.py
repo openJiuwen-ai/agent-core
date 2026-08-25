@@ -938,23 +938,18 @@ class ReActAgent(BaseAgent):
             ctx: AgentCallbackContext,
             final_system: List[SystemMessage],
     ) -> dict:
-        """Build the final ContextWindow inputs after model-call rails run."""
-        context_window_kwargs = {
+        """Build the final ContextWindow inputs after model-call rails run.
+
+        Prompt attachments are persisted in conversation order: the first
+        snapshot is synchronized before the first user message, and later
+        changes are synchronized immediately before the model call.  They are
+        intentionally left in ``context_messages``; no final-window mutator
+        moves them into ``system_messages``.
+        """
+        return {
             "system_messages": final_system,
             "tools": ctx.inputs.tools if ctx.inputs.tools else None,
         }
-        manager = getattr(self, "prompt_attachment_manager", None)
-        make_window_mutator = getattr(manager, "make_window_mutator", None)
-        if callable(make_window_mutator):
-            session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
-            )
-            context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id)
-            ]
-        return context_window_kwargs
 
     async def _sync_prompt_attachments(
             self,

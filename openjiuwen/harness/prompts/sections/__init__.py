@@ -12,7 +12,6 @@ class SectionName:
     TOOLS = "tools"
     TODO = "todo"
     TASK_TOOL = "task_tool"
-    TOOL_NAVIGATION = "tool_navigation"
     PROGRESSIVE_TOOL_RULES = "progressive_tool_rules"
     RUNTIME = "runtime"
     MEMORY = "memory"
