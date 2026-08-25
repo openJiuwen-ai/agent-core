@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from openjiuwen.symphony.orchestration.modes import is_supported, unsupported_mode_error
+
 
 @dataclass(frozen=True)
 class OrchestrationConfig:
@@ -14,8 +16,8 @@ class OrchestrationConfig:
     dynamic_graph_enabled: bool = False
 
     def __post_init__(self) -> None:
-        if self.mode not in {"fast", "beam"}:
-            raise ValueError(f"Unsupported orchestration mode: {self.mode}")
+        if not is_supported(self.mode):
+            raise unsupported_mode_error(self.mode)
         if self.top_k < 1 or self.max_depth < 1:
             raise ValueError("top_k and max_depth must be positive.")
         if not 0 <= self.min_edge_confidence <= 1:
