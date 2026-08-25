@@ -56,10 +56,113 @@ async def test_retries_when_model_call_times_out() -> None:
         call_model,
         operation_name="judge",
         max_retries=2,
+        initial_retry_delay_seconds=0,
     )
 
     assert result == '{"ok": true}'
     assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_retries_when_model_gateway_returns_502() -> None:
+    attempts = 0
+
+    async def call_model() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError(
+                "openAI API async invoke error: <html><head><title>502 Bad Gateway</title></head></html>"
+            )
+        return '{"ok": true}'
+
+    result = await run_model_call_with_retries(
+        call_model,
+        operation_name="diagnosis agent",
+        max_retries=2,
+        initial_retry_delay_seconds=0,
+    )
+
+    assert result == '{"ok": true}'
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_retries_rate_limit_but_not_exhausted_budget() -> None:
+    attempts = 0
+
+    async def rate_limited_call() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("Error code: 429 - rate limit exceeded")
+        return '{"ok": true}'
+
+    result = await run_model_call_with_retries(
+        rate_limited_call,
+        operation_name="diagnosis agent",
+        max_retries=2,
+        initial_retry_delay_seconds=0,
+    )
+    assert result == '{"ok": true}'
+    assert attempts == 2
+
+    async def exhausted_budget_call() -> str:
+        raise RuntimeError("Error code: 429 - Budget has been exceeded; code=budget_exceeded")
+
+    with pytest.raises(RuntimeError, match="Budget has been exceeded"):
+        await run_model_call_with_retries(
+            exhausted_budget_call,
+            operation_name="diagnosis agent",
+            max_retries=2,
+            initial_retry_delay_seconds=0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_retries_transient_connector_database_recovery_reported_as_401() -> None:
+    attempts = 0
+
+    async def call_model() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError(
+                "Error code: 401 - Authentication Error, Error in connector: "
+                "FATAL: the database system is not yet accepting connections; "
+                "DETAIL: Consistent recovery state has not been yet reached."
+            )
+        return '{"ok": true}'
+
+    result = await run_model_call_with_retries(
+        call_model,
+        operation_name="diagnosis agent",
+        max_retries=2,
+        initial_retry_delay_seconds=0,
+    )
+
+    assert result == '{"ok": true}'
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_does_not_retry_genuine_authentication_failure() -> None:
+    attempts = 0
+
+    async def call_model() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("Error code: 401 - Authentication failed: invalid API key")
+
+    with pytest.raises(RuntimeError, match="invalid API key"):
+        await run_model_call_with_retries(
+            call_model,
+            operation_name="diagnosis agent",
+            max_retries=2,
+            initial_retry_delay_seconds=0,
+        )
+
+    assert attempts == 1
 
 
 @pytest.mark.asyncio

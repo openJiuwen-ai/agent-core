@@ -18,6 +18,7 @@ from openjiuwen.rsi.schema import ActionDefinition
 
 _BUILTIN_GROUP_OPERATIONS: dict[str, tuple[str, ...]] = {
     "prompt": ("add", "modify", "remove"),
+    "rail": ("add", "modify", "remove"),
     "skill": ("add", "modify", "remove"),
     "tool": ("add", "modify", "remove"),
 }

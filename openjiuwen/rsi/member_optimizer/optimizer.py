@@ -37,6 +37,7 @@ from openjiuwen.rsi.member_optimizer.hypothesis import (
     load_optimization_hypotheses,
     write_candidate_manifest,
 )
+from openjiuwen.rsi.member_optimizer.execution_contract import role_execution_errors
 from openjiuwen.rsi.member_optimizer.lever import (
     LEVER_ACTION,
     LEVER_CONFIGURATION,
@@ -59,6 +60,7 @@ from openjiuwen.rsi.member_optimizer.role_attributor import RoleAttributor
 from openjiuwen.rsi.member_optimizer.schema import (
     MechanismAttributionReport,
     MemberOptimizationArtifact,
+    MemberOptimizationPlan,
     MemberOptimizationTarget,
     MemberSelectionReport,
     RoleAttributionReport,
@@ -78,6 +80,7 @@ class _PublishRequest:
     path_layout: MemberOptimizerPathLayout
     output_root: Path
     selection_report: Any
+    plan: MemberOptimizationPlan
     execution_results: Any
     verification_result: Any
     eval_ref_path: str
@@ -525,6 +528,7 @@ class MemberOptimizer:
                 path_layout=path_layout,
                 output_root=output_root,
                 selection_report=selection_report,
+                plan=plan,
                 execution_results=execution_results,
                 verification_result=verification_result,
                 eval_ref_path=eval_ref_path,
@@ -646,6 +650,7 @@ class MemberOptimizer:
         path_layout = request.path_layout
         output_root = request.output_root
         selection_report = request.selection_report
+        plan = request.plan
         execution_results = request.execution_results
         verification_result = request.verification_result
         eval_ref_path = request.eval_ref_path
@@ -671,7 +676,13 @@ class MemberOptimizer:
         skipped_roles: list[str] = []
         role_results: dict[str, RoleResult] = {}
 
-        verified_roles = {role: vr.status == "passed" for role, vr in verification_result.role_results.items()}
+        execution_errors_by_role = {
+            role: role_execution_errors(plan, execution_results, role) for role in selected_roles
+        }
+        verified_roles = {
+            role: vr.status == "passed" and not execution_errors_by_role.get(role)
+            for role, vr in verification_result.role_results.items()
+        }
 
         for role in sorted(selected_roles):
             before_ref = harness_refs.get(role, "")
@@ -723,7 +734,7 @@ class MemberOptimizer:
                     after_harness_ref_path=before_ref,
                     action_ids=[r.action_id for r in execution_results if r.role == role],
                     verification_status="failed",
-                    error="Verification failed",
+                    error="; ".join(execution_errors_by_role.get(role, [])) or "Verification failed",
                 )
 
         published_ref_paths = None
@@ -790,6 +801,7 @@ class MemberOptimizer:
                 "runtime_worktrees_dir": str(path_layout.worktrees_dir(run_dir.name)),
                 "candidate_manifest_path": candidate_manifest_path,
                 "optimization_hypotheses_path": optimization_hypotheses_path,
+                "execution_errors_by_role": execution_errors_by_role,
             },
         )
 
