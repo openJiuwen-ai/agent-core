@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -31,6 +32,165 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 # tens of KB while the front matter is a handful of lines; a file whose front
 # matter does not fit within this budget falls back to a full read.
 _FRONT_MATTER_PROBE_LINES = 64
+
+# Catalog path reads only YAML frontmatter from SKILL.md (no markdown body).
+_FRONTMATTER_READ_LIMIT = 65536
+
+# Process-level catalog index: resolved skill dir → (mtime, Skill).
+# Survives SkillUseRail rebuilds across sessions so cold-start ④ does not
+# re-read every SKILL.md. Body stays lazy via SkillTool.
+_PROCESS_SKILL_INDEX: Dict[str, Tuple[float, Skill]] = {}
+
+
+def _read_local_frontmatter_prefix(
+    path: Path,
+    *,
+    limit: int = _FRONTMATTER_READ_LIMIT,
+) -> str:
+    """Read SKILL.md until the closing frontmatter ``---`` (catalog path; no body)."""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        first = handle.read(3)
+        if first != "---":
+            rest = handle.read(max(0, limit - len(first)))
+            return first + rest
+        parts: List[str] = [first]
+        total = len(first)
+        line = handle.readline()
+        if line:
+            parts.append(line)
+            total += len(line)
+        while total < limit:
+            line = handle.readline()
+            if not line:
+                break
+            parts.append(line)
+            total += len(line)
+            if line.strip() == "---":
+                break
+        return "".join(parts)
+
+
+def _parse_frontmatter_yaml(text: str) -> Optional[dict]:
+    """Parse YAML frontmatter from a SKILL.md prefix; ignore markdown body."""
+    if not text.startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    yaml_data = yaml.safe_load(parts[1]) or {}
+    return yaml_data if isinstance(yaml_data, dict) else None
+
+
+def clear_process_skill_index() -> None:
+    """Clear the process-level skill catalog index (tests / forced refresh)."""
+    _PROCESS_SKILL_INDEX.clear()
+
+
+def _skill_from_frontmatter_local(skill_dir: Path, update_at: float) -> Skill:
+    """Build a catalog Skill from local frontmatter only (no SysOp, no body)."""
+    skill_md_path = skill_dir / "SKILL.md"
+    description = ""
+    try:
+        prefix = _read_local_frontmatter_prefix(skill_md_path)
+        yaml_data = _parse_frontmatter_yaml(prefix)
+        if yaml_data is not None and "description" in yaml_data:
+            description = str(yaml_data["description"])
+    except OSError as exc:
+        logger.debug(
+            "[SkillUseRail] local frontmatter read failed path=%s err=%s",
+            skill_md_path,
+            exc,
+        )
+    skill = Skill(
+        name=skill_dir.name,
+        description=description or f"Skill located in {skill_dir}",
+        directory=skill_dir,
+    )
+    try:
+        setattr(skill, "update_at", update_at)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return skill
+
+
+def warmup_process_skill_index(
+    skills_dir: Union[str, List[str]],
+    *,
+    enabled_skills: Optional[Union[str, List[str]]] = None,
+    disabled_skills: Optional[Union[str, List[str]]] = None,
+) -> Dict[str, Any]:
+    """Warm the process skill index by reading frontmatter only (sync, no SysOp).
+
+    Intended for AgentServer listen-after background warmup so the first chat
+    can hit ``cache=hit``. Safe to call repeatedly; mtime mismatch refreshes.
+
+    Returns:
+        Stats dict: ``scanned``, ``kept``, ``filled``, ``hits``, ``cost_ms``.
+    """
+    t0 = time.perf_counter()
+    enabled = SkillUseRail.normalize_name_set(enabled_skills)
+    disabled = SkillUseRail.normalize_name_set(disabled_skills)
+    roots = SkillUseRail.normalize_skill_dirs(skills_dir)
+    scanned = 0
+    kept = 0
+    filled = 0
+    hits = 0
+
+    def _allowed(name: str) -> bool:
+        if enabled and name not in enabled:
+            return False
+        if name in disabled:
+            return False
+        return True
+
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for item in sorted(root.iterdir(), key=lambda p: p.name):
+            if not item.is_dir():
+                continue
+            scanned += 1
+            if not _allowed(item.name):
+                continue
+            skill_md = item / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            kept += 1
+            try:
+                key = str(item.resolve())
+                update_at = skill_md.stat().st_mtime
+            except OSError:
+                continue
+            proc = _PROCESS_SKILL_INDEX.get(key)
+            if proc is not None and proc[0] == update_at:
+                hits += 1
+                continue
+            _PROCESS_SKILL_INDEX[key] = (
+                update_at,
+                _skill_from_frontmatter_local(item, update_at),
+            )
+            filled += 1
+
+    cost_ms = (time.perf_counter() - t0) * 1000
+    stats = {
+        "scanned": scanned,
+        "kept": kept,
+        "filled": filled,
+        "hits": hits,
+        "entries": len(_PROCESS_SKILL_INDEX),
+        "cost_ms": round(cost_ms, 1),
+    }
+    logger.info(
+        "[SkillUseRail] skill_index_warmup scanned=%s kept=%s filled=%s hits=%s "
+        "entries=%s cost_ms=%.1f",
+        scanned,
+        kept,
+        filled,
+        hits,
+        stats["entries"],
+        cost_ms,
+    )
+    return stats
 
 
 class SkillUseRail(DeepAgentRail):
@@ -92,8 +252,8 @@ class SkillUseRail(DeepAgentRail):
         self.list_skill_model = list_skill_model
         self.enable_cache = enable_cache
         self.include_tools = include_tools
-        self.enabled_skills = self._normalize_name_set(enabled_skills)
-        self.disabled_skills = self._normalize_name_set(disabled_skills)
+        self.enabled_skills = self.normalize_name_set(enabled_skills)
+        self.disabled_skills = self.normalize_name_set(disabled_skills)
         self.evolution_store: Optional[EvolutionStore] = evolution_store
         self.multimodal_skill_mode = multimodal_skill_mode
 
@@ -118,6 +278,11 @@ class SkillUseRail(DeepAgentRail):
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
+
+    @staticmethod
+    def clear_process_skill_index() -> None:
+        """Clear the process-level skill catalog index (tests / forced refresh)."""
+        _PROCESS_SKILL_INDEX.clear()
 
     @property
     def skills_meta(self) -> List[Skill]:
@@ -165,11 +330,16 @@ class SkillUseRail(DeepAgentRail):
 
         When ``enabled_skills`` / ``disabled_skills`` are set, skip disallowed
         directories before reading SKILL.md (filter-then-load).
+
+        Uses a process-level mtime index so a new ``SkillUseRail`` instance
+        (new session) does not re-read every SKILL.md. Catalog path only loads
+        frontmatter; markdown body stays lazy via ``skill_tool``.
         """
-        roots = self._normalize_skill_dirs(self.skills_dir)
+        roots = self.normalize_skill_dirs(self.skills_dir)
         if not roots:
             raise ValueError("skills_dir is empty")
 
+        t0 = time.perf_counter()
         logger.info(
             "[SkillUseRail] filter_before_load=1 enabled=%s disabled=%s roots=%s",
             sorted(self.enabled_skills) if self.enabled_skills else [],
@@ -182,6 +352,8 @@ class SkillUseRail(DeepAgentRail):
         scanned_dirs = 0
         skipped_by_filter = 0
         loaded_or_cached = 0
+        cache_hits = 0
+        cache_misses = 0
 
         for root in roots:
             if not root.exists():
@@ -221,8 +393,20 @@ class SkillUseRail(DeepAgentRail):
                 cached_skill = self._skill_cache.get(key)
                 cached_update_at = self._skill_update_at.get(key)
 
-                if cached_skill is None or cached_update_at != update_at:
-                    skill = await self._load_skill(item, update_at)
+                if cached_skill is not None and cached_update_at == update_at:
+                    cache_hits += 1
+                else:
+                    skill: Optional[Skill] = None
+                    if self.enable_cache:
+                        proc = _PROCESS_SKILL_INDEX.get(key)
+                        if proc is not None and proc[0] == update_at:
+                            skill = proc[1]
+                            cache_hits += 1
+                    if skill is None:
+                        skill = await self._load_skill(item, update_at)
+                        cache_misses += 1
+                        if self.enable_cache:
+                            _PROCESS_SKILL_INDEX[key] = (update_at, skill)
                     self._skill_cache[key] = skill
                     self._skill_update_at[key] = update_at
 
@@ -232,14 +416,30 @@ class SkillUseRail(DeepAgentRail):
         for key in stale_keys:
             self._skill_cache.pop(key, None)
             self._skill_update_at.pop(key, None)
+            _PROCESS_SKILL_INDEX.pop(key, None)
 
         self._skill_order = [key for key in ordered_keys if key in self._skill_cache]
 
+        if cache_misses == 0 and cache_hits > 0:
+            cache_label = "hit"
+        elif cache_hits == 0:
+            cache_label = "miss"
+        else:
+            cache_label = "mixed"
+        cost_ms = (time.perf_counter() - t0) * 1000
         logger.info(
             "[SkillUseRail] filter_before_load done scanned=%s skipped=%s kept=%s",
             scanned_dirs,
             skipped_by_filter,
             loaded_or_cached,
+        )
+        logger.info(
+            "[SkillUseRail] skill_index cache=%s hits=%s misses=%s entries=%s cost_ms=%.1f",
+            cache_label,
+            cache_hits,
+            cache_misses,
+            loaded_or_cached,
+            cost_ms,
         )
 
     async def _load_skill(self, skill_dir: Path, update_at: float) -> Skill:
@@ -487,7 +687,7 @@ class SkillUseRail(DeepAgentRail):
         """Build the same incremental-refresh signature used by _prepare_skills."""
         entries: List[Tuple[str, float]] = []
 
-        for root in self._normalize_skill_dirs(self.skills_dir):
+        for root in self.normalize_skill_dirs(self.skills_dir):
             if not root.exists():
                 continue
             if not root.is_dir():
@@ -748,7 +948,7 @@ class SkillUseRail(DeepAgentRail):
         return names
 
     @classmethod
-    def _normalize_name_set(cls, raw: Optional[Union[str, List[str]]]) -> Set[str]:
+    def normalize_name_set(cls, raw: Optional[Union[str, List[str]]]) -> Set[str]:
         """Normalize skill names into a set."""
         return set(cls._normalize_name_list(raw))
 
@@ -809,7 +1009,8 @@ class SkillUseRail(DeepAgentRail):
         """Load only the YAML front matter of a SKILL.md.
 
         A SKILL.md body can be tens of KB while the front matter is a handful of
-        lines, so a bounded head read is tried first and only a file whose front
+        lines. A local short read up to the closing ``---`` fence is tried first;
+        otherwise a bounded SysOp head read is used, and only a file whose front
         matter does not fit falls back to reading the whole file.
 
         Args:
@@ -818,6 +1019,14 @@ class SkillUseRail(DeepAgentRail):
         Returns:
             The parsed front matter mapping, or None when the file has none.
         """
+        try:
+            prefix = _read_local_frontmatter_prefix(path)
+            yaml_data = _parse_frontmatter_yaml(prefix)
+            if yaml_data is not None:
+                return yaml_data
+        except OSError:
+            pass
+
         head_text = await self._read_skill_text(path, head=_FRONT_MATTER_PROBE_LINES)
         parsed = self._split_front_matter(head_text)
         if parsed is not None:
@@ -878,7 +1087,7 @@ class SkillUseRail(DeepAgentRail):
         return [item.strip() for item in normalized.split(";") if item.strip()]
 
     @classmethod
-    def _normalize_skill_dirs(cls, skills_dir: Union[str, List[str]]) -> List[Path]:
+    def normalize_skill_dirs(cls, skills_dir: Union[str, List[str]]) -> List[Path]:
         """Normalize one or more skill directories."""
         if isinstance(skills_dir, str):
             raw_dirs = cls._parse_skill_dirs(skills_dir)
@@ -908,7 +1117,7 @@ class SkillUseRail(DeepAgentRail):
         skills_dir: Union[str, List[str]],
     ) -> List[Skill]:
         """Load skills from one or more skills directories."""
-        roots = cls._normalize_skill_dirs(skills_dir)
+        roots = cls.normalize_skill_dirs(skills_dir)
         if not roots:
             raise ValueError("skills_dir is empty")
 
