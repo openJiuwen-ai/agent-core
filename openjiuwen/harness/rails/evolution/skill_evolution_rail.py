@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
@@ -182,7 +182,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
-        two_stage: bool = False,
+        two_stage: bool = True,
         review_agent_max_iterations: int = 25,
         sharing_config: Optional[Dict[str, Any]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
@@ -241,7 +241,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             evaluate_llm_policy=evaluate_llm_policy,
             simplify_llm_policy=simplify_llm_policy,
         )
-        self._signal_trigger = bool(signal_trigger)
+        self._signal_trigger = True if signal_trigger is None else bool(signal_trigger)
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
@@ -882,10 +882,38 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 model=self._evolver.model,
                 language=self._language,
             )
+            session_skills: Set[str] = set()
+            traj_skills = detector.collect_skills_from_messages(messages)
+            session_skills.update(traj_skills)
+            logger.info(
+                "[SkillEvolutionRail] session used skills=%s (traj=%s)",
+                sorted(session_skills),
+                traj_skills,
+            )
+
             detected = detector.detect_trajectory_signals(
                 trajectory,
                 signal_types={"execution_failure", "script_artifact"},
             )
+            try:
+                feedback_signals = await detector.detect_user_intent(
+                    messages,
+                    extra_skills=sorted(session_skills),
+                )
+            except Exception as _fb_exc:
+                logger.warning(
+                    "[SkillEvolutionRail] user feedback signal detection failed: %s",
+                    _fb_exc,
+                )
+                feedback_signals = []
+            if feedback_signals:
+                logger.info(
+                    "[SkillEvolutionRail] detected %d user feedback signal(s), skills=%s",
+                    len(feedback_signals),
+                    sorted({s.skill_name for s in feedback_signals if getattr(s, "skill_name", None)}),
+                )
+                detected = [*detected, *feedback_signals]
+
             signals: List[EvolutionSignal] = []
             for signal in detected:
                 fp = make_signal_fingerprint(signal)

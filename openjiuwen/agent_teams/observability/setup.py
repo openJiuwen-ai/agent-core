@@ -12,9 +12,12 @@ from typing import Any
 from opentelemetry.sdk.trace import SpanProcessor
 from opentelemetry.sdk.trace.export import SpanExporter
 
+from opentelemetry.trace import Status, StatusCode
+
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.agent_teams.observability.span_context import finalize_trace, reset_all
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.extensions.observability.span_context import pop_current_llm_span
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.setup import (
     force_flush_provider,
@@ -126,3 +129,52 @@ def attach_to_team_agent(team_agent: Any) -> None:
         if listeners is not None and _monitor_handler in listeners:
             return
         team_agent.add_event_listener(_monitor_handler)
+
+
+def abort_current_llm_span(error: BaseException | None) -> bool:
+    """Close the current LLM span owned by the shared observability runtime."""
+    state = None
+    try:
+        span = pop_current_llm_span()
+        state = getattr(span, "otel_llm_state", None) if span else None
+
+        if state is None:
+            return False
+
+        if not state.span.is_recording():
+            return False
+
+        if error is not None:
+            state.span.record_exception(error)
+            state.span.set_status(Status(StatusCode.ERROR, str(error)))
+        else:
+            state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
+        state.span.end()
+        return True
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            team_logger.exception("otel: abort_current_llm_span failed: {}", exc)
+        if state is not None:
+            try:
+                if state.span.is_recording():
+                    state.span.set_status(Status(StatusCode.ERROR, "llm call error"))
+            except Exception as cleanup_exc:
+                team_logger.warning(
+                    "otel: abort_current_llm_span status cleanup failed: {}",
+                    cleanup_exc,
+                )
+            try:
+                if state.span.is_recording():
+                    state.span.end()
+                handled = not state.span.is_recording()
+            except Exception as cleanup_exc:
+                team_logger.warning(
+                    "otel: abort_current_llm_span end cleanup failed: {}",
+                    cleanup_exc,
+                )
+                handled = False
+        else:
+            handled = False
+        if not isinstance(exc, Exception):
+            raise
+        return handled
