@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Dict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from os import PathLike
 
 from openjiuwen.core.common.logging import logger
@@ -21,8 +21,8 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.agent_ras import AgentRASConfig
 from openjiuwen.harness.agent_ras.factory import build_agent_ras_rail
 from openjiuwen.harness.rails import (
-    LLMRetryRail,
     LLMStabilityRail,
+    ModelAnomalyDetectionRail,
     SecurityRail,
     SkillUseRail,
     SubagentRail,
@@ -45,6 +45,9 @@ from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.tools import create_vision_tools, is_free_search_enabled
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 
 
 def _collect_disabled_skills_from_state(skills_dirs: list[str]) -> list[str]:
@@ -98,6 +101,35 @@ def _is_disabled_free_search_tool(tool: Tool | ToolCard) -> bool:
     return card.name == "free_search" and not is_free_search_enabled()
 
 
+def _append_env_online_training_rail(
+    rails: list[AgentRail],
+    trajectory_span_processor: TrajectorySpanProcessor | None,
+) -> list[AgentRail]:
+    """Append env-configured online training rail without exposing it to hosts.
+
+    JiuwenSwarm and other harness hosts only need to set environment variables.
+    The online-RL package owns the concrete rail selection and gateway wiring.
+    """
+    try:
+        from openjiuwen.agent_evolving.agent_rl.online.rail import (
+            RLOnlineRail,
+            build_rl_online_rail_from_env,
+        )
+    except ImportError as exc:
+        logger.warning("Failed to import online training rail factory: %s", exc)
+        return rails
+
+    if any(isinstance(rail, RLOnlineRail) for rail in rails):
+        return rails
+    if trajectory_span_processor is None:
+        logger.warning("Online training rail is enabled but no trajectory span processor is available")
+        return rails
+    rail = build_rl_online_rail_from_env(trajectory_span_processor=trajectory_span_processor)
+    if rail is None:
+        return rails
+    return [*rails, rail]
+
+
 def _normalize_tools(
     tools: Optional[List[Tool | ToolCard]],
 ) -> tuple[List[ToolCard], List[Tool]]:
@@ -134,8 +166,17 @@ def _inject_general_purpose_subagent(
     mcps: Optional[List[McpServerConfig]],
     model: Model,
     skills: Optional[List[str]],
+    workspace: Optional[Workspace] = None,
+    sys_operation: Optional[SysOperation] = None,
 ) -> list[SubAgentConfig | DeepAgent]:
-    """Inject general-purpose subagent if requested and not already present."""
+    """Inject general-purpose subagent if requested and not already present.
+
+    ``workspace`` and ``sys_operation`` are the parent agent's resolved values;
+    the injected spec carries both so ``create_subagent`` keeps it inside the
+    parent's filesystem boundary instead of minting a fresh LOCAL
+    sys_operation for it (``create_subagent`` only adopts a spec's
+    sys_operation when its workspace is set as well).
+    """
     effective_subagents = list(subagents or [])
     if not add_general_purpose_agent:
         return effective_subagents
@@ -164,6 +205,8 @@ def _inject_general_purpose_subagent(
         model=model,
         skills=skills,
         rails=gp_rails,
+        workspace=workspace,
+        sys_operation=sys_operation,
         restrict_to_work_dir=False,
     ))
     return effective_subagents
@@ -227,9 +270,10 @@ def resolve_deep_agent_parts(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
-    enable_llm_retry_rail: bool = True,
+    enable_model_anomaly_detection_rail: bool = True,
     enable_sys_operation: bool = True,
     agent_ras: AgentRASConfig | dict[str, Any] | bool | None = None,
+    trajectory_span_processor: TrajectorySpanProcessor | None = None,
     **config_kwargs: Any,
 ) -> DeepAgentParts:
     """Assemble DeepAgent config + rails + tools without creating an instance.
@@ -278,18 +322,6 @@ def resolve_deep_agent_parts(
         False if vision_tools_enabled else enable_read_image_multimodal
     )
 
-    effective_subagents = _inject_general_purpose_subagent(
-        subagents,
-        add_general_purpose_agent=add_general_purpose_agent,
-        resolved_language=resolved_language,
-        rails=rails,
-        system_prompt=system_prompt,
-        tools=tools,
-        mcps=mcps,
-        model=model,
-        skills=skills,
-    )
-
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
     elif isinstance(workspace, (str, PathLike)):
@@ -324,6 +356,24 @@ def resolve_deep_agent_parts(
             sys_operation_obj = Runner.resource_mgr.get_sys_operation(sysop_id)
     else:
         sys_operation_obj = sys_operation
+
+    # Injected after the workspace / sys_operation are resolved so the
+    # general-purpose sub-agent can carry them: a spec without both makes
+    # create_subagent fall back to a fresh LOCAL sys_operation, which leaves
+    # this agent's sandbox behind.
+    effective_subagents = _inject_general_purpose_subagent(
+        subagents,
+        add_general_purpose_agent=add_general_purpose_agent,
+        resolved_language=resolved_language,
+        rails=rails,
+        system_prompt=system_prompt,
+        tools=tools,
+        mcps=mcps,
+        model=model,
+        skills=skills,
+        workspace=workspace_obj,
+        sys_operation=sys_operation_obj,
+    )
 
     config = DeepAgentConfig(
         model=model,
@@ -408,7 +458,11 @@ def resolve_deep_agent_parts(
 
     default_rails = [
         (SecurityRail, enable_security_rail, lambda: SecurityRail()),
-        (LLMRetryRail, enable_llm_retry_rail, lambda: LLMRetryRail()),
+        (
+            ModelAnomalyDetectionRail,
+            enable_model_anomaly_detection_rail,
+            lambda: ModelAnomalyDetectionRail(),
+        ),
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SubagentRail, bool(effective_subagents),
@@ -420,6 +474,7 @@ def resolve_deep_agent_parts(
     for rail_cls, should_add, make_rail in default_rails:
         if should_add and not _already_provided(rail_cls):
             all_rails.append(make_rail())
+    all_rails = _append_env_online_training_rail(all_rails, trajectory_span_processor)
 
     return DeepAgentParts(
         config=config,
@@ -497,7 +552,7 @@ def create_deep_agent(
     model_selection: Optional[Dict[Model, str]] = None,
     parallel_tool_calls: bool = True,
     enable_security_rail: bool = True,
-    enable_llm_retry_rail: bool = True,
+    enable_model_anomaly_detection_rail: bool = True,
     agent_ras: AgentRASConfig | dict[str, Any] | bool | None = None,
     **config_kwargs: Any,
 ) -> DeepAgent:
@@ -551,7 +606,8 @@ def create_deep_agent(
         default_mode: Initial agent mode (``AgentMode.NORMAL`` or ``AgentMode.PLAN``).
         enable_security_rail: Enable the default SecurityRail that injects the
             safety prompt section. Explicitly supplied security rails are kept.
-        enable_llm_retry_rail: Enable default LLMRetryRail for stream frame timeout and repeated-output retries.
+        enable_model_anomaly_detection_rail: Enable default ModelAnomalyDetectionRail
+            for stream frame timeout, repeated-output retries, and tool-loop compaction.
         agent_ras: Agent RAS configuration. ``None``/``True`` enables defaults;
             ``False`` disables; ``dict`` / ``AgentRASConfig`` provide advanced
             overrides. When enabled, AgentRASRail mounts automatically unless
@@ -595,7 +651,7 @@ def create_deep_agent(
         model_selection=model_selection,
         parallel_tool_calls=parallel_tool_calls,
         enable_security_rail=enable_security_rail,
-        enable_llm_retry_rail=enable_llm_retry_rail,
+        enable_model_anomaly_detection_rail=enable_model_anomaly_detection_rail,
         agent_ras=agent_ras,
         **config_kwargs,
     )

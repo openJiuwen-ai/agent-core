@@ -3,7 +3,7 @@
 """Trajectory-owned OTLP envelope and RL attribute names.
 
 Observability fields (GenAI, tool and Team context attributes) intentionally
-remain owned by :mod:`openjiuwen.agent_teams.observability.semconv`.  This
+remain owned by :mod:`openjiuwen.extensions.observability.semconv`.  This
 module only owns fields that identify a trajectory or are added by the
 evolution/RL projection.
 """
@@ -27,7 +27,7 @@ TRAJECTORY_SOURCE = "openjiuwen.trajectory.source"
 CASE_ID = "case_id"
 
 # RL enrichment fields are trajectory-owned and are not produced by
-# agent_teams.observability.  Keep the public names aligned with S_004.
+# extensions.observability.  Keep the public names aligned with S_004.
 RL_PROMPT_TOKEN_IDS = "evolution.rl.prompt_token_ids"
 RL_COMPLETION_TOKEN_IDS = "evolution.rl.completion_token_ids"
 RL_LOGPROBS = "evolution.rl.logprobs"

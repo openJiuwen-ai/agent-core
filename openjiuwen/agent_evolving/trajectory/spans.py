@@ -8,8 +8,8 @@ registry, or subscription.  Functions return detached dictionaries/lists and
 transformations create a new :class:`Trajectory` value through
 ``Trajectory.from_otlp``.
 
-Observability semantic keys are imported from ``agent_teams.observability``;
-the trajectory package must not maintain a second copy of those conventions.
+Current attributes follow the observability conventions; migration-only
+fallbacks remain explicitly owned by the trajectory package.
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ from copy import deepcopy
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Iterator, TypeAlias
 
-from openjiuwen.agent_evolving.trajectory import _semconv as semconv
+from openjiuwen.agent_evolving.trajectory import legacy_semconv
+from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
+from openjiuwen.extensions.observability import semconv
 
 
 JSONValue: TypeAlias = Any
@@ -28,45 +30,10 @@ Span: TypeAlias = dict[str, Any]
 SpanIdentity: TypeAlias = tuple[str, str]
 
 
-# ---------------------------------------------------------------------------
-# Small OTLP codec helpers
-# ---------------------------------------------------------------------------
-
-
-def _json_safe(value: Any) -> JSONValue:
-    """Return a detached JSON-compatible value without leaking input objects."""
-
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_json_safe(item) for item in value]
-    # OTel SDK values occasionally expose model_dump()/to_dict().  Falling
-    # back to a string is safer than retaining a live SDK object in a value.
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        try:
-            dumped = model_dump()
-        except Exception:
-            dumped = None
-        if isinstance(dumped, Mapping):
-            return _json_safe(dumped)
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        try:
-            dumped = to_dict()
-        except Exception:
-            dumped = None
-        if isinstance(dumped, Mapping):
-            return _json_safe(dumped)
-    return str(value)
-
-
 def encode_otlp_value(value: Any) -> dict[str, Any]:
     """Encode a Python value in the OTLP JSON ``AnyValue`` representation."""
 
-    value = _json_safe(value)
+    value = to_json_compatible(value)
     if value is None:
         return {"stringValue": ""}
     if isinstance(value, bool):
@@ -96,21 +63,21 @@ def decode_otlp_value(value: Any) -> Any:
     """
 
     if not isinstance(value, Mapping):
-        return _json_safe(value)
+        return to_json_compatible(value)
     if "stringValue" in value:
-        return _json_safe(value["stringValue"])
+        return to_json_compatible(value["stringValue"])
     if "boolValue" in value:
         return bool(value["boolValue"])
     if "intValue" in value:
         try:
             return int(value["intValue"])
         except (TypeError, ValueError):
-            return _json_safe(value["intValue"])
+            return to_json_compatible(value["intValue"])
     if "doubleValue" in value:
         try:
             return float(value["doubleValue"])
         except (TypeError, ValueError):
-            return _json_safe(value["doubleValue"])
+            return to_json_compatible(value["doubleValue"])
     if "arrayValue" in value:
         array = value.get("arrayValue") or {}
         values = array.get("values") if isinstance(array, Mapping) else []
@@ -175,8 +142,8 @@ def normalize_span(span: Mapping[str, Any]) -> Span:
 
     if not isinstance(span, Mapping):
         raise TypeError("span must be a mapping")
-    normalized = _json_safe(span)
-    if not isinstance(normalized, dict):  # pragma: no cover - _json_safe contract
+    normalized = to_json_compatible(span)
+    if not isinstance(normalized, dict):  # pragma: no cover - conversion contract
         raise TypeError("span must be a mapping")
     if "attributes" in normalized:
         normalized["attributes"] = _normalize_attributes(normalized.get("attributes"))
@@ -186,14 +153,14 @@ def normalize_span(span: Mapping[str, Any]) -> Span:
         for event in events:
             if not isinstance(event, Mapping):
                 continue
-            item = _json_safe(event)
+            item = to_json_compatible(event)
             if "attributes" in item:
                 item["attributes"] = _normalize_attributes(item.get("attributes"))
             normalized_events.append(item)
         normalized["events"] = normalized_events
     if "links" in normalized:
         links = normalized.get("links") or []
-        normalized["links"] = [_json_safe(link) for link in links if isinstance(link, Mapping)]
+        normalized["links"] = [to_json_compatible(link) for link in links if isinstance(link, Mapping)]
     return normalized
 
 
@@ -202,8 +169,8 @@ def normalize_otlp(payload: Mapping[str, Any]) -> dict[str, Any]:
 
     if not isinstance(payload, Mapping):
         raise TypeError("OTLP payload must be a mapping")
-    result = _json_safe(payload)
-    if not isinstance(result, dict):  # pragma: no cover - _json_safe contract
+    result = to_json_compatible(payload)
+    if not isinstance(result, dict):  # pragma: no cover - conversion contract
         raise TypeError("OTLP payload must be a mapping")
     resource_spans = result.get("resourceSpans") or []
     if not isinstance(resource_spans, list):
@@ -212,7 +179,7 @@ def normalize_otlp(payload: Mapping[str, Any]) -> dict[str, Any]:
     for resource_span in resource_spans:
         if not isinstance(resource_span, Mapping):
             continue
-        item = _json_safe(resource_span)
+        item = to_json_compatible(resource_span)
         resource = item.get("resource")
         if not isinstance(resource, Mapping):
             resource = {}
@@ -225,7 +192,7 @@ def normalize_otlp(payload: Mapping[str, Any]) -> dict[str, Any]:
         for scope in scopes:
             if not isinstance(scope, Mapping):
                 continue
-            scope_item = _json_safe(scope)
+            scope_item = to_json_compatible(scope)
             scope_item["scope"] = dict(scope_item.get("scope") or {})
             spans = scope_item.get("spans") or []
             scope_item["spans"] = [normalize_span(span) for span in spans if isinstance(span, Mapping)]
@@ -289,7 +256,7 @@ def span_status(span: Mapping[str, Any]) -> dict[str, Any]:
     """Return a detached status mapping (or an empty mapping)."""
 
     status = span.get("status") if isinstance(span, Mapping) else None
-    return dict(_json_safe(status)) if isinstance(status, Mapping) else {}
+    return dict(to_json_compatible(status)) if isinstance(status, Mapping) else {}
 
 
 def span_events(span: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -300,7 +267,7 @@ def span_events(span: Mapping[str, Any]) -> list[dict[str, Any]]:
     for event in events or []:
         if not isinstance(event, Mapping):
             continue
-        item = _json_safe(event)
+        item = to_json_compatible(event)
         if isinstance(item, dict) and "attributes" in item:
             item["attributes"] = _normalize_attributes(item.get("attributes"))
         if isinstance(item, dict):
@@ -563,15 +530,19 @@ def _message_list(value: Any) -> list[dict[str, Any]]:
 
 
 def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read detached prompt and completion messages from an ``llm.call`` span."""
+    """Read detached LLM messages, preferring standard attributes over Langfuse mirrors."""
 
     attrs = span_attributes(span)
     prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
     completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
     if not prompts:
-        prompts = _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
+        prompts = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_PROMPT)
     if not completions:
-        completions = _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
+        completions = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_COMPLETION)
+    if not prompts:
+        prompts = _message_list(attrs.get(legacy_semconv.LEGACY_GEN_AI_INPUT_MESSAGES))
+    if not completions:
+        completions = _message_list(attrs.get(legacy_semconv.LEGACY_GEN_AI_OUTPUT_MESSAGES))
     tool_calls = _decode_structured_attribute(attrs.get(semconv.GEN_AI_TOOL_CALLS))
     if tool_calls not in (None, ""):
         if completions:
@@ -597,19 +568,19 @@ def read_tool_call(span: Mapping[str, Any]) -> dict[str, Any]:
     attrs = span_attributes(span)
     result: dict[str, Any] = {}
     name = attrs.get(semconv.GEN_AI_TOOL_NAME)
-    tool_id = attrs.get(semconv.GEN_AI_TOOL_ID) or attrs.get(semconv.GEN_AI_TOOL_CALL_ID)
+    tool_id = attrs.get(semconv.GEN_AI_TOOL_ID) or attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ID)
     if name is not None:
         result["name"] = deepcopy(name)
     if tool_id is not None:
         result["id"] = deepcopy(tool_id)
     if semconv.GEN_AI_TOOL_INPUT in attrs:
         result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_INPUT])
-    elif semconv.GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
-        result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_ARGUMENTS])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
+        result["input"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS])
     if semconv.GEN_AI_TOOL_OUTPUT in attrs:
         result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_OUTPUT])
-    elif semconv.GEN_AI_TOOL_CALL_RESULT in attrs:
-        result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_RESULT])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT in attrs:
+        result["output"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT])
     error = read_span_error(span)
     if error is not None:
         result["error"] = error
@@ -621,10 +592,13 @@ def read_usage(span: Mapping[str, Any]) -> dict[str, int]:
 
     attrs = span_attributes(span)
     mapping = (
-        ("prompt_tokens", (semconv.GEN_AI_USAGE_PROMPT_TOKENS, semconv.GEN_AI_USAGE_INPUT_TOKENS)),
+        (
+            "prompt_tokens",
+            (semconv.GEN_AI_USAGE_PROMPT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_INPUT_TOKENS),
+        ),
         (
             "completion_tokens",
-            (semconv.GEN_AI_USAGE_COMPLETION_TOKENS, semconv.GEN_AI_USAGE_OUTPUT_TOKENS),
+            (semconv.GEN_AI_USAGE_COMPLETION_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS),
         ),
         ("total_tokens", (semconv.GEN_AI_USAGE_TOTAL_TOKENS,)),
     )
