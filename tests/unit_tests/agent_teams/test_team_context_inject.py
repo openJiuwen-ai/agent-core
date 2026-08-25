@@ -56,13 +56,35 @@ class _FakeBackend:
     async def get_members_max_updated_at(self) -> int:
         return 1
 
-    async def get_member_updated_at(self, member_name: str, field: str) -> int:
-        """Single-member mtime probe the identity body re-announce path uses."""
-        return getattr(self, "_prompt_mtime", 0)
+    async def get_member_updated_at_state(
+        self, member_name: str, field: str
+    ) -> tuple[int, bool]:
+        """Single-member mtime probe the identity body re-announce path uses.
+
+        Returns ``(mtime, present)``. ``present=True`` (a stamped
+        ``updated_at``) lets the wall-clock comparison run; the fake moves the
+        probe via :meth:`set_prompt_mtime`. ``present=False`` is exposed
+        separately via :meth:`set_prompt_updated_at_absent` to exercise the
+        blank-field "must update" path.
+        """
+        return getattr(self, "_prompt_mtime", 0), getattr(
+            self, "_prompt_present", True
+        )
 
     def set_prompt_mtime(self, mtime: int) -> None:
         """Move the prompt mtime so the identity body's probe sees a change."""
         self._prompt_mtime = mtime
+        self._prompt_present = True
+
+    def set_prompt_updated_at_absent(self) -> None:
+        """Make the probe report a blank ``updated_at`` (present=False)."""
+        self._prompt_mtime = 0
+        self._prompt_present = False
+
+    async def stamp_member_prompt_updated_at(self, member_name: str, ts: int) -> None:
+        """Record the stamped timestamp so the next probe mirrors a real md."""
+        self._prompt_mtime = ts
+        self._prompt_present = True
 
     async def get_team_info(self):
         return SimpleNamespace(team_name="demo", display_name="Demo", desc="")
@@ -226,36 +248,67 @@ async def test_emitted_prompt_mtime_unchanged_re_announces_nothing():
     assert "member_prompt_mtime" not in updated or updated["member_prompt_mtime"] == baseline["member_prompt_mtime"]
 
 
+# ─── blank updated_at forces a one-shot re-delivery (事 1, blank-field path) ─
+# A hand-evolved member_prompt whose frontmatter carries no ``updated_at``
+# (present=False) must re-announce exactly once: the delta fires, a single
+# timestamp T is stamped into the file and the baseline, and the next probe
+# (present=True, mtime=T == baseline) re-announces nothing — never a loop.
+
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_emitted_backend_without_single_member_probe_stays_one_shot():
-    """事 1 guard: a backend without ``get_member_updated_at`` keeps one-shot.
-
-    The ``getattr`` fallback returns ``None`` → nothing is probed → the body
-    stays one-shot. This is the back-compat path for older test fakes (and any
-    production backend with evolution off, where the method is absent).
-    """
-
-    class _LegacyBackend:
-        async def get_member(self, member_name: str):  # noqa: D401
-            return SimpleNamespace(
-                member_name="worker-a",
-                display_name="WorkerA",
-                desc="",
-                prompt=_EVOLVED_PROMPT,
-                role="teammate",
-            )
-
-        async def get_team_updated_at(self) -> int:
-            return 1
-
-        async def get_members_max_updated_at(self) -> int:
-            return 1
-
-    tracker = _tracker(backend=_LegacyBackend(), member_prompt=_BASELINE_PROMPT)
-    baseline = _baseline_with_identity_emitted(prompt_mtime=0)
+async def test_emitted_blank_updated_at_re_announces_once():
+    """事 1: blank updated_at (present=False) forces a one-shot re-announce."""
+    member = SimpleNamespace(
+        member_name="worker-a",
+        display_name="WorkerA",
+        desc="预配置成员描述",
+        prompt=_EVOLVED_PROMPT,
+        role="teammate",
+    )
+    backend = _FakeBackend(member=member)
+    tracker = _tracker(backend=backend, member_prompt=_BASELINE_PROMPT)
+    # Baseline carries a prior stamped mtime; the hand-edit blanked the field.
+    baseline = _baseline_with_identity_emitted(prompt_mtime=100)
     updated: dict[str, Any] = dict(baseline)
+    backend.set_prompt_updated_at_absent()  # present=False, mtime=0
+
     body = await tracker._identity_body(baseline, updated)
 
-    assert body is None, "legacy backend without the probe must not re-announce"
+    assert body is not None
+    assert _EVOLVED_TOKEN in body, "blank updated_at must still re-deliver the evolved prompt"
+    assert "## 私有工作约定" in body
+    # The stamper recorded T, and the baseline carries the same T (not 0, not
+    # the old 100) so the next probe mirrors a real md write.
+    assert updated["member_prompt_mtime"] == backend._prompt_mtime
+    assert backend._prompt_present is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_emitted_blank_updated_at_does_not_loop_after_stamp():
+    """事 1: after the stamp, the next probe (mtime==baseline) re-announces nothing."""
+    member = SimpleNamespace(
+        member_name="worker-a",
+        display_name="WorkerA",
+        desc="预配置成员描述",
+        prompt=_EVOLVED_PROMPT,
+        role="teammate",
+    )
+    backend = _FakeBackend(member=member)
+    tracker = _tracker(backend=backend, member_prompt=_BASELINE_PROMPT)
+    # First call: blank field → re-announce + stamp T into baseline.
+    baseline = _baseline_with_identity_emitted(prompt_mtime=100)
+    updated: dict[str, Any] = dict(baseline)
+    backend.set_prompt_updated_at_absent()
+    first_body = await tracker._identity_body(baseline, updated)
+    assert first_body is not None
+    stamped_mtime = updated["member_prompt_mtime"]
+
+    # Second call: the probe now reports present=True, mtime=stamped_mtime (the
+    # fake mirrors the stamp). baseline carries the same T → no re-fire.
+    second_updated: dict[str, Any] = dict(updated)
+    second_body = await tracker._identity_body(updated, second_updated)
+
+    assert second_body is None, "after the stamp, the probe must not re-fire"
+    assert second_updated["member_prompt_mtime"] == stamped_mtime
 

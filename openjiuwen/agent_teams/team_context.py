@@ -66,6 +66,7 @@ from openjiuwen.agent_teams.prompts.messages import (
     diff_roster,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -268,15 +269,31 @@ class TeamContextTracker:
         """
         if baseline.get(_IDENTITY_EMITTED):
             # Re-announce an evolved prompt without restating the constants.
-            # ``getattr`` keeps backends without the single-member probe
-            # (older test fakes, evolution off) on the one-shot path: ``None``
-            # → nothing to probe → return ``None``.
-            probe = getattr(self._team_backend, "get_member_updated_at", None)
-            if probe is None or not self._member_name:
+            if self._team_backend is None or not self._member_name:
                 return None
-            mtime = await probe(self._member_name, "prompt")
-            if mtime == baseline.get(_MEMBER_PROMPT_MTIME):
-                return None
+            mtime, present = await self._team_backend.get_member_updated_at_state(
+                self._member_name, "prompt"
+            )
+            if present:
+                # A stamped ``updated_at`` keeps the wall-clock comparison: only
+                # a moved mtime re-fires, and the baseline records the probe
+                # value so a stable file does not loop.
+                if mtime == baseline.get(_MEMBER_PROMPT_MTIME):
+                    return None
+                baseline_mtime = mtime
+            else:
+                # ``present=False`` (a blank ``updated_at`` — the evolution
+                # party edited the body without stamping the field) is an
+                # explicit "must update" signal: re-announce regardless of the
+                # baseline. A single timestamp T is then stamped into the file
+                # (meta only, the evolved body is preserved) and recorded as
+                # the new baseline — both share T, so the next probe reads
+                # ``present=True, mtime=T`` → ``T == baseline`` → no re-fire:
+                # a blank field forces exactly one re-delivery, never a loop.
+                baseline_mtime = get_current_time()
+                await self._team_backend.stamp_member_prompt_updated_at(
+                    self._member_name, baseline_mtime
+                )
             member = await self._team_backend.get_member(self._member_name)
             if member is None:
                 return None
@@ -286,7 +303,7 @@ class TeamContextTracker:
             )
             if delta is None:
                 return None
-            updated[_MEMBER_PROMPT_MTIME] = mtime
+            updated[_MEMBER_PROMPT_MTIME] = baseline_mtime
             return delta
         display_name = self._display_name
         # The constructor snapshot is the spec-time DB baseline (pre-evolution).
@@ -307,9 +324,10 @@ class TeamContextTracker:
         # Record the prompt mtime so a later hand-evolve moves the probe and the
         # delta path above re-announces only the prompt subsection.
         if self._team_backend is not None and self._member_name:
-            probe = getattr(self._team_backend, "get_member_updated_at", None)
-            if probe is not None:
-                updated[_MEMBER_PROMPT_MTIME] = await probe(self._member_name, "prompt")
+            mtime, _ = await self._team_backend.get_member_updated_at_state(
+                self._member_name, "prompt"
+            )
+            updated[_MEMBER_PROMPT_MTIME] = mtime
         return build_identity_text(
             member_name=self._member_name,
             display_name=display_name,

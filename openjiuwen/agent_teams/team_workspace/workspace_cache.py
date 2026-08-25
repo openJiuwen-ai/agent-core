@@ -54,6 +54,11 @@ from typing import Literal
 
 from openjiuwen.agent_teams.paths import team_member_workspace_dir
 from openjiuwen.agent_teams.team_workspace.file_content import FileContent, parse_file_content
+from openjiuwen.agent_teams.team_workspace.frontmatter import (
+    atomic_write,
+    read_frontmatter,
+    write_frontmatter,
+)
 from openjiuwen.agent_teams.team_workspace.layout import WorkspaceLayout
 from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
 from openjiuwen.core.common.logging import team_logger
@@ -194,6 +199,84 @@ class WorkspaceCache:
             self._member_values[key] = self._read_file_content(path)
         content = self._member_values[key]
         return content.updated_at if content is not None else 0
+
+    def get_member_updated_at_state(
+        self,
+        member_name: str,
+        field: Literal["desc", "prompt"],
+    ) -> tuple[int, bool]:
+        """Return ``(updated_at, present)`` for a member B-class file.
+
+        Counterpart of :meth:`get_member_updated_at` that also surfaces
+        whether the frontmatter carried an explicit ``updated_at`` integer.
+        The member-prompt re-announce probe uses ``present=False`` (a blank
+        field — the evolution party edited the body without stamping it) as
+        an explicit "must update" signal distinct from the ``0`` a *missing*
+        file produces (``content is None`` → ``(0, True)``, no update).
+
+        Shares the single file read with :meth:`get_member_updated_at` /
+        :meth:`get_member_field` via the resident ``_member_values`` entry.
+        """
+        key = (member_name, field)
+        if key not in self._member_values:
+            member_dir = team_member_workspace_dir(self._team_name, member_name)
+            if field == "desc":
+                path = WorkspaceLayout.member_card_file(member_dir)
+            else:
+                path = WorkspaceLayout.member_prompt_file(member_dir)
+            self._member_values[key] = self._read_file_content(path)
+        content = self._member_values[key]
+        if content is None:
+            # Missing file → (0, True): no "must update" signal (nothing to
+            # re-deliver). Distinct from a present file whose blank
+            # ``updated_at`` yields ``(0, False)``.
+            return (0, True)
+        return (content.updated_at, content.updated_at_present)
+
+    def stamp_member_prompt_updated_at(
+        self,
+        member_name: str,
+        ts: int,
+    ) -> None:
+        """Stamp ``ts`` into ``member_prompt.md``'s ``updated_at`` (meta only).
+
+        Called by the identity-body re-announce path right after it decides a
+        blank ``updated_at`` means "must update": one timestamp is used both
+        for the comparison baseline and the file's ``updated_at``, so the next
+        probe reads a stable non-zero value and does not re-fire. Only the
+        frontmatter changes — the body, baseline hash and ``evolved`` flag are
+        preserved (the evolution party's edit wins). Updates the resident
+        ``_member_values`` entry so a later ``get_member_updated_at_state``
+        in the same run is a dict hit, not a re-read.
+        """
+        key = (member_name, "prompt")
+        member_dir = team_member_workspace_dir(self._team_name, member_name)
+        path = WorkspaceLayout.member_prompt_file(member_dir)
+        try:
+            text = path.read_text(encoding="utf-8")
+            meta, body = read_frontmatter(text)
+            meta["updated_at"] = ts
+            atomic_write(path, write_frontmatter(meta, body))
+        except (OSError, ValueError) as exc:
+            team_logger.warning(
+                "[workspace] %s updated_at stamp failed: %s", path, exc
+            )
+            return
+        # Refresh the resident entry so the stamped value is visible to a
+        # same-run probe without a disk re-read. Reuse the already-read body
+        # and baseline; only ``updated_at`` / ``updated_at_present`` move.
+        old = self._member_values.get(key)
+        if old is not None:
+            self._member_values[key] = FileContent(
+                kind=old.kind,
+                name=old.name,
+                language=old.language,
+                baseline_sha256=old.baseline_sha256,
+                updated_at=ts,
+                body=old.body,
+                evolved=old.evolved,
+                updated_at_present=True,
+            )
 
     def get_team_updated_at(self, field: Literal["desc", "prompt"]) -> int:
         """Return the resident ``updated_at`` (ms) for a team B-class file."""

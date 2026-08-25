@@ -34,13 +34,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 from openjiuwen.agent_teams.team_workspace.frontmatter import (
-    atomic_write,
     body_sha256,
     read_frontmatter,
-    write_frontmatter,
 )
-from openjiuwen.agent_teams.tools.database.engine import get_current_time
-from openjiuwen.core.common.logging import team_logger
 
 
 class FileContent(NamedTuple):
@@ -59,6 +55,16 @@ class FileContent(NamedTuple):
     updated_at: int
     body: str
     evolved: bool
+    # Whether the frontmatter carried an explicit, parseable ``updated_at``
+    # integer. ``False`` means the field was absent / blank / non-int (a
+    # hand-evolved file that edited the body without stamping the field).
+    # The member-prompt re-announce probe treats ``updated_at == 0`` with
+    # ``updated_at_present=False`` as an explicit "must update" signal —
+    # distinct from ``updated_at == 0`` of a *missing* file (``present=True``
+    # via the caller's ``None`` → 0 fallback), so a blank field forces a
+    # one-shot re-delivery instead of relying on a backfilled wall-clock
+    # value happening to advance past the baseline.
+    updated_at_present: bool = True
 
     def is_evolved(self) -> bool:
         """Return whether the body has diverged from its recorded baseline.
@@ -96,15 +102,22 @@ def parse_file_content(path: Path) -> FileContent | None:
     # is checked on the raw text before parsing.
     has_frontmatter_block = text.startswith("---")
     meta, body = read_frontmatter(text)
+    updated_at_present = False
     if has_frontmatter_block:
         updated_at = meta.get("updated_at")
-        if not isinstance(updated_at, int) or updated_at < 0:
-            updated_at = get_current_time()
-            meta["updated_at"] = updated_at
-            try:
-                atomic_write(path, write_frontmatter(meta, body))
-            except OSError as exc:
-                team_logger.warning("[workspace] %s updated_at backfill failed: %s", path, exc)
+        if isinstance(updated_at, int) and updated_at >= 0:
+            updated_at_present = True
+        else:
+            # Blank / absent / non-int ``updated_at``: return 0 faithfully
+            # rather than backfilling a wall-clock value. The member-prompt
+            # re-announce probe treats ``(0, present=False)`` as an explicit
+            # "must update" signal and stamps a single timestamp back into the
+            # file + baseline in one move (so the next read sees a stable
+            # non-zero value and does not re-fire). The aggregated roster /
+            # team-info probes floor on the DB ``updated_at`` (``max(db, 0)``
+            # → ``db``), so a blank field does not advance them either —
+            # consistent with "blank does not mutate roster".
+            updated_at = 0
     else:
         updated_at = 0
     return FileContent(
@@ -115,6 +128,7 @@ def parse_file_content(path: Path) -> FileContent | None:
         updated_at=updated_at,
         body=body,
         evolved=bool(meta.get("evolved", False)),
+        updated_at_present=updated_at_present,
     )
 
 
