@@ -123,9 +123,11 @@ def _build_scheduler(
     )
     spec.agents = None
     infra.team_backend = AsyncMock(team_name=TEAM)
+    infra.team_backend.task_verification_enabled = lambda: True
     blueprint = SimpleNamespace(spec=spec, team_name=TEAM)
     host = FakeHost()
     if review_feedback_rail is not None:
+
         def _find_rails(rail_type):
             if rail_type.__name__ == "TeamSkillEvolutionRail":
                 return [review_feedback_rail]
@@ -140,6 +142,10 @@ def _build_scheduler(
         infra=infra,
         build_context=build_context,
     )
+    # Most scheduler unit tests drive votes through real TeamTaskManager
+    # instances and do not need an LLM harness. Protocol-lifecycle tests below
+    # replace this stub with their own outcome sequence.
+    scheduler._spawn_temp_reviewer = AsyncMock(return_value="unavailable")
     return scheduler, host, message_manager, task_manager
 
 
@@ -172,9 +178,7 @@ async def _age_task(db, task_id: str, seconds: int) -> None:
     model = _get_task_model()
     async with db.session_local() as session:
         await session.execute(
-            update(model)
-            .where(model.task_id == task_id)
-            .values(updated_at=get_current_time() - seconds * 1000)
+            update(model).where(model.task_id == task_id).values(updated_at=get_current_time() - seconds * 1000)
         )
         await session.commit()
 
@@ -353,6 +357,119 @@ async def test_review_dispatch_once_per_round_then_settle_pass(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_temp_reviewer_no_vote_retries_then_escalates_fail_closed(db, bus):
+    """A prose-only reviewer completion cannot strand IN_REVIEW silently."""
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    scheduler._spawn_temp_reviewer = AsyncMock(return_value="no_vote")
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if not scheduler._review_jobs and scheduler._spawn_temp_reviewer.await_count == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    assert scheduler._spawn_temp_reviewer.await_count == 2
+    assert (await tm.get("r")).status == TaskStatus.IN_REVIEW.value
+    protocol_failures = [text for text in host.leader_inputs if "rev-1" in text and "verify_task" in text]
+    assert len(protocol_failures) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_temp_reviewer_missing_vote_recovers_on_second_attempt(db, bus):
+    """A retry that persists a vote is reconciled immediately and settles."""
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    attempts = 0
+
+    async def _review_then_vote(reviewer, task):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return "no_vote"
+        result = await _reviewer_mgr(db, bus, reviewer).verify_task(task.task_id, "pass")
+        assert result.ok
+        return "voted"
+
+    scheduler._spawn_temp_reviewer = AsyncMock(side_effect=_review_then_vote)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if (await tm.get("r")).status == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+
+    assert attempts == 2
+    assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_active_scheduler_retries_cancelled_reviewer_job(db, bus):
+    """An inner run cancellation cannot consume the missing-vote wake-up."""
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    attempts = 0
+
+    async def _cancel_then_vote(reviewer, task):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise asyncio.CancelledError
+        result = await _reviewer_mgr(db, bus, reviewer).verify_task(task.task_id, "pass")
+        assert result.ok
+        return "voted"
+
+    scheduler._spawn_temp_reviewer = AsyncMock(side_effect=_cancel_then_vote)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if (await tm.get("r")).status == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+
+    assert attempts == 2
+    assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_replacing_non_voting_reviewer_dispatches_in_same_round(db, bus):
+    """Reviewer identity, not only (task, round), participates in dedupe."""
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    scheduler._spawn_temp_reviewer = AsyncMock(return_value="no_vote")
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if not scheduler._review_jobs and scheduler._spawn_temp_reviewer.await_count == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    changed = await tm.set_reviewer(
+        "r",
+        [{"type": "verifier", "reviewer_id": "rev-2", "instruction": "check runtime"}],
+    )
+    assert changed.ok
+
+    async def _replacement_votes(reviewer, task):
+        result = await _reviewer_mgr(db, bus, reviewer).verify_task(task.task_id, "pass")
+        assert result.ok
+        return "voted"
+
+    scheduler._spawn_temp_reviewer = AsyncMock(side_effect=_replacement_votes)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if (await tm.get("r")).status == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+
+    assert scheduler._spawn_temp_reviewer.await_count == 1
+    assert scheduler._spawn_temp_reviewer.await_args.args[0] == "rev-2"
+    assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_review_fail_settles_rework_with_feedback(db, bus):
     scheduler, host, mm, tm = _build_scheduler(db, bus, default_max_review_rounds=3)
     await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
@@ -365,7 +482,9 @@ async def test_review_fail_settles_rework_with_feedback(db, bus):
 
     task = await tm.get("r")
     assert task.status == TaskStatus.IN_PROGRESS.value
-    rework_dms = [(to, meta) for to, meta in _dm_targets(mm) if to == "dev-1" and meta["template"] == "scheduler_rework"]
+    rework_dms = [
+        (to, meta) for to, meta in _dm_targets(mm) if to == "dev-1" and meta["template"] == "scheduler_rework"
+    ]
     assert rework_dms
     # The aggregated fail feedback rides in params — a vote-round aggregate the
     # task row cannot answer at delivery time.
@@ -474,9 +593,7 @@ async def test_completion_event_digests_once(db, bus):
     author = _reviewer_mgr(db, bus, "dev-1")
     assert (await author.complete("a")).ok
 
-    event = EventMessage.from_event(
-        TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1")
-    )
+    event = EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1"))
     await scheduler.on_event(event)
     await scheduler.on_event(event)
 
@@ -508,25 +625,52 @@ def test_settle_review_tally_binary_pool():
     from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
 
     # 3 verifiers, all pass
-    assert settle_review_tally({
-        "verdict_pass_count": 3, "verdict_fail_count": 0,
-        "verdict_total": 3, "verdict_voted": 3,
-        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
-    }) == VERDICT_PASS
+    assert (
+        settle_review_tally(
+            {
+                "verdict_pass_count": 3,
+                "verdict_fail_count": 0,
+                "verdict_total": 3,
+                "verdict_voted": 3,
+                "inspector_count": 0,
+                "inspector_voted": 0,
+                "inspector_avg": None,
+            }
+        )
+        == VERDICT_PASS
+    )
 
     # 3 verifiers, 1 fail → FAIL
-    assert settle_review_tally({
-        "verdict_pass_count": 2, "verdict_fail_count": 1,
-        "verdict_total": 3, "verdict_voted": 3,
-        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
-    }) == VERDICT_FAIL
+    assert (
+        settle_review_tally(
+            {
+                "verdict_pass_count": 2,
+                "verdict_fail_count": 1,
+                "verdict_total": 3,
+                "verdict_voted": 3,
+                "inspector_count": 0,
+                "inspector_voted": 0,
+                "inspector_avg": None,
+            }
+        )
+        == VERDICT_FAIL
+    )
 
     # 3 verifiers, only 2 voted → UNDECIDED
-    assert settle_review_tally({
-        "verdict_pass_count": 2, "verdict_fail_count": 0,
-        "verdict_total": 3, "verdict_voted": 2,
-        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
-    }) == VERDICT_UNDECIDED
+    assert (
+        settle_review_tally(
+            {
+                "verdict_pass_count": 2,
+                "verdict_fail_count": 0,
+                "verdict_total": 3,
+                "verdict_voted": 2,
+                "inspector_count": 0,
+                "inspector_voted": 0,
+                "inspector_avg": None,
+            }
+        )
+        == VERDICT_UNDECIDED
+    )
 
 
 @pytest.mark.level0
@@ -535,22 +679,52 @@ def test_settle_review_tally_inspector_pool():
     from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
 
     # 2 inspectors, avg 0.90 → PASS
-    assert settle_review_tally({
-        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
-        "inspector_count": 2, "inspector_voted": 2, "inspector_avg": 0.90,
-    }) == VERDICT_PASS
+    assert (
+        settle_review_tally(
+            {
+                "verdict_total": 0,
+                "verdict_voted": 0,
+                "verdict_pass_count": 0,
+                "verdict_fail_count": 0,
+                "inspector_count": 2,
+                "inspector_voted": 2,
+                "inspector_avg": 0.90,
+            }
+        )
+        == VERDICT_PASS
+    )
 
     # 2 inspectors, avg 0.80 → FAIL
-    assert settle_review_tally({
-        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
-        "inspector_count": 2, "inspector_voted": 2, "inspector_avg": 0.80,
-    }) == VERDICT_FAIL
+    assert (
+        settle_review_tally(
+            {
+                "verdict_total": 0,
+                "verdict_voted": 0,
+                "verdict_pass_count": 0,
+                "verdict_fail_count": 0,
+                "inspector_count": 2,
+                "inspector_voted": 2,
+                "inspector_avg": 0.80,
+            }
+        )
+        == VERDICT_FAIL
+    )
 
     # 2 inspectors, only 1 voted → UNDECIDED
-    assert settle_review_tally({
-        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
-        "inspector_count": 2, "inspector_voted": 1, "inspector_avg": 0.95,
-    }) == VERDICT_UNDECIDED
+    assert (
+        settle_review_tally(
+            {
+                "verdict_total": 0,
+                "verdict_voted": 0,
+                "verdict_pass_count": 0,
+                "verdict_fail_count": 0,
+                "inspector_count": 2,
+                "inspector_voted": 1,
+                "inspector_avg": 0.95,
+            }
+        )
+        == VERDICT_UNDECIDED
+    )
 
 
 @pytest.mark.level0
@@ -559,38 +733,84 @@ def test_settle_review_tally_mixed():
     from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
 
     # Both pass
-    assert settle_review_tally({
-        "verdict_pass_count": 2, "verdict_fail_count": 0,
-        "verdict_total": 2, "verdict_voted": 2,
-        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.87,
-    }) == VERDICT_PASS
+    assert (
+        settle_review_tally(
+            {
+                "verdict_pass_count": 2,
+                "verdict_fail_count": 0,
+                "verdict_total": 2,
+                "verdict_voted": 2,
+                "inspector_count": 1,
+                "inspector_voted": 1,
+                "inspector_avg": 0.87,
+            }
+        )
+        == VERDICT_PASS
+    )
 
     # Binary pass, inspector fail
-    assert settle_review_tally({
-        "verdict_pass_count": 2, "verdict_fail_count": 0,
-        "verdict_total": 2, "verdict_voted": 2,
-        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.72,
-    }) == VERDICT_FAIL
+    assert (
+        settle_review_tally(
+            {
+                "verdict_pass_count": 2,
+                "verdict_fail_count": 0,
+                "verdict_total": 2,
+                "verdict_voted": 2,
+                "inspector_count": 1,
+                "inspector_voted": 1,
+                "inspector_avg": 0.72,
+            }
+        )
+        == VERDICT_FAIL
+    )
 
     # Binary fail, inspector pass
-    assert settle_review_tally({
-        "verdict_pass_count": 1, "verdict_fail_count": 1,
-        "verdict_total": 2, "verdict_voted": 2,
-        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.90,
-    }) == VERDICT_FAIL
+    assert (
+        settle_review_tally(
+            {
+                "verdict_pass_count": 1,
+                "verdict_fail_count": 1,
+                "verdict_total": 2,
+                "verdict_voted": 2,
+                "inspector_count": 1,
+                "inspector_voted": 1,
+                "inspector_avg": 0.90,
+            }
+        )
+        == VERDICT_FAIL
+    )
 
     # Binary not yet fully voted → UNDECIDED (even if inspector is done)
-    assert settle_review_tally({
-        "verdict_pass_count": 1, "verdict_fail_count": 0,
-        "verdict_total": 2, "verdict_voted": 1,
-        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.90,
-    }) == VERDICT_UNDECIDED
+    assert (
+        settle_review_tally(
+            {
+                "verdict_pass_count": 1,
+                "verdict_fail_count": 0,
+                "verdict_total": 2,
+                "verdict_voted": 1,
+                "inspector_count": 1,
+                "inspector_voted": 1,
+                "inspector_avg": 0.90,
+            }
+        )
+        == VERDICT_UNDECIDED
+    )
 
     # No reviewers at all → PASS (edge case)
-    assert settle_review_tally({
-        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
-        "inspector_count": 0, "inspector_voted": 0, "inspector_avg": None,
-    }) == VERDICT_PASS
+    assert (
+        settle_review_tally(
+            {
+                "verdict_total": 0,
+                "verdict_voted": 0,
+                "verdict_pass_count": 0,
+                "verdict_fail_count": 0,
+                "inspector_count": 0,
+                "inspector_voted": 0,
+                "inspector_avg": None,
+            }
+        )
+        == VERDICT_PASS
+    )
 
 
 @pytest.mark.level0
@@ -598,10 +818,20 @@ def test_settle_review_tally_boundary():
     """Inspector avg exactly at threshold (0.85) → PASS."""
     from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
 
-    assert settle_review_tally({
-        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
-        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": 0.85,
-    }) == VERDICT_PASS
+    assert (
+        settle_review_tally(
+            {
+                "verdict_total": 0,
+                "verdict_voted": 0,
+                "verdict_pass_count": 0,
+                "verdict_fail_count": 0,
+                "inspector_count": 1,
+                "inspector_voted": 1,
+                "inspector_avg": 0.85,
+            }
+        )
+        == VERDICT_PASS
+    )
 
 
 @pytest.mark.level0
@@ -609,10 +839,20 @@ def test_settle_review_tally_inspector_avg_none():
     """Inspector voted but avg is None (broken tally) → FAIL (safety)."""
     from openjiuwen.agent_teams.agent.scheduling.verdict import settle_review_tally
 
-    assert settle_review_tally({
-        "verdict_total": 0, "verdict_voted": 0, "verdict_pass_count": 0, "verdict_fail_count": 0,
-        "inspector_count": 1, "inspector_voted": 1, "inspector_avg": None,
-    }) == VERDICT_FAIL
+    assert (
+        settle_review_tally(
+            {
+                "verdict_total": 0,
+                "verdict_voted": 0,
+                "verdict_pass_count": 0,
+                "verdict_fail_count": 0,
+                "inspector_count": 1,
+                "inspector_voted": 1,
+                "inspector_avg": None,
+            }
+        )
+        == VERDICT_FAIL
+    )
 
 
 @pytest.mark.asyncio
