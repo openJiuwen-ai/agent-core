@@ -2,7 +2,7 @@
   "name": "openjiuwen_deepagent_evobench",
   "version": "0.1.0",
   "engine": "openjiuwen-deepagent",
-  "engine_revision": "da021f994908e6459177f408bbbfbd71e9f43d83",
+  "engine_revision": "repository-head",
   "system_prompt": "system_prompt.md",
   "max_steps": 120,
   "rollout_wall_clock_seconds": 3600,

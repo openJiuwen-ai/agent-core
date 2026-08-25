@@ -154,7 +154,6 @@ def _resolve_dataset_root(value: str) -> Path:
         [
             repo_root.parent / "workbuddy-bench" / "datasets" / "wb-bench-office-v1.0",
             repo_root.parent.parent / "workbuddy-bench" / "datasets" / "wb-bench-office-v1.0",
-            Path("D:/code/workbuddy-bench/datasets/wb-bench-office-v1.0"),
         ]
     )
     for candidate in candidates:

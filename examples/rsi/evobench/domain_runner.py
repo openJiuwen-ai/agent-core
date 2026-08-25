@@ -226,12 +226,15 @@ def _local_general_validation_command(
 ) -> list[str]:
     claw_repo = root / "external" / "claw-eval"
     python = root / ".claw-venv" / "bin" / "python"
-    if shutil.which("wsl.exe") is None or subprocess.run(
-        ["wsl.exe", "test", "-x", _to_wsl(python)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode:
+    if (
+        shutil.which("wsl.exe") is None
+        or subprocess.run(
+            ["wsl.exe", "test", "-x", _to_wsl(python)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+    ):
         raise RuntimeError("WSL Evo-Bench local runtime is not ready")
     return [
         "wsl.exe",

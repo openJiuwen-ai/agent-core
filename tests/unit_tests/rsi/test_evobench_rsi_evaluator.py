@@ -487,6 +487,10 @@ async def test_candidate_ignores_h0_cache_and_runs_official_protocol(
     )
 
     output_dir = tmp_path / "rsi-eval"
+    policy_config = tmp_path / "policy.yaml"
+    judge_config = tmp_path / "judge.yaml"
+    _write_model_config(policy_config, model="policy-test")
+    _write_model_config(judge_config, model="judge-test")
     monkeypatch.setattr(rsi_evaluator, "_short_official_eval_dir", lambda _: output_dir / "oe")
 
     def fake_run(command: list[str], cwd: Path, environment: dict[str, str]) -> subprocess.CompletedProcess[Any]:
@@ -507,6 +511,8 @@ async def test_candidate_ignores_h0_cache_and_runs_official_protocol(
         None,
         existing_official_result=str(result_path),
         evobench_root=str(root),
+        policy_model_config=str(policy_config),
+        judge_model_config=str(judge_config),
     )
 
     eval_ref = yaml.safe_load(Path(eval_ref_path).read_text(encoding="utf-8"))

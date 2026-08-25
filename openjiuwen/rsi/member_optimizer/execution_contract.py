@@ -21,11 +21,7 @@ class ActionExecutionOutcome:
 
 def action_bundle_key(action: Any) -> tuple[str, str] | None:
     """Return the role/issue key for an explicitly scoped action bundle."""
-    issue_ids = [
-        str(issue_id)
-        for issue_id in _list_value(_get(action, "attributed_issue_ids", []))
-        if str(issue_id)
-    ]
+    issue_ids = [str(issue_id) for issue_id in _list_value(_get(action, "attributed_issue_ids", [])) if str(issue_id)]
     if len(issue_ids) != 1:
         return None
     role = str(_get(action, "role", "") or "")
@@ -49,9 +45,7 @@ def evaluate_role_execution(
 
     actions_by_id = {action.action_id: action for action in planned}
     direct_success = {
-        action_id
-        for action_id, rows in rows_by_id.items()
-        if len(rows) == 1 and _is_merged_success(rows[0])
+        action_id for action_id, rows in rows_by_id.items() if len(rows) == 1 and _is_merged_success(rows[0])
     }
     successful_fallbacks_by_dependency: dict[str, list[str]] = {}
     for action in planned:
@@ -108,10 +102,7 @@ def evaluate_role_execution(
             outcomes[action.action_id] = ActionExecutionOutcome(
                 action_id=action.action_id,
                 satisfied=True,
-                reason=(
-                    "failed primary action replaced by successful fallback(s): "
-                    f"{sorted(successful_fallbacks)}"
-                ),
+                reason=(f"failed primary action replaced by successful fallback(s): {sorted(successful_fallbacks)}"),
             )
             continue
 
@@ -145,10 +136,7 @@ def role_execution_errors(
 
 
 def _is_merged_success(row: Any) -> bool:
-    return (
-        str(_get(row, "status", "") or "") == "succeeded"
-        and str(_get(row, "merge_status", "") or "") == "merged"
-    )
+    return str(_get(row, "status", "") or "") == "succeeded" and str(_get(row, "merge_status", "") or "") == "merged"
 
 
 def _same_bundle_or_unscoped(left: Any, right: Any) -> bool:

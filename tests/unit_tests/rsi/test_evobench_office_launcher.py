@@ -45,6 +45,25 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_help_does_not_require_runtime_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    launcher = _load_launcher()
+
+    class FakeRunner:
+        @staticmethod
+        def main(arguments: list[str]) -> int:
+            assert arguments == ["--help"]
+            return 0
+
+    monkeypatch.setattr(launcher, "_bootstrap_imports", lambda: (FakeRunner, None, None, None))
+    monkeypatch.setattr(
+        launcher,
+        "_configure_environment",
+        lambda: pytest.fail("help must not configure runtime credentials"),
+    )
+
+    assert launcher.main(["--help"]) == 0
+
+
 def test_task_infra_failure_distinguishes_compatibility_noise() -> None:
     launcher = _load_launcher()
 
@@ -161,7 +180,7 @@ def test_multimodal_judge_preflight_sends_valid_image_url(
     assert observed["timeout"] == 120
 
 
-def test_runtime_seed_uses_pinned_openjiuwen_deepagent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_seed_records_current_openjiuwen_revision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     launcher = _load_launcher()
     workspace = tmp_path / "workspace"
     source = workspace / "scripts" / "rsi" / "evobench_deepagent_harness"
@@ -170,19 +189,20 @@ def test_runtime_seed_uses_pinned_openjiuwen_deepagent(tmp_path: Path, monkeypat
         source / "harness.json",
         {
             "engine": "openjiuwen-deepagent",
-            "engine_revision": "da021f994908e6459177f408bbbfbd71e9f43d83",
+            "engine_revision": "repository-head",
         },
     )
     (source / "harness.py").write_text("class PolicyHarness: pass\n", encoding="utf-8")
     (source / "system_prompt.md").write_text("execute the task", encoding="utf-8")
     monkeypatch.setattr(launcher, "WORKSPACE_ROOT", workspace)
     monkeypatch.setattr(launcher, "RUNTIME_ROOT", tmp_path / "runtime")
+    monkeypatch.setattr(launcher, "_source_revision", lambda: "test-revision")
 
     seed = launcher._runtime_seed()
 
     config = json.loads((seed / "harness.json").read_text(encoding="utf-8"))
     assert config["engine"] == "openjiuwen-deepagent"
-    assert config["engine_revision"].startswith("da021f994")
+    assert config["engine_revision"] == "test-revision"
     assert "PolicyHarness" in (seed / "harness.py").read_text(encoding="utf-8")
 
 
@@ -836,7 +856,7 @@ async def test_submission_checkpoint_blocks_paraphrased_dependent_action_on_rele
     assert f"REMOVE: {removed_id}" in revised.content
 
 
-def test_configure_environment_selects_versioned_deepagent_template(
+def test_configure_environment_selects_configured_deepagent_template(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     launcher = _load_launcher()
@@ -847,8 +867,8 @@ def test_configure_environment_selects_versioned_deepagent_template(
 
     launcher._configure_environment()
 
-    assert os.environ["EVOBENCH_E2B_TEMPLATE"] == ("evobench-apex-openjiuwen-da021f994")
-    assert os.environ["EVOBENCH_E2B_APEX_TEMPLATE"] == ("evobench-apex-openjiuwen-da021f994")
+    assert os.environ["EVOBENCH_E2B_TEMPLATE"] == "evobench-apex-openjiuwen"
+    assert os.environ["EVOBENCH_E2B_APEX_TEMPLATE"] == "evobench-apex-openjiuwen"
     assert not launcher._task_infra_failure(
         {
             "exit_reason": "eval_pipeline_error",

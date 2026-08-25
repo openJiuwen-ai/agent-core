@@ -179,7 +179,6 @@ def resolve_evobench_root(value: str) -> Path:
         [
             workspace.parent / "Evo-Bench-official" / "Evo-Bench-main",
             workspace.parent / "Evo-Bench",
-            Path("D:/code/code1/Evo-Bench-official/Evo-Bench-main"),
         ]
     )
     for candidate in candidates:

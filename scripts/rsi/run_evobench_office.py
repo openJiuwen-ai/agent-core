@@ -1,7 +1,7 @@
 """Run Evo-Bench Office RSI with the latest openJiuwen DeepAgent.
 
-This launcher leaves the audited checkout untouched while fixing three
-environment mismatches:
+This launcher keeps benchmark-specific compatibility code outside the RSI
+package while fixing three environment mismatches:
 
 * APEX grading is multimodal. It uses a dedicated public Qwen3.7-Plus endpoint
   reachable from E2B instead of reusing the text-only DeepSeek task model.
@@ -38,20 +38,39 @@ import zlib
 import yaml
 
 
-AUDIT_ROOT = Path(r"D:\code\code1\agent-core-rsi-latest-audit")
-EVOBENCH_ROOT = Path(r"D:\code\code1\Evo-Bench-official\Evo-Bench-main")
-WORKSPACE_ROOT = Path(r"D:\code\code1\agent-core")
-RUNTIME_ROOT = WORKSPACE_ROOT / ".local" / "rsi_runtime"
-SHORT_SCRATCH_ROOT = Path(WORKSPACE_ROOT.anchor) / "evor"
-DEFAULT_POLICY_CONFIG = AUDIT_ROOT / ".local/rsi/models/token_plan_deepseek_v4_flash_single_harness.yaml"
-DEFAULT_ENV_FILE = AUDIT_ROOT / ".local/rsi/evobench.env"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = Path(os.environ.get("RSI_WORKSPACE_ROOT", REPO_ROOT)).expanduser().resolve()
+RUNTIME_ROOT = (
+    Path(os.environ.get("RSI_RUNTIME_ROOT", WORKSPACE_ROOT / ".local" / "rsi_runtime")).expanduser().resolve()
+)
+SHORT_SCRATCH_ROOT = (
+    Path(os.environ.get("RSI_SHORT_SCRATCH_ROOT", Path(tempfile.gettempdir()) / "openjiuwen-rsi"))
+    .expanduser()
+    .resolve()
+)
+DEFAULT_POLICY_CONFIG = (
+    Path(
+        os.environ.get(
+            "RSI_RUN_MODEL_CONFIG",
+            REPO_ROOT / ".local" / "rsi" / "models" / "token_plan_deepseek_v4_flash_single_harness.yaml",
+        )
+    )
+    .expanduser()
+    .resolve()
+)
+DEFAULT_ENV_FILE = (
+    Path(os.environ.get("RSI_EVOBENCH_ENV_FILE", REPO_ROOT / ".local" / "rsi" / "evobench.env")).expanduser().resolve()
+)
 DEFAULT_JUDGE_CONFIG = RUNTIME_ROOT / "model_configs/qwen37_plus_judge.yaml"
 DEFAULT_JUDGE_MODEL = "qwen3.7-plus"
 DEFAULT_JUDGE_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_JUDGE_API_BASE_ENV = "QWEN37_PLUS_API_BASE"
 DEFAULT_JUDGE_API_KEY_ENV = "QWEN37_PLUS_API_KEY"
 DEFAULT_SMOKE_TASK = "apex-2299b89dcaf64a4da4f3d03f8aac7215"
-DEFAULT_DEEPAGENT_TEMPLATE = "evobench-apex-openjiuwen-da021f994"
+DEFAULT_DEEPAGENT_TEMPLATE = os.environ.get(
+    "EVOBENCH_DEEPAGENT_TEMPLATE",
+    "evobench-apex-openjiuwen",
+)
 _IN_PROCESS_RUN_LOCK = threading.Lock()
 _INFRA_FAILURE_PREFIXES = (
     "judge_error:",
@@ -296,7 +315,7 @@ def _retry_infrastructure_failures(cli: Any, arguments: list[str]) -> None:
 
 
 def _bootstrap_imports() -> tuple[Any, Any, Any, Any]:
-    sys.path.insert(0, str(AUDIT_ROOT))
+    sys.path.insert(0, str(REPO_ROOT))
     from examples.rsi import run_evobench_single_harness as runner
     from examples.rsi.evobench import rsi_evaluator
     from examples.rsi.evobench.rsi_evaluator import (
@@ -312,9 +331,6 @@ def _configure_environment() -> None:
     runtime_temp.mkdir(parents=True, exist_ok=True)
     os.environ["TEMP"] = str(runtime_temp)
     os.environ["TMP"] = str(runtime_temp)
-    os.environ["HTTP_PROXY"] = "http://127.0.0.1:7897"
-    os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
-    os.environ["ALL_PROXY"] = "http://127.0.0.1:7897"
     os.environ.setdefault("EVOBENCH_E2B_REQUEST_TIMEOUT_SECONDS", "600")
     os.environ["EVOBENCH_APEX_SANDBOX_TTL_MINUTES"] = "60"
     os.environ["EVOBENCH_POLICY_SANDBOX_TTL_MINUTES"] = "60"
@@ -446,17 +462,39 @@ def _validate_multimodal_judge() -> None:
 
 def _runtime_seed() -> Path:
     source = WORKSPACE_ROOT / "scripts" / "rsi" / "evobench_deepagent_harness"
-    destination = RUNTIME_ROOT / "policy_harness_openjiuwen_da021f994"
+    destination = RUNTIME_ROOT / "policy_harness_openjiuwen_deepagent"
     if not source.is_dir():
         raise FileNotFoundError(f"openJiuwen Evo-Bench harness is missing: {source}")
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source, destination)
+    manifest_path = destination / "harness.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["engine_revision"] = _source_revision()
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return destination
 
 
-def _runtime_framework() -> Path:
-    source = EVOBENCH_ROOT / "evobench"
+def _source_revision() -> str:
+    configured = os.environ.get("OPENJIUWEN_SOURCE_REVISION", "").strip()
+    if configured:
+        return configured
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=WORKSPACE_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+def _runtime_framework(evobench_root: Path) -> Path:
+    source = evobench_root / "evobench"
     destination = RUNTIME_ROOT / "staged_framework" / "evobench"
     if destination.exists():
         shutil.rmtree(destination)
@@ -480,9 +518,7 @@ def _write_seed_refs(output_path: Path) -> Path:
                     {
                         "role": "policy_harness",
                         "member_name": "policy_harness",
-                        "description": (
-                            "Evo-Bench protocol adapter backed by openJiuwen DeepAgent revision da021f994."
-                        ),
+                        "description": "Evo-Bench protocol adapter backed by openJiuwen DeepAgent.",
                         "harness_ref_path": str(harness),
                     }
                 ],
@@ -495,7 +531,13 @@ def _write_seed_refs(output_path: Path) -> Path:
     return output_path
 
 
-def _install_runtime_patches(runner: Any, rsi_evaluator: Any) -> None:
+def _install_runtime_patches(
+    runner: Any,
+    rsi_evaluator: Any,
+    *,
+    evobench_root: Path | None = None,
+) -> None:
+    evobench_root = (evobench_root or REPO_ROOT).expanduser().resolve()
     original_config = runner.EvoBenchRSIEvaluatorConfig
     original_validate = rsi_evaluator._validate_task_result
 
@@ -540,10 +582,10 @@ def _install_runtime_patches(runner: Any, rsi_evaluator: Any) -> None:
         # freshly-created TEMP subtree. Running the official CLI in the worker
         # thread keeps identical CLI semantics without that Windows ACL split.
         with _IN_PROCESS_RUN_LOCK:
-            official_site_packages = EVOBENCH_ROOT / ".venv/Lib/site-packages"
+            official_site_packages = evobench_root / ".venv/Lib/site-packages"
             if official_site_packages.is_dir():
                 sys.path.insert(0, str(official_site_packages))
-            sys.path.insert(0, str(EVOBENCH_ROOT))
+            sys.path.insert(0, str(evobench_root))
             from evobench import cli
             from evobench.common import fs as common_fs
             from evobench.evaluation import tasks as evaluation_tasks
@@ -555,7 +597,7 @@ def _install_runtime_patches(runner: Any, rsi_evaluator: Any) -> None:
             # containment check so a real child is not rejected as an escape.
             common_fs.ensure_child_path = _ensure_child_path_windows_safe
             evaluation_tasks.ensure_child_path = _ensure_child_path_windows_safe
-            apex_sandbox._STAGED_FRAMEWORK["framework"] = _runtime_framework()
+            apex_sandbox._STAGED_FRAMEWORK["framework"] = _runtime_framework(evobench_root)
             if not getattr(e2b_runtime, "_rsi_temp_patch_installed", False):
 
                 def direct_download_tree(name: str, sandbox_dir: str, local_dir: str | Path) -> None:
@@ -670,7 +712,7 @@ def _with_default(arguments: list[str], flag: str, value: str) -> list[str]:
     return [*arguments, flag, value]
 
 
-async def _smoke(task_id: str, evaluator_cls: Any, config_cls: Any) -> int:
+async def _smoke(task_id: str, evaluator_cls: Any, config_cls: Any, *, evobench_root: Path) -> int:
     smoke_root = RUNTIME_ROOT / "smoke" / task_id
     if smoke_root.exists():
         shutil.rmtree(smoke_root)
@@ -678,7 +720,7 @@ async def _smoke(task_id: str, evaluator_cls: Any, config_cls: Any) -> int:
     refs = _write_seed_refs(smoke_root / "harness_refs.yaml")
     evaluator = evaluator_cls(
         config_cls(
-            evobench_root=str(EVOBENCH_ROOT),
+            evobench_root=str(evobench_root),
             policy_model_config=str(DEFAULT_POLICY_CONFIG),
             judge_model_config=str(DEFAULT_JUDGE_CONFIG),
             judge_model=DEFAULT_JUDGE_MODEL,
@@ -710,25 +752,35 @@ async def _smoke(task_id: str, evaluator_cls: Any, config_cls: Any) -> int:
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     mode = arguments.pop(0) if arguments else "optimize"
+    if mode in {"-h", "--help"}:
+        arguments.insert(0, mode)
+        mode = "optimize"
+    if any(value in {"-h", "--help"} for value in arguments):
+        runner, _, _, _ = _bootstrap_imports()
+        return int(runner.main(arguments))
     _configure_environment()
     _validate_multimodal_judge()
     runner, rsi_evaluator, evaluator_cls, config_cls = _bootstrap_imports()
-    _install_runtime_patches(runner, rsi_evaluator)
+    requested_root = (
+        os.environ.get("EVOBENCH_ROOT", "") if mode == "smoke" else _argument_value(arguments, "--evobench-root")
+    )
+    evobench_root = runner.resolve_evobench_root(requested_root)
+    _install_runtime_patches(runner, rsi_evaluator, evobench_root=evobench_root)
     RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
 
     if mode == "smoke":
         task_id = arguments[0] if arguments else DEFAULT_SMOKE_TASK
-        return asyncio.run(_smoke(task_id, evaluator_cls, config_cls))
+        return asyncio.run(_smoke(task_id, evaluator_cls, config_cls, evobench_root=evobench_root))
     if mode != "optimize":
         raise ValueError("first argument must be 'smoke' or 'optimize'")
 
     arguments = _with_default(arguments, "--output-dir", str(RUNTIME_ROOT / "runs"))
     arguments = _with_default(arguments, "--env-file", str(DEFAULT_ENV_FILE))
-    arguments = _with_default(arguments, "--evobench-root", str(EVOBENCH_ROOT))
+    arguments = _with_default(arguments, "--evobench-root", str(evobench_root))
     arguments = _with_default(arguments, "--e2b-template", DEFAULT_DEEPAGENT_TEMPLATE)
     arguments = _with_default(arguments, "--apex-template", DEFAULT_DEEPAGENT_TEMPLATE)
     arguments = _with_default(arguments, "--sibling-candidate-count", "1")
-    os.chdir(AUDIT_ROOT)
+    os.chdir(REPO_ROOT)
     return int(runner.main(arguments))
 
 

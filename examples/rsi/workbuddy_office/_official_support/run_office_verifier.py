@@ -60,9 +60,7 @@ class DockerExecEnvironment:
                 errors="replace",
             )
         except subprocess.TimeoutExpired as exc:
-            raise TimeoutError(
-                f"WorkBuddy verifier command timed out after {timeout_sec} seconds"
-            ) from exc
+            raise TimeoutError(f"WorkBuddy verifier command timed out after {timeout_sec} seconds") from exc
         return SimpleNamespace(
             return_code=completed.returncode,
             stdout=completed.stdout,
@@ -95,18 +93,10 @@ class DockerAttemptRuntime:
         prepend_pythonpath: str | None = None,
     ) -> dict[str, str]:
         env = {str(key): str(value) for key, value in (base or {}).items()}
-        env.update(
-            {
-                key: value
-                for key, value in os.environ.items()
-                if key.startswith("WORKBUDDY_VERIFIER_")
-            }
-        )
+        env.update({key: value for key, value in os.environ.items() if key.startswith("WORKBUDDY_VERIFIER_")})
         if prepend_pythonpath:
             current = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = (
-                f"{prepend_pythonpath}:{current}" if current else prepend_pythonpath
-            )
+            env["PYTHONPATH"] = f"{prepend_pythonpath}:{current}" if current else prepend_pythonpath
         return env
 
     def context(
@@ -125,9 +115,7 @@ class DockerAttemptRuntime:
             workspace=self.workspace,
             tests_dir=self.tests_dir,
             verifier_dir=self.container_verifier_dir,
-            container_paths={
-                str(key): str(value) for key, value in (container_paths or {}).items()
-            },
+            container_paths={str(key): str(value) for key, value in (container_paths or {}).items()},
             host_paths={str(key): str(value) for key, value in (host_paths or {}).items()},
             env={str(key): str(value) for key, value in (env or {}).items()},
             metadata=dict(metadata or {}),
@@ -158,8 +146,7 @@ class DockerAttemptRuntime:
         )
         if completed.returncode != 0:
             raise RuntimeError(
-                "failed to download WorkBuddy verifier artifacts: "
-                + (completed.stderr or completed.stdout).strip()
+                "failed to download WorkBuddy verifier artifacts: " + (completed.stderr or completed.stdout).strip()
             )
 
 
@@ -174,13 +161,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         task_id=task_dir.name,
         host_verifier_dir=output_dir,
     )
-    registry = load_verifier_registry(
-        RegistryBuildContext(contract=contract, runtime=runtime, verifier=None)
-    )
+    registry = load_verifier_registry(RegistryBuildContext(contract=contract, runtime=runtime, verifier=None))
     if registry.custom_verify is not None:
         raise RuntimeError(
-            "WorkBuddy Office adapter requires the registry engine contract; "
-            "custom_verify is not supported"
+            "WorkBuddy Office adapter requires the registry engine contract; custom_verify is not supported"
         )
 
     context = build_default_context(contract, runtime)

@@ -56,7 +56,7 @@ task86 的已知参考结果为 WorkBuddy Office 50 题单次平均分 `0.8218`�
 | JiuWenSwarm 运行脚手架 | [JiuwenSwarm solver](../../examples/rsi/workbuddy_office/jiuwenswarm_solver.py)已接入 Office backend，包含版本检查、AgentServer/Gateway 生命周期、`agent.plan`、进程清理和有界日志 | 尚需完成容器内真实冒烟与逐项运行证据核对 |
 | Harness 注入 | 每个 Case 会把当前 RSI Expert Harness 完整复制为隔离扩展包，在 Gateway 启动后通过 `harness.packages.activate` 激活；JiuWenSwarm 自带 Evolution 已关闭 | Tool/Rail 的实际加载效果仍需由真实激活结果和工具轨迹验收 |
 
-本地 `D:\code\code1\jiuwenswarm` 的 `pyproject.toml` 明确为 `0.2.2`，当前提交为 `cf882b45285c6f304ca9ac55d5d7af8c554b0aee`，且工作树存在大量已修改和未跟踪文件。**它不能作为 task86 的 `0.2.3` 基线，也不能用于生成基线镜像。**
+曾检查的本地 JiuwenSwarm 工作树版本为 `0.2.2`，且存在未提交改动。**该工作树不能作为 task86 的 `0.2.3` 基线，也不能用于生成基线镜像。**
 
 仓库内旧的 [JiuWenSwarmAgent 适配器](../../openjiuwen/agent_evolving/evaluator/evaluator_pipeline/adapters/agents/jiuwenswarm.py)可以参考 AgentServer、Gateway 和 WebSocket 通信过程，但**不得原样复用**。它属于旧 Agent Evolving Pipeline，默认可安装浮动 `develop`，默认参数和 task86 不一致，并混合了旧 Skill/Evolution 生命周期。
 

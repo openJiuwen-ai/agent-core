@@ -1237,8 +1237,7 @@ class MemberActionExecutor:
                                     status="failed",
                                     merge_status="not_merged",
                                     error=(
-                                        "atomic action bundle peer failed; successful partial result "
-                                        "was not merged"
+                                        "atomic action bundle peer failed; successful partial result was not merged"
                                     ),
                                 )
                             atomic_results.append(result)
@@ -1958,9 +1957,7 @@ def _normalize_rail_manifest_refs(
     return {
         "manifest_path": "rails/rails.yaml",
         "normalized_file_refs": [
-            entry.get("file")
-            for entry in normalized_entries
-            if isinstance(entry, dict) and entry.get("file")
+            entry.get("file") for entry in normalized_entries if isinstance(entry, dict) and entry.get("file")
         ],
     }
 

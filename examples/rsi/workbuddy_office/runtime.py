@@ -60,13 +60,9 @@ def prepare_workbuddy_office_workspace(
     archive = task_dir / "environment" / "workspace.tar.gz"
     dockerfile = task_dir / "environment" / "Dockerfile"
     if not archive.is_file():
-        raise WorkBuddyInfrastructureError(
-            f"WorkBuddy workspace archive not found: {archive}"
-        )
+        raise WorkBuddyInfrastructureError(f"WorkBuddy workspace archive not found: {archive}")
     if not dockerfile.is_file():
-        raise WorkBuddyInfrastructureError(
-            f"WorkBuddy Dockerfile not found: {dockerfile}"
-        )
+        raise WorkBuddyInfrastructureError(f"WorkBuddy Dockerfile not found: {dockerfile}")
 
     try:
         if workspace_dir.exists():
@@ -75,9 +71,7 @@ def prepare_workbuddy_office_workspace(
         _extract_workspace_archive(archive, workspace_dir)
     except (OSError, tarfile.TarError, ValueError) as exc:
         shutil.rmtree(workspace_dir, ignore_errors=True)
-        raise WorkBuddyInfrastructureError(
-            f"failed to extract WorkBuddy workspace archive {archive}: {exc}"
-        ) from exc
+        raise WorkBuddyInfrastructureError(f"failed to extract WorkBuddy workspace archive {archive}: {exc}") from exc
 
     configured_image = str(config.get("docker_image", "") or "").strip()
     if configured_image:
@@ -90,9 +84,7 @@ def prepare_workbuddy_office_workspace(
             timeout=min(timeout_sec, 60),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise WorkBuddyInfrastructureError(
-            f"failed to inspect WorkBuddy Docker image {image}: {exc}"
-        ) from exc
+        raise WorkBuddyInfrastructureError(f"failed to inspect WorkBuddy Docker image {image}: {exc}") from exc
     if inspected.returncode == 0:
         return image
     _build_workbuddy_office_image(
@@ -136,15 +128,9 @@ def run_workbuddy_office_verifier(
         timeout=min(timeout_sec, 300),
     )
 
-    bridge_path = (
-        Path(__file__).resolve().parent
-        / "_official_support"
-        / "run_office_verifier.py"
-    )
+    bridge_path = Path(__file__).resolve().parent / "_official_support" / "run_office_verifier.py"
     if not bridge_path.is_file():
-        raise WorkBuddyInfrastructureError(
-            f"WorkBuddy official verifier bridge not found: {bridge_path}"
-        )
+        raise WorkBuddyInfrastructureError(f"WorkBuddy official verifier bridge not found: {bridge_path}")
     verifier_command = [
         *_workbuddy_python_command(config, task_dir),
         str(bridge_path),
@@ -166,8 +152,7 @@ def run_workbuddy_office_verifier(
             8000,
         )
         raise WorkBuddyInfrastructureError(
-            "WorkBuddy CompositeVerifier failed "
-            f"for {task_dir.name} with exit code {completed.returncode}: {detail}"
+            f"WorkBuddy CompositeVerifier failed for {task_dir.name} with exit code {completed.returncode}: {detail}"
         )
 
     reward_payload = _read_json_object(verifier_dir / "reward.json")
@@ -175,15 +160,11 @@ def run_workbuddy_office_verifier(
     score = _official_reward(reward_payload, score_payload)
     status = str(score_payload.get("test_status") or "").strip()
     if status in {"build_error", "judge_error"}:
-        raise WorkBuddyInfrastructureError(
-            f"WorkBuddy CompositeVerifier returned {status} for {task_dir.name}"
-        )
+        raise WorkBuddyInfrastructureError(f"WorkBuddy CompositeVerifier returned {status} for {task_dir.name}")
 
     results_path = verifier_dir / "results.xml"
     atomic_checks = _parse_junit_checks(results_path)
-    scored_checks = [
-        check for check in atomic_checks if check.get("status") != "skipped"
-    ]
+    scored_checks = [check for check in atomic_checks if check.get("status") != "skipped"]
     passed_count = _nonnegative_int(
         reward_payload.get("tests_passed"),
         default=sum(1 for check in scored_checks if check["passed"]),
@@ -193,20 +174,12 @@ def run_workbuddy_office_verifier(
         default=len(scored_checks),
     )
     if not status:
-        status = (
-            "full_pass"
-            if score >= 1.0
-            else "partial_pass"
-            if score > 0.0
-            else "no_pass"
-        )
+        status = "full_pass" if score >= 1.0 else "partial_pass" if score > 0.0 else "no_pass"
     failed_checks = [dict(check) for check in scored_checks if not check["passed"]]
     score_payload = {
         **score_payload,
         "test_status": status,
-        "test_pass_rate": float(
-            reward_payload.get("test_pass_rate", score) or score
-        ),
+        "test_pass_rate": float(reward_payload.get("test_pass_rate", score) or score),
         "tests_passed": passed_count,
         "tests_total": total_count,
         "failed_checks": failed_checks,
@@ -232,9 +205,7 @@ def _workbuddy_python_command(config: dict[str, Any], task_dir: Path) -> list[st
     if configured:
         executable = Path(configured).expanduser().resolve()
         if not executable.is_file():
-            raise WorkBuddyInfrastructureError(
-                f"configured WorkBuddy Python not found: {executable}"
-            )
+            raise WorkBuddyInfrastructureError(f"configured WorkBuddy Python not found: {executable}")
         return [str(executable)]
 
     repo_root = _find_workbuddy_repo_root(task_dir)
@@ -249,8 +220,7 @@ def _workbuddy_python_command(config: dict[str, Any], task_dir: Path) -> list[st
     if uv:
         return [uv, "run", "--project", str(repo_root), "python"]
     raise WorkBuddyInfrastructureError(
-        "WorkBuddy Bench Python environment not found; create its .venv or set "
-        "workbuddy_office.python_executable"
+        "WorkBuddy Bench Python environment not found; create its .venv or set workbuddy_office.python_executable"
     )
 
 
@@ -259,22 +229,16 @@ def _find_workbuddy_repo_root(task_dir: Path) -> Path:
         pyproject = candidate / "pyproject.toml"
         if pyproject.is_file() and (candidate / "src" / "workbuddy_bench").is_dir():
             return candidate
-    raise WorkBuddyInfrastructureError(
-        f"could not find the WorkBuddy Bench repository for task: {task_dir}"
-    )
+    raise WorkBuddyInfrastructureError(f"could not find the WorkBuddy Bench repository for task: {task_dir}")
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise WorkBuddyInfrastructureError(
-            f"WorkBuddy verifier did not produce valid {path.name}: {exc}"
-        ) from exc
+        raise WorkBuddyInfrastructureError(f"WorkBuddy verifier did not produce valid {path.name}: {exc}") from exc
     if not isinstance(value, dict):
-        raise WorkBuddyInfrastructureError(
-            f"WorkBuddy verifier output must be an object: {path}"
-        )
+        raise WorkBuddyInfrastructureError(f"WorkBuddy verifier output must be an object: {path}")
     return value
 
 
@@ -294,9 +258,7 @@ def _official_reward(
                 return max(0.0, min(float(value), 1.0))
             except (TypeError, ValueError):
                 continue
-    raise WorkBuddyInfrastructureError(
-        "WorkBuddy verifier output contains no numeric reward"
-    )
+    raise WorkBuddyInfrastructureError("WorkBuddy verifier output contains no numeric reward")
 
 
 def _nonnegative_int(value: Any, *, default: int) -> int:
@@ -355,9 +317,7 @@ def _build_workbuddy_office_image(
         try:
             completed = _run(command, check=False, timeout=timeout_sec)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise WorkBuddyInfrastructureError(
-                f"failed to run Docker build for {image}: {exc}"
-            ) from exc
+            raise WorkBuddyInfrastructureError(f"failed to run Docker build for {image}: {exc}") from exc
         if completed.returncode == 0:
             return
 
@@ -365,18 +325,13 @@ def _build_workbuddy_office_image(
             f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
             8000,
         )
-        can_retry = (
-            attempt < _DOCKER_BUILD_MAX_ATTEMPTS
-            and _is_transient_docker_build_failure(completed)
-        )
+        can_retry = attempt < _DOCKER_BUILD_MAX_ATTEMPTS and _is_transient_docker_build_failure(completed)
         if not can_retry:
             raise WorkBuddyInfrastructureError(
-                "WorkBuddy Docker image build failed "
-                f"for {image} after {attempt} attempt(s): {detail}"
+                f"WorkBuddy Docker image build failed for {image} after {attempt} attempt(s): {detail}"
             )
         logger.warning(
-            "WorkBuddy Docker build for {} hit a transient network error; "
-            "retrying ({}/{})",
+            "WorkBuddy Docker build for {} hit a transient network error; retrying ({}/{})",
             image,
             attempt + 1,
             _DOCKER_BUILD_MAX_ATTEMPTS,
@@ -400,23 +355,16 @@ def _extract_workspace_archive(archive: Path, destination: Path) -> None:
             try:
                 target.relative_to(destination)
             except ValueError as exc:
-                raise ValueError(
-                    f"unsafe path in WorkBuddy workspace archive: {member.name}"
-                ) from exc
+                raise ValueError(f"unsafe path in WorkBuddy workspace archive: {member.name}") from exc
             if member.issym() or member.islnk():
-                raise ValueError(
-                    f"links are not allowed in WorkBuddy workspace archive: {member.name}"
-                )
+                raise ValueError(f"links are not allowed in WorkBuddy workspace archive: {member.name}")
         tar.extractall(destination)
         for member in members:
             if not member.isfile():
                 continue
             extracted = destination / member.name
             if not extracted.is_file() or extracted.stat().st_size != member.size:
-                raise OSError(
-                    "WorkBuddy workspace archive was only partially extracted: "
-                    f"{member.name}"
-                )
+                raise OSError(f"WorkBuddy workspace archive was only partially extracted: {member.name}")
 
 
 def _parse_junit_checks(path: Path) -> list[dict[str, Any]]:
@@ -429,13 +377,7 @@ def _parse_junit_checks(path: Path) -> list[dict[str, Any]]:
         failure = test_case.find("failure")
         error = test_case.find("error")
         skipped = test_case.find("skipped")
-        detail_node = (
-            failure
-            if failure is not None
-            else error
-            if error is not None
-            else skipped
-        )
+        detail_node = failure if failure is not None else error if error is not None else skipped
         detail = ""
         if detail_node is not None:
             detail = str(detail_node.get("message") or detail_node.text or "").strip()
@@ -484,9 +426,7 @@ def _run(
     )
     if check and result.returncode != 0:
         raise RuntimeError(
-            "command failed: "
-            + " ".join(command)
-            + f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            "command failed: " + " ".join(command) + f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
     return result
 

@@ -789,10 +789,7 @@ def _validate_action_results_by_role(
             checks_by_role[role].extend(checks)
         return checks_by_role
 
-    outcomes_by_role = {
-        role: evaluate_role_execution(plan, result_rows, role)
-        for role in checks_by_role
-    }
+    outcomes_by_role = {role: evaluate_role_execution(plan, result_rows, role) for role in checks_by_role}
 
     for action in plan.actions:
         role_checks = checks_by_role.setdefault(action.role, [])

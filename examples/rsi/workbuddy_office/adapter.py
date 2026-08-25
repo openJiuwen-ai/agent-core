@@ -1106,9 +1106,7 @@ def _stage_jiuwenswarm_skill_roots(
         source = (harness_dir / declared).resolve()
         runtime_name = source.name
         if runtime_name in seen_names:
-            raise WorkBuddyInfrastructureError(
-                f"Harness declares duplicate Skill runtime name: {runtime_name}"
-            )
+            raise WorkBuddyInfrastructureError(f"Harness declares duplicate Skill runtime name: {runtime_name}")
         seen_names.add(runtime_name)
         shutil.copytree(source, runtime_root / runtime_name)
     return [runtime_root_name]

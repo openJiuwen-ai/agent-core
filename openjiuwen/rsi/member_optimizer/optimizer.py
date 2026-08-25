@@ -677,8 +677,7 @@ class MemberOptimizer:
         role_results: dict[str, RoleResult] = {}
 
         execution_errors_by_role = {
-            role: role_execution_errors(plan, execution_results, role)
-            for role in selected_roles
+            role: role_execution_errors(plan, execution_results, role) for role in selected_roles
         }
         verified_roles = {
             role: vr.status == "passed" and not execution_errors_by_role.get(role)

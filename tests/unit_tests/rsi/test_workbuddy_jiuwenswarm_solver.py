@@ -295,8 +295,7 @@ def test_automatic_continuation_requires_plan_confirmation_and_missing_artifact(
     assert (
         solver_module._automatic_continuation_reason(
             final_response=(
-                "I've inspected the source data and prepared a plan. "
-                "Shall I proceed with generating the file?"
+                "I've inspected the source data and prepared a plan. Shall I proceed with generating the file?"
             ),
             artifact_state=missing,
         )

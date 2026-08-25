@@ -28,7 +28,7 @@ Evo-Bench 不是 WorkBuddy Office 的同类替代数据集，而是直接评测 
 
 ## 已完成
 
-- 官方代码、608 个任务定义和 GDPval 附件已下载到 `D:\code\code1\Evo-Bench-official\Evo-Bench-main`。
+- 官方代码、608 个任务定义和 GDPval 附件需放在 `EVOBENCH_ROOT` 指向的 Evo-Bench 工作目录中。
 - 官方 Release 完整性检查通过：任务数量、划分互斥、领域标签、附件哈希和 Seed Harness 加载均正常。
 - 固定版本 Claw-Eval 源码已准备并安装到官方运行环境。
 - 新增 `examples/rsi/run_evobench.py`，提供 `prepare`、`verify`、`smoke`、`baseline`、`evolve` 五个入口。
