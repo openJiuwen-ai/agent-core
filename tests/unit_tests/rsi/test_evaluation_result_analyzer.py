@@ -1720,6 +1720,121 @@ class TestDiagnosisAgentStrategy:
         assert results[0]["target_ref"] == "unassigned"
 
     @pytest.mark.asyncio
+    async def test_non_json_correction_still_enters_outcome_independent_recovery(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+            CaseAnalysisInput,
+            DeterministicSignals,
+        )
+
+        case_dir = tmp_path / "case_results" / "case_recovery"
+        result_path = case_dir / "result.json"
+        trace_path = case_dir / "trace.json"
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text("{}", encoding="utf-8")
+        trace_path.write_text(json.dumps({"case_id": "case_recovery", "events": []}), encoding="utf-8")
+        case = CaseAnalysisInput(
+            case_id="case_recovery",
+            status="failed",
+            score=0.0,
+            input="Inspect the task-visible evidence and answer.",
+            expected=None,
+            response="A released conclusion.",
+            error="",
+            evaluation_method="llm_as_judge",
+            evaluation_passed=False,
+            evaluation_reason="one opaque criterion failed",
+            evaluation_metadata={
+                "judge_evidence": {
+                    "criteria": [
+                        {
+                            "criterion_id": "opaque",
+                            "score": 0.0,
+                            "status": "failed",
+                            "rationale": "the evaluator-owned label differs",
+                        }
+                    ]
+                }
+            },
+            trace_path=str(trace_path),
+            result_path=str(result_path),
+        )
+        strategy = analyzer_module.DiagnosisAgentStrategy(
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=True)
+        )
+
+        async def fake_build_agent(workspace: str) -> dict[str, str]:
+            return {"workspace": workspace}
+
+        calls = 0
+
+        async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return json.dumps(
+                    {
+                        "causal_investigation": {
+                            "hypotheses": [
+                                {
+                                    "hypothesis_id": "h_leak",
+                                    "claim": "The expected answer requires another conclusion.",
+                                    "explains_requirement_ids": ["criterion:opaque"],
+                                    "falsified_if": "The target result agrees.",
+                                    "evidence_requests": [],
+                                }
+                            ]
+                        }
+                    }
+                )
+            if calls == 2:
+                return "correction was not JSON"
+            assert "CAUSAL_INVESTIGATION_PHASE=outcome_independent_recovery" in prompt
+            return json.dumps(
+                {
+                    "causal_investigation": {
+                        "hypotheses": [
+                            {
+                                "hypothesis_id": f"h{index}",
+                                "claim": f"Runtime mechanism {index} released an unsupported decision ground.",
+                                "explains_requirement_ids": ["criterion:opaque"],
+                                "current_support": [],
+                                "falsified_if": f"The trace verifies decision ground {index} before release.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": f"q{index}",
+                                        "operation": "search_trace",
+                                        "query": f"decision ground {index} release",
+                                    }
+                                ],
+                            }
+                            for index in (1, 2)
+                        ]
+                    }
+                }
+            )
+
+        def entered_evidence_execution(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("entered task-visible evidence execution")
+
+        monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+        monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+        monkeypatch.setattr(analyzer_module, "execute_causal_investigation", entered_evidence_execution)
+
+        with pytest.raises(RuntimeError, match="entered task-visible evidence execution"):
+            await strategy._per_case_diagnosis(
+                [case],
+                DeterministicSignals(method="llm_as_judge"),
+                None,
+            )
+        assert calls == 3
+
+    @pytest.mark.asyncio
     async def test_per_case_diagnosis_repairs_deterministic_evidence_conflict(
         self,
         tmp_path: Path,
@@ -1985,6 +2100,37 @@ class TestDiagnosisAgentStrategy:
         assert conclusion in prompt
         assert "ORIGINAL-EVIDENCE" not in prompt
         assert '"diagnoses"' in prompt
+        assert '"evidence_relation"' in prompt
+        assert '"evidence_independence"' in prompt
+
+    def test_handoff_repair_preserves_entailment_fields(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        prompt = analyzer_module._build_causal_handoff_repair_prompt(
+            public_task_contract="Use the declared public mode.",
+            diagnoses=[{"hypothesis_assessment": [{"hypothesis_id": "h1", "status": "falsified"}]}],
+            investigation={"hypotheses": [], "evidence_requests": []},
+            evidence_results={"results": []},
+            audit={"diagnosis_audits": []},
+        )
+
+        assert "evidence_relation" in prompt
+        assert "evidence_independence" in prompt
+        assert 'evidence_relation="direct_falsifier"' in prompt
+
+    def test_entailment_audit_json_repair_is_format_only(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+        prompt = analyzer_module._build_hypothesis_entailment_audit_json_repair_prompt(
+            "large frozen audit input",
+            "h1 was rejected because the cited result came from the questioned mechanism.",
+        )
+
+        assert "FORMAT-ONLY TASK" in prompt
+        assert '"assessment_audits"' in prompt
+        assert '"evidence_entails_status"' in prompt
+        assert '"evidence_independent"' in prompt
+        assert "large frozen audit input" not in prompt
 
 
 class TestDiagnosisPromptEvidenceSummary:
@@ -2247,7 +2393,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
         payload = json.loads(raw)
 
-        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v16"
+        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v19"
         assert payload["retrieved_experience"]["matches"][0]["component_layer"] == "prompt_section"
         assert payload["experience_usage_policy"]["must_use_current_evidence_first"] is True
         assert "Do not copy a historical target_ref" in payload["experience_usage_policy"]["rules"][0]
@@ -2271,6 +2417,9 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "authoritative_benchmark_test_contract.test_patch" in DIAGNOSIS_SYSTEM_PROMPT
         assert "evidence_summary.md" in DIAGNOSIS_SYSTEM_PROMPT
         assert "no-exception smoke probe" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Requirement-classification audit" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "false rejection" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "incorporation by" in DIAGNOSIS_SYSTEM_PROMPT
         assert "Do not convert a Tool, Skill, Config" in DIAGNOSIS_SYSTEM_PROMPT
         assert "member_harness.<role>.execution_budget" in DIAGNOSIS_SYSTEM_PROMPT
         assert "member_harness.<role>.rail" in DIAGNOSIS_SYSTEM_PROMPT
@@ -2279,6 +2428,45 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "counterfactual_prediction" in DIAGNOSIS_SYSTEM_PROMPT
         assert "public task contract is available" in DIAGNOSIS_SYSTEM_PROMPT
         assert "do not claim it is unavailable" in DIAGNOSIS_SYSTEM_PROMPT
+
+    def test_causal_prompt_preserves_late_controller_results_under_independent_budgets(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _causal_prompt_json
+
+        rendered = _causal_prompt_json(
+            {
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h1",
+                        "claim": "The first mechanism explains the failure.",
+                        "falsified_if": "A decisive artifact contradicts it.",
+                        "current_support": ["X" * 20_000],
+                    }
+                ]
+            },
+            {
+                "results": [
+                    {
+                        "request_id": "q1",
+                        "operation": "read_event",
+                        "availability": "available",
+                        "event": {"content": "A" * 20_000, "tool_calls": []},
+                    },
+                    {
+                        "request_id": "q2",
+                        "operation": "read_artifact_window",
+                        "availability": "available",
+                        "source": "artifacts/decisive.txt",
+                        "text": "LATE_DECISIVE_EVIDENCE",
+                    },
+                ]
+            },
+        )
+        payload = json.loads(rendered)
+
+        results = payload["controller_evidence_results"]["results"]
+        assert [item["request_id"] for item in results] == ["q1", "q2"]
+        assert results[1]["text"] == "LATE_DECISIVE_EVIDENCE"
+        assert "current_support" not in payload["investigation"]["hypotheses"][0]
 
     def test_input_builds_complete_failed_requirement_inventory(self, tmp_path: Path) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
@@ -3894,6 +4082,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q1 contains the source value used by the agent",
                 "controller_request_ids": ["q1"],
             },
@@ -3914,7 +4104,7 @@ class TestBoundedMultiDiagnosis:
                     {"hypothesis_id": "h_bad", "claim": "unobserved alternative"},
                 ],
                 "evidence_requests": [
-                    {"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "inspect_artifact"},
+                    {"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "read_artifact_window"},
                     {"request_id": "q2", "hypothesis_ids": ["h_bad"], "operation": "inspect_artifact"},
                 ],
             },
@@ -3995,6 +4185,64 @@ class TestBoundedMultiDiagnosis:
         assert corrected["causal_hypothesis_status"] == "not_tested"
         assert "did not activate" in correction
 
+    def test_causal_reconciliation_rejects_form_only_activation_when_failure_persists(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+
+        diagnosis = self._diagnosis(
+            failure_mode="unverified_decision_ground_used",
+            failed_check="criterion:value",
+            observable="the released decision still uses a ground with an incomplete requirement chain",
+        )
+        diagnosis["evidence_status"] = "supported_hypothesis"
+        diagnosis["prior_experiment_assessment"] = {
+            "availability": "available",
+            "intervention_activated": "yes",
+            "predicted_behavior_occurred": "yes",
+            "predicted_outcome_occurred": "no",
+            "causal_hypothesis_status": "falsified",
+            "reason": "A verification table was visible, but the score did not improve.",
+        }
+        diagnosis["hypothesis_assessment"] = [
+            {
+                "hypothesis_id": "h_ground",
+                "status": "supported",
+                "falsifying_condition_status": "not_observed",
+                "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
+                "logic_check": "q1 shows the incomplete ground was retained",
+                "controller_request_ids": ["q1"],
+            }
+        ]
+        feedback = {
+            "experiments": [
+                {
+                    "causal_intervention_contracts": [
+                        {"source_causal_hypothesis_semantic_id": ("chs:unverified_decision_ground_used")}
+                    ]
+                }
+            ]
+        }
+
+        reconciled, warnings = _reconcile_causal_assessments(
+            [diagnosis],
+            {
+                "hypotheses": [{"hypothesis_id": "h_ground", "claim": "an unverified ground was used"}],
+                "evidence_requests": [{"request_id": "q1", "hypothesis_ids": ["h_ground"], "operation": "read_event"}],
+            },
+            evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
+            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
+            prior_candidate_feedback=feedback,
+        )
+
+        assessment = reconciled[0]["prior_experiment_assessment"]
+        assert assessment["intervention_activated"] == "yes"
+        assert assessment["predicted_behavior_occurred"] == "no"
+        assert assessment["predicted_outcome_occurred"] == "no"
+        assert assessment["causal_hypothesis_status"] == "not_tested"
+        assert "visible form may have appeared" in assessment["reason"]
+        assert any("pre-registered failure mechanism remained supported" in warning for warning in warnings)
+
     def test_causal_reconciliation_preserves_valid_cluster_when_sibling_uses_unknown_id(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
@@ -4024,6 +4272,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q1 shows the successful method was not reused",
                 "controller_request_ids": ["q1"],
             }
@@ -4067,7 +4317,7 @@ class TestBoundedMultiDiagnosis:
                     {"hypothesis_id": "h_alternative", "claim": "an alternative mechanism occurred"},
                 ],
                 "evidence_requests": [
-                    {"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "search_trace"},
+                    {"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "read_event"},
                     {"request_id": "q2", "hypothesis_ids": ["h_alternative"], "operation": "search_trace"},
                 ],
             },
@@ -4310,6 +4560,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q_state shows the source changed while the derived value stayed stale",
                 "controller_request_ids": ["q_state"],
             },
@@ -4333,7 +4585,7 @@ class TestBoundedMultiDiagnosis:
                     {
                         "request_id": "q_state",
                         "hypothesis_ids": ["h_skipped"],
-                        "operation": "inspect_artifact",
+                        "operation": "read_artifact_window",
                     }
                 ],
             },
@@ -4374,6 +4626,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q_reuse shows the working method was not applied to the final artifact",
                 "controller_request_ids": ["q_reuse", "q_other"],
             }
@@ -4391,7 +4645,7 @@ class TestBoundedMultiDiagnosis:
                     {"hypothesis_id": "h_other", "claim": "another mechanism occurred"},
                 ],
                 "evidence_requests": [
-                    {"request_id": "q_reuse", "hypothesis_ids": ["h_reuse"], "operation": "search_trace"},
+                    {"request_id": "q_reuse", "hypothesis_ids": ["h_reuse"], "operation": "read_event"},
                     {"request_id": "q_other", "hypothesis_ids": ["h_other"], "operation": "search_trace"},
                 ],
             },
@@ -4502,6 +4756,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q1 directly shows the wrong branch decision",
                 "controller_request_ids": ["q1"],
             }
@@ -4587,6 +4843,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q1 shows which branch the runtime selected",
                 "controller_request_ids": ["q1"],
             }
@@ -4606,6 +4864,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q2 shows mutation followed directly by release",
                 "controller_request_ids": ["q2"],
                 "handoff_disposition": "selected",
@@ -4694,6 +4954,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q1 shows the update existed only in memory and no artifact write occurred",
                 "controller_request_ids": ["q1"],
             }
@@ -4713,7 +4975,7 @@ class TestBoundedMultiDiagnosis:
                     {
                         "request_id": "q1",
                         "hypothesis_ids": ["h_write"],
-                        "operation": "search_trace",
+                        "operation": "read_event",
                     }
                 ],
             },
@@ -4788,6 +5050,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q1 shows the observed mutation",
                 "controller_request_ids": ["q1"],
             },
@@ -4796,6 +5060,8 @@ class TestBoundedMultiDiagnosis:
                 "status": "supported",
                 "falsifying_condition_status": "not_observed",
                 "claim_follows_from_evidence": "yes",
+                "evidence_relation": "direct_claim",
+                "evidence_independence": "direct_observation",
                 "logic_check": "q2 shows the runtime mismatch",
                 "controller_request_ids": ["q2"],
             },
@@ -4822,7 +5088,7 @@ class TestBoundedMultiDiagnosis:
                 ],
                 "evidence_requests": [
                     {"request_id": "q1", "hypothesis_ids": ["h_observed"], "operation": "read_event"},
-                    {"request_id": "q2", "hypothesis_ids": ["h_runtime"], "operation": "inspect_artifact"},
+                    {"request_id": "q2", "hypothesis_ids": ["h_runtime"], "operation": "read_artifact_window"},
                 ],
             },
             evidence_results={
@@ -4993,6 +5259,63 @@ class TestBoundedMultiDiagnosis:
         assert "decision_rule_entailed is stricter than consistency" in prompt
         assert '"May mean", "could mean", "perhaps intended"' in prompt
 
+    def test_rejected_handoff_with_missing_authority_returns_to_evidence_acquisition(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _build_causal_handoff_evidence_prompt,
+            _causal_handoff_audit_needs_evidence,
+        )
+
+        audit = {
+            "diagnosis_audits": [
+                {
+                    "diagnosis_index": 1,
+                    "approved": False,
+                    "runtime_decidable": False,
+                    "decision_rule_entailed": False,
+                    "decision_rule_source": "none",
+                    "violations": ["No task-visible authority establishes the decision rule."],
+                }
+            ]
+        }
+
+        assert _causal_handoff_audit_needs_evidence(audit)
+        prompt = _build_causal_handoff_evidence_prompt(
+            public_task_contract="Use the public files to assess the requested outcome.",
+            investigation={
+                "hypotheses": [{"hypothesis_id": "h1", "claim": "the decision used the wrong authority"}],
+                "evidence_requests": [],
+            },
+            evidence_results={"results": []},
+            diagnoses=[{"selected_hypothesis_id": "h1"}],
+            audit=audit,
+        )
+
+        assert "Do not repair the diagnosis to unassigned yet" in prompt
+        assert "sources it named," in prompt
+        assert "opened, cited, relied on" in prompt
+        assert "use inspect_artifact/read_artifact_window" in prompt
+        assert "expected answer" in prompt
+
+    def test_rejected_handoff_without_source_gap_does_not_request_more_evidence(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _causal_handoff_audit_needs_evidence,
+        )
+
+        audit = {
+            "diagnosis_audits": [
+                {
+                    "diagnosis_index": 1,
+                    "approved": False,
+                    "runtime_decidable": True,
+                    "decision_rule_entailed": True,
+                    "decision_rule_source": "public_task_contract",
+                    "violations": ["The diagnosis bundled two independent interventions."],
+                }
+            ]
+        }
+
+        assert not _causal_handoff_audit_needs_evidence(audit)
+
     def test_evaluator_owned_outcome_cannot_define_causal_hypothesis(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
             _build_causal_plan_correction_prompt,
@@ -5027,6 +5350,175 @@ class TestBoundedMultiDiagnosis:
         )
         assert conflicts[0] in correction
         assert "independently observable prediction" in correction
+
+    def test_causal_plan_salvages_outcome_independent_siblings(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _normalize_outcome_independent_causal_plan,
+        )
+
+        requirement_id = "criterion:opaque"
+        raw = {
+            "causal_investigation": {
+                "hypotheses": [
+                    {
+                        "hypothesis_id": "h_trace",
+                        "claim": "The Agent released a conclusion before checking the cited source span.",
+                        "explains_requirement_ids": [requirement_id],
+                        "current_support": ["trial_1:message_8"],
+                        "falsified_if": "The trace contains a source read covering every cited ground before release.",
+                        "evidence_requests": [
+                            {
+                                "request_id": "q_trace",
+                                "operation": "search_trace",
+                                "query": "source read cited ground release",
+                            }
+                        ],
+                    },
+                    {
+                        "hypothesis_id": "h_scope",
+                        "claim": "A material decision ground was used without a task-visible scope check.",
+                        "explains_requirement_ids": [requirement_id],
+                        "current_support": ["trial_1:message_12"],
+                        "falsified_if": "Every material ground has a scope witness in the trace or artifact.",
+                        "evidence_requests": [
+                            {
+                                "request_id": "q_scope",
+                                "operation": "search_trace",
+                                "query": "scope witness material ground",
+                            }
+                        ],
+                    },
+                    {
+                        "hypothesis_id": "h_leak",
+                        "claim": "The expected answer requires a different conclusion.",
+                        "explains_requirement_ids": [requirement_id],
+                        "current_support": ["grader"],
+                        "falsified_if": "The target result matches the released conclusion.",
+                        "evidence_requests": [
+                            {
+                                "request_id": "q_leak",
+                                "operation": "inspect_evaluation",
+                                "query": "target result",
+                            }
+                        ],
+                    },
+                ]
+            }
+        }
+
+        plan, conflicts = _normalize_outcome_independent_causal_plan(
+            raw,
+            failed_requirement_ids=[requirement_id],
+        )
+
+        assert conflicts
+        assert plan is not None
+        assert [item["hypothesis_id"] for item in plan["hypotheses"]] == ["h_trace", "h_scope"]
+        assert {item["request_id"] for item in plan["evidence_requests"]} == {"q_trace", "q_scope"}
+
+    def test_structurally_invalid_plan_still_reports_outcome_leakage(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _normalize_outcome_independent_causal_plan,
+        )
+
+        plan, conflicts = _normalize_outcome_independent_causal_plan(
+            {
+                "causal_investigation": {
+                    "hypotheses": [
+                        {
+                            "hypothesis_id": "h_leak",
+                            "claim": "The expected answer requires a different action.",
+                            "explains_requirement_ids": ["criterion:opaque"],
+                            "falsified_if": "The target result agrees with the current action.",
+                            "evidence_requests": [],
+                        }
+                    ]
+                }
+            },
+            failed_requirement_ids=["criterion:opaque"],
+        )
+
+        assert plan is None
+        assert "hypothesis h_leak uses evaluator-owned outcomes in claim" in conflicts
+
+    def test_outcome_independent_plan_rejects_hidden_evaluation_requests(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _normalize_outcome_independent_causal_plan,
+        )
+
+        hypotheses = []
+        for index in (1, 2):
+            hypotheses.append(
+                {
+                    "hypothesis_id": f"h{index}",
+                    "claim": f"Runtime decision mechanism {index} released an unsupported claim.",
+                    "explains_requirement_ids": ["criterion:opaque"],
+                    "current_support": ["the judge target value disagrees"],
+                    "falsified_if": f"Task-visible evidence supports mechanism {index} before release.",
+                    "evidence_requests": [
+                        {
+                            "request_id": f"q{index}",
+                            "operation": "inspect_evaluation",
+                            "query": "judge target value",
+                        }
+                    ],
+                }
+            )
+
+        plan, conflicts = _normalize_outcome_independent_causal_plan(
+            {"causal_investigation": {"hypotheses": hypotheses}},
+            failed_requirement_ids=["criterion:opaque"],
+        )
+
+        assert plan is None
+        assert any("current_support" in item for item in conflicts)
+        assert any("inspect_evaluation" in item for item in conflicts)
+
+    def test_outcome_independent_recovery_input_keeps_behavior_but_removes_labels(self) -> None:
+        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+            _build_outcome_independent_causal_plan_recovery_prompt,
+        )
+
+        diagnosis_input = json.dumps(
+            {
+                "authoritative_task_contract": {"input_excerpt": "Inspect the artifact and answer."},
+                "authoritative_benchmark_test_contract": {"expected_answer": "YES"},
+                "primary_evidence": {
+                    "evidence_summary_text": "grader expects YES",
+                    "causal_digest": {
+                        "outcome": {"score": 0.0, "judge_evidence": "YES"},
+                        "trials": [
+                            {
+                                "trace_id": "trial_1",
+                                "final_output": {"excerpt": "The Agent answered NO after reading clause 4."},
+                                "trial_evaluation": {"score": 0.0, "passed": False},
+                            }
+                        ],
+                    },
+                },
+                "deterministic_failed_requirement_inventory": {
+                    "items": [{"requirement_id": "criterion:opaque", "expected": "YES"}]
+                },
+                "case_facts": {
+                    "case_id": "case_1",
+                    "score": 0.0,
+                    "evaluation_reason": "expected YES",
+                },
+            }
+        )
+
+        prompt = _build_outcome_independent_causal_plan_recovery_prompt(
+            diagnosis_input,
+            failed_requirement_ids=["criterion:opaque"],
+            validation_conflicts=["hypothesis h1 uses evaluator-owned outcomes in claim"],
+        )
+
+        task_visible = prompt.split("TASK_VISIBLE_DIAGNOSIS_INPUT:\n", maxsplit=1)[1]
+        assert "The Agent answered NO after reading clause 4." in task_visible
+        assert '"expected_answer":"YES"' not in task_visible
+        assert '"score":0.0' not in task_visible
+        assert "grader expects YES" not in task_visible
+        assert '"requirement_id":"criterion:opaque"' in task_visible
 
     def test_supported_sibling_hypothesis_cannot_disappear_from_handoff(self) -> None:
         from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (

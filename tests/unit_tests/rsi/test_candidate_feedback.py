@@ -322,6 +322,48 @@ def test_build_cohort_preserves_pre_evaluation_causal_prediction_and_assessment(
     assert experiment["assessment_by_case"]["case_a"][0]["causal_hypothesis_status"] == "falsified"
 
 
+def test_prompt_activation_uses_paired_analyzer_behavior_assessment() -> None:
+    candidate = _candidate(
+        "candidate",
+        1,
+        1,
+        0.0,
+        capabilities=[
+            _capability(
+                action_group="prompt",
+                operation="modify",
+                target_path="system_prompt.md",
+                runtime_name="",
+                target_case_ids=["case_a"],
+            )
+        ],
+        candidate_failure_diagnoses={
+            "case_a": [
+                {
+                    "prior_experiment_assessment": {
+                        "intervention_activated": "unknown",
+                        "predicted_behavior_occurred": "no",
+                        "predicted_outcome_occurred": "no",
+                    }
+                }
+            ]
+        },
+    )
+
+    ledger = build_candidate_feedback_cohort(
+        cohort=_cohort(target_case_ids=["case_a"]),
+        candidates=[candidate],
+        selected_candidate_id="",
+        top_m=1,
+    )
+
+    activation = ledger["candidates"][0]["activation"]
+    assert activation["availability"] == "observed"
+    assert activation["state"] == "unknown"
+    assert activation["observation_source"] == "candidate_failure_analysis"
+    assert activation["predicted_behavior_occurred"] == "no"
+
+
 def test_build_cohort_accepts_a_versioned_ranking_policy_and_records_improver() -> None:
     cohort = _cohort(
         ranking_policy="improver_policy_v2",

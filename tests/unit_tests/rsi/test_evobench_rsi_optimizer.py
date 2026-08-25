@@ -18,8 +18,12 @@ from examples.rsi.evobench.rsi_optimizer import (
     _audit_uses_new_substitution_families,
     _build_mandatory_abstraction_request,
     _build_transfer_review_request,
+    _candidate_decision_dependency_errors,
+    _controller_decision_dependency_contract,
+    _enforce_controller_decision_dependency,
     _forbidden_concrete_term_errors,
     _quoted_binding_phrases,
+    _transfer_audit_approved,
     _validate_causal_binding_independence,
     _validate_skill_spec,
     _validate_transfer_audit,
@@ -29,6 +33,34 @@ from examples.rsi.evobench.rsi_optimizer import (
 def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def _decision_dependency_test(**overrides: Any) -> dict[str, Any]:
+    payload = {
+        "upstream_decision_required": False,
+        "requirement_classification_required": False,
+        "upstream_decision": "",
+        "easiest_avoidance_path": "",
+        "decision_derivation_clause": "",
+        "authority_clause": "",
+        "scope_clause": "",
+        "responsibility_clause": "",
+        "claim_inventory_clause": "",
+        "conclusion_claim_clause": "",
+        "action_claim_clause": "",
+        "late_claim_gate_clause": "",
+        "final_release_scan_clause": "",
+        "unlisted_claim_restart_clause": "",
+        "source_witness_clause": "",
+        "stable_locator_clause": "",
+        "evidence_entailment_clause": "",
+        "trigger_clause": "",
+        "falsification_clause": "",
+        "negative_decision_gate_clause": "",
+        "avoidance_blocked": True,
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _policy_harness(root: Path) -> Path:
@@ -50,6 +82,11 @@ def _policy_harness(root: Path) -> Path:
                     "enabled": True,
                     "consecutive_threshold": 4,
                     "bailout_threshold": 3,
+                },
+                "submission_checkpoint": {
+                    "enabled": False,
+                    "instruction": "",
+                    "max_revisions": 1,
                 },
             },
             indent=2,
@@ -209,7 +246,7 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
     assert artifact["status"] == "success"
     assert artifact["promotion_status"] == "pending_gate"
-    assert artifact["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v15"
+    assert artifact["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v21"
     assert artifact["candidate_ready_roles"] == ["policy_harness"]
     candidate_refs = yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))
     assert "candidate_gate" not in candidate_refs
@@ -235,7 +272,7 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     )
 
     plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
-    assert plan["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v15"
+    assert plan["metadata"]["improver_protocol_version"] == "generic_behavior_intervention_v21"
     assert plan["targets"][0]["role"] == "policy_harness"
     assert plan["targets"][0]["attributed_issue_ids"] == ["ISSUE-1"]
     assert plan["targets"][0]["evidence_refs"] == [{"case_id": "case-1", "issue_id": "ISSUE-1"}]
@@ -256,7 +293,7 @@ def test_optimizer_copies_full_policy_harness_and_writes_orchestrator_contract(t
     assert all(capability["target_case_ids"] == ["case-1"] for capability in capabilities)
     assert "sibling candidate 2 of\n3" in requests[0]
     assert "activation or routing of the diagnosed behavior" in requests[0]
-    assert '"version": "generic_behavior_intervention_v15"' in requests[0]
+    assert '"version": "generic_behavior_intervention_v21"' in requests[0]
     assert '"supported_mutation_contract"' in requests[0]
     assert '"improver_policy_directives"' in requests[0]
     assert '"version_id": "I1"' in requests[0]
@@ -362,6 +399,9 @@ def test_transfer_review_requires_cross_domain_behavior_abstraction() -> None:
     assert "familiar mechanism from another task is a violation" in request
     assert "fallback contradicts a CAUSAL_BINDING scope_boundary" in request
     assert "hidden expected answer" in request
+    assert "intervention_entails_expected_effect" in request
+    assert "easiest\n  trigger-avoidance path" in request
+    assert "already-supported upstream decisions" in request
     assert '"concrete_terms": []' in request
     assert "Domain vocabulary is never allowed" in request
     assert "substitution_test" in request
@@ -374,10 +414,14 @@ def test_transfer_audit_requires_independent_evidence_and_explanations() -> None
     approved = _validate_transfer_audit(
         {
             "causal_faithful": True,
+            "intervention_entails_expected_effect": True,
+            "trigger_non_vacuous": True,
+            "preserves_supported_behavior": True,
             "evidence_independent": True,
             "task_detail_free": True,
             "cross_domain_transferable": True,
             "concrete_terms": [],
+            "decision_dependency_test": _decision_dependency_test(),
             "substitution_test": {
                 "task_family_a": "source-code repair",
                 "task_family_b": "document review",
@@ -390,14 +434,28 @@ def test_transfer_audit_requires_independent_evidence_and_explanations() -> None
     )
     assert approved["evidence_independent"] is True
 
+    rejected = _validate_transfer_audit(
+        {
+            **approved,
+            "intervention_entails_expected_effect": False,
+            "trigger_non_vacuous": False,
+            "violations": ["The rule can be avoided by switching the upstream branch."],
+        }
+    )
+    assert not _transfer_audit_approved(rejected)
+
     with pytest.raises(ValueError, match="explain at least one violation"):
         _validate_transfer_audit(
             {
                 "causal_faithful": True,
+                "intervention_entails_expected_effect": True,
+                "trigger_non_vacuous": True,
+                "preserves_supported_behavior": True,
                 "evidence_independent": False,
                 "task_detail_free": True,
                 "cross_domain_transferable": True,
                 "concrete_terms": [],
+                "decision_dependency_test": _decision_dependency_test(),
                 "substitution_test": {
                     "task_family_a": "source-code repair",
                     "task_family_b": "document review",
@@ -408,6 +466,209 @@ def test_transfer_audit_requires_independent_evidence_and_explanations() -> None
                 "violations": [],
             }
         )
+
+
+def test_decision_dependency_audit_rejects_post_classification_trigger() -> None:
+    candidate = {
+        "system_prompt_append": (
+            "When you conclude that every mandatory requirement is satisfied, state a positive verdict. "
+            "Only list additions when a mandatory requirement is genuinely not met."
+        )
+    }
+    audit = _validate_transfer_audit(
+        {
+            "causal_faithful": True,
+            "intervention_entails_expected_effect": True,
+            "trigger_non_vacuous": False,
+            "preserves_supported_behavior": True,
+            "evidence_independent": True,
+            "task_detail_free": True,
+            "cross_domain_transferable": True,
+            "concrete_terms": [],
+            "decision_dependency_test": _decision_dependency_test(
+                upstream_decision_required=True,
+                requirement_classification_required=True,
+                upstream_decision="whether the alleged gap is mandatory",
+                easiest_avoidance_path="relabel an optional observation as mandatory",
+                avoidance_blocked=False,
+            ),
+            "substitution_test": {
+                "task_family_a": "source-code review",
+                "task_family_b": "procurement eligibility",
+                "required_edits_a": [],
+                "required_edits_b": [],
+                "works_unchanged": True,
+            },
+            "violations": ["The candidate starts after the controlling classification."],
+        }
+    )
+
+    errors = _candidate_decision_dependency_errors(audit, candidate)
+
+    assert "decision dependency audit is missing decision_derivation_clause" in errors
+    assert "decision dependency audit is missing responsibility_clause" in errors
+    assert "decision dependency audit is missing trigger_clause" in errors
+    assert "decision dependency audit is missing stable_locator_clause" in errors
+    assert "decision dependency audit is missing final_release_scan_clause" in errors
+    assert "decision dependency audit is missing unlisted_claim_restart_clause" in errors
+    assert "candidate does not block the audited upstream trigger-avoidance path" in errors
+    assert not _transfer_audit_approved(audit)
+
+
+def test_decision_dependency_audit_accepts_task_visible_requirement_derivation() -> None:
+    clauses = {
+        "claim_inventory_clause": ("Before verification, draft and inventory every atomic material output claim."),
+        "conclusion_claim_clause": "Include every conclusion, verdict, and classification in that inventory.",
+        "action_claim_clause": (
+            "Include every prescribed action, recommended action, and required modification in that inventory."
+        ),
+        "late_claim_gate_clause": "No later or released material claim may bypass this inventory.",
+        "final_release_scan_clause": (
+            "Immediately before release, scan every material conclusion, classification, prescription, "
+            "recommendation, and required modification in the final output against the original inventory."
+        ),
+        "unlisted_claim_restart_clause": (
+            "If that final scan finds any unlisted material claim, block release and rerun the complete procedure."
+        ),
+        "authority_clause": "Identify the authoritative task-visible requirement and its scope.",
+        "scope_clause": (
+            "Establish the governed subject, object, operation, and boundary and match them to the assessed target."
+        ),
+        "responsibility_clause": (
+            "For each alleged gap, determine which actor, process, dependency, or evaluated target owns the "
+            "required outcome and whether the target itself must contain it."
+        ),
+        "source_witness_clause": ("For every retained claim, record an exact task-visible quote or bounded span."),
+        "stable_locator_clause": "Record a stable source locator that retrieves the same witness span.",
+        "evidence_entailment_clause": (
+            "Map that witness to the exact in-scope requirement and assessed target before classifying the gap."
+        ),
+        "trigger_clause": (
+            "Establish from task-visible evidence whether every condition that activates the requirement holds now."
+        ),
+        "falsification_clause": (
+            "Construct a countermodel in which the cited evidence is true but the proposed claim is false."
+        ),
+        "negative_decision_gate_clause": (
+            "Return a negative classification only when a mapped mandatory requirement remains unsupported."
+        ),
+    }
+    candidate = {"system_prompt_append": "\n".join(clauses.values())}
+    audit = _validate_transfer_audit(
+        {
+            "causal_faithful": True,
+            "intervention_entails_expected_effect": True,
+            "trigger_non_vacuous": True,
+            "preserves_supported_behavior": True,
+            "evidence_independent": True,
+            "task_detail_free": True,
+            "cross_domain_transferable": True,
+            "concrete_terms": [],
+            "decision_dependency_test": _decision_dependency_test(
+                upstream_decision_required=True,
+                requirement_classification_required=True,
+                upstream_decision="whether an alleged gap is an in-scope mandatory requirement",
+                easiest_avoidance_path="promote a useful but externally owned outcome to a target requirement",
+                decision_derivation_clause=clauses["evidence_entailment_clause"],
+                claim_inventory_clause=clauses["claim_inventory_clause"],
+                conclusion_claim_clause=clauses["conclusion_claim_clause"],
+                action_claim_clause=clauses["action_claim_clause"],
+                late_claim_gate_clause=clauses["late_claim_gate_clause"],
+                final_release_scan_clause=clauses["final_release_scan_clause"],
+                unlisted_claim_restart_clause=clauses["unlisted_claim_restart_clause"],
+                authority_clause=clauses["authority_clause"],
+                scope_clause=clauses["scope_clause"],
+                responsibility_clause=clauses["responsibility_clause"],
+                source_witness_clause=clauses["source_witness_clause"],
+                stable_locator_clause=clauses["stable_locator_clause"],
+                evidence_entailment_clause=clauses["evidence_entailment_clause"],
+                trigger_clause=clauses["trigger_clause"],
+                falsification_clause=clauses["falsification_clause"],
+                negative_decision_gate_clause=clauses["negative_decision_gate_clause"],
+                avoidance_blocked=True,
+            ),
+            "substitution_test": {
+                "task_family_a": "source-code review",
+                "task_family_b": "procurement eligibility",
+                "required_edits_a": [],
+                "required_edits_b": [],
+                "works_unchanged": True,
+            },
+            "violations": [],
+        }
+    )
+
+    assert _candidate_decision_dependency_errors(audit, candidate) == []
+    assert _transfer_audit_approved(audit)
+
+
+def test_controller_requirement_dependency_cannot_be_downgraded_by_reviewer() -> None:
+    causal_binding = {
+        "bindings": [
+            {
+                "source_hypothesis_semantic_id": "chs:unverified_decision_ground_used",
+                "causal_distinction": "A material ground requires its own verified decision chain.",
+            }
+        ]
+    }
+    audit = _validate_transfer_audit(
+        {
+            "causal_faithful": True,
+            "intervention_entails_expected_effect": True,
+            "trigger_non_vacuous": True,
+            "preserves_supported_behavior": True,
+            "evidence_independent": True,
+            "task_detail_free": True,
+            "cross_domain_transferable": True,
+            "concrete_terms": [],
+            "decision_dependency_test": _decision_dependency_test(),
+            "substitution_test": {
+                "task_family_a": "source-code review",
+                "task_family_b": "procurement eligibility",
+                "required_edits_a": [],
+                "required_edits_b": [],
+                "works_unchanged": True,
+            },
+            "violations": [],
+        }
+    )
+
+    contract = _controller_decision_dependency_contract(causal_binding)
+    enforced = _enforce_controller_decision_dependency(audit, causal_binding)
+    dependency = enforced["decision_dependency_test"]
+
+    assert contract == {
+        "requirement_classification_required": True,
+        "required_decision_links": ["authority", "entailment", "owner", "scope", "trigger"],
+    }
+    assert dependency["upstream_decision_required"] is True
+    assert dependency["requirement_classification_required"] is True
+    assert not _transfer_audit_approved(enforced)
+    assert "decision dependency audit is missing claim_inventory_clause" in _candidate_decision_dependency_errors(
+        enforced,
+        {"system_prompt_append": "Recompute the conclusion."},
+    )
+
+
+def test_decision_dependency_quote_ignores_markdown_presentation_only_differences() -> None:
+    clause = (
+        "State precisely which element the requirement demands. The mapping must specify:\n"
+        "- **the exact required element**, and\n"
+        "- **the location** where that element is absent."
+    )
+    candidate = {"system_prompt_append": clause}
+    audit = {
+        "decision_dependency_test": _decision_dependency_test(
+            upstream_decision_required=True,
+            decision_derivation_clause=(
+                "State precisely which element the requirement demands. The mapping must specify: "
+                "the exact required element, and the location where that element is absent."
+            ),
+            avoidance_blocked=True,
+        )
+    }
+
+    assert _candidate_decision_dependency_errors(audit, candidate) == []
 
 
 def test_rejected_concrete_term_matching_handles_inflection_without_symbol_false_positive() -> None:
@@ -488,10 +749,14 @@ def test_transfer_reviewer_rejects_cross_issue_mechanism_and_generator_repairs(t
         if len(review_requests) == 1:
             return {
                 "causal_faithful": False,
+                "intervention_entails_expected_effect": False,
+                "trigger_non_vacuous": False,
+                "preserves_supported_behavior": True,
                 "evidence_independent": True,
                 "task_detail_free": True,
                 "cross_domain_transferable": True,
                 "concrete_terms": [],
+                "decision_dependency_test": _decision_dependency_test(),
                 "substitution_test": {
                     "task_family_a": "source-code repair",
                     "task_family_b": "document review",
@@ -503,10 +768,14 @@ def test_transfer_reviewer_rejects_cross_issue_mechanism_and_generator_repairs(t
             }
         return {
             "causal_faithful": True,
+            "intervention_entails_expected_effect": True,
+            "trigger_non_vacuous": True,
+            "preserves_supported_behavior": True,
             "evidence_independent": True,
             "task_detail_free": True,
             "cross_domain_transferable": True,
             "concrete_terms": [],
+            "decision_dependency_test": _decision_dependency_test(),
             "substitution_test": {
                 "task_family_a": "source-code repair",
                 "task_family_b": "document review",
@@ -1352,6 +1621,108 @@ def test_optimizer_applies_declared_rail_target_without_python_changes(tmp_path:
     plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
     assert [action["action_group"] for action in plan["actions"]] == ["rail"]
     assert plan["actions"][0]["target_path"] == "harness.json"
+
+
+def test_optimizer_routes_decision_ground_failure_to_checkpoint_despite_model_phase(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
+    issue = analysis["issues"][0]
+    issue["summary"] = "A material decision ground was released before its requirement chain was verified."
+    issue["evidence"] = [{"failure_mode": "unverified_decision_ground_used"}]
+    issue["metadata"]["attribution"]["target_ref"] = "member_harness.policy_harness.prompt"
+    issue["metadata"]["attribution"]["decision_contract"] = {
+        "activation_phase": "post_diagnosis",
+        "required_action": "Exclude unsupported grounds and recompute the released conclusion.",
+        "acceptance_observable": "Every retained ground has a task-visible requirement-chain record.",
+    }
+    _write_yaml(inputs["analysis"], analysis)
+    requests: list[str] = []
+
+    def generate(request: str) -> dict[str, Any]:
+        requests.append(request)
+        return {
+            "system_prompt_append": "",
+            "skill": {"name": "", "description": "", "body": ""},
+            "harness_updates": {
+                "submission_checkpoint": {
+                    "enabled": True,
+                    "instruction": (
+                        "Before release, verify every material decision ground against task-visible evidence "
+                        "and recompute conclusions after excluding unsupported grounds."
+                    ),
+                }
+            },
+            "rationale": "The observed decision was released before its evidence chain was closed.",
+            "expected_effect": "The next answer is revised after a visible task-evidence closure pass.",
+        }
+
+    member_ref = asyncio.run(
+        PolicyHarnessRSIOptimizer(patch_generator=generate).optimize(
+            str(inputs["eval"]),
+            str(inputs["analysis"]),
+            str(inputs["refs"]),
+            str(tmp_path / "submission-checkpoint"),
+            optimization_issue_ids=["ISSUE-1"],
+        )
+    )
+
+    artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
+    candidate_refs = yaml.safe_load(Path(artifact["optimized_harness_refs_path"]).read_text(encoding="utf-8"))
+    candidate = Path(candidate_refs["harness_refs"]["policy_harness"])
+    candidate_config = json.loads((candidate / "harness.json").read_text(encoding="utf-8"))
+    assert candidate_config["submission_checkpoint"] == {
+        "enabled": True,
+        "instruction": (
+            "Before release, verify every material decision ground against task-visible evidence "
+            "and recompute conclusions after excluding unsupported grounds."
+        ),
+        "max_revisions": 1,
+    }
+    assert '"requested_mutation_surfaces": [\n    "rail"' in requests[0]
+    assert "submission_checkpoint" in requests[0]
+    plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
+    assert [action["action_id"] for action in plan["actions"]] == ["evobench_policy_submission_checkpoint"]
+
+
+def test_optimizer_routes_unverified_computation_release_to_checkpoint(tmp_path: Path) -> None:
+    inputs = _inputs(tmp_path)
+    analysis = yaml.safe_load(inputs["analysis"].read_text(encoding="utf-8"))
+    issue = analysis["issues"][0]
+    issue["summary"] = "An unverified computation was written into the deliverable as validated."
+    issue["evidence"] = [{"failure_mode": "unverified_computation_written_as_validated"}]
+    issue["metadata"]["attribution"]["target_ref"] = "member_harness.policy_harness.prompt"
+    _write_yaml(inputs["analysis"], analysis)
+
+    def generate(_request: str) -> dict[str, Any]:
+        return {
+            "system_prompt_append": "",
+            "harness_updates": {
+                "submission_checkpoint": {
+                    "enabled": True,
+                    "instruction": (
+                        "Before release, require a clean end-to-end computation and artifact read-back; "
+                        "failed or partial runs and cached-value substitution remain unverified."
+                    ),
+                }
+            },
+            "rationale": "The released deliverable used values from a failed computation.",
+            "expected_effect": "The next run repairs or recomputes failed dependencies before submission.",
+        }
+
+    member_ref = asyncio.run(
+        PolicyHarnessRSIOptimizer(patch_generator=generate).optimize(
+            str(inputs["eval"]),
+            str(inputs["analysis"]),
+            str(inputs["refs"]),
+            str(tmp_path / "computation-checkpoint"),
+            optimization_issue_ids=["ISSUE-1"],
+        )
+    )
+
+    artifact = yaml.safe_load(Path(member_ref).read_text(encoding="utf-8"))
+    plan = yaml.safe_load(Path(artifact["plan_path"]).read_text(encoding="utf-8"))
+    assert [action["action_group"] for action in plan["actions"]] == ["rail"]
+    assert [action["action_id"] for action in plan["actions"]] == ["evobench_policy_submission_checkpoint"]
 
 
 def test_optimizer_rejects_budget_update_for_prompt_target(tmp_path: Path) -> None:

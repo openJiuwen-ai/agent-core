@@ -374,6 +374,7 @@ def _candidate_feedback_record(
             "status": _text(candidate.get("status")),
             "reason": _text(candidate.get("reason")),
             "failure_class": _text(candidate.get("failure_class")),
+            "causal_failure_class": _text(candidate.get("causal_failure_class")),
         },
         "causal_experiment": _causal_experiment_summary(candidate, target_case_ids),
         "activation": _activation_summary(candidate, capabilities, target_case_ids),
@@ -451,6 +452,10 @@ def _activation_summary(
         return _unavailable_activation("missing_artifact", surfaces, "expected_runtime_name_missing")
     if not expected_pairs:
         if surfaces & _UNINSTRUMENTED_GROUPS:
+            observed = _behavioral_activation_from_diagnoses(candidate, fallback_target_case_ids)
+            if observed is not None:
+                observed["surfaces"] = sorted(surfaces & _UNINSTRUMENTED_GROUPS)
+                return observed
             return _unavailable_activation("not_instrumented", surfaces, "surface_has_no_activation_event")
         return _unavailable_activation("not_applicable", surfaces, "no_added_or_modified_runtime_capability")
 
@@ -479,6 +484,51 @@ def _activation_summary(
         "missing_pair_count": expected_count - observed_count,
         "trigger_rate": observed_count / expected_count,
     }
+
+
+def _behavioral_activation_from_diagnoses(
+    candidate: dict[str, Any],
+    target_case_ids: set[str],
+) -> dict[str, Any] | None:
+    """Use the paired Analyzer assessment for surfaces without runtime call events."""
+    diagnoses = candidate.get("candidate_failure_diagnoses", {})
+    if not isinstance(diagnoses, dict):
+        return None
+    assessments: list[dict[str, Any]] = []
+    for case_id in sorted(target_case_ids):
+        raw = diagnoses.get(case_id, [])
+        items = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+        assessments.extend(
+            dict(item["prior_experiment_assessment"])
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("prior_experiment_assessment"), dict)
+        )
+    if not assessments:
+        return None
+
+    activation_values = {_normalize_text(item.get("intervention_activated")) for item in assessments}
+    behavior_values = {_normalize_text(item.get("predicted_behavior_occurred")) for item in assessments}
+    outcome_values = {_normalize_text(item.get("predicted_outcome_occurred")) for item in assessments}
+    if activation_values == {"yes"}:
+        state = "triggered"
+    elif "no" in activation_values:
+        state = "not_triggered"
+    else:
+        state = "unknown"
+    return {
+        "availability": "observed",
+        "state": state,
+        "observation_source": "candidate_failure_analysis",
+        "assessment_count": len(assessments),
+        "intervention_activated": _single_observation(activation_values),
+        "predicted_behavior_occurred": _single_observation(behavior_values),
+        "predicted_outcome_occurred": _single_observation(outcome_values),
+    }
+
+
+def _single_observation(values: set[str]) -> str:
+    values.discard("")
+    return next(iter(values)) if len(values) == 1 else "mixed" if values else "unknown"
 
 
 def _unavailable_activation(availability: str, surfaces: set[str], reason: str) -> dict[str, Any]:

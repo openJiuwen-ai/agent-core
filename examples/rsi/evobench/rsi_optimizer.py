@@ -12,6 +12,7 @@ execution code remains immutable.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+import copy
 import hashlib
 import inspect
 import json
@@ -28,9 +29,11 @@ _PROMPT_PATH = "system_prompt.md"
 _HARNESS_PATH = "harness.json"
 _SKILLS_DIR = "skills"
 _BUDGET_HARNESS_FIELDS = {"command_timeout_seconds", "max_steps", "rollout_wall_clock_seconds"}
-_RAIL_HARNESS_FIELD = "tool_loop_compaction"
-_ALLOWED_RAIL_FIELDS = {"enabled", "consecutive_threshold", "bailout_threshold"}
-_ALLOWED_HARNESS_FIELDS = _BUDGET_HARNESS_FIELDS | {_RAIL_HARNESS_FIELD}
+_RAIL_HARNESS_FIELDS = {
+    "tool_loop_compaction": {"enabled", "consecutive_threshold", "bailout_threshold"},
+    "submission_checkpoint": {"enabled", "instruction", "max_revisions"},
+}
+_ALLOWED_HARNESS_FIELDS = _BUDGET_HARNESS_FIELDS | set(_RAIL_HARNESS_FIELDS)
 _WALL_CLOCK_ALIASES = {"wall_clock", "wall_clock_seconds"}
 _MAX_PROMPT_APPEND_CHARS = 8_000
 _MAX_SKILL_DESCRIPTION_CHARS = 500
@@ -38,7 +41,7 @@ _MAX_SKILL_BODY_CHARS = 12_000
 _MAX_STRUCTURED_EVIDENCE_CHARS = 40_000
 _MAX_LEGACY_RESULT_CHARS = 3_000
 _MAX_LEGACY_TRACE_CHARS = 4_000
-GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v15"
+GENERIC_IMPROVER_PROTOCOL_VERSION = "generic_behavior_intervention_v21"
 _CAUSAL_EVIDENCE_PATH_KEYS = {
     "causal_evidence_path",
     "causal_digest_path",
@@ -165,7 +168,7 @@ class PolicyHarnessRSIOptimizer:
             requested_surfaces=requested_surfaces,
         )
         supported_surfaces = {"prompt", "skill", "budget"}
-        if isinstance(source_harness_json.get(_RAIL_HARNESS_FIELD), Mapping):
+        if any(isinstance(source_harness_json.get(field), Mapping) for field in _RAIL_HARNESS_FIELDS):
             supported_surfaces.add("rail")
         unsupported_surfaces = sorted(requested_surfaces - supported_surfaces)
         if unsupported_surfaces:
@@ -394,7 +397,7 @@ class PolicyHarnessRSIOptimizer:
         if self._patch_generator is not None:
             generated = self._patch_generator(request)
             candidate = await generated if inspect.isawaitable(generated) else generated
-            if self._transfer_reviewer is None or not ({"prompt", "skill", "unspecified"} & requested_surfaces):
+            if self._transfer_reviewer is None or not ({"prompt", "skill", "rail", "unspecified"} & requested_surfaces):
                 return candidate
             return await _review_injected_candidate(
                 candidate=candidate,
@@ -444,10 +447,41 @@ def _requested_issue_surfaces(issues: list[dict[str, Any]]) -> set[str]:
         elif tokens & {"config", "configuration"}:
             surfaces.add("config")
         elif tokens & {"prompt", "system_prompt", "prompt_section"}:
-            surfaces.add("prompt")
+            # A pre-submission decision check with a runtime-visible record is
+            # a control boundary, not more static prompt content. Routing this
+            # failure class to the declared checkpoint rail avoids repeating a
+            # prompt intervention that the candidate can simply skip.
+            surfaces.add("rail" if _requires_submission_checkpoint(issue) else "prompt")
         else:
             surfaces.add("unknown")
     return surfaces
+
+
+def _requires_submission_checkpoint(issue: Mapping[str, Any]) -> bool:
+    metadata = issue.get("metadata") if isinstance(issue.get("metadata"), Mapping) else {}
+    attribution = metadata.get("attribution") if isinstance(metadata.get("attribution"), Mapping) else {}
+    failure_mode = " ".join(
+        str(value or "")
+        for value in (
+            issue.get("summary"),
+            attribution.get("root_cause"),
+            attribution.get("general_mechanism"),
+            *(evidence.get("failure_mode") for evidence in issue.get("evidence", []) if isinstance(evidence, Mapping)),
+        )
+    ).casefold()
+    # These failures share one enforceable boundary: an unverified result
+    # survived into the released answer or deliverable. Static guidance can be
+    # skipped, so route the repair to a final-response checkpoint regardless of
+    # a model-authored phase label.
+    explicit_modes = {
+        "unverified_decision_ground_used",
+        "unverified_computation_written_as_validated",
+        "stale_cached_values_from_crashed_engine",
+    }
+    if any(mode in failure_mode for mode in explicit_modes):
+        return True
+    release_terms = ("released answer", "final answer", "deliverable", "submitted", "written")
+    return "unverified" in failure_mode and any(term in failure_mode for term in release_terms)
 
 
 def _skill_mutation_policy(
@@ -715,10 +749,11 @@ async def _invoke_patch_agent(
             "paired evaluation evidence. The task domain is not assumed. Separate facts "
             "from hypotheses and return only the requested JSON mapping. Make one "
             "falsifiable behavior intervention within the supplied mutation contract. "
-            "Express persistent instructions as a transferable behavior rule rather than "
+            "Express every persistent Prompt, Skill, or Rail instruction as a transferable behavior rule rather than "
             "an answer for the observed benchmark instance. Persistent prompt text must "
             "remain valid across materially different task domains and must omit the "
-            "observed domain, artifact type, application, command, library, and example. "
+            "observed domain, artifact type, application, command, library, and example. Rail instructions obey "
+            "the same global transfer rule as Prompt text. "
             "A Skill may retain the public domain operations required by its capability, "
             "but it must transfer across different tasks and omit instance literals. "
             "Never encode case IDs, known answers, benchmark entities, or private tool fields."
@@ -780,12 +815,71 @@ async def _invoke_patch_agent(
             ),
         )
 
+    async def rewrite_rail_instruction(message: str, base_candidate: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite the Rail payload without letting the model mutate another surface."""
+
+        def validate_rewrite(value: Any) -> list[str]:
+            if not isinstance(value, Mapping):
+                return ["rail rewrite must be a JSON mapping"]
+            if set(value) != {"instruction"}:
+                return ["rail rewrite must contain exactly the instruction field"]
+            instruction = value.get("instruction")
+            if not isinstance(instruction, str):
+                return ["instruction must be a string"]
+            instruction = instruction.strip()
+            if not 40 <= len(instruction) <= 4_000:
+                return ["instruction must contain 40-4000 characters"]
+            projected = copy.deepcopy(base_candidate)
+            updates = projected.setdefault("harness_updates", {})
+            checkpoint = updates.setdefault("submission_checkpoint", {})
+            checkpoint["instruction"] = instruction
+            return [
+                *_patch_validation_errors(
+                    projected,
+                    source_harness=source_harness,
+                    leakage_guard=leakage_guard,
+                    causal_hypothesis_policy=causal_hypothesis_policy,
+                    requested_surfaces=requested_surfaces,
+                    required_budget_fields=required_budget_fields,
+                    skill_mutation_policy=skill_mutation_policy,
+                ),
+                *_forbidden_concrete_term_errors(projected, forbidden_prompt_terms),
+                *_global_submission_checkpoint_errors(instruction),
+            ]
+
+        rewritten = await invoke_member_optimizer_agent_structured(
+            agent=generator,
+            agent_name="EvoBenchPolicyHarnessRailRewriterAgent",
+            user_message=message,
+            session_id=f"evobench_rail_rewrite_{hashlib.sha256(message.encode('utf-8')).hexdigest()[:16]}",
+            retry_limit=2,
+            parse_response=parse_yaml_or_json_object_response,
+            validate_response=validate_rewrite,
+            build_retry_message=lambda _previous, error: (
+                f"{message}\n\nThe previous Rail rewrite was invalid: {error}\n"
+                'Return only {"instruction": "the corrected transferable instruction"}. '
+                "Do not return a Skill, Prompt, harness_updates, rationale, or any other field."
+            ),
+        )
+        projected = copy.deepcopy(base_candidate)
+        updates = projected.setdefault("harness_updates", {})
+        checkpoint = updates.setdefault("submission_checkpoint", {})
+        checkpoint["instruction"] = str(rewritten["instruction"]).strip()
+        return projected
+
     candidate = await generate(request)
-    if not ({"prompt", "skill", "unspecified"} & requested_surfaces):
+    if not ({"prompt", "skill", "rail", "unspecified"} & requested_surfaces):
         return candidate
     forbidden_prompt_terms.extend(_quoted_binding_phrases(causal_binding))
-    candidate = await generate(
-        _build_mandatory_abstraction_request(candidate, causal_binding, requested_surfaces=requested_surfaces)
+    abstraction_request = _build_mandatory_abstraction_request(
+        candidate,
+        causal_binding,
+        requested_surfaces=requested_surfaces,
+    )
+    candidate = (
+        await rewrite_rail_instruction(abstraction_request, candidate)
+        if "rail" in requested_surfaces and "skill" not in requested_surfaces
+        else await generate(abstraction_request)
     )
 
     audit_history: list[dict[str, Any]] = []
@@ -829,6 +923,28 @@ async def _invoke_patch_agent(
             ),
         )
         audit = _validate_transfer_audit(audit)
+        audit = _enforce_controller_decision_dependency(audit, causal_binding)
+        dependency_errors = _candidate_decision_dependency_errors(audit, validated)
+        if dependency_errors:
+            audit = {
+                **audit,
+                "trigger_non_vacuous": False,
+                "violations": list(dict.fromkeys([*audit["violations"], *dependency_errors])),
+            }
+        if "rail" in requested_surfaces and not _audit_exercises_global_rail_axes(audit):
+            audit = {
+                **audit,
+                "cross_domain_transferable": False,
+                "violations": list(
+                    dict.fromkeys(
+                        [
+                            *audit["violations"],
+                            "Rail substitution audit must exercise a computed-artifact result and an "
+                            "external-action postcondition, not two requirement-classification tasks",
+                        ]
+                    )
+                ),
+            }
         independently_sampled = _audit_uses_new_substitution_families(audit, audit_history)
         approved = _transfer_audit_approved(audit) and independently_sampled
         if not independently_sampled:
@@ -869,7 +985,12 @@ async def _invoke_patch_agent(
         if review_index == 3:
             raise ValueError("transfer audit rejected candidate: " + "; ".join(audit["violations"]))
         forbidden_prompt_terms.extend(audit["concrete_terms"])
-        candidate = await generate(_build_generation_repair_request(request, validated, audit))
+        repair_request = _build_generation_repair_request(request, validated, audit)
+        candidate = (
+            await rewrite_rail_instruction(repair_request, validated)
+            if "rail" in requested_surfaces and "skill" not in requested_surfaces
+            else await generate(repair_request)
+        )
     raise AssertionError("unreachable transfer review state")
 
 
@@ -880,7 +1001,9 @@ def _build_mandatory_abstraction_request(
     requested_surfaces: set[str] | None = None,
 ) -> str:
     """Lift a concrete repair into a persistent functional decision rule."""
-    skill_target = "skill" in set(requested_surfaces or {"prompt"})
+    surfaces = set(requested_surfaces or {"prompt"})
+    skill_target = "skill" in surfaces
+    rail_target = "rail" in surfaces and not skill_target
     rewrite_instruction = (
         "Rewrite only skill.name, skill.description, and skill.body. Preserve "
         "source_hypothesis_id, system_prompt_append, harness_updates, rationale, and expected_effect exactly. "
@@ -891,13 +1014,25 @@ def _build_mandatory_abstraction_request(
         "must use task-visible requirements, invariants, independent recomputation, or artifact read-back; "
         "it must never compare against an expected, gold, reference, or known answer."
         if skill_target
-        else "Rewrite only system_prompt_append. Preserve source_hypothesis_id, skill, harness_updates, "
-        "rationale, and expected_effect exactly. Remove every observed domain and implementation term so the "
-        "global policy applies unchanged across materially different task domains."
+        else (
+            "Return only a JSON mapping with one field named instruction. Rewrite the current "
+            "harness_updates.submission_checkpoint.instruction; the controller will preserve every other field. "
+            "Remove every observed domain and implementation term so the runtime checkpoint applies unchanged "
+            "across materially different task domains. It must explicitly cover all material release surfaces: "
+            "factual claims, computed or derived values, artifact or state mutations, conclusions or classifications, "
+            "and actions or operations. Express the observed mandatory/optional distinction as the general question "
+            "of whether verified evidence makes a ground decision-changing or merely advisory; do not retain "
+            "compliance-review vocabulary or an assessed-document workflow."
+            if rail_target
+            else "Rewrite only system_prompt_append. Preserve source_hypothesis_id, skill, harness_updates, "
+            "rationale, and expected_effect exactly. Remove every observed domain and implementation term so the "
+            "global policy applies unchanged across materially different task domains."
+        )
     )
     return f"""Perform the mandatory abstraction pass for this Harness candidate.
 {rewrite_instruction}
-Return only the complete six-field candidate JSON mapping.
+For a Rail target, return only {{"instruction": "..."}}. Otherwise return the
+complete six-field candidate JSON mapping.
 
 The persistent intervention must keep the same falsifiable trigger -> action ->
 observable relationship. For a global Prompt, express the mechanism through functional
@@ -911,6 +1046,16 @@ an upstream state or decision from a downstream computation, validation, or outc
 the abstract rule must still require the upstream causal action before the downstream
 operation. Never replace a required causal action with an easier proxy such as any
 edit, any tool call, any saved artifact, visible progress, or a final statement.
+If the intervention depends on classifying an alleged gap against requirements, retain
+the full task-visible derivation: authority and scope, ownership of the required outcome,
+an exhaustive inventory of atomic decision-changing output claims, including conclusions
+and prescribed or recommended actions, exact-witness evidence-to-requirement entailment,
+the requirement's scope and activation conditions, a countermodel attempt that can defeat the mapping,
+and a final pre-release scan that restarts on any unlisted material claim,
+and the gate for a negative decision or prescribed correction. A downstream rule that
+begins only after the agent has "confirmed" or "concluded" the controlling
+classification, or lets a later draft claim bypass the inventory, is not a causal
+intervention and must be rewritten to include that upstream procedure.
 Treat every scope_boundary entry as immutable. Inspect the full persistent
 intervention, including fallback and recovery sections, and remove any action that
 contradicts a boundary; never trade semantic correctness for visible completion.
@@ -938,7 +1083,19 @@ def _build_transfer_review_request(
     """Ask an independent model to audit without changing candidate semantics."""
     skill = patch.get("skill") if isinstance(patch.get("skill"), Mapping) else {}
     skill_target = bool(skill)
-    persistent_field = "skill.description and skill.body" if skill_target else "system_prompt_append"
+    rail_updates = patch.get("harness_updates") if isinstance(patch.get("harness_updates"), Mapping) else {}
+    checkpoint = (
+        rail_updates.get("submission_checkpoint")
+        if isinstance(rail_updates.get("submission_checkpoint"), Mapping)
+        else {}
+    )
+    rail_target = bool(str(checkpoint.get("instruction", "") or "").strip())
+    persistent_field = (
+        "skill.description and skill.body"
+        if skill_target
+        else ("harness_updates.submission_checkpoint.instruction" if rail_target else "system_prompt_append")
+    )
+    controller_dependency = _controller_decision_dependency_contract(causal_binding)
     detail_rule = (
         "For a Skill, public artifact classes, commands, libraries, and algorithms that are necessary to execute "
         "the declared capability are allowed. concrete_terms must instead contain observed-instance source names, "
@@ -948,11 +1105,14 @@ def _build_transfer_review_request(
         "cross_domain_transferable means unchanged transfer to two different tasks inside the same declared "
         "capability family; the tasks may share the public tool or artifact class."
         if skill_target
-        else "For a global Prompt, concrete_terms must contain every observed-domain term, artifact/media class, "
+        else "For a global Prompt or Rail instruction, concrete_terms must contain every observed-domain term, artifact/media class, "
         "file format, application, command, package/library, API, function, implementation parameter, named entity, "
         "fixed value, and worked example. Domain vocabulary is never allowed in a global persistent prompt. "
         "cross_domain_transferable requires two task families that do not share "
-        "the observed artifact, tool, or execution environment."
+        "the observed artifact, tool, or execution environment. For a Rail audit, task_family_a must begin exactly "
+        "with `computed-artifact:` and describe a computed or derived result persisted into an artifact; "
+        "task_family_b must begin exactly with `external-action:` and describe an executed action with an externally "
+        "observable postcondition. A classification or conformance review cannot serve as either family."
     )
     return f"""Audit pass {audit_pass}. Audit this proposed global Harness intervention. Do not rewrite it and do
 not propose an alternative.
@@ -960,10 +1120,36 @@ not propose an alternative.
 Return ONLY this JSON shape:
 {{
   "causal_faithful": true,
+  "intervention_entails_expected_effect": true,
+  "trigger_non_vacuous": true,
+  "preserves_supported_behavior": true,
   "evidence_independent": true,
   "task_detail_free": true,
   "cross_domain_transferable": true,
   "concrete_terms": [],
+  "decision_dependency_test": {{
+    "upstream_decision_required": true,
+    "requirement_classification_required": {json.dumps(controller_dependency["requirement_classification_required"])},
+    "upstream_decision": "the decision that controls whether the intervention runs",
+    "easiest_avoidance_path": "how the original defect could survive by changing that decision",
+    "decision_derivation_clause": "an exact quote from the persistent candidate that derives the decision",
+    "authority_clause": "",
+    "scope_clause": "",
+    "responsibility_clause": "",
+    "claim_inventory_clause": "",
+    "conclusion_claim_clause": "",
+    "action_claim_clause": "",
+    "late_claim_gate_clause": "",
+    "final_release_scan_clause": "",
+    "unlisted_claim_restart_clause": "",
+    "source_witness_clause": "",
+    "stable_locator_clause": "",
+    "evidence_entailment_clause": "",
+    "trigger_clause": "",
+    "falsification_clause": "",
+    "negative_decision_gate_clause": "",
+    "avoidance_blocked": true
+  }},
   "substitution_test": {{
     "task_family_a": "one materially different task family",
     "task_family_b": "another materially different task family",
@@ -975,12 +1161,70 @@ Return ONLY this JSON shape:
 }}
 
 Audit rules:
+- CONTROLLER_DECISION_DEPENDENCY is frozen evidence, not a reviewer opinion. When
+  its requirement_classification_required is true, copy true into the audit and
+  populate all eleven exact candidate clauses. You may upgrade false to true when
+  the candidate contains another requirement-classification dependency, but you
+  may never downgrade controller true to false.
 - causal_faithful is true only when the candidate implements the observed_decision
   -> required_behavior -> predicted_observable relationship in CAUSAL_BINDING. A
   familiar mechanism from another task is a violation, even if it sounds general.
 - causal_faithful is false when any instruction, validation step, recovery path, or
   fallback contradicts a CAUSAL_BINDING scope_boundary. Audit the full candidate,
   not only its primary procedure. A last-resort action is still a violation.
+- intervention_entails_expected_effect is true only when following the executable
+  persistent instruction is sufficient to produce the claimed expected_effect. Test
+  the exact instruction, not its rationale. It is false when expected_effect claims
+  a branch choice, classification, mutation, or observable that the instruction never
+  requires or derives.
+- trigger_non_vacuous is true only when the agent cannot satisfy or evade the new rule
+  merely by changing an upstream label, branch, or wording while leaving the evidenced
+  decision procedure unchanged. Simulate both the intended trigger path and the easiest
+  trigger-avoidance path. If avoidance preserves the original defect, set it false.
+- Complete decision_dependency_test before setting trigger_non_vacuous. Set
+  upstream_decision_required=true whenever the claimed effect depends on a verdict,
+  classification, branch, eligibility judgment, or other state that the candidate
+  merely assumes in its trigger. The easiest_avoidance_path must describe how an
+  agent could preserve the diagnosed defect by choosing a different upstream state.
+  decision_derivation_clause must be an exact, contiguous quote from the executable
+  persistent candidate that tells the agent how to derive that upstream state from
+  task-visible evidence before the dependent action. A clause that only says "when",
+  "if", "after confirming", "check", or "make sure" does not derive the state.
+- Set requirement_classification_required=true when the upstream decision determines
+  whether an alleged gap is an in-scope mandatory requirement of the evaluated target.
+  In that case copy fifteen exact, contiguous candidate quotes: claim_inventory_clause must
+  require a draft before verification and enumerate every atomic material output claim;
+  conclusion_claim_clause must explicitly cover every conclusion, verdict, and
+  classification; action_claim_clause must explicitly cover every prescribed,
+  recommended, or required action; late_claim_gate_clause must prohibit any later or
+  released material claim from bypassing that inventory; final_release_scan_clause must
+  require an immediate pre-release scan of every material conclusion, classification,
+  prescription, recommendation, and required modification in the final output against
+  the original inventory; unlisted_claim_restart_clause must block release and restart
+  the complete procedure whenever that scan finds an unlisted claim; authority_clause
+  must identify the task-visible source that makes the requirement binding; scope_clause
+  must establish that source's governed subject, object, operation, and boundary and
+  match them to the assessed target; responsibility_clause
+  must determine which actor, process, dependency, or target owns the required outcome;
+  source_witness_clause must require an exact task-visible quote or bounded span for every
+  retained claim; stable_locator_clause must separately require a stable source locator
+  for that witness; evidence_entailment_clause must map
+  that witness to the exact in-scope requirement and assessed target; trigger_clause must
+  establish from task-visible evidence whether every condition that activates that
+  requirement is satisfied in the current state; falsification_clause must challenge
+  that mapping with a countermodel in which the evidence is true but the proposed claim
+  is false; and negative_decision_gate_clause
+  must first account for every atomic reason that changes the conclusion or prescribed
+  action, then permit a negative verdict only after each retained mapped requirement
+  remains unsupported. A draft claim that bypasses that inventory makes the clause
+  incomplete. These clauses may be separate steps. Empty, post-verdict, self-attested,
+  or non-exhaustive clauses mean avoidance_blocked=false and trigger_non_vacuous=false.
+- Set avoidance_blocked=true only if the quoted executable procedure blocks the stated
+  easiest avoidance path. Do not credit rationale or expected_effect as instructions.
+- preserves_supported_behavior is true only when the intervention changes the diagnosed
+  decision and does not ask the agent to overturn already-supported upstream decisions
+  solely to make downstream output consistent. A consistency repair must determine or
+  preserve the evidence-backed branch first, then align dependent actions with it.
 - evidence_independent is true only when the persistent rule is justified by
   evidence available to the task agent. Audit both the binding and the candidate:
   controller-frozen means the causal relationship cannot be rewritten, not that it
@@ -1011,10 +1255,14 @@ Audit rules:
   audit pass. Previously used families are listed below; do not reuse or paraphrase
   them.
 - violations must contain short, concrete reasons for every false field and must
-  be empty only when all four booleans are true.
+  be empty only when all audit booleans are true and the decision-dependency test
+  contains the required executable clauses.
 
 PRIOR_SUBSTITUTION_FAMILIES:
 {json.dumps(prior_substitution_families or [], ensure_ascii=False, indent=2)}
+
+CONTROLLER_DECISION_DEPENDENCY:
+{json.dumps(controller_dependency, ensure_ascii=False, indent=2)}
 
 CAUSAL_BINDING (controller-frozen; audit may reject but never replace it):
 {json.dumps(causal_binding, ensure_ascii=False, indent=2)}
@@ -1031,23 +1279,46 @@ def _build_generation_repair_request(
 ) -> str:
     del original_request
     skill_target = isinstance(rejected_patch.get("skill"), Mapping) and bool(rejected_patch.get("skill"))
+    rail_updates = (
+        rejected_patch.get("harness_updates") if isinstance(rejected_patch.get("harness_updates"), Mapping) else {}
+    )
+    checkpoint = (
+        rail_updates.get("submission_checkpoint")
+        if isinstance(rail_updates.get("submission_checkpoint"), Mapping)
+        else {}
+    )
+    rail_target = bool(str(checkpoint.get("instruction", "") or "").strip())
     rewrite_target = (
         "Rewrite only skill.name, skill.description, and skill.body. Preserve the public operations required by "
         "the capability, but remove every observed-instance term listed by the audit. Replace any validation "
         "against an expected, gold, reference, or known answer with task-visible contract checks, invariants, "
         "independent recomputation, or artifact read-back."
         if skill_target
-        else "Rewrite only system_prompt_append at the functional trigger -> action -> observable level. Remove "
-        "every listed concrete term and any synonymous observed domain, artifact, application, command, library, "
-        "parameter, or worked-example term."
+        else (
+            "Return only a JSON mapping with one field named instruction. Rewrite the current Rail instruction "
+            "at the functional trigger -> action -> observable level. The controller preserves all other fields. "
+            "Remove every listed concrete term and "
+            "any synonymous observed domain, artifact, application, command, library, parameter, or worked-example term. "
+            "The replacement must govern factual claims, computed or derived values, artifact or state mutations, "
+            "conclusions or classifications, and actions or operations. Use the general distinction between a verified "
+            "decision-changing ground and a merely advisory ground, not compliance-specific mandatory/optional language."
+            if rail_target
+            else "Rewrite only system_prompt_append at the functional trigger -> action -> observable level. Remove "
+            "every listed concrete term and any synonymous observed domain, artifact, application, command, library, "
+            "parameter, or worked-example term."
+        )
     )
     return f"""The independent transfer audit rejected the persistent instruction.
 {rewrite_target}
 Preserve source_hypothesis_id, the other persistent surface, harness_updates,
 rationale, and expected_effect exactly as supplied.
 Do not weaken the causal intervention into generic advice.
+When the audit exposes a trigger-avoidance or upstream-decision gap, repair the
+executable decision procedure that precedes the trigger. Do not merely strengthen
+the downstream wording or repeat the conditional trigger.
 
-Return only the complete candidate JSON mapping with the same six top-level fields.
+For a Rail target, return only {{"instruction": "..."}}. Otherwise return the
+complete candidate JSON mapping with the same six top-level fields.
 
 REJECTED CANDIDATE:
 {json.dumps(rejected_patch, ensure_ascii=False, indent=2)}
@@ -1062,10 +1333,14 @@ def _validate_transfer_audit(value: Any) -> dict[str, Any]:
         raise TypeError("transfer audit must be a mapping")
     expected = {
         "causal_faithful",
+        "intervention_entails_expected_effect",
+        "trigger_non_vacuous",
+        "preserves_supported_behavior",
         "evidence_independent",
         "task_detail_free",
         "cross_domain_transferable",
         "concrete_terms",
+        "decision_dependency_test",
         "substitution_test",
         "violations",
     }
@@ -1075,6 +1350,9 @@ def _validate_transfer_audit(value: Any) -> dict[str, Any]:
         raise ValueError(f"transfer audit fields mismatch: missing={missing}, unknown={unknown}")
     boolean_fields = {
         "causal_faithful",
+        "intervention_entails_expected_effect",
+        "trigger_non_vacuous",
+        "preserves_supported_behavior",
         "evidence_independent",
         "task_detail_free",
         "cross_domain_transferable",
@@ -1087,6 +1365,51 @@ def _validate_transfer_audit(value: Any) -> dict[str, Any]:
         not isinstance(item, str) or not item.strip() for item in concrete_terms
     ):
         raise TypeError("transfer audit concrete_terms must be a list of non-empty strings")
+    dependency = value["decision_dependency_test"]
+    if not isinstance(dependency, Mapping):
+        raise TypeError("transfer audit decision_dependency_test must be a mapping")
+    dependency_fields = {
+        "upstream_decision_required",
+        "requirement_classification_required",
+        "upstream_decision",
+        "easiest_avoidance_path",
+        "decision_derivation_clause",
+        "authority_clause",
+        "scope_clause",
+        "responsibility_clause",
+        "claim_inventory_clause",
+        "conclusion_claim_clause",
+        "action_claim_clause",
+        "late_claim_gate_clause",
+        "final_release_scan_clause",
+        "unlisted_claim_restart_clause",
+        "source_witness_clause",
+        "stable_locator_clause",
+        "evidence_entailment_clause",
+        "trigger_clause",
+        "falsification_clause",
+        "negative_decision_gate_clause",
+        "avoidance_blocked",
+    }
+    if set(dependency) != dependency_fields:
+        raise ValueError("transfer audit decision_dependency_test fields mismatch")
+    for field in (
+        "upstream_decision_required",
+        "requirement_classification_required",
+        "avoidance_blocked",
+    ):
+        if not isinstance(dependency[field], bool):
+            raise TypeError(f"transfer audit decision_dependency_test {field} must be a boolean")
+    dependency_text_fields = dependency_fields - {
+        "upstream_decision_required",
+        "requirement_classification_required",
+        "avoidance_blocked",
+    }
+    for field in dependency_text_fields:
+        if not isinstance(dependency[field], str):
+            raise TypeError(f"transfer audit decision_dependency_test {field} must be a string")
+    if dependency["requirement_classification_required"] and not dependency["upstream_decision_required"]:
+        raise ValueError("requirement classification implies an upstream decision dependency")
     substitution = value["substitution_test"]
     if not isinstance(substitution, Mapping):
         raise TypeError("transfer audit substitution_test must be a mapping")
@@ -1121,6 +1444,10 @@ def _validate_transfer_audit(value: Any) -> dict[str, Any]:
         raise TypeError("transfer audit violations must be a list of non-empty strings")
     normalized = {key: value[key] for key in boolean_fields}
     normalized["concrete_terms"] = [item.strip() for item in concrete_terms]
+    normalized["decision_dependency_test"] = {
+        field: dependency[field] if isinstance(dependency[field], bool) else dependency[field].strip()
+        for field in dependency_fields
+    }
     normalized["substitution_test"] = {
         "task_family_a": family_a,
         "task_family_b": family_b,
@@ -1168,21 +1495,199 @@ def _transfer_audit_validation_errors(value: Any) -> list[str]:
     return []
 
 
+def _controller_decision_dependency_contract(causal_binding: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive non-optional decision-chain checks from controller-owned causal structure."""
+    required = False
+    links: set[str] = set()
+    bindings = causal_binding.get("bindings", [])
+    for binding in bindings if isinstance(bindings, list) else []:
+        if not isinstance(binding, Mapping):
+            continue
+        semantic_id = str(binding.get("source_hypothesis_semantic_id", "") or "").strip().casefold()
+        binding_links = {
+            str(item).strip().casefold() for item in binding.get("required_decision_links", []) if str(item).strip()
+        }
+        binding_required = binding.get("requirement_classification_required") is True
+        if semantic_id == "chs:unverified_decision_ground_used":
+            binding_required = True
+            binding_links.update({"authority", "scope", "owner", "trigger", "entailment"})
+        if binding_required:
+            required = True
+            links.update(binding_links)
+    return {
+        "requirement_classification_required": required,
+        "required_decision_links": sorted(links),
+    }
+
+
+def _enforce_controller_decision_dependency(
+    audit: Mapping[str, Any],
+    causal_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Prevent a reviewer from switching off a controller-required dependency audit."""
+    contract = _controller_decision_dependency_contract(causal_binding)
+    if not contract["requirement_classification_required"]:
+        return dict(audit)
+    dependency = audit.get("decision_dependency_test")
+    dependency = dict(dependency) if isinstance(dependency, Mapping) else {}
+    dependency["upstream_decision_required"] = True
+    dependency["requirement_classification_required"] = True
+    return {**audit, "decision_dependency_test": dependency}
+
+
 def _transfer_audit_approved(audit: Mapping[str, Any]) -> bool:
+    dependency = audit.get("decision_dependency_test")
+    dependency = dependency if isinstance(dependency, Mapping) else {}
+    upstream_ready = not bool(dependency.get("upstream_decision_required")) or bool(
+        str(dependency.get("upstream_decision", "")).strip()
+        and str(dependency.get("easiest_avoidance_path", "")).strip()
+        and str(dependency.get("decision_derivation_clause", "")).strip()
+    )
+    requirement_ready = not bool(dependency.get("requirement_classification_required")) or all(
+        str(dependency.get(key, "")).strip()
+        for key in (
+            "authority_clause",
+            "scope_clause",
+            "responsibility_clause",
+            "claim_inventory_clause",
+            "conclusion_claim_clause",
+            "action_claim_clause",
+            "late_claim_gate_clause",
+            "final_release_scan_clause",
+            "unlisted_claim_restart_clause",
+            "source_witness_clause",
+            "stable_locator_clause",
+            "evidence_entailment_clause",
+            "trigger_clause",
+            "falsification_clause",
+            "negative_decision_gate_clause",
+        )
+    )
     return (
         all(
             bool(audit.get(key))
             for key in (
                 "causal_faithful",
+                "intervention_entails_expected_effect",
+                "trigger_non_vacuous",
+                "preserves_supported_behavior",
                 "evidence_independent",
                 "task_detail_free",
                 "cross_domain_transferable",
             )
         )
         and not audit.get("concrete_terms")
+        and bool(dependency.get("avoidance_blocked"))
+        and upstream_ready
+        and requirement_ready
         and bool((audit.get("substitution_test") or {}).get("works_unchanged"))
         and not audit.get("violations")
     )
+
+
+def _audit_exercises_global_rail_axes(audit: Mapping[str, Any]) -> bool:
+    """Require transfer tests outside the failure's original decision genre."""
+    substitution = audit.get("substitution_test")
+    if not isinstance(substitution, Mapping):
+        return False
+    family_a = str(substitution.get("task_family_a", "") or "").strip().casefold()
+    family_b = str(substitution.get("task_family_b", "") or "").strip().casefold()
+    return family_a.startswith("computed-artifact:") and family_b.startswith("external-action:")
+
+
+def _candidate_decision_dependency_errors(
+    audit: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> list[str]:
+    """Verify that decision-audit clauses are executable candidate text, not reviewer inventions."""
+    dependency = audit.get("decision_dependency_test")
+    dependency = dependency if isinstance(dependency, Mapping) else {}
+    persistent_text = _persistent_intervention_text(candidate)
+    normalized_candidate = _normalize_dependency_quote(persistent_text)
+    errors: list[str] = []
+
+    required_quotes = ["decision_derivation_clause"] if dependency.get("upstream_decision_required") else []
+    if dependency.get("requirement_classification_required"):
+        required_quotes.extend(
+            [
+                "claim_inventory_clause",
+                "conclusion_claim_clause",
+                "action_claim_clause",
+                "late_claim_gate_clause",
+                "final_release_scan_clause",
+                "unlisted_claim_restart_clause",
+                "authority_clause",
+                "scope_clause",
+                "responsibility_clause",
+                "source_witness_clause",
+                "stable_locator_clause",
+                "evidence_entailment_clause",
+                "trigger_clause",
+                "falsification_clause",
+                "negative_decision_gate_clause",
+            ]
+        )
+    for field in required_quotes:
+        quote = str(dependency.get(field, "") or "").strip()
+        if not quote:
+            errors.append(f"decision dependency audit is missing {field}")
+            continue
+        if _normalize_dependency_quote(quote) not in normalized_candidate:
+            errors.append(f"decision dependency audit {field} is not an exact candidate quote")
+    if dependency.get("upstream_decision_required") and not dependency.get("avoidance_blocked"):
+        errors.append("candidate does not block the audited upstream trigger-avoidance path")
+    return errors
+
+
+def _persistent_intervention_text(candidate: Mapping[str, Any]) -> str:
+    """Collect every executable surface that persists into the candidate Harness."""
+    skill = candidate.get("skill") if isinstance(candidate.get("skill"), Mapping) else {}
+    harness_updates = candidate.get("harness_updates") if isinstance(candidate.get("harness_updates"), Mapping) else {}
+    checkpoint = (
+        harness_updates.get("submission_checkpoint")
+        if isinstance(harness_updates.get("submission_checkpoint"), Mapping)
+        else {}
+    )
+    return "\n".join(
+        str(value or "")
+        for value in (
+            skill.get("description", ""),
+            skill.get("body", ""),
+            candidate.get("system_prompt_append", ""),
+            checkpoint.get("instruction", ""),
+        )
+        if str(value or "").strip()
+    )
+
+
+def _global_submission_checkpoint_errors(instruction: str) -> list[str]:
+    """Reject release checkpoints that only work for the observed decision genre."""
+    normalized = _normalized_phrase(instruction)
+    token_groups = {
+        "factual claims": ("claim", "assertion", "fact"),
+        "computed or derived values": ("comput", "calculat", "deriv", "numeric"),
+        "artifact or state mutations": ("artifact", "state", "mutation", "persist", "read back"),
+        "actions or operations": ("action", "operation", "tool call", "execution"),
+    }
+    missing = [label for label, markers in token_groups.items() if not any(marker in normalized for marker in markers)]
+    if not missing:
+        return []
+    return [
+        "global submission checkpoint is narrowed to the observed decision genre; "
+        "it must explicitly cover " + ", ".join(missing)
+    ]
+
+
+def _normalize_dependency_quote(value: str) -> str:
+    """Canonicalize presentation-only Markdown while preserving token order.
+
+    Transfer reviewers quote prose without reliably copying list markers,
+    emphasis delimiters, or Unicode punctuation. Those presentation differences
+    must not send an otherwise unchanged intervention back through generation.
+    Requiring the complete normalized token sequence to occur contiguously still
+    prevents a reviewer from inventing a missing executable clause.
+    """
+    return " ".join(re.findall(r"[^\W_]+", str(value or "").casefold(), flags=re.UNICODE))
 
 
 async def _review_injected_candidate(
@@ -1197,6 +1702,14 @@ async def _review_injected_candidate(
         raw_audit = reviewer(_build_transfer_review_request(candidate, causal_binding))
         audit = await raw_audit if inspect.isawaitable(raw_audit) else raw_audit
         audit = _validate_transfer_audit(audit)
+        audit = _enforce_controller_decision_dependency(audit, causal_binding)
+        dependency_errors = _candidate_decision_dependency_errors(audit, candidate)
+        if dependency_errors:
+            audit = {
+                **audit,
+                "trigger_non_vacuous": False,
+                "violations": list(dict.fromkeys([*audit["violations"], *dependency_errors])),
+            }
         if _transfer_audit_approved(audit):
             return candidate
         if review_index == 1:
@@ -1364,6 +1877,12 @@ def _causal_binding(issues: list[dict[str, Any]]) -> dict[str, Any]:
                     if assessment.get(key) not in (None, "", {}, [])
                 }
             )
+        semantic_id = str(attribution.get("selected_hypothesis_semantic_id", "") or "").strip()
+        requirement_required = decision.get("requirement_classification_required") is True
+        required_links = [str(item) for item in decision.get("required_decision_links", []) if str(item)]
+        if semantic_id.casefold() == "chs:unverified_decision_ground_used":
+            requirement_required = True
+            required_links = sorted(set(required_links) | {"authority", "scope", "owner", "trigger", "entailment"})
         binding = {
             "source_issue_id": str(issue.get("issue_id", "") or ""),
             "target_ref": attribution.get("target_ref", ""),
@@ -1377,6 +1896,9 @@ def _causal_binding(issues: list[dict[str, Any]]) -> dict[str, Any]:
                 coverage.get("counterfactual_prediction", ""),
             ),
             "scope_boundary": decision.get("scope_boundary", []),
+            "source_hypothesis_semantic_id": semantic_id,
+            "requirement_classification_required": requirement_required,
+            "required_decision_links": required_links,
             "sufficiency_status": coverage.get("sufficiency_status", ""),
             "supported_hypotheses": supported_hypotheses,
         }
@@ -2162,11 +2684,20 @@ def _build_patch_request(  # pylint: disable=huawei-too-many-arguments
             "skill_mutation": skill_mutation_policy,
             "budget_fields": sorted(_BUDGET_HARNESS_FIELDS),
             "required_budget_fields": sorted(required_budget_fields),
-            "rail_config": (
-                {_RAIL_HARNESS_FIELD: sorted(_ALLOWED_RAIL_FIELDS)}
-                if isinstance(source_harness.get(_RAIL_HARNESS_FIELD), Mapping)
-                else {}
-            ),
+            "rail_config": {
+                field: {
+                    "allowed_fields": sorted(allowed_fields),
+                    "behavior": (
+                        "Intercept an answer-shaped draft before release and require a task-visible "
+                        "evidence-closure revision. The instruction field contains the minimal "
+                        "failure-specific trigger, action, and observable enforced at that boundary."
+                        if field == "submission_checkpoint"
+                        else "Compact repeated tool-loop behavior without changing task semantics."
+                    ),
+                }
+                for field, allowed_fields in _RAIL_HARNESS_FIELDS.items()
+                if isinstance(source_harness.get(field), Mapping)
+            },
             "unsupported": [
                 "task implementation code",
                 "tool implementation",
@@ -2228,8 +2759,13 @@ Rules:
   supported_mutation_contract.required_budget_fields is non-empty, every named
   field must be changed; modifying an adjacent budget does not implement the
   evidenced causal intervention. Rail targets may change only fields explicitly
-  listed under supported_mutation_contract.rail_config. An update is required
+  listed under supported_mutation_contract.rail_config. Each rail entry exposes
+  its allowed_fields and runtime behavior. An update is required
   for either target and must be empty for a Prompt-only target.
+- A submission_checkpoint update must enable the checkpoint and include a concise
+  instruction derived from causal_binding. The instruction must state what must be
+  verified before release and what observable invalidates completion. It must not
+  include case IDs, hidden answers, evaluator wording, or instance-only literals.
 - Do not replace or summarize the current prompt. Return only the new append.
 - Apply improver_policy_directives as versioned search guidance only when they
   are compatible with current causal evidence and the supported mutation
@@ -2274,6 +2810,44 @@ Rules:
   not substitute an easy-to-observe proxy for the predicted behavior. The
   expected_effect must preserve the Analyzer's pre-recorded counterfactual so
   the next candidate result can support or refute it.
+- The executable intervention must entail its expected_effect. Do not claim a
+  branch choice or upstream decision that the prompt or Skill only constrains after
+  that branch has already been chosen. Simulate an avoidance path: if the rule can
+  be satisfied merely by switching a label, branch, or wording while preserving the
+  faulty decision process, add the missing evidence-based decision procedure.
+- Preserve supported source behavior outside the diagnosed decision. In particular,
+  never repair a downstream contradiction by arbitrarily reversing its upstream
+  classification. Establish the upstream decision from task-visible evidence first,
+  then make dependent conclusions and actions consistent with it.
+- When the diagnosed mechanism is a requirement, eligibility, conformance, or other
+  evidence-backed classification, the executable intervention must contain the
+  reusable decision procedure, not only a rule that starts after the classification:
+  (1) before verification, draft and inventory every atomic material output claim,
+  explicitly including every conclusion, verdict, classification, prescribed action,
+  recommended action, and required modification; assign every claim its own verification
+  record, and allow no later or released material claim to bypass this inventory;
+  (2) identify the authoritative task-visible requirement; (3) establish the governed
+  subject, object, operation, and boundary of that source and match them to the assessed
+  target; (4) identify which actor, process, dependency, or evaluated target owns
+  the required outcome and whether the assessed target itself must contain it; (5) map
+  the observed evidence to that exact in-scope requirement with an exact task-visible
+  quote or bounded span for every retained claim and separately record a stable locator
+  that lets another pass retrieve the same source span, instead of
+  promoting one possible form, metadata field, or useful practice into a
+  requirement; (6) identify every condition that activates the mapped requirement and
+  establish from task-visible evidence whether each condition holds in the current state;
+  an inactive or unresolved trigger cannot support the claim; (7) try to construct a
+  minimal task-visible countermodel in which the
+  cited evidence remains true while the proposed claim is false, including satisfaction
+  by another owner, dependency, representation, or an inactive trigger; a surviving
+  countermodel defeats the claim; (8) allow a negative classification or prescribed
+  correction only for an inventoried mandatory claim that survives this falsification
+  attempt; and (9) immediately before release, scan every material conclusion,
+  classification, prescription, recommendation, and required modification in the final
+  output against the original inventory. If any is absent, block release and rerun the
+  complete procedure from the expanded inventory. Recompute after rejected claims are removed.
+  If the candidate trigger says "when/if/after you confirm" a classification but does
+  not define these preceding decisions, the candidate is incomplete and avoidable.
 - The appended text is a global, reusable policy. Never copy a case ID, issue ID,
   known/gold/reference answer, expected output, benchmark-specific entity list,
   fixed answer set, or other case-specific literal into it.
@@ -2295,6 +2869,9 @@ Rules:
   at least two materially different task families. If it fails, abstract the
   trigger/action/observable further without turning it into generic advice or
   changing the causal relationship in causal_binding.
+- A persistent submission_checkpoint instruction is also a global Harness policy.
+  Apply the same cross-domain substitution test and abstraction requirements as a
+  Prompt rule; runtime enforcement does not permit observed-domain vocabulary.
 - A persistent Skill must transfer unchanged to at least two materially different
   tasks in the same capability family. Keep the concrete public operations required
   by that capability, but remove every observed-instance noun, source name, answer,
@@ -2342,14 +2919,7 @@ def _forbidden_concrete_term_errors(value: Any, forbidden_terms: list[str]) -> l
     """Keep rejected implementation vocabulary out of the persistent retry."""
     if not forbidden_terms or not isinstance(value, Mapping):
         return []
-    skill = value.get("skill") if isinstance(value.get("skill"), Mapping) else {}
-    persistent_text = "\n".join(
-        (
-            str(value.get("system_prompt_append", "") or ""),
-            str(skill.get("description", "") or ""),
-            str(skill.get("body", "") or ""),
-        )
-    )
+    persistent_text = _persistent_intervention_text(value)
     append_normalized = _normalized_phrase(persistent_text)
     append_stems = {_light_stem(token) for token in append_normalized.split()}
     remaining: list[str] = []
@@ -2469,6 +3039,8 @@ def _validate_patch(
         raw_skill = {}
     if not isinstance(raw_skill, Mapping):
         raise TypeError("skill must be a mapping")
+    if raw_skill and all(not str(item or "").strip() for item in raw_skill.values()):
+        raw_skill = {}
     skill = _validate_skill_spec(raw_skill, leakage_guard=leakage_guard or {}) if raw_skill else {}
     if skill_required and not skill:
         raise ValueError("skill must not be empty for a Skill intervention")
@@ -2519,27 +3091,42 @@ def _validate_patch(
             raise ValueError(f"harness update is not allowed: {raw_key}")
         if key in _BUDGET_HARNESS_FIELDS and not budget_required:
             raise ValueError(f"budget harness update is outside the requested mutation surface: {raw_key}")
-        if key == _RAIL_HARNESS_FIELD:
+        if key in _RAIL_HARNESS_FIELDS:
             if not rail_required:
                 raise ValueError("rail harness update is outside the requested mutation surface")
-            source_rail = (source_harness or {}).get(_RAIL_HARNESS_FIELD)
+            source_rail = (source_harness or {}).get(key)
             if not isinstance(source_rail, Mapping):
-                raise ValueError("the current PolicyHarness does not expose tool_loop_compaction rail config")
+                raise ValueError(f"the current PolicyHarness does not expose {key} rail config")
             if not isinstance(raw_value, Mapping) or not raw_value:
-                raise TypeError("tool_loop_compaction update must be a non-empty mapping")
-            unknown_rail_fields = sorted(set(raw_value) - _ALLOWED_RAIL_FIELDS)
+                raise TypeError(f"{key} update must be a non-empty mapping")
+            unknown_rail_fields = sorted(set(raw_value) - _RAIL_HARNESS_FIELDS[key])
             if unknown_rail_fields:
-                raise ValueError(f"tool_loop_compaction update contains unsupported fields: {unknown_rail_fields}")
-            normalized_rail: dict[str, bool | int] = {}
+                raise ValueError(f"{key} update contains unsupported fields: {unknown_rail_fields}")
+            normalized_rail: dict[str, bool | int | str] = {}
             for rail_key, rail_value in raw_value.items():
                 if rail_key == "enabled":
                     if not isinstance(rail_value, bool):
-                        raise TypeError("tool_loop_compaction enabled must be a boolean")
+                        raise TypeError(f"{key} enabled must be a boolean")
+                elif rail_key == "instruction":
+                    if key != "submission_checkpoint" or not isinstance(rail_value, str):
+                        raise TypeError(f"{key} {rail_key} must be a string")
+                    rail_value = rail_value.strip()
+                    if not 40 <= len(rail_value) <= 4_000:
+                        raise ValueError("submission_checkpoint instruction must contain 40-4000 characters")
+                    _validate_generated_text_integrity(rail_value, field="submission_checkpoint.instruction")
+                    _validate_global_prompt_append(rail_value, leakage_guard or {})
                 elif isinstance(rail_value, bool) or not isinstance(rail_value, int):
-                    raise TypeError(f"tool_loop_compaction {rail_key} must be an integer")
-                elif not 1 <= rail_value <= 100:
-                    raise ValueError(f"tool_loop_compaction {rail_key} must be between 1 and 100")
+                    raise TypeError(f"{key} {rail_key} must be an integer")
+                elif key == "submission_checkpoint" and not 1 <= rail_value <= 3:
+                    raise ValueError("submission_checkpoint max_revisions must be between 1 and 3")
+                elif key != "submission_checkpoint" and not 1 <= rail_value <= 100:
+                    raise ValueError(f"{key} {rail_key} must be between 1 and 100")
                 normalized_rail[str(rail_key)] = rail_value
+            if key == "submission_checkpoint":
+                if normalized_rail.get("enabled") is not True:
+                    raise ValueError("submission_checkpoint intervention must set enabled to true")
+                if not str(normalized_rail.get("instruction", "") or "").strip():
+                    raise ValueError("submission_checkpoint intervention must include instruction")
             normalized_updates[key] = normalized_rail
             continue
         if isinstance(raw_value, bool) or not isinstance(raw_value, int):
@@ -2564,8 +3151,8 @@ def _validate_patch(
         raise ValueError(
             f"harness_updates must change the evidence-identified budget fields: {sorted(missing_required_budget)}"
         )
-    if rail_required and _RAIL_HARNESS_FIELD not in normalized_updates:
-        raise ValueError("harness_updates must include tool_loop_compaction for a rail intervention")
+    if rail_required and not (set(_RAIL_HARNESS_FIELDS) & set(normalized_updates)):
+        raise ValueError("harness_updates must include one declared rail config for a rail intervention")
     if not budget_required and not rail_required and normalized_updates:
         raise ValueError("harness_updates must be empty when no config or Rail mutation is requested")
     rationale = str(value.get("rationale", "") or "").strip()
@@ -2701,12 +3288,13 @@ def _apply_patch(
     if not harness_updates:
         return
     harness = dict(source_harness)
-    rail_updates = harness_updates.pop(_RAIL_HARNESS_FIELD, None)
+    rail_updates = {field: harness_updates.pop(field) for field in _RAIL_HARNESS_FIELDS if field in harness_updates}
     harness.update(harness_updates)
-    if isinstance(rail_updates, Mapping):
-        rail_config = dict(harness.get(_RAIL_HARNESS_FIELD, {}))
-        rail_config.update(rail_updates)
-        harness[_RAIL_HARNESS_FIELD] = rail_config
+    for field, updates in rail_updates.items():
+        if isinstance(updates, Mapping):
+            rail_config = dict(harness.get(field, {}))
+            rail_config.update(updates)
+            harness[field] = rail_config
     harness_path.write_text(json.dumps(harness, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -2837,17 +3425,17 @@ def _build_actions(
                 "depends_on": ["evobench_policy_prompt"] if patch["system_prompt_append"] else [],
             }
         )
-    if _RAIL_HARNESS_FIELD in patch["harness_updates"]:
+    for rail_field in sorted(set(_RAIL_HARNESS_FIELDS) & set(patch["harness_updates"])):
         actions.append(
             {
                 **common,
                 "action_group": "rail",
-                "action_id": "evobench_policy_tool_loop_compaction",
+                "action_id": f"evobench_policy_{rail_field}",
                 "target_path": _HARNESS_PATH,
-                "description": "Adjust the declared tool-loop compaction rail configuration.",
+                "description": f"Adjust the declared {rail_field} rail configuration.",
                 "rationale": patch["rationale"],
                 "intervention": json.dumps(
-                    {_RAIL_HARNESS_FIELD: patch["harness_updates"][_RAIL_HARNESS_FIELD]},
+                    {rail_field: patch["harness_updates"][rail_field]},
                     ensure_ascii=False,
                     sort_keys=True,
                 ),

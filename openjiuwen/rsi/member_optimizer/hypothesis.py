@@ -99,6 +99,12 @@ def compile_optimization_hypotheses(
             and str(item.get("status", "") or "").strip().casefold() == "supported"
             for item in hypothesis_assessment
         )
+        selected_assessment_verified = any(
+            isinstance(item, dict)
+            and str(item.get("hypothesis_id", "") or "").strip() == selected_causal_hypothesis_id
+            and str(item.get("verification_status", "") or "").strip().casefold() == "verified"
+            for item in hypothesis_assessment
+        )
         evidence_status = str(attribution.get("evidence_status", "") or "").strip().casefold()
         if (
             not target_ref
@@ -108,6 +114,7 @@ def compile_optimization_hypotheses(
             or "supported" not in assessment_statuses
             or not selected_causal_hypothesis_id
             or not selected_assessment_supported
+            or not selected_assessment_verified
         ):
             continue
         # A supported local contributor may coexist with unresolved causal

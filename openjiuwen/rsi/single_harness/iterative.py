@@ -367,7 +367,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     issue_budget_exhausted = False
                     repair_budget_exhausted = False
                     deferred_repairs: list[dict[str, Any]] = []
-                    for issue_id, issue_signature in issue_queue:
+                    for issue_queue_index, (issue_id, issue_signature) in enumerate(issue_queue):
                         if max_issue_attempts and issue_attempt_count >= max_issue_attempts:
                             issue_budget_exhausted = True
                             break
@@ -599,9 +599,20 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                             },
                                         }
                                     )
-                                    # Repair the newly exposed causal layer before
-                                    # spending another candidate on a sibling issue.
-                                    break
+                                    remaining_sibling_count = len(issue_queue) - issue_queue_index - 1
+                                    remaining_attempt_budget = (
+                                        max_issue_attempts - issue_attempt_count if max_issue_attempts else None
+                                    )
+                                    # Prefer immediate evidence-led repair when
+                                    # budget permits, but never let one semantic
+                                    # hypothesis consume the slots required to
+                                    # try already-queued alternatives.
+                                    if not _must_preserve_budget_for_siblings(
+                                        remaining_attempt_budget=remaining_attempt_budget,
+                                        remaining_sibling_count=remaining_sibling_count,
+                                    ):
+                                        break
+                                    continue
                                 elif repair_active_cases:
                                     repair_budget_exhausted = True
                             continue
@@ -1539,6 +1550,37 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 prior_candidate_feedback=paired_feedback,
             )
             candidate_failure_diagnoses = _compact_analysis_diagnoses(candidate_failure_analysis_ref)
+            _materialize_candidate_activation_repair(
+                candidate_failure_analysis_ref,
+                capabilities=capabilities,
+                causal_intervention_contracts=causal_intervention_contracts,
+                diagnoses_by_case=candidate_failure_diagnoses,
+            )
+            activation_by_case = {
+                case_id: _refine_paired_candidate_activation(
+                    _paired_candidate_activation(
+                        capabilities,
+                        case_id=case_id,
+                        pre_edit_tools_by_case=pre_edit_tools_by_case,
+                        pre_edit_skills_by_case=pre_edit_skills_by_case,
+                    ),
+                    candidate_failure_diagnoses.get(case_id, []),
+                )
+                for case_id in target_case_ids
+            }
+        else:
+            activation_by_case = {
+                case_id: _paired_candidate_activation(
+                    capabilities,
+                    case_id=case_id,
+                    pre_edit_tools_by_case=pre_edit_tools_by_case,
+                    pre_edit_skills_by_case=pre_edit_skills_by_case,
+                )
+                for case_id in target_case_ids
+            }
+        causal_failure_class = ""
+        if not accepted and not _eval_has_errors(candidate_eval_ref):
+            causal_failure_class = _causal_candidate_failure_classification(activation_by_case)
         return {
             "accepted": accepted,
             "status": (
@@ -1550,6 +1592,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             ),
             "reason": reason,
             "failure_class": failure_class,
+            "causal_failure_class": causal_failure_class,
             **base,
             "candidate_eval_ref_path": candidate_eval_ref,
             "candidate_score": candidate_score,
@@ -1585,6 +1628,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "candidate_patch_excerpts_by_case": candidate_patch_excerpts_by_case,
             "candidate_failure_analysis_ref_path": (candidate_failure_analysis_ref),
             "candidate_failure_diagnoses": candidate_failure_diagnoses,
+            "activation_by_case": activation_by_case,
             "causal_intervention_contracts": causal_intervention_contracts,
             "task_acceptance_contracts": task_acceptance_contracts,
             "non_target_case_ids": sorted(non_target_case_ids),
@@ -2127,6 +2171,7 @@ def _refresh_optimization_experience(
                     "status": str(gate.get("status", "") or ""),
                     "reason": str(gate.get("reason", "") or ""),
                     "failure_class": str(gate.get("failure_class", "") or ""),
+                    "causal_failure_class": str(gate.get("causal_failure_class", "") or ""),
                     "outcome": _experiment_outcome(gate),
                     "source_eval_ref_path": str(gate.get("paired_source_eval_ref_path", "") or ""),
                     "candidate_eval_ref_path": str(gate.get("candidate_eval_ref_path", "") or ""),
@@ -2238,18 +2283,31 @@ def _candidate_capabilities(member_info: dict[str, Any]) -> list[dict[str, Any]]
         optimization_contracts = [
             dict(item) for item in constraints.get("optimization_contracts", []) if isinstance(item, dict)
         ]
+        decision_contracts = [
+            dict(item.get("decision_contract", {}))
+            for item in optimization_contracts
+            if isinstance(item.get("decision_contract"), dict)
+        ]
         capabilities.append(
             {
                 "action_id": str(action.get("action_id", "") or ""),
                 "role": str(action.get("role", "") or ""),
                 "action_group": str(action.get("action_group", "") or ""),
                 "operation": str(action.get("operation", "") or ""),
+                "description": str(action.get("description", "") or ""),
+                "rationale": str(action.get("rationale", "") or ""),
+                "intervention": str(action.get("intervention", "") or ""),
                 "target_path": target_path,
                 "runtime_name": _capability_runtime_name(
                     str(action.get("action_group", "") or ""),
                     target_path,
                 ),
                 "expected_effect": str(action.get("expected_effect", "") or ""),
+                "decision_contracts": decision_contracts,
+                "attributed_issue_ids": [str(item) for item in action.get("attributed_issue_ids", []) if str(item)],
+                "analyzer_counterfactual_predictions": [
+                    str(item) for item in constraints.get("analyzer_counterfactual_predictions", []) if str(item)
+                ],
                 "lever_decision": (
                     dict(constraints.get("lever_decision", {}))
                     if isinstance(constraints.get("lever_decision"), dict)
@@ -2338,6 +2396,19 @@ def _analysis_issue_case_ids(analysis_ref: str | Path) -> dict[str, set[str]]:
                 case_ids.add(str(evidence["case_id"]))
         issue_case_ids[issue_id] = case_ids
     return issue_case_ids
+
+
+def _must_preserve_budget_for_siblings(
+    *,
+    remaining_attempt_budget: int | None,
+    remaining_sibling_count: int,
+) -> bool:
+    """Keep queued alternatives reachable before deepening one failed route."""
+    return (
+        remaining_attempt_budget is not None
+        and remaining_sibling_count > 0
+        and remaining_attempt_budget <= remaining_sibling_count
+    )
 
 
 def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
@@ -2487,11 +2558,208 @@ def _compact_analysis_diagnoses(
             "confidence",
             "diagnosis_status",
             "analysis_failed",
+            "evidence_status",
+            "hypothesis_assessment",
+            "causal_coverage",
+            "prior_experiment_assessment",
         ):
             if key in diagnosis:
                 compact_diagnosis[key] = diagnosis.get(key)
         compact.setdefault(case_id, []).append(compact_diagnosis)
     return compact
+
+
+def _refine_paired_candidate_activation(
+    activation: dict[str, Any],
+    diagnoses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Add paired behavioral evidence when a surface has no direct call event."""
+    assessments = [
+        dict(item["prior_experiment_assessment"])
+        for item in diagnoses
+        if isinstance(item, dict) and isinstance(item.get("prior_experiment_assessment"), dict)
+    ]
+    if not assessments:
+        return activation
+    values = {str(item.get("intervention_activated", "") or "").strip().casefold() for item in assessments}
+    values.discard("")
+    state = "triggered" if values == {"yes"} else "not_triggered" if "no" in values else "unknown"
+    refined = dict(activation)
+    refined.update(
+        {
+            "availability": "observed",
+            "state": state,
+            "observation_source": "candidate_failure_analysis",
+            "behavior_activation": {
+                "availability": "observed",
+                "state": state,
+                "assessment_count": len(assessments),
+                "predicted_behavior_occurred": _uniform_assessment_value(assessments, "predicted_behavior_occurred"),
+                "predicted_outcome_occurred": _uniform_assessment_value(assessments, "predicted_outcome_occurred"),
+            },
+        }
+    )
+    return refined
+
+
+def _uniform_assessment_value(assessments: list[dict[str, Any]], key: str) -> str:
+    values = {str(item.get(key, "") or "").strip().casefold() for item in assessments}
+    values.discard("")
+    return next(iter(values)) if len(values) == 1 else "mixed" if values else "unknown"
+
+
+def _causal_candidate_failure_classification(activation_by_case: dict[str, dict[str, Any]]) -> str:
+    """Route a rejected candidate by realized action, not score alone."""
+    states = {
+        str(item.get("state", "") or "").strip().casefold()
+        for item in activation_by_case.values()
+        if isinstance(item, dict)
+    }
+    behavioral = [
+        item.get("behavior_activation", {})
+        for item in activation_by_case.values()
+        if isinstance(item, dict) and isinstance(item.get("behavior_activation"), dict)
+    ]
+    behavior_values = {
+        str(item.get("predicted_behavior_occurred", "") or "").strip().casefold() for item in behavioral
+    } - {""}
+    outcome_values = {
+        str(item.get("predicted_outcome_occurred", "") or "").strip().casefold() for item in behavioral
+    } - {""}
+    if "not_triggered" in states or "no" in behavior_values:
+        return "intervention_not_activated"
+    if behavior_values == {"yes"} and "no" in outcome_values:
+        return "action_occurred_but_hypothesis_refuted"
+    if "no" in outcome_values:
+        return "outcome_not_improved"
+    return ""
+
+
+def _materialize_candidate_activation_repair(
+    analysis_ref_path: str | Path,
+    *,
+    capabilities: list[dict[str, Any]],
+    causal_intervention_contracts: list[dict[str, Any]],
+    diagnoses_by_case: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Keep a failed causal intervention repairable without inventing task semantics."""
+    analysis_path = Path(analysis_ref_path).expanduser().resolve()
+    analysis = _read_yaml(analysis_path)
+    if analysis.get("issues"):
+        return
+    raw_issues_path = str(analysis.get("issues_path", "") or "").strip()
+    issues_path = Path(raw_issues_path) if raw_issues_path else None
+    if issues_path is not None and not issues_path.is_absolute():
+        issues_path = analysis_path.parent / issues_path
+    if issues_path is not None and issues_path.is_file() and _read_yaml(issues_path).get("issues"):
+        return
+
+    capability = next((item for item in capabilities if isinstance(item, dict)), None)
+    contract = next((item for item in causal_intervention_contracts if isinstance(item, dict)), None)
+    if capability is None or contract is None:
+        return
+    affected_cases: list[str] = []
+    assessments: list[dict[str, Any]] = []
+    for case_id, diagnoses in diagnoses_by_case.items():
+        for diagnosis in diagnoses:
+            assessment = diagnosis.get("prior_experiment_assessment", {})
+            if not isinstance(assessment, dict):
+                continue
+            if str(assessment.get("predicted_behavior_occurred", "") or "").casefold() != "no":
+                continue
+            affected_cases.append(case_id)
+            assessments.append(dict(assessment))
+    if not affected_cases:
+        return
+
+    role = str(capability.get("role", "") or "solver")
+    surface = str(capability.get("action_group", "") or "prompt").casefold()
+    variable = {"prompt": "prompt_section", "skill": "skill", "tool": "tool", "rail": "rail"}.get(surface, "config")
+    target_ref = f"member_harness.{role}.{variable}"
+    predicted = str(contract.get("predicted_behavior_and_outcome", "") or "").strip()
+    intervention = str(contract.get("intervention", "") or "").strip()
+    digest = hashlib.sha256(
+        json.dumps(
+            {"target_ref": target_ref, "cases": sorted(set(affected_cases)), "predicted": predicted},
+            ensure_ascii=True,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    hypothesis_id = f"h_activation_{digest}"
+    evidence = [
+        {
+            "case_id": case_id,
+            "failure_mode": "candidate_intervention_behavior_not_reproduced",
+            "affected_component": role,
+        }
+        for case_id in sorted(set(affected_cases))
+    ]
+    issue = {
+        "issue_id": f"issue_activation_{digest}",
+        "category": "member_harness",
+        "severity": "high",
+        "summary": "The deployed candidate did not produce its pre-registered behavior on the paired target run.",
+        "affected_cases": sorted(set(affected_cases)),
+        "evidence": evidence,
+        "suspected_team_scope": "member",
+        "optimization_target": "member_harness",
+        "target_members": [role],
+        "recommendation": (
+            "Revise the activation and operational wording of the same intervention so its pre-registered "
+            "behavior becomes observable; do not change the task-semantic conclusion or add case literals."
+        ),
+        "metadata": {
+            "attribution": {
+                "evidence_status": "confirmed",
+                "selected_hypothesis_id": hypothesis_id,
+                "target_ref": target_ref,
+                "general_mechanism": (
+                    "When a deployed intervention does not cause its pre-registered behavior, strengthen its "
+                    "trigger, executable action, and observable completion condition on the same surface."
+                ),
+                "decision_contract": {
+                    "wrong_decision": "The candidate intervention was delivered but its predicted behavior did not occur.",
+                    "causal_distinction": (
+                        "This repair changes intervention activation and operationalization, not the unresolved "
+                        "task-semantic answer."
+                    ),
+                    "required_action": (
+                        f"Operationalize the existing intervention ({intervention}) so the recorded behavior occurs."
+                    ),
+                    "acceptance_observable": predicted,
+                    "scope_boundary": [
+                        "Preserve the original semantic decision contract.",
+                        "Do not add benchmark identifiers, evaluator answers, or case-specific literals.",
+                    ],
+                    "activation_phase": "task_execution",
+                },
+                "causal_coverage": {
+                    "explained_requirement_ids": ["candidate_intervention_behavior"],
+                    "residual_requirement_ids": [],
+                    "unexplained_observations": [],
+                    "sufficiency_status": "cluster_sufficient",
+                },
+                "hypothesis_assessment": [
+                    {
+                        "hypothesis_id": hypothesis_id,
+                        "status": "supported",
+                        "verification_status": "verified",
+                        "verification_basis": "paired_candidate_experiment",
+                        "falsifying_condition_status": "not_observed",
+                        "claim_follows_from_evidence": "yes",
+                        "reason": "The paired Analyzer observed that the pre-registered behavior did not occur.",
+                        "evidence_refs": evidence,
+                    }
+                ],
+                "prior_experiment_assessment": assessments[0],
+                "source_causal_intervention_contract": dict(contract),
+            }
+        },
+    }
+    analysis["issues"] = [issue]
+    _write_yaml_atomic(analysis_path, analysis)
+    if issues_path is not None:
+        _write_yaml_atomic(issues_path, {"issues": [issue]})
 
 
 def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2503,6 +2771,12 @@ def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[d
         expected_effect = _bounded_candidate_text(str(capability.get("expected_effect", "") or ""), 2_000)
         if not expected_effect:
             continue
+        decision_contracts = [dict(item) for item in capability.get("decision_contracts", []) if isinstance(item, dict)]
+        acceptance_observables = [
+            str(item.get("acceptance_observable", "") or "").strip()
+            for item in decision_contracts
+            if str(item.get("acceptance_observable", "") or "").strip()
+        ]
         contracts.append(
             {
                 "action_id": str(capability.get("action_id", "") or ""),
@@ -2520,6 +2794,18 @@ def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[d
                         or ""
                     ),
                     2_000,
+                ),
+                "target_object": str(
+                    capability.get("runtime_name") or capability.get("target_path") or capability.get("action_group")
+                ),
+                "expected_observable_actions_or_state_changes": acceptance_observables or [expected_effect],
+                "success_condition": (
+                    "The candidate trajectory or artifact contains the pre-registered observable change, "
+                    "and the paired target outcome improves without regression."
+                ),
+                "refutation_condition": (
+                    "The pre-registered action occurs but its predicted outcome does not; this refutes the "
+                    "source causal hypothesis rather than requesting another wording-only repair."
                 ),
                 "predicted_behavior_and_outcome": expected_effect,
                 "analyzer_counterfactual_predictions": [

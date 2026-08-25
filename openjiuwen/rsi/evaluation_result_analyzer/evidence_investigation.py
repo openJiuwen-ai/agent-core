@@ -8,6 +8,7 @@ import ast
 import hashlib
 import json
 import math
+import os
 import re
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -36,6 +37,9 @@ _MAX_EVENT_CHARS = 12_000
 _MAX_ARTIFACT_FILE_CHARS = 200_000
 _MAX_ARTIFACT_FILES = 100
 _MAX_ARTIFACT_WINDOW_CHARS = 12_000
+_MAX_AUTOMATIC_ARTIFACT_WINDOWS = 12
+_MAX_AUTOMATIC_ARTIFACT_SOURCES = 4
+_MAX_AUTOMATIC_ARTIFACT_CHARS = 96_000
 _MAX_STRUCTURED_ARTIFACTS_PER_REQUEST = 16
 _MAX_REPOSITORY_FILES = 2_000
 _MAX_STRUCTURED_CELLS = 20_000
@@ -77,6 +81,12 @@ _EXPLICIT_NUMERIC_DELTA_PATTERN = re.compile(
     r"formula\s+(?:change|delta))\b|(?:数值|公式)(?:变化|差值)|前后(?:数值|公式))",
     re.IGNORECASE,
 )
+_IMPLICIT_NUMERIC_DELTA_PATTERN = re.compile(
+    r"(?:[%％]|\b(?:percentage\s+points?|percent|delta|difference|increase[sd]?|decrease[sd]?|"
+    r"subtract(?:ed|ing)?|add(?:ed|ing)?|formula|ratio|rate)\b|(?:百分点|百分比|增(?:加|长)|"
+    r"减少|差值|公式|比率|比例))",
+    re.IGNORECASE,
+)
 _STOPWORDS = {
     "about",
     "after",
@@ -108,6 +118,15 @@ _STOPWORDS = {
     "trace",
     "with",
 }
+_ABSENCE_CLAIM_PATTERN = re.compile(
+    r"\b(?:absent|absence|missing|lacks?|without|does\s+not\s+(?:contain|include|show)|"
+    r"no\s+(?:evidence|record|field|entry|occurrence))\b|(?:缺少|缺失|不存在|未包含|没有)",
+    re.IGNORECASE,
+)
+_EXISTENCE_CLAIM_PATTERN = re.compile(
+    r"\b(?:contains?|includes?|present|exists?|records?|shows?|states?)\b|(?:包含|存在|记录|显示|说明)",
+    re.IGNORECASE,
+)
 
 
 def causal_hypothesis_semantic_id(claim: str, falsified_if: str) -> str:
@@ -175,10 +194,14 @@ def normalize_causal_investigation(
         requests = item.get("evidence_requests")
         raw_hypothesis_requests = requests if isinstance(requests, list) else []
         declared_numeric_check = item.get("numeric_change_check_required")
-        numeric_change_check_required = (
-            declared_numeric_check
-            if isinstance(declared_numeric_check, bool)
-            else bool(_EXPLICIT_NUMERIC_DELTA_PATTERN.search(f"{claim}\n{falsified_if}"))
+        # A model may underestimate its own verification obligation.  Explicit
+        # ``false`` therefore cannot disable a controller-detected numeric
+        # before/after claim.  This is a control-plane decision, not a prompt
+        # preference: textual arithmetic is never accepted as execution.
+        hypothesis_text = f"{claim}\n{falsified_if}"
+        numeric_change_check_required = bool(declared_numeric_check) or bool(
+            _EXPLICIT_NUMERIC_DELTA_PATTERN.search(hypothesis_text)
+            or _IMPLICIT_NUMERIC_DELTA_PATTERN.search(hypothesis_text)
         )
         if any(
             isinstance(request, Mapping) and request.get("operation") == "compare_numeric_change"
@@ -216,7 +239,8 @@ def normalize_causal_investigation(
 
     request_limit = min(_MAX_REQUESTS, max(0, int(max_requests)))
     requests: list[dict[str, Any]] = []
-    seen_requests: set[str] = set()
+    request_index_by_fingerprint: dict[str, int] = {}
+    used_request_ids: set[str] = set()
     for default_hypothesis_id, request in raw_requests:
         normalized = _normalize_request(
             request,
@@ -226,15 +250,34 @@ def normalize_causal_investigation(
         )
         if normalized is None:
             continue
-        fingerprint = json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-        if fingerprint in seen_requests:
+        fingerprint = _request_execution_fingerprint(normalized)
+        duplicate_index = request_index_by_fingerprint.get(fingerprint)
+        if duplicate_index is not None:
+            existing = requests[duplicate_index]
+            existing["hypothesis_ids"] = list(
+                dict.fromkeys(
+                    [
+                        *_string_list(existing.get("hypothesis_ids")),
+                        *_string_list(normalized.get("hypothesis_ids")),
+                    ]
+                )
+            )
             continue
-        seen_requests.add(fingerprint)
-        if request_limit == 0:
-            break
+        if request_limit == 0 or len(requests) >= request_limit:
+            # Keep scanning so later declarations can still bind another
+            # hypothesis to an already retained shared probe.
+            continue
+        request_id = str(normalized.get("request_id", "") or f"q{len(requests) + 1}")
+        if request_id in used_request_ids:
+            stem = request_id
+            suffix = 2
+            while request_id in used_request_ids:
+                request_id = f"{stem}_{suffix}"
+                suffix += 1
+            normalized["request_id"] = request_id
+        used_request_ids.add(request_id)
+        request_index_by_fingerprint[fingerprint] = len(requests)
         requests.append(normalized)
-        if len(requests) >= request_limit:
-            break
 
     if require_evidence_per_hypothesis:
         covered = {
@@ -243,12 +286,35 @@ def normalize_causal_investigation(
         if not hypothesis_ids.issubset(covered):
             return None
 
+    hypotheses_by_id = {item["hypothesis_id"]: item for item in hypotheses}
+    for request in requests:
+        if request.get("operation") != "inspect_artifact" or request.get("proof_obligation"):
+            continue
+        claim_text = " ".join(
+            str(hypotheses_by_id[hypothesis_id].get("claim", "") or "")
+            for hypothesis_id in _string_list(request.get("hypothesis_ids"))
+            if hypothesis_id in hypotheses_by_id
+        )
+        request["proof_obligation"] = (
+            "absence"
+            if _ABSENCE_CLAIM_PATTERN.search(claim_text)
+            else "existence"
+            if claim_text and _EXISTENCE_CLAIM_PATTERN.search(claim_text)
+            else "coverage"
+        )
+
     return {
         "schema_version": 1,
         "hypotheses": hypotheses,
         "evidence_requests": requests,
         "ready_without_more_evidence": bool(raw.get("ready_without_more_evidence")) and not requests,
     }
+
+
+def _request_execution_fingerprint(request: Mapping[str, Any]) -> str:
+    """Identify one controller operation independently of model-local labels."""
+    execution = {key: value for key, value in request.items() if key not in {"request_id", "hypothesis_ids", "purpose"}}
+    return json.dumps(execution, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
 def execute_causal_investigation(
@@ -306,9 +372,18 @@ def execute_causal_investigation(
                 "hypothesis_ids": _string_list(request.get("hypothesis_ids")),
                 "operation": operation,
                 "purpose": str(request.get("purpose", "") or ""),
+                "proof_obligation": str(request.get("proof_obligation", "") or ""),
                 **evidence,
             }
         )
+
+    automatic_requests, closure_results, closure = _close_incomplete_artifact_evidence(
+        case,
+        investigation,
+        results,
+        text_cache=artifact_text_cache,
+    )
+    results.extend(closure_results)
 
     return {
         "schema_version": 1,
@@ -319,10 +394,243 @@ def execute_causal_investigation(
             "display_omissions_are_not_task_agent_observations": True,
         },
         "hypotheses": list(investigation.get("hypotheses", [])),
-        "request_count": len(investigation.get("evidence_requests", [])),
+        "request_count": len(investigation.get("evidence_requests", [])) + len(automatic_requests),
+        "model_request_count": len(investigation.get("evidence_requests", [])),
+        "automatic_request_count": len(automatic_requests),
+        "automatic_requests": automatic_requests,
         "completed_request_count": len(results),
+        "artifact_evidence_closure": closure,
         "results": results,
     }
+
+
+def _close_incomplete_artifact_evidence(
+    case: CaseAnalysisInput,
+    investigation: Mapping[str, Any],
+    initial_results: Sequence[Mapping[str, Any]],
+    *,
+    text_cache: dict[Path, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Deterministically complete bounded artifact sources exposed by search.
+
+    ``inspect_artifact`` is discovery, not proof that content is absent.  Once a
+    causal request selects a physical source but returns an incomplete excerpt,
+    the controller owns the mechanical continuation.  This avoids asking the
+    model to rediscover an already known source/offset and gives absence claims
+    continuous coverage from character zero to EOF.
+    """
+    existing_ids = {
+        str(item.get("request_id", "") or "") for item in initial_results if str(item.get("request_id", "") or "")
+    }
+    # Explicit windows count toward coverage and must not be read again.
+    covered_ranges: dict[str, list[tuple[int, int]]] = {}
+    source_counts: dict[str, int] = {}
+    for item in initial_results:
+        if str(item.get("operation", "") or "") != "read_artifact_window":
+            continue
+        if str(item.get("availability", "") or "") != "available":
+            continue
+        source = str(item.get("source", "") or "")
+        start = _optional_nonnegative_int(item.get("source_char_start"))
+        end = _optional_nonnegative_int(item.get("source_char_end"))
+        count = _optional_nonnegative_int(item.get("source_char_count"))
+        if source and start is not None and end is not None and end >= start:
+            covered_ranges.setdefault(source, []).append((start, end))
+            if count is not None:
+                source_counts[source] = count
+
+    candidates: list[dict[str, Any]] = []
+    candidate_by_source: dict[str, dict[str, Any]] = {}
+    for item in initial_results:
+        if str(item.get("operation", "") or "") != "inspect_artifact":
+            continue
+        if str(item.get("availability", "") or "") != "available":
+            continue
+        hypothesis_ids = _string_list(item.get("hypothesis_ids"))
+        if not hypothesis_ids:
+            continue
+        if str(item.get("proof_obligation", "") or "") == "existence":
+            # A physical match is a complete witness for an existence claim.
+            # Reading unrelated tail content cannot strengthen that obligation.
+            continue
+        matches = item.get("matches", [])
+        for match in matches[:1] if isinstance(matches, list) else []:
+            if not isinstance(match, Mapping):
+                continue
+            source = str(match.get("source", "") or "")
+            if not source:
+                continue
+            raw_spans = match.get("exact_spans", [])
+            spans = raw_spans if isinstance(raw_spans, list) else []
+            incomplete = any(isinstance(span, Mapping) and not bool(span.get("window_complete")) for span in spans)
+            if not incomplete:
+                continue
+            parent_request_id = str(item.get("request_id", "") or "")
+            existing_candidate = candidate_by_source.get(source)
+            if existing_candidate is not None:
+                existing_candidate["hypothesis_ids"] = list(
+                    dict.fromkeys([*existing_candidate["hypothesis_ids"], *hypothesis_ids])
+                )
+                existing_candidate["parent_request_ids"] = list(
+                    dict.fromkeys([*existing_candidate["parent_request_ids"], parent_request_id])
+                )
+                continue
+            candidate = {
+                "source": source,
+                "logical_source": str(match.get("logical_source", "") or source),
+                "hypothesis_ids": hypothesis_ids,
+                "parent_request_id": parent_request_id,
+                "parent_request_ids": [parent_request_id] if parent_request_id else [],
+                "purpose": str(item.get("purpose", "") or ""),
+            }
+            candidate_by_source[source] = candidate
+            candidates.append(candidate)
+            if len(candidates) >= _MAX_AUTOMATIC_ARTIFACT_SOURCES:
+                break
+        if len(candidates) >= _MAX_AUTOMATIC_ARTIFACT_SOURCES:
+            break
+
+    automatic_requests: list[dict[str, Any]] = []
+    closure_results: list[dict[str, Any]] = []
+    source_records: list[dict[str, Any]] = []
+    total_chars = 0
+    window_budget = _MAX_AUTOMATIC_ARTIFACT_WINDOWS
+    for candidate in candidates:
+        source = candidate["source"]
+        cursor = _continuous_prefix_end(covered_ranges.get(source, []))
+        completed = bool(source_counts.get(source) is not None and cursor >= source_counts[source])
+        source_windows = 0
+        source_chars = 0
+        last_reason = "already_covered" if completed else ""
+        while not completed and window_budget > 0 and total_chars < _MAX_AUTOMATIC_ARTIFACT_CHARS:
+            remaining_chars = _MAX_AUTOMATIC_ARTIFACT_CHARS - total_chars
+            max_chars = min(_MAX_ARTIFACT_WINDOW_CHARS, remaining_chars)
+            request_id = _unique_automatic_request_id(
+                candidate["parent_request_id"],
+                source,
+                cursor,
+                existing_ids,
+            )
+            request = {
+                "request_id": request_id,
+                "hypothesis_ids": list(candidate["hypothesis_ids"]),
+                "operation": "read_artifact_window",
+                "relative_path": source,
+                "source_char_start": cursor,
+                "max_chars": max_chars,
+                "purpose": (
+                    "controller-owned continuation of an incomplete artifact search; "
+                    "establish continuous source coverage before reasoning about absence"
+                ),
+                "automatic": True,
+                "parent_request_id": candidate["parent_request_id"],
+                "parent_request_ids": list(candidate["parent_request_ids"]),
+            }
+            evidence = _read_artifact_window(case, request, text_cache=text_cache)
+            result = {
+                **request,
+                **evidence,
+            }
+            automatic_requests.append(request)
+            closure_results.append(result)
+            existing_ids.add(request_id)
+            window_budget -= 1
+            source_windows += 1
+            if str(evidence.get("availability", "") or "") != "available":
+                last_reason = str(evidence.get("reason", "") or evidence.get("availability", "") or "unavailable")
+                break
+            start = _optional_nonnegative_int(evidence.get("source_char_start"))
+            end = _optional_nonnegative_int(evidence.get("source_char_end"))
+            count = _optional_nonnegative_int(evidence.get("source_char_count"))
+            if start is None or end is None or count is None or start != cursor or end <= start:
+                last_reason = "non_contiguous_controller_window"
+                break
+            read_chars = end - start
+            total_chars += read_chars
+            source_chars += read_chars
+            covered_ranges.setdefault(source, []).append((start, end))
+            source_counts[source] = count
+            next_cursor = _continuous_prefix_end(covered_ranges[source])
+            if next_cursor <= cursor:
+                last_reason = "no_forward_progress"
+                break
+            cursor = next_cursor
+            completed = cursor >= count
+            last_reason = "complete" if completed else "continuation_required"
+        if not completed and not last_reason:
+            last_reason = "budget_exhausted"
+        if not completed and (window_budget <= 0 or total_chars >= _MAX_AUTOMATIC_ARTIFACT_CHARS):
+            last_reason = "budget_exhausted"
+        source_records.append(
+            {
+                "source": source,
+                "logical_source": candidate["logical_source"],
+                "parent_request_id": candidate["parent_request_id"],
+                "continuous_source_char_end": cursor,
+                "source_char_count": source_counts.get(source),
+                "window_count": source_windows,
+                "read_char_count": source_chars,
+                "complete": completed,
+                "status": last_reason,
+            }
+        )
+
+    attempted = bool(candidates)
+    all_complete = attempted and all(bool(item.get("complete")) for item in source_records)
+    budget_exhausted = any(item.get("status") == "budget_exhausted" for item in source_records)
+    return (
+        automatic_requests,
+        closure_results,
+        {
+            "attempted": attempted,
+            "status": (
+                "completed"
+                if all_complete
+                else "budget_exhausted"
+                if budget_exhausted
+                else "incomplete"
+                if attempted
+                else "not_needed"
+            ),
+            "candidate_source_count": len(candidates),
+            "completed_source_count": sum(bool(item.get("complete")) for item in source_records),
+            "automatic_window_count": len(automatic_requests),
+            "read_char_count": total_chars,
+            "limits": {
+                "max_sources": _MAX_AUTOMATIC_ARTIFACT_SOURCES,
+                "max_windows": _MAX_AUTOMATIC_ARTIFACT_WINDOWS,
+                "max_chars": _MAX_AUTOMATIC_ARTIFACT_CHARS,
+                "max_chars_per_window": _MAX_ARTIFACT_WINDOW_CHARS,
+            },
+            "sources": source_records,
+        },
+    )
+
+
+def _continuous_prefix_end(ranges: Sequence[tuple[int, int]]) -> int:
+    cursor = 0
+    for start, end in sorted(ranges):
+        if start > cursor:
+            break
+        if end > cursor:
+            cursor = end
+    return cursor
+
+
+def _unique_automatic_request_id(
+    parent_request_id: str,
+    source: str,
+    start: int,
+    existing_ids: set[str],
+) -> str:
+    stem = re.sub(r"[^a-zA-Z0-9_.-]+", "_", parent_request_id).strip("_") or "artifact"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:8]
+    candidate = f"{stem}.auto.{digest}.{start}"
+    suffix = 2
+    while candidate in existing_ids:
+        candidate = f"{stem}.auto.{digest}.{start}.{suffix}"
+        suffix += 1
+    return candidate
 
 
 def _normalize_request(
@@ -338,9 +646,13 @@ def _normalize_request(
     query = str(request.get("query", "") or "").strip()
     if operation in {"search_trace", "inspect_artifact", "inspect_evaluation", "search_repository"} and not query:
         return None
-    if operation in {"read_artifact_window", "read_repository_file"} and not _safe_relative_path(
-        request.get("relative_path")
-    ):
+    requested_path = request.get("relative_path")
+    if operation == "read_artifact_window" and not _safe_relative_path(requested_path):
+        # Inspection results expose the selected identity as ``source``. Accept
+        # that exact controller-issued identity when a refinement model feeds it
+        # back, while retaining the same bounded relative-path validation.
+        requested_path = request.get("source")
+    if operation in {"read_artifact_window", "read_repository_file"} and not _safe_relative_path(requested_path):
         return None
     if operation == "check_relation" and not str(request.get("expression", "") or "").strip():
         return None
@@ -360,6 +672,13 @@ def _normalize_request(
     }
     if query:
         normalized["query"] = query[:1_000]
+    if operation == "inspect_artifact":
+        artifact_hint = _safe_relative_path(request.get("relative_path") or request.get("source"))
+        if artifact_hint:
+            normalized["relative_path"] = artifact_hint
+        proof_obligation = str(request.get("proof_obligation", "") or "").strip().casefold()
+        if proof_obligation in {"existence", "absence", "coverage"}:
+            normalized["proof_obligation"] = proof_obligation
     if operation == "check_relation":
         expected = _finite_number(request.get("expected"))
         if expected is None:
@@ -399,11 +718,16 @@ def _normalize_request(
     if operation == "read_repository_file":
         normalized["relative_path"] = _safe_relative_path(request.get("relative_path"))
     if operation == "read_artifact_window":
-        normalized["relative_path"] = _safe_relative_path(request.get("relative_path"))
-        normalized["source_char_start"] = _optional_nonnegative_int(request.get("source_char_start")) or 0
+        normalized["relative_path"] = _safe_relative_path(requested_path)
+        source_char_start = _optional_nonnegative_int(request.get("source_char_start")) or 0
+        source_char_end = _optional_nonnegative_int(request.get("source_char_end"))
+        requested_max_chars = request.get("max_chars")
+        if requested_max_chars is None and source_char_end is not None and source_char_end > source_char_start:
+            requested_max_chars = source_char_end - source_char_start
+        normalized["source_char_start"] = source_char_start
         normalized["max_chars"] = min(
             _MAX_ARTIFACT_WINDOW_CHARS,
-            max(1, _positive_int(request.get("max_chars"), default=_MAX_ARTIFACT_WINDOW_CHARS)),
+            max(1, _positive_int(requested_max_chars, default=_MAX_ARTIFACT_WINDOW_CHARS)),
         )
     if operation == "read_event":
         message_index = _optional_nonnegative_int(request.get("message_index"))
@@ -660,8 +984,12 @@ def _inspect_artifact(
     description into apparent causal evidence.
     """
     query = str(request.get("query", "") or "")
+    artifact_hint = str(request.get("relative_path", "") or "").strip()
+    purpose = str(request.get("purpose", "") or "").strip()
+    selection_query = f"{query} {artifact_hint} {purpose}".strip()
     terms = _query_terms(query)
-    case_dir = Path(case.result_path).parent.resolve()
+    identity_terms = _query_terms(f"{artifact_hint} {purpose}".strip())
+    case_dir = _windows_long_path(Path(case.result_path).parent)
     sources: list[tuple[str, str, str]] = []
     artifacts_dir = case_dir / "artifacts"
     if artifacts_dir.is_dir():
@@ -682,7 +1010,7 @@ def _inspect_artifact(
             for path in sorted(artifacts_dir.rglob("*"))
             if path.is_file() and path.suffix.casefold() in _STRUCTURED_ARTIFACT_SUFFIXES
         ]
-        structured_files = _select_structured_artifact_files(structured_files, query, aliases=aliases)
+        structured_files = _select_structured_artifact_files(structured_files, selection_query, aliases=aliases)
         for path in structured_files:
             resolved = path.resolve()
             if not resolved.is_relative_to(case_dir):
@@ -705,13 +1033,29 @@ def _inspect_artifact(
             "matches": [],
         }
 
+    if artifact_hint:
+        hint_terms = _query_terms(artifact_hint)
+        identity_scores = [
+            (_query_match_score(logical_source, hint_terms), logical_source) for _, logical_source, _ in sources
+        ]
+        best_identity_score = max((score for score, _ in identity_scores), default=0.0)
+        if best_identity_score > 0:
+            best_logical_sources = {
+                logical_source for score, logical_source in identity_scores if score == best_identity_score
+            }
+            sources = [item for item in sources if item[1] in best_logical_sources]
+
     matches: list[tuple[float, str, str, str]] = []
     for source, logical_source, text in sources:
         lowered = text.casefold()
         matched = [term for term in terms if term in lowered]
         path_matched = [term for term in terms if term in logical_source.casefold()]
         if matched or path_matched:
-            score = _query_match_score(text, terms) + 2.0 * _query_match_score(logical_source, terms)
+            score = (
+                _query_match_score(text, terms)
+                + 2.0 * _query_match_score(logical_source, terms)
+                + 4.0 * _query_match_score(logical_source, identity_terms)
+            )
             matches.append((score, source, logical_source, text))
     selected = sorted(matches, key=lambda item: (-item[0], item[1]))[:_MAX_SEARCH_RESULTS]
     return {
@@ -792,9 +1136,28 @@ def _read_artifact_window(
         relative_path = relative_path.removeprefix("artifacts/")
     if not relative_path:
         return {"availability": "invalid", "reason": "invalid_relative_path"}
-    case_dir = Path(case.result_path).parent.resolve()
+    case_dir = _windows_long_path(Path(case.result_path).parent)
     artifacts_dir = (case_dir / "artifacts").resolve()
+    aliases = _artifact_path_aliases(case, artifacts_dir)
     path = (artifacts_dir / relative_path).resolve()
+    logical_source = aliases.get(path)
+    if not path.is_relative_to(artifacts_dir) or not path.is_file():
+        workspace_path = (artifacts_dir / "workspace" / relative_path).resolve()
+        if workspace_path.is_relative_to(artifacts_dir) and workspace_path.is_file():
+            path = workspace_path
+            logical_source = aliases.get(path)
+        else:
+            requested = relative_path.removeprefix("workspace/")
+            logical_matches = [
+                (stored, logical)
+                for stored, logical in aliases.items()
+                if logical.replace("\\", "/").removeprefix("workspace/") == requested
+            ]
+            if not logical_matches:
+                logical_matches = _unambiguous_logical_artifact_matches(requested, aliases)
+            if len(logical_matches) != 1:
+                return {"availability": "not_found", "relative_path": relative_path}
+            path, logical_source = logical_matches[0]
     if not path.is_relative_to(artifacts_dir) or not path.is_file():
         return {"availability": "not_found", "relative_path": relative_path}
     suffix = path.suffix.casefold()
@@ -820,11 +1183,11 @@ def _read_artifact_window(
         max(1, _positive_int(request.get("max_chars"), default=_MAX_ARTIFACT_WINDOW_CHARS)),
     )
     end = min(len(content), start + max_chars)
-    aliases = _artifact_path_aliases(case, artifacts_dir)
+    physical_relative_path = path.relative_to(artifacts_dir).as_posix()
     return {
         "availability": "available",
-        "source": f"artifacts/{relative_path}",
-        "logical_source": aliases.get(path, f"artifacts/{relative_path}"),
+        "source": f"artifacts/{physical_relative_path}",
+        "logical_source": logical_source or aliases.get(path, f"artifacts/{physical_relative_path}"),
         "source_char_start": start,
         "source_char_end": end,
         "source_char_count": len(content),
@@ -833,6 +1196,28 @@ def _read_artifact_window(
         "next_source_char_start": end if end < len(content) else None,
         "omission_origin": "controller_read_window" if start or end < len(content) else "none",
     }
+
+
+def _unambiguous_logical_artifact_matches(
+    requested: str,
+    aliases: Mapping[Path, str],
+) -> list[tuple[Path, str]]:
+    """Recover a named artifact when presentation-only path encoding changed."""
+    requested_terms = {term for term in _query_terms(Path(requested).name) if len(term) >= 3}
+    if len(requested_terms) < 2:
+        return []
+    ranked: list[tuple[int, Path, str]] = []
+    for stored, logical in aliases.items():
+        logical_terms = {term for term in _query_terms(Path(logical).name) if len(term) >= 3}
+        overlap = len(requested_terms & logical_terms)
+        if overlap:
+            ranked.append((overlap, stored, logical))
+    if not ranked:
+        return []
+    best = max(score for score, _, _ in ranked)
+    minimum = max(2, (len(requested_terms) + 1) // 2)
+    winners = [(stored, logical) for score, stored, logical in ranked if score == best and score >= minimum]
+    return winners if len(winners) == 1 else []
 
 
 def _inspect_evaluation(case: CaseAnalysisInput, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -1239,6 +1624,16 @@ def _read_text(path: Path, limit: int) -> str:
             return stream.read(limit)
     except OSError:
         return ""
+
+
+def _windows_long_path(path: Path) -> Path:
+    """Return an extended Windows path for deep evaluation artifact trees."""
+    resolved = str(path.resolve(strict=False))
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return Path(resolved)
+    if resolved.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + resolved.lstrip("\\"))
+    return Path("\\\\?\\" + resolved)
 
 
 def _string_list(value: Any) -> list[str]:

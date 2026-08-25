@@ -4297,7 +4297,11 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
                                 "target_ref": "member_harness.solver.skill",
                                 "evidence_status": "confirmed",
                                 "hypothesis_assessment": [
-                                    {"hypothesis_id": "h_direct_protocol", "status": "supported"}
+                                    {
+                                        "hypothesis_id": "h_direct_protocol",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    }
                                 ],
                                 "general_mechanism": (
                                     "A directly requested stateful protocol must implement and "
@@ -4458,7 +4462,11 @@ def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alt
                                 "target_ref": "member_harness.solver.prompt",
                                 "evidence_status": "supported_hypothesis",
                                 "hypothesis_assessment": [
-                                    {"hypothesis_id": "h1", "status": "supported"},
+                                    {
+                                        "hypothesis_id": "h1",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    },
                                     {"hypothesis_id": "h2", "status": "unresolved"},
                                 ],
                                 "general_mechanism": "Select values only after observing their source provenance.",
@@ -4488,6 +4496,57 @@ def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alt
     hypotheses = load_optimization_hypotheses(hypothesis_path)
     assert len(hypotheses) == 1
     assert hypotheses[0]["source_issue_id"] == "issue_local"
+
+
+@pytest.mark.parametrize(
+    ("verification_status", "expected_count"),
+    [(None, 0), ("unresolved", 0), ("verified", 1)],
+)
+def test_optimization_hypothesis_requires_explicit_verification(
+    tmp_path: Path,
+    verification_status: str | None,
+    expected_count: int,
+) -> None:
+    assessment = {"hypothesis_id": "h1", "status": "supported"}
+    if verification_status is not None:
+        assessment["verification_status"] = verification_status
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "category": "decision",
+                        "severity": "high",
+                        "summary": "An observed routing decision caused the failed behavior.",
+                        "affected_cases": ["case_1"],
+                        "evidence": [{"case_id": "case_1", "step_pointer": "step_2"}],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Use the observed routing discriminator.",
+                        "metadata": {
+                            "attribution": {
+                                "target_ref": "member_harness.solver.prompt",
+                                "evidence_status": "supported_hypothesis",
+                                "selected_hypothesis_id": "h1",
+                                "hypothesis_assessment": [assessment],
+                            }
+                        },
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    output = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Route this request."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    assert len(load_optimization_hypotheses(output)) == expected_count
 
 
 def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None:

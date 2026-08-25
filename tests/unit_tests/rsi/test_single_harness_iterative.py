@@ -35,15 +35,49 @@ from openjiuwen.rsi.single_harness import (
 from openjiuwen.rsi.single_harness.iterative import (
     _bind_task_acceptance_contracts,
     _candidate_capabilities,
+    _causal_candidate_failure_classification,
     _failed_machine_evidence,
     _initialize_frozen_baseline,
     _invoked_skill_names,
     _invoked_tool_names,
+    _must_preserve_budget_for_siblings,
     _refresh_optimization_experience,
     _resume_fingerprint_matches,
     _tool_names_match,
     _validate_and_filter_planned_batches,
 )
+
+
+def test_failed_route_cannot_consume_budget_reserved_for_queued_alternative() -> None:
+    assert _must_preserve_budget_for_siblings(
+        remaining_attempt_budget=1,
+        remaining_sibling_count=1,
+    )
+    assert not _must_preserve_budget_for_siblings(
+        remaining_attempt_budget=2,
+        remaining_sibling_count=1,
+    )
+    assert not _must_preserve_budget_for_siblings(
+        remaining_attempt_budget=None,
+        remaining_sibling_count=3,
+    )
+
+
+def test_realized_action_without_predicted_outcome_refutes_hypothesis() -> None:
+    assert (
+        _causal_candidate_failure_classification(
+            {
+                "case_1": {
+                    "state": "triggered",
+                    "behavior_activation": {
+                        "predicted_behavior_occurred": "yes",
+                        "predicted_outcome_occurred": "no",
+                    },
+                }
+            }
+        )
+        == "action_occurred_but_hypothesis_refuted"
+    )
 
 
 def test_infrastructure_skip_is_not_an_optimization_target(tmp_path: Path) -> None:
@@ -365,7 +399,13 @@ class _Analyzer:
                             "attribution": {
                                 "evidence_status": "confirmed",
                                 "target_ref": "member_harness.solver.prompt",
-                                "hypothesis_assessment": [{"hypothesis_id": f"h_{index:03d}", "status": "supported"}],
+                                "hypothesis_assessment": [
+                                    {
+                                        "hypothesis_id": f"h_{index:03d}",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    }
+                                ],
                                 "general_mechanism": "Verify the requested outcome before finishing.",
                             }
                         },
@@ -790,7 +830,13 @@ def test_three_siblings_freeze_parent_then_promote_best_realized_candidate(
                                 "attribution": {
                                     "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
-                                    "hypothesis_assessment": [{"hypothesis_id": "h_workbook", "status": "supported"}],
+                                    "hypothesis_assessment": [
+                                        {
+                                            "hypothesis_id": "h_workbook",
+                                            "status": "supported",
+                                            "verification_status": "verified",
+                                        }
+                                    ],
                                 }
                             },
                         }
@@ -1238,7 +1284,13 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
                                 "attribution": {
                                     "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.skill",
-                                    "hypothesis_assessment": [{"hypothesis_id": "h_case_001", "status": "supported"}],
+                                    "hypothesis_assessment": [
+                                        {
+                                            "hypothesis_id": "h_case_001",
+                                            "status": "supported",
+                                            "verification_status": "verified",
+                                        }
+                                    ],
                                 }
                             },
                         },
@@ -1254,7 +1306,13 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
                                 "attribution": {
                                     "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.skill",
-                                    "hypothesis_assessment": [{"hypothesis_id": "h_case_002", "status": "supported"}],
+                                    "hypothesis_assessment": [
+                                        {
+                                            "hypothesis_id": "h_case_002",
+                                            "status": "supported",
+                                            "verification_status": "verified",
+                                        }
+                                    ],
                                 }
                             },
                         },
@@ -1463,7 +1521,11 @@ def test_partial_candidate_is_reanalyzed_before_case_is_retained(tmp_path: Path)
                                     "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
                                     "hypothesis_assessment": [
-                                        {"hypothesis_id": f"h_residual_{index}", "status": "supported"}
+                                        {
+                                            "hypothesis_id": f"h_residual_{index}",
+                                            "status": "supported",
+                                            "verification_status": "verified",
+                                        }
                                     ],
                                 }
                             },
@@ -1618,7 +1680,13 @@ def test_residual_repair_stops_when_analyzer_repeats_same_issue(tmp_path: Path) 
                                 "attribution": {
                                     "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
-                                    "hypothesis_assessment": [{"hypothesis_id": "h_repeated", "status": "supported"}],
+                                    "hypothesis_assessment": [
+                                        {
+                                            "hypothesis_id": "h_repeated",
+                                            "status": "supported",
+                                            "verification_status": "verified",
+                                        }
+                                    ],
                                 }
                             },
                         }
@@ -1740,7 +1808,11 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                             "evidence_status": "confirmed",
                             "target_ref": "member_harness.solver.prompt_section",
                             "hypothesis_assessment": [
-                                {"hypothesis_id": f"h_scope_{self.call_count}", "status": "supported"}
+                                {
+                                    "hypothesis_id": f"h_scope_{self.call_count}",
+                                    "status": "supported",
+                                    "verification_status": "verified",
+                                }
                             ],
                         }
                     },
@@ -1760,7 +1832,11 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                                 "evidence_status": "confirmed",
                                 "target_ref": "member_harness.solver.prompt_section",
                                 "hypothesis_assessment": [
-                                    {"hypothesis_id": "h_sibling_case_002", "status": "supported"}
+                                    {
+                                        "hypothesis_id": "h_sibling_case_002",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    }
                                 ],
                             }
                         },
@@ -2552,6 +2628,40 @@ def test_candidate_capability_uses_skill_directory_as_runtime_name(tmp_path: Pat
     assert capabilities[0]["runtime_name"] == "post_edit_validation"
 
 
+def test_candidate_capability_preserves_pre_evaluation_causal_contract(tmp_path: Path) -> None:
+    plan = tmp_path / "plan.yaml"
+    _write_yaml(
+        plan,
+        {
+            "actions": [
+                {
+                    "action_id": "prompt_1",
+                    "role": "solver",
+                    "attributed_issue_ids": ["issue_001"],
+                    "action_group": "prompt",
+                    "operation": "modify",
+                    "target_path": "system_prompt.md",
+                    "description": "Make the existing decision rule operational.",
+                    "rationale": "The prior behavior was not observed.",
+                    "intervention": "On trigger A, perform B and verify C.",
+                    "expected_effect": "B occurs before completion.",
+                    "constraints": {
+                        "analyzer_counterfactual_predictions": ["B is visible in the trace"],
+                    },
+                }
+            ]
+        },
+    )
+
+    capability = _candidate_capabilities({"plan_path": str(plan)})[0]
+
+    assert capability["attributed_issue_ids"] == ["issue_001"]
+    assert capability["intervention"] == "On trigger A, perform B and verify C."
+    assert capability["description"] == "Make the existing decision rule operational."
+    assert capability["rationale"] == "The prior behavior was not observed."
+    assert capability["analyzer_counterfactual_predictions"] == ["B is visible in the trace"]
+
+
 def test_candidate_capability_resolves_target_cases_from_analysis(tmp_path: Path) -> None:
     analysis = tmp_path / "analysis_ref.yaml"
     _write_yaml(
@@ -3038,6 +3148,10 @@ def test_compact_analysis_diagnoses_preserves_multiple_case_diagnoses(tmp_path: 
                         "case_id": "case_001",
                         "root_cause": "first independent failure",
                         "target_ref": "member_harness.solver.skill",
+                        "prior_experiment_assessment": {
+                            "intervention_activated": "unknown",
+                            "predicted_behavior_occurred": "no",
+                        },
                     },
                     {
                         "case_id": "case_001",
@@ -3076,6 +3190,61 @@ def test_compact_analysis_diagnoses_preserves_multiple_case_diagnoses(tmp_path: 
     )["by_case"]["case_001"][0]
     assert feedback["candidate_failure_diagnosis"]["root_cause"] == "first independent failure"
     assert len(feedback["candidate_failure_diagnoses"]) == 2
+    assert compact["case_001"][0]["prior_experiment_assessment"]["predicted_behavior_occurred"] == "no"
+
+
+def test_failed_candidate_behavior_materializes_same_route_repair_issue(tmp_path: Path) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    issues_path = tmp_path / "issues.yaml"
+    _write_yaml(analysis_ref, {"issues": [], "issues_path": str(issues_path)})
+    _write_yaml(issues_path, {"issues": []})
+
+    iterative_module._materialize_candidate_activation_repair(
+        analysis_ref,
+        capabilities=[
+            {
+                "role": "solver",
+                "action_group": "prompt",
+                "operation": "modify",
+            }
+        ],
+        causal_intervention_contracts=[
+            {
+                "intervention": "On trigger A, perform B and verify C.",
+                "predicted_behavior_and_outcome": "B and C are visible in the trace.",
+            }
+        ],
+        diagnoses_by_case={
+            "case_001": [
+                {
+                    "prior_experiment_assessment": {
+                        "availability": "available",
+                        "intervention_activated": "unknown",
+                        "predicted_behavior_occurred": "no",
+                        "predicted_outcome_occurred": "no",
+                    }
+                }
+            ]
+        },
+    )
+
+    issue = iterative_module._read_yaml(analysis_ref)["issues"][0]
+    attribution = issue["metadata"]["attribution"]
+    assert issue["optimization_target"] == "member_harness"
+    assert attribution["target_ref"] == "member_harness.solver.prompt_section"
+    assert attribution["evidence_status"] == "confirmed"
+    assert attribution["hypothesis_assessment"][0]["verification_status"] == "verified"
+    assert attribution["hypothesis_assessment"][0]["verification_basis"] == "paired_candidate_experiment"
+    assert attribution["decision_contract"]["acceptance_observable"] == "B and C are visible in the trace."
+    assert iterative_module._read_yaml(issues_path)["issues"][0]["issue_id"] == issue["issue_id"]
+    hypotheses_path = iterative_module.compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_001", "task": "Complete the requested deliverable."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+    hypotheses = iterative_module.load_optimization_hypotheses(hypotheses_path)
+    assert len(hypotheses) == 1
+    assert hypotheses[0]["source_issue_id"] == issue["issue_id"]
 
 
 def test_invoked_skill_names_reads_skill_tool_arguments(tmp_path: Path) -> None:
@@ -3431,6 +3600,7 @@ def test_candidate_gate_rejects_generated_skill_that_was_not_invoked(tmp_path: P
     assert gate["accepted"] is False
     assert gate["reason"] == "expected_skill_not_invoked_on_target_case"
     assert gate["failure_class"] == "natural_skill_activation_failure"
+    assert gate["causal_failure_class"] == "intervention_not_activated"
     assert gate["expected_skill_names"] == ["post_edit_validation"]
     assert gate["invoked_skill_names"] == []
     assert gate["missing_expected_skill_names"] == ["post_edit_validation"]

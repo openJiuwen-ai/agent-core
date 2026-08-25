@@ -154,8 +154,8 @@ def test_numeric_delta_obligation_distinguishes_behavior_from_numeric_context() 
             "hypotheses": [
                 {
                     "hypothesis_id": "h_write",
-                    "claim": "The agent did not write the +1pp scenario into the persisted artifact.",
-                    "falsified_if": "A write event shows the 1% scenario was persisted.",
+                    "claim": "The agent did not write the requested scenario into the persisted artifact.",
+                    "falsified_if": "A write event shows the requested scenario was persisted.",
                     "numeric_change_check_required": False,
                     "evidence_requests": [
                         {
@@ -185,6 +185,25 @@ def test_numeric_delta_obligation_distinguishes_behavior_from_numeric_context() 
     assert plan is not None
     obligations = {item["hypothesis_id"]: item["numeric_change_check_required"] for item in plan["hypotheses"]}
     assert obligations == {"h_write": False, "h_delta": True}
+
+
+def test_numeric_delta_language_cannot_be_disabled_by_model_declaration() -> None:
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "claim": "The formula subtracts two percent and then adds one percent.",
+                    "falsified_if": "The before and after values differ by the requested percentage point.",
+                    "numeric_change_check_required": False,
+                    "evidence_requests": [{"operation": "read_event", "message_index": 3}],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    assert plan["hypotheses"][0]["numeric_change_check_required"] is True
 
 
 def test_numeric_delta_request_cannot_be_disabled_by_model_declaration() -> None:
@@ -542,6 +561,110 @@ def test_artifact_search_uses_logical_source_name_before_structured_parse_limit(
     assert stored_name in parsed
 
 
+def test_artifact_inspection_uses_requested_source_as_selection_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+
+    logical_name = "nested/Controlling Contract.docx"
+    stored_name = "__longpath__/target.docx"
+    case = _case(
+        tmp_path,
+        metadata={"analysis_artifact_snapshot": {"files": [{"path": stored_name, "source_path": logical_name}]}},
+    )
+    artifacts = Path(case.result_path).parent / "artifacts"
+    for index in range(20):
+        path = artifacts / f"noise_{index:02d}.docx"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"placeholder")
+    target = artifacts / stored_name
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"placeholder")
+    parsed: list[str] = []
+
+    def fake_structured_text(path: Path) -> str:
+        parsed.append(path.name)
+        return "The decisive obligation is present."
+
+    monkeypatch.setattr(evidence_investigation, "_structured_artifact_text", fake_structured_text)
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The named source contains the obligation.",
+                    "falsified_if": "The obligation is absent.",
+                    "evidence_requests": [
+                        {
+                            "operation": "inspect_artifact",
+                            "query": "decisive obligation",
+                            "relative_path": logical_name,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    result = execute_causal_investigation(case, plan)["results"][0]
+    assert result["availability"] == "available"
+    assert len(result["matches"]) == 1
+    assert result["matches"][0]["logical_source"] == logical_name
+    assert target.name in parsed
+
+
+def test_artifact_inspection_uses_named_source_from_request_purpose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+
+    target_logical = "deliverables/Target Decision Record.docx"
+    reference_logical = "references/Decision Guidance.docx"
+    case = _case(
+        tmp_path,
+        metadata={
+            "analysis_artifact_snapshot": {
+                "files": [
+                    {"path": "target.docx", "source_path": target_logical},
+                    {"path": "reference.docx", "source_path": reference_logical},
+                ]
+            }
+        },
+    )
+    artifacts = Path(case.result_path).parent / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "target.docx").write_bytes(b"placeholder")
+    (artifacts / "reference.docx").write_bytes(b"placeholder")
+
+    def fake_structured_text(path: Path) -> str:
+        return "decision required condition" if path.name == "target.docx" else "decision required condition " * 20
+
+    monkeypatch.setattr(evidence_investigation, "_structured_artifact_text", fake_structured_text)
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The target record contains the required condition.",
+                    "falsified_if": "The condition is absent.",
+                    "evidence_requests": [
+                        {
+                            "operation": "inspect_artifact",
+                            "query": "decision required condition",
+                            "purpose": "Read Target Decision Record.docx rather than topical guidance.",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    result = execute_causal_investigation(case, plan)["results"][0]
+    assert result["matches"][0]["logical_source"] == target_logical
+
+
 def test_artifact_search_window_can_be_followed_without_repeating_broad_query(tmp_path: Path) -> None:
     case = _case(tmp_path)
     artifact = Path(case.result_path).parent / "artifacts" / "contract.txt"
@@ -585,6 +708,105 @@ def test_artifact_search_window_can_be_followed_without_repeating_broad_query(tm
     assert "DECISIVE_CLAUSE" in results[1]["text"]
 
 
+def test_artifact_window_resolves_snapshot_logical_path_to_longpath_file(tmp_path: Path) -> None:
+    logical_name = "nested/source/Controlling Contract.txt"
+    stored_name = "__longpath__/a1b2c3d4.txt"
+    case = _case(
+        tmp_path,
+        metadata={"analysis_artifact_snapshot": {"files": [{"path": stored_name, "source_path": logical_name}]}},
+    )
+    artifact = Path(case.result_path).parent / "artifacts" / stored_name
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("DECISIVE_CLAUSE", encoding="utf-8")
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The logical artifact contains the decisive clause.",
+                    "falsified_if": "The clause is absent.",
+                    "evidence_requests": [
+                        {
+                            "operation": "read_artifact_window",
+                            "relative_path": logical_name,
+                            "source_char_start": 0,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    result = execute_causal_investigation(case, plan)["results"][0]
+    assert result["availability"] == "available"
+    assert result["source"] == f"artifacts/{stored_name}"
+    assert result["logical_source"] == logical_name
+    assert result["text"] == "DECISIVE_CLAUSE"
+
+
+def test_artifact_window_recovers_unambiguous_logical_name_after_encoding_damage(tmp_path: Path) -> None:
+    logical_name = "deliverables/Annex 3 - Controller Notification Template.txt"
+    stored_name = "__longpath__/a1b2c3d4.txt"
+    case = _case(
+        tmp_path,
+        metadata={"analysis_artifact_snapshot": {"files": [{"path": stored_name, "source_path": logical_name}]}},
+    )
+    artifact = Path(case.result_path).parent / "artifacts" / stored_name
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("DECISIVE_CLAUSE", encoding="utf-8")
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The logical artifact is readable.",
+                    "falsified_if": "The artifact cannot be resolved.",
+                    "evidence_requests": [
+                        {
+                            "operation": "read_artifact_window",
+                            "relative_path": "deliverables/Annex 3 ?C Controller Notification Template.txt",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    result = execute_causal_investigation(case, plan)["results"][0]
+    assert result["availability"] == "available"
+    assert result["logical_source"] == logical_name
+
+
+def test_artifact_window_accepts_controller_source_and_end_offset(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    artifact = Path(case.result_path).parent / "artifacts" / "workspace" / "contract.txt"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("0123456789", encoding="utf-8")
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "A returned source identity can be followed.",
+                    "falsified_if": "The returned window is unavailable.",
+                    "evidence_requests": [
+                        {
+                            "operation": "read_artifact_window",
+                            "source": "artifacts/workspace/contract.txt",
+                            "source_char_start": 3,
+                            "source_char_end": 7,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    result = execute_causal_investigation(case, plan)["results"][0]
+    assert result["availability"] == "available"
+    assert result["text"] == "3456"
+
+
 def test_artifact_search_prefers_window_covering_specific_terms(tmp_path: Path) -> None:
     case = _case(tmp_path)
     artifact = Path(case.result_path).parent / "artifacts" / "contract.txt"
@@ -610,6 +832,167 @@ def test_artifact_search_prefers_window_covering_specific_terms(tmp_path: Path) 
     assert plan is not None
     result = execute_causal_investigation(case, plan)["results"][0]
     assert "WATERFALL_TRIGGER" in result["matches"][0]["exact_spans"][0]["text"]
+
+
+def test_controller_closes_incomplete_artifact_source_with_contiguous_windows(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    artifact = Path(case.result_path).parent / "artifacts" / "policy.txt"
+    artifact.parent.mkdir()
+    content = "A" * 13_000 + "DECISIVE_TERM" + "B" * 12_500
+    artifact.write_text(content, encoding="utf-8")
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h_absence",
+                    "claim": "The bounded source is missing a required statement.",
+                    "falsified_if": "The complete source contains the statement.",
+                    "evidence_requests": [
+                        {
+                            "request_id": "q_search",
+                            "operation": "inspect_artifact",
+                            "query": "DECISIVE_TERM",
+                            "proof_obligation": "absence",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    evidence = execute_causal_investigation(case, plan)
+
+    automatic = [item for item in evidence["results"] if item.get("automatic")]
+    assert [item["source_char_start"] for item in automatic] == [0, 12_000, 24_000]
+    assert [item["source_char_end"] for item in automatic] == [12_000, 24_000, len(content)]
+    assert evidence["artifact_evidence_closure"]["status"] == "completed"
+    assert evidence["artifact_evidence_closure"]["completed_source_count"] == 1
+    assert evidence["automatic_request_count"] == 3
+
+
+def test_controller_stops_at_physical_witness_for_existence_obligation(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    artifact = Path(case.result_path).parent / "artifacts" / "large.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("A" * 5_000 + "PRESENT_WITNESS" + "B" * 5_000, encoding="utf-8")
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "claim": "The source contains a present witness.",
+                    "falsified_if": "No witness exists in the source.",
+                    "evidence_requests": [
+                        {
+                            "operation": "inspect_artifact",
+                            "query": "PRESENT_WITNESS",
+                            "proof_obligation": "existence",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert plan is not None
+    evidence = execute_causal_investigation(case, plan)
+
+    assert evidence["results"][0]["availability"] == "available"
+    assert evidence["automatic_request_count"] == 0
+    assert evidence["artifact_evidence_closure"]["status"] == "not_needed"
+
+
+def test_controller_deduplicates_automatic_closure_for_repeated_source(tmp_path: Path) -> None:
+    case = _case(tmp_path)
+    artifact = Path(case.result_path).parent / "artifacts" / "record.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("required record " * 1_000, encoding="utf-8")
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h_missing",
+                    "claim": "The source is missing a complete record.",
+                    "falsified_if": "The source contains the complete record.",
+                    "evidence_requests": [
+                        {
+                            "request_id": "q1",
+                            "operation": "inspect_artifact",
+                            "query": "required record",
+                            "proof_obligation": "coverage",
+                        }
+                    ],
+                },
+                {
+                    "hypothesis_id": "h_conflict",
+                    "claim": "The source contains a conflicting record.",
+                    "falsified_if": "The conflicting record is absent.",
+                    "evidence_requests": [
+                        {
+                            "request_id": "q2",
+                            "operation": "inspect_artifact",
+                            "query": "complete record",
+                            "proof_obligation": "coverage",
+                        },
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert plan is not None
+    evidence = execute_causal_investigation(case, plan)
+
+    assert evidence["artifact_evidence_closure"]["candidate_source_count"] == 1
+    automatic = [item for item in evidence["results"] if item.get("automatic")]
+    starts = [item["source_char_start"] for item in automatic]
+    assert starts == [0, 12_000]
+    assert all(item["hypothesis_ids"] == ["h_missing", "h_conflict"] for item in automatic)
+    assert all(item["parent_request_ids"] == ["q1", "q2"] for item in automatic)
+
+
+def test_normalizer_merges_shared_probe_bindings_before_applying_budget() -> None:
+    plan = normalize_causal_investigation(
+        {
+            "hypotheses": [
+                {
+                    "hypothesis_id": "h1",
+                    "claim": "The source is missing a decision record.",
+                    "falsified_if": "The record is present.",
+                    "evidence_requests": [
+                        {
+                            "request_id": "q1",
+                            "operation": "inspect_artifact",
+                            "query": "decision record",
+                            "proof_obligation": "coverage",
+                            "purpose": "test h1",
+                        }
+                    ],
+                },
+                {
+                    "hypothesis_id": "h2",
+                    "claim": "The source contains a conflicting record.",
+                    "falsified_if": "The record is absent.",
+                    "evidence_requests": [
+                        {
+                            "request_id": "q1",
+                            "operation": "inspect_artifact",
+                            "query": "decision record",
+                            "proof_obligation": "coverage",
+                            "purpose": "the same probe also tests h2",
+                        }
+                    ],
+                },
+            ]
+        },
+        max_requests=1,
+        min_hypotheses=2,
+        require_evidence_per_hypothesis=True,
+    )
+
+    assert plan is not None
+    assert len(plan["evidence_requests"]) == 1
+    assert plan["evidence_requests"][0]["hypothesis_ids"] == ["h1", "h2"]
 
 
 def test_controller_compares_prior_experiment_without_zero_filling(tmp_path: Path) -> None:
@@ -815,6 +1198,8 @@ def test_supported_local_issue_survives_when_unresolved_hypothesis_is_split() ->
                             "status": "supported",
                             "falsifying_condition_status": "not_observed",
                             "claim_follows_from_evidence": "yes",
+                            "evidence_relation": "direct_claim",
+                            "evidence_independence": "direct_observation",
                             "logic_check": "q1 shows the read ended before the clause",
                             "controller_request_ids": ["q1"],
                         },
@@ -988,6 +1373,932 @@ def test_local_hypothesis_label_can_be_reused_for_a_different_causal_claim() -> 
     assert not any("falsified prior causal hypotheses were reused" in conflict for conflict in conflicts)
 
 
+def test_reconciliation_keeps_same_mechanism_falsifier_unresolved() -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        _hypothesis_assessment_entailment_audit,
+        _reconcile_causal_assessments,
+    )
+
+    investigation = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h_iteration",
+                "claim": "An approximate solver stopped before the output was stable at required precision.",
+                "explains_requirement_ids": ["case:authoritative_outcome"],
+                "falsified_if": "An independent perturbation or recomputation is stable at required precision.",
+            }
+        ],
+        "evidence_requests": [
+            {
+                "request_id": "q1",
+                "hypothesis_ids": ["h_iteration"],
+                "operation": "read_event",
+                "trace_id": "case:trial_1",
+                "message_index": 3,
+            }
+        ],
+    }
+    diagnoses = [
+        {
+            "issue_category": "unassigned",
+            "evidence_status": "insufficient",
+            "target_ref": "unassigned",
+            "selected_hypothesis_id": "",
+            "confidence": "low",
+            "failure_cluster": {
+                "failed_checks": ["case:authoritative_outcome"],
+                "observable_behavior": "the solver returned a final value",
+            },
+            "causal_coverage": {
+                "explained_requirement_ids": [],
+                "residual_requirement_ids": ["case:authoritative_outcome"],
+                "unexplained_observations": ["no independent stability probe was run"],
+                "sufficiency_status": "unknown",
+            },
+            "hypothesis_assessment": [
+                {
+                    "hypothesis_id": "h_iteration",
+                    "status": "falsified",
+                    "falsifying_condition_status": "observed",
+                    "claim_follows_from_evidence": "no",
+                    "evidence_relation": "self_consistency",
+                    "evidence_independence": "same_mechanism",
+                    "logic_check": "The questioned solver returned a value and its own outputs agreed.",
+                    "controller_request_ids": ["q1"],
+                }
+            ],
+        }
+    ]
+    reconciled, warnings = _reconcile_causal_assessments(
+        diagnoses,
+        investigation,
+        evidence_results={"results": [{"request_id": "q1", "operation": "read_event", "availability": "available"}]},
+        failed_requirement_inventory={"requirements": [{"requirement_id": "case:authoritative_outcome"}]},
+    )
+
+    assessment = reconciled[0]["hypothesis_assessment"][0]
+    assert assessment["status"] == "unresolved"
+    assert assessment["verification_status"] == "unresolved"
+    assert any("falsifier_not_independent_of_questioned_mechanism" in warning for warning in warnings)
+    assert _hypothesis_assessment_entailment_audit(reconciled)["status"] == "needs_evidence"
+
+
+def test_unverified_decision_ground_requires_structured_incomplete_chain() -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _decision_ground_audit_conflicts
+
+    diagnosis = {
+        "failure_mode": "unverified_decision_ground_used",
+        "decision_ground_audit": [
+            {
+                "ground_id": "g1",
+                "ground_text": "A preferred practice was used as a rejection ground.",
+                "materiality": "material",
+                "used_for_decision": True,
+                "authority_status": "verified",
+                "scope_status": "matched",
+                "owner_status": "matched",
+                "trigger_status": "not_applicable",
+                "entailment_status": "not_entailed",
+                "controller_request_ids": ["q_ground"],
+            }
+        ],
+    }
+
+    assert _decision_ground_audit_conflicts(diagnosis) == []
+    diagnosis["decision_ground_audit"][0]["entailment_status"] = "entailed"
+    assert "lacks a material ground with an incomplete chain" in _decision_ground_audit_conflicts(diagnosis)[0]
+
+
+def test_decision_ground_audit_adds_exact_released_answer_probe(tmp_path: Path) -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+    case = _case(tmp_path)
+    diagnoses = [
+        {
+            "decision_ground_audit": [
+                {
+                    "ground_id": "g1",
+                    "ground_text": "A preferred item was used as a blocking reason.",
+                    "materiality": "material",
+                    "used_for_decision": True,
+                    "controller_request_ids": ["q_discovery"],
+                }
+            ]
+        }
+    ]
+    investigation = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h1",
+                "claim": "The released answer used the preferred item as required.",
+                "falsified_if": "The released answer did not use that ground.",
+                "explains_requirement_ids": ["case:authoritative_outcome"],
+            }
+        ],
+        "evidence_requests": [
+            {
+                "request_id": "q_discovery",
+                "hypothesis_ids": ["h1"],
+                "operation": "inspect_artifact",
+                "query": "preferred item",
+            }
+        ],
+    }
+    evidence_results = {
+        "results": [
+            {
+                "request_id": "q_discovery",
+                "hypothesis_ids": ["h1"],
+                "operation": "inspect_artifact",
+                "availability": "available",
+            }
+        ],
+        "completed_request_count": 1,
+    }
+
+    updated, evidence, request_ids = analyzer_module._supplement_decision_ground_trace_evidence(
+        case,
+        diagnoses=diagnoses,
+        investigation=investigation,
+        evidence_results=evidence_results,
+    )
+
+    assert len(request_ids) == 1
+    assert updated["evidence_requests"][-1]["operation"] == "read_event"
+    assert updated["evidence_requests"][-1]["message_index"] == 7
+    result = next(item for item in evidence["results"] if item["request_id"] == request_ids[0])
+    assert result["availability"] == "available"
+    assert "I need to distinguish" in json.dumps(result["event"]["content"])
+
+
+def test_decision_ground_audit_expands_exact_children_and_rejects_discovery_only() -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+    evidence_rows = [
+        {
+            "request_id": "q1",
+            "operation": "inspect_artifact",
+            "availability": "available",
+        },
+        {
+            "request_id": "q1.auto.0",
+            "parent_request_id": "q1",
+            "operation": "read_artifact_window",
+            "availability": "available",
+        },
+    ]
+    assert analyzer_module._expand_cited_evidence_ids({"q1"}, evidence_rows) == {
+        "q1",
+        "q1.auto.0",
+    }
+
+    diagnoses = [
+        {
+            "decision_ground_audit": [
+                {
+                    "ground_id": "g1",
+                    "ground_text": "A discovery result was used as a blocking reason.",
+                    "materiality": "material",
+                    "used_for_decision": True,
+                }
+            ]
+        }
+    ]
+    raw = {
+        "ground_audits": [
+            {
+                "diagnosis_index": 1,
+                "ground_id": "g1",
+                "material_ground_observed": True,
+                "used_for_decision_observed": True,
+                "authority_status": "missing",
+                "scope_status": "matched",
+                "owner_status": "matched",
+                "trigger_status": "not_applicable",
+                "entailment_status": "not_entailed",
+                "direct_trace_entails": True,
+                "exact_trace_evidence": "The discovery excerpt alone was cited.",
+                "controller_request_ids": ["q1"],
+                "approved_process_defect": True,
+            }
+        ]
+    }
+    audit = analyzer_module._normalize_decision_ground_entailment_audit(
+        raw,
+        diagnoses=diagnoses,
+        evidence_results={"results": evidence_rows[:1]},
+    )
+    assert audit["status"] == "not_established"
+
+
+@pytest.mark.asyncio
+async def test_broad_decision_claim_narrows_to_verified_material_ground(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+    case = _case(tmp_path)
+    strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
+    phases: list[str] = []
+    diagnosis_calls = 0
+    audit_calls = 0
+
+    def assessment(hypothesis_id: str, status: str, request_id: str) -> dict[str, Any]:
+        return {
+            "hypothesis_id": hypothesis_id,
+            "status": status,
+            "falsifying_condition_status": "not_observed" if status == "supported" else "observed",
+            "claim_follows_from_evidence": "yes" if status == "supported" else "no",
+            "evidence_relation": "direct_claim" if status == "supported" else "direct_falsifier",
+            "evidence_independence": "direct_observation",
+            "logic_check": "The exact decision-ground span was observed.",
+            "controller_request_ids": [request_id],
+        }
+
+    def diagnosis(*, narrow: bool) -> dict[str, Any]:
+        selected = "h_ground" if narrow else "h_blanket"
+        return {
+            "diagnoses": [
+                {
+                    "issue_category": "member_harness",
+                    "severity": "medium",
+                    "summary": "A conclusion used a material reason without a complete requirement chain.",
+                    "failure_mode": ("unverified_decision_ground_used" if narrow else "blanket_shortcut_assumed"),
+                    "failure_cluster": {
+                        "failed_checks": ["case:authoritative_outcome"],
+                        "observable_behavior": "the final reasoning used the stated ground",
+                    },
+                    "evidence_status": "supported_hypothesis",
+                    "failed_requirement": "Reach the requested conclusion from task-visible requirements.",
+                    "competing_hypotheses": ["blanket shortcut", "one unverified ground"],
+                    "discriminating_evidence": "The exact ground is material but its entailment is absent.",
+                    "selected_hypothesis_id": selected,
+                    "root_cause": (
+                        "One material decision ground was used without verifying its entailment."
+                        if narrow
+                        else "Every gap was automatically treated as failure."
+                    ),
+                    "critical_mistake": "The observed ground was used before its requirement chain was complete.",
+                    "general_mechanism": "Verify each material decision ground independently before using it.",
+                    "target_ref": "member_harness.solver.prompt",
+                    "evidence_refs": [{"trace_id": "case_001:trial_1", "message_index": 7}],
+                    "affected_components": ["solver"],
+                    "recommendation": "Require a complete ground ledger and recompute the conclusion.",
+                    "decision_ground_audit": [
+                        {
+                            "ground_id": "g1",
+                            "ground_text": "A preferred practice was presented as required.",
+                            "materiality": "material",
+                            "used_for_decision": True,
+                            "authority_status": "verified",
+                            "scope_status": "matched",
+                            "owner_status": "matched",
+                            "trigger_status": "not_applicable",
+                            "entailment_status": "not_entailed",
+                            "controller_request_ids": ["refine_ground" if narrow else "q1"],
+                        }
+                    ],
+                    "causal_coverage": {
+                        "explained_requirement_ids": ["case:authoritative_outcome"],
+                        "residual_requirement_ids": [],
+                        "unexplained_observations": [],
+                        "causal_chain": [],
+                        "counterfactual_prediction": "Only grounds with a complete chain remain in the recomputed decision.",
+                        "sufficiency_status": "local_contributor",
+                    },
+                    "decision_contract": {
+                        "wrong_decision": "use an unverified material ground",
+                        "causal_distinction": "complete versus incomplete requirement chain",
+                        "required_action": "verify every material ground, exclude unsupported grounds, and recompute",
+                        "acceptance_observable": "the ledger is complete and no unsupported ground is used",
+                        "scope_boundary": ["do not prescribe the final label"],
+                        "activation_phase": "during_investigation",
+                    },
+                    "hypothesis_assessment": [assessment(selected, "supported", "refine_ground" if narrow else "q1")],
+                    "confidence": "medium",
+                }
+            ]
+        }
+
+    async def fake_build_agent(workspace: str) -> dict[str, str]:
+        return {"workspace": workspace}
+
+    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int, **kwargs: Any) -> str:
+        nonlocal diagnosis_calls, audit_calls
+        del agent, max_retries, kwargs
+        phase = prompt.splitlines()[0]
+        phases.append(phase)
+        if phase == "CAUSAL_INVESTIGATION_PHASE=plan":
+            return json.dumps(
+                {
+                    "causal_investigation": {
+                        "hypotheses": [
+                            {
+                                "hypothesis_id": "h_blanket",
+                                "claim": "Every identified gap was automatically treated as failure.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
+                                "falsified_if": "Each ground was separately classified.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": "q1",
+                                        "operation": "read_event",
+                                        "trace_id": "case_001:trial_1",
+                                        "message_index": 7,
+                                    }
+                                ],
+                            },
+                            {
+                                "hypothesis_id": "h_valid",
+                                "claim": "Every material ground had a complete requirement chain.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
+                                "falsified_if": "One used material ground lacks entailment.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": "q1",
+                                        "operation": "read_event",
+                                        "trace_id": "case_001:trial_1",
+                                        "message_index": 7,
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                }
+            )
+        if phase == "CAUSAL_ASSESSMENT_PHASE=entailment_audit":
+            audit_calls += 1
+            if audit_calls == 1:
+                return json.dumps(
+                    {
+                        "assessment_audits": [
+                            {
+                                "diagnosis_index": 1,
+                                "hypothesis_id": "h_blanket",
+                                "claimed_status": "supported",
+                                "evidence_entails_status": False,
+                                "evidence_independent": True,
+                                "exact_entailment": "One ground does not prove a blanket shortcut.",
+                                "approved": False,
+                                "missing_discriminator": (
+                                    "The visible material ground was used without a complete entailment chain."
+                                ),
+                            }
+                        ]
+                    }
+                )
+            return json.dumps(
+                {
+                    "assessment_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "hypothesis_id": "h_ground",
+                            "claimed_status": "supported",
+                            "evidence_entails_status": True,
+                            "evidence_independent": True,
+                            "exact_entailment": "The exact material ground is used and lacks entailment.",
+                            "approved": True,
+                            "missing_discriminator": "",
+                        }
+                    ]
+                }
+            )
+        if phase == "CAUSAL_ASSESSMENT_PHASE=decision_ground_audit":
+            return json.dumps(
+                {
+                    "ground_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "ground_id": "g1",
+                            "material_ground_observed": True,
+                            "used_for_decision_observed": True,
+                            "authority_status": "unknown",
+                            "scope_status": "unknown",
+                            "owner_status": "unknown",
+                            "trigger_status": "unknown",
+                            "entailment_status": "unknown",
+                            "direct_trace_entails": True,
+                            "exact_trace_evidence": "The ground was used, but no specific broken link is proven.",
+                            "controller_request_ids": ["q1"],
+                            "approved_process_defect": False,
+                            "reason": "Unknown alone cannot establish the process defect.",
+                        }
+                    ]
+                }
+            )
+        if phase == "CAUSAL_INVESTIGATION_PHASE=refine":
+            assert "unverified_decision_ground_used" in prompt
+            return json.dumps(
+                {
+                    "causal_investigation": {
+                        "hypotheses": [
+                            {
+                                "hypothesis_id": "h_ground",
+                                "origin": "abductive_refinement",
+                                "discovery_evidence_request_ids": ["q1"],
+                                "claim": "One material decision ground was used before entailment was verified.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
+                                "falsified_if": "The ground was not used or its complete chain was verified.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": "ground",
+                                        "operation": "read_event",
+                                        "trace_id": "case_001:trial_1",
+                                        "message_index": 7,
+                                        "tool_call_index": 1,
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            )
+        if phase == "CAUSAL_HANDOFF_PHASE=audit":
+            assert "do not prescribe the final label" in prompt
+            return json.dumps(
+                {
+                    "diagnosis_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "selected_hypothesis_id": "h_ground",
+                            "hypothesis_binding": True,
+                            "runtime_decidable": True,
+                            "public_contract_consistent": True,
+                            "decision_rule_entailed": True,
+                            "decision_rule_source": "task_visible_invariant",
+                            "decision_rule_evidence": "Each stated ground must entail the conclusion it supports.",
+                            "evaluation_independent": True,
+                            "single_intervention": True,
+                            "approved": True,
+                            "violations": [],
+                        }
+                    ]
+                }
+            )
+        diagnosis_calls += 1
+        return json.dumps(diagnosis(narrow=diagnosis_calls > 1))
+
+    def fake_execute(case_input: Any, investigation: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        del case_input, kwargs
+        results = [
+            {
+                "request_id": str(request.get("request_id", "")),
+                "operation": str(request.get("operation", "")),
+                "availability": "available",
+                "summary": "exact decision-ground span",
+            }
+            for request in investigation.get("evidence_requests", [])
+        ]
+        return {"results": results, "completed_request_count": len(results)}
+
+    monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+    monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(analyzer_module, "execute_causal_investigation", fake_execute)
+    monkeypatch.setattr(analyzer_module, "_case_diagnoses_validation_conflicts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(analyzer_module, "_causal_investigation_conflicts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        analyzer_module,
+        "_reconcile_causal_assessments",
+        lambda diagnoses, *args, **kwargs: (diagnoses, []),
+    )
+
+    results = await strategy._per_case_diagnosis([case], DeterministicSignals(method="script_based"), None)
+
+    assert phases == [
+        "CAUSAL_INVESTIGATION_PHASE=plan",
+        "CAUSAL_INVESTIGATION_PHASE=diagnose",
+        "CAUSAL_ASSESSMENT_PHASE=decision_ground_audit",
+        "CAUSAL_ASSESSMENT_PHASE=decision_ground_audit",
+        "CAUSAL_ASSESSMENT_PHASE=entailment_audit",
+        "CAUSAL_INVESTIGATION_PHASE=refine",
+        "CAUSAL_INVESTIGATION_PHASE=diagnose",
+        "CAUSAL_ASSESSMENT_PHASE=entailment_audit",
+        "CAUSAL_HANDOFF_PHASE=audit",
+    ]
+    assert results[0]["failure_mode"] == "unverified_decision_ground_used"
+    assert results[0]["target_ref"] == "member_harness.solver.prompt"
+    assert results[0]["causal_investigation"]["closure_rounds"][0]["request_ids"] == ["refine_ground"]
+
+
+@pytest.mark.asyncio
+async def test_independent_ground_audit_injects_label_free_process_hypothesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+    diagnoses = [
+        {
+            # Answer-level uncertainty is intentionally unassigned. The independent
+            # controller audit is what may narrow it to an optimizable process defect.
+            "issue_category": "unassigned",
+            "target_ref": "unassigned",
+            "failure_cluster": {
+                "failed_checks": ["case:authoritative_outcome"],
+                "observable_behavior": "a preferred item was used as a blocking ground",
+            },
+            "failed_requirement": "Reach the requested conclusion from task-visible requirements.",
+            "selected_hypothesis_id": "h_blanket",
+            "evidence_refs": [{"trace_id": "case_001:trial_1", "message_index": 7}],
+            "decision_ground_audit": [
+                {
+                    "ground_id": "g_preference",
+                    "ground_text": "The response called a preferred practice a required correction.",
+                    "materiality": "material",
+                    "used_for_decision": True,
+                    "authority_status": "unknown",
+                    "scope_status": "unknown",
+                    "owner_status": "unknown",
+                    "trigger_status": "unknown",
+                    "entailment_status": "unknown",
+                    "controller_request_ids": ["q_final"],
+                }
+            ],
+            "causal_coverage": {
+                "explained_requirement_ids": ["case:authoritative_outcome"],
+                "residual_requirement_ids": [],
+                "unexplained_observations": [],
+                "causal_chain": [],
+                "counterfactual_prediction": "unknown",
+                "sufficiency_status": "local_contributor",
+            },
+            "hypothesis_assessment": [{"hypothesis_id": "h_blanket", "status": "supported"}],
+        }
+    ]
+    investigation = {
+        "hypotheses": [
+            {
+                "hypothesis_id": "h_blanket",
+                "claim": "Every possible gap was treated as blocking.",
+                "falsified_if": "Each reason was classified independently.",
+                "explains_requirement_ids": ["case:authoritative_outcome"],
+            }
+        ],
+        "evidence_requests": [
+            {
+                "request_id": "q_final",
+                "operation": "read_event",
+                "trace_id": "case_001:trial_1",
+                "message_index": 7,
+            }
+        ],
+    }
+    evidence_results = {
+        "results": [
+            {
+                "request_id": "q_final",
+                "operation": "read_event",
+                "availability": "available",
+                "summary": (
+                    "The final response calls the item recommended for convenience, "
+                    "then lists it under required corrections supporting rejection."
+                ),
+            }
+        ]
+    }
+
+    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int, **kwargs: Any) -> str:
+        del agent, max_retries, kwargs
+        assert prompt.startswith("CAUSAL_ASSESSMENT_PHASE=decision_ground_audit")
+        return json.dumps(
+            {
+                "ground_audits": [
+                    {
+                        "diagnosis_index": 1,
+                        "ground_id": "g_preference",
+                        "material_ground_observed": True,
+                        "used_for_decision_observed": True,
+                        "authority_status": "contradicted",
+                        "scope_status": "matched",
+                        "owner_status": "matched",
+                        "trigger_status": "not_applicable",
+                        "entailment_status": "not_entailed",
+                        "direct_trace_entails": True,
+                        "exact_trace_evidence": (
+                            "The released response says the item is recommended, then uses its "
+                            "absence as a required correction supporting rejection."
+                        ),
+                        "controller_request_ids": ["q_final"],
+                        "approved_process_defect": True,
+                        "reason": "The same decision span directly contradicts mandatory entailment.",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+    narrowed, frozen, audit = await analyzer_module._run_decision_ground_entailment_audit(
+        object(),
+        diagnoses=diagnoses,
+        investigation=investigation,
+        evidence_results=evidence_results,
+    )
+
+    assert audit["status"] == "approved"
+    assert narrowed[0]["failure_mode"] == "unverified_decision_ground_used"
+    assert narrowed[0]["issue_category"] == "member_harness"
+    assert narrowed[0]["target_ref"] == "member_harness.solver.prompt"
+    assert narrowed[0]["selected_hypothesis_id"] == "h_controller_decision_ground"
+    assert narrowed[0]["causal_coverage"]["sufficiency_status"] == "local_contributor"
+    assert "final label" in narrowed[0]["decision_contract"]["scope_boundary"][0]
+    assert any(item["hypothesis_id"] == "h_controller_decision_ground" for item in frozen["hypotheses"])
+
+
+@pytest.mark.asyncio
+async def test_ground_audit_canonical_survives_unresolved_sibling_and_enters_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+    case = _case(tmp_path)
+    strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
+    phases: list[str] = []
+    refine_calls = 0
+    diagnose_calls = 0
+
+    def supported(hypothesis_id: str) -> dict[str, Any]:
+        return {
+            "hypothesis_id": hypothesis_id,
+            "status": "supported",
+            "falsifying_condition_status": "not_observed",
+            "claim_follows_from_evidence": "yes",
+            "evidence_relation": "direct_claim",
+            "evidence_independence": "direct_observation",
+            "logic_check": "The exact event shows the claimed behavior.",
+            "controller_request_ids": ["q1"],
+        }
+
+    def assigned_diagnoses() -> dict[str, Any]:
+        base_coverage = {
+            "explained_requirement_ids": ["case:authoritative_outcome"],
+            "residual_requirement_ids": [],
+            "unexplained_observations": [],
+            "causal_chain": [
+                {
+                    "cause": "an observed decision step",
+                    "effect": "the released result",
+                    "evidence_status": "observed",
+                    "evidence_refs": [],
+                }
+            ],
+            "counterfactual_prediction": "The released behavior changes.",
+            "sufficiency_status": "cluster_sufficient",
+        }
+        common = {
+            "issue_category": "member_harness",
+            "severity": "medium",
+            "failure_cluster": {
+                "failed_checks": ["case:authoritative_outcome"],
+                "observable_behavior": "the released decision used stated reasons",
+            },
+            "evidence_status": "supported_hypothesis",
+            "failed_requirement": "Complete the public task from task-visible requirements.",
+            "evidence_refs": [{"trace_id": "case_001:trial_1", "message_index": 7}],
+            "affected_components": ["solver"],
+            "confidence": "medium",
+        }
+        return {
+            "diagnoses": [
+                {
+                    **common,
+                    "summary": "A broad decision mechanism was suspected.",
+                    "failure_mode": "broad_decision_mechanism",
+                    "selected_hypothesis_id": "h1",
+                    "root_cause": "The broad mechanism was used.",
+                    "critical_mistake": "A preferred item was used as required.",
+                    "general_mechanism": "Verify decision reasons.",
+                    "target_ref": "member_harness.solver.prompt",
+                    "recommendation": "Verify the decision reasons.",
+                    "decision_ground_audit": [
+                        {
+                            "ground_id": "g1",
+                            "ground_text": "A preferred practice was listed as a required correction.",
+                            "materiality": "material",
+                            "used_for_decision": True,
+                            "authority_status": "unknown",
+                            "scope_status": "unknown",
+                            "owner_status": "unknown",
+                            "trigger_status": "unknown",
+                            "entailment_status": "unknown",
+                            "controller_request_ids": ["q1"],
+                        }
+                    ],
+                    "causal_coverage": dict(base_coverage),
+                    "hypothesis_assessment": [supported("h1")],
+                },
+                {
+                    **common,
+                    "summary": "A sibling mechanism was suspected.",
+                    "failure_mode": "sibling_mechanism",
+                    "selected_hypothesis_id": "h2",
+                    "root_cause": "A sibling mechanism may also contribute.",
+                    "critical_mistake": "A separate step may be wrong.",
+                    "general_mechanism": "Check the sibling step.",
+                    "target_ref": "member_harness.solver.prompt",
+                    "recommendation": "Check the sibling step.",
+                    "causal_coverage": dict(base_coverage),
+                    "hypothesis_assessment": [supported("h2")],
+                },
+            ]
+        }
+
+    async def fake_build_agent(workspace: str) -> dict[str, str]:
+        return {"workspace": workspace}
+
+    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int, **kwargs: Any) -> str:
+        nonlocal refine_calls, diagnose_calls
+        del agent, max_retries, kwargs
+        phase = prompt.splitlines()[0]
+        phases.append(phase)
+        if phase == "CAUSAL_INVESTIGATION_PHASE=plan":
+            hypotheses = []
+            for hypothesis_id in ("h1", "h2"):
+                hypotheses.append(
+                    {
+                        "hypothesis_id": hypothesis_id,
+                        "claim": f"{hypothesis_id} caused the observed decision behavior.",
+                        "explains_requirement_ids": ["case:authoritative_outcome"],
+                        "falsified_if": f"The exact event refutes {hypothesis_id}.",
+                        "evidence_requests": [
+                            {
+                                "request_id": "q1",
+                                "operation": "read_event",
+                                "trace_id": "case_001:trial_1",
+                                "message_index": 7,
+                            }
+                        ],
+                    }
+                )
+            return json.dumps({"causal_investigation": {"hypotheses": hypotheses}})
+        if phase == "CAUSAL_ASSESSMENT_PHASE=decision_ground_audit":
+            return json.dumps(
+                {
+                    "ground_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "ground_id": "g1",
+                            "material_ground_observed": True,
+                            "used_for_decision_observed": True,
+                            "authority_status": "contradicted",
+                            "scope_status": "matched",
+                            "owner_status": "matched",
+                            "trigger_status": "not_applicable",
+                            "entailment_status": "not_entailed",
+                            "direct_trace_entails": True,
+                            "exact_trace_evidence": (
+                                "The final response calls the practice preferred, then uses "
+                                "its absence as a required correction supporting the decision."
+                            ),
+                            "controller_request_ids": ["q1"],
+                            "approved_process_defect": True,
+                            "reason": "The authority-to-entailment link is directly contradicted.",
+                        }
+                    ]
+                }
+            )
+        if phase == "CAUSAL_ASSESSMENT_PHASE=entailment_audit":
+            return json.dumps(
+                {
+                    "assessment_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "hypothesis_id": "h_controller_decision_ground",
+                            "claimed_status": "supported",
+                            "evidence_entails_status": True,
+                            "evidence_independent": True,
+                            "exact_entailment": "The exact ground was materially used with a contradicted link.",
+                            "approved": True,
+                            "missing_discriminator": "",
+                        },
+                        {
+                            "diagnosis_index": 2,
+                            "hypothesis_id": "h2",
+                            "claimed_status": "supported",
+                            "evidence_entails_status": False,
+                            "evidence_independent": True,
+                            "exact_entailment": "",
+                            "approved": False,
+                            "missing_discriminator": "The sibling mechanism remains unresolved.",
+                        },
+                    ]
+                }
+            )
+        if phase == "CAUSAL_INVESTIGATION_PHASE=refine":
+            refine_calls += 1
+            if refine_calls == 1:
+                return json.dumps(
+                    {
+                        "causal_investigation": {
+                            "evidence_requests": [
+                                {
+                                    "request_id": "q2",
+                                    "operation": "read_event",
+                                    "trace_id": "case_001:trial_1",
+                                    "message_index": 8,
+                                }
+                            ]
+                        }
+                    }
+                )
+            return json.dumps({"causal_investigation": {"evidence_requests": [], "ready_without_more_evidence": True}})
+        if phase == "CAUSAL_HANDOFF_PHASE=audit":
+            assert "h_controller_decision_ground" in prompt
+            return json.dumps(
+                {
+                    "diagnosis_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "selected_hypothesis_id": "h_controller_decision_ground",
+                            "hypothesis_binding": True,
+                            "runtime_decidable": True,
+                            "public_contract_consistent": True,
+                            "decision_rule_entailed": True,
+                            "decision_rule_source": "task_visible_invariant",
+                            "decision_rule_evidence": "Each material ground must entail the decision it supports.",
+                            "evaluation_independent": True,
+                            "single_intervention": True,
+                            "approved": True,
+                            "violations": [],
+                        }
+                    ]
+                }
+            )
+        diagnose_calls += 1
+        if diagnose_calls == 1:
+            return json.dumps(assigned_diagnoses())
+        return json.dumps(
+            {
+                "diagnoses": [
+                    {
+                        "issue_category": "unassigned",
+                        "severity": "low",
+                        "summary": "The sibling mechanism remains unresolved.",
+                        "failure_mode": "unresolved_sibling",
+                        "failure_cluster": {
+                            "failed_checks": ["case:authoritative_outcome"],
+                            "observable_behavior": "the sibling observation remains ambiguous",
+                        },
+                        "evidence_status": "insufficient",
+                        "selected_hypothesis_id": "",
+                        "root_cause": "The sibling mechanism is unresolved.",
+                        "target_ref": "unassigned",
+                        "causal_coverage": {
+                            "explained_requirement_ids": [],
+                            "residual_requirement_ids": ["case:authoritative_outcome"],
+                            "unexplained_observations": ["The sibling mechanism is unresolved."],
+                            "causal_chain": [
+                                {
+                                    "cause": "unknown sibling cause",
+                                    "effect": "ambiguous observation",
+                                    "evidence_status": "unknown",
+                                    "evidence_refs": [],
+                                }
+                            ],
+                            "counterfactual_prediction": "No sibling prediction is available.",
+                            "sufficiency_status": "unknown",
+                        },
+                        "hypothesis_assessment": [{"hypothesis_id": "h2", "status": "unresolved"}],
+                    }
+                ]
+            }
+        )
+
+    def fake_execute(case_input: Any, investigation: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        del case_input, kwargs
+        results = [
+            {
+                "request_id": str(request.get("request_id", "")),
+                "operation": str(request.get("operation", "")),
+                "availability": "available",
+                "summary": "bounded exact decision evidence",
+            }
+            for request in investigation.get("evidence_requests", [])
+        ]
+        return {"results": results, "completed_request_count": len(results)}
+
+    monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+    monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(analyzer_module, "execute_causal_investigation", fake_execute)
+    monkeypatch.setattr(analyzer_module, "_case_diagnoses_validation_conflicts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(analyzer_module, "_causal_investigation_conflicts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        analyzer_module,
+        "_reconcile_causal_assessments",
+        lambda diagnoses, *args, **kwargs: (diagnoses, []),
+    )
+
+    results = await strategy._per_case_diagnosis([case], DeterministicSignals(method="script_based"), None)
+
+    canonical = next(item for item in results if item.get("failure_mode") == "unverified_decision_ground_used")
+    assert canonical["selected_hypothesis_id"] == "h_controller_decision_ground"
+    assert canonical["target_ref"] == "member_harness.solver.prompt"
+    assert "CAUSAL_INVESTIGATION_PHASE=refine" in phases
+    assert phases[-1] == "CAUSAL_HANDOFF_PHASE=audit"
+    assert results[0]["causal_investigation"]["causal_handoff_audit"]["status"] == "approved"
+
+
 @pytest.mark.asyncio
 async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
     tmp_path: Path,
@@ -1039,12 +2350,30 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
                     "causal_investigation": {
                         "evidence_requests": [
                             {
+                                "request_id": "followup",
                                 "operation": "read_event",
                                 "trace_id": "case_001:trial_1",
                                 "message_index": 7,
                             }
                         ]
                     }
+                }
+            )
+        if prompt.startswith("CAUSAL_ASSESSMENT_PHASE=entailment_audit"):
+            return json.dumps(
+                {
+                    "assessment_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "hypothesis_id": "h_parser",
+                            "claimed_status": "supported",
+                            "evidence_entails_status": True,
+                            "evidence_independent": True,
+                            "exact_entailment": "The exact event directly records legacy mode.",
+                            "approved": True,
+                            "missing_discriminator": "",
+                        }
+                    ]
                 }
             )
         if prompt.startswith("CAUSAL_HANDOFF_PHASE=audit"):
@@ -1118,8 +2447,10 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
                                 "status": "supported",
                                 "falsifying_condition_status": "not_observed",
                                 "claim_follows_from_evidence": "yes",
+                                "evidence_relation": "direct_claim",
+                                "evidence_independence": "direct_observation",
                                 "logic_check": "The observed mode equals the legacy mode predicted by h_parser.",
-                                "controller_request_ids": ["q1"],
+                                "controller_request_ids": ["refine_followup"],
                                 "reason": "observed",
                                 "evidence_refs": [],
                             },
@@ -1158,15 +2489,265 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
         None,
     )
 
-    assert len(prompts) == 5
+    assert len(prompts) == 7
     assert prompts[1].startswith("CAUSAL_INVESTIGATION_PHASE=diagnose")
     assert prompts[2].startswith("CAUSAL_INVESTIGATION_PHASE=refine")
     assert prompts[3].startswith("CAUSAL_INVESTIGATION_PHASE=diagnose")
+    assert prompts[4].startswith("CAUSAL_ASSESSMENT_PHASE=entailment_audit")
+    assert prompts[5].startswith("CAUSAL_INVESTIGATION_PHASE=refine")
+    assert prompts[6].startswith("CAUSAL_HANDOFF_PHASE=audit")
     assert results[0]["causal_investigation"]["planning_status"] == "completed"
     assert results[0]["causal_investigation"]["refinement_status"] == "completed"
     assert results[0]["causal_investigation"]["refinement_request_count"] == 1
     assert results[0]["causal_investigation"]["hypothesis_count"] == 2
-    assert results[0]["hypothesis_assessment"][1]["status"] == "falsified"
+    assert results[0]["causal_investigation"]["closure_termination_reason"] == "no_new_legal_request"
+    assert results[0]["hypothesis_assessment"][1]["status"] == "unresolved"
+    assert results[0]["causal_investigation"]["hypothesis_entailment_audit"]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_independent_entailment_rejection_reenters_evidence_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+    case = _case(tmp_path)
+    strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
+    phases: list[str] = []
+    diagnosis_calls = 0
+    audit_calls = 0
+
+    def diagnosis(final: bool) -> dict[str, Any]:
+        selected = "h_stability" if final else "h_input"
+        request_id = "refine_stability" if final else "q1"
+        assessments = [
+            {
+                "hypothesis_id": "h_input",
+                "status": "falsified" if final else "supported",
+                "falsifying_condition_status": "observed" if final else "not_observed",
+                "claim_follows_from_evidence": "no" if final else "yes",
+                "evidence_relation": "direct_falsifier" if final else "direct_claim",
+                "evidence_independence": "direct_observation",
+                "logic_check": "The exact input-path event was observed.",
+                "controller_request_ids": [request_id],
+            },
+            {
+                "hypothesis_id": "h_stability",
+                "status": "supported" if final else "falsified",
+                "falsifying_condition_status": "not_observed" if final else "observed",
+                "claim_follows_from_evidence": "yes" if final else "no",
+                "evidence_relation": "direct_claim" if final else "direct_falsifier",
+                "evidence_independence": "independent" if final else "direct_observation",
+                "logic_check": (
+                    "The independent stability probe changed the result."
+                    if final
+                    else "The questioned runtime returned a value and its own outputs agreed."
+                ),
+                "controller_request_ids": [request_id],
+            },
+        ]
+        return {
+            "diagnoses": [
+                {
+                    "issue_category": "member_harness",
+                    "severity": "medium",
+                    "summary": "The runtime accepted a result without an independent decision check.",
+                    "failure_mode": "unchecked_runtime_decision",
+                    "failure_cluster": {
+                        "failed_checks": ["case:authoritative_outcome"],
+                        "observable_behavior": "the runtime returned a value",
+                    },
+                    "evidence_status": "confirmed",
+                    "failed_requirement": "Produce a result satisfying the public task.",
+                    "selected_hypothesis_id": selected,
+                    "root_cause": "The selected runtime decision lacked the required check.",
+                    "critical_mistake": "The runtime accepted its own output.",
+                    "general_mechanism": "Validate with evidence independent of the questioned mechanism.",
+                    "target_ref": "member_harness.solver.prompt",
+                    "recommendation": "Run the bounded independent check before accepting the output.",
+                    "causal_coverage": {
+                        "explained_requirement_ids": ["case:authoritative_outcome"],
+                        "residual_requirement_ids": [],
+                        "unexplained_observations": [],
+                        "causal_chain": [],
+                        "counterfactual_prediction": "The output is accepted only after the independent check.",
+                        "sufficiency_status": "task_sufficient",
+                    },
+                    "decision_contract": {
+                        "wrong_decision": "accept the unchecked output",
+                        "causal_distinction": "an independent check is missing",
+                        "required_action": "run the independent check",
+                        "acceptance_observable": "the check is present and passes",
+                        "scope_boundary": [],
+                        "activation_phase": "pre_submission",
+                    },
+                    "hypothesis_assessment": assessments,
+                    "confidence": "high",
+                }
+            ]
+        }
+
+    async def fake_build_agent(workspace: str) -> dict[str, str]:
+        return {"workspace": workspace}
+
+    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int, **kwargs: Any) -> str:
+        nonlocal diagnosis_calls, audit_calls
+        del agent, max_retries, kwargs
+        phase = prompt.splitlines()[0]
+        phases.append(phase)
+        if phase == "CAUSAL_INVESTIGATION_PHASE=plan":
+            return json.dumps(
+                {
+                    "causal_investigation": {
+                        "hypotheses": [
+                            {
+                                "hypothesis_id": "h_input",
+                                "claim": "The wrong task-visible input path was selected.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
+                                "falsified_if": "The exact event records the required input path.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": "q1",
+                                        "operation": "read_event",
+                                        "trace_id": "case_001:trial_1",
+                                        "message_index": 7,
+                                    }
+                                ],
+                            },
+                            {
+                                "hypothesis_id": "h_stability",
+                                "claim": "The approximate result was accepted before stability was established.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
+                                "falsified_if": "An independent stability probe is stable at required precision.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": "q1",
+                                        "operation": "read_event",
+                                        "trace_id": "case_001:trial_1",
+                                        "message_index": 7,
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                }
+            )
+        if phase == "CAUSAL_ASSESSMENT_PHASE=entailment_audit":
+            audit_calls += 1
+            first = audit_calls == 1
+            return json.dumps(
+                {
+                    "assessment_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "hypothesis_id": "h_input",
+                            "claimed_status": "supported" if first else "falsified",
+                            "evidence_entails_status": True,
+                            "evidence_independent": True,
+                            "exact_entailment": "The input-path event is directly observed.",
+                            "approved": True,
+                            "missing_discriminator": "",
+                        },
+                        {
+                            "diagnosis_index": 1,
+                            "hypothesis_id": "h_stability",
+                            "claimed_status": "falsified" if first else "supported",
+                            "evidence_entails_status": not first,
+                            "evidence_independent": not first,
+                            "exact_entailment": "Same-mechanism agreement is not a stability check.",
+                            "approved": not first,
+                            "missing_discriminator": (
+                                "Run a bounded independent stability or perturbation probe." if first else ""
+                            ),
+                        },
+                    ]
+                }
+            )
+        if phase == "CAUSAL_INVESTIGATION_PHASE=refine":
+            assert "bounded independent stability" in prompt
+            return json.dumps(
+                {
+                    "causal_investigation": {
+                        "evidence_requests": [
+                            {
+                                "request_id": "stability",
+                                "operation": "read_event",
+                                "trace_id": "case_001:trial_1",
+                                "message_index": 7,
+                                "tool_call_index": 1,
+                            }
+                        ]
+                    }
+                }
+            )
+        if phase == "CAUSAL_HANDOFF_PHASE=audit":
+            return json.dumps(
+                {
+                    "diagnosis_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "selected_hypothesis_id": "h_stability",
+                            "hypothesis_binding": True,
+                            "runtime_decidable": True,
+                            "public_contract_consistent": True,
+                            "decision_rule_entailed": True,
+                            "decision_rule_source": "runtime_safety_invariant",
+                            "decision_rule_evidence": "Run an independent bounded check before release.",
+                            "evaluation_independent": True,
+                            "single_intervention": True,
+                            "approved": True,
+                            "violations": [],
+                        }
+                    ]
+                }
+            )
+        diagnosis_calls += 1
+        return json.dumps(diagnosis(diagnosis_calls > 1))
+
+    def fake_execute(case_input: Any, investigation: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        del case_input, kwargs
+        results = [
+            {
+                "request_id": str(request.get("request_id", "")),
+                "operation": str(request.get("operation", "")),
+                "availability": "available",
+                "summary": "exact bounded event",
+            }
+            for request in investigation.get("evidence_requests", [])
+        ]
+        return {"results": results, "completed_request_count": len(results)}
+
+    monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+    monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(analyzer_module, "execute_causal_investigation", fake_execute)
+    monkeypatch.setattr(analyzer_module, "_case_diagnoses_validation_conflicts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(analyzer_module, "_causal_investigation_conflicts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        analyzer_module,
+        "_reconcile_causal_assessments",
+        lambda diagnoses, *args, **kwargs: (diagnoses, []),
+    )
+
+    results = await strategy._per_case_diagnosis([case], DeterministicSignals(method="script_based"), None)
+
+    assert phases == [
+        "CAUSAL_INVESTIGATION_PHASE=plan",
+        "CAUSAL_INVESTIGATION_PHASE=diagnose",
+        "CAUSAL_ASSESSMENT_PHASE=entailment_audit",
+        "CAUSAL_INVESTIGATION_PHASE=refine",
+        "CAUSAL_INVESTIGATION_PHASE=diagnose",
+        "CAUSAL_ASSESSMENT_PHASE=entailment_audit",
+        "CAUSAL_HANDOFF_PHASE=audit",
+    ]
+    record = results[0]["causal_investigation"]
+    audit = record["independent_hypothesis_entailment_audit"]
+    assert audit["attempt_count"] == 2
+    assert audit["attempts"][0]["status"] == "needs_evidence"
+    assert audit["attempts"][1]["status"] == "approved"
+    assert record["closure_rounds"][0]["request_ids"] == ["refine_stability"]
+    assert results[0]["selected_hypothesis_id"] == "h_stability"
 
 
 @pytest.mark.asyncio
@@ -1289,5 +2870,302 @@ async def test_legacy_diagnosis_cannot_bypass_mandatory_investigation(
 
     assert len(prompts) == 5
     assert "CAUSAL_INVESTIGATION_PHASE=refine" in prompts[3]
+    assert "CAUSAL_INVESTIGATION_PHASE=refine" in prompts[4]
+    assert results[0]["target_ref"] == "unassigned"
     assert results[0]["causal_investigation"]["strict_plan_correction_attempted"] is True
     assert results[0]["causal_investigation"]["hypothesis_count"] == 2
+    assert results[0]["causal_investigation"]["closure_termination_reason"] == "no_new_legal_request"
+
+
+@pytest.mark.asyncio
+async def test_handoff_audit_reenters_evidence_and_reaudits_assigned_diagnosis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+
+    case = _case(tmp_path)
+    strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
+    prompts: list[str] = []
+    audit_calls = 0
+    closure_calls = 0
+
+    def diagnosis(request_id: str) -> dict[str, Any]:
+        evidence_ref = {"trace_id": "case_001:trial_1", "message_index": 7}
+        return {
+            "diagnoses": [
+                {
+                    "issue_category": "member_harness",
+                    "severity": "medium",
+                    "summary": "The runtime selected the legacy parser mode.",
+                    "failure_mode": "legacy_parser_selection",
+                    "failure_cluster": {
+                        "failed_checks": ["case:authoritative_outcome"],
+                        "observable_behavior": "legacy mode selected",
+                    },
+                    "evidence_status": "confirmed",
+                    "failed_requirement": "Complete the public task with the compatible parser.",
+                    "competing_hypotheses": ["legacy parser", "modern parser"],
+                    "discriminating_evidence": "The exact event records legacy mode.",
+                    "selected_hypothesis_id": "h_legacy",
+                    "root_cause": "The runtime selected legacy parser mode.",
+                    "critical_mistake": "The parser-mode decision selected legacy.",
+                    "general_mechanism": "Select the parser mode required by a task-visible source.",
+                    "target_ref": "member_harness.solver.prompt",
+                    "evidence_refs": [evidence_ref],
+                    "affected_components": ["solver"],
+                    "recommendation": "Derive parser mode from the task-visible declaration before parsing.",
+                    "causal_coverage": {
+                        "explained_requirement_ids": ["case:authoritative_outcome"],
+                        "residual_requirement_ids": [],
+                        "unexplained_observations": [],
+                        "causal_chain": [
+                            {
+                                "cause": "legacy mode selected",
+                                "effect": "the public task failed",
+                                "evidence_status": "observed",
+                                "evidence_refs": [evidence_ref],
+                            }
+                        ],
+                        "counterfactual_prediction": "The declared parser mode is selected.",
+                        "sufficiency_status": "task_sufficient",
+                    },
+                    "decision_contract": {
+                        "wrong_decision": "legacy mode selected",
+                        "causal_distinction": "a task-visible declaration requires another mode",
+                        "required_action": "select the declared mode",
+                        "acceptance_observable": "the selected mode equals the public declaration",
+                        "scope_boundary": ["Do not infer a mode from evaluator output."],
+                        "activation_phase": "during_investigation",
+                    },
+                    "hypothesis_assessment": [
+                        {
+                            "hypothesis_id": "h_legacy",
+                            "status": "supported",
+                            "falsifying_condition_status": "not_observed",
+                            "claim_follows_from_evidence": "yes",
+                            "evidence_relation": "direct_claim",
+                            "evidence_independence": "direct_observation",
+                            "logic_check": "The exact event says legacy mode.",
+                            "controller_request_ids": [request_id],
+                            "reason": "observed",
+                            "evidence_refs": [evidence_ref],
+                        },
+                        {
+                            "hypothesis_id": "h_modern",
+                            "status": "falsified",
+                            "falsifying_condition_status": "observed",
+                            "claim_follows_from_evidence": "no",
+                            "evidence_relation": "direct_falsifier",
+                            "evidence_independence": "direct_observation",
+                            "logic_check": "The exact event contradicts modern mode.",
+                            "controller_request_ids": [request_id],
+                            "reason": "refuted",
+                            "evidence_refs": [evidence_ref],
+                        },
+                    ],
+                    "confidence": "high",
+                }
+            ]
+        }
+
+    async def fake_build_agent(workspace: str) -> dict[str, str]:
+        return {"workspace": workspace}
+
+    async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int, **kwargs: Any) -> str:
+        nonlocal audit_calls, closure_calls
+        del agent, max_retries, kwargs
+        prompts.append(prompt)
+        if prompt.startswith("CAUSAL_ASSESSMENT_PHASE=entailment_audit"):
+            return json.dumps(
+                {
+                    "assessment_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "hypothesis_id": "h_legacy",
+                            "claimed_status": "supported",
+                            "evidence_entails_status": True,
+                            "evidence_independent": True,
+                            "exact_entailment": "The exact event directly records legacy mode.",
+                            "approved": True,
+                            "missing_discriminator": "",
+                        },
+                        {
+                            "diagnosis_index": 1,
+                            "hypothesis_id": "h_modern",
+                            "claimed_status": "falsified",
+                            "evidence_entails_status": True,
+                            "evidence_independent": True,
+                            "exact_entailment": "The exact event matches the frozen falsifier.",
+                            "approved": True,
+                            "missing_discriminator": "",
+                        },
+                    ]
+                }
+            )
+        if prompt.startswith("CAUSAL_INVESTIGATION_PHASE=plan"):
+            return json.dumps(
+                {
+                    "causal_investigation": {
+                        "hypotheses": [
+                            {
+                                "hypothesis_id": "h_legacy",
+                                "claim": "Legacy parser mode was selected.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
+                                "falsified_if": "The exact event records modern mode.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": "q1",
+                                        "operation": "read_event",
+                                        "trace_id": "case_001:trial_1",
+                                        "message_index": 7,
+                                    }
+                                ],
+                            },
+                            {
+                                "hypothesis_id": "h_modern",
+                                "claim": "Modern parser mode was selected but failed later.",
+                                "explains_requirement_ids": ["case:authoritative_outcome"],
+                                "falsified_if": "The exact event records legacy mode.",
+                                "evidence_requests": [
+                                    {
+                                        "request_id": "q1",
+                                        "operation": "read_event",
+                                        "trace_id": "case_001:trial_1",
+                                        "message_index": 7,
+                                    }
+                                ],
+                            },
+                        ]
+                    }
+                }
+            )
+        if prompt.startswith("CAUSAL_INVESTIGATION_PHASE=handoff_evidence_closure"):
+            closure_calls += 1
+            request_id = "authority" if closure_calls == 1 else "scope"
+            return json.dumps(
+                {
+                    "causal_investigation": {
+                        "evidence_requests": [
+                            {
+                                "request_id": request_id,
+                                "operation": "read_event",
+                                "trace_id": "case_001:trial_1",
+                                "message_index": 7,
+                                "tool_call_index": closure_calls - 1,
+                                "purpose": "Read the task-visible authority or scope used by the decision.",
+                            }
+                        ]
+                    }
+                }
+            )
+        if prompt.startswith("CAUSAL_HANDOFF_PHASE=audit"):
+            audit_calls += 1
+            approved = audit_calls == 2
+            return json.dumps(
+                {
+                    "diagnosis_audits": [
+                        {
+                            "diagnosis_index": 1,
+                            "selected_hypothesis_id": "h_legacy",
+                            "hypothesis_binding": True,
+                            "runtime_decidable": approved,
+                            "public_contract_consistent": True,
+                            "decision_rule_entailed": approved,
+                            "decision_rule_source": "task_visible_invariant" if approved else "none",
+                            "decision_rule_evidence": "exact task-visible declaration" if approved else "",
+                            "evaluation_independent": True,
+                            "single_intervention": True,
+                            "approved": approved,
+                            "violations": [] if approved else ["The authority source has not been read."],
+                        }
+                    ]
+                }
+            )
+        if "refine_authority" in prompt and "refine_scope" not in prompt:
+            return json.dumps(
+                {
+                    "diagnoses": [
+                        {
+                            "issue_category": "unassigned",
+                            "severity": "low",
+                            "summary": "Authority was found, but its exact scope is still unresolved.",
+                            "failure_mode": "authority_scope_unresolved",
+                            "failure_cluster": {
+                                "failed_checks": ["case:authoritative_outcome"],
+                                "observable_behavior": "legacy mode selected",
+                            },
+                            "evidence_status": "insufficient",
+                            "failed_requirement": "Complete the public task with the compatible parser.",
+                            "selected_hypothesis_id": "",
+                            "root_cause": "The exact scope discriminator has not yet been read.",
+                            "target_ref": "unassigned",
+                            "recommendation": "Read the exact source span that defines parser-mode scope.",
+                            "causal_coverage": {
+                                "explained_requirement_ids": [],
+                                "residual_requirement_ids": ["case:authoritative_outcome"],
+                                "unexplained_observations": ["The scope-bearing span is still unread."],
+                                "causal_chain": [],
+                                "counterfactual_prediction": "No prediction until scope is read.",
+                                "sufficiency_status": "unknown",
+                            },
+                            "hypothesis_assessment": [
+                                {
+                                    "hypothesis_id": "h_legacy",
+                                    "status": "unresolved",
+                                    "falsifying_condition_status": "not_observed",
+                                    "claim_follows_from_evidence": "unknown",
+                                    "logic_check": "The authority is visible, but its scope remains unread.",
+                                    "controller_request_ids": ["refine_authority"],
+                                    "reason": "The required scope discriminator remains obtainable.",
+                                    "evidence_refs": [{"trace_id": "case_001:trial_1", "message_index": 7}],
+                                },
+                                {
+                                    "hypothesis_id": "h_modern",
+                                    "status": "falsified",
+                                    "falsifying_condition_status": "observed",
+                                    "claim_follows_from_evidence": "no",
+                                    "evidence_relation": "direct_falsifier",
+                                    "evidence_independence": "direct_observation",
+                                    "logic_check": "The exact event contradicts modern mode.",
+                                    "controller_request_ids": ["q1"],
+                                    "reason": "refuted",
+                                    "evidence_refs": [{"trace_id": "case_001:trial_1", "message_index": 7}],
+                                },
+                            ],
+                            "confidence": "low",
+                        }
+                    ]
+                }
+            )
+        request_id = "refine_scope" if "refine_scope" in prompt else "q1"
+        return json.dumps(diagnosis(request_id))
+
+    monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
+    monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
+    monkeypatch.setattr(analyzer_module, "_case_diagnoses_validation_conflicts", lambda *args, **kwargs: [])
+
+    results = await strategy._per_case_diagnosis([case], DeterministicSignals(method="script_based"), None)
+
+    record = results[0]["causal_investigation"]
+    handoff = record["causal_handoff_audit"]
+    assert [prompt.splitlines()[0] for prompt in prompts] == [
+        "CAUSAL_INVESTIGATION_PHASE=plan",
+        "CAUSAL_INVESTIGATION_PHASE=diagnose",
+        "CAUSAL_ASSESSMENT_PHASE=entailment_audit",
+        "CAUSAL_HANDOFF_PHASE=audit",
+        "CAUSAL_INVESTIGATION_PHASE=handoff_evidence_closure",
+        "CAUSAL_INVESTIGATION_PHASE=diagnose",
+        "CAUSAL_ASSESSMENT_PHASE=entailment_audit",
+        "CAUSAL_INVESTIGATION_PHASE=handoff_evidence_closure",
+        "CAUSAL_INVESTIGATION_PHASE=diagnose",
+        "CAUSAL_ASSESSMENT_PHASE=entailment_audit",
+        "CAUSAL_HANDOFF_PHASE=audit",
+    ], (prompts, handoff)
+    assert handoff["status"] == "approved"
+    assert len(handoff["attempts"]) == 2
+    assert handoff["evidence_closure_rounds"][0]["request_ids"] == ["refine_authority"]
+    assert handoff["evidence_closure_rounds"][0]["status"] == "rediagnosed_unassigned"
+    assert handoff["evidence_closure_rounds"][1]["request_ids"] == ["refine_scope"]
+    assert results[0]["target_ref"] == "member_harness.solver.prompt"
