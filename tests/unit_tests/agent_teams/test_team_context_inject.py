@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY, TeamContextTracker
 
 # A marker an evolved prompt body carries; the baseline never has it.
 _EVOLVED_TOKEN = "EVOLVED_TOKEN_8422"
@@ -55,6 +55,14 @@ class _FakeBackend:
 
     async def get_members_max_updated_at(self) -> int:
         return 1
+
+    async def get_member_updated_at(self, member_name: str, field: str) -> int:
+        """Single-member mtime probe the identity body re-announce path uses."""
+        return getattr(self, "_prompt_mtime", 0)
+
+    def set_prompt_mtime(self, mtime: int) -> None:
+        """Move the prompt mtime so the identity body's probe sees a change."""
+        self._prompt_mtime = mtime
 
     async def get_team_info(self):
         return SimpleNamespace(team_name="demo", display_name="Demo", desc="")
@@ -139,3 +147,115 @@ async def test_backend_returns_none_member_emits_nothing():
     body = await _identity_body(tracker)
 
     assert body is None
+
+
+# ─── member_prompt re-announce on same-session resume (事 1) ──────────────
+# Once the identity body has been delivered, the constants never change, so a
+# hand-evolved member_prompt re-announces *only* the prompt subsection. The
+# probe is the md file's ``updated_at``; when it moves past the baseline the
+# delta path renders ``## 私有工作约定`` + the evolved body, without restating
+# member_name / display_name / member_workspace_path.
+
+_MEMBER_NAME_LINE = "你的 member_name"
+_DISPLAY_NAME_LINE = "你的 display_name"
+_WORKSPACE_LINE = "你的私有工作区"
+
+
+def _baseline_with_identity_emitted(prompt_mtime: int = 1) -> dict[str, Any]:
+    """Baseline after a first identity body has been committed."""
+    return {
+        "identity_emitted": True,
+        "member_prompt_mtime": prompt_mtime,
+        "team_info_mtime": 0,
+        "roster_mtime": 0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_emitted_prompt_mtime_move_re_announces_only_prompt_delta():
+    """事 1: evolved member_prompt re-announces without restating constants."""
+    member = SimpleNamespace(
+        member_name="worker-a",
+        display_name="WorkerA",
+        desc="预配置成员描述",
+        prompt=_EVOLVED_PROMPT,
+        role="teammate",
+    )
+    backend = _FakeBackend(member=member)
+    tracker = _tracker(backend=backend, member_prompt=_BASELINE_PROMPT)
+    # Baseline carries the emitted flag + the *old* prompt mtime; the md edit
+    # moved the probe past it.
+    baseline = _baseline_with_identity_emitted(prompt_mtime=1)
+    updated: dict[str, Any] = dict(baseline)
+    backend.set_prompt_mtime(2)
+    body = await tracker._identity_body(baseline, updated)
+
+    assert body is not None
+    assert _EVOLVED_TOKEN in body, "evolved prompt did not re-reach the body"
+    # Re-announce carries the prompt heading + body, NOT the constants.
+    assert "## 私有工作约定" in body
+    assert _MEMBER_NAME_LINE not in body, "constants must not be restated"
+    assert _DISPLAY_NAME_LINE not in body
+    assert _WORKSPACE_LINE not in body
+    # The probe advanced the baseline mtime so the next call (mtime unchanged)
+    # re-announces nothing.
+    assert updated["member_prompt_mtime"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_emitted_prompt_mtime_unchanged_re_announces_nothing():
+    """事 1 guard: no md move → one-shot still holds → return None."""
+    member = SimpleNamespace(
+        member_name="worker-a",
+        display_name="WorkerA",
+        desc="预配置成员描述",
+        prompt=_EVOLVED_PROMPT,
+        role="teammate",
+    )
+    backend = _FakeBackend(member=member)
+    tracker = _tracker(backend=backend, member_prompt=_BASELINE_PROMPT)
+    # mtime matches the baseline — no move.
+    baseline = _baseline_with_identity_emitted(prompt_mtime=2)
+    updated: dict[str, Any] = dict(baseline)
+    backend.set_prompt_mtime(2)
+    body = await tracker._identity_body(baseline, updated)
+
+    assert body is None
+    assert "member_prompt_mtime" not in updated or updated["member_prompt_mtime"] == baseline["member_prompt_mtime"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_emitted_backend_without_single_member_probe_stays_one_shot():
+    """事 1 guard: a backend without ``get_member_updated_at`` keeps one-shot.
+
+    The ``getattr`` fallback returns ``None`` → nothing is probed → the body
+    stays one-shot. This is the back-compat path for older test fakes (and any
+    production backend with evolution off, where the method is absent).
+    """
+
+    class _LegacyBackend:
+        async def get_member(self, member_name: str):  # noqa: D401
+            return SimpleNamespace(
+                member_name="worker-a",
+                display_name="WorkerA",
+                desc="",
+                prompt=_EVOLVED_PROMPT,
+                role="teammate",
+            )
+
+        async def get_team_updated_at(self) -> int:
+            return 1
+
+        async def get_members_max_updated_at(self) -> int:
+            return 1
+
+    tracker = _tracker(backend=_LegacyBackend(), member_prompt=_BASELINE_PROMPT)
+    baseline = _baseline_with_identity_emitted(prompt_mtime=0)
+    updated: dict[str, Any] = dict(baseline)
+    body = await tracker._identity_body(baseline, updated)
+
+    assert body is None, "legacy backend without the probe must not re-announce"
+

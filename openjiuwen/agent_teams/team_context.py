@@ -58,6 +58,7 @@ from openjiuwen.agent_teams.inbound_render import (
 )
 from openjiuwen.agent_teams.prompts.messages import (
     build_identity_conversion,
+    build_identity_prompt_delta,
     build_identity_text,
     build_roster_delta_text,
     build_roster_snapshot_text,
@@ -78,6 +79,7 @@ _IDENTITY_EMITTED = "identity_emitted"
 _TEAM_INFO_MTIME = "team_info_mtime"
 _ROSTER_MTIME = "roster_mtime"
 _ROSTER = "roster"
+_MEMBER_PROMPT_MTIME = "member_prompt_mtime"
 
 # Stable contract tokens for the <team-event> ``kind`` attribute.
 ROSTER_EVENT_KIND = "roster"
@@ -238,10 +240,19 @@ class TeamContextTracker:
     # ------------------------------------------------------------------
 
     async def _identity_body(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
-        """Render the one-shot identity body, or None when already delivered.
+        """Render the identity body, re-announcing only the prompt on change.
 
-        Constant for the lifetime of the member, so it has no probe: the
-        baseline flag alone decides once it has gone out.
+        The constant fields (member_name / display_name / member_workspace_path)
+        are fixed at spawn and never change, so they are delivered exactly once
+        by :func:`build_identity_text` and gated by the ``identity_emitted``
+        flag. The private working agreement (``member_prompt.md``) is the one
+        identity field that *can* be hand-evolved mid-session, and its only
+        model-side channel is this body — so once emitted, the body probes the
+        member_prompt ``updated_at`` and re-announces **only** the prompt
+        subsection (via :func:`build_identity_prompt_delta`) when that mtime
+        moves. The constants are never restated. A backend without the single-
+        member probe (older fakes, evolution off) keeps the one-shot behaviour
+        — ``getattr`` returns ``None`` and nothing is re-announced.
 
         **Waits for the member's own DB row**, because that row is what
         ``display_name`` has to come from. The constructor value is only a
@@ -256,7 +267,27 @@ class TeamContextTracker:
         the constructor values are used as-is.
         """
         if baseline.get(_IDENTITY_EMITTED):
-            return None
+            # Re-announce an evolved prompt without restating the constants.
+            # ``getattr`` keeps backends without the single-member probe
+            # (older test fakes, evolution off) on the one-shot path: ``None``
+            # → nothing to probe → return ``None``.
+            probe = getattr(self._team_backend, "get_member_updated_at", None)
+            if probe is None or not self._member_name:
+                return None
+            mtime = await probe(self._member_name, "prompt")
+            if mtime == baseline.get(_MEMBER_PROMPT_MTIME):
+                return None
+            member = await self._team_backend.get_member(self._member_name)
+            if member is None:
+                return None
+            delta = build_identity_prompt_delta(
+                member_prompt=member.prompt,
+                language=self._language,
+            )
+            if delta is None:
+                return None
+            updated[_MEMBER_PROMPT_MTIME] = mtime
+            return delta
         display_name = self._display_name
         # The constructor snapshot is the spec-time DB baseline (pre-evolution).
         # ``get_member`` returns the overlay-merged row, whose ``prompt`` may
@@ -273,6 +304,12 @@ class TeamContextTracker:
             if member.prompt:
                 member_prompt = member.prompt
         updated[_IDENTITY_EMITTED] = True
+        # Record the prompt mtime so a later hand-evolve moves the probe and the
+        # delta path above re-announces only the prompt subsection.
+        if self._team_backend is not None and self._member_name:
+            probe = getattr(self._team_backend, "get_member_updated_at", None)
+            if probe is not None:
+                updated[_MEMBER_PROMPT_MTIME] = await probe(self._member_name, "prompt")
         return build_identity_text(
             member_name=self._member_name,
             display_name=display_name,

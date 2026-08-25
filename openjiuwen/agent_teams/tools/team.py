@@ -1345,6 +1345,27 @@ class TeamBackend:
         )
         return max(db_ts, md_max)
 
+    async def get_member_updated_at(self, member_name: str, field: str) -> int:
+        """Probe one member's md ``updated_at`` for change detection.
+
+        The identity body's prompt mtime probe. The md ``updated_at`` is the
+        frontmatter field that moves when the member's ``member_prompt.md``
+        (or ``card.md``) is re-written — the evolution party's hand-edit. It
+        reads from the resident workspace cache, so the probe never touches
+        disk on a warmed cache and ``0`` means "no md file / evolution off".
+        Single-member single-field counterpart of
+        :meth:`get_members_max_updated_at` (which is the team-wide MAX the
+        roster probe uses). ``field`` is ``"desc"`` or ``"prompt"``.
+
+        Returns:
+            Last md update timestamp (ms), or ``0`` when the cache is absent
+            or the md file is missing.
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return 0
+        return cache.get_member_updated_at(member_name, field)
+
     async def get_members_max_updated_at(self) -> int:
         """Probe ``max(DB updated_at, max(md updated_at))`` for the team.
 

@@ -291,6 +291,38 @@ def build_identity_text(
     return "\n".join(lines) + "\n"
 
 
+def build_identity_prompt_delta(
+    *,
+    member_prompt: str | None,
+    language: str = "cn",
+) -> str | None:
+    """Render *only* the private working-agreement subsection of the identity body.
+
+    The constant identity fields (member_name / display_name /
+    member_workspace_path) are delivered once by :func:`build_identity_text`
+    and never change, so re-announcing them after every edit would be noise.
+    The private working agreement (``member_prompt.md``) *can* be hand-evolved
+    mid-session, and its only model-side channel is the identity body — which
+    is one-shot. This delta renders just that subsection so the identity body
+    can re-announce an evolved prompt without restating the constants.
+
+    Blank ``member_prompt`` yields ``None`` (nothing to re-announce), matching
+    :func:`build_identity_text`'s blank-drop behaviour.
+
+    Args:
+        member_prompt: The (possibly evolved) private working agreement body.
+        language: Body language ('cn' or 'en').
+
+    Returns:
+        The rendered subsection, or ``None`` when the prompt is blank.
+    """
+    private_prompt = member_prompt.strip() if member_prompt else ""
+    if not private_prompt:
+        return None
+    labels = labels_for(language)
+    return "\n".join(["", labels["private_prompt_heading"], "", private_prompt]) + "\n"
+
+
 def build_identity_conversion(
     *,
     source: str,

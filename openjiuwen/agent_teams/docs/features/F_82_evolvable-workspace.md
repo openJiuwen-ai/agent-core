@@ -4,7 +4,7 @@
 
 | 项 | 值 |
 |---|---|
-| 日期 | 2026-08-22（F_82 + F_85 + F_84 三合一重写，以代码为准） |
+| 日期 | 2026-08-24（F_82 + F_85 + F_84 三合一重写 + member_prompt 同 session 重发，以代码为准） |
 | 范围 | `team_workspace/{assembler,workspace_store,workspace_cache,frontmatter,layout}.py`、`prompts/loader.py`（`make_template_loader`）、`tools/locales/__init__.py`（`make_translator` 加 cache 参数）、`agent/agent_configurator.py`（`_assemble_member_workspace` / `_attach_workspace_cache`）、`agent/coordination/kernel.py`（`start` A/C 写盘）、`tools/team.py`（`TeamBackend` overlay + `_spec_evolution_enabled`）、`schema/{blueprint,team}.py`（`evolution_enabled`）、`team_context.py`（身份块注入）、`rails/*`、`scheduler`、`tool_factory`；测试 `tests/unit_tests/agent_teams/team_workspace/`、`tests/unit_tests/agent_teams/test_team_context_inject.py` |
 | 测试基线 | team_workspace UT 全过；ST 在独立分支验证（见「验证」），不进本分支 |
 | Refs | `specs/S_24_evolvable-workspace.md` |
@@ -165,19 +165,29 @@ DB 裸值。`get_member_field` / `get_team_field` 的调用方白名单只落在
 构造参数保留：`team_backend=None` 的单测场景（无 backend 时构造值原样渲染）依赖它；有 backend 时
 渲染层以 overlay 值为准。
 
-演进值在"下个 run"生效的完整路径：
-1. 演进方改文件（body hash != baseline_sha256）。
+身份块的常量字段（member_name / display_name / member_workspace_path）spawn 后永不变，
+由 `_IDENTITY_EMITTED` 基线门控**只投递一次**。私有工作约定（`member_prompt.md`）是身份块里
+唯一可手编演进的字段，它的 mtime 探针驱动身份块**重发只含 prompt 子节的增量**
+（`build_identity_prompt_delta`，不含常量字段），与 team_info / roster 两条 mtime 通道并列：
+
+- 首次（`not identity_emitted`）：渲染完整身份块 + `identity_emitted=True` + 记录 prompt mtime。
+- 已 emitted：`backend.get_member_updated_at(name, "prompt")` 探 md mtime；移动 →
+  `member.prompt` overlay 值渲染 prompt-only 增量块 + 更新 mtime；不移动 → return None（one-shot 保持）。
+- backend 无单成员探针（`getattr` 取不到 `get_member_updated_at`）→ return None（one-shot 保持，
+  覆盖演进机制 off / 旧 fake backend）。
+
+演进值在"下个 run"或"同 session resume"生效的完整路径：
+1. 演进方改文件（body hash != baseline_sha256，frontmatter `updated_at` 移动）。
 2. 新 run / 新 session → `RuntimeManager.finalize`（pause 路径）`invalidate_workspace_cache()`
    清空 dict。
 3. 成员 spawn / 装配：ctx 携带 DB 裸值（写盘源不变）；tracker 构造 `member_prompt` 仍为 ctx 值
    （fallback 语义，不删）。
-4. 第一次 pending_text / 工具调用：`_identity_body` → `backend.get_member()` → `_overlay_member`
-   → `cache.get_member_field("prompt")` → lazy miss → 读最新 `member_prompt.md`（演进值）→
-   `member.prompt = 演进值` → 身份块渲染演进值。
+4. pending_text → `_identity_body`：首次走完整块；已 emitted 走 mtime 探针，
+   `backend.get_member()` → `_overlay_member` → `cache.get_member_field("prompt")` lazy miss →
+   读最新 `member_prompt.md` → `member.prompt = 演进值` → 渲染 prompt-only 增量块进对话历史。
 
-关键性质：cache 在本 run 第一次 `get*` 时已失效/为空 → 必读到最新文件值；身份块只投递一次
-（`_IDENTITY_EMITTED` 基线）→ 演进值在首次渲染时读取，无二次投递问题；写盘仍用 ctx 裸值 →
-`baseline_sha256` 语义完整。
+关键性质：cache 在本 run 第一次 `get*` 时已失效/为空 → 必读到最新文件值；常量字段 one-shot、
+prompt 子节 mtime 驱动重发，两条通道并列不串扰；写盘仍用 ctx 裸值 → `baseline_sha256` 语义完整。
 
 #### 写盘源例外（显式声明）
 
@@ -208,9 +218,11 @@ store 4 个 B 方法 + `_write_tool_params` 全补齐）。
 
 以下场景演进值不到模型是设计预期，不是 bug：
 
-1. **同 session identity 消息不重发**：`_IDENTITY_EMITTED` 基线使身份块只投递一次。同 session
-   内演进文件后，已投递的身份块不会重发 → 演进值本次 run 不生效，下次 run（换 session / 重启）
-   生效。详见 `analysis/evolvable-team/design-v5/2026-08-21-no-redelivery-exception-scenarios.md`。
+1. **同 session identity 常量字段不重发**：身份块的常量字段（member_name /
+   display_name / member_workspace_path）由 `_IDENTITY_EMITTED` 基线门控只投递一次——
+   这些字段 spawn 后永不变，重发是噪声。**member_prompt 是唯一例外**：它是身份块里唯一可手编
+   演进的字段，同 session resume 时经 `get_member_updated_at("prompt")` mtime 探针重发
+   prompt-only 增量子节（不含常量字段，见 D8）。
 
 2. **external CLI 三方 agent 无 workspace**：external CLI 成员（`external_cli_spawn.py`）是
    轻量成员——cwd = team-workspace，无私有 workspace、无 member identity md 文件、不参与
@@ -305,7 +317,8 @@ cache 的存在、各自维护"演进优先/DB 回退"逻辑，新增缺口时�
   原 F_84 #2（external_cli_spawn 经 get_member 取 overlay）设计存疑且不适用，未实施。
 - **`build_team_info_text` 补 team prompt 字段**（原 F_84 #3）：`get_team_info` 的 overlay 已覆盖
   `team.prompt` 字段，但渲染函数漏字段，演进值到不了模型的团队信息块。未实施，待定。
-- **member_prompt 演进模型侧通道**：switch + resume 代码确认都通（teammate 重新 spawn →
-  overlay → 身份块），身份块 one-shot 重发有风险，ST 未补（用户裁决：测不过就记录不修复）。
+- **member_prompt 同 session resume 重发**：已实施（D8 身份块 prompt 注入 + mtime 探针重发
+  prompt-only 增量子节）。switch session 走 fresh tracker 空基线路径，首次即带演进 prompt。
+  resume ST 验证中。
 - **独立进程 `ExternalTeamClient` 自建 cache**：机制已核实（`WorkspaceCache` 能脱离 manager 自建），
   代码未改；前提 `OPENJIUWEN_HOME` 与 leader 一致。

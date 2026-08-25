@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/team_workspace/{assembler,workspace_store,workspace_cache,frontmatter,layout}.py`、`openjiuwen/agent_teams/prompts/loader.py`、`openjiuwen/agent_teams/tools/locales/__init__.py`、`openjiuwen/agent_teams/tools/tool_factory.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`（`_assemble_member_workspace`）、`openjiuwen/agent_teams/agent/team_agent.py`（`share_workspace_cache_with` + `invalidate_workspace_cache`）、`openjiuwen/agent_teams/runtime/manager.py`（`finalize` pause 路径调 invalidate）、`openjiuwen/agent_teams/schema/blueprint.py` + `schema/team.py`（`evolution_enabled`） |
-| 最近一次修订日期 | 2026-08-20 |
+| 最近一次修订日期 | 2026-08-24 |
 | 关联 feature | `features/F_82_evolvable-workspace.md`、`features/F_85_workspace-md-io-optimization.md` |
 
 ## 范围 / 边界
@@ -79,6 +79,11 @@ class WorkspaceCache:
     def get_team_field(self, field: Literal["desc", "prompt"]) -> str | None: ...  # B team
     def get_tool_md(self, desc_key: str) -> str | None: ...            # C tool 级，lazy miss 扫描 tool/
     def get_tool_param(self, desc_key: str, param: str) -> str | None: ...  # C 参数级，lazy miss 读 tool.param.<lang>.md
+
+    # B 类 mtime 探针（lazy get，同 FileContent 的 updated_at，0=缺文件/演进 off）
+    # 读侧判据，不读 body：roster/team_info/identity 三条 mtime 通道的驱动信号
+    def get_member_updated_at(self, member_name: str, field: Literal["desc", "prompt"]) -> int: ...  # B member 单成员单字段
+    def get_team_updated_at(self, field: Literal["desc", "prompt"]) -> int: ...  # B team 单字段
 
     # 写侧 fill（组装器已持有最终 body——框架默认或演进值——直接入 dict，读侧零 IO）
     def fill_template(self, name: str, body: str | None) -> None: ...
@@ -179,6 +184,34 @@ def make_translator(lang: str = "cn", ws_cache: WorkspaceCache | None = None) ->
 ```
 
 `ws_cache=None` 时闭包与旧 `make_translator(lang)` / `load_template` 完全等价——11 个 `make_translator` 调用点与 N 个 `load_template` 调用点零改动。装配点显式传 ws_cache：`create_team_tools`（`tool_factory.py`）内部从 `agent_team.workspace_cache` 取（不另设参数——backend 已委托 manager，见不变量 4）做 `make_translator(lang, ws_cache=...)` + `make_template_loader(ws_cache)`；rails / scheduler / tiny agent / external CLI 同理从 `backend.workspace_cache` 取，仅 worker backend / external client 两个无 backend 场景从 manager 直取（代码注释标明例外）。
+
+### `TeamBackend` overlay + mtime 探针（B 类到模型的三条通道）
+
+B 类演进值到模型只经 `TeamBackend`（`tools/team.py`）三个 overlay 方法：`get_member` /
+`list_members` / `get_team_info` 用 `cache.get_member_field` / `get_team_field` 覆盖 DB 裸值
+（`_overlay_member` / `get_team_info` 内，`display_name` 不演进回退 DB 列）。下游一律经 backend
+方法取，禁止直访 `workspace_cache.get_member_field`（D8 统一覆盖原则）。
+
+三条 mtime 通道驱动 team-context 重发（`team_context.py:TeamContextTracker`，baseline 持久化在
+成员 child AgentSession）：
+
+| 通道 | backend 探针 | 探什么 | 重发判据 |
+|---|---|---|---|
+| team_info | `get_team_updated_at()` | `max(DB team updated_at, team_card/prompt md updated_at)` | mtime 移动 → 重发团队信息块 |
+| roster | `get_members_max_updated_at()` | 全队 MAX（DB + 各成员 card/prompt md + team card/prompt md） | mtime 移动 → 重发 roster delta |
+| identity（prompt 子节） | `get_member_updated_at(name, "prompt")` | 该成员 `member_prompt.md` 的 md updated_at（**纯 md，不碰 DB**） | mtime 移动 → 重发 prompt-only 增量子节 |
+
+`TeamBackend.get_member_updated_at(member_name, field)` 纯转发
+`cache.get_member_updated_at`（cache=None → 0），不查 DB——演进信号只看 md 文件版本，
+DB 列 `TeamMember.updated_at` 在 prompt 演进时不动。
+
+**身份块 prompt 重发**：身份块常量字段（member_name / display_name / member_workspace_path）
+spawn 后永不变，`_IDENTITY_EMITTED` 基线门控只投递一次。`member_prompt` 是唯一可手编演进的
+身份字段，已 emitted 后 `_identity_body` 探其 md mtime，移动 →
+`build_identity_prompt_delta` 渲染**只含 `## 私有工作约定` 子节的增量块**（不含常量字段）
+投递进对话历史；不移动 → return None（one-shot 保持）。backend 无单成员探针
+（`getattr` 取不到 `get_member_updated_at`，演进 off / 旧 fake backend）→ return None。
+首次投递时记录 prompt mtime 作后续比较基线。
 
 ## 装配生命周期
 
