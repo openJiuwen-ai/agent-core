@@ -510,7 +510,9 @@ def _indexed_messages(attributes: Mapping[str, Any], base: str) -> list[dict[str
         if not match or match.group("base") != base:
             continue
         index = int(match.group("index"))
-        indexed.setdefault(index, {})[match.group("field")] = deepcopy(value)
+        indexed.setdefault(index, {})[match.group("field")] = _decode_structured_attribute(
+            value
+        )
     return [indexed[index] for index in sorted(indexed)]
 
 
