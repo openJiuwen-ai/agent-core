@@ -129,7 +129,7 @@ async def test_skill_prepared_input_is_frozen_and_contains_detached_state(tmp_pa
         trajectory_span_processor=TrajectorySpanProcessor(),
         **{**_skill_kwargs(), "signal_trigger": True},
     )
-    rail._collect_messages_from_trajectory = lambda _trajectory: [{"role": "user", "content": "hello"}]
+    rail._trajectory_to_messages = lambda _trajectory, **_kwargs: [{"role": "user", "content": "hello"}]
 
     prepared = await rail._prepare_evolution_input(_trajectory(), _ctx())
 
