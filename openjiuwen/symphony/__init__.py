@@ -58,12 +58,13 @@ from openjiuwen.symphony.shared.fingerprint import (
 
 if TYPE_CHECKING:
     from openjiuwen.symphony import agent as agent
+    from openjiuwen.symphony import discovery as discovery
     from openjiuwen.symphony import retrieval as retrieval
     from openjiuwen.symphony import shared as shared
 
 CapabilityInput = ParameterSpec
 CapabilityOutput = ArtifactSpec
-_LAZY_MODULES = frozenset({"agent", "retrieval", "shared"})
+_LAZY_MODULES = frozenset({"agent", "discovery", "retrieval", "shared"})
 
 __all__ = [
     "FINGERPRINT_ARTIFACT_FILENAME",
@@ -114,6 +115,7 @@ __all__ = [
     "SymphonyLLM",
     "SymphonyRuntime",
     "agent",
+    "discovery",
     "retrieval",
     "shared",
 ]

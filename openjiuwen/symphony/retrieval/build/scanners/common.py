@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
 
-def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
+SKILL_FILENAMES = ("SKILL.md", "skill.md", "Skill.md")
+
+
+def find_skill_file(skill_dir: Path) -> Path | None:
+    return next(
+        (skill_dir / name for name in SKILL_FILENAMES if (skill_dir / name).is_file()),
+        None,
+    )
+
+
+def parse_frontmatter(content: str, *, fallback_to_simple: bool = True) -> tuple[dict[str, Any], str]:
     if not content.startswith("---"):
         return {}, content
 
-    end_match = re.search(r"\n---\s*\n", content[3:])
+    end_match = re.search(r"\n---\s*(?:\n|$)", content[3:])
     if not end_match:
         return {}, content
 
@@ -17,8 +28,38 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
     body_start = end_match.end() + 3
     frontmatter_str = content[3:frontmatter_end]
     body = content[body_start:]
-    parsed = _safe_load_frontmatter(frontmatter_str.strip())
+    parsed = _safe_load_frontmatter(frontmatter_str.strip(), fallback_to_simple=fallback_to_simple)
     return parsed, body
+
+
+def read_skill_file(
+    path: Path,
+    *,
+    errors: str = "strict",
+    fallback_to_simple: bool = True,
+) -> tuple[dict[str, Any], str, str]:
+    raw = path.read_bytes()
+    metadata, body = parse_frontmatter(
+        raw.decode("utf-8", errors=errors),
+        fallback_to_simple=fallback_to_simple,
+    )
+    return metadata, body, hashlib.sha256(raw).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def first_paragraph(body: str, *, limit: int | None = None) -> str:
+    for block in re.split(r"\n\s*\n", str(body or "").strip()):
+        cleaned = " ".join(line.strip() for line in block.splitlines()).strip()
+        if cleaned:
+            return cleaned if limit is None else cleaned[:limit]
+    return ""
 
 
 def clean_first_paragraph(body: str, *, limit: int = 500) -> str:
@@ -37,18 +78,19 @@ def read_text_if_exists(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _safe_load_frontmatter(text: str) -> dict[str, Any]:
+def _safe_load_frontmatter(text: str, *, fallback_to_simple: bool = True) -> dict[str, Any]:
+    fallback = _parse_simple_frontmatter if fallback_to_simple else lambda _: {}
     try:
         import yaml
     except ModuleNotFoundError:
-        return _parse_simple_frontmatter(text)
+        return fallback(text)
 
     try:
         payload = yaml.safe_load(text) or {}
     except Exception:
-        return _parse_simple_frontmatter(text)
+        return fallback(text)
     if not isinstance(payload, dict):
-        return _parse_simple_frontmatter(text)
+        return fallback(text)
     return payload
 
 

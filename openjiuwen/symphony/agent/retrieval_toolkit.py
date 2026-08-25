@@ -2,16 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import threading
 import time
+import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, Iterable, Sequence
 
+import portalocker
+
 from openjiuwen.symphony.retrieval.build.io import load_tree_preset
+from openjiuwen.symphony.retrieval.build.scanners.common import (
+    find_skill_file,
+    first_paragraph,
+    read_skill_file,
+    sha256_file,
+)
 from openjiuwen.symphony.retrieval.build.workflows.artifacts import BuildConfig
 from openjiuwen.symphony.retrieval.build.workflows.index_builder import IndexBuilder
 from openjiuwen.symphony.retrieval.common.models import RetrieverItem, RetrieverNode
@@ -23,11 +33,14 @@ from openjiuwen.symphony.retrieval.search.artifacts.loading import (
 )
 from openjiuwen.symphony.retrieval.search.runtime.subtree import DefaultCurrentSubtreeProvider
 from openjiuwen.symphony.retrieval.search.runtime.types import ProgressiveRetrieverConfig, SearchCursor
+from openjiuwen.symphony.shared.fingerprint._io import atomic_write_json
 
 TREE_INDEX_FILENAME = "tree_index.yaml"
 CATALOG_FILENAME = "catalog.jsonl"
 MANIFEST_FILENAME = "manifest.json"
 STATE_FILENAME = "state.json"
+COMMIT_FILENAME = "commit.json"
+_INDEX_PUBLISH_LOCK_FILENAME = ".skill-index.publish.lock"
 
 _TASKS: dict[str, "_BuildTask"] = {}
 _TASKS_LOCK = threading.RLock()
@@ -161,6 +174,7 @@ class AgenticSkillRetrievalToolkit:
         self._skills_dir = Path(skills_dir).expanduser().resolve() if skills_dir else None
         self._visible_skill_names = _normalize_visible_skill_names(visible_skill_names)
         self._loaded_index: LoadedRetrieverIndex | None = None
+        self._loaded_index_generation = ""
         self._filtered_root: RetrieverNode | None = None
         self._node_by_id: dict[str, RetrieverNode] = {}
         self._path_by_id: dict[str, tuple[str, ...]] = {}
@@ -179,12 +193,12 @@ class AgenticSkillRetrievalToolkit:
         cancel_token: Callable[[], bool] | threading.Event | None = None,
         _build_id: str | None = None,
     ) -> dict[str, Any]:
-        records = self._resolve_records(skills=skills, skills_dir=skills_dir)
-        if skills is not None:
-            self._skills = list(records)
+        records = [
+            _snapshot_record_source(record) for record in self._resolve_records(skills=skills, skills_dir=skills_dir)
+        ]
         if skills_dir is not None:
             self._skills_dir = Path(skills_dir).expanduser()
-            self._skills = list(records)
+        self._skills = list(records)
         build_cfg = build_config or self._build_config
         llm_cfg = llm_config or self._llm_config
         if build_config is not None:
@@ -193,13 +207,24 @@ class AgenticSkillRetrievalToolkit:
             self._llm_config = llm_cfg
         started = time.monotonic()
         build_id = str(_build_id or _new_build_id())
-        fingerprint = _index_fingerprint(records, build_cfg)
-        previous_index_state = self._read_state()
+        record_hashes = _record_hashes(records)
+        source_file_hashes = _source_file_hashes(records)
+        fingerprint = _index_fingerprint(
+            records,
+            build_cfg,
+            record_hashes=record_hashes,
+            source_file_hashes=source_file_hashes,
+        )
+        previous_root_state = self._read_state()
+        previous_index_state = self._read_committed_index_state(
+            fallback=previous_root_state,
+        )
         previous_index_available = _is_complete_index(self.index_dir)
         self.index_root.mkdir(parents=True, exist_ok=True)
 
         if not records:
-            _cleanup_index(self.index_dir)
+            if not build_cfg.preserve_previous_index_on_failure:
+                _cleanup_index(self.index_dir)
             state = _build_state(
                 status="failed",
                 stage="scan",
@@ -212,7 +237,14 @@ class AgenticSkillRetrievalToolkit:
                 fingerprint=fingerprint,
                 finished=True,
             )
-            self._write_state(state)
+            _set_failed_index_state(
+                state,
+                previous_state=previous_index_state,
+                previous_index_available=previous_index_available,
+                previous_index_preserved=build_cfg.preserve_previous_index_on_failure,
+                attempted_fingerprint=fingerprint,
+            )
+            self._write_state(state, expected_build_id=build_id, claim=True)
             return _result(False, "Skill index build failed: no enabled skills were provided.", data=state)
 
         if not force and self._is_fresh(fingerprint):
@@ -226,12 +258,13 @@ class AgenticSkillRetrievalToolkit:
                 force=force,
                 indexed_count=len(records),
                 fingerprint=fingerprint,
-                record_hashes=_record_hashes(records),
+                record_hashes=record_hashes,
+                source_file_hashes=source_file_hashes,
                 finished=True,
                 elapsed_seconds=time.monotonic() - started,
             )
             _set_capability_category_paths(state, capability_category_paths)
-            self._write_state(state)
+            self._write_state(state, expected_build_id=build_id, claim=True)
             return _result(
                 True,
                 f"Skill index is fresh. {len(records)} skills indexed.",
@@ -294,7 +327,7 @@ class AgenticSkillRetrievalToolkit:
                 previous_index_preserved=build_cfg.preserve_previous_index_on_failure,
                 attempted_fingerprint=fingerprint,
             )
-            self._write_state(state)
+            self._write_state(state, expected_build_id=build_id)
             return _result(
                 False,
                 f"Skill index build failed: {error}",
@@ -312,9 +345,18 @@ class AgenticSkillRetrievalToolkit:
         with TemporaryDirectory(prefix="symphony-skill-index-") as tmp:
             tmp_root = Path(tmp)
             item_jsonl = tmp_root / "skills.jsonl"
-            plan = self._select_build_plan(records=records, force=force)
+            base_index_dir = tmp_root / "base-index"
+            base_state = {} if force else self._snapshot_index_base(base_index_dir)
+            plan = self._select_build_plan(
+                records=records,
+                force=force,
+                base_index_dir=base_index_dir,
+                committed_state=base_state,
+            )
             _write_records_jsonl(plan.records, item_jsonl)
             output_dir = tmp_root / "index"
+            published = False
+            committed_state: dict[str, Any] = {}
             try:
                 self._set_running_state(
                     build_id=build_id,
@@ -336,7 +378,7 @@ class AgenticSkillRetrievalToolkit:
                         operation=plan.operation,
                         item_jsonl_path=item_jsonl,
                         output_dir=output_dir,
-                        base_index_dir=self.index_dir,
+                        base_index_dir=base_index_dir,
                         config=config,
                     )
                 else:
@@ -345,7 +387,7 @@ class AgenticSkillRetrievalToolkit:
                             operation=plan.operation,
                             item_jsonl_path=item_jsonl,
                             output_dir=output_dir,
-                            base_index_dir=self.index_dir,
+                            base_index_dir=base_index_dir,
                             config=config,
                         )
                     except Exception:
@@ -364,7 +406,7 @@ class AgenticSkillRetrievalToolkit:
                             operation="build",
                             item_jsonl_path=item_jsonl,
                             output_dir=output_dir,
-                            base_index_dir=self.index_dir,
+                            base_index_dir=base_index_dir,
                             config=config,
                         )
                 try:
@@ -377,6 +419,17 @@ class AgenticSkillRetrievalToolkit:
                     output_dir,
                     worker_ids=plan.response_worker_ids,
                 )
+                _validate_index_worker_ids(
+                    output_dir,
+                    expected_worker_ids={record.resolved_worker_id for record in records},
+                )
+                committed_state = _committed_index_state(
+                    build_id=build_id,
+                    fingerprint=fingerprint,
+                    record_hashes=record_hashes,
+                    source_file_hashes=source_file_hashes,
+                )
+                _write_index_commit(output_dir, committed_state)
                 self._set_running_state(
                     build_id=build_id,
                     stage="publish",
@@ -386,7 +439,9 @@ class AgenticSkillRetrievalToolkit:
                     indexed_count=len(records),
                     fingerprint=fingerprint,
                 )
-                _publish_index(candidate_dir=output_dir, index_dir=self.index_dir)
+                _publish_index(candidate_dir=output_dir, index_dir=self.index_dir, expected_build_id=build_id)
+                published = True
+                self._clear_loaded_index()
                 elapsed = time.monotonic() - started
                 state = _build_state(
                     status="success",
@@ -397,13 +452,13 @@ class AgenticSkillRetrievalToolkit:
                     force=force,
                     indexed_count=len(records),
                     fingerprint=fingerprint,
-                    record_hashes=_record_hashes(records),
+                    record_hashes=record_hashes,
+                    source_file_hashes=source_file_hashes,
                     finished=True,
                     elapsed_seconds=elapsed,
                 )
                 _set_capability_category_paths(state, capability_category_paths)
-                self._write_state(state)
-                self._clear_loaded_index()
+                self._write_state(state, expected_build_id=build_id)
                 return _result(
                     True,
                     f"Skill index build completed. {len(records)} skills indexed.",
@@ -414,8 +469,21 @@ class AgenticSkillRetrievalToolkit:
                         "capability_category_paths": capability_category_paths,
                     },
                 )
+            except SkillIndexBuildCancelled:
+                return self._cancelled_result(build_id=build_id, started=started, fingerprint=fingerprint)
             except Exception as exc:
                 error = _normalize_error(exc)
+                if published:
+                    return _result(
+                        True,
+                        "Skill index build completed; status metadata could not be updated.",
+                        data={
+                            **committed_state,
+                            "index_dir": str(self.index_dir),
+                            "index_updated": True,
+                            "status_warning": error,
+                        },
+                    )
                 if not build_cfg.preserve_previous_index_on_failure:
                     _cleanup_index(self.index_dir)
                 state = _build_state(
@@ -438,7 +506,7 @@ class AgenticSkillRetrievalToolkit:
                     previous_index_preserved=build_cfg.preserve_previous_index_on_failure,
                     attempted_fingerprint=fingerprint,
                 )
-                self._write_state(state)
+                self._write_state(state, expected_build_id=build_id)
                 return _result(
                     False,
                     f"Skill index build failed: {error}",
@@ -466,16 +534,21 @@ class AgenticSkillRetrievalToolkit:
         key = str(self.index_root)
         with _TASKS_LOCK:
             existing = _TASKS.get(key)
-            if existing and existing.thread.is_alive():
-                if not replace_running:
-                    return _result(
-                        True,
-                        "Skill index build is already running.",
-                        data={"build_id": existing.build_id, "state": "running"},
-                    )
-                existing.cancel_event.set()
             cancel_event = threading.Event()
             build_id = _new_build_id()
+            active_build_id = self._set_queued_state(
+                build_id=build_id,
+                force=force,
+                replace_running=replace_running,
+            )
+            if active_build_id is not None:
+                return _result(
+                    True,
+                    "Skill index build is already running.",
+                    data={"build_id": active_build_id, "state": "running"},
+                )
+            if existing and existing.thread.is_alive():
+                existing.cancel_event.set()
             thread = threading.Thread(
                 target=self._run_async_build,
                 kwargs={
@@ -492,7 +565,12 @@ class AgenticSkillRetrievalToolkit:
                 name=f"symphony-skill-index-{build_id}",
             )
             _TASKS[key] = _BuildTask(thread=thread, cancel_event=cancel_event, build_id=build_id)
-            thread.start()
+            try:
+                thread.start()
+            except Exception as exc:
+                _TASKS.pop(key, None)
+                self._mark_start_failure(build_id=build_id, error=_normalize_error(exc))
+                raise
         return _result(True, "Skill index build started.", data={"build_id": build_id, "state": "running"})
 
     def check_build_status(
@@ -521,14 +599,30 @@ class AgenticSkillRetrievalToolkit:
     ) -> dict[str, Any]:
         key = str(self.index_root)
         cancelled = False
+        active_build_id = ""
         with _TASKS_LOCK:
             task = _TASKS.get(key)
+            if task is not None and task.thread.is_alive():
+                active_build_id = task.build_id
+                if build_id and build_id != active_build_id:
+                    return _build_id_mismatch_result(
+                        requested_build_id=build_id,
+                        active_build_id=active_build_id,
+                    )
             if _is_running_build_task(task, build_id):
                 task.cancel_event.set()
                 cancelled = True
         state = self._read_state()
         build = dict(state.get("build") or {})
+        persisted_build_id = str(build.get("build_id") or "")
+        if not cancelled and build_id:
+            if build.get("status") == "running" and build_id != persisted_build_id:
+                return _build_id_mismatch_result(
+                    requested_build_id=build_id,
+                    active_build_id=persisted_build_id,
+                )
         if cancelled or build.get("status") == "running":
+            cancelled = True
             build["status"] = "cancelled"
             build["stage"] = "cancelled"
             build["message"] = "Skill index build cancellation requested."
@@ -536,7 +630,7 @@ class AgenticSkillRetrievalToolkit:
             build["finished_at"] = _now_iso()
             build["capability_category_paths"] = []
             state["build"] = build
-            self._write_state(state)
+            self._write_state(state, expected_build_id=persisted_build_id)
         if wait and cancelled:
             deadline = time.monotonic() + max(0.0, float(timeout_seconds))
             while time.monotonic() < deadline:
@@ -561,20 +655,28 @@ class AgenticSkillRetrievalToolkit:
     ) -> dict[str, Any]:
         state = self._read_state()
         build = dict(state.get("build") or {})
+        committed = self._read_committed_index_state(fallback=state)
         index_exists = _is_complete_index(self.index_dir)
-        if build.get("status") == "running" and not self._has_running_task(build.get("build_id")):
-            build.update(
-                {
-                    "status": "failed",
-                    "stage": "interrupted",
-                    "message": "Skill index build was interrupted.",
-                    "error": "No running build task was found for the persisted running state.",
-                    "finished_at": _now_iso(),
-                    "progress": 1.0,
-                }
-            )
-            state["build"] = build
-            self._write_state(state)
+        if not index_exists:
+            committed = {}
+        committed_build_id = str(committed.get("build_id") or "")
+        if index_exists and build.get("status") == "running":
+            if committed_build_id and committed_build_id == str(build.get("build_id") or ""):
+                build.update(
+                    {
+                        "status": "success",
+                        "stage": "success",
+                        "message": "Skill index build completed.",
+                        "error": "",
+                        "progress": 1.0,
+                        "finished_at": str(committed.get("committed_at") or _now_iso()),
+                    }
+                )
+                state["build"] = build
+                for key in ("fingerprint", "indexed_count", "record_hashes", "source_file_hashes"):
+                    if key in committed:
+                        state[key] = committed[key]
+                self._write_state(state, expected_build_id=committed_build_id)
         if not index_exists:
             state["indexed_count"] = 0
             if build.get("status") == "success":
@@ -590,10 +692,12 @@ class AgenticSkillRetrievalToolkit:
                 )
                 state["build"] = build
                 state["fingerprint"] = ""
-                self._write_state(state)
+                self._write_state(state, expected_build_id=str(build.get("build_id") or ""))
         capability_category_paths: list[dict[str, Any]] = []
         if build.get("status") == "success":
             capability_category_paths = list(build.get("capability_category_paths") or [])
+        current_records = self._current_records(refresh=refresh_inventory)
+        current_fingerprint = _index_fingerprint(current_records, self._build_config)
         status = {
             "status": str(build.get("status") or "idle"),
             "stage": str(build.get("stage") or ""),
@@ -608,18 +712,18 @@ class AgenticSkillRetrievalToolkit:
             "elapsed_seconds": float(build.get("elapsed_seconds") or 0.0),
             "index_dir": str(self.index_dir),
             "index_exists": index_exists,
-            "fresh": index_exists
-            and str(state.get("fingerprint") or "")
-            == _index_fingerprint(self._current_records(refresh=refresh_inventory), self._build_config),
-            "indexed_count": int(state.get("indexed_count") or 0) if index_exists else 0,
-            "fingerprint": str(state.get("fingerprint") or ""),
+            "fresh": index_exists and str(committed.get("fingerprint") or "") == current_fingerprint,
+            "indexed_count": int(committed.get("indexed_count") or 0) if index_exists else 0,
+            "fingerprint": str(committed.get("fingerprint") or ""),
             "capability_category_paths": capability_category_paths,
         }
         if include_logs:
             status["logs"] = list(build.get("logs") or [])
         if include_inventory:
-            records = self._current_records(refresh=refresh_inventory)
-            status["inventory"] = {"count": len(records), "fingerprint": _records_fingerprint(records)}
+            status["inventory"] = {
+                "count": len(current_records),
+                "fingerprint": _records_fingerprint(current_records),
+            }
         if build_id and status["build_id"] and build_id != status["build_id"]:
             status["message"] = f"Latest build id is {status['build_id']}; requested {build_id}."
         return status
@@ -636,7 +740,13 @@ class AgenticSkillRetrievalToolkit:
         if error:
             text = _index_unavailable_text(error, language=language)
             return _result(False, text, data={"index_exists": _is_complete_index(self.index_dir), "tree": []})
-        payload = load_tree_preset(self.index_dir / TREE_INDEX_FILENAME)
+        with portalocker.Lock(
+            str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),
+            mode="a+",
+            timeout=30,
+        ):
+            _recover_index_directory_unlocked(self.index_dir)
+            payload = load_tree_preset(self.index_dir / TREE_INDEX_FILENAME)
         raw_nodes = payload.get("nodes")
         nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
         outline = _render_tree_outline(nodes, max_nodes=max_nodes)
@@ -794,6 +904,8 @@ class AgenticSkillRetrievalToolkit:
         cancel_event = kwargs.pop("cancel_event")
         try:
             self.build_index(cancel_token=cancel_event, **kwargs)
+        except Exception as exc:
+            self._mark_async_failure(build_id=build_id, error=_normalize_error(exc))
         finally:
             with _TASKS_LOCK:
                 task = _TASKS.get(str(self.index_root))
@@ -810,10 +922,10 @@ class AgenticSkillRetrievalToolkit:
             records = _coerce_skill_records(skills)
         elif skills_dir is not None:
             records = scan_skill_records(skills_dir)
-        elif self._skills:
-            records = list(self._skills)
         elif self._skills_dir is not None:
             records = scan_skill_records(self._skills_dir)
+        elif self._skills:
+            records = list(self._skills)
         else:
             records = []
         return [record for record in records if record.enabled and record.resolved_worker_id]
@@ -823,10 +935,40 @@ class AgenticSkillRetrievalToolkit:
             self._skills = scan_skill_records(self._skills_dir)
         return [record for record in self._skills if record.enabled and record.resolved_worker_id]
 
-    def _select_build_plan(self, *, records: Sequence[SkillRecord], force: bool) -> _IndexBuildPlan:
-        if force or not _is_complete_index(self.index_dir):
+    def _snapshot_index_base(self, destination_dir: Path) -> dict[str, Any]:
+        """Copy one committed index generation for an incremental build."""
+
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        with portalocker.Lock(
+            str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),
+            mode="a+",
+            timeout=30,
+        ):
+            _recover_index_directory_unlocked(self.index_dir)
+            if not _is_complete_index(self.index_dir):
+                return {}
+            shutil.copytree(self.index_dir, destination_dir)
+            commit_path = destination_dir / COMMIT_FILENAME
+            if commit_path.is_file():
+                return _read_json_object(commit_path)
+            return self._read_state()
+
+    def _select_build_plan(
+        self,
+        *,
+        records: Sequence[SkillRecord],
+        force: bool,
+        base_index_dir: Path | None = None,
+        committed_state: dict[str, Any] | None = None,
+    ) -> _IndexBuildPlan:
+        resolved_base_dir = base_index_dir or self.index_dir
+        if force or not _is_complete_index(resolved_base_dir):
             return _IndexBuildPlan("build", tuple(records))
-        state = self._read_state()
+        state = (
+            dict(committed_state)
+            if committed_state is not None
+            else self._read_committed_index_state(fallback=self._read_state())
+        )
         previous_hashes = dict(state.get("record_hashes") or {})
         current_hashes = _record_hashes(records)
         if not previous_hashes:
@@ -856,22 +998,41 @@ class AgenticSkillRetrievalToolkit:
         return _IndexBuildPlan("build", tuple(records))
 
     def _is_fresh(self, fingerprint: str) -> bool:
-        state = self._read_state()
+        state = self._read_committed_index_state(fallback=self._read_state())
         return _is_complete_index(self.index_dir) and str(state.get("fingerprint") or "") == fingerprint
 
     def _ensure_runtime(self, *, visible_skill_names: Iterable[str] | None = None) -> None:
-        error = self._index_readiness_error()
-        if error:
-            raise RuntimeError(error)
         visible = _normalize_visible_skill_names(visible_skill_names)
         if visible is None:
             visible = self._visible_skill_names
-        if self._loaded_index is not None and visible == self._visible_skill_names:
-            return
-        if not _is_complete_index(self.index_dir):
-            raise RuntimeError(f"skill index is not complete: {self.index_dir}")
-        loaded = load_retriever_index(self.index_dir)
+        records = self._current_records()
+        expected = _index_fingerprint(records, self._build_config) if records else ""
+        with portalocker.Lock(
+            str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),
+            mode="a+",
+            timeout=30,
+        ):
+            _recover_index_directory_unlocked(self.index_dir)
+            if not _is_complete_index(self.index_dir):
+                raise RuntimeError(f"skill index is not complete: {self.index_dir}")
+            commit_path = self.index_dir / COMMIT_FILENAME
+            committed = (
+                _read_json_object(commit_path)
+                if commit_path.is_file()
+                else _read_json_object(self.index_root / STATE_FILENAME)
+            )
+            if expected and str(committed.get("fingerprint") or "") != expected:
+                raise RuntimeError("Skill index is stale because skills or build settings changed.")
+            generation = str(committed.get("build_id") or committed.get("fingerprint") or "")
+            if (
+                self._loaded_index is not None
+                and visible == self._visible_skill_names
+                and generation == self._loaded_index_generation
+            ):
+                return
+            loaded = load_retriever_index(self.index_dir)
         self._loaded_index = loaded
+        self._loaded_index_generation = generation
         self._visible_skill_names = visible
         self._catalog_by_payload = {str(record.payload): record for record in loaded.catalog_records}
         self._filtered_root = _filter_tree(loaded.tree_root, self._catalog_by_payload, visible)
@@ -881,13 +1042,13 @@ class AgenticSkillRetrievalToolkit:
         self._index_nodes(self._filtered_root, ("ROOT",))
 
     def _index_readiness_error(self, *, refresh_inventory: bool = False) -> str | None:
+        state = self._read_committed_index_state(fallback=self._read_state())
         if not _is_complete_index(self.index_dir):
             return f"Skill index is missing or incomplete: {self.index_dir}"
         records = self._current_records(refresh=refresh_inventory)
         if not records:
             return None
         expected = _index_fingerprint(records, self._build_config)
-        state = self._read_state()
         actual = str(state.get("fingerprint") or "")
         if actual != expected:
             return "Skill index is stale because skills or build settings changed."
@@ -902,6 +1063,7 @@ class AgenticSkillRetrievalToolkit:
 
     def _clear_loaded_index(self) -> None:
         self._loaded_index = None
+        self._loaded_index_generation = ""
         self._filtered_root = None
         self._node_by_id = {}
         self._path_by_id = {}
@@ -1069,35 +1231,171 @@ class AgenticSkillRetrievalToolkit:
             "progress": _coerce_progress(progress),
             "build_id": build_id,
             "force": bool(force),
+            "target_count": int(indexed_count),
             "started_at": str(previous_build.get("started_at") or _now_iso()),
             "updated_at": _now_iso(),
+            "attempted_fingerprint": fingerprint,
             "capability_category_paths": [],
             "logs": logs[-40:],
         }
         state.update(
             {
                 "build": build,
-                "fingerprint": fingerprint,
-                "indexed_count": int(indexed_count),
+                "attempted_fingerprint": fingerprint,
                 "updated_at": _now_iso(),
             }
         )
-        self._write_state(state)
+        if not _is_complete_index(self.index_dir):
+            state.setdefault("fingerprint", "")
+            state.setdefault("indexed_count", 0)
+        self._write_state(
+            state,
+            expected_build_id=build_id,
+            claim=stage == "prepare",
+            progress=stage != "prepare",
+        )
+
+    def _set_queued_state(self, *, build_id: str, force: bool, replace_running: bool = False) -> str | None:
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        with portalocker.Lock(
+            str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),
+            mode="a+",
+            timeout=30,
+        ):
+            _recover_index_directory_unlocked(self.index_dir)
+            state = _read_json_object(self.index_root / STATE_FILENAME)
+            previous_build = dict(state.get("build") or {})
+            active_build_id = str(previous_build.get("build_id") or "")
+            committed = (
+                _read_json_object(self.index_dir / COMMIT_FILENAME) if _is_complete_index(self.index_dir) else {}
+            )
+            committed_build_id = str(committed.get("build_id") or "")
+            if previous_build.get("status") == "running" and active_build_id and active_build_id == committed_build_id:
+                previous_build.update(
+                    status="success",
+                    stage="success",
+                    message="Skill index build completed.",
+                    error="",
+                    progress=1.0,
+                    finished_at=str(committed.get("committed_at") or _now_iso()),
+                )
+                for key in ("fingerprint", "indexed_count", "record_hashes", "source_file_hashes"):
+                    if key in committed:
+                        state[key] = committed[key]
+            if previous_build.get("status") == "running" and active_build_id:
+                if active_build_id != build_id and not replace_running:
+                    return active_build_id
+            now = _now_iso()
+            logs = list(previous_build.get("logs") or [])
+            logs.append(
+                {
+                    "stage": "queued",
+                    "status": "running",
+                    "message": "Skill index build is queued.",
+                    "time": now,
+                }
+            )
+            state.update(
+                {
+                    "build": {
+                        **previous_build,
+                        "status": "running",
+                        "stage": "queued",
+                        "message": "Skill index build is queued.",
+                        "error": "",
+                        "progress": 0.0,
+                        "build_id": build_id,
+                        "force": bool(force),
+                        "started_at": now,
+                        "updated_at": now,
+                        "finished_at": "",
+                        "capability_category_paths": [],
+                        "logs": logs[-40:],
+                    },
+                    "updated_at": now,
+                }
+            )
+            atomic_write_json(self.index_root / STATE_FILENAME, state)
+            return None
+
+    def _mark_start_failure(self, *, build_id: str, error: str) -> None:
+        state = self._read_state()
+        build = dict(state.get("build") or {})
+        build.update(
+            status="failed",
+            stage="failed",
+            message="Skill index build thread could not be started.",
+            error=error,
+            progress=1.0,
+            finished_at=_now_iso(),
+        )
+        state["build"] = build
+        self._write_state(state, expected_build_id=build_id)
+
+    def _mark_async_failure(self, *, build_id: str, error: str) -> None:
+        state = self._read_state()
+        build = dict(state.get("build") or {})
+        if str(build.get("build_id") or "") != build_id or str(build.get("status") or "") != "running":
+            return
+        now = _now_iso()
+        logs = list(build.get("logs") or [])
+        logs.append(
+            {
+                "stage": "failed",
+                "status": "failed",
+                "message": "Skill index build thread failed unexpectedly.",
+                "time": now,
+            }
+        )
+        build.update(
+            status="failed",
+            stage="failed",
+            message="Skill index build thread failed unexpectedly.",
+            error=error,
+            progress=1.0,
+            updated_at=now,
+            finished_at=now,
+            logs=logs[-40:],
+        )
+        state["build"] = build
+        self._write_state(state, expected_build_id=build_id, progress=True)
 
     def _cancelled_result(self, *, build_id: str, started: float, fingerprint: str) -> dict[str, Any]:
-        state = _build_state(
-            status="cancelled",
-            stage="cancelled",
-            message="Skill index build was cancelled.",
-            progress=1.0,
-            build_id=build_id,
-            force=False,
-            indexed_count=0,
-            fingerprint=fingerprint,
-            finished=True,
-            elapsed_seconds=time.monotonic() - started,
+        state = self._read_state()
+        committed = self._read_committed_index_state(fallback=state)
+        previous_build = dict(state.get("build") or {})
+        now = _now_iso()
+        build = {
+            **previous_build,
+            "status": "cancelled",
+            "stage": "cancelled",
+            "message": "Skill index build was cancelled.",
+            "error": "",
+            "progress": 1.0,
+            "build_id": build_id,
+            "updated_at": now,
+            "finished_at": now,
+            "elapsed_seconds": time.monotonic() - started,
+            "attempted_fingerprint": fingerprint,
+            "capability_category_paths": [],
+        }
+        state.update(
+            {
+                "build": build,
+                "attempted_fingerprint": fingerprint,
+                "updated_at": now,
+            }
         )
-        self._write_state(state)
+        if _is_complete_index(self.index_dir):
+            for key in ("fingerprint", "indexed_count", "record_hashes", "source_file_hashes"):
+                if key in committed:
+                    state[key] = committed[key]
+        else:
+            state["fingerprint"] = ""
+            state["indexed_count"] = 0
+            state["record_hashes"] = {}
+            state["source_file_hashes"] = {}
+        self._write_state(state, expected_build_id=build_id)
         return _result(
             False,
             "Skill index build was cancelled.",
@@ -1144,7 +1442,7 @@ class AgenticSkillRetrievalToolkit:
             previous_index_preserved=preserve_previous_index,
             attempted_fingerprint=fingerprint,
         )
-        self._write_state(state)
+        self._write_state(state, expected_build_id=build_id)
         return _result(
             False,
             f"Skill index build failed: {error}",
@@ -1167,13 +1465,54 @@ class AgenticSkillRetrievalToolkit:
         except Exception:
             return {}
 
-    def _write_state(self, state: dict[str, Any]) -> None:
+    def _read_committed_index_state(
+        self,
+        *,
+        fallback: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        with portalocker.Lock(
+            str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),
+            mode="a+",
+            timeout=30,
+        ):
+            _recover_index_directory_unlocked(self.index_dir)
+            commit_path = self.index_dir / COMMIT_FILENAME
+            if commit_path.is_file():
+                return _read_json_object(commit_path)
+        return dict(fallback or {})
+
+    def _write_state(
+        self,
+        state: dict[str, Any],
+        *,
+        expected_build_id: str | None = None,
+        claim: bool = False,
+        progress: bool = False,
+    ) -> bool:
         self.index_root.mkdir(parents=True, exist_ok=True)
         payload = dict(state)
         payload["updated_at"] = _now_iso()
-        tmp = self.index_root / f".{STATE_FILENAME}.tmp"
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.index_root / STATE_FILENAME)
+        with portalocker.Lock(
+            str(self.index_root / _INDEX_PUBLISH_LOCK_FILENAME),
+            mode="a+",
+            timeout=30,
+        ):
+            current = _read_json_object(self.index_root / STATE_FILENAME)
+            current_build = dict(current.get("build") or {})
+            current_build_id = str(current_build.get("build_id") or "")
+            current_status = str(current_build.get("status") or "")
+            if expected_build_id is not None:
+                if claim:
+                    if current_status == "running" and current_build_id not in {"", expected_build_id}:
+                        return False
+                elif progress:
+                    if current_build_id != expected_build_id or current_status != "running":
+                        return False
+                elif current_build_id != expected_build_id:
+                    return False
+            atomic_write_json(self.index_root / STATE_FILENAME, payload)
+            return True
 
     def _has_running_task(self, build_id: Any) -> bool:
         with _TASKS_LOCK:
@@ -1205,16 +1544,15 @@ def scan_skill_records(skills_dir: str | Path) -> list[SkillRecord]:
         return records
     candidates = [path for path in root.iterdir() if path.is_dir()]
     for skill_dir in sorted(candidates, key=lambda item: item.name):
-        skill_file = _find_skill_file(skill_dir)
+        skill_file = find_skill_file(skill_dir)
         if skill_file is None:
             continue
         try:
-            content = skill_file.read_text(encoding="utf-8")
+            frontmatter, body, content_hash = read_skill_file(skill_file, fallback_to_simple=False)
         except (OSError, UnicodeError):
             continue
-        frontmatter, body = _parse_frontmatter(content)
         name = str(frontmatter.get("name") or skill_dir.name).strip() or skill_dir.name
-        description = str(frontmatter.get("description") or "").strip() or _first_paragraph(body)
+        description = str(frontmatter.get("description") or "").strip() or first_paragraph(body)
         records.append(
             SkillRecord(
                 name=name,
@@ -1224,7 +1562,7 @@ def scan_skill_records(skills_dir: str | Path) -> list[SkillRecord]:
                 enabled=True,
                 metadata=dict(frontmatter),
                 content=body.strip(),
-                content_hash=_sha256_text(content),
+                content_hash=content_hash,
             )
         )
     return records
@@ -1491,6 +1829,7 @@ def _build_state(
     fingerprint: str,
     error: str = "",
     record_hashes: dict[str, str] | None = None,
+    source_file_hashes: dict[str, str] | None = None,
     finished: bool = False,
     elapsed_seconds: float = 0.0,
 ) -> dict[str, Any]:
@@ -1499,6 +1838,7 @@ def _build_state(
         "fingerprint": fingerprint,
         "indexed_count": int(indexed_count),
         "record_hashes": dict(record_hashes or {}),
+        "source_file_hashes": dict(source_file_hashes or {}),
         "updated_at": now,
         "build": {
             "status": status,
@@ -1573,6 +1913,36 @@ def _load_capability_category_paths(
     return paths
 
 
+def _validate_index_worker_ids(
+    index_dir: Path,
+    *,
+    expected_worker_ids: set[str],
+) -> None:
+    actual: set[str] = set()
+    for line in (index_dir / CATALOG_FILENAME).read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise RuntimeError("built index contains an invalid catalog record")
+        worker_id = str(payload.get("worker_id") or payload.get("skill_id") or "").strip()
+        if not worker_id or worker_id in actual:
+            raise RuntimeError("built index contains a missing or duplicate capability ID")
+        actual.add(worker_id)
+    if actual != expected_worker_ids:
+        missing = sorted(expected_worker_ids - actual)
+        unexpected = sorted(actual - expected_worker_ids)
+        detail: list[str] = []
+        if missing:
+            detail.append(f"missing: {', '.join(missing[:5])}")
+        if unexpected:
+            detail.append(f"unexpected: {', '.join(unexpected[:5])}")
+        raise RuntimeError(
+            "built index catalog does not match the requested Skill snapshot"
+            + (f" ({'; '.join(detail)})" if detail else "")
+        )
+
+
 def _set_failed_index_state(
     state: dict[str, Any],
     *,
@@ -1584,28 +1954,133 @@ def _set_failed_index_state(
     if previous_index_available and previous_index_preserved:
         state["fingerprint"] = str(previous_state.get("fingerprint") or "")
         state["indexed_count"] = int(previous_state.get("indexed_count") or 0)
+        state["record_hashes"] = dict(previous_state.get("record_hashes") or {})
+        state["source_file_hashes"] = dict(previous_state.get("source_file_hashes") or {})
     else:
         state["fingerprint"] = ""
         state["indexed_count"] = 0
+        state["record_hashes"] = {}
+        state["source_file_hashes"] = {}
     state["attempted_fingerprint"] = attempted_fingerprint
     build = dict(state.get("build") or {})
     build["attempted_fingerprint"] = attempted_fingerprint
     state["build"] = build
 
 
-def _publish_index(*, candidate_dir: Path, index_dir: Path) -> None:
+def _committed_index_state(
+    *,
+    build_id: str,
+    fingerprint: str,
+    record_hashes: dict[str, str],
+    source_file_hashes: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "build_id": build_id,
+        "fingerprint": fingerprint,
+        "indexed_count": len(record_hashes),
+        "record_hashes": dict(record_hashes),
+        "source_file_hashes": dict(source_file_hashes),
+        "committed_at": _now_iso(),
+    }
+
+
+def _write_index_commit(index_dir: Path, state: dict[str, Any]) -> None:
+    atomic_write_json(index_dir / COMMIT_FILENAME, state)
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _recover_index_directory_unlocked(
+    index_dir: Path,
+    *,
+    replace_invalid: bool = False,
+    validator: Callable[[Path], bool] | None = None,
+) -> bool:
+    """Recover an interrupted directory swap while the publication lock is held."""
+
+    if _is_complete_index(index_dir) and not replace_invalid:
+        return False
+    parent = index_dir.parent
+    candidates: list[Path] = []
+    for pattern in (f".{index_dir.name}.staging-*", f".{index_dir.name}.backup-*"):
+        for path in parent.glob(pattern):
+            try:
+                valid = validator(path) if validator is not None else _is_complete_index(path)
+            except Exception:
+                valid = False
+            if path.is_dir() and valid:
+                candidates.append(path)
+    if not candidates:
+        return False
+    candidates.sort(
+        key=lambda path: (
+            int((path / COMMIT_FILENAME).is_file()),
+            int(".staging-" in path.name),
+            path.stat().st_mtime_ns,
+        ),
+        reverse=True,
+    )
+    selected = candidates[0]
+    if index_dir.exists():
+        shutil.rmtree(index_dir, ignore_errors=True)
+    selected.replace(index_dir)
+    return True
+
+
+def _publish_index(*, candidate_dir: Path, index_dir: Path, expected_build_id: str) -> None:
     parent = index_dir.parent
     parent.mkdir(parents=True, exist_ok=True)
-    backup = parent / f".{index_dir.name}.backup-{time.time_ns()}"
-    if index_dir.exists():
-        index_dir.replace(backup)
-    shutil.copytree(candidate_dir, index_dir)
-    if backup.exists():
-        shutil.rmtree(backup, ignore_errors=True)
+    token = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+    backup = parent / f".{index_dir.name}.backup-{token}"
+    pending = parent / f".{index_dir.name}.pending-{token}"
+    staging = parent / f".{index_dir.name}.staging-{token}"
+    try:
+        # Recovery deliberately ignores pending copies. The completed candidate
+        # only becomes recoverable after it is handed off under the publish lock.
+        shutil.copytree(candidate_dir, pending)
+        with portalocker.Lock(
+            str(parent / _INDEX_PUBLISH_LOCK_FILENAME),
+            mode="a+",
+            timeout=30,
+        ):
+            current = _read_json_object(parent / STATE_FILENAME)
+            build = dict(current.get("build") or {})
+            if str(build.get("build_id") or "") != expected_build_id or str(build.get("status") or "") != "running":
+                raise SkillIndexBuildCancelled("Skill index build was superseded before publication.")
+            pending.replace(staging)
+            if index_dir.exists():
+                index_dir.replace(backup)
+            try:
+                staging.replace(index_dir)
+            except Exception:
+                if backup.exists() and not index_dir.exists():
+                    backup.replace(index_dir)
+                raise
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+    finally:
+        if pending.exists():
+            shutil.rmtree(pending, ignore_errors=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _cleanup_index(index_dir: Path) -> None:
-    shutil.rmtree(index_dir, ignore_errors=True)
+    parent = index_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    with portalocker.Lock(
+        str(parent / _INDEX_PUBLISH_LOCK_FILENAME),
+        mode="a+",
+        timeout=30,
+    ):
+        shutil.rmtree(index_dir, ignore_errors=True)
 
 
 def _is_complete_index(index_dir: Path) -> bool:
@@ -1614,9 +2089,21 @@ def _is_complete_index(index_dir: Path) -> bool:
     )
 
 
-def _index_fingerprint(records: Sequence[SkillRecord], config: SkillIndexBuildConfig) -> str:
+def _index_fingerprint(
+    records: Sequence[SkillRecord],
+    config: SkillIndexBuildConfig,
+    *,
+    record_hashes: dict[str, str] | None = None,
+    source_file_hashes: dict[str, str] | None = None,
+) -> str:
+    snapshot_records = (
+        list(records)
+        if record_hashes is not None and source_file_hashes is not None
+        else [_snapshot_record_source(record) for record in records]
+    )
     payload = {
-        "records": _record_hashes(records),
+        "records": dict(record_hashes or _record_hashes(snapshot_records)),
+        "source_files": dict(source_file_hashes or _source_file_hashes(snapshot_records)),
         "config": asdict(config),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -1636,56 +2123,54 @@ def _record_hashes(records: Sequence[SkillRecord]) -> dict[str, str]:
 
 
 def _skill_record_hash(record: SkillRecord) -> str:
-    if record.content_hash:
-        return str(record.content_hash)
     payload = {
         "name": record.name,
         "description": record.description,
         "worker_id": record.resolved_worker_id,
         "skill_md_path": record.skill_md_path,
         "content": record.content,
+        "content_hash": record.content_hash,
         "metadata": record.metadata,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _find_skill_file(skill_dir: Path) -> Path | None:
-    for name in ("SKILL.md", "skill.md", "Skill.md"):
-        path = skill_dir / name
-        if path.exists():
-            return path
-    return None
+def _source_file_hashes(records: Sequence[SkillRecord]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for record in sorted(records, key=lambda item: item.resolved_worker_id):
+        value = str(record.content_hash or "").strip()
+        if not value and record.skill_md_path:
+            path = Path(record.skill_md_path).expanduser()
+            if path.is_file():
+                value = sha256_file(path)
+        if not value:
+            value = _skill_record_hash(record)
+        hashes[record.resolved_worker_id] = value
+    return hashes
 
 
-def _parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
-    text = str(content or "")
-    if not text.startswith("---"):
-        return {}, text
-    end = text.find("\n---", 3)
-    if end < 0:
-        return {}, text
-    raw = text[3:end].strip()
-    body_start = end + 4
-    body = text[body_start:].lstrip()
+def _snapshot_record_source(record: SkillRecord) -> SkillRecord:
+    """Bind a path-backed record without a hash to one immutable file snapshot."""
+
+    if record.content_hash or not record.skill_md_path:
+        return record
+    path = Path(record.skill_md_path).expanduser()
+    if not path.is_file():
+        return record
     try:
-        import yaml
-
-        parsed = yaml.safe_load(raw) or {}
-        return (parsed if isinstance(parsed, dict) else {}), body
-    except Exception:
-        return {}, body
-
-
-def _first_paragraph(text: str) -> str:
-    paragraph: list[str] = []
-    for line in str(text or "").splitlines():
-        stripped = line.strip()
-        if not stripped and paragraph:
-            break
-        if stripped:
-            paragraph.append(stripped)
-    return " ".join(paragraph)
+        frontmatter, body, content_hash = read_skill_file(path, fallback_to_simple=False)
+    except (OSError, UnicodeError):
+        return record
+    metadata = {**record.metadata, **frontmatter}
+    return replace(
+        record,
+        name=str(frontmatter.get("name") or record.name).strip() or record.resolved_worker_id,
+        description=(str(frontmatter.get("description") or record.description).strip() or first_paragraph(body)),
+        metadata=metadata,
+        content=body.strip(),
+        content_hash=content_hash,
+    )
 
 
 def _first_description_line(text: str) -> str:
@@ -1808,4 +2293,20 @@ def _now_iso() -> str:
 
 
 def _new_build_id() -> str:
-    return f"build-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{time.time_ns()}"
+    return (
+        f"build-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{os.getpid()}-{time.time_ns()}-{uuid.uuid4().hex}"
+    )
+
+
+def _build_id_mismatch_result(*, requested_build_id: str, active_build_id: str) -> dict[str, Any]:
+    message = f"Build id mismatch: active build is {active_build_id}; requested {requested_build_id}."
+    return _result(
+        False,
+        message,
+        data={
+            "state": "running",
+            "build_id": active_build_id,
+            "requested_build_id": requested_build_id,
+        },
+        error={"code": "build_id_mismatch", "message": message},
+    )

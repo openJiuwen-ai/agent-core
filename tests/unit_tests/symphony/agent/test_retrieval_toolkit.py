@@ -185,11 +185,17 @@ def test_incremental_build_returns_and_persists_final_category_path(tmp_path: Pa
             output_dir,
             catalog=[
                 {
+                    "name": "Existing",
+                    "cid": "Productivity.Documents.Existing",
+                    "worker_id": "existing",
+                    "branch_path": ["Productivity", "Documents"],
+                },
+                {
                     "name": "New",
                     "cid": "Productivity.Documents.New",
                     "worker_id": "new",
                     "branch_path": ["Productivity", "Documents"],
-                }
+                },
             ],
         )
 
