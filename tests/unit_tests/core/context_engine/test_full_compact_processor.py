@@ -64,7 +64,9 @@ async def create_context_with_full_compact(
 
 class TestFullCompactProcessor:
     @pytest.mark.asyncio
-    async def test_trigger_add_messages_true_when_combined_tokens_exceed_threshold(self):
+    async def test_trigger_add_messages_never_triggers_on_add_path(self):
+        # FullCompact 仅用于溢出恢复（GET 路径 force_compact），不参与日常 add 压缩。
+        # 无论候选 token 是否超 trigger_total_tokens，add 路径都恒不触发。
         config = FullCompactProcessorConfig(
             trigger_total_tokens=20,
             compression_call_max_tokens=2000,
@@ -79,7 +81,7 @@ class TestFullCompactProcessor:
             ctx,
             [AssistantMessage(content="new assistant " + ("payload " * 20))],
         )
-        assert triggered is True
+        assert triggered is False
 
     @pytest.mark.asyncio
     async def test_streams_state_when_full_compact_processor_triggers(self):
