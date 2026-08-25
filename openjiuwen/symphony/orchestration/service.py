@@ -244,6 +244,9 @@ class OrchestrationService:
         progress: ProgressCallback | None = None,
         disabled_capability_ids: Sequence[str] | None = None,
         dynamic_overlay: dict[str, Any] | None = None,
+        graph_revision: str | None = None,
+        graph_snapshot: dict[str, Any] | None = None,
+        task_cluster_id: str | None = None,
         progress_callback: ProgressCallback | None = None,
         mode: str | None = None,
     ) -> OrchestrationPlan:
@@ -252,7 +255,7 @@ class OrchestrationService:
             raise ValueError("Symphony planning requires a model.")
         await _emit(callback, "plan_started", query=query)
         artifacts = filter_disabled_graph_artifacts(
-            load_graph_artifacts(self.graph_artifact_root),
+            load_graph_artifacts(self.graph_artifact_root, graph_revision),
             disabled_capability_ids,
         )
         planning_mode = mode or self.config.mode
@@ -273,6 +276,8 @@ class OrchestrationService:
                 candidate_skill_ids=selected,
                 progress_callback=_planner_progress_callback(callback),
                 language=normalized_language,
+                dynamic_overlay=effective_overlay,
+                task_cluster_id=task_cluster_id,
             )
         else:
             planner = FastOneShotPlanner(
@@ -284,14 +289,18 @@ class OrchestrationService:
                 candidate_skill_ids=selected,
                 language=normalized_language,
                 dynamic_overlay=effective_overlay,
+                task_cluster_id=task_cluster_id,
             )
         result = await planner.plan(query)
         result["language"] = normalized_language
         result["plan_id"] = str(uuid4())
         result["graph_artifact_root"] = str(self.graph_artifact_root)
         result["dynamic_graph_enabled"] = self.config.dynamic_graph_enabled
+        if graph_snapshot is not None:
+            result["graph_snapshot"] = dict(graph_snapshot)
         result["capability_retrieval"] = summary
-        result["execution_graph"] = build_execution_graph(result, artifacts)
+        result["planned_graph"] = build_execution_graph(result, artifacts)
+        result["execution_graph"] = result["planned_graph"]
         public_result = OrchestrationPlan(_generalize_public_fields(result))
         await _emit(callback, "plan_completed", plan_id=public_result["plan_id"])
         return public_result

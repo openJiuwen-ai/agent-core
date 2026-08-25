@@ -357,6 +357,61 @@ async def test_dynamic_graph_enabled_reports_config_without_overlay(
     assert result["dynamic_overlay_used"] is False
 
 
+@pytest.mark.asyncio
+async def test_beam_planner_receives_same_dynamic_overlay_as_fast(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict] = []
+
+    class _Planner:
+        def __init__(self, *args, dynamic_overlay=None, **kwargs):
+            del args, kwargs
+            captured.append(dynamic_overlay)
+
+        async def plan(self, query):
+            del query
+            return {
+                "plans": [],
+                "recommended_plans": [],
+                "dynamic_overlay_used": True,
+            }
+
+    monkeypatch.setattr("openjiuwen.symphony.orchestration.service.BidirectionalBeamPlanner", _Planner)
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+        config=OrchestrationConfig(dynamic_graph_enabled=True),
+    )
+    await service.build()
+    overlay = {"edges": {"edge-1": {"runtime_weight": 1.2}}}
+
+    await service.plan("query", dynamic_overlay=overlay, mode="beam")
+
+    assert captured == [overlay]
+
+
+@pytest.mark.asyncio
+async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path) -> None:
+    runtime = SymphonyRuntime(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=True),
+    )
+    await runtime.graph_engine.build()
+
+    snapshot = runtime.graph_engine.get_snapshot()
+    result = await runtime.graph_engine.plan("query", merged_revision=snapshot.merged_revision)
+
+    assert result["graph_snapshot"]["static_revision"] == snapshot.static_revision
+    assert result["graph_snapshot"]["observation_revision"] == snapshot.observation_revision
+    assert result["graph_snapshot"]["merged_revision"] == snapshot.merged_revision
+    assert result["planned_graph"] == result["execution_graph"]
+    runtime.graph_engine.close()
+
+
 class _MixedPlanLLM:
     async def invoke(self, messages, **kwargs):
         del kwargs
