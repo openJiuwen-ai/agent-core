@@ -455,11 +455,13 @@ class _StubTeam:
 class _FakeTeamBackend:
     """In-memory TeamBackend that tracks call counts.
 
-    Mirrors the four TeamBackend methods the team-context tracker consumes:
+    Mirrors the TeamBackend methods the team-context tracker consumes:
     ``get_team_updated_at``, ``get_members_max_updated_at``, ``get_team_info``,
-    ``list_members``. Lets tests assert the probes short-circuit the expensive
-    reads while nothing has changed. ``list_members`` excludes the caller, as
-    the real backend does.
+    ``list_members``, plus the single-member ``get_member_updated_at_state`` /
+    ``stamp_member_prompt_updated_at`` pair the identity-body first-emit path
+    records ``member_prompt_mtime`` through. Lets tests assert the probes
+    short-circuit the expensive reads while nothing has changed.
+    ``list_members`` excludes the caller, as the real backend does.
     """
 
     def __init__(
@@ -513,6 +515,22 @@ class _FakeTeamBackend:
         if self._self_row is not None and self._self_row.member_name == member_name:
             return self._self_row
         return next((m for m in self._members if m.member_name == member_name), None)
+
+    async def get_member_updated_at_state(
+        self, member_name: str, field: str
+    ) -> tuple[int, bool]:
+        """Single-member mtime probe the identity body's first-emit records.
+
+        Returns a stable ``(0, True)`` — mirrors a member with no
+        ``member_prompt.md`` (evolution off), so the re-announce path does
+        not fire. This fake exercises the rail's delivery plumbing, not
+        prompt-evolution semantics.
+        """
+        return 0, True
+
+    async def stamp_member_prompt_updated_at(self, member_name: str, ts: int) -> None:
+        """No-op: the stable probe above never signals a blank field."""
+        return None
 
     def hitt_enabled(self) -> bool:
         """The rail probes this at init to gate the static HITT contract."""
