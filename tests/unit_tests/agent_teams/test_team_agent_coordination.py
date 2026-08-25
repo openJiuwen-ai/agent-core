@@ -2212,6 +2212,9 @@ def _external_backend() -> MagicMock:
     backend.team_name = "test-team"
     backend.get_team_updated_at = AsyncMock(return_value=1)
     backend.get_members_max_updated_at = AsyncMock(return_value=1)
+    # External backend serves no real member_prompt.md, so the probe reports 0
+    # (missing file / evolution off) -- matching real WorkspaceCache behaviour.
+    backend.get_member_updated_at = AsyncMock(return_value=0)
     backend.get_member = AsyncMock(
         return_value=SimpleNamespace(
             member_name="claude-1",
