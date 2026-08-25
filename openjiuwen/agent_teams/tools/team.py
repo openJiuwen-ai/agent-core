@@ -1190,37 +1190,6 @@ class TeamBackend:
             team_prompt=None,
         )
 
-    def _prepare_predefined_workspace(self, member_name: str, role: "TeamRole") -> None:
-        """Pre-create a predefined member's workspace link at build time.
-
-        ``build_team`` calls this for each predefined teammate right after
-        writing its DB row so the in-team symlink exists before the leader's
-        first roster read (see :meth:`build_team`). Best-effort: a failure
-        degrades to a warning — the later ``setup_agent`` spawn path retries
-        the idempotent link, and a missing link only means the first roster
-        falls back to the DB baseline (the evolved desc shows up once spawn
-        completes and the probe advances).
-        """
-        from openjiuwen.agent_teams.team_workspace.binder import prepare_member_workspace
-
-        predefined = {m.member_name for m in self.predefined_members}
-        try:
-            prepare_member_workspace(
-                team_name=self.team_name,
-                member_name=member_name,
-                role=role,
-                leader_member_name=self.leader_member_name,
-                predefined_members=predefined,
-                external_cli_members=set(self.external_cli_agent_names()),
-                member_workspace_prefix=self._member_workspace_prefix,
-            )
-        except Exception as exc:
-            team_logger.warning(
-                "predefined workspace prepare %s failed (link retried at spawn): %s",
-                member_name,
-                exc,
-            )
-
     def _overlay_member(self, member: Optional[TeamMember]) -> Optional[TeamMember]:
         """Overlay evolved B-class file values onto a member row in place."""
         if member is None or self.workspace_cache is None:
@@ -1700,21 +1669,6 @@ class TeamBackend:
                 name=member_spec.display_name,
                 description=member_spec.desc,
             )
-            # Pre-create the predefined member's workspace link now (before
-            # the leader's first roster read) so the symlink exists when
-            # ``read_card`` resolves it. ``spawn_member`` only writes the DB
-            # row; the symlink + identity write otherwise happens later
-            # during ``setup_agent`` (the real spawn). For a predefined
-            # member the shared independent workspace already holds an
-            # evolved ``card.md`` the evolution party hand-edited; without
-            # this early link the leader's first roster read hits a missing
-            # symlink → fallback DB baseline, masking the evolved desc.
-            # Idempotent: the later ``setup_agent`` call is a no-op on the
-            # link. Gated on evolution — when off the leader reads the DB
-            # directly and the link is not needed here (it is still built
-            # at spawn time by ``setup_agent``).
-            if self._spec_evolution_enabled:
-                self._prepare_predefined_workspace(member_spec.member_name, member_spec.role_type)
             allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
             await self.spawn_member(
                 member_name=member_spec.member_name,
