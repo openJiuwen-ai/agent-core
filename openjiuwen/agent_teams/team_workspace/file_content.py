@@ -37,6 +37,7 @@ from openjiuwen.agent_teams.team_workspace.frontmatter import (
     body_sha256,
     read_frontmatter,
 )
+from openjiuwen.core.common.logging import team_logger
 
 
 class FileContent(NamedTuple):
