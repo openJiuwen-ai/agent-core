@@ -170,6 +170,24 @@ async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
             )
 
 
+def _live_team_session(entry: "ActiveTeam"):
+    """Best-effort: the live ``AgentTeamSession`` bound to ``entry``, or None.
+
+    Tolerates agents without ``session_manager`` (subprocess members, test
+    mocks): returns None so callers skip the live-clear and fall back to the
+    throwaway clear. In production every pooled leader is a ``TeamAgent`` with
+    ``session_manager`` (team_agent.py:272-274), so this returns the live
+    session there. Any access error is swallowed to None (best-effort).
+    """
+    session_mgr = getattr(getattr(entry, "agent", None), "session_manager", None)
+    if not callable(session_mgr):
+        return None
+    try:
+        return getattr(session_mgr(), "team_session", None)
+    except Exception:  # noqa: BLE001 - best-effort; throwaway clear is the fallback
+        return None
+
+
 class TeamRuntimeManager:
     """Owns the in-process ``TeamRuntimePool`` and runs the dispatch + side-effect cycle."""
 
@@ -946,27 +964,68 @@ class TeamRuntimeManager:
             ``False``. ``asyncio.CancelledError`` is never swallowed here --
             an outer cancel propagates (see ``_clear_inprocess_members_inflight``).
         """
+        reset_failed = False
         if await self._pool.has_active(team_name):
             entry = await self._pool.get(team_name)
-            if entry is not None and force:
-                team_logger.info(
-                    "reset_session(force=True) stopping active runtime team={} session={}",
-                    team_name,
-                    entry.current_session_id,
-                )
-                # Abort each in-process member's in-flight round BEFORE the
-                # stop_team/force_kill fallback. force_kill is a bare task.cancel
-                # that bypasses harness.abort, so without this the interrupted
-                # round's incomplete tool_call survives in the member's checkpoint
-                # and is restored by COLD_RECOVER pre_run -> the member resumes the
-                # old task instead of the leader's new dispatch. The abort's
-                # _cleanup_context_on_cancel drops the incomplete tool debris and
-                # keeps the UserMessage + completed tool pairs + history.
-                await _clear_inprocess_members_inflight(entry)
-                await self.stop_team(
-                    team_name=team_name,
-                    session_id=entry.current_session_id,
-                )
+            if entry is not None:
+                # Clear the leader's cold-resume marker on the LIVE session's
+                # in-memory state whenever a live session exists (regardless of
+                # force). The checkpoint blob is a per-session full-overwrite
+                # save (AgentTeamStorage.save, inmemory.py:410-415 /
+                # persistence.py:172-206); the live session's authoritative
+                # flush is its own post_run (team_runner.py:291, idempotent via
+                # _post_run_done, agent_team.py:99-103). A throwaway-session
+                # clear below persists to the blob but leaves the live
+                # session's in-memory copy carrying the marker -- its later
+                # post_run flushes that stale copy back, the stomp. Clearing the
+                # live in-memory here (a pure dict mutate via
+                # session.update_state, metadata.py:135 -- no stream/close
+                # interaction) makes the live session's eventual post_run flush
+                # the already-cleared state. We deliberately do NOT
+                # flush_checkpoint the live session here -- doing so before
+                # stop_team -> stop_coordination -> harness.abort would persist
+                # the leader's un-cleaned mid-round context; persistence is left
+                # to the throwaway clear below (a freshly-loaded session, never
+                # the live mid-round state). Decoupled from ``force`` so the
+                # stomp is closed even when the caller resets without
+                # force-stopping. Read team_session before stop_team:
+                # release_session (session_manager.py:109-119) sets it to None
+                # on teardown (in/after stop_coordination, not in post_run,
+                # agent_team.py:98-103).
+                live_session = _live_team_session(entry)
+                if live_session is not None:
+                    try:
+                        from openjiuwen.agent_teams.runtime.metadata import clear_pending_resume
+
+                        clear_pending_resume(live_session, team_name)
+                    except Exception as e:  # noqa: BLE001
+                        reset_failed = True
+                        team_logger.warning(
+                            "reset_session: failed to clear pending_resume on live "
+                            "session team={} session={}: {}",
+                            team_name,
+                            session_id,
+                            e,
+                        )
+                if force:
+                    team_logger.info(
+                        "reset_session(force=True) stopping active runtime team={} session={}",
+                        team_name,
+                        entry.current_session_id,
+                    )
+                    # Abort each in-process member's in-flight round BEFORE the
+                    # stop_team/force_kill fallback. force_kill is a bare task.cancel
+                    # that bypasses harness.abort, so without this the interrupted
+                    # round's incomplete tool_call survives in the member's checkpoint
+                    # and is restored by COLD_RECOVER pre_run -> the member resumes the
+                    # old task instead of the leader's new dispatch. The abort's
+                    # _cleanup_context_on_cancel drops the incomplete tool debris and
+                    # keeps the UserMessage + completed tool pairs + history.
+                    await _clear_inprocess_members_inflight(entry)
+                    await self.stop_team(
+                        team_name=team_name,
+                        session_id=entry.current_session_id,
+                    )
 
         checkpointer = CheckpointerFactory.get_checkpointer()
         if not await checkpointer.session_exists(session_id):
@@ -976,6 +1035,14 @@ class TeamRuntimeManager:
                 session_id,
                 type(checkpointer).__name__,
             )
+            # No checkpoint bucket to clear, but if the live-clear in the
+            # has_active block above failed (reset_failed), surface it per the
+            # C2 contract: the live session's in-memory marker was not cleared,
+            # so its post_run could still create a marker blob -> stomp. For the
+            # persistence checkpointer, session_exists is False until the first
+            # post_run, so this is reachable while a run is still active.
+            if reset_failed:
+                return False
             return True
 
         release_info = await self._resolve_any_team_session_release_info([session_id])
@@ -1012,7 +1079,6 @@ class TeamRuntimeManager:
         # surviving state is retriable. The caller MUST treat False as "retry
         # reset before chat.send" (see Returns); proceeding on a False reset
         # re-opens the stale paused-round resume this method exists to prevent.
-        reset_failed = False
         cleared = 0
         try:
             cleared = await db.clear_session_task_board_by_id(session_id)
@@ -1091,6 +1157,28 @@ class TeamRuntimeManager:
                     team.team_name,
                     session_id,
                 )
+                # Clear pending_resume on the LIVE session's in-memory state
+                # before stop_team, same rationale as reset_session's live
+                # clear: the throwaway clear below persists to the blob but
+                # leaves the live session's stale in-memory copy to be flushed
+                # back by its later post_run (the stomp). Clearing the live
+                # in-memory here makes the live session's eventual post_run
+                # flush the already-cleared state. No live flush (would persist
+                # un-cleaned mid-round context before stop_team -> harness.abort).
+                live_session = _live_team_session(team)
+                if live_session is not None:
+                    try:
+                        from openjiuwen.agent_teams.runtime.metadata import clear_pending_resume
+
+                        clear_pending_resume(live_session, team.team_name)
+                    except Exception as e:  # noqa: BLE001
+                        team_logger.warning(
+                            "release_session: failed to clear pending_resume on live "
+                            "session team={} session={}: {}",
+                            team.team_name,
+                            session_id,
+                            e,
+                        )
                 await self.stop_team(team_name=team.team_name, session_id=session_id)
 
         release_info = await self.resolve_team_session_release_info(session_id)
