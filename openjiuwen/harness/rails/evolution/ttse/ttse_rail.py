@@ -19,6 +19,9 @@ async primitives.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
@@ -55,7 +58,9 @@ class TTSERail(EvolutionRail):
         self._ttse_llm = llm
         self._ttse_model = model
         self._ttse_config = ttse_config or TTSEConfig()
-        self._ttse_store = TTSERecordStore(self._ttse_config, embedding=embedding)
+        resolved = embedding if embedding is not None else self._ttse_config.embedding
+        self._ttse_config.embedding = resolved
+        self._ttse_store = TTSERecordStore(self._ttse_config, embedding=resolved)
         # Pluggable success detector gates the blame/synthesize pass.
         self._success_detector = success_detector or TrajectoryErrorSuccessDetector(self._ttse_config.success_threshold)
         # Per-invoke injection cache (query -> rendered section body).
@@ -397,7 +402,7 @@ class TTSERail(EvolutionRail):
 
     async def _build_injection_body_async(self, query: str) -> str:
         """Top-K retrieval when an embedding provider is configured."""
-        if self._ttse_config.embedding is None:
+        if not self._ttse_store.has_embedding_provider():
             return self._build_injection_body()
         retrieved = await retrieve_top_k(
             query,
@@ -444,6 +449,74 @@ class TTSERail(EvolutionRail):
                 if content:
                     return str(content)
         return ""
+
+    # ------------------------------------------------------------------
+    # Bench export: persist trajectory even when evolve_enabled=False
+    # Need to be deleted before merge into main branch
+    # ------------------------------------------------------------------
+
+    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Export a JSON snapshot for WorkBuddy Bench post-score TTSE.
+
+        ``evolve_enabled=False`` still finalizes the trajectory in the base
+        rail; this hook writes messages/query so a later ``ttse-post-score``
+        step can call ``_run_ttse_induction`` with grader scores.
+        """
+        await super()._on_after_invoke(ctx)
+        await self._export_trajectory_for_bench(ctx)
+
+    async def _export_trajectory_for_bench(self, ctx: AgentCallbackContext) -> None:
+        export_path = (os.environ.get("TTSE_TRAJECTORY_EXPORT_PATH") or "").strip()
+        if not export_path:
+            return
+        try:
+            trajectory = None
+            if self._builder is not None:
+                trajectory = self._build_trajectory(ctx, finalize=False)
+            messages = self._collect_messages_from_trajectory(trajectory) if trajectory else None
+            if not messages:
+                inputs = getattr(ctx, "inputs", None)
+                raw = getattr(inputs, "messages", None) if inputs is not None else None
+                messages = self._normalize_messages(raw)
+            if not messages:
+                logger.debug("[TTSERail] traj export skipped: no messages")
+                return
+            try:
+                capabilities = await render_capabilities(getattr(ctx, "agent", None))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[TTSERail] traj export capabilities failed: %s", exc)
+                capabilities = ""
+            payload = {
+                "messages": messages,
+                "ttse_task_query": self._extract_query(ctx),
+                "ttse_capabilities": capabilities,
+                "evolve_enabled": bool(self._ttse_config.evolve_enabled),
+            }
+            path = Path(export_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("[TTSERail] exported trajectory snapshot to %s (%s msgs)", path, len(messages))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[TTSERail] traj export failed: %s", exc)
+
+    @staticmethod
+    def _normalize_messages(raw: Any) -> list[dict]:
+        if not raw:
+            return []
+        out: list[dict] = []
+        for msg in raw:
+            if isinstance(msg, dict):
+                role = msg.get("role")
+                content = msg.get("content")
+            else:
+                role = getattr(msg, "role", None)
+                content = getattr(msg, "content", None)
+            if role is None:
+                continue
+            if not isinstance(content, str):
+                content = str(content) if content is not None else ""
+            out.append({"role": str(role), "content": content})
+        return out
 
 
 __all__ = ["TTSERail"]

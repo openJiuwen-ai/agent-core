@@ -32,6 +32,10 @@ class TTSEConfig:
             similarity (semantic) and retrieval injects the top-K most relevant
             rules. When ``None``, dedup falls back to substring matching and the
             whole bank is injected (the reference's legacy mode).
+            Callers typically construct
+            ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
+            (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
+            and assign it here; do not put raw url/key strings on TTSEConfig.
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Ignored when ``embedding`` is None.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).

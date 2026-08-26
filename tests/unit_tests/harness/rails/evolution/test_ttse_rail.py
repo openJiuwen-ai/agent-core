@@ -331,6 +331,70 @@ async def test_injection_per_invoke_cache_hits_same_query(tmp_path):
     assert "cached fact" in body1
 
 
+class _MockEmbedding:
+    """Deterministic EmbeddingProvider for top-K injection tests."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def embed_query(self, text: str):
+        self.calls.append(text)
+        # Axis-aligned vectors so cosine ranking is stable.
+        table = {
+            "login bug": [1.0, 0.0, 0.0],
+            "relevant fact about login": [0.9, 0.1, 0.0],
+            "unrelated weather tip": [0.0, 1.0, 0.0],
+            "another login tip": [0.8, 0.2, 0.0],
+        }
+        return table.get(text, [0.0, 0.0, 1.0])
+
+    async def embed_documents(self, texts: list[str]):
+        return [await self.embed_query(t) for t in texts]
+
+
+@pytest.mark.asyncio
+async def test_injection_uses_top_k_when_config_embedding_set(tmp_path):
+    provider = _MockEmbedding()
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        embedding=provider,
+        top_k_facts=1,
+        top_k_tips=1,
+    )
+    rail = TTSERail(llm=ScriptedLLM(lambda p: "NONE"), model="m", ttse_config=cfg)
+    await rail._ttse_store.add_fact("relevant fact about login")
+    await rail._ttse_store.add_fact("unrelated weather tip")
+    await rail._ttse_store.add_tip("another login tip")
+
+    body = await rail._resolve_injection_body("login bug")
+    assert "relevant fact about login" in body
+    assert "unrelated weather tip" not in body
+    assert "another login tip" in body
+    assert "login bug" in provider.calls
+
+
+@pytest.mark.asyncio
+async def test_constructor_embedding_syncs_to_config_and_enables_retrieval(tmp_path):
+    provider = _MockEmbedding()
+    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"), top_k_facts=1, top_k_tips=1)
+    rail = TTSERail(
+        llm=ScriptedLLM(lambda p: "NONE"),
+        model="m",
+        ttse_config=cfg,
+        embedding=provider,
+    )
+    assert rail._ttse_config.embedding is provider
+    assert rail._ttse_store.has_embedding_provider()
+    await rail._ttse_store.add_fact("relevant fact about login")
+    await rail._ttse_store.add_tip("another login tip")
+    await rail._ttse_store.add_tip("unrelated weather tip")
+
+    body = await rail._resolve_injection_body("login bug")
+    assert "relevant fact about login" in body
+    assert "another login tip" in body
+    assert "unrelated weather tip" not in body
+
+
 # ----------------------------------------------------------------------
 # Success detector
 # ----------------------------------------------------------------------
