@@ -83,18 +83,21 @@ def _write_skill(
     name: str,
     description: str,
     body: str = "",
+    *,
+    description_cn: str | None = None,
+    description_en: str | None = None,
 ) -> Path:
     """Create a minimal skill directory with SKILL.md."""
     skill_dir = root / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_md = skill_dir / "SKILL.md"
-    skill_md.write_text(
-        "---\n"
-        f"description: {description}\n"
-        "---\n\n"
-        f"# {name}\n{body}",
-        encoding="utf-8",
-    )
+    frontmatter = ["---", f"description: {description}"]
+    if description_cn is not None:
+        frontmatter.append(f"description_cn: {description_cn}")
+    if description_en is not None:
+        frontmatter.append(f"description_en: {description_en}")
+    frontmatter.extend(["---", "", f"# {name}", body])
+    skill_md.write_text("\n".join(frontmatter), encoding="utf-8")
     return skill_dir
 
 
@@ -210,6 +213,53 @@ async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     assert "Parse invoice pdf files" in content
     assert "Write xlsx reports" in content
     assert "list_skill" not in content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "description_cn", "description_en", "expected"),
+    [
+        ("cn", "中文技能描述", "English localized description", "中文技能描述"),
+        ("en", "中文技能描述", "English localized description", "English localized description"),
+        ("cn", None, None, "Default skill description"),
+    ],
+)
+async def test_skill_rail_uses_localized_description_with_default_fallback(
+    tmp_path: Path,
+    language: str,
+    description_cn: str | None,
+    description_en: str | None,
+    expected: str,
+):
+    """Skill descriptions should follow prompt language and fall back to description."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(
+        skills_root,
+        "localized-skill",
+        "Default skill description",
+        description_cn=description_cn,
+        description_en=description_en,
+    )
+
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_sys_operation(_make_sys_operation(tmp_path))
+    skill_rail.system_prompt_builder = SystemPromptBuilder(language=language)
+
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=ModelCallInputs(tools=[]),
+        session=None,
+    )
+    await skill_rail.before_invoke(ctx)
+    await skill_rail.before_model_call(ctx)
+
+    content = skill_rail.system_prompt_builder.build()
+    assert expected in content
 
 
 @pytest.mark.asyncio
@@ -414,7 +464,7 @@ async def test_skill_rail_register_rail_auto_list_registers_list_skill_tool(tmp_
     }
 
     assert "read_file" in ability_names
-    assert "code" in ability_names
+    assert "code" not in ability_names
     assert "bash" in ability_names
     assert "list_skill" in ability_names
 
@@ -456,7 +506,7 @@ async def test_auto_list_prompt_is_injected_without_preselecting_skills(tmp_path
     assert "list_skill" in content
     assert "invoice-parser" not in content
     assert "read_file" in content
-    assert "code" in content
+    assert "code" not in content
     assert "bash" in content
 
 
@@ -759,7 +809,7 @@ async def test_skill_rail_combines_additions_removals_and_evolution_in_one_attac
     assert len(attachments) == 1
     content = attachments[0].content or ""
     assert "新增可用 Skill：" in content
-    assert "new-parser: Parse new files" in content
+    assert "0. `new-parser`：Parse new files" in content
     assert "已移除、当前不可用的 Skill：" in content
     assert "legacy-parser" in content
     assert "[Skill: invoice-parser]" in content
