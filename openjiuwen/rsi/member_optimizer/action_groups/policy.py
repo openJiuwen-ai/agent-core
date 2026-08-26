@@ -18,6 +18,7 @@ from openjiuwen.rsi.schema import ActionDefinition
 ALLOWED_ACTION_GROUPS: Final[frozenset[str]] = frozenset(
     {
         "prompt",
+        "rail",
         "skill",
         "tool",
     }
@@ -28,6 +29,7 @@ ALLOWED_OPERATIONS: Final[frozenset[str]] = frozenset(
         "add",
         "modify",
         "remove",
+        "search",
     }
 )
 
@@ -47,6 +49,7 @@ GROUP_PATH_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
         "prompt_sections/files/",
     ),
     "tool": ("tools/",),
+    "rail": ("rails/",),
     "skill": ("skills/",),
 }
 
@@ -76,13 +79,18 @@ Allowed target_path and declared_write_paths by action_group:
 {path_lines}
 
 Current member optimizer actions are limited to local ExpertHarness package file
-changes on prompt, skill, and tool surfaces.
+changes on prompt, skill, tool, and rail surfaces.
 
 Operation rules:
+- `search` is allowed only for `skill/search`.
+- `skill/search` must set a non-empty English `candidate_query`, keep
+  `install_ref` empty, target `skills/`, and declare `skills/` plus
+  `skills/skills.yaml`. If search is unavailable or fails, use an explicit
+  dependency-failed `skill/add` fallback.
 - `skill/add` must target `skills/<snake_name>/SKILL.md`, declare that
   `SKILL.md` plus `skills/skills.yaml`, and keep `skills/skills.yaml`
   mounting the parent `skills` directory.
-- `candidate_query` and `install_ref` must be empty; RSI generates package-local artifacts.
+- For every non-search action, `candidate_query` and `install_ref` must be empty.
 - Do not output config, mcp, dependency, test, documentation, memory,
   knowledge, context, workflow, install, or global environment actions.
 Prompt rules:
@@ -98,7 +106,12 @@ Prompt rules:
   - Specific workflows, checklists, verification procedures, and task recovery
     routines belong in `prompt_sections/files/*.md`, not in `identity.md` or
     `soul.md`.
-  - Skills hold reusable methodology or domain capability.
+  - Skills hold reusable methodology or domain capability. A new Skill requires
+    the same causal mechanism in at least two distinct cases and a trigger that
+    is observable from the public task input or early runtime evidence. One
+    verifier subitem, literal case IDs, fixed expected row counts, and known
+    answer filenames are not reusable Skill content. Use a prompt section for a
+    single-case instruction hypothesis.
   - Tools are only for deterministic executable capability.
 
 Tool rules:
@@ -107,6 +120,15 @@ Tool rules:
   `constraints.class_name` to the Tool subclass name.
 - `tools/tools.yaml` must register package-local tools as mappings like
   `{{"file": "tools/<name>.py", "class_name": "<ToolClass>"}}`.
+
+Rail rules:
+- `rail/add` must target a loadable Python file under `rails/*.py`, declare
+  both that Python file and `rails/rails.yaml`, and set
+  `constraints.class_name` to the AgentRail subclass name.
+- `rails/rails.yaml` must register package-local rails as mappings like
+  `{{"file": "rails/<name>.py", "class_name": "<AgentRailClass>"}}`.
+- Rails are for lifecycle and action-transition control. Do not use them as a
+  static Prompt or Skill hidden inside Python source.
 
 """
 
@@ -162,10 +184,20 @@ def validate_action_policy(
     elif action_group and not _operation_allowed(action_group, operation):
         errors.append(f"operation '{operation}' is not allowed for action_group '{action_group}'")
 
-    if candidate_query:
+    if candidate_query and not (action_group == "skill" and operation == "search"):
         errors.append("candidate_query must be empty")
     if install_ref:
         errors.append("install_ref must be empty")
+
+    if action_group == "skill" and operation == "search":
+        if not candidate_query.strip():
+            errors.append("skill/search requires a non-empty candidate_query")
+        if _normalize_policy_path(target_path) != "skills":
+            errors.append("skill/search target_path must be skills/")
+        if "skills" not in {_normalize_policy_path(path) for path in declared_paths}:
+            errors.append("skill/search must declare skills/")
+        if "skills/skills.yaml" not in {_normalize_policy_path(path) for path in declared_paths}:
+            errors.append("skill/search must declare skills/skills.yaml")
 
     unsupported_tools = [tool for tool in allowed_tools if tool not in ALLOWED_EXECUTOR_TOOLS]
     if unsupported_tools:
@@ -244,10 +276,33 @@ def validate_action_policy(
     if action_group == "tool" and operation == "remove" and normalized_target_path == "tools/tools.yaml":
         errors.append("tool/remove must target a package-local tool, not tools/tools.yaml")
 
+    rail_manifest_missing = (
+        normalized_target_path.startswith("rails/")
+        and normalized_target_path != "rails/rails.yaml"
+        and "rails/rails.yaml" not in normalized_declared_paths
+    )
+    if action_group == "rail" and rail_manifest_missing:
+        errors.append("rail implementation changes must also declare rails/rails.yaml so the rail can be mounted")
+
+    if action_group == "rail" and operation == "add":
+        if not _is_python_resource_path(normalized_target_path, "rails"):
+            errors.append("rail/add target_path must be a package-local rails/*.py file")
+        if normalized_target_path not in normalized_declared_paths:
+            errors.append("rail/add must declare its target Python file")
+        if "rails/rails.yaml" not in normalized_declared_paths:
+            errors.append("rail/add must declare rails/rails.yaml")
+        if not str(constraints.get("class_name", "") or "").strip():
+            errors.append("rail/add requires constraints.class_name")
+
+    if action_group == "rail" and operation == "remove" and normalized_target_path == "rails/rails.yaml":
+        errors.append("rail/remove must target a package-local rail, not rails/rails.yaml")
+
     return ActionPolicyCheck(valid=not errors, errors=tuple(errors))
 
 
 def _operation_allowed(action_group: str, operation: str) -> bool:
+    if operation == "search":
+        return action_group == "skill"
     return operation in {"add", "modify", "remove"}
 
 

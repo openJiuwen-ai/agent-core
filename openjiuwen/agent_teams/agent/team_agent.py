@@ -180,6 +180,12 @@ class TeamAgent(BaseAgent):
         from openjiuwen.agent_teams.tiny_agent import create_tiny_agent
 
         language = self.blueprint.language if self.blueprint is not None else "cn"
+        # tiny-agent tool descriptions resolve evolved values through the
+        # team backend's cache (it delegates to the workspace manager — the
+        # single source every consumer uses). ``None`` keeps the framework
+        # default.
+        backend = infra.team_backend
+        cache = backend.workspace_cache if backend is not None else None
         agent = create_tiny_agent(
             system_prompt=tiny_spec.system_prompt,
             model_name=tiny_spec.model_name,
@@ -189,6 +195,7 @@ class TeamAgent(BaseAgent):
             language=language,
             max_iterations=tiny_spec.max_iterations,
             enable_security_rail=tiny_spec.enable_security_rail,
+            cache=cache,
         )
         infra.tiny_agents[name] = agent
         return agent
@@ -200,9 +207,7 @@ class TeamAgent(BaseAgent):
             try:
                 await agent.aclose()
             except Exception:
-                team_logger.debug(
-                    "[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True
-                )
+                team_logger.debug("[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True)
         infra.tiny_agents.clear()
 
     @property
@@ -1161,16 +1166,14 @@ class TeamAgent(BaseAgent):
         return agent
 
     async def _on_teammate_created(self, teammate_id: str):
-        team_logger.info("[%s] on_teammate_created: %s",
-                         self._member_name() or "?", teammate_id)
+        team_logger.info("[%s] on_teammate_created: %s", self._member_name() or "?", teammate_id)
 
         # ── Resolve fork context ──
         fork_ctx: ForkContext | None = None
         if self.team_backend is not None:
             fork_info = self.team_backend.consume_fork_on_spawn(teammate_id)
             team_logger.debug(
-                "[fork] _on_teammate_created: member=%s fork_info=%s "
-                "checkpoints=%s spawned_handles=%s",
+                "[fork] _on_teammate_created: member=%s fork_info=%s checkpoints=%s spawned_handles=%s",
                 teammate_id,
                 fork_info,
                 list(self._named_checkpoints.keys()),
@@ -1181,7 +1184,8 @@ class TeamAgent(BaseAgent):
                     native = self._resolve_fork_native(fork_info.get("source"))
                     team_logger.debug(
                         "[fork] resolve_fork_native: source=%s native=%s",
-                        fork_info.get("source"), type(native).__name__ if native else "None",
+                        fork_info.get("source"),
+                        type(native).__name__ if native else "None",
                     )
                     if native is not None:
                         fork_value = fork_info["fork"]
@@ -1212,15 +1216,19 @@ class TeamAgent(BaseAgent):
                                     "[fork] checkpoint '%s' created by '%s' but "
                                     "fork_source='%s'; the index belongs to another "
                                     "member and may not fit this source's context",
-                                    fork_value, creator, source_name,
+                                    fork_value,
+                                    creator,
+                                    source_name,
                                 )
                                 # The recorded count is only meaningful for its
                                 # creator's context. Falling back to full keeps the
                                 # behaviour consistent with the leader notification.
                                 ckpt_idx = None
                                 from openjiuwen.agent_teams.i18n import t
+
                                 await self._notify_fork_name_not_found(
-                                    teammate_id, fork_value,
+                                    teammate_id,
+                                    fork_value,
                                     detail=t(
                                         "checkpoint.fork_source_mismatch",
                                         creator=creator,
@@ -1250,14 +1258,15 @@ class TeamAgent(BaseAgent):
                                 # (ckpt_idx cleared above) but has already been
                                 # warned and notified with the detail.
                                 team_logger.warning(
-                                    "[fork] checkpoint '%s' not found for "
-                                    "member=%s; falling back to full context",
-                                    fork_value, teammate_id,
+                                    "[fork] checkpoint '%s' not found for member=%s; falling back to full context",
+                                    fork_value,
+                                    teammate_id,
                                 )
                                 await self._notify_fork_name_not_found(teammate_id, fork_value)
                         elif fork_mode == "before":
                             fork_ctx = ForkContext.from_agent(
-                                native, checkpoint=ckpt_idx,
+                                native,
+                                checkpoint=ckpt_idx,
                             )
                         elif fork_mode == "after":
                             fork_ctx = ForkContext.from_agent(
@@ -1277,7 +1286,8 @@ class TeamAgent(BaseAgent):
                             )
                         team_logger.debug(
                             "[fork] ForkContext created: msgs=%d empty=%s",
-                            len(fork_ctx.messages), fork_ctx.is_empty(),
+                            len(fork_ctx.messages),
+                            fork_ctx.is_empty(),
                         )
                         team_logger.info(
                             "[fork] %s into %s (msgs=%d)%s",
@@ -1289,9 +1299,9 @@ class TeamAgent(BaseAgent):
                         )
                 except Exception as exc:  # noqa: BLE001 - never let fork capture block the spawn
                     team_logger.warning(
-                        "[fork] fork capture failed for member=%s: %s; "
-                        "spawning without inherited context",
-                        teammate_id, exc,
+                        "[fork] fork capture failed for member=%s: %s; spawning without inherited context",
+                        teammate_id,
+                        exc,
                     )
                     fork_ctx = None
 
@@ -1369,12 +1379,52 @@ class TeamAgent(BaseAgent):
         except Exception as exc:  # noqa: BLE001 - best-effort, never block the spawn
             team_logger.warning(
                 "[fork] failed to notify leader about missing checkpoint '%s': %s",
-                fork_name, exc,
+                fork_name,
+                exc,
             )
 
     def share_checkpoints_with(self, other: "TeamAgent") -> None:
         """Share the leader's checkpoint namespace with another agent."""
         other.set_checkpoints_from(self._named_checkpoints)
+
+    def share_workspace_cache_with(self, other: "TeamAgent") -> None:
+        """Share the team-level workspace manager with an in-process teammate.
+
+        The leader owns one ``TeamWorkspaceManager`` (and its resident
+        ``WorkspaceCache``, built once at assembly). In-process teammates
+        reuse the same manager by reference — mirroring
+        ``share_checkpoints_with`` — so their ``_assemble_member_workspace``
+        reuse check hits the leader's cache and they do **not** build their
+        own. Must run **before** ``teammate.configure(...)``:
+        afterwards the teammate has already created its own manager.
+        """
+        own = self._configurator.workspace_manager
+        if own is not None:
+            other.attach_workspace_manager(own)
+
+    def attach_workspace_manager(self, manager: TeamWorkspaceManager | None) -> None:
+        """Adopt a shared workspace manager (in-process member share).
+
+        Called by the leader's ``share_workspace_cache_with`` — the teammate
+        reuses the leader's manager (and its resident ``WorkspaceCache``) by
+        reference instead of building its own.
+        """
+        self._configurator.workspace_manager = manager
+
+    def invalidate_workspace_cache(self) -> None:
+        """Drop resident evolvable-workspace values so the next run re-reads.
+
+        Called from ``RuntimeManager.finalize`` on the pause path (the run
+        boundary). The cache instance survives — it lives on
+        the workspace manager, which the pool entry keeps across a pause —
+        but its dicts are cleared, so the resumed run's first read-side
+        ``get*`` re-reads the md files the evolution party may have edited
+        in between. No file IO here; pure dict clear. No-op when no cache is
+        attached (single-agent / evolution disabled / pre-assembly).
+        """
+        manager = self._configurator.infra.workspace_manager
+        if manager is not None and manager.workspace_cache is not None:
+            manager.workspace_cache.invalidate()
 
     def set_checkpoint(
         self,

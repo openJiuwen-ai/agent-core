@@ -18,6 +18,7 @@ from .artifacts import (
     ResolvedBuildConfig,
     build_catalog_records_from_nodes,
     build_fallback_tree_nodes,
+    build_fallback_tree_nodes_from_records,
     can_build_tree_with_llm,
 )
 
@@ -121,29 +122,37 @@ class _IndexBuildWorkflow:
             with timer.phase("build_tree_llm"):
                 from openjiuwen.symphony.retrieval.build.workflows import index_builder as public_module
 
-                return public_module.build_tree(
-                    skills_dir=aggregate_dir,
-                    output_path=tree_output_path,
-                    config=DynamicTreeConfig(
-                        branching_factor=self._config.tree_branching_factor,
-                        max_depth=self._config.tree_max_depth,
-                        root_categories=normalize_root_categories(self._config.tree_root_categories),
-                    ),
-                    manager_config=_tree_manager_config(self._config),
-                    client=self._config.llm_openai_client,
-                    model=self._config.llm_model,
-                    api_key=self._config.tree_llm_api_key,
-                    base_url=self._config.tree_llm_base_url,
-                    llm_seed=self._config.llm_seed,
-                    max_workers=self._config.tree_max_workers,
-                    verbose=False,
-                    show_tree=False,
-                    display_skills_dir=(
-                        self._infer_display_skills_dir(resolved_item_paths) if pre_scanned_skills is None else None
-                    ),
-                    item_type=self._item_type,
-                    skill_entries=(list(pre_scanned_skills.values()) if pre_scanned_skills is not None else None),
-                )
+                try:
+                    return public_module.build_tree(
+                        skills_dir=aggregate_dir,
+                        output_path=tree_output_path,
+                        config=DynamicTreeConfig(
+                            branching_factor=self._config.tree_branching_factor,
+                            max_depth=self._config.tree_max_depth,
+                            root_categories=normalize_root_categories(self._config.tree_root_categories),
+                        ),
+                        manager_config=_tree_manager_config(self._config),
+                        client=self._config.llm_openai_client,
+                        model=self._config.llm_model,
+                        api_key=self._config.tree_llm_api_key,
+                        base_url=self._config.tree_llm_base_url,
+                        llm_seed=self._config.llm_seed,
+                        max_workers=self._config.tree_max_workers,
+                        verbose=False,
+                        show_tree=False,
+                        display_skills_dir=(
+                            self._infer_display_skills_dir(resolved_item_paths) if pre_scanned_skills is None else None
+                        ),
+                        item_type=self._item_type,
+                        skill_entries=(list(pre_scanned_skills.values()) if pre_scanned_skills is not None else None),
+                    )
+                except Exception:
+                    if not self._config.allow_fallback_tree:
+                        raise
+                    LOGGER.warning(
+                        "build fallback: tree -> fallback_tree | reason=tree llm failed",
+                        exc_info=True,
+                    )
 
         if not self._config.allow_fallback_tree:
             raise ValueError("Tree build requested but no LLM capability is configured and fallback is disabled")
@@ -228,24 +237,12 @@ class _IndexBuildWorkflow:
 
     @staticmethod
     def _fallback_tree_nodes_from_scanned(scanned_items: Dict[str, dict]) -> list[dict[str, object]]:
-        nodes: list[dict[str, object]] = [
+        return build_fallback_tree_nodes_from_records(
             {
-                "cid": "Skills",
-                "type": "branch",
-                "description": "Fallback skill index built without LLM tree generation.",
+                str(worker_id): str(item.get("description") or item.get("name") or worker_id)
+                for worker_id, item in scanned_items.items()
             }
-        ]
-        for worker_id in sorted(str(key) for key in scanned_items):
-            item = scanned_items.get(worker_id) or {}
-            nodes.append(
-                {
-                    "cid": f"Skills.{worker_id}",
-                    "type": "leaf",
-                    "description": str(item.get("description") or item.get("name") or worker_id),
-                    "worker_id": worker_id,
-                }
-            )
-        return nodes
+        )
 
 
 def _tree_manager_config(config: ResolvedBuildConfig) -> TreeManagerConfig:

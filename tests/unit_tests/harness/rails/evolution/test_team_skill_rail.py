@@ -118,18 +118,13 @@ def test_review_feedback_uses_mounted_team_rail_lifecycle(tmp_path):
     )
 
     rail.configure_review_feedback_evolution(
-        global_skills_dir=tmp_path / "global-skills",
-        trajectory_registry=object(),
         session_id="session-1",
         team_id="team-1",
     )
 
     assert rail.review_feedback_evolution_enabled is True
-    assert rail._review_feedback_global_rail is not None
-    assert (
-        rail._review_feedback_global_rail._online_request_id_prefix()
-        == "team_skill_evolve"
-    )
+    assert rail._review_feedback_coordinator._team_evolution_rail() is rail
+    assert rail._online_request_id_prefix() == "team_skill_evolve"
 
 
 @pytest.mark.asyncio
@@ -145,12 +140,8 @@ async def test_review_feedback_child_events_and_creation_approval_use_parent_que
     )
     creation_rail = SimpleNamespace(
         _pending_external_proposals={"team_skill_evolve_create_1": object()},
-        owns_external_proposal=lambda request_id: (
-            request_id == "team_skill_evolve_create_1"
-        ),
-        resolve_external_proposal=lambda request_id, *, accepted: (
-            "create approved Skill" if accepted else None
-        ),
+        owns_external_proposal=lambda request_id: request_id == "team_skill_evolve_create_1",
+        resolve_external_proposal=lambda request_id, *, accepted: "create approved Skill" if accepted else None,
     )
     rail.bind_review_feedback_skill_create_rail(creation_rail)
     event = OutputSchema(
@@ -164,56 +155,8 @@ async def test_review_feedback_child_events_and_creation_approval_use_parent_que
     assert rail.owns_approval_request("team_skill_evolve_create_1") is True
     assert await rail.drain_pending_approval_events(wait=False) == [event]
     await rail.approve_record("team_skill_evolve_create_1")
-    assert (
-        rail.pop_approval_continuation("team_skill_evolve_create_1")
-        == "create approved Skill"
-    )
+    assert rail.pop_approval_continuation("team_skill_evolve_create_1") == "create approved Skill"
     assert rail.owns_approval_request("team_skill_evolve_create_1") is False
-
-
-@pytest.mark.asyncio
-async def test_review_feedback_partial_global_approval_keeps_parent_request(tmp_path):
-    rail = _team_skill_rail(
-        str(tmp_path / "team-skills"),
-        llm=MagicMock(),
-        model="mock-model",
-        signal_trigger=False,
-        async_evolution=False,
-    )
-
-    class _GlobalRail:
-        def __init__(self):
-            self._pending_approval_snapshots = {
-                "team_skill_evolve_1": {"records": ["record-1", "record-2"]}
-            }
-
-        async def approve_record(self, request_id, *, approved_record_ids=None):
-            if approved_record_ids == ["record-1"]:
-                self._pending_approval_snapshots[request_id] = {
-                    "records": ["record-2"]
-                }
-            else:
-                self._pending_approval_snapshots.pop(request_id, None)
-
-    global_rail = _GlobalRail()
-    rail._review_feedback_global_rail = global_rail
-    rail._pending_approval_snapshots["team_skill_evolve_1"] = {
-        "records": ["record-1", "record-2"]
-    }
-
-    await rail.approve_record(
-        "team_skill_evolve_1",
-        approved_record_ids=["record-1"],
-    )
-
-    assert rail.owns_approval_request("team_skill_evolve_1") is True
-    assert rail._pending_approval_snapshots["team_skill_evolve_1"] == {
-        "records": ["record-2"]
-    }
-
-    await rail.approve_record("team_skill_evolve_1")
-
-    assert rail.owns_approval_request("team_skill_evolve_1") is False
 
 
 @pytest.mark.asyncio
@@ -462,7 +405,13 @@ def _trajectory_from_steps(
     meta: dict[str, Any] | None = None,
 ) -> Trajectory:
     """Build canonical OTLP input for Team Skill rail tests."""
-    from openjiuwen.agent_evolving.trajectory.schema import MEMBER_ID, SESSION_ID, TEAM_ID, TRAJECTORY_ID, TRAJECTORY_SOURCE
+    from openjiuwen.agent_evolving.trajectory.schema import (
+        MEMBER_ID,
+        SESSION_ID,
+        TEAM_ID,
+        TRAJECTORY_ID,
+        TRAJECTORY_SOURCE,
+    )
     from openjiuwen.extensions.observability import semconv
 
     resource_attrs: dict[str, Any] = {TRAJECTORY_ID: execution_id, TRAJECTORY_SOURCE: source}
@@ -488,7 +437,9 @@ def _trajectory_from_steps(
                     prompt_index += 1
                 attrs[f"{message_prefix}.role"] = role or ""
                 attrs[f"{message_prefix}.content"] = content or ""
-                tool_calls = getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
+                tool_calls = (
+                    getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
+                )
                 if tool_calls:
                     all_tool_calls.extend(tool_calls)
             if all_tool_calls:
@@ -515,9 +466,16 @@ def _trajectory_from_steps(
         if step.error:
             span["status"] = {"code": "ERROR", "message": str(step.error.get("message", "error"))}
         spans.append(span)
-    return Trajectory.from_otlp({
-        "resourceSpans": [{"resource": {"attributes": attributes_from_map(resource_attrs)}, "scopeSpans": [{"scope": {}, "spans": spans}]}]
-    })
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map(resource_attrs)},
+                    "scopeSpans": [{"scope": {}, "spans": spans}],
+                }
+            ]
+        }
+    )
 
 
 def _prepared_input(
@@ -899,13 +857,7 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
 
         result = await rail._stage_evolution_from_signals(
             "team-skill-a",
-            trajectory=_trajectory_from_steps(
-                execution_id="e1",
-                session_id="s1",
-                steps=[],
-                source="online",
-            ),
-            signals=[
+            [
                 make_evolution_signal(
                     signal_type="trajectory_issue",
                     section="",
@@ -914,7 +866,14 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
                     context={"trajectory_issues": [{"issue_type": "timeout"}]},
                 )
             ],
-            auto_approve=False,
+            [],
+            trajectory=_trajectory_from_steps(
+                execution_id="e1",
+                session_id="s1",
+                steps=[],
+                source="online",
+            ),
+            requires_approval=True,
         )
         bind_kwargs = rail._online_updater.bind.call_args.kwargs
         assert bind_kwargs["online_contexts"]["team-skill-a"].trajectory.session_id == "s1"
@@ -1990,6 +1949,50 @@ async def test_team_handle_evolution_from_signals_emits_no_records_outcome():
         assert outcomes[-1].payload["evolution_meta"]["status"] == "no_evolution_no_records"
         assert outcomes[-1].payload["evolution_meta"]["rail_kind"] == "team"
         assert outcomes[-1].payload["evolution_meta"]["skill_name"] == "team-skill-a"
+
+
+@pytest.mark.asyncio
+async def test_team_external_signals_use_team_approval_flow():
+    with patch.object(TeamSkillRail, "__init__", lambda self, *args, **kwargs: None):
+        rail = TeamSkillRail.__new__(TeamSkillRail)
+        rail._disabled_skills = set()
+        rail._auto_save = False
+        rail._evolution_sem = asyncio.Semaphore(1)
+        rail._evolution_store = SimpleNamespace(skill_exists=Mock(return_value=True))
+        rail._is_regular_skill = Mock(return_value=True)
+        expected = OnlineEvolutionResult(skill_name="team-skill-a", status="staged")
+        rail._handle_evolution_from_signals_with_result = AsyncMock(return_value=expected)
+        signal = make_evolution_signal(
+            signal_type="trajectory_issue",
+            section="",
+            excerpt="detected issue",
+            skill_name="team-skill-a",
+        )
+        trajectory = _trajectory_from_steps(
+            execution_id="e1",
+            session_id="s1",
+            steps=[],
+            source="online",
+        )
+
+        result = await rail.evolve_from_external_signals(
+            signals=[signal],
+            messages=[{"role": "user", "content": "review feedback"}],
+            trajectory=trajectory,
+            user_query="aggregated feedback",
+            requires_approval=True,
+        )
+
+        assert result is expected
+        rail._handle_evolution_from_signals_with_result.assert_awaited_once_with(
+            skill_name="team-skill-a",
+            trajectory=trajectory,
+            signals=[signal],
+            auto_approve=False,
+            user_query="aggregated feedback",
+            messages=[{"role": "user", "content": "review feedback"}],
+            emit_host_events=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -3113,6 +3116,8 @@ async def test_stage_evolution_from_signals_rejects_legacy_excerpt_arguments():
         await TeamSkillRail._stage_evolution_from_signals(  # type: ignore[misc]
             rail,
             "team-skill-a",
+            [],
+            [],
             trajectory=_trajectory_from_steps(
                 execution_id="e1",
                 session_id="s1",
@@ -3120,5 +3125,5 @@ async def test_stage_evolution_from_signals_rejects_legacy_excerpt_arguments():
                 source="online",
             ),
             excerpt="legacy",
-            auto_approve=False,
+            requires_approval=True,
         )

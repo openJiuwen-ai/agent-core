@@ -208,7 +208,8 @@ def test_team_info_supports_path_only_workspace():
         language="en",
     )
     assert body is not None
-    assert "`.team/" not in body
+    # Path-only workspace (third-party CLI members, no ``.team/{team}/`` mount
+    # in their cwd): the absolute path is rendered.
     assert "Team Shared Workspace: `/tmp/demo-workspace`" in body
 
 

@@ -94,8 +94,12 @@ class MemberOptimizerPathLayout:
 
 def _infer_runtime_root(output_root: Path) -> Path:
     """Infer a short workspace-level runtime root from member_optimizations."""
-    if output_root.name == "member_optimizations":
-        team_root = output_root.parent
+    member_optimizations_root = next(
+        (candidate for candidate in (output_root, *output_root.parents) if candidate.name == "member_optimizations"),
+        None,
+    )
+    if member_optimizations_root is not None:
+        team_root = member_optimizations_root.parent
         workspace_root = team_root.parent
         if workspace_root.name == "workspace" or _looks_like_orchestrator_team_root(team_root):
             return workspace_root / "mh"

@@ -36,6 +36,20 @@ def test_member_optimizer_runtime_paths_do_not_nest_under_audit_dir(tmp_path: Pa
     assert len(str(current_path)) < len(str(old_publish_path))
 
 
+def test_member_optimizer_runtime_paths_are_short_for_nested_sibling_candidate(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / ".office_runs" / "runs" / "office_jws_example"
+    optimization_root = run_root / "single_harness_optimization"
+    (optimization_root / "evaluations").mkdir(parents=True)
+    candidate_root = optimization_root / "member_optimizations" / "sibling_cohorts" / "e001_b001_r001_example" / "c001"
+
+    layout = MemberOptimizerPathLayout.from_output_root(candidate_root)
+
+    assert layout.runtime_root == run_root / "mh"
+    assert candidate_root not in layout.worktrees_dir("member_optimization_001").parents
+
+
 def test_member_optimizer_role_mapping_is_stable(tmp_path: Path) -> None:
     layout = MemberOptimizerPathLayout.from_output_root(tmp_path / "workspace" / "demo-team" / "member_optimizations")
 

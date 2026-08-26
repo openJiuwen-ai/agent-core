@@ -45,7 +45,6 @@ def build_training_executor(
     supervisor_token: str = "",
     supervisor_model: str = "",
     target_model_id: str = "",
-    sft_trainer_command: str = "",
     sft_dry_run: bool = False,
 ) -> Any:
     """Build the concrete training executor selected by ``train_backend``.
@@ -68,7 +67,6 @@ def build_training_executor(
             supervisor_token=supervisor_token,
             supervisor_model=supervisor_model,
             target_model_id=target_model_id or base_model_path,
-            trainer_command=sft_trainer_command,
             dry_run=sft_dry_run,
         )
     if normalized == "PPO":

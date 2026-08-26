@@ -48,7 +48,7 @@ _SUBAGENT_MANIFEST_NAME = ".subagent.json"
 # before they validate as ``PluginSpec``. Precedence: harness_config.yaml over
 # harness.yaml.
 _LEGACY_PACKAGE_MANIFEST_NAMES = ("harness_config.yaml", "harness.yaml")
-_MCP_DIR_MANIFEST_NAMES = ("mcps.json", "mcps.yaml")
+_MCP_DIR_MANIFEST_NAMES = ("mcp.json", "mcps.json", "mcps.yaml")
 _MCP_TRANSPORT_ALIASES = {
     "stdio": "stdio",
     "sse": "sse",
@@ -62,6 +62,7 @@ _LEGACY_AGENT_CONTROL_KEYS = {
     "context",
     "default_mode",
     "enable_async_subagent",
+    "enable_subagent_runtime",
     "enable_task_loop",
     "enable_task_planning",
     "language",
@@ -121,10 +122,10 @@ def _find_legacy_yaml_manifest(path: str | Path) -> Path:
 
 
 def normalize_package_mcps(mcps: Any, package_dir: str | Path) -> list[dict[str, Any]]:
-    """Expand ``{dir: ./mcps}`` refs and normalize config.yaml-style MCP entries.
+    """Expand ``{file: .../mcp.json}`` / ``{dir: ...}`` refs and normalize MCP entries.
 
     Used by Plugin package loading and by AgentTemplate packages whose
-    ``manifest.json`` only points at an MCP directory.
+    ``manifest.json`` points at an MCP file or directory.
     """
     return _normalize_mcps(mcps, Path(package_dir).expanduser().resolve())
 
@@ -139,7 +140,7 @@ def find_plugin_manifest(path: str | Path) -> Path:
 
     An explicit file is parsed as-is (no sibling search). A directory is
     checked for ``manifest.json`` first; once present it is used regardless of
-    its ``packageType`` (``load_plugin_package`` rejects the wrong type — no
+    its ``package_type`` (``load_plugin_package`` rejects the wrong type — no
     legacy YAML fallback is attempted once ``manifest.json`` exists). Only
     when ``manifest.json`` is absent does the legacy
     ``harness_config.yaml`` / ``expert_harness.yaml`` / ``harness.yaml``
@@ -191,19 +192,24 @@ def load_plugin_package(manifest_path: str | Path) -> PluginSpec:
 
 
 def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
-    """Parse a root ``packageType=agent_template`` ``manifest.json`` into an ``AgentTemplateSpec``.
+    """Parse a root ``package_type=agent_template`` ``manifest.json`` into an ``AgentTemplateSpec``.
     """
     manifest = Path(manifest_path).expanduser().resolve(strict=True)
     if manifest.name != _PACKAGE_MANIFEST_NAME:
         raise ValueError(f"AgentTemplate manifest must be named {_PACKAGE_MANIFEST_NAME!r}: {manifest}")
     package_root = manifest.parent.resolve(strict=True)
     payload = _read_json_mapping(manifest)
-    if payload.get("packageType") != "agent_template":
-        raise ValueError(f"{manifest} declares packageType={payload.get('packageType')!r}, expected 'agent_template'")
+    if payload.get("package_type") != "agent_template":
+        raise ValueError(
+            f"{manifest} declares package_type={payload.get('package_type')!r}, expected 'agent_template'"
+        )
 
-    agent_card_payload = payload.get("agentCard")
-    if not agent_card_payload:
-        raise ValueError(f"AgentTemplate manifest {manifest} is missing required 'agentCard'")
+    template_name = payload.get("name")
+    if not isinstance(template_name, str) or not template_name.strip():
+        raise ValueError(f"AgentTemplate manifest {manifest} is missing required non-empty 'name'")
+    description = payload.get("description")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError(f"AgentTemplate manifest {manifest} is missing required non-empty 'description'")
 
     base_dir = manifest.parent
     subagents = [
@@ -216,7 +222,11 @@ def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
         for item in _as_list(payload.get("subagents"))
     ]
     return AgentTemplateSpec(
-        agent_card=AgentCard.model_validate(agent_card_payload),
+        agent_card=AgentCard(
+            id=template_name.strip(),
+            name=template_name.strip(),
+            description=description.strip(),
+        ),
         model=_build_model_spec(payload.get("model"), base_dir=base_dir, package_root=package_root),
         prompt_sections=_build_persona_prompt_sections(
             payload.get("persona"), base_dir=base_dir, package_root=package_root
@@ -234,10 +244,10 @@ def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
 
 def _load_plugin_manifest_json(manifest: Path) -> PluginSpec:
     payload = _read_json_mapping(manifest)
-    package_type = payload.get("packageType")
+    package_type = payload.get("package_type")
     if package_type != "plugin":
-        raise ValueError(f"{manifest} declares packageType={package_type!r}, expected 'plugin'")
-    for forbidden_key in ("persona", "agentCard", "model", "subagents", "memories", "rubrics"):
+        raise ValueError(f"{manifest} declares package_type={package_type!r}, expected 'plugin'")
+    for forbidden_key in ("persona", "agent_card", "model", "subagents", "memories", "rubrics"):
         if forbidden_key in payload:
             raise ValueError(f"Plugin manifest {manifest} must not declare {forbidden_key!r}")
 
@@ -300,15 +310,15 @@ def _load_agent_subtemplate(subagent_dir: Path, *, package_root: Path) -> AgentT
             f"Subagent template {manifest} must not declare 'subagents' "
             "(only the root agent_template may declare direct subagents)"
         )
-    agent_name = payload.get("agentName")
+    agent_name = payload.get("agent_name")
     if not agent_name:
-        raise ValueError(f"Subagent template {manifest} is missing required 'agentName'")
+        raise ValueError(f"Subagent template {manifest} is missing required 'agent_name'")
 
     base_dir = manifest.parent
     agent_card = AgentCard(
         id=str(agent_name),
         name=str(agent_name),
-        description=_first_display_description(payload.get("displayDescription")),
+        description=_first_display_description(payload.get("display_description")),
     )
     return AgentTemplateSpec(
         agent_card=agent_card,
@@ -477,15 +487,48 @@ def _build_mcp_specs(items: Any, *, base_dir: Path, package_root: Path) -> list[
     for item in _as_list(items):
         if not isinstance(item, dict):
             raise ValueError(f"mcp entry must be a mapping: {item!r}")
+        if "file" in item and not _looks_like_mcp_server_entry(item):
+            mcp_file = _resolve_new_manifest_path(
+                str(item["file"]), base_dir=base_dir, package_root=package_root, must_be_dir=False
+            )
+            mcp_base = mcp_file.parent
+            for raw_entry in _mcp_payload_entries(_load_data_file(mcp_file)):
+                specs.append(_build_mcp_server_spec(raw_entry, base_dir=mcp_base, package_root=package_root))
+            continue
         if "dir" in item and not _looks_like_mcp_server_entry(item):
             mcp_dir = _resolve_new_manifest_path(
                 str(item["dir"]), base_dir=base_dir, package_root=package_root, must_be_dir=True
             )
             for raw_entry in _load_mcp_dir_entries(mcp_dir):
-                specs.append(_build_mcp_server_spec(raw_entry, base_dir=base_dir, package_root=package_root))
+                specs.append(_build_mcp_server_spec(raw_entry, base_dir=mcp_dir, package_root=package_root))
+            continue
+        if "connector" in item:
+            # Host-managed external MCP ref, Strict shape only — skip; never expand into a local McpServerSpec.
+            connector = item.get("connector")
+            if set(item) != {"connector"} or not isinstance(connector, str) or not connector:
+                raise ValueError(
+                    f"mcp connector entry must be {{'connector': <non-empty str>}}: {item!r}"
+                )
             continue
         specs.append(_build_mcp_server_spec(item, base_dir=base_dir, package_root=package_root))
     return specs
+
+
+def _mcp_payload_entries(payload: Any) -> list[dict[str, Any]]:
+    """Parse marketplace ``mcpServers`` or legacy ``servers`` / ``mcps`` lists."""
+    if isinstance(payload, dict) and isinstance(payload.get("mcpServers"), dict):
+        entries: list[dict[str, Any]] = []
+        for name, cfg in payload["mcpServers"].items():
+            if not isinstance(cfg, dict):
+                continue
+            entry = dict(cfg)
+            entry.setdefault("name", str(name))
+            entries.append(entry)
+        return entries
+    if isinstance(payload, dict):
+        servers = payload.get("servers", payload.get("mcps", []))
+        return [item for item in _as_list(servers) if isinstance(item, dict)]
+    return [item for item in _as_list(payload) if isinstance(item, dict)]
 
 
 def _load_mcp_dir_entries(mcp_dir: Path) -> list[dict[str, Any]]:
@@ -493,9 +536,7 @@ def _load_mcp_dir_entries(mcp_dir: Path) -> list[dict[str, Any]]:
         path = mcp_dir / filename
         if not path.is_file():
             continue
-        payload = _load_data_file(path)
-        servers = payload.get("servers", payload.get("mcps", [])) if isinstance(payload, dict) else payload
-        return [item for item in _as_list(servers) if isinstance(item, dict)]
+        return _mcp_payload_entries(_load_data_file(path))
     raise FileNotFoundError(f"MCP dir {mcp_dir} must contain one of: {', '.join(_MCP_DIR_MANIFEST_NAMES)}")
 
 
@@ -702,10 +743,23 @@ def _load_data_file(path: Path) -> Any:
 
 
 def _normalize_mcps(items: Any, package_dir: Path) -> list[dict[str, Any]]:
-    """Expand ``{dir: ...}`` refs and normalize config.yaml-style MCP entries."""
+    """Expand ``{file: ...}`` / ``{dir: ...}`` refs and normalize MCP entries."""
     normalized: list[dict[str, Any]] = []
     for item in _as_list(items):
         if not isinstance(item, dict):
+            continue
+        if "file" in item and not _looks_like_mcp_server_entry(item):
+            mcp_file = Path(str(item["file"]))
+            if not mcp_file.is_absolute():
+                mcp_file = (package_dir / mcp_file).resolve()
+            else:
+                mcp_file = mcp_file.resolve()
+            for raw in _mcp_payload_entries(_load_data_file(mcp_file)):
+                entry = _normalize_mcp_server_entry(raw)
+                if entry is not None:
+                    if not entry.get("cwd"):
+                        entry["cwd"] = str(mcp_file.parent)
+                    normalized.append(entry)
             continue
         if "dir" in item and not _looks_like_mcp_server_entry(item):
             normalized.extend(_load_mcps_from_dir(package_dir, str(item["dir"])))
@@ -742,16 +796,12 @@ def _load_mcps_from_dir(package_dir: Path, relative_dir: str) -> list[dict[str, 
         path = mcp_dir / filename
         if not path.is_file():
             continue
-        payload = _load_data_file(path)
-        servers = payload
-        if isinstance(payload, dict):
-            servers = payload.get("servers", payload.get("mcps", []))
         normalized: list[dict[str, Any]] = []
-        for item in _as_list(servers):
-            if not isinstance(item, dict):
-                continue
+        for item in _mcp_payload_entries(_load_data_file(path)):
             entry = _normalize_mcp_server_entry(item)
             if entry is not None:
+                if not entry.get("cwd"):
+                    entry["cwd"] = str(mcp_dir)
                 normalized.append(entry)
         return normalized
 

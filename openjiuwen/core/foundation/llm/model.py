@@ -566,7 +566,7 @@ def init_model(
         api_base: str,
         *,
         temperature: float = 0.95,
-        top_p: float = 0.1,
+        top_p: float = 0.95,
         max_tokens: Optional[int] = None,
         timeout: float = 60.0,
         max_retries: int = 3,

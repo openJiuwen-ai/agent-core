@@ -81,6 +81,8 @@ async def run(args):
     - `isolation='worktree'`：在全新 git worktree 里跑 worker，**昂贵**（每 worker 约 200-500ms 设置 + 磁盘开销），**仅当** worker 并行改文件且会互相冲突时才用；worktree 若无更改则自动回收。
     - `agent_type`：用具名专家 subagent（如团队里某类 teammate）替代默认 worker，从与团队相同的注册表解析；与 `schema` 组合使用（专家系统提示词会被追加结构化输出指令）。（接口就位、执行推进中。）
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` —— **有状态**多轮 agent，跨轮记忆，第二轮无需重述第一轮上下文。`notify=True` 单向推送、返回 `None`。
+- `await s.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` —— 从 `agent_session` 派生一个**独立分支**（`fork_mode` 五种）：`full` 全量继承；`before`/`after` 以第 N 轮为界保留前/后；`keep_before_compact_after`/`keep_after_compact_before` 保留一侧、另一侧压成摘要。`keep_rounds` 是**轮数**（每次 `send()` 计一轮）：**`full` 之外的模式必填**（缺省会直接报错，没有截断点就没法截断）；传入的轮数超过父会话实际轮数时**降级为全量**并告警，不报错。fork 在调用时刻冻结父上下文，此后两条线互不影响；子会话可继续 `send`、也可再 `fork`（链式）。`human_session` 不支持 fork。
+  - **链式 fork 约束**：**不要 `fork` 一个尚未发送过任何消息的 fork 子会话**——它会降级为镜像兜底（丢失 ToolMessage）。链式派生时，每个被 `fork` 的会话都必须先 `send` 过；若想基于父会话的早期状态派生，直接用父会话的 `fork_mode` + `keep_rounds`（如 `before`/`after`）表达，而不是先 fork 出一个未发送的子再 fork 它。
 - `await human(prompt, *, schema=)` / `human_session()` + `.send()` —— 一次性 / 有状态的**人类参与**（HITL），等真人不占并发 permit、不计 spawn 预算，可被 journal 重放。
 - `await parallel([thunk, ...])` —— fork-join **栅栏**：并发跑、等齐才返回；分支抛错落 `None`，调用**永不抛**（用前 `compact` 过滤）。thunk 是 `lambda: agent(...)` 这样的零参可调用。
 - `await pipeline(items, stage1, stage2, ...)` —— **无栅栏**流式：每个 item 独立穿过所有 stage（A 可在 stage3 而 B 还在 stage1）；每个 stage 回调收 `(prev, item, index)`——后续 stage 可用 `item`/`index` 标注工作，无需把上下文穿过 `prev`；某 stage 抛错只把该 item 落为 `None`、跳过它剩余 stage。

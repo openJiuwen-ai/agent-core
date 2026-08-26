@@ -115,6 +115,21 @@ class _FakeBackend:
     async def get_members_max_updated_at(self) -> int:
         return self.members_mtime
 
+    async def get_member_updated_at_state(
+        self, member_name: str, field: str
+    ) -> tuple[int, bool]:
+        """Single-member mtime probe the identity body's first-emit records.
+
+        Returns a stable ``(mtime, present=True)`` so the probe does not
+        re-fire between rounds — this fake exercises the CLI delivery path,
+        not the prompt-evolution re-announce semantics.
+        """
+        return 1, True
+
+    async def stamp_member_prompt_updated_at(self, member_name: str, ts: int) -> None:
+        """No-op: the stable probe above never signals a blank field."""
+        return None
+
     async def get_team_info(self):
         return self.team
 
@@ -123,7 +138,9 @@ class _FakeBackend:
 
     async def get_member(self, member_name: str):
         if member_name == "claude-1":
-            return SimpleNamespace(member_name="claude-1", display_name="Claude One", desc="", role="teammate")
+            return SimpleNamespace(
+                member_name="claude-1", display_name="Claude One", desc="", role="teammate", prompt=""
+            )
         return next((m for m in self.members if m.member_name == member_name), None)
 
     def add_member(self, member_name: str, display_name: str) -> None:

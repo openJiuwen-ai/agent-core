@@ -138,6 +138,7 @@ class SpawnManager:
             else:
                 hitt_enabled = False
             handle = await external_cli_spawn(
+                team_agent=self._get_team_agent(),
                 spec=spec,
                 ctx=ctx,
                 hitt_enabled=hitt_enabled,
@@ -367,6 +368,15 @@ class SpawnManager:
 
         permissions_override = get_member_permissions_override(teammate)
 
+        # Team-level B-class values come from ``team_info``: they are
+        # written to the DB when ``build_team`` succeeds and are carried
+        # into assembly through the runtime context — never derived from
+        # the spec. ``get_team_info`` already overlays evolved workspace
+        # values, so the ctx mirrors what the read side would return.
+        team = await team_backend.get_team_info()
+        team_desc = team.desc if team is not None else None
+        team_prompt = team.prompt if team is not None else None
+
         return TeamRuntimeContext(
             role=role,
             member_name=teammate.member_name,
@@ -374,6 +384,8 @@ class SpawnManager:
             desc=teammate.desc or "",
             prompt=teammate.prompt or "",
             team_spec=ctx.team_spec if ctx else None,
+            team_desc=team_desc,
+            team_prompt=team_prompt,
             messager_config=self._configurator.build_member_messager_config(teammate.member_name),
             db_config=ctx.db_config if ctx else None,
             member_model=member_model,

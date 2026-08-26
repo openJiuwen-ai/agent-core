@@ -9,6 +9,7 @@ Outer layer validates the plan before returning MemberOptimizationPlan.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import re
@@ -54,8 +55,10 @@ _ROLE_IDENTITY_SCOPES = frozenset({"role_identity", "duty_boundary"})
 _SOUL_SCOPES = frozenset({"durable_operating_principle"})
 _PROMPT_CORE_PATHS = frozenset({"identity.md", "soul.md"})
 _RUN_IF_VALUES = frozenset({"dependency_succeeded", "dependency_failed", "always"})
-_UNSUPPORTED_OPTIMIZATION_SURFACES = frozenset({"rail"})
+_UNSUPPORTED_OPTIMIZATION_SURFACES: frozenset[str] = frozenset()
 _PLAN_VALIDATION_ATTEMPTS = 3
+_MAX_ACTIONS_PER_ISSUE = 3
+_MIN_NEW_SKILL_SUPPORT_CASES = 2
 
 
 def _validate_action(
@@ -96,6 +99,8 @@ def _validate_plan(
         errors.extend(f"action {action_id}: {e}" for e in surface_errors)
         alignment_errors = _validate_optimization_surface_alignment(action, targets_by_role)
         errors.extend(f"action {action_id}: {e}" for e in alignment_errors)
+        skill_qualification_errors = _validate_new_skill_qualification(action, targets_by_role)
+        errors.extend(f"action {action_id}: {e}" for e in skill_qualification_errors)
         attribution_errors = _validate_action_issue_attribution(action, targets_by_role)
         errors.extend(f"action {action_id}: {e}" for e in attribution_errors)
         existing_surface_errors = _validate_existing_surface_operation(action, targets_by_role)
@@ -110,6 +115,8 @@ def _validate_plan(
             errors.append(f"duplicate action_id: {action_id}")
         action_ids_seen.add(action_id)
 
+    errors.extend(_validate_skill_search_add_fallback(plan_data))
+    errors.extend(_validate_action_bundle_cohesion(plan_data))
     errors.extend(
         _validate_actionable_target_coverage(
             targets or [],
@@ -123,7 +130,9 @@ def _validate_plan(
             if action_id not in all_action_ids:
                 errors.append(f"wave[{wave_idx}] references unknown action_id: {action_id}")
 
-    action_ids_from_waves = {aid for wave in plan_data.get("action_waves", []) for aid in wave}
+    action_ids_from_waves: set[str] = set()
+    for wave in plan_data.get("action_waves", []):
+        action_ids_from_waves.update(wave)
     if action_ids_from_waves != all_action_ids:
         missing = all_action_ids - action_ids_from_waves
         extra = action_ids_from_waves - all_action_ids
@@ -132,6 +141,76 @@ def _validate_plan(
         if extra:
             errors.append(f"waves reference unknown action_ids: {extra}")
 
+    return errors
+
+
+def _validate_action_bundle_cohesion(plan_data: dict[str, Any]) -> list[str]:
+    """Require related multi-action repairs to stay inside one issue bundle."""
+    actions = [action for action in plan_data.get("actions", []) if isinstance(action, dict)]
+    actions_by_id = {
+        str(action.get("action_id", "") or ""): action for action in actions if str(action.get("action_id", "") or "")
+    }
+    bundle_by_action_id: dict[str, tuple[str, str]] = {}
+    actions_by_bundle: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for action in actions:
+        issue_ids = [str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)]
+        action_id = str(action.get("action_id", "") or "")
+        role = str(action.get("role", "") or "")
+        if action_id and role and len(issue_ids) == 1:
+            bundle = (role, issue_ids[0])
+            bundle_by_action_id[action_id] = bundle
+            actions_by_bundle.setdefault(bundle, []).append(action)
+
+    errors: list[str] = []
+    for bundle, bundle_actions in sorted(actions_by_bundle.items()):
+        if len(bundle_actions) > _MAX_ACTIONS_PER_ISSUE:
+            errors.append(
+                f"role {bundle[0]} issue {bundle[1]} has {len(bundle_actions)} actions; "
+                f"at most {_MAX_ACTIONS_PER_ISSUE} associated actions are allowed"
+            )
+
+    for action in actions:
+        action_id = str(action.get("action_id", "") or "")
+        action_bundle = bundle_by_action_id.get(action_id)
+        for dependency_id in action.get("depends_on", []) or []:
+            dependency_id = str(dependency_id)
+            dependency = actions_by_id.get(dependency_id)
+            if dependency is None:
+                errors.append(f"action {action_id} depends on unknown action_id: {dependency_id}")
+                continue
+            dependency_bundle = bundle_by_action_id.get(dependency_id)
+            if action_bundle is not None and dependency_bundle != action_bundle:
+                errors.append(
+                    f"action {action_id} depends on unrelated action {dependency_id}; "
+                    "dependencies must stay within the same role and attributed issue"
+                )
+
+    for bundle, bundle_actions in sorted(actions_by_bundle.items()):
+        if len(bundle_actions) <= 1:
+            continue
+        action_ids = {str(action.get("action_id", "") or "") for action in bundle_actions}
+        adjacency = {action_id: set() for action_id in action_ids}
+        for action in bundle_actions:
+            action_id = str(action.get("action_id", "") or "")
+            for dependency_id in action.get("depends_on", []) or []:
+                dependency_id = str(dependency_id)
+                if dependency_id not in action_ids:
+                    continue
+                adjacency[action_id].add(dependency_id)
+                adjacency[dependency_id].add(action_id)
+        visited: set[str] = set()
+        pending = [next(iter(action_ids))]
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            pending.extend(adjacency[current] - visited)
+        if visited != action_ids:
+            errors.append(
+                f"role {bundle[0]} issue {bundle[1]} actions are not one connected "
+                "dependency bundle; split unrelated changes into separate candidates"
+            )
     return errors
 
 
@@ -166,6 +245,29 @@ def _validate_action_issue_attribution(
         ]
     action["attributed_issue_ids"] = sorted(action_issue_ids)
     return _validate_action_issue_text_scope(action, action_issue_ids)
+
+
+def _validate_new_skill_qualification(
+    action: dict[str, Any],
+    targets_by_role: dict[str, MemberOptimizationTarget],
+) -> list[str]:
+    """Prevent one observed subtask from being materialized as a new Skill."""
+    if str(action.get("action_group", "")).strip() != "skill":
+        return []
+    target = targets_by_role.get(str(action.get("role", "") or ""))
+    if target is None:
+        return []
+    qualification = target.metadata.get("new_skill_qualification", {})
+    if not isinstance(qualification, dict):
+        return []
+    if qualification.get("status") != "insufficient_cross_case_support":
+        return []
+    return [
+        "a Skill change requires the same reusable mechanism in at least "
+        f"{qualification.get('required_support_case_count', _MIN_NEW_SKILL_SUPPORT_CASES)} "
+        "distinct cases; use the declared prompt_section fallback for this "
+        "single-case observation"
+    ]
 
 
 def _validate_action_issue_text_scope(
@@ -316,7 +418,7 @@ def _supported_optimization_surfaces(
         group = str(definition.group or "").strip()
         if group == "prompt":
             surfaces.update({"prompt", "prompt_section", "identity", "soul"})
-        elif group in {"skill", "tool"}:
+        elif group in {"skill", "tool", "rail"}:
             surfaces.add(group)
     return surfaces
 
@@ -326,6 +428,33 @@ def _normalize_optimization_surface(surface: Any) -> str:
     if value in {"prompt_file", "prompt_section_file"}:
         return "prompt_section"
     return value
+
+
+def _validate_skill_search_add_fallback(plan_data: dict[str, Any]) -> list[str]:
+    """Require explicit failure semantics for local add after skill search."""
+    actions = {
+        str(action.get("action_id", "") or ""): action
+        for action in plan_data.get("actions", [])
+        if isinstance(action, dict)
+    }
+    search_action_ids = {
+        action_id
+        for action_id, action in actions.items()
+        if str(action.get("action_group", "") or "") == "skill" and str(action.get("operation", "") or "") == "search"
+    }
+    errors: list[str] = []
+    for action_id, action in actions.items():
+        if str(action.get("action_group", "") or "") != "skill" or str(action.get("operation", "") or "") != "add":
+            continue
+        depends_on = {str(dependency_id) for dependency_id in action.get("depends_on", [])}
+        if not (depends_on & search_action_ids):
+            continue
+        run_if = str(action.get("run_if", "dependency_succeeded") or "dependency_succeeded")
+        if run_if != "dependency_failed":
+            errors.append(
+                f"action {action_id}: skill/add fallback after skill/search must set run_if=dependency_failed"
+            )
+    return errors
 
 
 def _normalize_required_declared_paths(plan_data: dict[str, Any]) -> None:
@@ -370,8 +499,12 @@ def _required_declared_paths_for_action(
         return [target_path, "prompt_sections/sections.yaml"]
     if action_group == "skill" and target_path.startswith("skills/"):
         return [target_path, "skills/skills.yaml"]
+    if action_group == "skill" and operation == "search":
+        return ["skills", "skills/skills.yaml"]
     if action_group == "tool" and target_path.startswith("tools/") and target_path != "tools/tools.yaml":
         return [target_path, "tools/tools.yaml"]
+    if action_group == "rail" and target_path.startswith("rails/") and target_path != "rails/rails.yaml":
+        return [target_path, "rails/rails.yaml"]
     return []
 
 
@@ -479,7 +612,7 @@ def _validate_optimization_surface_alignment(
 def _action_optimization_surface(action: dict[str, Any]) -> str:
     action_group = str(action.get("action_group", "") or "")
     target_path = _normalize_plan_path(str(action.get("target_path", "") or ""))
-    if action_group in {"skill", "tool"}:
+    if action_group in {"skill", "tool", "rail"}:
         return action_group
     if action_group != "prompt":
         return ""
@@ -574,7 +707,7 @@ class MemberActionPlannerAgent:
             agent=agent,
             agent_name="MemberActionPlannerAgent",
             user_message=user_message,
-            session_id="member_action_planner",
+            session_id=_planner_session_id(optimization_experience),
             retry_limit=self._retry_limit,
             parse_response=parse_yaml_or_json_object_response,
             build_retry_message=self._build_retry_message,
@@ -750,6 +883,8 @@ evidence-backed surface and repair the causal discriminator instead.
                     "public_trigger": item.get("public_trigger", []),
                     "decisive_probe": item.get("decisive_probe", {}),
                     "decision_contract": item.get("decision_contract", {}),
+                    "supported_causal_hypothesis_ids": item.get("supported_causal_hypothesis_ids", []),
+                    "falsified_causal_hypothesis_ids": item.get("falsified_causal_hypothesis_ids", []),
                 }
                 for item in optimization_hypotheses
                 if isinstance(item, dict)
@@ -764,6 +899,8 @@ one allowed runtime surface, but do not weaken, reverse, or paraphrase away its
 required_behavior or decision_contract. Attribute each action only to the
 source_issue_id it fixes. The action must teach the selected required_action;
 do not turn it back into a menu containing the recorded wrong_decision.
+Every action is controller-bound to supported_causal_hypothesis_ids. Never use,
+rename, or combine a hypothesis listed in falsified_causal_hypothesis_ids.
 """
         experience_context = ""
         if optimization_experience:
@@ -774,7 +911,8 @@ do not turn it back into a menu containing the recorded wrong_decision.
                 if isinstance(journal, list)
                 else []
             )
-            experience_context = f"""
+            if scoreboard or recent:
+                experience_context = f"""
 ## Optimization Experience
 
 Lever scoreboard:
@@ -792,6 +930,12 @@ that behavior and narrow the next action to remaining_failed_fail_to_pass.
 Do not describe a binary 0-to-0 case score as "no effect" when the official
 per-test delta records partial contract progress.
 """
+        sibling_generation_context = _build_sibling_generation_context(
+            optimization_experience,
+        )
+        improver_policy_context = _build_improver_policy_context(
+            optimization_experience,
+        )
 
         return f"""## Current Action Contract
 
@@ -810,6 +954,8 @@ per-test delta records partial contract progress.
 {role_mechanisms_text}
 {hypothesis_contract}
 {experience_context}
+{improver_policy_context}
+{sibling_generation_context}
 {validation_feedback}
 {rejected_feedback}
 
@@ -817,6 +963,192 @@ per-test delta records partial contract progress.
 
 Return ONLY a JSON plan object as specified in the system prompt.
 """
+
+
+def _planner_session_id(optimization_experience: dict[str, Any] | None) -> str:
+    sibling_generation = _sibling_generation(optimization_experience)
+    candidate_id = str(sibling_generation.get("candidate_id", "") or "").strip()
+    if not candidate_id:
+        return "member_action_planner"
+    safe_candidate_id = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate_id).strip("_")
+    digest = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:10]
+    return f"member_action_planner_{safe_candidate_id[:32] or 'candidate'}_{digest}"
+
+
+def _build_improver_policy_context(
+    optimization_experience: dict[str, Any] | None,
+) -> str:
+    if not isinstance(optimization_experience, dict):
+        return ""
+    raw_policy = optimization_experience.get("improver_policy")
+    if not isinstance(raw_policy, dict) or not str(raw_policy.get("version_id", "") or ""):
+        return ""
+    policy = {
+        "version_id": str(raw_policy.get("version_id", "") or ""),
+        "policy_digest": str(raw_policy.get("policy_digest", "") or ""),
+        "generation_directives": (
+            dict(raw_policy.get("generation_directives", {}))
+            if isinstance(raw_policy.get("generation_directives"), dict)
+            else {}
+        ),
+        "budget_policy": (
+            dict(raw_policy.get("budget_policy", {})) if isinstance(raw_policy.get("budget_policy"), dict) else {}
+        ),
+    }
+    return f"""
+## Frozen Improver Policy
+
+{json.dumps(policy, ensure_ascii=False, indent=2)}
+
+This is the versioned pre-execution policy for the current Improver. It is not
+sibling execution feedback and contains no result for the current cohort.
+Apply its generation directives only within the immutable hypothesis, diagnosed
+lever, run-specific action contract, and available Harness surfaces. A diversity
+directive never permits an unsupported cross-lever change. An activation-evidence
+directive requires concrete current execution or Harness-path evidence before
+choosing that surface. Do not invent evidence merely to satisfy the policy.
+"""
+
+
+def _build_sibling_generation_context(
+    optimization_experience: dict[str, Any] | None,
+) -> str:
+    sibling_generation = _sibling_generation(optimization_experience)
+    candidate_id = str(sibling_generation.get("candidate_id", "") or "").strip()
+    if not candidate_id:
+        return ""
+    prior_proposals = sibling_generation.get("prior_proposals", [])
+    if not isinstance(prior_proposals, list):
+        prior_proposals = []
+    compact_proposals = [_compact_sibling_proposal(item) for item in prior_proposals if isinstance(item, dict)]
+    compact_proposals = [item for item in compact_proposals if item]
+    generation_position = {
+        "candidate_id": candidate_id,
+        "generation_index": sibling_generation.get(
+            "generation_index",
+            sibling_generation.get("candidate_index", ""),
+        ),
+        "candidate_count": sibling_generation.get("candidate_count", ""),
+    }
+    return f"""
+## Sibling Candidate Generation (Pre-Execution Plans Only)
+
+Current candidate position:
+{json.dumps(generation_position, ensure_ascii=False, indent=2)}
+
+Prior sibling proposal summaries:
+{json.dumps(compact_proposals, ensure_ascii=False, indent=2)}
+
+This section contains static plans produced before candidate execution. It is
+not execution feedback, rejection history, verifier evidence, a score outcome,
+or evidence that any sibling works. `generation_index` is only a generation
+slot; it is not a quality prediction. Predicted ranks are computed and frozen
+only after every sibling proposal exists.
+
+Generate the proposal assigned to the current generation slot. Make it
+materially different from the prior proposal summaries in its intervention,
+not merely in action IDs, wording, or file names. Stay inside the immutable
+hypothesis and its diagnosed lever. Never cross levers just to manufacture
+diversity. If no evidence-backed materially distinct proposal exists, keep the
+evidence contract even if the resulting proposal is a duplicate; the cohort
+ranker will identify that duplicate without pretending it is a new strategy.
+"""
+
+
+def _sibling_generation(
+    optimization_experience: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(optimization_experience, dict):
+        return {}
+    sibling_generation = optimization_experience.get("sibling_generation")
+    return dict(sibling_generation) if isinstance(sibling_generation, dict) else {}
+
+
+def _compact_sibling_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    static_keys = (
+        "candidate_id",
+        "index",
+        "candidate_index",
+        "generation_order",
+        "plan_id",
+        "summary",
+        "proposal_summary",
+        "intervention_summary",
+        "intervention_strategy",
+        "diversity_signature",
+        "candidate_fingerprint",
+        "role",
+        "action_group",
+        "operation",
+        "action_type",
+        "target_path",
+        "runtime_name",
+        "description",
+        "rationale",
+        "expected_effect",
+        "selected_lever",
+        "selected_surface",
+        "action_groups",
+        "operations",
+        "target_paths",
+        "hypothesis_ids",
+        "source_issue_ids",
+        "target_case_ids",
+        "action_count",
+    )
+    compact = {key: proposal[key] for key in static_keys if key in proposal and proposal[key] not in (None, "", [], {})}
+    raw_actions = proposal.get("actions", [])
+    if isinstance(raw_actions, list):
+        actions = [_compact_sibling_action(action) for action in raw_actions if isinstance(action, dict)]
+        actions = [action for action in actions if action]
+        if actions:
+            compact["actions"] = actions
+    raw_capabilities = proposal.get("capabilities", [])
+    if isinstance(raw_capabilities, list):
+        capabilities = [
+            _compact_sibling_action(capability) for capability in raw_capabilities if isinstance(capability, dict)
+        ]
+        capabilities = [capability for capability in capabilities if capability]
+        if capabilities:
+            compact["capabilities"] = capabilities
+    return compact
+
+
+def _compact_sibling_action(action: dict[str, Any]) -> dict[str, Any]:
+    static_keys = (
+        "role",
+        "action_group",
+        "operation",
+        "action_type",
+        "target_path",
+        "runtime_name",
+        "description",
+        "rationale",
+        "expected_effect",
+        "attributed_issue_ids",
+        "declared_write_paths",
+        "optimization_hypothesis_ids",
+        "target_case_ids",
+    )
+    compact = {key: action[key] for key in static_keys if key in action and action[key] not in (None, "", [], {})}
+    lever_decision = action.get("lever_decision")
+    if not isinstance(lever_decision, dict):
+        constraints = action.get("constraints")
+        if isinstance(constraints, dict):
+            lever_decision = constraints.get("lever_decision")
+    if isinstance(lever_decision, dict):
+        compact_lever: dict[str, Any] = {}
+        for key in (
+            "selected_lever",
+            "selected_surface",
+            "recommended_levers",
+            "predicted_affected_case_ids",
+        ):
+            if key in lever_decision and lever_decision[key] not in (None, "", [], {}):
+                compact_lever[key] = lever_decision[key]
+        if compact_lever:
+            compact["lever_decision"] = compact_lever
+    return compact
 
 
 def _summarize_evidence_items(items: list[dict[str, Any]], *, limit: int = 4) -> str:
@@ -869,6 +1201,14 @@ def _bind_immutable_hypotheses(
                 "public_trigger": item.get("public_trigger", []),
                 "decisive_probe": item.get("decisive_probe", {}),
             }
+            if item.get("supported_causal_hypothesis_ids"):
+                contract["supported_causal_hypothesis_ids"] = item["supported_causal_hypothesis_ids"]
+            if item.get("supported_causal_hypothesis_semantic_ids"):
+                contract["supported_causal_hypothesis_semantic_ids"] = item["supported_causal_hypothesis_semantic_ids"]
+            if item.get("falsified_causal_hypothesis_ids"):
+                contract["falsified_causal_hypothesis_ids"] = item["falsified_causal_hypothesis_ids"]
+            if item.get("falsified_causal_hypothesis_semantic_ids"):
+                contract["falsified_causal_hypothesis_semantic_ids"] = item["falsified_causal_hypothesis_semantic_ids"]
             if isinstance(item.get("decision_contract"), dict) and item.get("decision_contract"):
                 contract["decision_contract"] = item["decision_contract"]
             if isinstance(item.get("lever_policy"), dict) and item.get("lever_policy"):
@@ -882,6 +1222,31 @@ def _bind_immutable_hypotheses(
             contracts.append(contract)
         constraints = dict(action.get("constraints") or {})
         constraints["optimization_contracts"] = contracts
+        supported_causal_ids: list[str] = []
+        falsified_causal_ids: set[str] = set()
+        for item in selected:
+            for hypothesis_id in item.get("supported_causal_hypothesis_ids", []):
+                normalized = str(hypothesis_id)
+                if normalized and normalized not in supported_causal_ids:
+                    supported_causal_ids.append(normalized)
+            for hypothesis_id in item.get("falsified_causal_hypothesis_ids", []):
+                normalized = str(hypothesis_id)
+                if normalized:
+                    falsified_causal_ids.add(normalized)
+        if set(supported_causal_ids) & falsified_causal_ids:
+            raise RuntimeError("optimization hypothesis marks one causal hypothesis both supported and falsified")
+        if any(item.get("hypothesis_assessment") for item in selected) and not supported_causal_ids:
+            raise RuntimeError("optimization hypothesis has no supported causal hypothesis")
+        if supported_causal_ids:
+            constraints["source_causal_hypothesis_ids"] = supported_causal_ids
+        supported_causal_semantic_ids: list[str] = []
+        for item in selected:
+            for semantic_id in item.get("supported_causal_hypothesis_semantic_ids", []):
+                normalized = str(semantic_id)
+                if normalized and normalized not in supported_causal_semantic_ids:
+                    supported_causal_semantic_ids.append(normalized)
+        if supported_causal_semantic_ids:
+            constraints["source_causal_hypothesis_semantic_ids"] = supported_causal_semantic_ids
         policies = [
             dict(item.get("lever_policy", {}))
             for item in selected
@@ -914,6 +1279,42 @@ def _bind_immutable_hypotheses(
     if isinstance(metadata, dict):
         metadata["optimization_hypothesis_ids"] = list(dict.fromkeys(selected_hypothesis_ids))
         metadata["semantic_authority"] = "immutable_optimization_hypotheses"
+
+
+def _annotate_action_bundles(
+    plan_data: dict[str, Any],
+    hypotheses: list[dict[str, Any]],
+) -> None:
+    """Persist the issue and required behavior shared by each atomic bundle."""
+    required_behavior_by_issue = {
+        str(item.get("source_issue_id", "")): str(item.get("required_behavior", "") or "")
+        for item in hypotheses
+        if isinstance(item, dict) and str(item.get("source_issue_id", ""))
+    }
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for action in plan_data.get("actions", []):
+        if not isinstance(action, dict):
+            continue
+        issue_ids = [str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)]
+        if len(issue_ids) != 1:
+            continue
+        key = (str(action.get("role", "") or ""), issue_ids[0])
+        grouped.setdefault(key, []).append(str(action.get("action_id", "") or ""))
+
+    metadata = plan_data.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        return
+    metadata["action_bundles"] = [
+        {
+            "bundle_id": f"{role}:{issue_id}",
+            "role": role,
+            "issue_id": issue_id,
+            "required_behavior": required_behavior_by_issue.get(issue_id, ""),
+            "action_ids": action_ids,
+            "atomic": True,
+        }
+        for (role, issue_id), action_ids in sorted(grouped.items())
+    ]
 
 
 def _build_action_contract_text(action_definitions: list[ActionDefinition]) -> str:
@@ -970,7 +1371,9 @@ def _attach_improvement_briefs(
             continue
 
         role = str(action.get("role", ""))
-        for issue_id in issue_ids_by_role.get(role, set()):
+        action_issue_ids = {str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)}
+        candidate_issue_ids = action_issue_ids or issue_ids_by_role.get(role, set())
+        for issue_id in candidate_issue_ids:
             brief = brief_by_issue.get(issue_id)
             if brief:
                 action["constraints"] = dict(brief)
@@ -1136,13 +1539,12 @@ def _adapt_surface_for_activation_phase(
     MechanismAttributionReport,
     list[dict[str, Any]],
 ]:
-    """Place an Instruction on the runtime surface that can activate it.
+    """Move post-diagnosis Instructions to Control without inferring reuse.
 
-    Universal task-start policy can remain a Prompt.  A reusable method needed
-    while investigating belongs on the routed Skill surface.  A transition
-    that only becomes knowable after diagnosis or at submission belongs on a
-    runtime Control surface, regardless of whether the analyzer initially
-    named Prompt or Skill.
+    Activation phase answers *when* behavior is needed. It does not establish
+    that a method is reusable enough to become a Skill. Investigation-time
+    Prompt guidance therefore remains a Prompt; Skill qualification is handled
+    independently from cross-case evidence.
     """
     instruction_surfaces = {
         "identity",
@@ -1151,7 +1553,6 @@ def _adapt_surface_for_activation_phase(
         "prompt_section",
         "skill",
     }
-    prompt_surfaces = {"identity", "soul", "prompt", "prompt_section"}
     control_phases = {"post_diagnosis", "pre_submission"}
     phase_by_issue: dict[str, str] = {}
     for item in optimization_hypotheses:
@@ -1175,10 +1576,6 @@ def _adapt_surface_for_activation_phase(
         if phases and phases <= control_phases and source_surfaces & instruction_surfaces:
             adapted_surface = "control"
             reason = "required_action_is_not_knowable_at_task_start_and_must_not_be_recast_as_static_instruction"
-        elif phases == {"during_investigation"} and source_surfaces & prompt_surfaces:
-            adapted_surface = "skill"
-            reason = "investigation_method_requires_task_relevant_routing_instead_of_global_static_prompt_injection"
-
         if not adapted_surface:
             adapted_targets.append(target)
             continue
@@ -1231,6 +1628,115 @@ def _adapt_surface_for_activation_phase(
     }
     metadata = dict(mechanism_report.metadata)
     metadata["activation_phase_surface_adaptations"] = adaptations
+    return (
+        adapted_targets,
+        replace(
+            mechanism_report,
+            role_mechanisms=role_mechanisms,
+            metadata=metadata,
+        ),
+        adaptations,
+    )
+
+
+def _adapt_surface_for_new_skill_qualification(
+    *,
+    targets: list[MemberOptimizationTarget],
+    mechanism_report: MechanismAttributionReport,
+    optimization_hypotheses: list[dict[str, Any]],
+) -> tuple[
+    list[MemberOptimizationTarget],
+    MechanismAttributionReport,
+    list[dict[str, Any]],
+]:
+    """Expose a Prompt fallback when a proposed new Skill has one-case support.
+
+    The mechanism presented to the planner defaults to a prompt section and
+    every Skill action is rejected for that target. Thus one observed verifier
+    subitem cannot create or contaminate a benchmark-specific runtime
+    capability.
+    """
+    support_by_issue: dict[str, set[str]] = {}
+    for hypothesis in optimization_hypotheses:
+        if not isinstance(hypothesis, dict):
+            continue
+        issue_id = str(hypothesis.get("source_issue_id", "") or "").strip()
+        if not issue_id:
+            continue
+        raw_case_ids = hypothesis.get("target_case_ids", [])
+        if not isinstance(raw_case_ids, list):
+            continue
+        support_by_issue.setdefault(issue_id, set()).update(
+            str(case_id).strip() for case_id in raw_case_ids if str(case_id).strip()
+        )
+
+    adaptations: list[dict[str, Any]] = []
+    adapted_targets: list[MemberOptimizationTarget] = []
+    for target in targets:
+        surfaces = [str(surface).strip() for surface in target.optimization_surfaces if str(surface).strip()]
+        if "skill" not in surfaces:
+            adapted_targets.append(target)
+            continue
+        issue_ids = {str(issue_id).strip() for issue_id in target.attributed_issue_ids if str(issue_id).strip()}
+        support_case_id_set: set[str] = set()
+        for issue_id in issue_ids:
+            support_case_id_set.update(support_by_issue.get(issue_id, set()))
+        support_case_ids = sorted(support_case_id_set)
+        if len(support_case_ids) != 1:
+            adapted_targets.append(target)
+            continue
+
+        qualification = {
+            "status": "insufficient_cross_case_support",
+            "support_case_ids": support_case_ids,
+            "support_case_count": len(support_case_ids),
+            "required_support_case_count": _MIN_NEW_SKILL_SUPPORT_CASES,
+            "fallback_surface": "prompt_section",
+            "reason": "one_observed_subtask_does_not_establish_a_reusable_skill",
+        }
+        metadata = dict(target.metadata)
+        metadata["new_skill_qualification"] = qualification
+        adapted_surfaces = [surface for surface in surfaces if surface != "skill"]
+        if "prompt_section" not in adapted_surfaces:
+            adapted_surfaces.append("prompt_section")
+        adapted_targets.append(
+            replace(
+                target,
+                optimization_surfaces=adapted_surfaces,
+                metadata=metadata,
+            )
+        )
+        adaptations.append(
+            {
+                "role": target.role,
+                "issue_ids": sorted(issue_ids),
+                **qualification,
+            }
+        )
+    if not adaptations:
+        return targets, mechanism_report, []
+    adapted_issue_ids: set[str] = set()
+    for adaptation in adaptations:
+        adapted_issue_ids.update(adaptation["issue_ids"])
+    role_mechanisms = {
+        role: [
+            replace(
+                mechanism,
+                optimization_surface="prompt_section",
+                rationale=(
+                    f"{mechanism.rationale} A single observed case does not establish "
+                    "cross-case Skill reuse; test the instruction as a bounded prompt "
+                    "section until another independent case supports the mechanism."
+                ).strip(),
+            )
+            if mechanism.issue_id in adapted_issue_ids and mechanism.optimization_surface == "skill"
+            else mechanism
+            for mechanism in mechanisms
+        ]
+        for role, mechanisms in mechanism_report.role_mechanisms.items()
+    }
+    metadata = dict(mechanism_report.metadata)
+    metadata["new_skill_qualification_adaptations"] = adaptations
     return (
         adapted_targets,
         replace(
@@ -1479,6 +1985,15 @@ class MemberActionPlanner:
             mechanism_report=actionable_mechanism_report,
             optimization_hypotheses=list(optimization_hypotheses or []),
         )
+        (
+            actionable_targets,
+            actionable_mechanism_report,
+            new_skill_qualification_adaptations,
+        ) = _adapt_surface_for_new_skill_qualification(
+            targets=actionable_targets,
+            mechanism_report=actionable_mechanism_report,
+            optimization_hypotheses=list(optimization_hypotheses or []),
+        )
         # A delivered-but-unapplied Skill already supplied the method. Adapt the
         # next attempt to a bounded execution checkpoint instead of another Skill.
         (
@@ -1548,6 +2063,7 @@ class MemberActionPlanner:
                     "wave_count": 0,
                     "filtered_inactionable_issue_ids": filtered_issue_ids,
                     "activation_phase_surface_adaptations": (activation_phase_surface_adaptations),
+                    "new_skill_qualification_adaptations": (new_skill_qualification_adaptations),
                     "allowed_action_groups": sorted(restricted_groups),
                     "allowed_prompt_surfaces": sorted(restricted_prompt_surfaces),
                     "capability_requests": deferred_capability_requests,
@@ -1622,6 +2138,10 @@ class MemberActionPlanner:
             plan_data,
             list(optimization_hypotheses or []),
         )
+        _annotate_action_bundles(
+            plan_data,
+            list(optimization_hypotheses or []),
+        )
         plan_id = plan_data.get("plan_id", f"member_plan_{uuid.uuid4().hex[:8]}")
 
         actions = []
@@ -1671,12 +2191,18 @@ class MemberActionPlanner:
                 "max_actions_per_plan": max_actions_per_plan,
                 "capability_requests": deferred_capability_requests,
                 "activation_phase_surface_adaptations": (activation_phase_surface_adaptations),
+                "new_skill_qualification_adaptations": (new_skill_qualification_adaptations),
                 "recovery_surface_adaptations": recovery_surface_adaptations,
                 "optimization_hypothesis_ids": list(
                     (plan_data.get("metadata") or {}).get(
                         "optimization_hypothesis_ids",
                         [],
                     )
+                    if isinstance(plan_data.get("metadata"), dict)
+                    else []
+                ),
+                "action_bundles": list(
+                    (plan_data.get("metadata") or {}).get("action_bundles", [])
                     if isinstance(plan_data.get("metadata"), dict)
                     else []
                 ),

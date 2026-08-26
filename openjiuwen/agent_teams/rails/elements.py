@@ -197,10 +197,12 @@ class TeamPolicyInput(ConstructionInput):
 )
 def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
     """Build the team policy rail (always mounted)."""
+    from openjiuwen.agent_teams.prompts.loader import make_template_loader
     from openjiuwen.agent_teams.rails.team_policy_rail import TeamPolicyRail
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     inp = TeamPolicyInput.resolve(params, context)
+    backend = get_team_backend(context)
     return TeamPolicyRail(
         role=TeamRole(inp.role),
         member_prompt=inp.prompt,
@@ -215,10 +217,12 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         base_prompt=inp.base_prompt,
         team_workspace_mount=inp.team_workspace_mount,
         team_workspace_path=inp.team_workspace_path,
-        team_backend=get_team_backend(context),
+        team_backend=backend,
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
         steer_batch_size=inp.steer_batch_size,
         fork_source=inp.fork_source or None,
+        # Bind the per-team workspace cache at construction.
+        loader=make_template_loader(backend.workspace_cache if backend is not None else None),
         # Same signal the tool factory gates the ``swarmflow`` tool on, so the
         # prompt that describes the mechanism and the tool that runs it appear
         # and disappear together.
@@ -312,10 +316,17 @@ class TeamPlanModeInput(ConstructionInput):
 )
 def build_team_plan_mode_rail(params: dict[str, Any], context: Any) -> Any:
     """Build the team plan-mode rail."""
+    from openjiuwen.agent_teams.prompts.loader import make_template_loader
     from openjiuwen.agent_teams.rails.team_plan_mode_rail import TeamPlanModeRail
 
     inp = TeamPlanModeInput.resolve(params, context)
-    return TeamPlanModeRail(language=inp.language)
+    backend = get_team_backend(context)
+    return TeamPlanModeRail(
+        language=inp.language,
+        # team_plan_mode / team_plan_agent read evolved workspace values
+        # through this loader.
+        loader=make_template_loader(backend.workspace_cache if backend is not None else None),
+    )
 
 
 # ---------------------------------------------------------------------------

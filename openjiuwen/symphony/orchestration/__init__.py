@@ -5,6 +5,8 @@ from openjiuwen.symphony.orchestration.contracts import (
     CapabilityGraph,
     GraphArtifactStatus,
     GraphBuildResult,
+    GraphMutationDelta,
+    GraphMutationResult,
     OrchestrationPlan,
     OrchestrationProgress,
 )
@@ -14,6 +16,8 @@ __all__ = [
     "CapabilityGraph",
     "GraphArtifactStatus",
     "GraphBuildResult",
+    "GraphMutationDelta",
+    "GraphMutationResult",
     "OrchestrationConfig",
     "OrchestrationPlan",
     "OrchestrationProgress",

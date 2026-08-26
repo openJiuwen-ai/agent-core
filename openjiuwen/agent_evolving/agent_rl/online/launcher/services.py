@@ -235,6 +235,7 @@ def start_online_training_scheduler(
     from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
 
     train_gpu_count = len([gpu for gpu in cfg.training.gpu_ids.split(',') if gpu.strip()]) or 1
+    notifier = InferenceNotifier(runtime.inference_url) if cfg.training.auto_hotload_lora else None
     scheduler = OnlineTrainingScheduler(
         redis_url=cfg.gateway.redis_url or "",
         trajectory_store_backend=cfg.gateway.trajectory_store_backend,
@@ -244,7 +245,7 @@ def start_online_training_scheduler(
         min_samples_for_training=cfg.training.threshold,
         base_model_path=cfg.inference.model_path,
         lora_repo=LoRARepository(runtime.lora_repo),
-        notifier=InferenceNotifier(runtime.inference_url),
+        notifier=notifier,
         nproc_per_node=train_gpu_count,
         training_gpu_ids=cfg.training.gpu_ids,
         ppo_config_path=cfg.training.ppo_config,
@@ -260,7 +261,6 @@ def start_online_training_scheduler(
         supervisor_token=cfg.training.supervisor_token,
         supervisor_model=cfg.training.supervisor_model,
         target_model_id=cfg.training.target_model_id or cfg.inference.model_name,
-        sft_trainer_command=cfg.training.sft_trainer_command,
         sft_dry_run=cfg.training.sft_dry_run,
     )
     scheduler.start()
@@ -414,6 +414,7 @@ def print_launch_summary(
         f'  LoRA repo:       {runtime.lora_repo}',
         f'  Train threshold: {cfg.training.threshold} samples',
         f'  Drain pending:   {cfg.training.drain_pending_on_train}',
+        f'  Auto hot-load:   {cfg.training.auto_hotload_lora}',
         f'  Max/run:         {cfg.training.max_samples_per_run or "unlimited"} samples',
         f'  PPO step size:   {cfg.training.ppo_samples_per_step or "all claimed"} samples',
         f'  Collect batch:   {cfg.trajectory.batch_size}',

@@ -14,7 +14,6 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    Callable,
     Literal,
     Optional,
     Union,
@@ -50,9 +49,9 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
+from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyLimits, validate_swarmflow_concurrency
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.worktree import WorktreeConfig
-from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyLimits, validate_swarmflow_concurrency
 
 if TYPE_CHECKING:
     # Resolved for type-checkers only; the runtime import lives in ``build()``
@@ -207,6 +206,13 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
+    evolution_enabled: bool = True
+    """Team switch for self-evolution coverage.
+
+    ``True`` (default): workspace files with an evolved value override code
+    defaults / DB values. ``False``: files are never applied — everything
+    falls back to code defaults / DB values.
+    """
     enable_team_plan: bool = False
     """Whether the leader starts in single-agent plan mode for this run.
 
@@ -217,6 +223,16 @@ class TeamAgentSpec(BaseModel):
     teammate_mode: str = "build_mode"
     """Member execution mode: ``build_mode`` or ``plan_mode``."""
     spawn_mode: str = "process"
+    member_workspace_prefix: bool = True
+    """Dynamic-only switch for member workspace isolation (block C).
+
+    When True, dynamic member real directories live at
+    ``.agent_teams/<team>#<member>/`` (per-team isolation). When False they
+    share the plain ``.agent_teams/<member>/`` shape (same as predefined).
+    The in-team link name is unaffected — it stays
+    ``workspaces/<member>_workspace`` either way, so A/B code and the worker
+    path never notice the switch.
+    """
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[PredefinedMemberSpec] = []
     external_cli_agents: list[ExternalCliAgentSpec] = []
@@ -766,6 +782,8 @@ class TeamAgentSpec(BaseModel):
             model_pool_strategy=team_strategy,
             external_messager_config=external_messager_config,
             workspace=self.workspace.model_dump() if self.workspace is not None else None,
+            evolution_enabled=self.evolution_enabled,
+            member_workspace_prefix=self.member_workspace_prefix,
         )
 
         messager_config = self.transport.build() if self.transport else None

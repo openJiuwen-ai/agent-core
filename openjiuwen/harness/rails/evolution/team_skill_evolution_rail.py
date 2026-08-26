@@ -134,16 +134,6 @@ def infer_team_skill_from_trajectory(
     )
 
 
-class _ReviewFeedbackGlobalSkillEvolutionRail(SkillEvolutionRail):
-    """Regular global-Skill persistence using the existing team approval route."""
-
-    def _online_request_id_prefix(self) -> str | None:
-        return "team_skill_evolve"
-
-    def _online_stage_source(self) -> str:
-        return "scheduler_review_feedback"
-
-
 class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
     """Team skill evolution rail — counterpart of SkillEvolutionRail.
 
@@ -218,8 +208,8 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         self._passive_evolution_pending = False
         self._host_completion_pending_session_id: Optional[str] = None
         self._completion_followup_pending_session_id: Optional[str] = None
+        self._team_id = team_id
         self._review_feedback_coordinator = None
-        self._review_feedback_global_rail: SkillEvolutionRail | None = None
         self._review_feedback_skill_create_rail = None
         self._review_feedback_approval_continuations: dict[str, str] = {}
         self.set_member_role(member_role or self._DEFAULT_MEMBER_ROLE)
@@ -256,43 +246,25 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
     def configure_review_feedback_evolution(
         self,
         *,
-        global_skills_dir: str | Path,
-        trajectory_registry: Any,
         session_id: str,
         team_id: str,
         min_confidence: float = 0.7,
     ) -> None:
         """Attach reviewer-feedback evolution to this standard team Rail.
 
-        The internal regular-Skill Rail owns global Skill persistence, while
-        this mounted team Rail remains the sole lifecycle and host-event
-        surface. Scheduler feedback therefore follows the same pending-event
-        and approval path as ordinary team evolution.
+        Task feedback is translated into structured observations and retained
+        until the team finishes. Terminal aggregation then reuses this mounted
+        Rail's ordinary Team Skill optimizer, persistence, pending-event, and
+        approval path.
         """
         from openjiuwen.agent_teams.agent.scheduling.review_feedback_evolution import (
             ReviewFeedbackEvolutionCoordinator,
         )
 
-        global_rail = _ReviewFeedbackGlobalSkillEvolutionRail(
-            str(global_skills_dir),
-            llm=self.evolver.llm,
-            model=self.evolver.model,
-            review_runtime=EvolutionReviewRuntime(),
-            # The child rail never subscribes on its own; sharing the mounted
-            # rail's processor keeps the whole evolution stack on one instance.
-            trajectory_span_processor=self.trajectory_span_processor,
-            language=self._language,
-            signal_trigger=False,
-            review_trigger=False,
-            auto_save=self.auto_save,
-            disabled_skills=list(getattr(self, "_disabled_skills", set())),
-        )
-        self._review_feedback_global_rail = global_rail
         self._review_feedback_coordinator = ReviewFeedbackEvolutionCoordinator(
             session_id=session_id,
             team_id=team_id,
-            trajectory_registry=trajectory_registry,
-            global_rail_provider=lambda: self._review_feedback_global_rail,
+            team_rail_provider=lambda: self,
             skill_create_rail_provider=lambda: self._review_feedback_skill_create_rail,
             event_sink=self._relay_review_feedback_events,
             min_confidence=min_confidence,
@@ -316,7 +288,7 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         self,
         payload: dict[str, Any] | None = None,
     ) -> bool:
-        """Run the terminal global aggregation pass for scheduler feedback."""
+        """Run the terminal Team Skill aggregation pass for scheduler feedback."""
         if self._review_feedback_coordinator is None:
             return False
         return await self._review_feedback_coordinator.on_team_completed(payload)
@@ -326,16 +298,8 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         event_group: str,
         events: list[Any],
     ) -> None:
-        """Relay child-Rail events into the mounted Rail's normal host queue."""
-        if event_group == "global_evolution" and self._review_feedback_global_rail is not None:
-            child_snapshots = getattr(
-                self._review_feedback_global_rail,
-                "_pending_approval_snapshots",
-                {},
-            )
-            for request_id, snapshot in child_snapshots.items():
-                self._pending_approval_snapshots[request_id] = snapshot
-        elif event_group == "skill_creation" and self._review_feedback_skill_create_rail is not None:
+        """Relay reviewer-feedback events into the normal host queue."""
+        if event_group == "skill_creation" and self._review_feedback_skill_create_rail is not None:
             proposals = getattr(
                 self._review_feedback_skill_create_rail,
                 "_pending_external_proposals",
@@ -921,26 +885,6 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
                 continuations[request_id] = continuation
             return
 
-        global_rail = getattr(self, "_review_feedback_global_rail", None)
-        if global_rail is not None and request_id in getattr(
-            global_rail,
-            "_pending_approval_snapshots",
-            {},
-        ):
-            await global_rail.approve_record(
-                request_id,
-                approved_record_ids=approved_record_ids,
-            )
-            child_snapshots = getattr(global_rail, "_pending_approval_snapshots", {})
-            if request_id in child_snapshots:
-                # A partial approval keeps the remaining records pending. Keep
-                # the mounted Rail's mirror in sync so a later approval/reject
-                # can still be routed through the standard team endpoint.
-                self._pending_approval_snapshots[request_id] = child_snapshots[request_id]
-            else:
-                self._pending_approval_snapshots.pop(request_id, None)
-            return
-
         approve_kwargs: dict[str, list[str]] = {}
         if approved_record_ids is not None:
             approve_kwargs["approved_record_ids"] = approved_record_ids
@@ -965,16 +909,6 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         creation_rail = getattr(self, "_review_feedback_skill_create_rail", None)
         if creation_rail is not None and creation_rail.owns_external_proposal(request_id):
             creation_rail.resolve_external_proposal(request_id, accepted=False)
-            self._pending_approval_snapshots.pop(request_id, None)
-            return
-
-        global_rail = getattr(self, "_review_feedback_global_rail", None)
-        if global_rail is not None and request_id in getattr(
-            global_rail,
-            "_pending_approval_snapshots",
-            {},
-        ):
-            await global_rail.reject_record(request_id)
             self._pending_approval_snapshots.pop(request_id, None)
             return
 
@@ -1202,7 +1136,7 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         self,
         *,
         skill_name: str,
-        trajectory: Trajectory,
+        trajectory: Optional[Trajectory],
         signals: list[EvolutionSignal],
         auto_approve: bool,
         user_query: str = "",
@@ -1220,9 +1154,9 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
             skill_name=skill_name,
             trajectory=trajectory,
             signals=signals,
-            auto_approve=auto_approve,
+            requires_approval=not auto_approve,
             user_query=user_query,
-            messages=messages,
+            messages=messages or [],
         )
         request = result.request
         if result.status in ONLINE_EVOLUTION_OUTCOME_STATUSES:
@@ -1284,25 +1218,49 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         )
         return result
 
+    async def _handle_evolution_from_signals(
+        self,
+        *,
+        skill_name: str,
+        signals: list[EvolutionSignal],
+        messages: list[dict],
+        trajectory: Optional[Trajectory] = None,
+        ctx: Optional[AgentCallbackContext],
+        user_query: str = "",
+        requires_approval: bool,
+        emit_host_events: bool = True,
+    ) -> OnlineEvolutionResult:
+        """Route the shared external-signal entry point through Team approval events."""
+        del ctx
+        return await self._handle_evolution_from_signals_with_result(
+            skill_name=skill_name,
+            trajectory=trajectory,
+            signals=signals,
+            auto_approve=not requires_approval,
+            user_query=user_query,
+            messages=messages,
+            emit_host_events=emit_host_events,
+        )
+
     async def _stage_evolution_from_signals(
         self,
         skill_name: str,
-        *,
-        trajectory: Trajectory,
         signals: list[EvolutionSignal],
-        auto_approve: bool,
+        messages: list[dict],
+        *,
+        trajectory: Optional[Trajectory] = None,
         user_query: str = "",
-        messages: Optional[list[dict]] = None,
+        requires_approval: bool,
     ) -> OnlineEvolutionResult:
         """Stage team-skill evolution from normalized signals through the shared orchestrator."""
         self._emit_progress("staging", f"staging evolution request for '{skill_name}'", skill_name=skill_name)
         return await self._online_orchestrator.evolve(
             skill_name=skill_name,
             signals=signals,
-            messages=messages or [],
+            messages=messages,
             user_query=user_query,
             trajectory=trajectory,
-            requires_approval=not auto_approve,
+            requires_approval=requires_approval,
             metadata={},
             source="team_skill_experience_updater",
         )

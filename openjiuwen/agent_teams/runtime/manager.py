@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.interaction.router import (
     parse_interact_str,
     resolve_targets,
 )
+from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.monitor import (
     TeamMonitor,
     create_monitor,
@@ -63,7 +64,6 @@ from openjiuwen.agent_teams.runtime.pool import (
     RuntimeState,
     TeamRuntimePool,
 )
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
@@ -224,6 +224,13 @@ class TeamRuntimeManager:
                     session_id,
                 )
                 await agent.pause_coordination()
+                # Run boundary: the cache instance survives
+                # the pause (the pool entry keeps the agent, and with it the
+                # workspace manager + cache), so drop its resident values now
+                # — the resumed run's first read-side ``get*`` re-reads the
+                # md files the evolution party may have edited between runs.
+                # No file IO here; pure dict clear.
+                agent.invalidate_workspace_cache()
                 entry.state = RuntimeState.PAUSED
         except Exception as exc:
             team_logger.warning(
@@ -795,6 +802,9 @@ class TeamRuntimeManager:
             await db.drop_session_tables_by_id(session_id)
             if not await remove_session_worktrees(team_name, session_id):
                 team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
+            # Reclaim the session's message/task spill files after the dynamic
+            # tables are dropped so on-disk content does not outlive its rows.
+            _remove_session_content_files(team_name, session_id)
 
         for session_id in session_ids:
             await checkpointer.release(session_id)
@@ -802,6 +812,18 @@ class TeamRuntimeManager:
         deleted = await db.team.delete_team(team_name)
         if not deleted:
             team_logger.info("Team {} already absent from team_info during delete", team_name)
+
+        # Block C: detach member links and release the team's dynamic real dirs
+        # (``.agent_teams/<team>#<member>``) before removing ``team_home`` —
+        # they live outside the team tree (siblings), so a bare rmtree of
+        # ``team_dir`` would otherwise leave them and their ``.refs.json`` refs
+        # behind, and a junction would be descended and delete shared contents.
+        try:
+            from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
+
+            MemberWorkspaceBinder().cleanup_team(team_name)
+        except OSError as exc:
+            team_logger.warning("Failed to clean member workspace links for {}: {}", team_name, exc)
 
         # Remove team filesystem directory (team_home) after database cleanup.
         # This covers the case where the caller has already stopped the runtime
@@ -869,6 +891,8 @@ class TeamRuntimeManager:
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):
                 team_logger.warning("Failed to remove session worktrees for team={} session={}", team_name, session_id)
+            # Reclaim the session's message/task spill files.
+            _remove_session_content_files(team_name, session_id)
 
     @staticmethod
     async def _resolve_any_team_session_release_info(
@@ -1114,3 +1138,27 @@ _REJECT_KINDS = frozenset(
         RunActionKind.REJECT_INCONSISTENT,
     }
 )
+
+
+def _remove_session_content_files(team_name: str, session_id: str) -> None:
+    """Reclaim a session's spill files.
+
+    Called by ``delete_team`` / ``release_session`` right after
+    ``drop_session_tables_by_id`` so the on-disk ``messages/`` and ``tasks/``
+    directories do not outlive their dynamic tables. Best-effort — an IO
+    failure logs a warning and never blocks session teardown.
+    """
+    try:
+        from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
+
+        SessionFileStore().remove_session(
+            team_name=team_name,
+            session_id=session_id,
+        )
+    except (OSError, ValueError) as exc:  # best-effort cleanup
+        team_logger.warning(
+            "Failed to remove session content files team={} session={}: {}",
+            team_name,
+            session_id,
+            exc,
+        )

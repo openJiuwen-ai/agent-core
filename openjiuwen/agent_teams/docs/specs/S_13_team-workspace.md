@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/team_workspace/` |
-| 最近一次修订日期 | 2026-08-12 |
-| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` · `F_79_team-scoped-skill-library-and-visibility.md` |
+| 最近一次修订日期 | 2026-08-20 |
+| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` · `F_79_team-scoped-skill-library-and-visibility.md` · `F_85_block-c-member-directory-linker.md` |
 
 ## 范围 / 边界
 
@@ -27,7 +27,7 @@
 
 - **不管代码隔离**。每个成员各自的 git worktree 由 `WorktreeManager`（`openjiuwen.harness.tools.worktree`）独立负责；workspace 是产物协同区，worktree 是源码工作树，二者磁盘路径不相交。
 - **不管文件 I/O 实现**。`read_file` / `write_file` / `glob` 等读写动作走标准 SysOperation 工具，命中 `.team/` 前缀时被 `TeamWorkspaceRail` 拦截、加上锁与版本策略。manager 自身不做内容读写。
-- **不管成员私有 workspace**。成员私有目录是 `team_home(team_name)/workspaces/{member}_workspace/` 或 `independent_member_workspace(member)`，由 `agent_configurator.setup_agent` 处理；workspace manager 只把团队共享区**挂载**进成员 workspace。
+- **不管成员私有 workspace 的拓扑**。成员私有目录由 `agent_configurator.setup_agent` 经 Block C 成员目录链接器装配（`team_workspace/binder.py::prepare_member_workspace`）：是否 link 出去按**成员 role 白名单**判定——只有 `TEAMMATE` 与 `HUMAN_AGENT` 走 dynamic（真实目录扁平化到 `.agent_teams/<team>#<member>/` 并 link），`LEADER`（含按名判定的 leader）留 team 内真实目录，`predefined` 走 `.agent_teams/<member>`（跨 team 共享）+ link，其余 role（`EXTERNAL_CLI`、`BRIDGE_AGENT`、`WORKER`、未知）一律退回 team 内真实目录不 link 出去。外部 CLI 成员另有 `setup_agent` 的 `member_runtime is not None` 提前返回，根本不触达装配段。team 内 `workspaces/{member}_workspace` 是透明 link（建不出则退回 team 内真实目录）。对 A/B 代码与 workspace manager 而言 `team_member_workspace_dir` 依然有效——manager 只把团队共享区**挂载**进成员 workspace（见 [[F_85]]）。
 - **不管 Skill 实体**。Skill 实体唯一存放于 `paths.global_skills_dir()`，团队共享工作区**没有** `skills/` 节点。本子系统只负责在 workspace 根播种团队那份可见性声明文件；声明的语义、合成与授权归 `agent_teams/skill/visibility.py` 与 `rails/team_skill_use_rail.py`（见 [[F_79]]）。
 - **不管多 team 全局协调**。一份 `TeamWorkspaceManager` 只服务一个 team_name；跨 team 的状态在 runtime pool 层。
 
@@ -229,7 +229,7 @@ Skill 实体不在上面这棵树里，它在 `paths.global_skills_dir()`（默�
 两份文档由 `skill/visibility.py::compose_skill_visibility` 合成后喂给
 `rails/team_skill_use_rail.py::TeamSkillUseRail`。见 [[F_79]]。
 
-成员若在独立 workspace 模式（`stable_base=True`），`independent_member_workspace(member)` 通过符号链接被纳入 `team_home(team_name)/workspaces/{member}_workspace`；`.team` 挂载点不变。符号链接建不出来时（受限运行时）成员留在自己的独立 workspace 里跑，声明文件跟着它走——`workspace_layout.ensure_team_member_workspace_link` 已不再整份 copytree 成员 workspace（[[F_79]] D6）。
+成员 workspace 的装配由 Block C 成员目录链接器完成（[[F_85]]）：是否 link 出去按**成员 role 白名单**判定——只有 `TEAMMATE` 与 `HUMAN_AGENT` 走 dynamic，真实目录落盘在 `.agent_teams/<team>#<member>/`（per-team 隔离）并在 `workspaces/{member}_workspace` 建 link 指过去；leader 留在 team 内、predefined 落到 `.agent_teams/<member>`（跨 team 共享）+ link；其余 role（`EXTERNAL_CLI` 等）退回 team 内真实目录不 link 出去。外部 CLI 成员另有 `setup_agent` 的 `member_runtime is not None` 提前返回，不触达装配段。`.team` 挂载点不变。link 建不出来时（受限运行时）真实目录**退回 team 内**，`team_member_workspace_dir` 仍然有效。`workspace_layout.ensure_team_member_workspace_link` 保留给 WORKER（swarmflow）调用点使用，不参与 Block C 装配（其行为保持 [[F_79]] D6：不再整份 copytree 成员 workspace）。
 
 ## 与其它 spec 的关系
 

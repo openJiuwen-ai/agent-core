@@ -44,7 +44,6 @@ def build_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
         'supervisor_token': 'training.supervisor_token',
         'supervisor_model': 'training.supervisor_model',
         'target_model_id': 'training.target_model_id',
-        'sft_trainer_command': 'training.sft_trainer_command',
         'sft_dry_run': 'training.sft_dry_run',
         'threshold': 'training.threshold',
         'scan_interval': 'training.scan_interval',
@@ -53,6 +52,7 @@ def build_cli_overrides(args: argparse.Namespace) -> dict[str, object]:
         'rollouter': 'training.rollouter',
         'evaler': 'training.evaler',
         'drain_pending_on_train': 'training.drain_pending_on_train',
+        'auto_hotload_lora': 'training.auto_hotload_lora',
         'max_samples_per_run': 'training.max_samples_per_run',
         'ppo_samples_per_step': 'training.ppo_samples_per_step',
         'allow_partial_last_step': 'training.allow_partial_last_step',
@@ -114,12 +114,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--supervisor-token', default=None, help='Supervisor / teacher model token')
     parser.add_argument('--supervisor-model', default=None, help='Supervisor model name')
     parser.add_argument('--target-model-id', default=None, help='Target model id for SFT output')
-    parser.add_argument('--sft-trainer-command', default=None, help='Shell command used to run the SFT trainer')
     parser.add_argument(
         '--sft-dry-run',
         action=argparse.BooleanOptionalAction,
         default=None,
-        help='Build SFT JSONL without running the trainer command',
+        help='Build the v1-compatible SFT parquet and config without running veRL',
     )
     parser.add_argument('--threshold', type=int, default=None, help='Sample count threshold to trigger training')
     parser.add_argument('--scan-interval', type=int, default=None, help='TrainingScheduler poll interval (seconds)')
@@ -139,6 +138,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action='store_true',
         default=None,
         help='When a user reaches threshold, claim all currently pending samples for one LoRA run',
+    )
+    parser.add_argument(
+        '--auto-hotload-lora',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='Notify vLLM to hot-load the newly trained LoRA after training succeeds',
     )
     parser.add_argument(
         '--max-samples-per-run',

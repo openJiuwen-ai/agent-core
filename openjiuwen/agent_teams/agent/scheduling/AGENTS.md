@@ -7,7 +7,7 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
 | 文件 | 职责 |
 |---|---|
 | `scheduler.py` | `TeamScheduler`：事件粗筛 + 双幂等扫描（开工 / 验票）+ `SchedulerHost` 窄协议 + 已挂载 `TeamSkillEvolutionRail` 的 reviewer feedback 旁路（F_73） |
-| `review_feedback_evolution.py` | `ReviewFeedbackEvolutionCoordinator`：与产品无关的 Feedback 归因、成员演进、全局汇总与新 Skill 候选路由；由 `TeamSkillEvolutionRail` 持有，子 Rail 事件回流到父 Rail 的标准 host-event 队列 |
+| `review_feedback_evolution.py` | `ReviewFeedbackEvolutionCoordinator`：与产品无关的逐 Task Feedback 归因、团队终态汇总演进与新 Skill 候选路由；由 `TeamSkillEvolutionRail` 持有，复用其标准 host-event 队列 |
 | `verdict.py` | 纯函数投票判定（`settle_review_tally`：二元票池（verifier+challenger）一票否决 + 检视者分数池平均≥0.85）——策略可整体替换，不碰票据存储与状态机 |
 | `render.py` | 两类收件人两套机制：**成员**交接只组投递载荷 `meta_*`（`{template, refs, params}`，`content=""`），文案在 `prompts/<lang>/scheduler_*.md`、投递时渲染（F_63）；**leader** 摘要/升级走 `deliver_input` 直投，仍是 `i18n.py` 的 `scheduler.leader_*` 一行短串 |
 

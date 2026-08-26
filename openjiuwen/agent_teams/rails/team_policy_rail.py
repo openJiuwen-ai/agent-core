@@ -50,6 +50,7 @@ from openjiuwen.agent_teams.prompts import (
     build_team_extra_section,
     build_team_static_sections,
 )
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
@@ -57,6 +58,10 @@ from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY,
+    PromptAttachmentKind,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -77,16 +82,10 @@ class TeamPolicyRail(DeepAgentRail):
         metadata, and the peer roster. These are per-member and/or appear only
         once the team exists, so they cannot live in the shared prefix.
         :class:`TeamContextTracker` decides what is still unsaid; the rail
-        delivers it either on the input that is being admitted
-        (``on_user_message``, the normal case) or, when state appears mid
-        tool-loop with no input to ride, as a message appended at the tail.
-        Nothing already in the history is ever rewritten.
-
-    The state lane used to be a per-round prompt attachment. An attachment
-    never invalidates the prefix (it is appended at the tail of the window and
-    never persisted) but it is re-encoded on *every* model call and can never be
-    served from the cache -- so constant content paid full price forever. Written
-    into the conversation once, the same tokens are encoded once.
+        queues it as one dynamic attachment section. ReAct then appends a
+        role=system snapshot/delta message either before the admitted user
+        turn or after a tool result when state appears mid-loop. Nothing already
+        in the history is ever rewritten.
 
     Two more jobs are not about team state at all, and both are about the same
     thing: what a member coming back from a busy stretch is handed in one turn.
@@ -126,6 +125,7 @@ class TeamPolicyRail(DeepAgentRail):
         swarmflow_enabled: bool = False,
         steer_batch_size: int = 2,
         fork_source: str | None = None,
+        loader: TemplateLoader = load_template,
     ) -> None:
         super().__init__()
         self._language = language
@@ -134,6 +134,13 @@ class TeamPolicyRail(DeepAgentRail):
         self._expose_human_agents_to_teammates = expose_human_agents_to_teammates
         self._steer_batch_size = steer_batch_size
         self.system_prompt_builder = None
+        self.attachment_manager = None
+
+        # The loader is bound at construction by the rail factory
+        # (elements.py) from the backend's cache; the default is the
+        # framework read-only loader (unit tests /
+        # no backend). No second fallback here — the factory owns the wiring.
+        self._loader = loader
 
         # All team sections are static and built once. The HITT contract is
         # gated on the (sync) HITT capability flag rather than the live human
@@ -174,6 +181,7 @@ class TeamPolicyRail(DeepAgentRail):
         """Cache the agent's shared prompt builder."""
         super().init(agent)
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
 
     def uninit(self, agent: Any) -> None:
         """Remove the team static sections from the shared builder.
@@ -186,6 +194,7 @@ class TeamPolicyRail(DeepAgentRail):
             for section in self._static_sections:
                 self.system_prompt_builder.remove_section(section.name)
         self.system_prompt_builder = None
+        self.attachment_manager = None
 
     async def on_user_message(self, ctx: AgentCallbackContext) -> None:
         """Drop superseded inputs from the batch, then fold in team state.
@@ -218,6 +227,8 @@ class TeamPolicyRail(DeepAgentRail):
             return
         text = await self._tracker.pending_text(session)
         if not text:
+            return
+        if await self._queue_team_context_attachment(ctx, session, text):
             return
         parts.insert(0, text)
         await self._tracker.commit(session)
@@ -275,13 +286,50 @@ class TeamPolicyRail(DeepAgentRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject the static sections, then catch state with no input to ride."""
-        if self.system_prompt_builder is None:
-            return
-
-        for section in self._static_sections:
-            self.system_prompt_builder.add_section(section)
+        if self.system_prompt_builder is not None:
+            for section in self._static_sections:
+                self.system_prompt_builder.add_section(section)
 
         await self._announce_unattached_state(ctx)
+
+    async def _queue_team_context_attachment(
+        self,
+        ctx: AgentCallbackContext,
+        session: Any,
+        text: str,
+    ) -> bool:
+        """Queue one team-state section for the shared history synchronizer.
+
+        The ReAct agent calls ``sync_to_context`` after all rails at the user
+        admission and before-model boundaries.  The tracker baseline is
+        committed only after that synchronization succeeds, so a failed
+        context write leaves the announcement pending for the next boundary.
+        """
+        manager = self.attachment_manager
+        if manager is None:
+            return False
+        try:
+            writer = manager.bind_context(ctx)
+            await writer.add_section(
+                section="team.context",
+                content=text,
+                kind=PromptAttachmentKind.RUNTIME,
+                source="agent_core.team_policy_rail",
+                priority=80,
+                content_kind="text/markdown",
+            )
+        except (TypeError, ValueError) as exc:
+            team_logger.warning(
+                "[{}] failed to queue team context attachment: {}",
+                self._member_name or "?",
+                exc,
+            )
+            return False
+
+        callbacks = ctx.extra.setdefault(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY, [])
+        if isinstance(callbacks, list):
+            callbacks.append(lambda: self._tracker.commit(session))
+        return True
 
     async def _announce_unattached_state(self, ctx: AgentCallbackContext) -> None:
         """Append team state that appeared with no input to ride along with.
@@ -302,6 +350,8 @@ class TeamPolicyRail(DeepAgentRail):
             return
         text = await self._tracker.pending_text(session)
         if not text:
+            return
+        if await self._queue_team_context_attachment(ctx, session, text):
             return
         await context.add_messages(UserMessage(content=text))
         await self._tracker.commit(session)
@@ -352,6 +402,7 @@ class TeamPolicyRail(DeepAgentRail):
                 language=self._language,
                 hitt_enabled=hitt_enabled,
                 expose_human_agents_to_teammates=self._expose_human_agents_to_teammates,
+                loader=self._loader,
             )
         team_logger.info(
             "[{}] TeamPolicyRail static sections: section_names={}",
@@ -376,6 +427,7 @@ class TeamPolicyRail(DeepAgentRail):
         sections = [build_leader_bootstrap_section(
             swarmflow_enabled=swarmflow_enabled,
             language=self._language,
+            loader=self._loader,
         )]
         extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
         if extra is not None:

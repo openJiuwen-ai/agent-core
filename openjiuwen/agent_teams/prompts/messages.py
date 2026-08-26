@@ -62,6 +62,11 @@ _LABELS: dict[str, dict[str, str]] = {
             "所有成员通过该路径前缀读写同一份文件，系统自动管理版本和文件锁"
         ),
         "team_workspace_abs": "绝对路径",
+        "team_workspace_symlink_note": (
+            "任务或消息里若出现 `.team/{team_name}/...`，它是指向该工作空间的符号链接，"
+            "等价于上面的绝对路径，而不是子目录。写文件请直接写到该工作空间根目录，"
+            "用文件名区分各成员的产物，不要新建 `.team` 或 `{team_name}` 子目录"
+        ),
         "members_heading": "# 成员关系",
         "roster_change_heading": "# 成员变更",
         "roster_joined": "加入",
@@ -101,6 +106,12 @@ _LABELS: dict[str, dict[str, str]] = {
             "Versioning and file locks are managed automatically"
         ),
         "team_workspace_abs": "Absolute path",
+        "team_workspace_symlink_note": (
+            "If `.team/{team_name}/...` appears in a task or message, it is a symlink to "
+            "this workspace, equivalent to the absolute path above, not a sub-directory. "
+            "Write files directly to the workspace root, distinguish members' outputs by "
+            "filename, and do not create a `.team` or `{team_name}` sub-directory"
+        ),
         "members_heading": "# Relationships",
         "roster_change_heading": "# Roster Change",
         "roster_joined": "joined",
@@ -280,6 +291,38 @@ def build_identity_text(
     return "\n".join(lines) + "\n"
 
 
+def build_identity_prompt_delta(
+    *,
+    member_prompt: str | None,
+    language: str = "cn",
+) -> str | None:
+    """Render *only* the private working-agreement subsection of the identity body.
+
+    The constant identity fields (member_name / display_name /
+    member_workspace_path) are delivered once by :func:`build_identity_text`
+    and never change, so re-announcing them after every edit would be noise.
+    The private working agreement (``member_prompt.md``) *can* be hand-evolved
+    mid-session, and its only model-side channel is the identity body — which
+    is one-shot. This delta renders just that subsection so the identity body
+    can re-announce an evolved prompt without restating the constants.
+
+    Blank ``member_prompt`` yields ``None`` (nothing to re-announce), matching
+    :func:`build_identity_text`'s blank-drop behaviour.
+
+    Args:
+        member_prompt: The (possibly evolved) private working agreement body.
+        language: Body language ('cn' or 'en').
+
+    Returns:
+        The rendered subsection, or ``None`` when the prompt is blank.
+    """
+    private_prompt = member_prompt.strip() if member_prompt else ""
+    if not private_prompt:
+        return None
+    labels = labels_for(language)
+    return "\n".join(["", labels["private_prompt_heading"], "", private_prompt]) + "\n"
+
+
 def build_identity_conversion(
     *,
     source: str,
@@ -357,6 +400,15 @@ def build_team_info_text(
     elif path:
         lines.append(f"- {labels['team_workspace']}: `{path}`")
         lines.append(f"  - {labels['team_workspace_purpose']}")
+        # Third-party CLI members (no ``.team/{team}`` mount in their cwd):
+        # explain that the ``.team/{team}/`` string that may appear in task
+        # content or elsewhere is a symlink to this workspace root, NOT a
+        # sub-directory — otherwise they paste ``.team`` literally and land
+        # files in a nested ``.team/{team}/...`` path.
+        if team_name:
+            lines.append(
+                "  - " + labels["team_workspace_symlink_note"].format(team_name=team_name)
+            )
     return "\n".join(lines) + "\n"
 
 

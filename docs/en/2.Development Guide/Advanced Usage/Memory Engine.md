@@ -54,7 +54,7 @@ The memory engine relies on three core configuration classes to define LLM and e
 | ----------------------- | ------------ | -------- | ------- | --------------------------------------------------------------------------- |
 | `model` / `model_name`  | str          | No       | `""`    | Model name, e.g., `gpt-4`. Supports alias `model`                           |
 | `temperature`           | float        | No       | `0.95`  | Temperature parameter, controls output randomness. Higher values produce more random output, lower values produce more deterministic output. Range: [0, 1] |
-| `top_p`                 | float        | No       | `0.1`   | Top-p sampling parameter, controls nucleus sampling range. Range: [0, 1]    |
+| `top_p`                 | float        | No       | `0.95`  | Top-p sampling parameter, controls nucleus sampling range. Range: [0, 1]    |
 | `max_tokens`            | int \| None  | No       | `None`  | Maximum number of tokens to generate                                        |
 | `stop`                  | str \| None  | No       | `None`  | Stop sequence, model stops generating when encountering this sequence       |
 

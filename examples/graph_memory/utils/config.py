@@ -53,7 +53,7 @@ def build_llm():
     request_config = ModelRequestConfig(
         model=model,
         temperature=float(cfg.get("temperature", 0.6)),
-        top_p=float(cfg.get("top_p", 0.1)),
+        top_p=float(cfg.get("top_p", 0.95)),
         max_tokens=cfg.get("max_tokens"),
     )
     return Model(model_config=request_config, model_client_config=client_config)

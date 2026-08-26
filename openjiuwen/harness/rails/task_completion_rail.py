@@ -260,6 +260,11 @@ class TaskCompletionRail(DeepAgentRail):
 
     # -- lifecycle hooks --
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Stage goal-round dynamic context before the first user message."""
+        builder = getattr(ctx.agent, "system_prompt_builder", None)
+        await self._sync_goal_protocol_prompt(ctx, builder)
+
     async def before_model_call(
         self, ctx: AgentCallbackContext,
     ) -> None:

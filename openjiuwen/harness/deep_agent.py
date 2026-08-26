@@ -92,6 +92,7 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
+from openjiuwen.harness.tools.subagent._control_registry import release_subagent_control
 from openjiuwen.harness.goal.manager import GoalManager
 from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
 from openjiuwen.harness.schema.interaction import (
@@ -139,7 +140,7 @@ from openjiuwen.harness.resources.extension_resolver import (
     resolve_plugin_parts,
 )
 from openjiuwen.harness.schema.build_context import BuildContext
-from openjiuwen.harness.schema.extension_spec import PluginSpec
+from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec, PluginSpec
 from openjiuwen.harness.workspace.workspace import Workspace
 
 # Events bridged to the inner ReActAgent.
@@ -195,6 +196,12 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
         "grep",
         "bash",
         "task_tool",
+        "subagent_spawn",
+        "subagent_wait",
+        "subagent_list",
+        "subagent_send_input",
+        "subagent_close",
+        "subagent_resume",
         "ask_user",
         "todo_create",
         "todo_list",
@@ -1821,7 +1828,7 @@ class DeepAgent(BaseAgent):
     ) -> LoadRecord:
         """Hot-load a file-backed Plugin package.
 
-        Accepts either a ``packageType=plugin`` ``manifest.json`` or a legacy
+        Accepts either a ``package_type=plugin`` ``manifest.json`` or a legacy
         ``harness_config.yaml`` / ``expert_harness.yaml`` / ``harness.yaml``
         package (see ``find_plugin_manifest`` for the lookup order); both map
         onto ``PluginSpec``.
@@ -1882,6 +1889,31 @@ class DeepAgent(BaseAgent):
             ctx.extras["_parent_model"] = self.deep_config.model
             parts = resolve_agent_template_parts(spec, ctx)
             return await self._apply_extension_parts(parts, source_uri=str(manifest_path))
+        except Exception as exc:
+            raise build_error(
+                StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
+                error_msg=str(exc),
+                cause=exc,
+            ) from exc
+
+    async def load_agent_template_spec(
+        self,
+        spec: AgentTemplateSpec,
+        *,
+        context: BuildContext | None = None,
+    ) -> LoadRecord:
+        """Hot-load an in-memory ``AgentTemplateSpec``.
+
+        Unlike :meth:`load_agent_template`, no package manifest is read here:
+        every path-bearing field on ``spec`` must already be absolute.  This is
+        the in-memory counterpart to :meth:`load_plugin_spec` and is suitable
+        for a serialized spec carried across a team-member build boundary.
+        """
+        try:
+            ctx = self._new_extension_context(context)
+            ctx.extras["_parent_model"] = self.deep_config.model
+            parts = resolve_agent_template_parts(spec, ctx)
+            return await self._apply_extension_parts(parts, source_uri=None)
         except Exception as exc:
             raise build_error(
                 StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
@@ -2618,6 +2650,10 @@ class DeepAgent(BaseAgent):
             # Without this, await task could wait for a long-running
             # operation (e.g., wait_round_completion with 600s timeout).
             await self._cancel_session_deep_tasks(session.get_session_id())
+            await self._release_session_subagent_controls(
+                session,
+                reason="stream_cancelled",
+            )
             await self._cancel_stream_process_task()
             raise
         finally:
@@ -2858,6 +2894,26 @@ class DeepAgent(BaseAgent):
                 exc_info=True,
             )
 
+    async def _release_session_subagent_controls(
+        self,
+        session: Optional[Session],
+        *,
+        reason: str,
+    ) -> None:
+        """Cancel persistent runtime subagents owned by a parent session."""
+        if session is None:
+            return
+        session_id = session.get_session_id()
+        try:
+            await release_subagent_control(self, session_id, reason=reason)
+        except Exception as e:
+            logger.warning(
+                "Failed to release subagent controls for session %s: %s",
+                session_id,
+                e,
+                exc_info=True,
+            )
+
     async def _cancel_session_deep_tasks(self, session_id: str) -> None:
         """Cancel active DeepAgent round tasks for a session.
 
@@ -2914,9 +2970,9 @@ class DeepAgent(BaseAgent):
         instead of leaving a zombie ReAct loop running.
 
         Args:
-            session: Current session (unused).
+            session: Parent session whose runtime subagents should be cancelled.
+                Falls back to the bound loop session when omitted.
         """
-        _ = session
         coordinator = self._loop_coordinator
         controller = self._loop_controller
         if coordinator is not None and controller is not None:
@@ -2927,6 +2983,10 @@ class DeepAgent(BaseAgent):
             )
             await handler.on_abort()
         await self._cancel_stream_process_task()
+        await self._release_session_subagent_controls(
+            session or self._loop_session,
+            reason="aborted",
+        )
 
     # ----------------------------------------------------------------
     # long-lived session

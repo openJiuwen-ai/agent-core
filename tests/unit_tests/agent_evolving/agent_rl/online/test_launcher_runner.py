@@ -284,6 +284,62 @@ def test_print_launch_summary_works_without_gateway_mode(tmp_path: Path, caplog)
     assert 'Gateway mode' not in caplog.text
 
 
+def test_start_online_training_scheduler_can_disable_lora_hotload(monkeypatch, tmp_path: Path):
+    from openjiuwen.agent_evolving.agent_rl.config.online_config import OnlineRLConfig, TrainingConfig
+    from openjiuwen.agent_evolving.agent_rl.online.launcher.services import (
+        LaunchRuntime,
+        start_online_training_scheduler,
+    )
+
+    captured = {}
+
+    class _StartedScheduler:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+    monkeypatch.setattr(
+        'openjiuwen.agent_evolving.agent_rl.online.core.scheduler.OnlineTrainingScheduler',
+        _StartedScheduler,
+    )
+
+    cfg = OnlineRLConfig(
+        training=TrainingConfig(auto_hotload_lora=False),
+        inference={'model_path': '/tmp/model', 'port': 18002},
+        judge={'port': 18003},
+        gateway={'port': 18080, 'local_trajectory_store_dir': str(tmp_path / 'store')},
+        jiuwen={'agent_server_port': 18092, 'ws_port': 19000, 'web_port': 5173},
+    )
+    runtime = LaunchRuntime(
+        inference_url='http://127.0.0.1:18002',
+        judge_url='http://127.0.0.1:18003',
+        gateway_base_url='http://127.0.0.1:18080',
+        gateway_api_url='http://127.0.0.1:18080/v1',
+        lora_repo=str(tmp_path / 'lora_repo'),
+        skip_vllm=True,
+        skip_judge=True,
+        reuse_inference_for_judge=True,
+        judge_label='reuse inference',
+        ports_to_check=(),
+    )
+
+    scheduler = start_online_training_scheduler(cfg=cfg, runtime=runtime)
+
+    assert scheduler.started is True
+    assert captured['notifier'] is None
+
+
+def test_cli_can_disable_lora_hotload():
+    from openjiuwen.agent_evolving.agent_rl.online.launcher.cli import build_arg_parser, build_cli_overrides
+
+    args = build_arg_parser().parse_args(['--no-auto-hotload-lora'])
+
+    assert build_cli_overrides(args) == {'training': {'auto_hotload_lora': False}}
+
+
 def test_ensure_workspace_writes_web_user_headers(monkeypatch, tmp_path: Path):
     from openjiuwen.agent_evolving.agent_rl.online.launcher.workspace import ensure_workspace
 

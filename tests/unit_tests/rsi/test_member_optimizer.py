@@ -19,6 +19,7 @@ import yaml
 
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseModelClient
 from openjiuwen.rsi.config import MemberOptimizerConfig
+from openjiuwen.rsi.member_optimizer import action_planner as action_planner_module
 from openjiuwen.rsi.member_optimizer.action_executor import (
     MemberActionExecutor,
     _normalize_skill_frontmatter_name,
@@ -36,9 +37,12 @@ from openjiuwen.rsi.member_optimizer.action_groups import (
 )
 from openjiuwen.rsi.member_optimizer.action_planner import (
     MemberActionPlanner,
+    MemberActionPlannerAgent,
     _adapt_surface_for_activation_phase,
+    _adapt_surface_for_new_skill_qualification,
     _bind_immutable_hypotheses,
     _validate_action_issue_attribution,
+    _validate_new_skill_qualification,
 )
 from openjiuwen.rsi.member_optimizer.agents.factory import (
     _failure_signature_values,
@@ -101,6 +105,11 @@ def test_lever_policy_does_not_recast_configuration_as_instruction() -> None:
     assert available_surfaces_for_lever(lever, ["prompt", "skill", "tool"]) == []
 
 
+def test_execution_budget_has_an_explicit_configuration_lever() -> None:
+    assert target_ref_lever("member_harness.solver.execution_budget") == "configuration"
+    assert target_ref_lever("member_harness.solver.rail") == "control"
+
+
 def test_instruction_lever_exposes_only_instruction_surfaces() -> None:
     lever = target_ref_lever("member_harness.solver.skill")
 
@@ -108,6 +117,136 @@ def test_instruction_lever_exposes_only_instruction_surfaces() -> None:
         lever,
         ["prompt", "skill", "tool"],
     ) == ["prompt_section", "skill"]
+
+
+def test_sibling_generation_prompt_treats_prior_proposals_as_pre_execution_plans() -> None:
+    message = MemberActionPlannerAgent._build_user_message(
+        targets=[],
+        role_attribution_report=RoleAttributionReport(),
+        mechanism_attribution_report=MechanismAttributionReport(),
+        action_definitions=[],
+        optimization_experience={
+            "sibling_generation": {
+                "candidate_id": "candidate_beta",
+                "generation_index": 2,
+                "candidate_count": 3,
+                "prior_proposals": [
+                    {
+                        "candidate_id": "candidate_alpha",
+                        "plan_id": "plan_alpha",
+                        "proposal_summary": "Modify an existing prompt section.",
+                        "candidate_score": 0.9,
+                        "outcome": "accepted",
+                        "actions": [
+                            {
+                                "action_group": "prompt",
+                                "operation": "modify",
+                                "target_path": "prompt_sections/files/checkpoint.md",
+                                "expected_effect": "Require a bounded decision checkpoint.",
+                                "status": "succeeded",
+                                "verifier_result": "passed",
+                                "constraints": {
+                                    "lever_decision": {
+                                        "selected_lever": "instruction",
+                                        "selected_surface": "prompt_section",
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    assert "## Sibling Candidate Generation (Pre-Execution Plans Only)" in message
+    assert '"candidate_id": "candidate_beta"' in message
+    assert '"generation_index": 2' in message
+    assert "it is not a quality prediction" in message
+    assert "Modify an existing prompt section." in message
+    assert "Require a bounded decision checkpoint." in message
+    assert '"selected_lever": "instruction"' in message
+    assert "not execution feedback" in message
+    assert "Never cross levers just to manufacture" in message
+
+
+def test_improver_policy_prompt_is_frozen_and_strips_training_evidence() -> None:
+    message = MemberActionPlannerAgent._build_user_message(
+        targets=[],
+        role_attribution_report=RoleAttributionReport(),
+        mechanism_attribution_report=MechanismAttributionReport(),
+        action_definitions=[],
+        optimization_experience={
+            "improver_policy": {
+                "version_id": "I_1",
+                "policy_digest": "sha256:policy",
+                "generation_directives": {
+                    "require_unique_candidate_fingerprint": True,
+                },
+                "budget_policy": {"top_m": 2},
+                "training_evidence": {"candidate_score": 1.0},
+            }
+        },
+    )
+
+    assert "## Frozen Improver Policy" in message
+    assert '"version_id": "I_1"' in message
+    assert '"require_unique_candidate_fingerprint": true' in message
+    assert "pre-execution policy" in message
+    assert "sibling execution feedback" in message
+    assert "training_evidence" not in message
+    assert "candidate_score" not in message
+    assert "candidate_score" not in message
+    assert '"outcome": "accepted"' not in message
+    assert "verifier_result" not in message
+    assert '"status": "succeeded"' not in message
+    assert "## Optimization Experience" not in message
+    assert "## Rejected Capability History" not in message
+
+
+@pytest.mark.asyncio
+async def test_sibling_candidates_use_isolated_planner_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_ids: list[str] = []
+
+    monkeypatch.setattr(
+        action_planner_module,
+        "create_action_planning_agent",
+        lambda **kwargs: object(),
+    )
+
+    async def fake_invoke(**kwargs):  # type: ignore[no-untyped-def]
+        session_ids.append(str(kwargs["session_id"]))
+        return {}
+
+    monkeypatch.setattr(
+        action_planner_module,
+        "invoke_member_optimizer_agent_structured",
+        fake_invoke,
+    )
+    planner = MemberActionPlannerAgent(model_config_ref="unused")
+    common = {
+        "targets": [],
+        "role_attribution_report": RoleAttributionReport(),
+        "mechanism_attribution_report": MechanismAttributionReport(),
+        "action_definitions": [],
+    }
+
+    await planner.create_plan(
+        **common,
+        optimization_experience={"sibling_generation": {"candidate_id": "candidate/alpha"}},
+    )
+    await planner.create_plan(
+        **common,
+        optimization_experience={"sibling_generation": {"candidate_id": "candidate/beta"}},
+    )
+    await planner.create_plan(**common)
+
+    assert len(set(session_ids)) == 3
+    assert session_ids[0].startswith("member_action_planner_candidate_alpha_")
+    assert session_ids[1].startswith("member_action_planner_candidate_beta_")
+    assert session_ids[2] == "member_action_planner"
 
 
 def test_member_optimizer_package_exports_only_facade_and_schema() -> None:
@@ -207,6 +346,105 @@ def test_action_issue_attribution_rejects_combining_independent_issues() -> None
         "each optimization action must attribute exactly one diagnosed issue; "
         "separate causal mechanisms require separate actions"
     ]
+
+
+def test_action_bundle_accepts_three_connected_actions_for_one_issue() -> None:
+    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "implement",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": [],
+            },
+            {
+                "action_id": "register",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": ["implement"],
+            },
+            {
+                "action_id": "route",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": ["register"],
+            },
+        ]
+    }
+
+    assert _validate_action_bundle_cohesion(plan_data) == []
+
+
+def test_action_bundle_rejects_more_than_three_actions_for_one_issue() -> None:
+    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": f"action_{index}",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": [f"action_{index - 1}"] if index else [],
+            }
+            for index in range(4)
+        ]
+    }
+
+    errors = _validate_action_bundle_cohesion(plan_data)
+
+    assert any("at most 3 associated actions" in error for error in errors)
+
+
+def test_action_bundle_rejects_cross_issue_dependency() -> None:
+    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "formula_fix",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_formula"],
+                "depends_on": [],
+            },
+            {
+                "action_id": "payment_fix",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_payment"],
+                "depends_on": ["formula_fix"],
+            },
+        ]
+    }
+
+    errors = _validate_action_bundle_cohesion(plan_data)
+
+    assert any("depends on unrelated action formula_fix" in error for error in errors)
+
+
+def test_action_bundle_rejects_disconnected_changes_for_one_issue() -> None:
+    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "tool_add",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_activation"],
+                "depends_on": [],
+            },
+            {
+                "action_id": "unrelated_prompt",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_activation"],
+                "depends_on": [],
+            },
+        ]
+    }
+
+    errors = _validate_action_bundle_cohesion(plan_data)
+
+    assert any("not one connected dependency bundle" in error for error in errors)
 
 
 def test_skill_frontmatter_normalization_repairs_plain_scalar_colon() -> None:
@@ -2194,14 +2432,14 @@ def test_action_config_cannot_expand_current_policy() -> None:
 
     filtered = filter_action_definitions(definitions)
 
-    assert [definition.name for definition in filtered] == ["prompt_modify"]
+    assert [definition.name for definition in filtered] == ["prompt_modify", "skill_search"]
 
 
 def test_action_definition_loader_filters_config_policy(action_group_yaml: Path) -> None:
     """Action config loading keeps only current Auto Harness-compatible actions."""
     definitions = load_action_definitions([str(action_group_yaml)])
 
-    assert [definition.name for definition in definitions] == ["prompt_modify"]
+    assert [definition.name for definition in definitions] == ["prompt_modify", "skill_search"]
 
 
 def test_action_definition_loader_tolerates_missing_config(tmp_path: Path) -> None:
@@ -2226,7 +2464,11 @@ def test_action_definition_loader_resolves_builtin_group_names() -> None:
         ("tool", "modify"),
         ("tool", "remove"),
     }
-    assert load_action_definitions(["rail"]) == []
+    assert {(item.group, item.operation) for item in load_action_definitions(["rail"])} == {
+        ("rail", "add"),
+        ("rail", "modify"),
+        ("rail", "remove"),
+    }
 
 
 def _write_model_config(path: Path) -> Path:
@@ -2672,6 +2914,108 @@ def test_member_optimizer_full_pipeline_fake_agents_closes_loop(
         assert refs_path.name == "candidate_harness_refs.yaml"
         assert current_refs["last_attempt"]["published_roles"] == ["explainer"]
     assert "diagnostician" in current_refs["harness_refs"]
+
+
+def test_member_optimizer_publish_rejects_partially_executed_role(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    from openjiuwen.rsi.member_optimizer.optimizer import _PublishRequest
+    from openjiuwen.rsi.member_optimizer.schema import (
+        MemberSelectionReport,
+        MemberVerificationResult,
+        RoleVerificationResult,
+    )
+
+    output_root = tmp_path / "member_optimizations"
+    run_dir = output_root / "member_optimization_001"
+    run_dir.mkdir(parents=True)
+    layout = MemberOptimizerPathLayout.from_output_root(output_root)
+    source_harness = two_role_harness_dir / "explainer"
+    harness_refs_path = tmp_path / "harness_refs.yaml"
+    harness_refs_path.write_text(
+        yaml.safe_dump({"harness_refs": {"explainer": str(source_harness)}}),
+        encoding="utf-8",
+    )
+    integration = integration_worktree_path(layout.worktrees_dir(run_dir.name), "explainer")
+    shutil.copytree(source_harness, integration)
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(source_harness),
+        attributed_issue_ids=["issue_activation"],
+    )
+    first = MemberOptimizationAction(
+        action_id="implement",
+        role="explainer",
+        action_group="tool",
+        operation="add",
+        action_type="tool_add",
+        target_path="tools/check.py",
+        attributed_issue_ids=["issue_activation"],
+    )
+    second = MemberOptimizationAction(
+        action_id="route",
+        role="explainer",
+        action_group="prompt",
+        operation="modify",
+        action_type="prompt_modify",
+        target_path="identity.md",
+        attributed_issue_ids=["issue_activation"],
+        depends_on=["implement"],
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="partial_plan",
+        targets=[target],
+        actions=[first, second],
+        action_waves=[["implement"], ["route"]],
+    )
+    execution_results = [
+        MemberActionExecutionResult(
+            action_id="implement",
+            role="explainer",
+            status="succeeded",
+            merge_status="merged",
+        ),
+        MemberActionExecutionResult(
+            action_id="route",
+            role="explainer",
+            status="failed",
+            error="routing edit failed",
+        ),
+    ]
+    verification_result = MemberVerificationResult(
+        status="passed",
+        checked_roles=["explainer"],
+        role_results={"explainer": RoleVerificationResult(role="explainer", status="passed")},
+    )
+
+    artifact = MemberOptimizer(MemberOptimizerConfig(model_config_ref="unused"))._publish(
+        _PublishRequest(
+            run_dir=run_dir,
+            path_layout=layout,
+            output_root=output_root,
+            selection_report=MemberSelectionReport(targets=[target]),
+            plan=plan,
+            execution_results=execution_results,
+            verification_result=verification_result,
+            eval_ref_path="eval_ref.yaml",
+            analysis_result_path="analysis_ref.yaml",
+            harness_refs_path=str(harness_refs_path),
+            role_attr_path="role_attribution.yaml",
+            mechanism_attr_path="mechanism_attribution.yaml",
+            selection_path="member_selection.yaml",
+            plan_path="plan.yaml",
+            execution_result_path="execution_results.json",
+            verification_path="verification.json",
+            fix_result_path="fix_result.json",
+            defer_publish=True,
+        )
+    )
+
+    assert artifact.status == "failed"
+    assert artifact.published_roles == []
+    assert "route: execution status='failed'" in artifact.role_results["explainer"].error
+    assert not layout.candidate_harness_dir(run_dir.name, "explainer").exists()
 
 
 def test_member_optimizer_rejects_invalid_llm_plan_without_aborting_run(
@@ -3951,11 +4295,28 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
                             "forbidden_behavior": ["Treat __iter__ alone as sufficient."],
                             "attribution": {
                                 "target_ref": "member_harness.solver.skill",
+                                "evidence_status": "confirmed",
+                                "hypothesis_assessment": [
+                                    {
+                                        "hypothesis_id": "h_direct_protocol",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    }
+                                ],
                                 "general_mechanism": (
                                     "A directly requested stateful protocol must implement and "
                                     "probe its direct operation."
                                 ),
                                 "critical_mistake": ("Do not substitute a returned iterator for direct __next__."),
+                                "causal_coverage": {
+                                    "explained_requirement_ids": ["verifier:FAIL_TO_PASS:test_next"],
+                                    "residual_requirement_ids": [],
+                                    "unexplained_observations": [],
+                                    "counterfactual_prediction": (
+                                        "direct next succeeds before and after iterator initialization"
+                                    ),
+                                    "sufficiency_status": "task_sufficient",
+                                },
                             },
                         },
                     }
@@ -4000,6 +4361,10 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         "scope_boundary": ["Treat __iter__ alone as sufficient."],
         "activation_phase": "task_start",
     }
+    assert hypotheses[0]["causal_coverage"]["sufficiency_status"] == "task_sufficient"
+    assert hypotheses[0]["decisive_probe"]["causal_coverage"]["counterfactual_prediction"].startswith(
+        "direct next succeeds"
+    )
     assert hypotheses[0]["public_trigger"] == [
         {
             "case_id": "case_pydicom",
@@ -4018,6 +4383,170 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="content digest mismatch"):
         load_optimization_hypotheses(hypothesis_path)
+
+
+@pytest.mark.parametrize(
+    ("attribution", "affected_cases"),
+    [
+        ({"evidence_status": "confirmed"}, ["case_1"]),
+        (
+            {"target_ref": "member_harness.solver.prompt", "evidence_status": "confirmed"},
+            ["case_1"],
+        ),
+        ({"target_ref": "member_harness.solver.prompt", "evidence_status": "insufficient"}, ["case_1"]),
+        ({"target_ref": "member_harness.solver.prompt", "evidence_status": "confirmed"}, []),
+        (
+            {
+                "target_ref": "member_harness.solver.prompt",
+                "evidence_status": "supported_hypothesis",
+                "hypothesis_assessment": [{"hypothesis_id": "h1", "status": "unresolved"}],
+            },
+            ["case_1"],
+        ),
+    ],
+)
+def test_optimization_hypothesis_rejects_unattributed_or_unresolved_issues(
+    tmp_path: Path,
+    attribution: dict[str, object],
+    affected_cases: list[str],
+) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "category": "execution",
+                        "severity": "high",
+                        "summary": "The task failed.",
+                        "affected_cases": affected_cases,
+                        "evidence": [],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Change the harness.",
+                        "metadata": {"attribution": attribution},
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hypothesis_path = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Do the task."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    assert load_optimization_hypotheses(hypothesis_path) == []
+
+
+def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alternative(tmp_path: Path) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_local",
+                        "category": "decision",
+                        "severity": "medium",
+                        "summary": "An observed decision causes the failed requirement.",
+                        "affected_cases": ["case_1"],
+                        "evidence": [{"case_id": "case_1", "step_pointer": "step_2"}],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Use the observed discriminator before selecting the value.",
+                        "metadata": {
+                            "attribution": {
+                                "target_ref": "member_harness.solver.prompt",
+                                "evidence_status": "supported_hypothesis",
+                                "hypothesis_assessment": [
+                                    {
+                                        "hypothesis_id": "h1",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    },
+                                    {"hypothesis_id": "h2", "status": "unresolved"},
+                                ],
+                                "general_mechanism": "Select values only after observing their source provenance.",
+                                "causal_coverage": {
+                                    "explained_requirement_ids": ["criterion:value"],
+                                    "residual_requirement_ids": [],
+                                    "unexplained_observations": ["one alternative remains unresolved"],
+                                    "counterfactual_prediction": "the selected value matches the observed source",
+                                    "sufficiency_status": "local_contributor",
+                                },
+                            }
+                        },
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hypothesis_path = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Select the documented value."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    hypotheses = load_optimization_hypotheses(hypothesis_path)
+    assert len(hypotheses) == 1
+    assert hypotheses[0]["source_issue_id"] == "issue_local"
+
+
+@pytest.mark.parametrize(
+    ("verification_status", "expected_count"),
+    [(None, 0), ("unresolved", 0), ("verified", 1)],
+)
+def test_optimization_hypothesis_requires_explicit_verification(
+    tmp_path: Path,
+    verification_status: str | None,
+    expected_count: int,
+) -> None:
+    assessment = {"hypothesis_id": "h1", "status": "supported"}
+    if verification_status is not None:
+        assessment["verification_status"] = verification_status
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "category": "decision",
+                        "severity": "high",
+                        "summary": "An observed routing decision caused the failed behavior.",
+                        "affected_cases": ["case_1"],
+                        "evidence": [{"case_id": "case_1", "step_pointer": "step_2"}],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Use the observed routing discriminator.",
+                        "metadata": {
+                            "attribution": {
+                                "target_ref": "member_harness.solver.prompt",
+                                "evidence_status": "supported_hypothesis",
+                                "selected_hypothesis_id": "h1",
+                                "hypothesis_assessment": [assessment],
+                            }
+                        },
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    output = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Route this request."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    assert len(load_optimization_hypotheses(output)) == expected_count
 
 
 def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None:
@@ -4048,6 +4577,40 @@ def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None
     action = plan_data["actions"][0]
     assert action["expected_effect"] == "Implement stateful direct __next__ semantics."
     assert action["constraints"]["optimization_contracts"] == hypotheses
+
+
+def test_planner_binding_persists_only_supported_causal_hypotheses() -> None:
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "a1",
+                "attributed_issue_ids": ["issue_protocol"],
+                "constraints": {},
+            }
+        ]
+    }
+    hypotheses = [
+        {
+            "hypothesis_id": "hyp_protocol",
+            "content_sha256": "abc123",
+            "source_issue_id": "issue_protocol",
+            "required_behavior": "Use the supported direct-call mechanism.",
+            "hypothesis_assessment": [
+                {"hypothesis_id": "h_supported", "status": "supported"},
+                {"hypothesis_id": "h_falsified", "status": "falsified"},
+            ],
+            "supported_causal_hypothesis_ids": ["h_supported"],
+            "falsified_causal_hypothesis_ids": ["h_falsified"],
+        }
+    ]
+
+    _bind_immutable_hypotheses(plan_data, hypotheses)
+
+    constraints = plan_data["actions"][0]["constraints"]
+    assert constraints["source_causal_hypothesis_ids"] == ["h_supported"]
+    contract = constraints["optimization_contracts"][0]
+    assert contract["supported_causal_hypothesis_ids"] == ["h_supported"]
+    assert contract["falsified_causal_hypothesis_ids"] == ["h_falsified"]
     assert plan_data["metadata"]["semantic_authority"] == ("immutable_optimization_hypotheses")
 
 
@@ -4295,7 +4858,7 @@ def test_post_diagnosis_prompt_contract_is_deferred_to_runtime_control() -> None
     assert report.role_mechanisms["solver"][0].optimization_surface == "control"
 
 
-def test_investigation_prompt_contract_routes_as_skill() -> None:
+def test_investigation_prompt_contract_does_not_infer_skill_reuse() -> None:
     target = MemberOptimizationTarget(
         role="solver",
         harness_ref_path="solver",
@@ -4324,11 +4887,98 @@ def test_investigation_prompt_contract_routes_as_skill() -> None:
         ],
     )
 
-    assert targets[0].optimization_surfaces == ["skill"]
-    assert report.role_mechanisms["solver"][0].optimization_surface == "skill"
-    assert adaptations[0]["reason"] == (
-        "investigation_method_requires_task_relevant_routing_instead_of_global_static_prompt_injection"
+    assert targets[0].optimization_surfaces == ["prompt_section"]
+    assert report.role_mechanisms["solver"][0].optimization_surface == "prompt_section"
+    assert adaptations == []
+
+
+def test_single_case_new_skill_gets_prompt_fallback_and_add_is_rejected() -> None:
+    target = MemberOptimizationTarget(
+        role="solver",
+        harness_ref_path="solver",
+        attributed_issue_ids=["issue_1"],
+        optimization_surfaces=["skill"],
     )
+    mechanism = RoleMechanismAttribution(
+        issue_id="issue_1",
+        role="solver",
+        mechanism_type="instruction",
+        failure_signature="range_value_misclassified",
+        confidence=0.9,
+        optimization_surface="skill",
+    )
+
+    targets, report, adaptations = _adapt_surface_for_new_skill_qualification(
+        targets=[target],
+        mechanism_report=MechanismAttributionReport(
+            role_mechanisms={"solver": [mechanism]},
+        ),
+        optimization_hypotheses=[
+            {
+                "source_issue_id": "issue_1",
+                "target_case_ids": ["contract-extract-L3-014"],
+            }
+        ],
+    )
+
+    assert targets[0].optimization_surfaces == ["prompt_section"]
+    assert targets[0].metadata["new_skill_qualification"] == {
+        "status": "insufficient_cross_case_support",
+        "support_case_ids": ["contract-extract-L3-014"],
+        "support_case_count": 1,
+        "required_support_case_count": 2,
+        "fallback_surface": "prompt_section",
+        "reason": "one_observed_subtask_does_not_establish_a_reusable_skill",
+    }
+    assert report.role_mechanisms["solver"][0].optimization_surface == "prompt_section"
+    assert adaptations[0]["reason"] == "one_observed_subtask_does_not_establish_a_reusable_skill"
+    errors = _validate_new_skill_qualification(
+        {
+            "role": "solver",
+            "action_group": "skill",
+            "operation": "add",
+        },
+        {"solver": targets[0]},
+    )
+    assert errors and "at least 2 distinct cases" in errors[0]
+
+
+def test_cross_case_new_skill_remains_eligible() -> None:
+    target = MemberOptimizationTarget(
+        role="solver",
+        harness_ref_path="solver",
+        attributed_issue_ids=["issue_1"],
+        optimization_surfaces=["skill"],
+    )
+    mechanism_report = MechanismAttributionReport(
+        role_mechanisms={
+            "solver": [
+                RoleMechanismAttribution(
+                    issue_id="issue_1",
+                    role="solver",
+                    mechanism_type="instruction",
+                    failure_signature="semantic_classification_error",
+                    confidence=0.9,
+                    optimization_surface="skill",
+                )
+            ]
+        },
+    )
+
+    targets, report, adaptations = _adapt_surface_for_new_skill_qualification(
+        targets=[target],
+        mechanism_report=mechanism_report,
+        optimization_hypotheses=[
+            {
+                "source_issue_id": "issue_1",
+                "target_case_ids": ["case_a", "case_b"],
+            }
+        ],
+    )
+
+    assert targets == [target]
+    assert report == mechanism_report
+    assert adaptations == []
 
 
 def test_generated_skill_contract_accepts_bold_capsule_labels() -> None:
@@ -4916,6 +5566,50 @@ def test_member_executor_rejects_illegal_action_before_execution(
     assert not (role_worktree_path(run_dir / "wt", "explainer") / "waves").exists()
 
 
+def test_member_executor_executes_package_local_rail_action(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    run_dir = tmp_path / "member_optimization_001"
+    action = MemberOptimizationAction(
+        action_id="rail_explainer_001",
+        role="explainer",
+        action_group="rail",
+        operation="add",
+        action_type="rail_guard",
+        target_path="rails/conflict_marker_guard.py",
+        declared_write_paths=["rails/conflict_marker_guard.py", "rails/rails.yaml"],
+        description="Add conflict marker guard.",
+        constraints={"class_name": "ConflictMarkerGuardRail"},
+    )
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(two_role_harness_dir / "explainer"),
+        attributed_issue_ids=["issue_001"],
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="plan_rail",
+        targets=[target],
+        actions=[action],
+        action_waves=[[action.action_id]],
+    )
+
+    results = asyncio.run(
+        MemberActionExecutor(executor_agent=_RailShortManifestExecutorAgent()).execute(
+            plan=plan,
+            output_dir=str(run_dir),
+            model_config_ref="unused-by-fake",
+        )
+    )
+
+    assert results[0].status == "succeeded"
+    assert "rails/conflict_marker_guard.py" in results[0].changed_files
+    manifest = Path(results[0].worktree_path) / "rails" / "rails.yaml"
+    assert yaml.safe_load(manifest.read_text(encoding="utf-8"))["rails"][0]["file"] == (
+        "rails/conflict_marker_guard.py"
+    )
+
+
 def test_member_repair_prompt_includes_failed_file_contents(tmp_path: Path) -> None:
     """Repair agent receives bounded file content for directly failed files."""
     from openjiuwen.rsi.member_optimizer.verification import (
@@ -5051,6 +5745,174 @@ def test_member_executor_merges_successful_non_overlapping_action_when_peer_fail
     assert (integration_worktree_path(run_dir / "wt", "explainer") / "identity.md").read_text(
         encoding="utf-8"
     ) == "# bash-only solver\n"
+
+
+def test_member_executor_does_not_merge_partial_same_issue_bundle(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    run_dir = tmp_path / "member_optimization_001"
+    source_harness = two_role_harness_dir / "explainer"
+    original_identity = (source_harness / "identity.md").read_text(encoding="utf-8")
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(source_harness),
+        attributed_issue_ids=["issue_activation"],
+        confidence=0.9,
+    )
+    prompt_action = MemberOptimizationAction(
+        action_id="act_prompt",
+        role="explainer",
+        action_group="prompt",
+        operation="modify",
+        action_type="prompt_refinement",
+        target_path="identity.md",
+        declared_write_paths=["identity.md"],
+        attributed_issue_ids=["issue_activation"],
+    )
+    failed_action = MemberOptimizationAction(
+        action_id="act_config",
+        role="explainer",
+        action_group="skill",
+        operation="modify",
+        action_type="skill_refinement",
+        target_path="skills/activation/SKILL.md",
+        declared_write_paths=["skills/activation/SKILL.md", "skills/skills.yaml"],
+        attributed_issue_ids=["issue_activation"],
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="plan_atomic_bundle",
+        targets=[target],
+        actions=[prompt_action, failed_action],
+        action_waves=[["act_prompt", "act_config"]],
+    )
+    executor = MemberActionExecutor(executor_agent=_MixedSubwaveExecutorAgent())
+
+    results = asyncio.run(
+        executor.execute(
+            plan=plan,
+            output_dir=str(run_dir),
+            model_config_ref="unused-by-fake",
+        )
+    )
+
+    by_id = {result.action_id: result for result in results}
+    assert by_id["act_config"].status == "failed"
+    assert by_id["act_prompt"].status == "failed"
+    assert by_id["act_prompt"].merge_status == "not_merged"
+    assert "atomic action bundle peer failed" in by_id["act_prompt"].error
+    assert (integration_worktree_path(run_dir / "wt", "explainer") / "identity.md").read_text(
+        encoding="utf-8"
+    ) == original_identity
+
+
+def test_role_execution_contract_accepts_successful_fallback_branch() -> None:
+    from openjiuwen.rsi.member_optimizer.execution_contract import role_execution_errors
+
+    target = MemberOptimizationTarget(
+        role="solver",
+        harness_ref_path="solver",
+        attributed_issue_ids=["issue_skill"],
+    )
+    search = MemberOptimizationAction(
+        action_id="search",
+        role="solver",
+        action_group="skill",
+        operation="search",
+        action_type="skill_search",
+        target_path="skills/",
+        attributed_issue_ids=["issue_skill"],
+    )
+    fallback = MemberOptimizationAction(
+        action_id="fallback",
+        role="solver",
+        action_group="skill",
+        operation="add",
+        action_type="skill_add",
+        target_path="skills/local/SKILL.md",
+        attributed_issue_ids=["issue_skill"],
+        depends_on=["search"],
+        run_if="dependency_failed",
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="fallback_plan",
+        targets=[target],
+        actions=[search, fallback],
+        action_waves=[["search"], ["fallback"]],
+    )
+    results = [
+        MemberActionExecutionResult(
+            action_id="search",
+            role="solver",
+            status="failed",
+            error="no external candidate",
+        ),
+        MemberActionExecutionResult(
+            action_id="fallback",
+            role="solver",
+            status="succeeded",
+            merge_status="merged",
+        ),
+    ]
+
+    assert role_execution_errors(plan, results, "solver") == []
+
+
+def test_member_executor_runs_local_add_fallback_when_skill_search_is_unavailable(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    run_dir = tmp_path / "member_optimization_001"
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(two_role_harness_dir / "explainer"),
+        attributed_issue_ids=["issue_001"],
+    )
+    search = MemberOptimizationAction(
+        action_id="search",
+        role="explainer",
+        action_group="skill",
+        operation="search",
+        action_type="skill_search",
+        target_path="skills/",
+        candidate_query="preserve analyze fix",
+        declared_write_paths=["skills", "skills/skills.yaml"],
+        attributed_issue_ids=["issue_001"],
+    )
+    fallback = MemberOptimizationAction(
+        action_id="fallback",
+        role="explainer",
+        action_group="skill",
+        operation="add",
+        action_type="skill_add",
+        target_path="skills/preserve_analyze_fix/SKILL.md",
+        declared_write_paths=["skills/preserve_analyze_fix/SKILL.md", "skills/skills.yaml"],
+        attributed_issue_ids=["issue_001"],
+        depends_on=["search"],
+        run_if="dependency_failed",
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="fallback_plan",
+        targets=[target],
+        actions=[search, fallback],
+        action_waves=[["search", "fallback"]],
+    )
+
+    results = asyncio.run(
+        MemberActionExecutor(executor_agent=_SkillWritingExecutorAgent()).execute(
+            plan=plan,
+            output_dir=str(run_dir),
+            model_config_ref="unused-by-fake",
+        )
+    )
+
+    by_id = {result.action_id: result for result in results}
+    assert by_id["search"].status == "failed"
+    assert by_id["fallback"].status == "succeeded"
+    assert by_id["fallback"].merge_status == "merged"
+    assert (
+        integration_worktree_path(run_dir / "wt", "explainer") / "skills" / "preserve_analyze_fix" / "SKILL.md"
+    ).is_file()
 
 
 def test_member_verifier_fails_role_when_planned_action_failed(

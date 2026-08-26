@@ -14,11 +14,15 @@ The module is organised in two layers:
   transaction shells over the helpers above.
 """
 
-from typing import Dict, Iterable, List, Optional
+from dataclasses import replace
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from sqlalchemy import case, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
 
 from openjiuwen.agent_teams.schema.status import (
     TASK_TRANSITIONS,
@@ -44,7 +48,6 @@ from openjiuwen.agent_teams.tools.models import (
     _get_task_model,
 )
 from openjiuwen.core.common.logging import team_logger
-
 
 # ---------------------------------------------------------------------------
 # Internal control-flow signal for graph-mutation step failures.
@@ -346,9 +349,113 @@ async def _apply_new_edges(
 class TaskDao:
     """Data access object for task and task-dependency tables."""
 
-    def __init__(self, sessions: DbSessions) -> None:
-        """Initialize task DAO with the shared read/write session provider."""
+    def __init__(
+        self,
+        sessions: DbSessions,
+        *,
+        file_store: Optional["SessionFileStore"] = None,
+    ) -> None:
+        """Initialize task DAO with the shared read/write session provider.
+
+        Args:
+            file_store: Optional design-v5 content store. When set, task
+                bodies are written to session files (DB keeps the ``#file#``
+                placeholder; the path is derived from the row) and
+                dereferenced on read; ``update_task`` rewrites the same file
+                (task_id unchanged → overwrite in place). When ``None``
+                (default) behaviour is unchanged (inline ``content``).
+        """
         self._sessions = sessions
+        self._file_store = file_store
+
+    @staticmethod
+    def _session_id() -> Optional[str]:
+        from openjiuwen.agent_teams.context import get_session_id
+
+        return get_session_id()
+
+    def _to_stored(self, team_name: str, content: str, *, task_id: str) -> str:
+        """Persist ``content`` to a session file; return the ``#file#`` placeholder.
+
+        On IO failure the raw text is returned instead, so the caller stores
+        it inline — the non-placeholder value keeps the degradation visible
+        (and read-back correct) without any path stored in the DB. Empty
+        content stays inline (no file created, no placeholder).
+        """
+        if not content:
+            return content
+        if self._file_store is None:
+            return content
+        session_id = self._session_id()
+        if not session_id:
+            return content
+        from openjiuwen.agent_teams.team_workspace.session_file_store import CONTENT_IN_FILE, FileAddress
+
+        try:
+            self._file_store.put(
+                content,
+                FileAddress(
+                    team_name=team_name,
+                    session_id=session_id,
+                    kind="task",
+                    object_id=task_id,
+                    to_member=None,
+                ),
+            )
+            return CONTENT_IN_FILE
+        except OSError as exc:
+            team_logger.warning("task content spill failed for %s; keeping inline: %s", task_id, exc)
+            return content
+
+    @staticmethod
+    def _is_placeholder(content: str) -> bool:
+        """True when ``content`` marks a body stored in a session file.
+
+        Imported lazily — a module-level import of the team_workspace
+        package from the DAO layer triggers a circular import chain.
+        """
+        from openjiuwen.agent_teams.team_workspace.session_file_store import CONTENT_IN_FILE
+
+        return content == CONTENT_IN_FILE
+
+    def _deref_row(self, row: TeamTaskBase) -> str:
+        """Read a placeholder row's body from its session file.
+
+        The file path is derived from the row's own fields (kind ``task``,
+        object id = ``task_id``), so the DB never stores a pointer. Any
+        resolution/IO failure degrades back to the stored value (the
+        placeholder) instead of raising.
+        """
+        session_id = self._session_id()
+        if not session_id:
+            return row.content
+        from openjiuwen.agent_teams.team_workspace.session_file_store import FileAddress
+
+        try:
+            return self._file_store.get(
+                FileAddress(
+                    team_name=row.team_name,
+                    session_id=session_id,
+                    kind="task",
+                    object_id=row.task_id,
+                    to_member=None,
+                )
+            )
+        except (ValueError, OSError) as exc:
+            team_logger.warning("task content deref failed for %s: %s", row.task_id, exc)
+            return row.content
+
+    def _hydrate_row(self, row: Optional[TeamTaskBase]) -> Optional[TeamTaskBase]:
+        """Dereference a task row's ``content`` in place."""
+        if row is not None and self._is_placeholder(row.content):
+            row.content = self._deref_row(row)
+        return row
+
+    def _hydrate_rows(self, rows: List[TeamTaskBase]) -> List[TeamTaskBase]:
+        for row in rows:
+            if self._is_placeholder(row.content):
+                row.content = self._deref_row(row)
+        return rows
 
     async def create_task(
         self,
@@ -360,13 +467,14 @@ class TaskDao:
     ) -> bool:
         """Create a new team task."""
         team_task_model = _get_task_model()
+        stored_content = self._to_stored(team_name, content, task_id=task_id)
         async with self._sessions.write() as session:
             try:
                 task = team_task_model(
                     task_id=task_id,
                     team_name=team_name,
                     title=title,
-                    content=content,
+                    content=stored_content,
                     status=status,
                     updated_at=get_current_time(),
                 )
@@ -384,7 +492,7 @@ class TaskDao:
         team_task_model = _get_task_model()
         async with self._sessions.read() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-            return result.scalar_one_or_none()
+            return self._hydrate_row(result.scalar_one_or_none())
 
     async def get_team_tasks(self, team_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
         """Get all tasks for a team, optionally filtered by status."""
@@ -394,7 +502,7 @@ class TaskDao:
             if status:
                 query = query.where(team_task_model.status == status)
             result = await session.execute(query)
-            return result.scalars().all()
+            return self._hydrate_rows(result.scalars().all())
 
     async def count_tasks_terminality(self, team_name: str) -> tuple[int, int]:
         """Return ``(total_tasks, non_terminal_tasks)`` for a team in one query.
@@ -437,7 +545,7 @@ class TaskDao:
             if status:
                 query = query.where(team_task_model.status == status)
             result = await session.execute(query)
-            return result.scalars().all()
+            return self._hydrate_rows(result.scalars().all())
 
     async def get_other_active_task_id(
         self, team_name: str, member_name: str, exclude_task_id: str
@@ -962,8 +1070,15 @@ class TaskDao:
             if title is not None and task.title != title:
                 task.title = title
                 updated = True
-            if content is not None and task.content != content:
-                task.content = content
+            if content is not None:
+                # Spill always overwrites the session file (task_id unchanged →
+                # same path), so the content path counts as a change regardless
+                # of the DB value. The DB row keeps the constant ``#file#`` on
+                # success; on IO failure ``_to_stored`` degrades to the raw
+                # text, which then must be persisted (design-v5 block B).
+                stored = self._to_stored(task.team_name, content, task_id=task_id)
+                if task.content != stored:
+                    task.content = stored
                 updated = True
 
             if updated:
@@ -989,6 +1104,20 @@ class TaskDao:
         add_edges = list(add_edges or [])
         if not new_tasks and not add_edges:
             return GraphMutationResult.success()
+
+        # Spill task bodies before the write transaction — matches the message
+        # DAO (create_message / create_direct_messages): synchronous file IO
+        # must not hold the process-wide SQLite write lock. ``_to_stored``
+        # writes the file and returns the ``#file#`` placeholder; on IO
+        # failure (or no session / no file_store) it degrades to the raw
+        # text, which then persists inline — read-back stays correct because
+        # ``_hydrate_row`` only dereferences the placeholder. ``NewTaskSpec``
+        # is frozen, so ``replace`` rebuilds it with the spilled content.
+        if new_tasks:
+            new_tasks = [
+                replace(spec, content=self._to_stored(team_name, spec.content, task_id=spec.task_id))
+                for spec in new_tasks
+            ]
 
         async with self._sessions.write() as session:
             try:

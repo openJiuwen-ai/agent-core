@@ -55,6 +55,13 @@ class EvaluatorConfig:
     backend: str = "single_harness"
     evaluation_method: str = "script-based"
     transient_case_retry_limit: int = 2
+    solver_backend: str = "deep_agent"
+    jiuwenswarm_executable: str = ""
+    jiuwenswarm_python: str = ""
+    jiuwenswarm_expected_version: str = ""
+    jiuwenswarm_startup_timeout_sec: int = 120
+    jiuwenswarm_runtime_timeout_sec: int = 3600
+    jiuwenswarm_runtime_profile: str = "task86"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvaluatorConfig":
@@ -66,6 +73,19 @@ class EvaluatorConfig:
                 data.get("transient_case_retry_limit"),
                 default=2,
             ),
+            solver_backend=str(data.get("solver_backend", "deep_agent")),
+            jiuwenswarm_executable=str(data.get("jiuwenswarm_executable", "")),
+            jiuwenswarm_python=str(data.get("jiuwenswarm_python", "")),
+            jiuwenswarm_expected_version=str(data.get("jiuwenswarm_expected_version", "")),
+            jiuwenswarm_startup_timeout_sec=_int_value(
+                data.get("jiuwenswarm_startup_timeout_sec"),
+                default=120,
+            ),
+            jiuwenswarm_runtime_timeout_sec=_int_value(
+                data.get("jiuwenswarm_runtime_timeout_sec"),
+                default=3600,
+            ),
+            jiuwenswarm_runtime_profile=str(data.get("jiuwenswarm_runtime_profile", "task86")),
         )
 
 
@@ -78,6 +98,8 @@ class EvaluationResultAnalyzerConfig:
     diagnosis_agent_max_retries: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     diagnosis_agent_max_concurrency: int = 5
     diagnosis_agent_max_iterations: int = 20
+    diagnosis_agent_max_tokens: int = 16384
+    causal_investigation_required: bool = True
     max_issues: int = 20
     evidence_limit_per_issue: int = 5
     output_filename: str = "issues.yaml"
@@ -98,6 +120,14 @@ class EvaluationResultAnalyzerConfig:
             diagnosis_agent_max_iterations=_int_value(
                 data.get("diagnosis_agent_max_iterations"),
                 default=20,
+            ),
+            diagnosis_agent_max_tokens=_int_value(
+                data.get("diagnosis_agent_max_tokens"),
+                default=16384,
+            ),
+            causal_investigation_required=_bool_value(
+                data.get("causal_investigation_required"),
+                default=True,
             ),
             max_issues=_int_value(data.get("max_issues"), default=20),
             evidence_limit_per_issue=_int_value(data.get("evidence_limit_per_issue"), default=5),
@@ -127,6 +157,10 @@ class MemberOptimizerConfig:
     allowed_action_groups: list[str] = field(default_factory=list)
     allowed_prompt_surfaces: list[str] = field(default_factory=list)
     max_actions_per_plan: int = 0
+    max_issue_attempts_per_batch: int = 0
+    max_repair_rounds_per_batch: int = 3
+    sibling_candidate_count: int = 1
+    improver_policy_ref: str = ""
     candidate_min_score_delta: float = 0.0
     candidate_min_target_behavior_delta: float = 0.0
     candidate_non_target_max_regression: float = 0.0
@@ -167,6 +201,19 @@ class MemberOptimizerConfig:
             allowed_action_groups=_string_list(data.get("allowed_action_groups")),
             allowed_prompt_surfaces=_string_list(data.get("allowed_prompt_surfaces")),
             max_actions_per_plan=_int_value(data.get("max_actions_per_plan"), default=0),
+            max_issue_attempts_per_batch=_int_value(
+                data.get("max_issue_attempts_per_batch"),
+                default=0,
+            ),
+            max_repair_rounds_per_batch=_int_value(
+                data.get("max_repair_rounds_per_batch"),
+                default=3,
+            ),
+            sibling_candidate_count=_int_value(
+                data.get("sibling_candidate_count"),
+                default=1,
+            ),
+            improver_policy_ref=str(data.get("improver_policy_ref", "")),
             candidate_min_score_delta=_float_value(data.get("candidate_min_score_delta"), default=0.0),
             candidate_min_target_behavior_delta=_float_value(
                 data.get("candidate_min_target_behavior_delta"),
@@ -262,6 +309,18 @@ class AutoCoordinatingHarnessConfig:
             raise ValueError("evaluation_result_analyzer.max_issues must be greater than or equal to 1")
         if self.evaluation_result_analyzer.evidence_limit_per_issue < 1:
             raise ValueError("evaluation_result_analyzer.evidence_limit_per_issue must be greater than or equal to 1")
+        if self.evaluator.solver_backend not in {"deep_agent", "jiuwenswarm"}:
+            raise ValueError("evaluator.solver_backend must be one of: deep_agent, jiuwenswarm")
+        if self.evaluator.jiuwenswarm_startup_timeout_sec < 1:
+            raise ValueError("evaluator.jiuwenswarm_startup_timeout_sec must be greater than or equal to 1")
+        if self.evaluator.jiuwenswarm_runtime_timeout_sec < 1:
+            raise ValueError("evaluator.jiuwenswarm_runtime_timeout_sec must be greater than or equal to 1")
+        if self.member_optimizer.max_issue_attempts_per_batch < 0:
+            raise ValueError("member_optimizer.max_issue_attempts_per_batch must be greater than or equal to 0")
+        if self.member_optimizer.max_repair_rounds_per_batch < 1:
+            raise ValueError("member_optimizer.max_repair_rounds_per_batch must be greater than or equal to 1")
+        if self.member_optimizer.sibling_candidate_count < 1:
+            raise ValueError("member_optimizer.sibling_candidate_count must be greater than or equal to 1")
 
 
 def _mapping(value: Any) -> dict[str, Any]:

@@ -50,7 +50,6 @@ class OnlineTrainingScheduler:
         supervisor_token: str = "",
         supervisor_model: str = "",
         target_model_id: str = "",
-        sft_trainer_command: str = "",
         sft_dry_run: bool = False,
     ) -> None:
         self.redis_url = redis_url
@@ -101,7 +100,6 @@ class OnlineTrainingScheduler:
             supervisor_token=supervisor_token,
             supervisor_model=supervisor_model,
             target_model_id=target_model_id,
-            sft_trainer_command=sft_trainer_command,
             sft_dry_run=sft_dry_run,
         )
 
