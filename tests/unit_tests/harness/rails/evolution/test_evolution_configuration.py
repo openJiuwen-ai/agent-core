@@ -275,6 +275,7 @@ def test_configure_twice_regular_is_idempotent(tmp_path):
         trajectory_span_processor=_PROCESSOR,
         team=False,
         review_runtime=runtime,
+        signal_trigger=True,
     )
 
     assert result is agent
@@ -315,6 +316,7 @@ def test_configure_twice_team_is_idempotent(tmp_path):
         trajectory_span_processor=_PROCESSOR,
         team=True,
         review_runtime=runtime,
+        signal_trigger=True,
     )
 
     assert result is agent
@@ -550,6 +552,7 @@ def test_configure_binds_unbound_interrupt_rail(tmp_path):
         trajectory_span_processor=_PROCESSOR,
         team=False,
         review_runtime=evolution_rail._review_runtime,
+        signal_trigger=True,
     )
 
     assert result is agent
@@ -598,6 +601,7 @@ def test_configure_fails_on_bound_interrupt_submission_mismatch(tmp_path):
             trajectory_span_processor=_PROCESSOR,
             team=False,
             review_runtime=runtime,
+            signal_trigger=True,
         )
 
 
@@ -635,6 +639,7 @@ def test_configure_ignores_existing_subagent_rail(tmp_path):
         trajectory_span_processor=_PROCESSOR,
         team=False,
         review_runtime=evolution_rail._review_runtime,
+        signal_trigger=True,
     )
 
     subagent_calls = [call.args[0] for call in agent.add_rail.call_args_list if isinstance(call.args[0], SubagentRail)]
@@ -741,6 +746,7 @@ async def test_configure_skill_evolution_runtime_second_consistent_config_does_n
         model="dummy-model",
         trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
+        signal_trigger=True,
     )
     agent.register_rail.reset_mock()
 
@@ -751,6 +757,7 @@ async def test_configure_skill_evolution_runtime_second_consistent_config_does_n
         model="dummy-model",
         trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
+        signal_trigger=True,
     )
 
     assert result is agent
@@ -768,6 +775,7 @@ async def test_configure_skill_evolution_runtime_reuses_existing_runtime_when_ru
         llm=_mock_llm(),
         model="dummy-model",
         trajectory_span_processor=_PROCESSOR,
+        signal_trigger=True,
     )
     agent.register_rail.reset_mock()
 
@@ -777,6 +785,7 @@ async def test_configure_skill_evolution_runtime_reuses_existing_runtime_when_ru
         llm=_mock_llm(),
         model="dummy-model",
         trajectory_span_processor=_PROCESSOR,
+        signal_trigger=True,
     )
 
     assert result is agent
@@ -807,6 +816,7 @@ async def test_configure_skill_evolution_runtime_binds_existing_unbound_interrup
         model="dummy-model",
         trajectory_span_processor=_PROCESSOR,
         review_runtime=runtime,
+        signal_trigger=True,
     )
 
     assert result is agent
