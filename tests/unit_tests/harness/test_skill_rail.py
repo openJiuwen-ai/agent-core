@@ -90,6 +90,7 @@ def _write_skill(
     skill_md = skill_dir / "SKILL.md"
     skill_md.write_text(
         "---\n"
+        f"name: {name}\n"
         f"description: {description}\n"
         "---\n\n"
         f"# {name}\n{body}",
@@ -631,6 +632,148 @@ def test_warmup_process_skill_index_fills_without_sysop(tmp_path: Path):
     stats2 = warmup_process_skill_index(str(skills_root))
     assert stats2["filled"] == 0
     assert stats2["hits"] == 2
+
+
+_QUOTED_TABLE_SKILL_MD = (
+    "---\n"
+    "name: pptx-craft\n"
+    'description: "Use when making PPT/PPTX.\n'
+    "\n"
+    "  | 类型 | 内容 |\n"
+    "  |---|---|\n"
+    "  | 新增 | {新增产物} |\n"
+    '"\n'
+    "---\n"
+    "\n"
+    "# PPT 全流程路由\n"
+)
+
+
+def test_parse_frontmatter_quoted_description_with_md_table():
+    """Quoted description may contain Markdown ``|---|---|``; that is not a fence."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import _parse_frontmatter_yaml
+
+    data = _parse_frontmatter_yaml(_QUOTED_TABLE_SKILL_MD)
+    assert data is not None
+    assert data["name"] == "pptx-craft"
+    assert "|---|---|" in data["description"]
+    assert "新增产物" in data["description"]
+
+
+def test_parse_frontmatter_malformed_yaml_returns_none():
+    """Malformed YAML / no fence must not raise; catalog treats it as non-skill."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import _parse_frontmatter_yaml
+
+    assert _parse_frontmatter_yaml('---\ndescription: "unterminated\n---\n') is None
+    assert _parse_frontmatter_yaml("# Invoice parser\n\nParse PDF invoices.\n") is None
+
+
+def test_catalog_name_and_description_requires_both_fields():
+    """Industry Agent Skills require both frontmatter name and description."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _catalog_name_and_description,
+    )
+
+    assert _catalog_name_and_description(None) is None
+    assert _catalog_name_and_description({"name": "x"}) is None
+    assert _catalog_name_and_description({"description": "y"}) is None
+    assert _catalog_name_and_description({"name": "x", "description": "y"}) == (
+        "x",
+        "y",
+    )
+
+
+def test_warmup_process_skill_index_quoted_table_description(tmp_path: Path):
+    """skill_index_warmup must keep pptx-craft-style quoted table descriptions."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "pptx-craft"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(_QUOTED_TABLE_SKILL_MD, encoding="utf-8")
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 1
+    assert stats["filled"] == 1
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.name == "pptx-craft"
+    assert "|---|---|" in skill.description
+    assert "PPT/PPTX" in skill.description
+
+
+def test_warmup_process_skill_index_malformed_yaml_does_not_abort(tmp_path: Path):
+    """Malformed YAML is skipped; sibling skills still index."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
+    bad_dir = skills_root / "broken-skill"
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    (bad_dir / "SKILL.md").write_text(
+        '---\ndescription: "unterminated\n---\n',
+        encoding="utf-8",
+    )
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 1
+    assert stats["filled"] == 1
+    xlsx = skills_root / "xlsx-writer"
+    assert _PROCESS_SKILL_INDEX[str(xlsx.resolve())][1].description == (
+        "Write xlsx reports"
+    )
+    assert str(bad_dir.resolve()) not in _PROCESS_SKILL_INDEX
+
+
+def test_warmup_process_skill_index_without_frontmatter_fence(tmp_path: Path):
+    """A SKILL.md with no ``---`` is not a skill and is not indexed."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "plain-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# Plain skill\n\nJust markdown instructions.\n",
+        encoding="utf-8",
+    )
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 0
+    assert stats["filled"] == 0
+    assert str(skill_dir.resolve()) not in _PROCESS_SKILL_INDEX
+
+
+def test_warmup_process_skill_index_prefers_frontmatter_name(tmp_path: Path):
+    """Catalog name comes from frontmatter ``name``, not the folder name."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "pptx-craft-dir"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: pptx-craft\ndescription: Make slides\n---\n",
+        encoding="utf-8",
+    )
+
+    warmup_process_skill_index(str(skills_root))
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.name == "pptx-craft"
+    assert skill.description == "Make slides"
 
 
 @pytest.mark.asyncio

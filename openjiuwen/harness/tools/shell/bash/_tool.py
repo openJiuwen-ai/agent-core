@@ -70,6 +70,7 @@ class _BashInputs:
     max_output_chars: int
     shell_type: str
     description: str
+    environment: Optional[Dict[str, str]] = None
 
 
 class BashTool(Tool):
@@ -133,11 +134,33 @@ class BashTool(Tool):
         return max(200, min(value, max_chars))
 
     @staticmethod
+    def _parse_environment(raw_value: Any) -> Optional[Dict[str, str]]:
+        """Normalize optional ``env`` / ``environment`` into a string dict.
+
+        Accepts either key so rails and programmatic callers can inject credentials
+        without depending on a single alias. Empty / invalid values are ignored.
+        """
+        if raw_value is None:
+            return None
+        if not isinstance(raw_value, dict):
+            return None
+        parsed: Dict[str, str] = {}
+        for key, value in raw_value.items():
+            if key in (None, "") or value in (None, ""):
+                continue
+            parsed[str(key)] = str(value)
+        return parsed or None
+
+    @staticmethod
     def _parse_inputs(inputs: Dict[str, Any]) -> _BashInputs:
         """Parse and clamp tool inputs."""
         shell_type = inputs.get("shell_type", "auto")
         if shell_type not in _VALID_SHELL_TYPES:
             shell_type = "auto"
+        # Prefer explicit ``environment``; fall back to ``env`` (rail / MCP style).
+        environment = BashTool._parse_environment(
+            inputs.get("environment", inputs.get("env"))
+        )
         return _BashInputs(
             command=_make_sudo_noninteractive((inputs.get("command") or "").strip()),
             timeout=BashTool._resolve_timeout(inputs.get("timeout", 300)),
@@ -146,6 +169,7 @@ class BashTool(Tool):
             max_output_chars=BashTool._resolve_max_output_chars(inputs.get("max_output_chars", 20000)),
             shell_type=shell_type,
             description=inputs.get("description", ""),
+            environment=environment,
         )
 
     # ── invoke ────────────────────────────────────────────────
@@ -190,7 +214,10 @@ class BashTool(Tool):
         # ── background execution ──────────────────────────────
         if p.run_in_background:
             res = await self._operation.shell().execute_cmd_background(
-                p.command, cwd=resolved_cwd, shell_type=p.shell_type,
+                p.command,
+                cwd=resolved_cwd,
+                environment=p.environment,
+                shell_type=p.shell_type,
             )
             data = res.data
             # Keep a fallback for non-local/older shell operations that may not populate data.status.
@@ -237,7 +264,11 @@ class BashTool(Tool):
 
         # ── normal execution ──────────────────────────────────
         res = await self._operation.shell().execute_cmd(
-            p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
+            p.command,
+            cwd=resolved_cwd,
+            timeout=p.timeout,
+            environment=p.environment,
+            shell_type=p.shell_type,
         )
         if res.code != StatusCode.SUCCESS.code:
             # A post-launch failure (e.g. timeout) still carries output collected
@@ -324,7 +355,11 @@ class BashTool(Tool):
         final_exit_code: int = -1
 
         async for chunk in self._operation.shell().execute_cmd_stream(
-                p.command, cwd=resolved_cwd, timeout=p.timeout, shell_type=p.shell_type,
+                p.command,
+                cwd=resolved_cwd,
+                timeout=p.timeout,
+                environment=p.environment,
+                shell_type=p.shell_type,
         ):
             if chunk.code != StatusCode.SUCCESS.code:
                 yield ToolOutput(success=False, error=chunk.message)
