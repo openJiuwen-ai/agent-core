@@ -253,6 +253,7 @@ def create_team_tools(
             manager=org_task_manager,
             team_id=agent_team.team_name,
             leader_id=leader_id,
+            transport=getattr(agent_team, "org_transport", None),
         )
         all_tools.update({tool.card.name: tool for tool in org_tools})
 

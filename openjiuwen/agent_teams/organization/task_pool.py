@@ -802,17 +802,7 @@ class OrgTaskManager:
             )
             session.add(row)
             await session.commit()
-        await self._publish_event(
-            OrgLeaderMessageEvent(
-                organization_id=self.organization_id,
-                team_id=from_team_id,
-                leader_id=from_leader_id,
-                message_id=message_id,
-                from_team_id=from_team_id,
-                to_team_id=to_team_id,
-            ),
-            team_inbox_id=to_team_id,
-        )
+        # Notification is owned by TransportAPI (org_send_leader_message → deliver).
         return OrgTaskOpResult(ok=True, data=self._message_dict(row))
 
     async def list_leader_messages(

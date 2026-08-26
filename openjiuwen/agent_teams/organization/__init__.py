@@ -18,8 +18,16 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager, OrgTaskOpResult
+from openjiuwen.agent_teams.organization.transport_api import (
+    NegotiationRequest,
+    NegotiationResult,
+    TransportAPI,
+    TransportResult,
+)
 
 __all__ = [
+    "NegotiationRequest",
+    "NegotiationResult",
     "OrgAssignment",
     "OrgAssignmentType",
     "OrgLeaderHandle",
@@ -34,4 +42,6 @@ __all__ = [
     "OrgTaskSource",
     "OrgTaskStatus",
     "TeamOrganizationManager",
+    "TransportAPI",
+    "TransportResult",
 ]

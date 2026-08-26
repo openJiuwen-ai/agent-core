@@ -20,6 +20,7 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
+    from openjiuwen.agent_teams.organization.transport_api import TransportAPI
 
 
 class _OrgLeaderTool(TeamTool):
@@ -493,9 +494,15 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
 
 
 class OrgSendLeaderMessageTool(_OrgLeaderTool):
-    """Persist and announce a leader-to-leader message."""
+    """Persist and announce a leader-to-leader message via TransportAPI."""
 
-    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        transport: "TransportAPI | None" = None,
+    ) -> None:
         super().__init__(
             name="org_send_leader_message",
             description="Send a DB-backed message to another team leader or all leaders.",
@@ -503,6 +510,7 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
             team_id=team_id,
             leader_id=leader_id,
         )
+        self.transport = transport
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -519,17 +527,56 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
         content = inputs.get("content")
         if not content:
             return ToolOutput(success=False, error="'content' is required")
+        if self.transport is None:
+            return ToolOutput(success=False, error="organization transport is not bound")
+
+        to_team_id = inputs.get("to_team_id")
         result = await self.manager.send_leader_message(
             from_team_id=self.team_id,
             from_leader_id=self.leader_id,
             content=content,
-            to_team_id=inputs.get("to_team_id"),
+            to_team_id=to_team_id,
             to_leader_id=inputs.get("to_leader_id"),
             metadata=inputs.get("metadata") or {},
         )
-        if not result.ok:
-            return ToolOutput(success=False, error=result.reason)
-        return ToolOutput(success=True, data=result.data)
+        if not result.ok or not result.data:
+            return ToolOutput(success=False, error=result.reason or "failed to persist leader message")
+
+        message_id = result.data["message_id"]
+        targets = await self._resolve_delivery_targets(to_team_id)
+        if not targets:
+            return ToolOutput(success=False, error="no delivery targets for leader message")
+
+        delivered: list[str] = []
+        for target in targets:
+            transport_result = await self.transport.deliver(
+                content,
+                target,
+                message_id=message_id,
+            )
+            if not transport_result.success:
+                return ToolOutput(
+                    success=False,
+                    error=transport_result.reason or f"failed to deliver to {target}",
+                    data={**result.data, "delivered_to": delivered},
+                )
+            delivered.append(target)
+
+        return ToolOutput(success=True, data={**result.data, "delivered_to": delivered})
+
+    async def _resolve_delivery_targets(self, to_team_id: str | None) -> list[str]:
+        if to_team_id:
+            return [to_team_id]
+        organization = await self.manager.get_organization()
+        if organization is None:
+            return []
+        return sorted(
+            {
+                leader.team_id
+                for leader in organization.leaders
+                if leader.team_id and leader.team_id != self.team_id
+            }
+        )
 
 
 class OrgViewChildTasksTool(_OrgLeaderTool):
@@ -740,6 +787,7 @@ def create_org_leader_tools(
     manager: OrgTaskManager,
     team_id: str,
     leader_id: str,
+    transport: "TransportAPI | None" = None,
 ) -> list[TeamTool]:
     return [
         OrgViewTasksTool(manager, team_id, leader_id),
@@ -747,7 +795,7 @@ def create_org_leader_tools(
         OrgClaimTaskTool(manager, team_id, leader_id),
         OrgDelegateTaskTool(manager, team_id, leader_id),
         OrgUpdateTaskTool(manager, team_id, leader_id),
-        OrgSendLeaderMessageTool(manager, team_id, leader_id),
+        OrgSendLeaderMessageTool(manager, team_id, leader_id, transport=transport),
         OrgViewChildTasksTool(manager, team_id, leader_id),
         OrgViewPendingReviewsTool(manager, team_id, leader_id),
         OrgReviewTaskTool(manager, team_id, leader_id),
