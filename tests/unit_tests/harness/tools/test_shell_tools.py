@@ -96,7 +96,7 @@ async def test_bash_tool_fail_command(sys_op):
 
     fail_res = await bash_tool.invoke({"command": "echo fail && exit 1"})
     assert fail_res.success is False
-    assert fail_res.data["content"].startswith("Exit code")
+    assert "Exit Code: 1" in fail_res.data["content"]
 
 
 @pytest.mark.asyncio
