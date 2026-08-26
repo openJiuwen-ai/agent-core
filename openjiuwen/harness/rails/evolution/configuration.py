@@ -310,7 +310,7 @@ def _validate_evolution_rail_config(
         mismatches.append("trajectory_span_processor: object identity differs")
 
     requested_signal_trigger = rail_kwargs.get("signal_trigger")
-    expected_signal_trigger = bool(requested_signal_trigger)
+    expected_signal_trigger = True if requested_signal_trigger is None else bool(requested_signal_trigger)
     if getattr(existing, "signal_trigger", None) != expected_signal_trigger:
         mismatches.append(
             f"signal_trigger: {getattr(existing, 'signal_trigger', None)!r} != {expected_signal_trigger!r}"
