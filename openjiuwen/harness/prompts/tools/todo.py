@@ -164,6 +164,12 @@ insert_before：在指定任务之前插入新任务（目标任务状态须为 
 ID 精确性要求（极其重要）：
 - 禁止凭记忆推测或修改 ID 中的任何字符，即使只错一个字符也会导致操作失败
 - 如果不确定任务 ID，请先调用 todo_list 获取准确的 ID 列表
+
+## 效率准则
+
+- 优先把「标记完成 + 启动下个任务」与实际工作工具放在**同一轮**调用，避免 todo-only 轮（即整轮只调 todo_modify 而不伴随实际工作）。
+- 批量更新：一次 todo_modify 可同时更新多个任务状态（如完成 A + 启动 B）。
+- 仅在收尾或取消时才允许单独调用 todo_modify。
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
@@ -236,6 +242,12 @@ Core rules:
 ID Accuracy Requirement (Critical):
 - Do NOT guess or modify any character in the ID — even a single wrong character will cause the operation to fail
 - If unsure about task IDs, call todo_list first to get the accurate ID list
+
+## Efficiency guidelines
+
+- Prefer putting "mark completed + start next task" in the **same response** as the actual work tool; avoid todo-only rounds (a whole round that only calls todo_modify without accompanying real work).
+- Batch updates: a single todo_modify can update multiple task statuses at once (e.g. complete A + start B).
+- Only call todo_modify alone when wrapping up or cancelling.
 """
 
 TODO_MODIFY_DESCRIPTION: Dict[str, str] = {
