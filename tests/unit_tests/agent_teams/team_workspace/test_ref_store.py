@@ -111,17 +111,6 @@ def test_delete_if_zero_keeps_leader_dir() -> None:
 
 
 @pytest.mark.level0
-def test_cleanup_team_dynamic_members_scans_hash_prefix(tmp_path: Path) -> None:
-    store = MemberRefStore()
-    store.add_ref("teamA", "memX", mode=MEMBER_MODE_DYNAMIC)
-    # A different team's dynamic dir must not be released by teamA's scan.
-    store.add_ref("teamB", "other", mode=MEMBER_MODE_DYNAMIC)
-    freed = store.cleanup_team_dynamic_members("teamA")
-    assert freed == ["memX"]
-    assert store.get_ref_count("teamB", "other") == 1
-
-
-@pytest.mark.level0
 def test_malformed_refs_file_treated_as_empty() -> None:
     store = MemberRefStore()
     real = member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC)

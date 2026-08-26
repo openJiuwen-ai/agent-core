@@ -31,7 +31,6 @@ import json
 import shutil
 from pathlib import Path
 
-from openjiuwen.agent_teams.paths import get_agent_teams_home
 from openjiuwen.agent_teams.skill.file_lock import cross_process_file_lock
 from openjiuwen.agent_teams.team_workspace.paths import (
     MEMBER_MODE_DYNAMIC,
@@ -189,73 +188,6 @@ class MemberRefStore:
             return False
         return True
 
-    def cleanup_team_dynamic_members(self, team_name: str) -> list[str]:
-        """Release every ``<team>#`` prefixed dynamic directory.
-
-        Returns the member names whose reference list reached zero (candidates
-        for ``delete_if_zero``). Fail-soft: an ``OSError`` logs a warning and
-        is skipped.
-        """
-        freed: list[str] = []
-        base = get_agent_teams_home()
-        prefix = f"{team_name}#"
-        try:
-            entries = sorted(base.iterdir())
-        except OSError as exc:
-            team_logger.warning("cleanup dynamic members scan failed: %s", exc)
-            return freed
-        for entry in entries:
-            if not entry.is_dir() or not entry.name.startswith(prefix):
-                continue
-            member_name = entry.name[len(prefix):]
-            try:
-                count = self.remove_ref(team_name, member_name, mode=MEMBER_MODE_DYNAMIC)
-            except OSError as exc:
-                team_logger.warning("cleanup remove_ref failed for %s: %s", entry.name, exc)
-                continue
-            if count == 0:
-                freed.append(member_name)
-        return freed
-
-    def release_predefined_refs(self, team_name: str) -> list[str]:
-        """Drop ``team_name`` from every predefined member's ref list.
-
-        Predefined (shared) directories live at ``.agent_teams/<member>`` (no
-        ``<team>#`` prefix), so ``cleanup_team_dynamic_members`` cannot see
-        them. This is the missing counterpart: for each predefined real dir
-        whose ``.refs.json`` references ``team_name``, drop that team so the
-        ref list does not leak a disbanded team. The real directory is never
-        removed — predefined dirs are shared assets
-        (``delete_if_zero`` returns False for non-dynamic modes).
-        """
-        released: list[str] = []
-        base = get_agent_teams_home()
-        try:
-            entries = sorted(base.iterdir())
-        except OSError as exc:
-            team_logger.warning("release predefined refs scan failed: %s", exc)
-            return released
-        for entry in entries:
-            # Dynamic dirs carry the ``<team>#`` prefix; team dirs hold a
-            # ``team-workspace`` subfolder, not a member ``.refs.json``. Only
-            # a flat predefined dir with a ``.refs.json`` of kind predefined
-            # is a candidate here.
-            if not entry.is_dir() or "#" in entry.name:
-                continue
-            refs_path = entry / _REFS_FILE
-            data = self._read(refs_path)
-            if data is None or data.get("kind") != MEMBER_MODE_PREDEFINED:
-                continue
-            if team_name not in self._teams(data):
-                continue
-            try:
-                self.remove_ref(team_name, entry.name, mode=MEMBER_MODE_PREDEFINED)
-            except OSError as exc:
-                team_logger.warning("release predefined ref failed for %s: %s", entry.name, exc)
-                continue
-            released.append(entry.name)
-        return released
-
     # ── helpers ────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -304,4 +236,8 @@ class MemberRefStore:
         tmp.replace(path)
 
 
-__all__ = ["MemberRefStore"]
+__all__ = ["MemberRefStore", "REFS_FILE_NAME"]
+
+# The ``.refs.json`` filename; also imported by the binder, which resolves a
+# member's real dir through its in-team link and reads the ref file there.
+REFS_FILE_NAME = _REFS_FILE

@@ -97,16 +97,6 @@ def test_link_failure_retreats_into_team(monkeypatch) -> None:
 
 
 @pytest.mark.level0
-def test_cleanup_team_links_unlinks_only() -> None:
-    binder = MemberWorkspaceBinder()
-    binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
-    indep = apaths.get_agent_teams_home() / "shared"
-    binder.cleanup_team_links("teamA")
-    assert not is_dir_link(apaths.team_member_workspace_dir("teamA", "shared"))
-    assert indep.is_dir(), "shared asset preserved"
-
-
-@pytest.mark.level0
 def test_release_and_delete_if_zero_per_mode() -> None:
     binder = MemberWorkspaceBinder()
     binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
@@ -255,3 +245,116 @@ def test_cleanup_team_drops_only_the_disbanded_team_from_shared_predefined() -> 
     assert refs_after == ["teamB"], (
         f"disbanded teamA dropped, surviving teamB kept; got {refs_after}"
     )
+
+
+# ── prefix=False cleanup + no-ref-for-linkless members ──────────────────────
+#
+# Two design invariants, each a regression target:
+#   1. cleanup always starts from the in-team link and resolves the real dir
+#      via the link — it never scans ``.agent_teams/`` by ``<team>#`` name
+#      prefix. So ``member_workspace_prefix=False`` (real dir = ``<member>``
+#      with no ``#``) must still be recycled on team delete.
+#   2. A ``.refs.json`` only belongs to a member whose real dir is linked out
+#      of the team tree and shared across teams — i.e. dynamic + predefined.
+#      leader / external_cli real dirs live in-team, never link out, and are
+#      never shared, so they carry no refs file.
+
+
+def _binding_prefix_off(team: str, member: str, mode: str) -> TeamMemberBinding:
+    return TeamMemberBinding(
+        team_name=team,
+        member_name=member,
+        mode=mode,
+        member_workspace_prefix=False,
+    )
+
+
+@pytest.mark.level0
+def test_cleanup_team_recycles_prefix_off_dynamic_via_link() -> None:
+    """prefix=False dynamic real dir (``.agent_teams/<member>``, no ``#``)
+    must be recycled when the team is deleted.
+
+    The old cleanup scanned ``.agent_teams/`` for ``<team>#`` prefixed dirs,
+    so a prefix-off dir was invisible and leaked. The new cleanup resolves the
+    real dir from the in-team link, so the prefix never matters.
+    """
+    binder = MemberWorkspaceBinder()
+    binder.setup(_binding_prefix_off("teamA", "worker", MEMBER_MODE_DYNAMIC))
+    real = member_real_dir(
+        "teamA", "worker", MEMBER_MODE_DYNAMIC, member_workspace_prefix=False
+    )
+    assert real.is_dir(), "precondition: real dir created"
+
+    binder.cleanup_team("teamA")
+
+    assert not real.exists(), "prefix-off dynamic real dir recycled on team delete"
+    assert not is_dir_link(
+        apaths.team_member_workspace_dir("teamA", "worker")
+    ), "member link removed"
+    assert (
+        MemberRefStore().get_ref_count(
+            "teamA", "worker", member_workspace_prefix=False
+        )
+        == 0
+    ), "refs cleared"
+
+
+@pytest.mark.level0
+def test_cleanup_team_prefix_off_preserves_other_team_ref() -> None:
+    """Two teams sharing a prefix-off dynamic member dir: deleting one team
+    drops only its ref; the other team's reference survives and the shared
+    real dir is kept."""
+    binder = MemberWorkspaceBinder()
+    binder.setup(_binding_prefix_off("teamA", "shared-mem", MEMBER_MODE_DYNAMIC))
+    binder.setup(_binding_prefix_off("teamB", "shared-mem", MEMBER_MODE_DYNAMIC))
+    real = member_real_dir(
+        "teamA", "shared-mem", MEMBER_MODE_DYNAMIC, member_workspace_prefix=False
+    )
+
+    binder.cleanup_team("teamA")
+
+    assert real.is_dir(), "shared real dir kept while teamB still references it"
+    assert MemberRefStore().get_ref_teams(
+        "teamB", "shared-mem", member_workspace_prefix=False
+    ) == ["teamB"], "surviving teamB ref intact"
+
+
+@pytest.mark.level0
+def test_leader_and_external_cli_have_no_refs() -> None:
+    """leader / external_cli real dirs are in-team, never linked out, never
+    shared across teams — so they must not carry a ``.refs.json``."""
+    binder = MemberWorkspaceBinder()
+    # leader
+    binder.setup(_binding("teamA", "leader", MEMBER_MODE_LEADER))
+    leader_real = apaths.team_member_workspace_dir("teamA", "leader")
+    assert not (leader_real / ".refs.json").exists(), "leader has no refs file"
+    # external_cli lands on MEMBER_MODE_LEADER (role-whitelist fallback).
+    prepare_member_workspace(
+        team_name="teamA",
+        member_name="claude-1",
+        role=TeamRole.EXTERNAL_CLI,
+        leader_member_name="leader",
+        predefined_members=set(),
+    )
+    ext_real = apaths.team_member_workspace_dir("teamA", "claude-1")
+    assert not (ext_real / ".refs.json").exists(), "external_cli has no refs file"
+
+
+@pytest.mark.level0
+def test_cleanup_team_prefix_off_predefined_preserves_shared_dir() -> None:
+    """prefix=False does not change predefined semantics: the shared indep
+    dir is kept on team delete (shared-asset), only the link is removed and
+    the disbanded team is dropped from the ref list."""
+    binder = MemberWorkspaceBinder()
+    binder.setup(_binding_prefix_off("teamA", "shared", MEMBER_MODE_PREDEFINED))
+    indep = apaths.get_agent_teams_home() / "shared"
+
+    binder.cleanup_team("teamA")
+
+    assert indep.is_dir(), "predefined shared dir preserved"
+    assert not is_dir_link(
+        apaths.team_member_workspace_dir("teamA", "shared")
+    ), "predefined link removed"
+    assert MemberRefStore().get_ref_teams(
+        "teamA", "shared", mode=MEMBER_MODE_PREDEFINED
+    ) == [], "disbanded team dropped from predefined ref list"
