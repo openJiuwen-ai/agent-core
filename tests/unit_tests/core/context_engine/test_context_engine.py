@@ -234,18 +234,33 @@ class TestContextEngine:
         )
 
     @pytest.mark.asyncio
-    async def test_recover_from_model_exception_does_not_retry_partial_stream(self, engine):
+    async def test_recover_from_model_exception_skips_partial_stream(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[STREAM_RECOVERED]"),
+            )],
+            history_messages=[UserMessage(content="large historical context")],
+        )
+        session.commit = AsyncMock()
         provider_error = RuntimeError(
             "This model's maximum context length is 1048576 tokens."
         )
 
         recovered = await engine.recover_from_model_exception(
+            context_id="ctx",
+            session=session,
+            context=context,
             exception=provider_error,
             streaming=True,
             stream_chunks_emitted=1,
         )
 
         assert recovered is False
+        assert context.get_messages()[0].content == "large historical context"
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_compress_context_preserves_explicit_empty_trigger(self, engine, session):
@@ -973,3 +988,32 @@ class TestContextEngine:
         context1.set_messages(messages=messages1, with_history=False)
         assert context1.get_messages(with_history=False) == messages1
         assert context1.get_messages() == history + messages[:-1] + messages1
+
+    @pytest.mark.asyncio
+    async def test_model_context_window_override_updates_cached_context(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                model_name="model-a",
+                model_context_window_tokens_override=131072,
+            )
+        )
+        context = await engine.create_context(context_id="ctx", session=session)
+        assert context.context_window_tokens() == 131072
+
+        engine.update_model_context(model_name="model-b", context_window_tokens=262144)
+        assert context.context_window_tokens() == 262144
+
+    @pytest.mark.asyncio
+    async def test_global_context_window_stays_above_model_override(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                context_window_tokens=65536,
+                model_name="model-a",
+                model_context_window_tokens_override=131072,
+            )
+        )
+        context = await engine.create_context(context_id="ctx", session=session)
+        assert context.context_window_tokens() == 65536
+
+        engine.update_model_context(model_name="model-b", context_window_tokens=262144)
+        assert context.context_window_tokens() == 65536
