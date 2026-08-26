@@ -92,6 +92,7 @@ agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
 claude = ["claude-agent-sdk>=0.2.115"]
 codex = ["openai-codex>=0.144.4"]
 ssh = ["asyncssh>=2.24.0"]
+browser = ["playwright>=1.45.0"]
 observability = [
     "opentelemetry-api>=1.25.0",
     "opentelemetry-sdk>=1.25.0",
