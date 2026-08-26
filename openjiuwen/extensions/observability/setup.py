@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from opentelemetry.sdk.trace import SpanProcessor
+from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter
 
 from openjiuwen.extensions.observability.config import ObservabilityConfig
@@ -22,13 +22,21 @@ def init_observability(
     config: ObservabilityConfig,
     *,
     span_exporter_override: SpanExporter | None = None,
+    tracer_provider_override: TracerProvider | None = None,
+    owns_provider: bool = False,
     additional_span_processors: Sequence[SpanProcessor] = (),
 ) -> None:
-    """Initialize the shared runtime or attach additional processors."""
+    """Initialize the shared runtime or attach additional processors.
+
+    An overridden provider remains host-owned unless ``owns_provider=True``
+    explicitly transfers its lifecycle to this runtime.
+    """
 
     _runtime.initialize(
         config,
         span_exporter_override=span_exporter_override,
+        tracer_provider_override=tracer_provider_override,
+        owns_provider=owns_provider,
         additional_span_processors=additional_span_processors,
     )
 
