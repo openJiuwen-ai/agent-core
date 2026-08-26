@@ -17,11 +17,6 @@ from typing import (
     Union,
 )
 
-from openjiuwen.core.sys_operation.local.output_encoding import (
-    IncrementalCommandDecoder,
-    decode_command_output,
-)
-
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -29,6 +24,10 @@ from pydantic import (
 )
 
 from openjiuwen.core.common.logging import sys_operation_logger, LogEventType
+from openjiuwen.core.sys_operation.local.output_encoding import (
+    IncrementalCommandDecoder,
+    decode_command_output,
+)
 
 
 class StreamEventType(str, Enum):
