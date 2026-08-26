@@ -70,15 +70,41 @@ def _read_local_frontmatter_prefix(
         return "".join(parts)
 
 
-def _parse_frontmatter_yaml(text: str) -> Optional[dict]:
-    """Parse YAML frontmatter from a SKILL.md prefix; ignore markdown body."""
-    if not text.startswith("---"):
+def _extract_frontmatter_yaml_and_body(text: str) -> tuple[Optional[str], str]:
+    """Split SKILL.md on line-level ``---`` fences.
+
+    Only a line whose strip is exactly ``---`` is a fence, so Markdown
+    ``|---|---|`` inside a quoted description is not treated as a closer.
+    No fence pair → ``(None, text)``; the skill is still indexed by folder name.
+    """
+    if not text:
+        return None, text
+    source = text[1:] if text.startswith("\ufeff") else text
+    lines = source.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None, text
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            body_start = index + 1
+            return "\n".join(lines[1:index]), "\n".join(lines[body_start:])
+    return None, text
+
+
+def _load_frontmatter_mapping(yaml_block: str) -> Optional[dict]:
+    """Parse a YAML frontmatter block; return None on malformed YAML."""
+    try:
+        yaml_data = yaml.safe_load(yaml_block) or {}
+    except yaml.YAMLError:
         return None
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
-    yaml_data = yaml.safe_load(parts[1]) or {}
     return yaml_data if isinstance(yaml_data, dict) else None
+
+
+def _parse_frontmatter_yaml(text: str) -> Optional[dict]:
+    """Load frontmatter mapping for catalog ``name`` / ``description``. Never raises."""
+    yaml_block, _ = _extract_frontmatter_yaml_and_body(text)
+    if yaml_block is None:
+        return None
+    return _load_frontmatter_mapping(yaml_block)
 
 
 def clear_process_skill_index() -> None:
@@ -86,24 +112,47 @@ def clear_process_skill_index() -> None:
     _PROCESS_SKILL_INDEX.clear()
 
 
-def _skill_from_frontmatter_local(skill_dir: Path, update_at: float) -> Skill:
-    """Build a catalog Skill from local frontmatter only (no SysOp, no body)."""
+def _catalog_name_and_description(yaml_data: Optional[dict]) -> Optional[tuple[str, str]]:
+    """Return ``(name, description)`` from frontmatter, or None if not a valid skill.
+
+    Agent Skills (agentskills.io / Claude Skills) require both fields; missing or
+    unparsable frontmatter means the directory is not indexed as a skill.
+    """
+    if not yaml_data:
+        return None
+    name = str(yaml_data.get("name") or "").strip()
+    description = str(yaml_data.get("description") or "").strip()
+    if not name or not description:
+        return None
+    return name, description
+
+
+def _skill_from_frontmatter_local(
+    skill_dir: Path, update_at: float
+) -> Optional[Skill]:
+    """Build a catalog Skill from local frontmatter only (no SysOp, no body).
+
+    Returns None when SKILL.md has no usable ``name`` + ``description``.
+    """
     skill_md_path = skill_dir / "SKILL.md"
-    description = ""
+    yaml_data = None
     try:
         prefix = _read_local_frontmatter_prefix(skill_md_path)
         yaml_data = _parse_frontmatter_yaml(prefix)
-        if yaml_data is not None and "description" in yaml_data:
-            description = str(yaml_data["description"])
     except OSError as exc:
         logger.debug(
             "[SkillUseRail] local frontmatter read failed path=%s err=%s",
             skill_md_path,
             exc,
         )
+        return None
+    fields = _catalog_name_and_description(yaml_data)
+    if fields is None:
+        return None
+    name, description = fields
     skill = Skill(
-        name=skill_dir.name,
-        description=description or f"Skill located in {skill_dir}",
+        name=name,
+        description=description,
         directory=skill_dir,
     )
     try:
@@ -155,7 +204,6 @@ def warmup_process_skill_index(
             skill_md = item / "SKILL.md"
             if not skill_md.is_file():
                 continue
-            kept += 1
             try:
                 key = str(item.resolve())
                 update_at = skill_md.stat().st_mtime
@@ -163,12 +211,27 @@ def warmup_process_skill_index(
                 continue
             proc = _PROCESS_SKILL_INDEX.get(key)
             if proc is not None and proc[0] == update_at:
+                kept += 1
                 hits += 1
                 continue
-            _PROCESS_SKILL_INDEX[key] = (
-                update_at,
-                _skill_from_frontmatter_local(item, update_at),
-            )
+            try:
+                skill = _skill_from_frontmatter_local(item, update_at)
+            except Exception as exc:
+                logger.debug(
+                    "[SkillUseRail] skill_index_warmup skip path=%s err=%s",
+                    item,
+                    exc,
+                )
+                continue
+            if skill is None:
+                logger.debug(
+                    "[SkillUseRail] skill_index_warmup skip path=%s: "
+                    "missing frontmatter name/description",
+                    item,
+                )
+                continue
+            kept += 1
+            _PROCESS_SKILL_INDEX[key] = (update_at, skill)
             filled += 1
 
     cost_ms = (time.perf_counter() - t0) * 1000
@@ -405,6 +468,11 @@ class SkillUseRail(DeepAgentRail):
                     if skill is None:
                         skill = await self._load_skill(item, update_at)
                         cache_misses += 1
+                        if skill is None:
+                            discovered_keys.discard(key)
+                            if ordered_keys and ordered_keys[-1] == key:
+                                ordered_keys.pop()
+                            continue
                         if self.enable_cache:
                             _PROCESS_SKILL_INDEX[key] = (update_at, skill)
                     self._skill_cache[key] = skill
@@ -442,19 +510,31 @@ class SkillUseRail(DeepAgentRail):
             cost_ms,
         )
 
-    async def _load_skill(self, skill_dir: Path, update_at: float) -> Skill:
-        """Load one skill from a skill directory."""
+    async def _load_skill(self, skill_dir: Path, update_at: float) -> Optional[Skill]:
+        """Load one skill from a skill directory.
+
+        Returns None when frontmatter lacks required ``name`` / ``description``.
+        """
         skill_md_path = skill_dir / "SKILL.md"
 
-        description = ""
+        yaml_data = None
         try:
-            description = await self._load_description(skill_md_path)
+            yaml_data = await self._load_front_matter(skill_md_path)
         except Exception as exc:
-            logger.warning(f"Failed to load description from {skill_md_path}: {exc}")
+            logger.warning(f"Failed to load frontmatter from {skill_md_path}: {exc}")
+            return None
 
+        fields = _catalog_name_and_description(yaml_data)
+        if fields is None:
+            logger.debug(
+                "[SkillUseRail] skip skill path=%s: missing frontmatter name/description",
+                skill_dir,
+            )
+            return None
+        name, description = fields
         skill = Skill(
-            name=skill_dir.name,
-            description=description or f"Skill located in {skill_dir}",
+            name=name,
+            description=description,
             directory=skill_dir,
         )
         try:
@@ -491,7 +571,11 @@ class SkillUseRail(DeepAgentRail):
 
     def _filter_skills(self, skills: List[Skill]) -> List[Skill]:
         """Filter skills by enabled_skills and disabled_skills."""
-        return [skill for skill in skills if self._is_skill_name_allowed(skill.name)]
+        return [
+            skill
+            for skill in skills
+            if self._is_skill_name_allowed(skill.directory.name)
+        ]
 
     def init(self, agent):
         """Register this rail's tools through the agent ability manager.
@@ -997,13 +1081,13 @@ class SkillUseRail(DeepAgentRail):
             The parsed front matter and the remaining body, or None when the
             text does not open with a complete ``---`` delimited block.
         """
-        if not text.startswith("---"):
+        yaml_block, body = _extract_frontmatter_yaml_and_body(text)
+        if yaml_block is None:
             return None
-        parts = text.split("---", 2)
-        if len(parts) < 3:
+        yaml_data = _load_frontmatter_mapping(yaml_block)
+        if not yaml_data:
             return None
-        _, yaml_block, body = parts
-        return yaml.safe_load(yaml_block) or {}, body.lstrip()
+        return yaml_data, body.lstrip()
 
     async def _load_front_matter(self, path: Path) -> Optional[dict]:
         """Load only the YAML front matter of a SKILL.md.
@@ -1057,21 +1141,23 @@ class SkillUseRail(DeepAgentRail):
 
         text = content if isinstance(content, str) else str(content)
 
-        if text.startswith("---"):
-            parts = text.split("---", 2)
-            if len(parts) >= 3:
-                _, yaml_block, body = parts
-                yaml_data = yaml.safe_load(yaml_block) or {}
-                return yaml_data, body.lstrip()
-
+        yaml_block, body = _extract_frontmatter_yaml_and_body(text)
+        if yaml_block is None:
+            return None, text
+        yaml_data = _load_frontmatter_mapping(yaml_block)
+        if yaml_data:
+            return yaml_data, body.lstrip()
         return None, text
 
     async def _load_description(self, path: Path) -> str:
         """Load description from YAML front matter."""
         yaml_data = await self._load_front_matter(path)
-        if yaml_data is None or "description" not in yaml_data:
+        description = ""
+        if yaml_data:
+            description = str(yaml_data.get("description") or "").strip()
+        if not description:
             raise KeyError("SKILL.md file does not contain a description field")
-        return str(yaml_data["description"])
+        return description
 
     @staticmethod
     def _skill_md_path(skill: Skill) -> Path:
@@ -1155,6 +1241,8 @@ class SkillUseRail(DeepAgentRail):
 
                 update_at = skill_md_path.stat().st_mtime
                 skill = await loader._load_skill(item, update_at)
+                if skill is None:
+                    continue
 
                 if skill.name in skill_map:
                     prev_dir = skill_map[skill.name].directory
