@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import threading
 from pathlib import Path
@@ -23,8 +22,8 @@ from openjiuwen.harness.personal_context.source_metadata import (
 def _config() -> PersonalContextConfig:
     return PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": True,
+            "collection_enabled": True,
+            "agent_use_enabled": True,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -45,19 +44,18 @@ def _item(
     *,
     revision_id: str = "rev-1",
     content: str = "First paragraph.\n\nSecond paragraph.",
-    operation: str = "upsert",
     original_ref: str | None = None,
     title: str = "One",
 ) -> dict[str, object]:
     return {
         "logical_id": logical_id,
         "revision_id": revision_id,
-        "operation": operation,
+        "operation": "upsert",
         "title": title,
-        "content": content if operation == "upsert" else None,
+        "content": content,
         "original_ref": original_ref or f"file:///{logical_id}",
         "metadata": {"kind": "note"},
-        "raw_snapshot": "raw source" if operation == "upsert" else None,
+        "raw_snapshot": "raw source",
     }
 
 
@@ -220,30 +218,6 @@ async def test_startup_removes_only_stale_personal_context_content_roots(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_rules_pipeline_delete_removes_page_but_keeps_source_metadata(tmp_path: Path) -> None:
-    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
-    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
-    await service.start()
-
-    await _submit_run(queue, "local", "run-1", _batch(_item()))
-    source_metadata = list((tmp_path / "workspace" / "source-meta").glob("src_*.md"))
-    assert len(source_metadata) == 1
-
-    await _submit_run(queue, "local", "run-2", _batch(_item(operation="delete"), batch_id="batch-2"))
-    context_root = tmp_path / "workspace" / "context"
-    assert not [path for path in context_root.rglob("*.md") if path.name != "description.md"]
-    assert source_metadata[0].is_file()
-    assert not (tmp_path / "workspace" / "source-proofs").exists()
-    assert description_has_empty_summary(context_root / "description.md")
-
-    await service.stop(timeout_seconds=1)
-
-
-def description_has_empty_summary(path: Path) -> bool:
-    return "No context documents" in path.read_text(encoding="utf-8")
-
-
-@pytest.mark.asyncio
 async def test_pipeline_failure_sets_completion_exception_and_cleans_sandbox(tmp_path: Path) -> None:
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
     service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
@@ -334,7 +308,7 @@ async def test_two_batches_share_run_inputs_and_finish_publishes_once(
     first_batch = _batch(_item(content=large_content), batch_id="batch-1")
     second_batch = _batch(
         _item("notes/two", revision_id="rev-2", content="Second source."),
-        _item("notes/deleted", revision_id="rev-3", operation="delete"),
+        _item("notes/three", revision_id="rev-3", content="Third source."),
         batch_id="batch-2",
     )
     try:
@@ -348,10 +322,7 @@ async def test_two_batches_share_run_inputs_and_finish_publishes_once(
             "batch-1",
             "batch-2",
         }
-        assert (run_root / "inputs" / "deleted" / "batch-1.json").is_file()
-        assert json.loads((run_root / "inputs" / "deleted" / "batch-2.json").read_text(encoding="utf-8")) == [
-            "notes/deleted"
-        ]
+        assert len(list((run_root / "inputs" / "records" / "batch-2").rglob("content.md"))) == 2
         assert len(list((run_root / "inputs" / "records" / "batch-1").rglob("content.md"))) == 1
         assert len(list((run_root / "inputs" / "records" / "batch-1").rglob("context.md"))) == 1
         assert len(list((run_root / "inputs" / "processed" / "batch-1").rglob("record.json"))) == 1
@@ -398,11 +369,7 @@ async def test_source_ref_alias_is_monotonic_per_run_and_restarts_for_another_ru
             _batch(
                 _item("notes/one-copy", original_ref=first_locator),
                 _item("notes/three", original_ref="https://example.test/source/three"),
-                _item(
-                    "notes/deleted",
-                    operation="delete",
-                    original_ref="https://example.test/source/deleted",
-                ),
+                _item("notes/one-again", original_ref=first_locator),
                 batch_id="batch-2",
             ),
         )
@@ -424,10 +391,10 @@ async def test_source_ref_alias_is_monotonic_per_run_and_restarts_for_another_ru
         state = service._run_states[("local", "run-alias")]
         aliases = state.get("source_alias_by_id")
         logical_sources = state.get("source_id_by_logical_id")
-        assert isinstance(aliases, dict) and len(aliases) == 4
+        assert isinstance(aliases, dict) and len(aliases) == 3
         assert isinstance(logical_sources, dict) and len(logical_sources) == 5
         source_files = sorted((tmp_path / "workspace" / "source-meta").glob("*.md"))
-        assert len(source_files) == 4
+        assert len(source_files) == 3
         assert all("raw source" not in path.read_text(encoding="utf-8") for path in source_files)
 
         await _put_event(queue, "abort", "local", "run-alias", None)

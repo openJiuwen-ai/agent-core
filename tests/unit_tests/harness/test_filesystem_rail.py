@@ -128,6 +128,46 @@ def test_sys_operation_rail_registers_base_tools(tmp_path):
     asyncio.run(_run())
 
 
+def test_sys_operation_rail_can_omit_model_visible_shell_tools(tmp_path):
+    async def _run():
+        await Runner.start()
+        rail = None
+        sys_operation = None
+        agent = _Agent()
+        try:
+            card = SysOperationCard(
+                id="test_sys_operation_rail_without_shell_tools",
+                mode=OperationMode.LOCAL,
+                work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+            )
+            Runner.resource_mgr.add_sys_operation(card)
+            sys_operation = Runner.resource_mgr.get_sys_operation(card.id)
+            rail = SysOperationRail(with_shell_tools=False)
+            rail.set_sys_operation(sys_operation)
+
+            rail.init(agent)
+
+            assert set(agent.ability_manager.cards) == {
+                "read_file",
+                "write_file",
+                "edit_file",
+                "glob",
+                "list_files",
+                "grep",
+            }
+            assert "bash" not in agent.ability_manager.cards
+            assert "powershell" not in agent.ability_manager.cards
+            assert "code" not in agent.ability_manager.cards
+        finally:
+            if rail is not None:
+                rail.uninit(agent)
+            if sys_operation is not None:
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id=card.id)
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
 def test_sys_operation_rail_read_only(tmp_path):
     async def _run():
         await Runner.start()

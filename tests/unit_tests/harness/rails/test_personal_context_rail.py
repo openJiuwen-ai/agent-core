@@ -37,50 +37,50 @@ def _tool_group() -> list[object]:
     ]
 
 
-def _write_runtime_config(home: Path, text: str = "enabled: true\n") -> Path:
+def _write_runtime_config(home: Path, text: str = "agent_use_enabled: true\n") -> Path:
     config_path = home / "personal_context.yaml"
     config_path.write_text(text, encoding="utf-8")
     return config_path
 
 
-def test_runtime_enabled_requires_strict_boolean_and_valid_mapping(tmp_path: Path) -> None:
+def test_agent_use_enabled_requires_strict_boolean_and_valid_mapping(tmp_path: Path) -> None:
     config_path = tmp_path / "personal_context.yaml"
 
-    config_path.write_text("enabled: true\n", encoding="utf-8")
-    assert personal_context_rail._runtime_enabled(config_path) is True
+    config_path.write_text("agent_use_enabled: true\n", encoding="utf-8")
+    assert personal_context_rail._agent_use_enabled(config_path) is True
 
-    config_path.write_text("enabled: false\n", encoding="utf-8")
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    config_path.write_text("agent_use_enabled: false\n", encoding="utf-8")
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
-    config_path.write_text("enabled: 'true'\n", encoding="utf-8")
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    config_path.write_text("agent_use_enabled: 'true'\n", encoding="utf-8")
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
-    config_path.write_text("enabled: 1\n", encoding="utf-8")
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    config_path.write_text("agent_use_enabled: 1\n", encoding="utf-8")
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
-    config_path.write_text("enabled: [\n", encoding="utf-8")
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    config_path.write_text("agent_use_enabled: [\n", encoding="utf-8")
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
     config_path.write_text("- enabled\n", encoding="utf-8")
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
     config_path.unlink()
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
 
-def test_runtime_enabled_rejects_directory_and_oversized_config(tmp_path: Path) -> None:
+def test_agent_use_enabled_rejects_directory_and_oversized_config(tmp_path: Path) -> None:
     config_path = tmp_path / "personal_context.yaml"
     config_path.mkdir()
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
     config_path.rmdir()
-    config_path.write_bytes(b"enabled: true\n" + b"x" * (4 * 1024 * 1024))
-    assert personal_context_rail._runtime_enabled(config_path) is False
+    config_path.write_bytes(b"agent_use_enabled: true\n" + b"x" * (4 * 1024 * 1024))
+    assert personal_context_rail._agent_use_enabled(config_path) is False
 
 
-def test_runtime_enabled_rejects_symlink_without_following_target(tmp_path: Path) -> None:
+def test_agent_use_enabled_rejects_symlink_without_following_target(tmp_path: Path) -> None:
     target = tmp_path / "target.yaml"
-    target.write_text("enabled: true\n", encoding="utf-8")
+    target.write_text("agent_use_enabled: true\n", encoding="utf-8")
     config_path = tmp_path / "personal_context.yaml"
     try:
         config_path.symlink_to(target)
@@ -88,9 +88,9 @@ def test_runtime_enabled_rejects_symlink_without_following_target(tmp_path: Path
         # Windows environments without symlink privileges still exercise the
         # regular-file boundary with a directory at the exact config path.
         config_path.mkdir()
-        assert personal_context_rail._runtime_enabled(config_path) is False
+        assert personal_context_rail._agent_use_enabled(config_path) is False
     else:
-        assert personal_context_rail._runtime_enabled(config_path) is False
+        assert personal_context_rail._agent_use_enabled(config_path) is False
 
 
 @pytest.mark.asyncio
@@ -111,7 +111,7 @@ async def test_disabled_runtime_clears_previous_section_without_reading_descript
     await rail.before_model_call(ctx)
     assert len(await manager.collect_for_session("session-1")) == 1
 
-    _write_runtime_config(tmp_path, "enabled: false\n")
+    _write_runtime_config(tmp_path, "agent_use_enabled: false\n")
     monkeypatch.setattr(
         personal_context_rail,
         "_read_description",
@@ -141,7 +141,7 @@ async def test_missing_or_invalid_runtime_config_does_not_read_description(
         "_read_description",
         lambda _path: pytest.fail("invalid runtime config must not read description"),
     )
-    for config_text in (None, "enabled: [\n", "enabled: 'true'\n"):
+    for config_text in (None, "agent_use_enabled: [\n", "agent_use_enabled: 'true'\n"):
         config_path = tmp_path / "personal_context.yaml"
         if config_text is None:
             config_path.unlink(missing_ok=True)
@@ -157,7 +157,7 @@ async def test_oversized_runtime_config_does_not_read_description(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = _write_runtime_config(tmp_path)
-    config_path.write_bytes(b"enabled: true\n" + b"x" * (4 * 1024 * 1024))
+    config_path.write_bytes(b"agent_use_enabled: true\n" + b"x" * (4 * 1024 * 1024))
     context_root = tmp_path / "workspace" / "context"
     context_root.mkdir(parents=True)
     (context_root / "description.md").write_text("content", encoding="utf-8")
@@ -182,7 +182,7 @@ async def test_symlink_runtime_config_does_not_read_description(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "target.yaml"
-    target.write_text("enabled: true\n", encoding="utf-8")
+    target.write_text("agent_use_enabled: true\n", encoding="utf-8")
     config_path = tmp_path / "personal_context.yaml"
     try:
         config_path.symlink_to(target)

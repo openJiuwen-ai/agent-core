@@ -16,6 +16,7 @@ def _local_service(service_id: str = "notes", *, enabled: bool = True) -> dict:
         "enabled": enabled,
         "interval_seconds": 300,
         "max_items_per_run": 100,
+        "time_range": {"mode": "all"},
         "source": {"root_dir": "~/notes"},
         "credentials": {},
     }
@@ -23,8 +24,8 @@ def _local_service(service_id: str = "notes", *, enabled: bool = True) -> dict:
 
 def _valid_config(*services: dict, strategy_profile: str = "rules") -> dict:
     return {
-        "enabled": True,
-        "fetching_enabled": True,
+        "collection_enabled": True,
+        "agent_use_enabled": True,
         "strategy_profile": strategy_profile,
         "model_client": None,
         "model_request": None,
@@ -39,6 +40,7 @@ def _github_service(token: str = "mock-token") -> dict:
         "enabled": True,
         "interval_seconds": 60,
         "max_items_per_run": None,
+        "time_range": {"mode": "all"},
         "source": {"owner": "openai", "repo": "agent-core"},
         "credentials": {"token": token},
     }
@@ -58,16 +60,116 @@ def test_config_normalizes_service_order_and_is_frozen():
         config.enabled = False
 
 
-def test_fetching_enabled_is_required_and_serialized():
+def test_dual_global_switches_default_false_and_serialize_without_legacy_fields():
     raw = _valid_config(_local_service())
-    raw.pop("fetching_enabled")
+    raw.pop("collection_enabled")
+    raw.pop("agent_use_enabled")
+
+    config = PersonalContextConfig.from_dict(raw)
+    dumped = config.model_dump(mode="json")
+
+    assert config.collection_enabled is False
+    assert config.agent_use_enabled is False
+    assert dumped["collection_enabled"] is False
+    assert dumped["agent_use_enabled"] is False
+    assert "enabled" not in dumped
+    assert "fetching_enabled" not in dumped
+
+
+@pytest.mark.parametrize("legacy_field", ["enabled", "fetching_enabled"])
+def test_config_rejects_legacy_global_switch_fields(legacy_field: str):
+    raw = _valid_config(_local_service())
+    raw[legacy_field] = True
+
     with pytest.raises(JiuwenValidationError):
         PersonalContextConfig.from_dict(raw)
 
-    raw["fetching_enabled"] = False
-    config = PersonalContextConfig.from_dict(raw)
-    assert config.fetching_enabled is False
-    assert config.model_dump(mode="json")["fetching_enabled"] is False
+
+@pytest.mark.parametrize(
+    ("time_range", "expected"),
+    [
+        ({"mode": "all"}, {"mode": "all"}),
+        (
+            {"mode": "recent", "recent_days": 3},
+            {"mode": "recent", "recent_days": 3},
+        ),
+        (
+            {
+                "mode": "fixed",
+                "start_at": "2026-08-01T00:00:00+08:00",
+                "end_at": "2026-08-11T00:00:00+08:00",
+            },
+            {
+                "mode": "fixed",
+                "start_at": "2026-07-31T16:00:00Z",
+                "end_at": "2026-08-10T16:00:00Z",
+            },
+        ),
+    ],
+)
+def test_fetch_service_accepts_and_normalizes_strict_time_ranges(
+    time_range: dict[str, object],
+    expected: dict[str, object],
+):
+    service = _local_service()
+    service["time_range"] = time_range
+
+    config = PersonalContextConfig.from_dict(_valid_config(service))
+
+    assert config.fetch_services[0].time_range == expected
+
+
+def test_fetch_service_requires_time_range():
+    service = _local_service()
+    service.pop("time_range")
+
+    with pytest.raises(JiuwenValidationError):
+        PersonalContextConfig.from_dict(_valid_config(service))
+
+
+@pytest.mark.parametrize(
+    "time_range",
+    [
+        {"mode": "all", "recent_days": 3},
+        {"mode": "recent"},
+        {"mode": "recent", "recent_days": 0},
+        {"mode": "recent", "recent_days": -1},
+        {"mode": "recent", "recent_days": True},
+        {"mode": "recent", "recent_days": 1.5},
+        {"mode": "recent", "recent_days": 3, "start_at": "2026-08-01T00:00:00Z"},
+        {
+            "mode": "fixed",
+            "start_at": "2026-08-01T00:00:00",
+            "end_at": "2026-08-11T00:00:00Z",
+        },
+        {
+            "mode": "fixed",
+            "start_at": "2026-08-11T00:00:00Z",
+            "end_at": "2026-08-01T00:00:00Z",
+        },
+        {
+            "mode": "fixed",
+            "start_at": "2026-08-01T00:00:00Z",
+            "end_at": "2026-08-01T00:00:00Z",
+        },
+        {
+            "mode": "fixed",
+            "start_at": "2026-08-01T00:00:00Z",
+            "end_at": "2026-08-11T00:00:00Z",
+            "recent_days": 3,
+        },
+        {"mode": "fixed", "start_at": "2026-08-01T00:00:00Z"},
+        {"mode": "unknown"},
+    ],
+)
+def test_fetch_service_rejects_invalid_time_range_combinations(
+    time_range: dict[str, object],
+):
+    service = _local_service()
+    service["time_range"] = time_range
+
+    with pytest.raises(JiuwenValidationError):
+        PersonalContextConfig.from_dict(_valid_config(service))
 
 
 def test_fetch_service_interval_defaults_to_three_hours():

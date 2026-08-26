@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +13,9 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch import browser_bookmarks
+from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.browser_bookmarks import BrowserBookmarksFetchService
+from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.status_codes import StatusCode
 
 
@@ -22,6 +26,7 @@ def _config(
     include_subfolders: bool = True,
     fetch_page_content: bool = False,
     max_items: int | None = None,
+    time_range: dict[str, object] | None = None,
 ) -> PersonalContextFetchServiceConfig:
     return PersonalContextFetchServiceConfig(
         service_id="bookmarks",
@@ -29,6 +34,7 @@ def _config(
         enabled=True,
         interval_seconds=60,
         max_items_per_run=max_items,
+        time_range=time_range or {"mode": "all"},
         source={
             "bookmarks_path": str(bookmarks_path),
             "bookmark_folder_paths": folders or [],
@@ -82,12 +88,42 @@ def _bookmark(
     return node
 
 
-async def _batches(service: BrowserBookmarksFetchService, cursor: dict[str, object] | None = None):
-    return [batch async for batch in service.fetch(run_id="run-1", cursor=cursor)]
+def _edge_timestamp(value: datetime) -> str:
+    epoch = datetime(1601, 1, 1, tzinfo=UTC)
+    return str(int((value.astimezone(UTC) - epoch).total_seconds() * 1_000_000))
+
+
+async def _batches(
+    service: BrowserBookmarksFetchService,
+    cursor: dict[str, object] | None = None,
+    *,
+    run_started_at: datetime | None = None,
+):
+    candidates = await service.prepare_run(
+        run_id="run-1",
+        run_started_at=run_started_at or datetime.now(UTC),
+        cursor=cursor,
+    )
+    batches = [
+        batch
+        async for batch in service.fetch(
+            run_id="run-1",
+            cursor=cursor,
+            candidates=candidates,
+        )
+    ]
+    if batches:
+        committed = record_completed_candidates(batches[-1].next_cursor, candidates)
+        batches[-1] = batches[-1].model_copy(update={"next_cursor": committed})
+    return batches
 
 
 def _items(batches):
     return [item for batch in batches for item in batch.items]
+
+
+async def _no_retry_sleep(_delay: float) -> None:
+    return None
 
 
 def test_browser_bookmarks_reads_edge_json_and_filters_folders(tmp_path: Path):
@@ -118,6 +154,169 @@ def test_browser_bookmarks_reads_edge_json_and_filters_folders(tmp_path: Path):
         == hashlib.sha256("AI\nhttps://example.com/ai\n收藏夹栏/AI\n13200000000000000".encode()).hexdigest()
     )
     assert items[0].metadata["folder_path"] == "收藏夹栏/AI"
+
+
+def test_browser_bookmarks_retries_transient_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "One", "https://example.com/one")])
+    service = BrowserBookmarksFetchService(_config(path), home=tmp_path / "home")
+    original = browser_bookmarks._read_bookmarks_file
+    calls = 0
+
+    def flaky(bookmarks_path: Path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            cause = json.JSONDecodeError("partial write", "{", 1)
+            raise browser_bookmarks._file_error("Edge Bookmarks file is not valid JSON", cause)
+        return original(bookmarks_path)
+
+    monkeypatch.setattr(browser_bookmarks, "_read_bookmarks_file", flaky)
+    monkeypatch.setattr(retry_module, "_sleep", _no_retry_sleep)
+    monkeypatch.setattr(retry_module, "_jitter_seconds", lambda: 0.0)
+
+    items = _items(asyncio.run(_batches(service)))
+
+    assert calls == 2
+    assert [item.title for item in items] == ["One"]
+
+
+def test_browser_bookmarks_does_not_retry_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "One", "https://example.com/one")])
+    service = BrowserBookmarksFetchService(_config(path), home=tmp_path / "home")
+    calls = 0
+
+    def denied(_bookmarks_path: Path):
+        nonlocal calls
+        calls += 1
+        cause = PermissionError(errno.EACCES, "denied")
+        raise browser_bookmarks._file_error("Edge Bookmarks file could not be read", cause)
+
+    monkeypatch.setattr(browser_bookmarks, "_read_bookmarks_file", denied)
+    monkeypatch.setattr(retry_module, "_sleep", _no_retry_sleep)
+
+    with pytest.raises(BaseError) as caught:
+        asyncio.run(_batches(service))
+
+    assert calls == 1
+    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
+
+
+def test_browser_bookmarks_prepare_uses_date_added_and_reads_only_selected_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "TimeBookmarks"
+    run_started_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    nodes = [
+        _bookmark(
+            name,
+            name,
+            f"https://example.com/{name}",
+            date_added=_edge_timestamp(run_started_at + timedelta(days=offset)),
+        )
+        for name, offset in (
+            ("old", -4),
+            ("start", -3),
+            ("middle", -1),
+            ("end", 0),
+            ("future", 1),
+        )
+    ]
+    _write_bookmarks(path, nodes)
+    page_reads: list[str] = []
+
+    async def read_page(url: str):
+        page_reads.append(url)
+        return {"status": "ok", "final_url": url, "title": None, "description": None, "text": "body"}
+
+    monkeypatch.setattr(browser_bookmarks, "_fetch_page_content", read_page)
+    recent = BrowserBookmarksFetchService(
+        _config(
+            path,
+            max_items=2,
+            fetch_page_content=True,
+            time_range={"mode": "recent", "recent_days": 3},
+        ),
+        home=tmp_path / "recent-home",
+    )
+
+    candidates = asyncio.run(recent.prepare_run(run_id="recent", run_started_at=run_started_at, cursor=None))
+
+    assert [candidate["locator"] for candidate in candidates] == [
+        "https://example.com/end",
+        "https://example.com/middle",
+    ]
+    assert all(candidate["resource_lane"] == "bookmark" for candidate in candidates)
+    assert candidates[0]["candidate_time"] == run_started_at.isoformat().replace("+00:00", "Z")
+    assert page_reads == []
+
+    batches = asyncio.run(_batches(recent, run_started_at=run_started_at))
+    assert [item.title for item in _items(batches)] == ["end", "middle"]
+    assert page_reads == ["https://example.com/end", "https://example.com/middle"]
+
+    fixed = BrowserBookmarksFetchService(
+        _config(
+            path,
+            time_range={
+                "mode": "fixed",
+                "start_at": (run_started_at - timedelta(days=3)).isoformat(),
+                "end_at": run_started_at.isoformat(),
+            },
+        ),
+        home=tmp_path / "fixed-home",
+    )
+    fixed_candidates = asyncio.run(fixed.prepare_run(run_id="fixed", run_started_at=run_started_at, cursor=None))
+    assert {candidate["locator"] for candidate in fixed_candidates} == {
+        "https://example.com/start",
+        "https://example.com/middle",
+    }
+
+
+def test_browser_bookmarks_recent_window_rolls_and_new_bookmark_preempts_history(tmp_path: Path) -> None:
+    path = tmp_path / "RollingBookmarks"
+    first_started_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    initial = [
+        _bookmark(
+            str(index),
+            f"base-{index}",
+            f"https://example.com/base-{index}",
+            date_added=_edge_timestamp(first_started_at - timedelta(hours=index)),
+        )
+        for index in range(1, 5)
+    ]
+    _write_bookmarks(path, initial)
+    service = BrowserBookmarksFetchService(
+        _config(path, max_items=2, time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path / "rolling-home",
+    )
+    first = asyncio.run(_batches(service, run_started_at=first_started_at))
+    cursor = first[-1].next_cursor
+    assert [item.title for item in _items(first)] == ["base-1", "base-2"]
+    assert cursor is not None
+
+    new = _bookmark(
+        "new",
+        "new",
+        "https://example.com/new",
+        date_added=_edge_timestamp(first_started_at + timedelta(hours=1)),
+    )
+    _write_bookmarks(path, [new, *initial])
+    second = asyncio.run(_batches(service, cursor, run_started_at=first_started_at + timedelta(hours=2)))
+    assert [item.title for item in _items(second)] == ["new", "base-3"]
+
+    outside = asyncio.run(
+        service.prepare_run(
+            run_id="outside",
+            run_started_at=first_started_at + timedelta(days=4),
+            cursor=second[-1].next_cursor,
+        )
+    )
+    assert outside == ()
 
 
 def test_browser_bookmarks_folder_filter_can_exclude_subfolders(tmp_path: Path):
@@ -154,7 +353,7 @@ def test_browser_bookmarks_invalid_json_structure_fails_whole_run(tmp_path: Path
     assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
 
 
-def test_browser_bookmarks_detects_update_and_delete_and_advances_only_emitted_ids(tmp_path: Path):
+def test_browser_bookmarks_detects_update_and_ignores_removed_bookmark(tmp_path: Path):
     path = tmp_path / "Bookmarks"
     _write_bookmarks(
         path,
@@ -178,13 +377,12 @@ def test_browser_bookmarks_detects_update_and_delete_and_advances_only_emitted_i
     )
     changed = asyncio.run(_batches(service, cursor))
     changed_items = _items(changed)
-    assert {(item.operation, item.title) for item in changed_items} == {
+    assert [(item.operation, item.title) for item in changed_items] == [
         ("upsert", "First changed"),
-        ("delete", None),
-    }
-    assert changed[-1].next_cursor == {
-        "items": {item.logical_id: item.revision_id for item in changed_items if item.operation == "upsert"}
-    }
+    ]
+    selection = changed[-1].next_cursor["_selection"]
+    assert isinstance(selection, dict)
+    assert len(selection["completed"]) == 3
 
 
 def test_browser_bookmarks_default_batches_are_at_most_twenty(tmp_path: Path):
@@ -313,6 +511,107 @@ def test_browser_bookmarks_follows_safe_page_redirects(monkeypatch: pytest.Monke
     assert str(headers["User-Agent"]).startswith("Mozilla/5.0 ")
 
 
+def test_browser_bookmarks_retries_transient_page_http_error(monkeypatch: pytest.MonkeyPatch):
+    requested_urls: list[str] = []
+    responses = [
+        (503, ""),
+        (200, "<html><title>Recovered</title><main>complete body</main></html>"),
+    ]
+
+    class Response:
+        def __init__(self, status: int, body: str) -> None:
+            self.status = status
+            self.url = "https://example.com/article"
+            self.headers = {"Content-Type": "text/html; charset=utf-8"}
+            self._body = body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def raise_for_status(self) -> None:
+            if self.status >= 400:
+                raise browser_bookmarks.aiohttp.ClientResponseError(
+                    request_info=SimpleNamespace(real_url=self.url),
+                    history=(),
+                    status=self.status,
+                )
+
+        async def text(self) -> str:
+            return self._body
+
+    class Session:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def get(self, url: str, **_kwargs):
+            requested_urls.append(url)
+            status, body = responses.pop(0)
+            return Response(status, body)
+
+    monkeypatch.setattr(browser_bookmarks.aiohttp, "ClientSession", Session)
+    monkeypatch.setattr(retry_module, "_sleep", _no_retry_sleep)
+    monkeypatch.setattr(retry_module, "_jitter_seconds", lambda: 0.0)
+
+    page = asyncio.run(browser_bookmarks._fetch_page_content("https://example.com/article"))
+
+    assert requested_urls == ["https://example.com/article", "https://example.com/article"]
+    assert page["status"] == "ok"
+    assert page["title"] == "Recovered"
+
+
+def test_browser_bookmarks_does_not_retry_page_http_404(monkeypatch: pytest.MonkeyPatch):
+    requested_urls: list[str] = []
+
+    class Response:
+        status = 404
+        url = "https://example.com/missing"
+        headers: dict[str, str] = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def raise_for_status(self) -> None:
+            raise browser_bookmarks.aiohttp.ClientResponseError(
+                request_info=SimpleNamespace(real_url=self.url),
+                history=(),
+                status=self.status,
+            )
+
+    class Session:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def get(self, url: str, **_kwargs):
+            requested_urls.append(url)
+            return Response()
+
+    monkeypatch.setattr(browser_bookmarks.aiohttp, "ClientSession", Session)
+    monkeypatch.setattr(retry_module, "_sleep", _no_retry_sleep)
+
+    with pytest.raises(browser_bookmarks.aiohttp.ClientResponseError):
+        asyncio.run(browser_bookmarks._fetch_page_content("https://example.com/missing"))
+
+    assert requested_urls == ["https://example.com/missing"]
+
+
 def test_browser_bookmarks_extracts_structured_body_before_applying_text_limit():
     html_text = (
         "<html><head><title>Structured article</title>"
@@ -426,7 +725,7 @@ def test_browser_bookmarks_missing_file_fails_instead_of_deleting_everything(tmp
     service = BrowserBookmarksFetchService(_config(tmp_path / "missing"), home=tmp_path / "home")
 
     with pytest.raises(BaseError):
-        asyncio.run(_batches(service, {"bookmarks": {"old": "fingerprint"}}))
+        asyncio.run(_batches(service))
 
 
 def test_browser_bookmarks_empty_roots_fails_instead_of_deleting_everything(tmp_path: Path):
@@ -435,7 +734,7 @@ def test_browser_bookmarks_empty_roots_fails_instead_of_deleting_everything(tmp_
     service = BrowserBookmarksFetchService(_config(path), home=tmp_path / "home")
 
     with pytest.raises(BaseError) as caught:
-        asyncio.run(_batches(service, {"items": {"old": "fingerprint"}}))
+        asyncio.run(_batches(service))
     assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
 
 
@@ -471,7 +770,9 @@ def test_browser_bookmarks_history_and_new_changes_use_stable_priority(tmp_path:
     assert len(logical_ids) == len(set(logical_ids)) == 205
     assert {item.original_ref for items in rounds for item in items} == expected_urls
     assert cursor is not None
-    assert set(cursor["items"]) == set(logical_ids)
+    selection = cursor["_selection"]
+    assert isinstance(selection, dict)
+    assert len(selection["completed"]) == len(logical_ids)
 
     priority_path = tmp_path / "PriorityBookmarks"
     original_nodes = [
@@ -515,3 +816,37 @@ def test_browser_bookmarks_history_and_new_changes_use_stable_priority(tmp_path:
     assert len(changed) == 100
     assert [item.title for item in changed[:3]] == ["New B", "New A", "Modified title"]
     assert changed[2].logical_id == first_items[modified_index].logical_id
+
+
+def test_browser_bookmarks_new_overflow_stays_ahead_of_history(tmp_path: Path):
+    path = tmp_path / "OverflowBookmarks"
+
+    def bookmark(name: str, timestamp: int) -> dict[str, object]:
+        return _bookmark(
+            name,
+            name,
+            f"https://example.com/{name}",
+            date_added=str(timestamp),
+        )
+
+    initial = [bookmark(f"base-{timestamp}", timestamp) for timestamp in (3, 2, 1)]
+    _write_bookmarks(path, initial)
+    service = BrowserBookmarksFetchService(_config(path, max_items=2), home=tmp_path / "overflow-home")
+    first = asyncio.run(_batches(service))
+    cursor = first[-1].next_cursor
+    assert cursor is not None
+
+    changed = [*[bookmark(f"new-{timestamp}", timestamp) for timestamp in range(8, 3, -1)], *initial]
+    _write_bookmarks(path, changed)
+    round_titles: list[list[str]] = []
+    for _ in range(3):
+        batches = asyncio.run(_batches(service, cursor))
+        round_titles.append([item.title for item in _items(batches)])
+        cursor = batches[-1].next_cursor
+        assert cursor is not None
+
+    assert round_titles == [
+        ["new-8", "new-7"],
+        ["new-6", "new-5"],
+        ["new-4", "base-1"],
+    ]

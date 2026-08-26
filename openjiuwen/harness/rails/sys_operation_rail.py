@@ -36,6 +36,7 @@ class SysOperationRail(DeepAgentRail):
         self,
         *,
         with_code_tool: bool = False,
+        with_shell_tools: bool = True,
         read_only: bool = False,
         enable_read_image_multimodal: Optional[bool] = None,
         bash_deny_patterns: list[str] | None = None,
@@ -43,6 +44,7 @@ class SysOperationRail(DeepAgentRail):
         super().__init__()
         self.tools: list[Any] | None = None
         self._with_code_tool = with_code_tool
+        self._with_shell_tools = with_shell_tools
         self._read_only = read_only
         self._enable_read_image_multimodal = enable_read_image_multimodal
         self._bash_deny_patterns = list(bash_deny_patterns or [])
@@ -65,21 +67,24 @@ class SysOperationRail(DeepAgentRail):
         glob_tool = GlobTool(self.sys_operation, lang, agent_id)
         list_dir_tool = ListDirTool(self.sys_operation, lang, agent_id)
         grep_tool = GrepTool(self.sys_operation, lang, agent_id)
-        bash_tool = BashTool(
-            self.sys_operation,
-            lang,
-            agent_id=agent_id,
-            deny_patterns=self._bash_deny_patterns,
-        )
-        powershell_tool = PowerShellTool(self.sys_operation, lang, agent_id=agent_id) if os.name == "nt" else None
 
-        shared = [glob_tool, list_dir_tool, grep_tool, bash_tool]
+        shared = [glob_tool, list_dir_tool, grep_tool]
+        if self._with_shell_tools:
+            shared.append(
+                BashTool(
+                    self.sys_operation,
+                    lang,
+                    agent_id=agent_id,
+                    deny_patterns=self._bash_deny_patterns,
+                )
+            )
+
         if self._read_only:
             self.tools = [read_tool, *shared]
         else:
             self.tools = [read_tool, write_tool, edit_tool, *shared]
-        if powershell_tool is not None:
-            self.tools.append(powershell_tool)
+        if self._with_shell_tools and os.name == "nt":
+            self.tools.append(PowerShellTool(self.sys_operation, lang, agent_id=agent_id))
 
         if self._with_code_tool and not self._read_only:
             self.tools.append(CodeTool(self.sys_operation, lang, agent_id))
@@ -95,8 +100,8 @@ class SysOperationRail(DeepAgentRail):
     def uninit(self, agent):
         if self.tools:
             for tool in self.tools:
-                name = getattr(tool.card, 'name', None)
-                if name and hasattr(agent, 'ability_manager'):
+                name = getattr(tool.card, "name", None)
+                if name and hasattr(agent, "ability_manager"):
                     agent.ability_manager.remove_ability(name)
 
 

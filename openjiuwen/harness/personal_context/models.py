@@ -13,6 +13,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PersonalContextState = Literal["CREATED", "CONFIGURED", "STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"]
 _FetchState = Literal["STOPPED", "STARTING", "RUNNING", "STOPPING", "FAILED"]
+_FETCH_RUN_STATES = {"idle", "running", "succeeded", "failed", "cancelled"}
+_FETCH_RUN_PROGRESS_FIELDS = {
+    "service_id",
+    "run_state",
+    "progress_percent",
+    "total_items",
+    "completed_items",
+    "last_error",
+}
 
 
 def _json_size(value: object, *, field_name: str, max_bytes: int | None = None) -> None:
@@ -39,13 +48,14 @@ class PersonalContextStatus(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     configured: bool
-    enabled: bool
-    fetching_enabled: bool
+    collection_enabled: bool
+    agent_use_enabled: bool
     state: _PersonalContextState
     pipeline_running: bool
     pipeline_queue_size: int = Field(ge=0)
     fetch_service_states: dict[str, _FetchState]
     fetch_service_errors: dict[str, str]
+    fetch_run_progress: dict[str, dict[str, object]] = Field(default_factory=dict)
     context_root: str = Field(min_length=1)
     context_ready: bool
     last_error: dict[str, object] | None = None
@@ -56,7 +66,12 @@ class PersonalContextStatus(BaseModel):
         if not isinstance(value, Mapping):
             return value
         copied = deepcopy(dict(value))
-        for field_name in ("fetch_service_states", "fetch_service_errors", "last_error"):
+        for field_name in (
+            "fetch_service_states",
+            "fetch_service_errors",
+            "fetch_run_progress",
+            "last_error",
+        ):
             if copied.get(field_name) is not None:
                 copied[field_name] = _copy_mapping(copied[field_name], field_name=field_name)
         return copied
@@ -66,6 +81,46 @@ class PersonalContextStatus(BaseModel):
     def bound_error_messages(cls, value: dict[str, str]) -> dict[str, str]:
         if any(len(message) > 512 for message in value.values()):
             raise ValueError("fetch service errors must be at most 512 characters")
+        return value
+
+    @field_validator("fetch_run_progress")
+    @classmethod
+    def validate_fetch_run_progress(
+        cls,
+        value: dict[str, dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        for service_id, progress in value.items():
+            if not service_id or set(progress) != _FETCH_RUN_PROGRESS_FIELDS:
+                raise ValueError("fetch run progress has an invalid shape")
+            if progress["service_id"] != service_id:
+                raise ValueError("fetch run progress service_id does not match its key")
+            run_state = progress["run_state"]
+            if run_state not in _FETCH_RUN_STATES:
+                raise ValueError("fetch run progress has an invalid run_state")
+            numeric: dict[str, int] = {}
+            for field_name in ("progress_percent", "total_items", "completed_items"):
+                field_value = progress[field_name]
+                if isinstance(field_value, bool) or not isinstance(field_value, int):
+                    raise ValueError(f"fetch run progress {field_name} must be an integer")
+                numeric[field_name] = field_value
+            percent = numeric["progress_percent"]
+            total = numeric["total_items"]
+            completed = numeric["completed_items"]
+            if not 0 <= percent <= 100 or total < 0 or not 0 <= completed <= total:
+                raise ValueError("fetch run progress counts are out of range")
+            expected_percent = 0 if total == 0 else min(99, completed * 100 // total)
+            if run_state == "succeeded":
+                if completed != total:
+                    raise ValueError("succeeded fetch run progress requires all items completed")
+                expected_percent = 100
+            if percent != expected_percent:
+                raise ValueError("fetch run progress percent does not match its counts and state")
+            last_error = progress["last_error"]
+            if run_state == "failed":
+                if not isinstance(last_error, str) or not last_error.strip() or len(last_error) > 512:
+                    raise ValueError("failed fetch run progress requires a bounded last_error")
+            elif last_error is not None:
+                raise ValueError("only failed fetch run progress may contain last_error")
         return value
 
     @field_validator("last_error")
@@ -96,7 +151,7 @@ class RawChangeItem(BaseModel):
 
     logical_id: str = Field(min_length=1, max_length=512)
     revision_id: str = Field(min_length=1, max_length=256)
-    operation: Literal["upsert", "delete"]
+    operation: Literal["upsert"]
     title: str | None = None
     content: str | None = None
     original_ref: str = Field(min_length=1)
@@ -145,10 +200,8 @@ class RawChangeItem(BaseModel):
 
     @model_validator(mode="after")
     def validate_operation_pairing(self) -> "RawChangeItem":
-        if self.operation == "upsert" and (self.content is None or not self.content.strip()):
+        if self.content is None or not self.content.strip():
             raise ValueError("upsert changes require non-empty content")
-        if self.operation == "delete" and (self.content is not None or self.raw_snapshot is not None):
-            raise ValueError("delete changes must not carry content or raw_snapshot")
         return self
 
 

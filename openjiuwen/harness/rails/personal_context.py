@@ -42,8 +42,8 @@ def _warn(operation: str, exc: BaseException | None = None) -> None:
         logger.warning("[PersonalContextRail] %s failed (%s)", operation, type(exc).__name__)
 
 
-def _runtime_enabled(config_path: Path) -> bool:
-    """Read the fixed runtime switch without following unsafe config paths."""
+def _agent_use_enabled(config_path: Path) -> bool:
+    """Read the fixed Agent-use switch without following unsafe config paths."""
 
     try:
         current = config_path
@@ -65,7 +65,7 @@ def _runtime_enabled(config_path: Path) -> bool:
         loaded = yaml.safe_load(payload.decode("utf-8"))
         if not isinstance(loaded, dict):
             return False
-        enabled = loaded.get("enabled")
+        enabled = loaded.get("agent_use_enabled")
         return isinstance(enabled, bool) and enabled
     except Exception:
         return False
@@ -214,11 +214,11 @@ class PersonalContextRail(DeepAgentRail):
             return
 
         try:
-            runtime_enabled = await asyncio.to_thread(_runtime_enabled, self._config_path)
+            agent_use_enabled = await asyncio.to_thread(_agent_use_enabled, self._config_path)
         except Exception as exc:
             _warn("read runtime switch", exc)
             return
-        if not runtime_enabled:
+        if not agent_use_enabled:
             return
 
         inputs = ctx.inputs

@@ -1036,6 +1036,7 @@ def _resolve_short_references(
             text = page.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise _pipeline_error("candidate Markdown could not be read for source reference resolution") from exc
+        display_numbers: dict[str, int] = {}
 
         def replace(match: re.Match[str], *, current_page: Path = page) -> str:
             token = match.group(0)
@@ -1053,7 +1054,8 @@ def _resolve_short_references(
                 ).replace("\\", "/")
             except ValueError as exc:
                 raise _pipeline_error("candidate source reference cannot be made relative") from exc
-            return f"[{source_id}]({_markdown_link_target(relative_target)})"
+            display_number = display_numbers.setdefault(source_id, len(display_numbers) + 1)
+            return f"[来源{display_number}]({_markdown_link_target(relative_target)})"
 
         resolved = _SHORT_REFERENCE.sub(replace, text)
         if "[[ref:" in resolved:
@@ -2008,11 +2010,7 @@ class ContextPipelineService:
 
         documents: list[dict[str, object]] = []
         blocks: list[dict[str, object]] = []
-        deleted_ids: list[str] = []
         for item in batch.items:
-            if item.operation == "delete":
-                deleted_ids.append(item.logical_id)
-                continue
             markdown = _normalize_markdown(item.content or "")
             document: dict[str, object] = {
                 "logical_id": item.logical_id,
@@ -2037,7 +2035,7 @@ class ContextPipelineService:
         return {
             "documents": documents,
             "blocks": blocks,
-            "deleted_ids": deleted_ids,
+            "deleted_ids": [],
             "actual_profile": "deterministic",
         }
 
@@ -2178,6 +2176,11 @@ class ContextPipelineService:
                             "inputs/deleted/; "
                             "read it only when needed for organizing the candidate and do not copy the list into "
                             "your reply. "
+                            "Use only read_file, write_file, edit_file, glob, list_files, and grep. Never execute "
+                            "code or use unlisted tools. For large files, each write_file or edit_file call may add "
+                            "no more than 2000 characters of Markdown. Start a new page with a bounded first section, "
+                            "then append bounded sections with edit_file and a short unique tail anchor. Do not rewrite "
+                            "a complete large file when only one section changes. "
                             "inputs/ and materialized-source/ are read-only. Use tmp/ for scratch files; tmp/ is "
                             "never published. Keep page paths below sandbox/context, ending in .md. Never use parent "
                             "traversal or create a business page named description.md. Do not add YAML/frontmatter, "
@@ -2186,8 +2189,8 @@ class ContextPipelineService:
                             "tmp/, and the optional materialized source copy. This is a "
                             "disposable PersonalContext sandbox: do not follow generic soft-delete/archive rules, "
                             "do not "
-                            "create .archive, .deleted, recycle-bin, or any other root entry, and delete "
-                            "temporary files directly with the allowed tools. The only permitted sandbox-root "
+                            "create .archive, .deleted, recycle-bin, or any other root entry. PersonalContext cleans "
+                            "scratch files after the attempt. The only permitted sandbox-root "
                             "entries are framework-created .agent_history, context, inputs, tmp, "
                             "and materialized-source. Keep ordinary "
                             "pages that are not part of this batch unchanged. Write all final wiki Markdown in "

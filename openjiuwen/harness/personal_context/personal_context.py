@@ -26,24 +26,27 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.context_graph import (
     build_context_graph,
+    build_context_tree,
     read_context_graph_page,
     search_context_graph,
 )
 from openjiuwen.harness.personal_context.context_pipeline import ContextPipelineService
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
 from openjiuwen.harness.personal_context.fetch.browser_bookmarks import BrowserBookmarksFetchService
+from openjiuwen.harness.personal_context.fetch.cursor_selection import compact_cursor, record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.feishu import (
     FeishuFetchService,
     _lark_cli_auth_status,
     _lark_cli_begin_authorization,
     _lark_cli_finish_authorization,
-    required_scopes_for_config,
+    supported_read_scopes,
 )
 from openjiuwen.harness.personal_context.fetch.github import GitHubFetchService
 from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetchService
 from openjiuwen.harness.personal_context.fetch.toutiao_reader import ToutiaoReaderFetchService
 from openjiuwen.harness.personal_context.fetch.zhihu_reader import ZhihuReaderFetchService
 from openjiuwen.harness.personal_context.models import FetchBatch, PersonalContextStatus
+from openjiuwen.harness.personal_context.source_metadata import read_source_detail
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 _QUEUE_CAPACITY = 8
@@ -101,6 +104,56 @@ def _redact_text(value: object, *, limit: int = 512) -> str:
         text,
     )
     return text[:limit]
+
+
+def _fetch_run_status(
+    service_id: str,
+    *,
+    run_state: str,
+    total_items: int = 0,
+    completed_items: int = 0,
+    last_error: str | None = None,
+) -> dict[str, object]:
+    percent = 100 if run_state == "succeeded" else 0
+    if run_state != "succeeded" and total_items > 0:
+        percent = min(99, completed_items * 100 // total_items)
+    return {
+        "service_id": service_id,
+        "run_state": run_state,
+        "progress_percent": percent,
+        "total_items": total_items,
+        "completed_items": completed_items,
+        "last_error": last_error,
+    }
+
+
+def _copy_run_candidates(value: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(value, tuple):
+        raise _fetch_error("provider prepare_run must return a tuple")
+    required_fields = {
+        "stable_id",
+        "revision_id",
+        "candidate_time",
+        "resource_lane",
+        "locator",
+    }
+    candidates: list[dict[str, object]] = []
+    for raw_candidate in value:
+        if not isinstance(raw_candidate, Mapping):
+            raise _fetch_error("provider prepared an invalid candidate")
+        candidate = dict(raw_candidate)
+        for field_name in required_fields:
+            field_value = candidate.get(field_name)
+            if not isinstance(field_value, str) or not field_value.strip():
+                raise _fetch_error(f"provider candidate {field_name} must be a non-empty string")
+        try:
+            candidate_time = datetime.fromisoformat(str(candidate["candidate_time"]).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise _fetch_error("provider candidate_time must be RFC 3339", cause=exc) from exc
+        if candidate_time.tzinfo is None:
+            raise _fetch_error("provider candidate_time must include a timezone")
+        candidates.append(candidate)
+    return tuple(candidates)
 
 
 def _source_fingerprint(config: PersonalContextFetchServiceConfig) -> str:
@@ -215,6 +268,7 @@ class PersonalContext:
         self._fetch_running: set[str] = set()
         self._fetch_states: dict[str, str] = {}
         self._fetch_errors: dict[str, str] = {}
+        self._fetch_run_progress: dict[str, dict[str, object]] = {}
 
     async def set_configuration(self, config: PersonalContextConfig) -> None:
         """Set or replace the complete configuration while PersonalContext is stopped."""
@@ -231,6 +285,10 @@ class PersonalContext:
             self._config = config
             self._fetch_states = {service.service_id: "STOPPED" for service in config.fetch_services}
             self._fetch_errors = {}
+            self._fetch_run_progress = {
+                service.service_id: _fetch_run_status(service.service_id, run_state="idle")
+                for service in config.fetch_services
+            }
             self._fetch_providers = {}
             self._fetch_tasks = {}
             self._fetch_stop_events = {}
@@ -245,9 +303,61 @@ class PersonalContext:
         config = self._config
         if config is None:
             raise _state_error("PersonalContext has not been configured")
-        if not any(item.provider == provider for item in config.fetch_services):
-            raise _state_error("feishu provider is not configured")
-        return required_scopes_for_config(config)
+        return supported_read_scopes()
+
+    async def start_collection(self) -> None:
+        """Enable collection and start its Pipeline and service schedulers."""
+
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            if not config.collection_enabled:
+                self._config = config.model_copy(update={"collection_enabled": True})
+        await self.activate_runtime()
+
+    async def stop_collection(self, *, timeout_seconds: float = 30.0) -> None:
+        """Disable collection and cancel every active round before stopping the Pipeline."""
+
+        if timeout_seconds <= 0:
+            raise _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "timeout_seconds must be greater than zero")
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            if config.collection_enabled:
+                self._config = config.model_copy(update={"collection_enabled": False})
+        async with self._fetch_lock:
+            for event in self._fetch_stop_events.values():
+                event.set()
+            tasks = list(dict.fromkeys((*self._fetch_tasks.values(), *self._manual_fetch_tasks.values())))
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        await self._deactivate_runtime(
+            timeout_seconds=timeout_seconds,
+            cancel_authorization=False,
+        )
+
+    async def start_agent_use(self) -> None:
+        """Enable Agent use without starting collection work."""
+
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            if not config.agent_use_enabled:
+                self._config = config.model_copy(update={"agent_use_enabled": True})
+
+    async def stop_agent_use(self) -> None:
+        """Disable Agent use without stopping collection work."""
+
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            if config.agent_use_enabled:
+                self._config = config.model_copy(update={"agent_use_enabled": False})
 
     async def get_authorization_status(self, provider: str) -> dict[str, object]:
         """Read shared provider authorization state without starting authorization."""
@@ -387,10 +497,15 @@ class PersonalContext:
                     if update_error:
                         self._authorization_error = authorization_error
 
-    async def get_graph(self) -> dict[str, object]:
-        """Read the last published Context graph without starting the runtime."""
+    async def get_graph(self, *, root_id: str | None = None, depth: int = 3) -> dict[str, object]:
+        """Read one breadth-first slice of the last published Context graph."""
 
-        return await asyncio.to_thread(build_context_graph, self._home)
+        return await asyncio.to_thread(build_context_graph, self._home, root_id=root_id, depth=depth)
+
+    async def get_tree(self, *, root_id: str | None = None, depth: int = 3) -> dict[str, object]:
+        """Read one breadth-first slice of the last published Context file tree."""
+
+        return await asyncio.to_thread(build_context_tree, self._home, root_id=root_id, depth=depth)
 
     async def search_graph(self, query: str) -> dict[str, object]:
         """Search the last published Context pages without starting the runtime."""
@@ -404,12 +519,18 @@ class PersonalContext:
 
         return await asyncio.to_thread(read_context_graph_page, self._home, node_id)
 
+    async def get_source(self, source_id: str) -> dict[str, object]:
+        """Read one structured atomic-source detail without exposing internals."""
+
+        source_root = self._home / "workspace" / "source-meta"
+        return await asyncio.to_thread(read_source_detail, source_root, source_id)
+
     async def activate_runtime(self) -> None:
         """Start the one Pipeline and all enabled provider scheduler tasks."""
         async with self._state_lock:
             if self._config is None:
                 raise _state_error("PersonalContext has not been configured")
-            if not self._config.enabled:
+            if not self._config.collection_enabled:
                 # Host normally does not call activate_runtime for a disabled
                 # configuration.  Treat an accidental call as a safe no-op.
                 return
@@ -444,7 +565,7 @@ class PersonalContext:
             pipeline = ContextPipelineService(home=self._home, config=config, input_queue=self._pipeline_queue)
             await pipeline.start()
             self._pipeline_service = pipeline
-            if config.fetching_enabled:
+            if config.collection_enabled:
                 for service in config.fetch_services:
                     if service.enabled:
                         await self.start_fetch_service(service.service_id)
@@ -506,7 +627,7 @@ class PersonalContext:
             config = self._config
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
-            if not config.fetching_enabled:
+            if not config.collection_enabled:
                 self._fetch_states[safe_id] = "STOPPED"
                 raise _state_error("PersonalContext fetching is disabled")
             if self._state not in {"STARTING", "RUNNING"}:
@@ -540,6 +661,34 @@ class PersonalContext:
             self._fetch_tasks[safe_id] = task
             self._fetch_states[safe_id] = "RUNNING"
 
+    async def set_fetch_service_enabled(self, service_id: str, enabled: bool) -> None:
+        """Change only future scheduling; an active round is allowed to finish."""
+
+        if not isinstance(enabled, bool):
+            raise _state_error("enabled must be a boolean")
+        safe_id = _safe_service_id(service_id)
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            services = list(config.fetch_services)
+            index = next((index for index, item in enumerate(services) if item.service_id == safe_id), None)
+            if index is None:
+                raise _state_error("unknown fetch service")
+            services[index] = services[index].model_copy(update={"enabled": enabled})
+            self._config = config.model_copy(update={"fetch_services": tuple(services)})
+            collection_running = config.collection_enabled and self._state == "RUNNING"
+        if enabled:
+            if collection_running:
+                await self.start_fetch_service(safe_id)
+            return
+        async with self._fetch_lock:
+            event = self._fetch_stop_events.get(safe_id)
+            if event is not None:
+                event.set()
+            elif safe_id not in self._fetch_running:
+                self._fetch_states[safe_id] = "STOPPED"
+
     async def run_fetch(
         self,
         *,
@@ -551,7 +700,7 @@ class PersonalContext:
             pipeline = self._pipeline_service
             if config is None:
                 raise _state_error("PersonalContext has not been configured")
-            if not config.enabled:
+            if not config.collection_enabled:
                 raise _state_error("PersonalContext is disabled")
             if self._state != "RUNNING":
                 raise _state_error("PersonalContext runtime is not running")
@@ -723,19 +872,35 @@ class PersonalContext:
             context_ready = False
         return PersonalContext.Status(
             configured=config is not None,
-            enabled=bool(config.enabled) if config is not None else False,
-            fetching_enabled=bool(config.fetching_enabled) if config is not None else False,
+            collection_enabled=bool(config.collection_enabled) if config is not None else False,
+            agent_use_enabled=bool(config.agent_use_enabled) if config is not None else False,
             state=status_state,
             pipeline_running=pipeline_running,
             pipeline_queue_size=self._pipeline_queue.qsize(),
             fetch_service_states=dict(self._fetch_states),
             fetch_service_errors=dict(self._fetch_errors),
+            fetch_run_progress={
+                service_id: dict(progress) for service_id, progress in self._fetch_run_progress.items()
+            },
             context_root=str(context_root),
             context_ready=context_ready,
             last_error=last_error,
         )
 
     async def deactivate_runtime(self, *, timeout_seconds: float = 30.0) -> None:
+        """Stop the complete Core runtime, including a pending authorization task."""
+
+        await self._deactivate_runtime(
+            timeout_seconds=timeout_seconds,
+            cancel_authorization=True,
+        )
+
+    async def _deactivate_runtime(
+        self,
+        *,
+        timeout_seconds: float = 30.0,
+        cancel_authorization: bool = True,
+    ) -> None:
         """Stop all provider tasks and the single pipeline under one deadline."""
         if timeout_seconds <= 0:
             raise _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "timeout_seconds must be greater than zero")
@@ -743,7 +908,8 @@ class PersonalContext:
         async with self._state_lock:
             if self._state == "CREATED":
                 return
-            await self._cancel_authorization()
+            if cancel_authorization:
+                await self._cancel_authorization()
             self._state = "STOPPING"
             activation = self._activation_task
         stop_error: BaseError | None = None
@@ -882,35 +1048,45 @@ class PersonalContext:
         provider = self._fetch_providers[service_id]
         config = self._service_config(service_id)
         interval = config.interval_seconds
-        while not stop_event.is_set():
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-                return
-            except asyncio.TimeoutError:
-                pass
-            if stop_event.is_set():
-                return
-            async with self._fetch_lock:
-                if service_id in self._fetch_running:
-                    continue
-                self._fetch_running.add(service_id)
-                if self._fetch_states.get(service_id) != "STOPPING":
-                    self._fetch_states[service_id] = "RUNNING"
-            try:
-                await self._run_fetch_once(service_id, provider)
-            except Exception as exc:
+        try:
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+                if stop_event.is_set():
+                    return
                 async with self._fetch_lock:
-                    if self._fetch_states.get(service_id) != "STOPPING":
-                        self._fetch_states[service_id] = "FAILED"
-                    self._fetch_errors[service_id] = _redact_text(exc)
-            else:
-                async with self._fetch_lock:
+                    if service_id in self._fetch_running:
+                        continue
+                    self._fetch_running.add(service_id)
                     if self._fetch_states.get(service_id) != "STOPPING":
                         self._fetch_states[service_id] = "RUNNING"
-                        self._fetch_errors.pop(service_id, None)
-            finally:
-                async with self._fetch_lock:
-                    self._fetch_running.discard(service_id)
+                try:
+                    await self._run_fetch_once(service_id, provider)
+                except Exception as exc:
+                    async with self._fetch_lock:
+                        if self._fetch_states.get(service_id) != "STOPPING":
+                            self._fetch_states[service_id] = "FAILED"
+                        self._fetch_errors[service_id] = _redact_text(exc)
+                else:
+                    async with self._fetch_lock:
+                        if self._fetch_states.get(service_id) != "STOPPING":
+                            self._fetch_states[service_id] = "RUNNING"
+                            self._fetch_errors.pop(service_id, None)
+                finally:
+                    async with self._fetch_lock:
+                        self._fetch_running.discard(service_id)
+        finally:
+            current = asyncio.current_task()
+            async with self._fetch_lock:
+                if self._fetch_tasks.get(service_id) is current:
+                    self._fetch_tasks.pop(service_id, None)
+                    self._fetch_stop_events.pop(service_id, None)
+                    self._fetch_providers.pop(service_id, None)
+                if service_id not in self._fetch_running:
+                    self._fetch_states[service_id] = "STOPPED"
 
     async def _run_manual_fetch_once(
         self,
@@ -943,10 +1119,15 @@ class PersonalContext:
         config = self._service_config(service_id)
         old_cursor = self._read_cursor(service_id)
         run_id = uuid4().hex
-        last_cursor: dict[str, object] | None = None
+        run_started_at = datetime.now(UTC)
+        last_cursor = dict(old_cursor) if old_cursor is not None else None
         saw_batch = False
         pipeline_work_enqueued = asyncio.Event()
         item_count = 0
+        completed_items = 0
+        total_items = 0
+        prepared_candidates: tuple[dict[str, object], ...] = ()
+        self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
 
         async def abort_run() -> None:
             if pipeline_work_enqueued.is_set():
@@ -956,33 +1137,91 @@ class PersonalContext:
                 await provider.abort_run(run_id=run_id)
 
         try:
-            async for batch in provider.fetch(run_id=run_id, cursor=old_cursor):
+            prepared = await provider.prepare_run(
+                run_id=run_id,
+                run_started_at=run_started_at,
+                cursor=old_cursor,
+            )
+            candidates = _copy_run_candidates(prepared)
+            prepared_candidates = candidates
+            total_items = len(candidates)
+            if config.max_items_per_run is not None and total_items > config.max_items_per_run:
+                raise _fetch_error("prepare_run exceeded max_items_per_run")
+            self._fetch_run_progress[service_id] = _fetch_run_status(
+                service_id,
+                run_state="running",
+                total_items=total_items,
+            )
+            batches = provider.fetch(
+                run_id=run_id,
+                cursor=old_cursor,
+                candidates=candidates,
+            )
+            async for batch in batches:
                 if not isinstance(batch, FetchBatch):
                     raise _fetch_error("provider yielded an invalid batch")
                 saw_batch = True
                 item_count += len(batch.items)
                 if config.max_items_per_run is not None and item_count > config.max_items_per_run:
                     raise _fetch_error("fetch service exceeded max_items_per_run")
+                if item_count > total_items:
+                    raise _fetch_error("provider yielded more items than its prepared candidates")
                 # Providers emit an empty batch to advance a no-change cursor.
                 # It still participates in commit_run, but must not wake the
                 # Processing/Filesystem Agent pipeline with no work.
                 if batch.items:
                     await self._submit_batch(service_id, run_id, batch, enqueued=pipeline_work_enqueued)
+                    completed_items += len(batch.items)
+                    self._fetch_run_progress[service_id] = _fetch_run_status(
+                        service_id,
+                        run_state="running",
+                        total_items=total_items,
+                        completed_items=completed_items,
+                    )
                 last_cursor = dict(batch.next_cursor) if batch.next_cursor is not None else None
-            if not saw_batch:
+            if not saw_batch and total_items > 0:
                 raise _fetch_error("provider produced no batch")
+            if item_count != total_items:
+                raise _fetch_error("provider did not yield every prepared candidate")
             if pipeline_work_enqueued.is_set():
                 await self._finish_pipeline_run(service_id, run_id)
+            last_cursor = record_completed_candidates(last_cursor, prepared_candidates)
             await provider.commit_run(run_id=run_id)
             self._write_cursor(service_id, last_cursor)
+            self._fetch_run_progress[service_id] = _fetch_run_status(
+                service_id,
+                run_state="succeeded",
+                total_items=total_items,
+                completed_items=completed_items,
+            )
         except asyncio.CancelledError:
             await abort_run()
+            self._fetch_run_progress[service_id] = _fetch_run_status(
+                service_id,
+                run_state="cancelled",
+                total_items=total_items,
+                completed_items=completed_items,
+            )
             raise
-        except BaseError:
+        except BaseError as exc:
             await abort_run()
+            self._fetch_run_progress[service_id] = _fetch_run_status(
+                service_id,
+                run_state="failed",
+                total_items=total_items,
+                completed_items=completed_items,
+                last_error=_redact_text(exc),
+            )
             raise
         except Exception as exc:
             await abort_run()
+            self._fetch_run_progress[service_id] = _fetch_run_status(
+                service_id,
+                run_state="failed",
+                total_items=total_items,
+                completed_items=completed_items,
+                last_error=_redact_text(exc),
+            )
             raise _fetch_error("fetch run failed", cause=exc) from exc
 
     async def _submit_batch(
@@ -1166,7 +1405,10 @@ class PersonalContext:
         if cursor is not None:
             if not isinstance(cursor, Mapping):
                 raise _file_error("cursor payload must be an object or null")
-            cursor_payload: object = dict(cursor)
+            try:
+                cursor_payload: object = compact_cursor(dict(cursor))
+            except ValueError as exc:
+                raise _file_error("cursor payload cannot be compacted safely", cause=exc) from exc
         else:
             cursor_payload = None
         data = {
