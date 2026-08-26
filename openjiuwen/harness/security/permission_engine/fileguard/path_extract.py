@@ -16,12 +16,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
-from openjiuwen.harness.security.files.registry import (
+from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs import (
     FileToolSpec,
     lookup_file_tool_specs,
 )
-from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
-from openjiuwen.harness.security.tiered_policy import _PATH_TOOLS, _iter_path_strings
+from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
+    canonicalize_shell_command_for_permission,
+)
+from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import parse_shell_for_permission
+from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import _PATH_TOOLS, _iter_path_strings
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,9 @@ _PATH_AWARE_COMMANDS = frozenset({
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
     "ls", "dir", "type", "del", "rd", "copy", "move", "md",
     "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
+    "get-content", "gc",
+    "set-content", "add-content", "out-file", "tee-object", "sc",
+    "remove-item", "ri", "new-item", "ni",
 })
 
 _INTERPRETER_BASENAMES = frozenset({
@@ -49,10 +55,16 @@ _NT_CMD_SWITCH_BODY = re.compile(r"^[A-Za-z]{1,2}(?::[^\s/\\]+)?$")
 
 _READ_CMDS = frozenset({
     "cat", "ls", "dir", "type", "head", "tail", "more", "less",
+    "get-content", "gc",
 })
 _WRITE_CMDS = frozenset({
     "rm", "mkdir", "touch", "chmod", "chown", "del", "rd", "md",
+    "set-content", "add-content", "out-file", "tee-object", "sc",
+    "remove-item", "ri", "new-item", "ni",
 })
+_PS_PATH_FLAGS = frozenset({"-path", "-literalpath", "-filepath"})
+_FD_ALIAS_RE = re.compile(r"^&\d+$")
+_UNEXPANDED_VAR_RE = re.compile(r"(?i)\$(\w+|\{[^}]+\}|env:\w+)")
 _TRANSFER_CMDS = frozenset({"cp", "copy", "mv", "move"})
 
 
@@ -77,6 +89,37 @@ def _looks_like_path(token: str) -> bool:
     if re.match(r"^[A-Za-z]:[\\/]", t):
         return True
     return "\\" in t or "/" in t
+
+
+def _looks_like_redirect_target(token: str) -> bool:
+    t = token.strip().strip('"').strip("'")
+    if not t or _FD_ALIAS_RE.match(t):
+        return False
+    if t.startswith("$") or _UNEXPANDED_VAR_RE.search(t):
+        return False
+    return True
+
+
+def _collect_ps_path_tokens(tokens: list[str]) -> list[str]:
+    out: list[str] = []
+    first_positional = True
+    idx = 1
+    while idx < len(tokens):
+        raw = tokens[idx].strip().strip('"').strip("'")
+        flag = raw.lower().split(":")[0]
+        if flag in _PS_PATH_FLAGS:
+            if idx + 1 < len(tokens):
+                out.append(tokens[idx + 1].strip().strip('"').strip("'"))
+                idx += 2
+                continue
+        if raw.startswith("-"):
+            idx += 1
+            continue
+        if first_positional and raw:
+            out.append(raw)
+            first_positional = False
+        idx += 1
+    return out
 
 
 def _is_shell_flag_token(tok: str) -> bool:
@@ -125,19 +168,33 @@ def _path_aware_one_segment(
         return [], None
     base = cwd.resolve()
     path_tokens: list[tuple[Path, int]] = []
-    for idx, tok in enumerate(tokens[1:]):
+
+    def _append_path_token(tok: str, idx: int, *, require_path_shape: bool) -> None:
         tok = tok.strip().strip('"').strip("'")
-        if not tok or _is_shell_flag_token(tok):
-            continue
-        if not _looks_like_path(tok):
-            continue
+        if not tok or _UNEXPANDED_VAR_RE.search(tok):
+            return
+        if require_path_shape and not _looks_like_path(tok):
+            return
         p = Path(tok)
         if not p.is_absolute():
             p = base / tok
         try:
             path_tokens.append((p.resolve(), idx))
         except (OSError, RuntimeError):
+            return
+
+    for idx, tok in enumerate(tokens[1:]):
+        tok = tok.strip().strip('"').strip("'")
+        if not tok or _is_shell_flag_token(tok):
             continue
+        _append_path_token(tok, idx, require_path_shape=True)
+
+    if cmd0 in (
+        "get-content", "gc", "set-content", "add-content", "out-file",
+        "tee-object", "sc", "remove-item", "ri", "new-item", "ni",
+    ):
+        for extra in _collect_ps_path_tokens(tokens):
+            _append_path_token(extra, len(path_tokens), require_path_shape=False)
 
     results: list[tuple[Path, FileAction]] = []
     new_cwd: Path | None = None
@@ -182,6 +239,7 @@ def extract_path_aware_command_accesses(
 ) -> list[tuple[Path, FileAction]]:
     if not command or not isinstance(command, str):
         return []
+    command = canonicalize_shell_command_for_permission(command)
     cwd = Path(workdir).resolve()
     combined: list[tuple[Path, FileAction]] = []
     for seg in _segments_for_extract(command):
@@ -198,12 +256,16 @@ def extract_shell_path_accesses(
 ) -> list[tuple[Path, FileAction]]:
     if not command or not isinstance(command, str):
         return []
+    command = canonicalize_shell_command_for_permission(command)
     base = Path(workdir).resolve()
     results: list[tuple[Path, FileAction]] = []
 
-    def _resolve(tok: str) -> Path | None:
+    def _resolve(tok: str, *, redirect: bool = False) -> Path | None:
         tok = tok.strip().strip('"').strip("'")
-        if not tok or not _looks_like_path(tok):
+        if redirect:
+            if not _looks_like_redirect_target(tok):
+                return None
+        elif not tok or not _looks_like_path(tok):
             return None
         p = Path(tok)
         if not p.is_absolute():
@@ -218,7 +280,7 @@ def extract_shell_path_accesses(
 
     for m in re.finditer(r"(?:^|[\s;|&])(\d*>>?|\d*<|&>)\s*([^\s;|&<>]+)", command):
         op, target = m.group(1), m.group(2)
-        rp = _resolve(target)
+        rp = _resolve(target, redirect=True)
         if rp is None:
             continue
         if "<" in op and ">" not in op:
@@ -269,7 +331,7 @@ def extract_accesses_native(
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
 
-    if tool_name in ("mcp_exec_command", "bash", "create_terminal"):
+    if tool_name in ("mcp_exec_command", "bash", "powershell", "core.powershell", "create_terminal"):
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve() if workdir else workspace
