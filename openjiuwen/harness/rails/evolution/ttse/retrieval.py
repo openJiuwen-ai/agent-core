@@ -36,6 +36,18 @@ async def _rank(
     return [record for _, record in scored[: max(0, k)]]
 
 
+def _provider_label(store: TTSERecordStore) -> str:
+    """Best-effort id/model string for embedding-related logs."""
+    provider = getattr(store, "_embedding", None)
+    if provider is None:
+        return "none"
+    model = getattr(provider, "model", None) or getattr(provider, "id", None) or type(provider).__name__
+    pid = getattr(provider, "id", None)
+    if pid and model and pid != model:
+        return f"{pid}/{model}"
+    return str(model)
+
+
 async def retrieve_top_k(
     query: str,
     store: TTSERecordStore,
@@ -50,15 +62,43 @@ async def retrieve_top_k(
     """
     if not store.has_embedding_provider() or not (query or "").strip():
         return None
+    provider = _provider_label(store)
+    bank_facts = len(store.facts_records())
+    bank_tips = len(store.tips_records())
+    logger.info(
+        "[TTSERail] embedding retrieval start provider=%s query=%s bank_facts=%s bank_tips=%s k_facts=%s k_tips=%s",
+        provider,
+        (query or "")[:80],
+        bank_facts,
+        bank_tips,
+        k_facts,
+        k_tips,
+    )
     try:
         query_vec = await store.embedding_of(query)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("TTSE query embedding failed, falling back to whole bank: %s", exc)
+        logger.warning(
+            "[TTSERail] query embedding failed provider=%s, falling back to whole bank: %s",
+            provider,
+            exc,
+        )
         return None
     if query_vec is None:
+        logger.warning(
+            "[TTSERail] query embedding returned empty provider=%s, falling back to whole bank",
+            provider,
+        )
         return None
     facts = await _rank(store.facts_records(), query_vec, store, k_facts)
     tips = await _rank(store.tips_records(), query_vec, store, k_tips)
+    logger.info(
+        "[TTSERail] embedding recall done provider=%s recalled_facts=%s/%s recalled_tips=%s/%s",
+        provider,
+        len(facts),
+        bank_facts,
+        len(tips),
+        bank_tips,
+    )
     return facts, tips
 
 

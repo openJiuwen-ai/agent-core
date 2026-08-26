@@ -113,12 +113,20 @@ class TTSERecordStore:
         if self._embedding is None:
             return None
         try:
+            model = getattr(self._embedding, "model", None) or getattr(self._embedding, "id", "unknown")
+            logger.debug("[TTSERail] embedding model=%s text=%s", model, text[:60])
             vec = await self._embedding.embed_query(text)
         except Exception as exc:  # noqa: BLE001 - degrade to substring dedup
             logger.warning("[TTSERail] embedding failed, falling back to substring dedup: %s", exc)
             return None
         if vec:
             self._emb_cache[key] = vec
+            logger.debug(
+                "[TTSERail] embedding ok model=%s dims=%s cache_size=%s",
+                model,
+                len(vec),
+                len(self._emb_cache),
+            )
         return vec or None
 
     async def embedding_of(self, text: str) -> Optional[List[float]]:

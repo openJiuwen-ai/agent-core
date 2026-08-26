@@ -403,7 +403,13 @@ class TTSERail(EvolutionRail):
     async def _build_injection_body_async(self, query: str) -> str:
         """Top-K retrieval when an embedding provider is configured."""
         if not self._ttse_store.has_embedding_provider():
-            return self._build_injection_body()
+            body = self._build_injection_body()
+            logger.info(
+                "[TTSERail] injection without embedding (whole bank) facts=%s tips=%s",
+                len(self._ttse_store.facts_records()),
+                len(self._ttse_store.tips_records()),
+            )
+            return body
         retrieved = await retrieve_top_k(
             query,
             self._ttse_store,
@@ -411,10 +417,22 @@ class TTSERail(EvolutionRail):
             k_tips=self._ttse_config.top_k_tips,
         )
         if retrieved is None:
-            return self._build_injection_body()
+            body = self._build_injection_body()
+            logger.info(
+                "[TTSERail] injection fallback to whole bank facts=%s tips=%s",
+                len(self._ttse_store.facts_records()),
+                len(self._ttse_store.tips_records()),
+            )
+            return body
         facts, tips = retrieved
         if not facts and not tips:
+            logger.info("[TTSERail] embedding recall empty; skip TTSE section")
             return ""
+        logger.info(
+            "[TTSERail] injection via embedding recall facts=%s tips=%s",
+            len(facts),
+            len(tips),
+        )
         return build_section_text(facts, tips, retrieved=True)
 
     def _build_injection_body(self) -> str:
