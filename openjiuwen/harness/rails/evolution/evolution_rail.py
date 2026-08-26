@@ -27,7 +27,11 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Collection, List, Mapping, Optional, Union
 
-from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
+from openjiuwen.agent_evolving.trajectory.messages import (
+    DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    MessageField,
+    trajectory_to_messages,
+)
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import (
@@ -946,7 +950,10 @@ class EvolutionRail(DeepAgentRail):
         a background task.
         """
         del ctx
-        messages = self._collect_messages_from_trajectory(trajectory)
+        messages = self._trajectory_to_messages(
+            trajectory,
+            fields=DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+        )
         return PreparedEvolutionInput(
             trajectory=trajectory,
             messages=tuple(deepcopy(messages)),
@@ -984,18 +991,16 @@ class EvolutionRail(DeepAgentRail):
             result.append(item)
         return result
 
-    @classmethod
-    def _collect_messages_from_trajectory(cls, trajectory: Optional[Trajectory]) -> List[dict]:
-        """Derive message-like dicts from recorded trajectory steps."""
+    @staticmethod
+    def _trajectory_to_messages(
+        trajectory: Optional[Trajectory],
+        *,
+        fields: Collection[MessageField] = DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    ) -> List[dict]:
+        """Derive detached messages with explicitly selected semantic fields."""
         if trajectory is None:
             return []
-        raw = ConversationSignalDetector.convert_trajectory_to_messages(trajectory)
-        normalized = cls._normalize_callback_messages(raw)
-        deduped: List[dict] = []
-        for message in normalized:
-            if message not in deduped:
-                deduped.append(message)
-        return deduped
+        return trajectory_to_messages(trajectory, fields=fields)
 
     @staticmethod
     def _extract_tool_args(tool_args: Any) -> dict[str, Any]:

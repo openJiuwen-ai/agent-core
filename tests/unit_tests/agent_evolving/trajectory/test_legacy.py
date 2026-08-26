@@ -22,11 +22,6 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_tool_call,
     read_usage,
 )
-from openjiuwen.agent_evolving.trajectory.types import (
-    trajectory_resource_attributes,
-    trajectory_session_id,
-    trajectory_with_resource_attributes,
-)
 
 
 def test_upgrade_legacy_steps_returns_canonical_trajectory() -> None:
@@ -52,26 +47,6 @@ def test_upgrade_legacy_steps_returns_canonical_trajectory() -> None:
     assert trajectory.trajectory_id == "legacy-1"
     assert trajectory.session_id == "session-1"
     assert trajectory.to_otlp()["resourceSpans"]
-
-
-def test_migration_accessors_read_and_update_canonical_trajectory() -> None:
-    trajectory = upgrade_legacy_record(
-        {
-            "execution_id": "canonical-accessors",
-            "session_id": "session-before",
-            "steps": [],
-        }
-    )
-
-    updated = trajectory_with_resource_attributes(
-        trajectory,
-        {SESSION_ID: "session-after"},
-    )
-
-    assert isinstance(updated, Trajectory)
-    assert trajectory_session_id(trajectory) == "session-before"
-    assert trajectory_session_id(updated) == "session-after"
-    assert trajectory_resource_attributes(updated)[TRAJECTORY_ID] == "canonical-accessors"
 
 
 def test_upgrade_legacy_otlp_aliases_is_single_directional() -> None:

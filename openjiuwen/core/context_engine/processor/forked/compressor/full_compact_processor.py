@@ -1,6 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+"""Forked FullCompactProcessor — whole-window fallback compactor.
+
+Mirrors ``processor/compressor/full_compact_processor.py`` and is registered
+under the same official name (``FullCompactProcessor``) via
+``openjiuwen.core.context_engine.processor.forked.activate()`` so the forked
+preset chain and the ``ContextOverflowRecoveryRail`` both resolve to this
+implementation. Only import paths differ from the original; the compaction
+behavior is identical.
+"""
+
 from __future__ import annotations
 
 import json
@@ -19,12 +29,10 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     invalidate_session_memory_anchor,
 )
 from openjiuwen.core.context_engine.context_engine import ContextEngine
-from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor, _invoke_via_stream
-from openjiuwen.core.context_engine.processor.compressor.util import (
-    FullCompactStateReinjector,
-    build_plan_mode_reinjected_content,
-    build_task_status_reinjected_content,
-    build_skill_reinjected_content,
+from openjiuwen.core.context_engine.processor.base import _invoke_via_stream
+from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
+from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+    build_compressor_reinjected_state_message,
 )
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -50,7 +58,7 @@ NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
 """
 
-DETAILED_ANALYSIS_INSTRUCTION = """Before providing your final summary, wrap your analysis in <analysis> 
+DETAILED_ANALYSIS_INSTRUCTION = """Before providing your final summary, wrap your analysis in <analysis>
 tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
 1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
@@ -63,16 +71,16 @@ tags to organize your thoughts and ensure you've covered all necessary points. I
      - function signatures
      - file edits
    - Errors that you ran into and how you fixed them
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something 
+   - Pay special attention to specific user feedback that you received, especially if the user told you to do something
      differently.
 2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
 """
 
 BASE_COMPACT_PROMPT = (
     NO_TOOLS_PREAMBLE
-    + """Your task is to create a detailed summary of the conversation so far, 
+    + """Your task is to create a detailed summary of the conversation so far,
     paying close attention to the user's explicit requests and your previous actions.
-This summary should be thorough in capturing technical details, code patterns, 
+This summary should be thorough in capturing technical details, code patterns,
 and architectural decisions that would be essential for continuing development work without losing context.
 
 """
@@ -82,28 +90,28 @@ Your summary should include the following sections:
 
 1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
 2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
-3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. 
-    Pay special attention to the most recent messages and include full code snippets where applicable and 
+3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created.
+    Pay special attention to the most recent messages and include full code snippets as applicable and
     include a summary of why this file read or edit is important.
-4. Errors and fixes: List all errors that you ran into, and how you fixed them. 
-    Pay special attention to specific user feedback that you received, 
+4. Errors and fixes: List all errors that you ran into, and how you fixed them.
+    Pay special attention to specific user feedback that you received,
     especially if the user told you to do something differently.
 5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages that are not tool results. 
+6. All user messages: List ALL user messages that are not tool results.
     These are critical for understanding the users' feedback and changing intent.
 7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
-8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, 
-    paying special attention to the most recent messages from both user and assistant. 
-    Include file names and code snippets where applicable.
-9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. 
-    IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, 
-    and the task you were working on immediately before this summary request. If your last task was concluded, 
-    then only list next steps if they are explicitly in line with the users request. 
-    Do not start on tangential requests or really old requests that were already completed without 
+8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request,
+    paying special attention to the most recent messages from both user and assistant.
+    Include file names and code snippets as applicable.
+9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing.
+    IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests,
+    and the task you were working on immediately before this summary. If your last task was concluded,
+    then only list next steps that are explicitly in line with the users request.
+    Do not start on tangential requests or really old requests that were already completed without
     confirming with the user first.
     If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were
-    working on and where you left off. 
-    This should be verbatim to ensure there's no drift in task interpretation.
+    working on and where you left off.
+    This should be verbatim so that there is no drift in task interpretation.
 
 Here's an example of how your output should be structured:
 
@@ -137,27 +145,27 @@ Here's an example of how your output should be structured:
     - [...]
 
 5. Problem Solving:
-   [Description of solved problems and ongoing troubleshooting]
+    [Description of solved problems and ongoing troubleshooting]
 
 6. All user messages:
     - [Detailed non tool use user message]
     - [...]
 
 7. Pending Tasks:
-   - [Task 1]
-   - [Task 2]
-   - [...]
+    - [Task 1]
+    - [Task 2]
+    - [...]
 
 8. Current Work:
-   [Precise description of current work]
+    [Precise description of current work]
 
 9. Optional Next Step:
-   [Optional Next step to take]
+    [Optional Next step to take]
 
 </summary>
 </example>
 
-Please provide your summary based on the conversation so far, 
+Please provide your summary based on the conversation so far,
 following this structure and ensuring precision and thoroughness in your response.
 """
     + "\n\nREMINDER: Do NOT call any tools. "
@@ -243,7 +251,10 @@ class FullCompactProcessorConfig(BaseModel):
     session_memory_intro: str = Field(default=SESSION_MEMORY_SUMMARY_INTRO)
 
 
-@ContextEngine.register_processor()
+# NOTE: deliberately NOT decorated with @ContextEngine.register_processor().
+# This forked implementation is registered under the official ``FullCompactProcessor``
+# name by ``openjiuwen.core.context_engine.processor.forked.activate()``, mirroring
+# how the other forked compressors override their same-name originals.
 class FullCompactProcessor(ContextProcessor):
     """Fallback compactor aligned with Claude Code's full compact flow."""
 
@@ -253,7 +264,6 @@ class FullCompactProcessor(ContextProcessor):
         self._compression_call_max_tokens = config.compression_call_max_tokens
         self._messages_to_keep = config.messages_to_keep
         self._keep_tool_message_pairs = config.keep_tool_message_pairs
-        self._state_snapshot_max_chars = config.state_snapshot_max_chars
         self._marker = config.marker
         self._state_marker = config.state_marker
         self._synthetic_user_marker = config.synthetic_user_marker
@@ -268,22 +278,8 @@ class FullCompactProcessor(ContextProcessor):
         # 正常 ADD 路径两者均为 None/False，行为不变。
         self._force_compact: bool = False
         self._overflow_threshold_override: Optional[int] = None
-        self._state_reinjector = FullCompactStateReinjector()
-        self._state_reinjector.register_builder(
-            name="skills",
-            label="SKILLS",
-            builder=build_skill_reinjected_content,
-        )
-        self._state_reinjector.register_builder(
-            name="task_status",
-            label="TASK_STATUS",
-            builder=build_task_status_reinjected_content,
-        )
-        self._state_reinjector.register_builder(
-            name="plan_mode",
-            label="PLAN_MODE",
-            builder=build_plan_mode_reinjected_content,
-        )
+        # State reinjection 走 forked 共用管线 build_compressor_reinjected_state_message，
+        # 它内部用 DEFAULT_REINJECT_BUILDERS + builder_names 过滤，无需本类自持 reinjector。
         self._model: Model | None = None
         if config.model is not None and config.model_client is not None:
             self._model = Model(config.model_client, config.model)
@@ -388,7 +384,7 @@ class FullCompactProcessor(ContextProcessor):
         **kwargs: Any,
     ) -> bool:
         # FullCompact 仅用于溢出恢复：GET 路径由 ContextOverflowRecoveryRail 置
-        # force_compact 触发。日常 add 路径不参与压缩, 交由 RoundLevel/Dialogue 等分级处理器承担。
+        # force_compact 触发。日常 add 路径不参与压缩交由 RoundLevel/Dialogue 等分级处理器承担。
         #（框架原本就不注册此 processor，本次注册它，只为 413 兜底），后续有需要，直接放开即可
         return False
         # candidate_messages = context.get_messages() + list(messages_to_add or [])
@@ -1019,37 +1015,30 @@ class FullCompactProcessor(ContextProcessor):
         boundary_message: SystemMessage,
         builder_names: Optional[List[str]] = None,
     ) -> List[BaseMessage]:
-        _ = context, summary_message, boundary_message
+        """Reinject state via the forked reinjection pipeline.
+
+        Unlike the original ``processor/compressor`` implementation, which called
+        each builder directly with ``(self, context=, messages=, ...)``, the
+        forked builders take a single ``ReinjectContext``. We therefore route
+        through ``build_compressor_reinjected_state_message`` (the shared forked
+        entry point that assembles that context) and wrap its single merged
+        message in a list so callers can ``extend`` unchanged.
+        """
+        _ = summary_message, boundary_message
         candidate_messages = self._prepare_messages_for_prompt(source_messages)
         if not candidate_messages:
             return []
 
-        active_builder_names = set(builder_names) if builder_names is not None else None
-        state_messages: List[BaseMessage] = []
-        for builder_spec in self._state_reinjector.iter_builders():
-            if active_builder_names is not None and builder_spec.name not in active_builder_names:
-                continue
-            content = builder_spec.builder(
-                self,
-                context=context,
-                messages=candidate_messages,
-                messages_to_keep=messages_to_keep,
-            )
-            if isinstance(content, list):
-                state_messages.extend(content)
-                continue
-            if content:
-                state_messages.append(self._make_state_message(builder_spec.label, content))
-        return state_messages
-
-    def _make_state_message(self, label: str, content: str) -> UserMessage:
-        compact_content = self.truncate_state_text(content)
-        return UserMessage(content=f"{self._state_marker}\n[{label}]\n{compact_content}")
-
-    def truncate_state_text(self, text: str) -> str:
-        if len(text) <= self._state_snapshot_max_chars:
-            return text
-        return self._build_head_tail_truncated_text(text, self._state_snapshot_max_chars)
+        reinjected_message = build_compressor_reinjected_state_message(
+            source_messages=candidate_messages,
+            messages_to_keep=messages_to_keep,
+            context=context,
+            config=self.config,
+            builder_names=builder_names,
+        )
+        if reinjected_message is None:
+            return []
+        return [reinjected_message]
 
     def _count_prompt_tokens(self, messages: List[BaseMessage], context: ModelContext) -> int:
         prompt_messages = [
@@ -1304,18 +1293,6 @@ class FullCompactProcessor(ContextProcessor):
 
     def _is_synthetic_marker_message(self, message: BaseMessage) -> bool:
         return isinstance(message, UserMessage) and message.content == self._synthetic_user_marker
-
-    @staticmethod
-    def _build_head_tail_truncated_text(text: str, kept_chars: int) -> str:
-        if kept_chars <= 0:
-            return "...[TRUNCATED]..."
-        head_chars = max(int(kept_chars * 0.2), 0)
-        tail_chars = max(kept_chars - head_chars, 0)
-        head = text[:head_chars]
-        tail = text[-tail_chars:] if tail_chars > 0 else ""
-        if head and tail:
-            return f"{head}\n...[TRUNCATED]...\n{tail}"
-        return head or tail or "...[TRUNCATED]..."
 
     def load_state(self, state: Dict[str, Any]) -> None:
         return

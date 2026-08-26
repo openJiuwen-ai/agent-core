@@ -82,6 +82,7 @@
       - [rails](2.开发指南/API文档/openjiuwen.harness/rails/rails.md)
         - [interrupt](2.开发指南/API文档/openjiuwen.harness/rails/interrupt.md)
         - [skill_evolution_rail](2.开发指南/API文档/openjiuwen.harness/rails/evolution/skill_evolution_rail.md)
+        - [evolution_rail](2.开发指南/API文档/openjiuwen.harness/rails/evolution/evolution_rail.md)
         - [team_skill_evolution_rail](2.开发指南/API文档/openjiuwen.harness/rails/evolution/team_skill_evolution_rail.md)
       - [tools](2.开发指南/API文档/openjiuwen.harness/tools/tools.md)
       - [subagents](2.开发指南/API文档/openjiuwen.harness/subagents/subagents.md)

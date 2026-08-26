@@ -20,7 +20,8 @@ from typing import Any, Iterator
 from unittest.mock import MagicMock
 
 import pytest
-from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 
@@ -182,6 +183,92 @@ def test_setup_forwards_additional_processor_to_runtime() -> None:
         assert [span.name for span in exporter.get_finished_spans()] == ["captured"]
     finally:
         shutdown_observability()
+
+
+def test_legacy_api_uses_external_provider_without_shutting_it_down() -> None:
+    """The Team facade keeps Jiuwen's externally-owned provider contract."""
+    from openjiuwen.agent_teams.observability import get_tracer
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    try:
+        init_observability(
+            ObservabilityConfig(enabled=True, service_name="external-provider-test"),
+            tracer_provider_override=provider,
+        )
+        core_span = get_tracer("openjiuwen.agent_teams.observability.test").start_span(
+            "agentcore.span"
+        )
+        core_span.end()
+        shutdown_observability()
+
+        caller_span = provider.get_tracer("jiuwenswarm.caller").start_span("caller.still.active")
+        assert caller_span.is_recording()
+        caller_span.end()
+        assert [span.name for span in exporter.get_finished_spans()] == [
+            "agentcore.span",
+            "caller.still.active",
+        ]
+    finally:
+        shutdown_observability()
+        provider.shutdown()
+
+
+def test_team_initialization_failure_keeps_external_provider_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later Team setup failure must not close the borrowed provider."""
+    import openjiuwen.agent_teams.observability.setup as team_setup
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(
+        team_setup,
+        "OtelTeamMonitorHandler",
+        MagicMock(side_effect=RuntimeError("monitor initialization failed")),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="monitor initialization failed"):
+            team_setup.init_observability(
+                ObservabilityConfig(enabled=True, service_name="team-rollback-test"),
+                tracer_provider_override=provider,
+            )
+
+        caller_span = provider.get_tracer("host.after.team.rollback").start_span("still.active")
+        caller_span.end()
+        assert [span.name for span in exporter.get_finished_spans()] == ["still.active"]
+    finally:
+        team_setup.shutdown_observability()
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_legacy_abort_current_llm_span_closes_once(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """A consumer can settle the Core-owned current LLM span exactly once."""
+    from openjiuwen.agent_teams.observability import abort_current_llm_span
+    from openjiuwen.agent_teams.observability.span_context import get_current_llm_span
+    from opentelemetry.trace import StatusCode
+
+    _create_team_span("abort-test")
+    await Runner.callback_framework.trigger(
+        LLMCallEvents.LLM_INVOKE_INPUT,
+        messages=[{"role": "user", "content": "cancel me"}],
+        model="fake-llm-1",
+    )
+
+    error = asyncio.CancelledError("cancelled")
+    assert abort_current_llm_span(error) is True
+    assert abort_current_llm_span(error) is False
+    assert get_current_llm_span() is None
+
+    spans = _spans_by_name(in_memory_exporter, "llm.call")
+    assert len(spans) == 1
+    assert spans[0].status.status_code is StatusCode.ERROR
+    assert "cancelled" in (spans[0].status.description or "")
 
 
 def test_callback_wiring_failure_rolls_back_runtime_and_team_state(monkeypatch: Any) -> None:

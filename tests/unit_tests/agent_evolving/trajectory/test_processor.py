@@ -83,12 +83,6 @@ def test_on_end_swallows_issue_recording_failure(monkeypatch: pytest.MonkeyPatch
     processor.on_end(_MalformedSpan())
 
 
-def test_trajectory_root_exports_processor() -> None:
-    from openjiuwen.agent_evolving.trajectory import TrajectorySpanProcessor as RootProcessor
-
-    assert RootProcessor is TrajectorySpanProcessor
-
-
 def test_on_end_swallows_routing_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     processor = TrajectorySpanProcessor(max_pending_spans=1)
     processor.subscribe(include_span_categories={"llm"})

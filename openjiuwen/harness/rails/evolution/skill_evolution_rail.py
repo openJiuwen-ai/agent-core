@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
@@ -50,6 +50,7 @@ from openjiuwen.agent_evolving.skill_self_evolution import (
 )
 from openjiuwen.agent_evolving.tools import create_main_evolution_tools
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.messages import tool_call_arguments, tool_call_name
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.updater import SingleDimUpdater
 from openjiuwen.agent_evolving.utils import infer_skill_from_texts, parse_top_level_frontmatter
@@ -181,7 +182,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         generate_records_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY,
         evaluate_llm_policy: LLMInvokePolicy = EVALUATE_LLM_POLICY,
         simplify_llm_policy: LLMInvokePolicy = SIMPLIFY_LLM_POLICY,
-        two_stage: bool = False,
+        two_stage: bool = True,
         review_agent_max_iterations: int = 25,
         sharing_config: Optional[Dict[str, Any]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
@@ -240,7 +241,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             evaluate_llm_policy=evaluate_llm_policy,
             simplify_llm_policy=simplify_llm_policy,
         )
-        self._signal_trigger = bool(signal_trigger)
+        self._signal_trigger = True if signal_trigger is None else bool(signal_trigger)
         self._processed_signal_keys: set[tuple[str, ...]] = set()
         self._auto_save = auto_save
         # Optimizer path (for _auto_save=False): memory-staged records until user approval
@@ -881,10 +882,38 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 model=self._evolver.model,
                 language=self._language,
             )
+            session_skills: Set[str] = set()
+            traj_skills = detector.collect_skills_from_messages(messages)
+            session_skills.update(traj_skills)
+            logger.info(
+                "[SkillEvolutionRail] session used skills=%s (traj=%s)",
+                sorted(session_skills),
+                traj_skills,
+            )
+
             detected = detector.detect_trajectory_signals(
                 trajectory,
                 signal_types={"execution_failure", "script_artifact"},
             )
+            try:
+                feedback_signals = await detector.detect_user_intent(
+                    messages,
+                    extra_skills=sorted(session_skills),
+                )
+            except Exception as _fb_exc:
+                logger.warning(
+                    "[SkillEvolutionRail] user feedback signal detection failed: %s",
+                    _fb_exc,
+                )
+                feedback_signals = []
+            if feedback_signals:
+                logger.info(
+                    "[SkillEvolutionRail] detected %d user feedback signal(s), skills=%s",
+                    len(feedback_signals),
+                    sorted({s.skill_name for s in feedback_signals if getattr(s, "skill_name", None)}),
+                )
+                detected = [*detected, *feedback_signals]
+
             signals: List[EvolutionSignal] = []
             for signal in detected:
                 fp = make_signal_fingerprint(signal)
@@ -1324,9 +1353,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                     texts.append(str(msg.get("content", "")))
                 elif role == "assistant":
                     for tool_call in msg.get("tool_calls", []):
-                        texts.append(str(tool_call.get("arguments", "")))
-                        if tool_call.get("name") == "skill_tool":
-                            skill_tool_payloads.append(tool_call.get("arguments"))
+                        arguments = tool_call_arguments(tool_call)
+                        texts.append(str("" if arguments is None else arguments))
+                        if tool_call_name(tool_call) == "skill_tool":
+                            skill_tool_payloads.append(arguments)
             else:
                 # Pydantic model: use attribute access
                 role = getattr(msg, "role", "")
@@ -1715,8 +1745,10 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             if role != "assistant":
                 continue
             for tool_call in msg.get("tool_calls", []) or []:
-                tool = str(tool_call.get("name") or "").lower()
-                arguments = tool_call.get("arguments", "")
+                tool = str(tool_call_name(tool_call) or "").lower()
+                arguments = tool_call_arguments(tool_call)
+                if arguments is None:
+                    arguments = ""
                 if tool == "skill_tool":
                     args = cls._parse_tool_args_dict(arguments)
                     if str(args.get("skill_name") or "").strip() != skill_name:
@@ -1755,8 +1787,9 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 lines.append(f"[{role}] {content}")
             if role == "assistant":
                 for tool_call in msg.get("tool_calls", []) or []:
-                    tool = str(tool_call.get("name") or "")
-                    args = str(tool_call.get("arguments") or "")[:max_content_chars]
+                    tool = str(tool_call_name(tool_call) or "")
+                    arguments = tool_call_arguments(tool_call)
+                    args = str("" if arguments is None else arguments)[:max_content_chars]
                     if tool:
                         lines.append(f"[assistant/tool_call] {tool} {args}")
         return "\n".join(lines)

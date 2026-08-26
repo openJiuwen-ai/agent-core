@@ -42,40 +42,51 @@ class SafeSpanProcessor(SpanProcessor):
     def __init__(self, processor: SpanProcessor) -> None:
         self._processor = processor
         self._shutdown_called = False
+        self._lifecycle_lock = threading.RLock()
 
     def on_start(self, span: Any, parent_context: Any = None) -> None:
-        try:
-            self._processor.on_start(span, parent_context=parent_context)
-        except Exception as exc:
-            self._log_failure("on_start", exc)
+        with self._lifecycle_lock:
+            if self._shutdown_called:
+                return
+            try:
+                self._processor.on_start(span, parent_context=parent_context)
+            except Exception as exc:
+                self._log_failure("on_start", exc)
 
     def on_end(self, span: Any) -> None:
-        try:
-            self._processor.on_end(span)
-        except Exception as exc:
-            self._log_failure("on_end", exc)
+        with self._lifecycle_lock:
+            if self._shutdown_called:
+                return
+            try:
+                self._processor.on_end(span)
+            except Exception as exc:
+                self._log_failure("on_end", exc)
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        try:
-            result = self._processor.force_flush(timeout_millis)
-        except Exception as exc:
-            self._log_failure("force_flush", exc)
+        with self._lifecycle_lock:
+            if self._shutdown_called:
+                return True
+            try:
+                result = self._processor.force_flush(timeout_millis)
+            except Exception as exc:
+                self._log_failure("force_flush", exc)
+                return True
+            if result is False:
+                logger.warning(
+                    "otel: additional span processor {} force_flush returned False",
+                    type(self._processor).__name__,
+                )
             return True
-        if result is False:
-            logger.warning(
-                "otel: additional span processor {} force_flush returned False",
-                type(self._processor).__name__,
-            )
-        return True
 
     def shutdown(self) -> None:
-        if self._shutdown_called:
-            return
-        self._shutdown_called = True
-        try:
-            self._processor.shutdown()
-        except Exception as exc:
-            self._log_failure("shutdown", exc)
+        with self._lifecycle_lock:
+            if self._shutdown_called:
+                return
+            self._shutdown_called = True
+            try:
+                self._processor.shutdown()
+            except Exception as exc:
+                self._log_failure("shutdown", exc)
 
     def _log_failure(self, method: str, exc: Exception) -> None:
         # Logging is secondary to processor isolation and must not escape.
@@ -88,13 +99,63 @@ class SafeSpanProcessor(SpanProcessor):
             )
 
 
+class ExternalProviderSpanTracker(ActiveSpanTracker):
+    """Track only AgentCore spans when a host owns the provider lifecycle."""
+
+    _INSTRUMENTATION_SCOPE_PREFIXES = (
+        "openjiuwen.extensions.observability",
+        "openjiuwen.agent_teams.observability",
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._accepting = True
+        self._accepting_lock = threading.Lock()
+
+    def stop_accepting(self) -> bool:
+        """Stop observing host-provider spans and report whether this is new."""
+        with self._accepting_lock:
+            if not self._accepting:
+                return False
+            self._accepting = False
+            return True
+
+    def on_start(self, span: Any, parent_context: Any = None) -> None:
+        if not self._is_agentcore_span(span):
+            return
+        with self._accepting_lock:
+            if self._accepting:
+                super().on_start(span, parent_context)
+
+    def on_end(self, span: Any) -> None:
+        if not self._is_agentcore_span(span):
+            return
+        with self._accepting_lock:
+            if self._accepting:
+                super().on_end(span)
+
+    def shutdown(self) -> None:
+        if self.stop_accepting():
+            self.flush_all_spans(exclude_root_span=False)
+
+    @classmethod
+    def _is_agentcore_span(cls, span: Any) -> bool:
+        scope_name = str(getattr(getattr(span, "instrumentation_scope", None), "name", ""))
+        return any(
+            scope_name == prefix or scope_name.startswith(f"{prefix}.")
+            for prefix in cls._INSTRUMENTATION_SCOPE_PREFIXES
+        )
+
+
 class ObservabilityRuntime:
-    """Own one configured ``TracerProvider`` and its processor lifecycle."""
+    """Manage one configured or borrowed ``TracerProvider`` lifecycle."""
 
     def __init__(self) -> None:
         self._provider: TracerProvider | None = None
+        self._owns_provider = True
         self._config: ObservabilityConfig | None = None
         self._additional_processors: list[SpanProcessor] = []
+        self._additional_processor_adapters: list[SafeSpanProcessor] = []
         self._tracker: ActiveSpanTracker | None = None
         self._callback_handler: OtelCallbackHandler | None = None
         self._registered_callbacks: list[tuple[str, Any]] = []
@@ -108,47 +169,85 @@ class ObservabilityRuntime:
         config: ObservabilityConfig,
         *,
         span_exporter_override: SpanExporter | None = None,
+        tracer_provider_override: TracerProvider | None = None,
+        owns_provider: bool = False,
         additional_span_processors: Sequence[SpanProcessor] = (),
     ) -> None:
-        """Create the provider and register its exporter and processors."""
+        """Create or borrow a provider and register its processors.
+
+        A provider supplied through ``tracer_provider_override`` remains
+        host-owned unless ``owns_provider=True`` explicitly transfers its
+        lifecycle to this runtime. Providers created here are always owned.
+        """
         with self._lock:
             if not config.enabled:
                 logger.info("observability disabled by config")
                 return
-            if self._provider is not None:
-                self.add_span_processors(additional_span_processors)
-                return
             if self._initializing:
                 raise RuntimeError("observability initialization is already in progress")
+            if tracer_provider_override is not None and span_exporter_override is not None:
+                raise ValueError(
+                    "tracer_provider_override and span_exporter_override are mutually exclusive"
+                )
+            if tracer_provider_override is not None and not isinstance(tracer_provider_override, TracerProvider):
+                raise TypeError("tracer_provider_override must be a TracerProvider")
+            if self._provider is not None:
+                if (
+                    tracer_provider_override is not None
+                    and tracer_provider_override is not self._provider
+                ):
+                    raise RuntimeError(
+                        "observability is already initialized with a different tracer provider"
+                    )
+                if (
+                    tracer_provider_override is not None
+                    and owns_provider is not self._owns_provider
+                ):
+                    raise RuntimeError(
+                        "observability provider ownership differs from the active configuration"
+                    )
+                self.add_span_processors(additional_span_processors)
+                return
+            effective_owns_provider = tracer_provider_override is None or owns_provider
 
             self._initializing = True
             provider: TracerProvider | None = None
+            tracker: ActiveSpanTracker | None = None
             additional_processors: list[SpanProcessor] = []
+            additional_processor_adapters: list[SafeSpanProcessor] = []
             try:
-                tracker = ActiveSpanTracker()
-                provider = TracerProvider(
-                    resource=Resource.create({"service.name": config.service_name}),
-                    sampler=ParentBased(root=TraceIdRatioBased(config.sample_rate)),
-                    span_limits=SpanLimits(max_attributes=config.max_attributes),
-                )
+                if tracer_provider_override is None:
+                    provider = TracerProvider(
+                        resource=Resource.create({"service.name": config.service_name}),
+                        sampler=ParentBased(root=TraceIdRatioBased(config.sample_rate)),
+                        span_limits=SpanLimits(max_attributes=config.max_attributes),
+                    )
+                    tracker = ActiveSpanTracker()
+                else:
+                    provider = tracer_provider_override
+                    tracker = ExternalProviderSpanTracker()
                 provider.add_span_processor(tracker)
 
-                exporter = span_exporter_override or build_span_exporter(config)
-                if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
-                    provider.add_span_processor(SimpleSpanProcessor(exporter))
-                else:
-                    provider.add_span_processor(BatchSpanProcessor(exporter))
+                if tracer_provider_override is None:
+                    exporter = span_exporter_override or build_span_exporter(config)
+                    if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
+                        provider.add_span_processor(SimpleSpanProcessor(exporter))
+                    else:
+                        provider.add_span_processor(BatchSpanProcessor(exporter))
 
                 self._register_span_processors(
                     provider,
                     additional_span_processors,
                     tracked_processors=additional_processors,
+                    tracked_adapters=additional_processor_adapters,
                 )
                 self._provider = provider
+                self._owns_provider = effective_owns_provider
                 self._config = config
                 self._tracker = tracker
                 set_active_span_tracker(tracker)
                 self._additional_processors.extend(additional_processors)
+                self._additional_processor_adapters.extend(additional_processor_adapters)
 
                 callback_handler = OtelCallbackHandler(
                     config,
@@ -156,23 +255,30 @@ class ObservabilityRuntime:
                 )
                 self._callback_handler = callback_handler
                 self._register_callbacks(self._callback_pairs(callback_handler))
-                try:
-                    trace.set_tracer_provider(provider)
-                except Exception as exc:
-                    logger.warning("otel: set_tracer_provider failed - {}", exc)
+                if tracer_provider_override is None:
+                    try:
+                        trace.set_tracer_provider(provider)
+                    except Exception as exc:
+                        logger.warning("otel: set_tracer_provider failed - {}", exc)
             except Exception:
                 self._unregister_callbacks()
-                if provider is not None:
+                if isinstance(tracker, ExternalProviderSpanTracker):
+                    tracker.stop_accepting()
+                if provider is not None and effective_owns_provider:
                     try:
                         provider.shutdown()
                     except Exception as exc:
                         logger.warning("otel: initialization rollback provider shutdown failed - {}", exc)
+                else:
+                    self._shutdown_processor_adapters(additional_processor_adapters)
                 self._provider = None
+                self._owns_provider = True
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
                 set_active_span_tracker(None)
                 self._additional_processors.clear()
+                self._additional_processor_adapters.clear()
                 raise
             finally:
                 self._initializing = False
@@ -197,7 +303,7 @@ class ObservabilityRuntime:
             return self._config
 
     def is_initialized(self) -> bool:
-        """Return whether this runtime owns an active provider."""
+        """Return whether this runtime has an active provider."""
         with self._lock:
             return self._provider is not None
 
@@ -212,15 +318,20 @@ class ObservabilityRuntime:
                 logger.warning("otel: force_flush failed - {}", exc)
 
     def shutdown(self, timeout_millis: int = 5000) -> None:
-        """Flush and shut down the provider, then clear runtime state."""
+        """Flush and release the provider, shutting it down only when owned."""
         with self._lock:
             provider = self._provider
             tracker = self._tracker
+            owns_provider = self._owns_provider
             try:
                 self._unregister_callbacks()
                 if tracker is not None:
                     try:
-                        tracker.flush_all_spans(exclude_root_span=False)
+                        if isinstance(tracker, ExternalProviderSpanTracker):
+                            if tracker.stop_accepting():
+                                tracker.flush_all_spans(exclude_root_span=False)
+                        else:
+                            tracker.flush_all_spans(exclude_root_span=False)
                     except Exception as exc:
                         logger.warning("otel: tracker flush failed - {}", exc)
                 if provider is not None:
@@ -228,18 +339,23 @@ class ObservabilityRuntime:
                         provider.force_flush(timeout_millis=timeout_millis)
                     except Exception as exc:
                         logger.warning("otel: provider force_flush failed - {}", exc)
-                    try:
-                        provider.shutdown()
-                    except Exception as exc:
-                        logger.warning("otel: provider shutdown failed - {}", exc)
+                    if owns_provider:
+                        try:
+                            provider.shutdown()
+                        except Exception as exc:
+                            logger.warning("otel: provider shutdown failed - {}", exc)
+                    else:
+                        self._shutdown_processor_adapters(self._additional_processor_adapters)
             finally:
                 self._provider = None
+                self._owns_provider = True
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
                 if get_active_span_tracker() is tracker:
                     set_active_span_tracker(None)
                 self._additional_processors.clear()
+                self._additional_processor_adapters.clear()
 
     def get_tracker(self) -> ActiveSpanTracker | None:
         """Return the tracker owned by this runtime, if initialized."""
@@ -340,13 +456,26 @@ class ObservabilityRuntime:
         processors: Sequence[SpanProcessor],
         *,
         tracked_processors: list[SpanProcessor] | None = None,
+        tracked_adapters: list[SafeSpanProcessor] | None = None,
     ) -> None:
         registered = self._additional_processors if tracked_processors is None else tracked_processors
+        adapters = (
+            self._additional_processor_adapters
+            if tracked_adapters is None
+            else tracked_adapters
+        )
         for processor in processors:
             if any(existing is processor for existing in registered):
                 continue
-            provider.add_span_processor(SafeSpanProcessor(processor))
+            adapter = SafeSpanProcessor(processor)
+            provider.add_span_processor(adapter)
             registered.append(processor)
+            adapters.append(adapter)
+
+    @staticmethod
+    def _shutdown_processor_adapters(processors: Sequence[SafeSpanProcessor]) -> None:
+        for processor in processors:
+            processor.shutdown()
 
 
 def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
@@ -387,6 +516,7 @@ def build_auth_headers(config: ObservabilityConfig) -> dict[str, str]:
 
 
 __all__ = [
+    "ExternalProviderSpanTracker",
     "ObservabilityRuntime",
     "SafeSpanProcessor",
     "build_auth_headers",

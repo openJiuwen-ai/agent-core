@@ -107,32 +107,6 @@ def test_store_rejects_untyped_trajectory_payload(tmp_path) -> None:
             store.save({"resourceSpans": []})  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("store_factory", [InMemoryTrajectoryStore, pytest.param(lambda: None, id="file")])
-def test_store_upgrades_legacy_otlp_wrapper_to_canonical(store_factory, tmp_path) -> None:
-    from openjiuwen.agent_evolving.trajectory.types import trajectory_from_steps
-
-    store = FileTrajectoryStore(tmp_path) if store_factory() is None else store_factory()
-    legacy = trajectory_from_steps(
-        execution_id="legacy-wrapper",
-        steps=[],
-        session_id="session-legacy",
-    )
-
-    store.save(legacy)
-
-    loaded = store.load("legacy-wrapper")
-    assert isinstance(loaded, Trajectory)
-    assert loaded.session_id == "session-legacy"
-
-
-def test_store_rejects_legacy_wrapper_without_otlp_payload(tmp_path) -> None:
-    from openjiuwen.agent_evolving.trajectory.types import Trajectory as LegacyTrajectory
-
-    for store in (InMemoryTrajectoryStore(), FileTrajectoryStore(tmp_path)):
-        with pytest.raises(ValueError, match="OTLP payload"):
-            store.save(LegacyTrajectory())
-
-
 def test_store_metadata_reads_only_canonical_source() -> None:
     trajectory = Trajectory.from_otlp(
         {
