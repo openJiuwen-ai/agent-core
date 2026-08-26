@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -633,6 +634,25 @@ async def test_get_context_usage_prefers_model_usage_metadata() -> None:
     assert usage["usage_ratio"] == 0.25
     assert usage["usage_percent"] == 25.0
     assert usage["stats"]["total_tokens"] == 250
+
+
+def test_resolve_context_window_prefers_selected_model_override() -> None:
+    agent = DeepAgent.__new__(DeepAgent)
+    agent._react_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            model_name="selected-model",
+            model_config_obj=ModelRequestConfig(
+                model="selected-model",
+                context_window=131072,
+            ),
+            context_engine_config=ContextEngineConfig(
+                model_context_window_tokens_override=65536,
+                model_context_window_tokens={"selected-model": 90000},
+            ),
+        ),
+    )
+
+    assert agent._resolve_context_window_tokens() == 65536
 
 
 @pytest.mark.asyncio
