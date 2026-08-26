@@ -232,6 +232,8 @@ store 4 个 B 方法 + `_write_tool_params` 全补齐）。
    `analysis/evolvable-team/design-v5/2026-08-22-predefined-member-no-identity-md.md`。
    （原 F_84 设计文档曾把"external CLI 装配点的一次 get_member 是 spawn 路径的额外 DB 读"写为
    预期成本——**该描述是错的**，cli 没有 workspace，不存在该 get_member 路径；此处纠正。）
+   注：此例外针对 **B 类 member identity**（member_prompt / card / desc）。C 类 tool 描述对
+   in-process claude 成员已生效（见"已知遗留 · external CLI 演进值共享"），codex 仍是边界。
 
 3. **swarmflow worker 是 ephemeral `wf-*` 成员**：不写 DB roster 行、不落盘 B 类 member 级
    identity，system_prompt 走 C 类 inline（`_t("swarmflow_worker", key=...)`），不经 assembler、
@@ -313,8 +315,17 @@ cache 的存在、各自维护"演进优先/DB 回退"逻辑，新增缺口时�
 
 - **三段式完整生命周期 ST**（关→开→演进→关）待补：off 不写 → on 写全部 → 演进 → 再关回退
   框架/DB。三段必须换 session 冷恢复（D5 开关真相）。
-- **external CLI 演进值共享**：cli 三方 agent 无 workspace，演进值不生效（例外场景 2，正常）。
-  原 F_84 #2（external_cli_spawn 经 get_member 取 overlay）设计存疑且不适用，未实施。
+- **external CLI 演进值共享**：分两条路径——
+  - **claude（in-process SDK，已修复）**：external CLI 成员在 `setup_agent` 走 early
+    return，原跳过 `_attach_workspace_cache`，`team_backend.workspace_cache=None` →
+    `bind_team_tools` 用 `ws_cache=None` 建翻译器 → C 类 tool 描述走框架默认值。修复在
+    early return 前调 `_attach_external_cli_backend_cache`，把共享 manager 接到 backend
+    （经 TeamBackend 统一载体，非下游打补丁，符合 R10），SDK MCP tool set 即读演进值。
+    经 `bind_team_tools_send_message_param_carries_evolved_marker` UT 钉住。
+  - **codex（独立 MCP 进程，仍是固有边界）**：codex 的 MCP server 是独立进程自建 cache，
+    不经 leader 的 `team_backend`；演进值到 codex 需该进程自建 cache 且 `OPENJIUWEN_HOME`
+    与 leader 一致。详见"独立进程 `ExternalTeamClient` 自建 cache"条目。
+  - 原 F_84 #2（external_cli_spawn 经 get_member 取 overlay）设计存疑且不适用，未实施。
 - **`build_team_info_text` 补 team prompt 字段**（原 F_84 #3）：`get_team_info` 的 overlay 已覆盖
   `team.prompt` 字段，但渲染函数漏字段，演进值到不了模型的团队信息块。未实施，待定。
 - **member_prompt 同 session resume 重发**：已实施（D8 身份块 prompt 注入 + mtime 探针重发

@@ -1020,3 +1020,97 @@ async def _collect_messages(reader: Any) -> list[dict[str, Any]]:
     async for message in reader:
         messages.append(message)
     return messages
+
+
+# ── C-class tool-param evolution through bind_team_tools (BUG-002 repro) ──
+# send_message's content param description is固化 at ToolCard construction
+# (tool_message.py:73 ``description=t("send_message","content")``). bind_team_tools
+# reads ``team_backend.workspace_cache`` (sdk_mcp.py:101). When a manager with an
+# evolved cache is attached, the description must carry the evolved marker —
+# this reproduces the claude CLI C-class path without a live LLM.
+
+_EVO_PARAM_MARKER = "EVO-CPARAM-OK"
+
+
+def _attach_evolved_cache(team_backend: TeamBackend, team_name: str) -> None:
+    """Attach a workspace manager whose cache reads an evolved tool.param.cn.md."""
+    import json
+    from pathlib import Path
+    from openjiuwen.agent_teams.paths import (
+        configure_openjiuwen_home,
+        team_workspace_dir,
+    )
+    from openjiuwen.agent_teams.team_workspace.frontmatter import write_frontmatter
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
+    from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
+
+    # Point OPENJIUWEN_HOME at the team_db's home so paths line up.
+    root = team_workspace_dir(team_name)
+    root.mkdir(parents=True, exist_ok=True)
+    param_path = root / "prompts" / "tool" / "tool.param.cn.md"
+    param_path.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(
+        {"send_message.content": _EVO_PARAM_MARKER + "消息内容"},
+        ensure_ascii=False,
+    )
+    meta = {"baseline_sha256": "deadbeef"}  # diverges → evolved
+    param_path.write_text(write_frontmatter(meta, body), encoding="utf-8")
+
+    manager = TeamWorkspaceManager(
+        config=TeamWorkspaceConfig(enabled=True),
+        workspace_path=str(root),
+        team_name=team_name,
+    )
+    cache = WorkspaceCache(WorkspaceStore(), team_name, language="cn")
+    manager.attach_workspace_cache(cache)
+    team_backend.attach_workspace_manager(manager)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_bind_team_tools_send_message_param_carries_evolved_marker(
+    fake_claude_sdk,
+    team_db,
+    make_descriptor,
+):
+    """bind_team_tools must固化 the evolved tool-param into send_message's schema.
+
+    Regression for BUG-002 (claude CLI C-class): resume rebuilds the runtime and
+    calls bind_team_tools, which constructs ToolCards via create_team_tools.
+    ``t("send_message","content")`` is evaluated once at construction and the
+    string is baked into the parameters schema — so the cache must already hold
+    the evolved value at that moment. This test pins the construction path.
+    """
+    descriptor = make_descriptor(scope="member")
+    team_backend = TeamBackend(
+        team_name=descriptor.team_name,
+        member_name=descriptor.member_name,
+        is_leader=False,
+        db=team_db,
+        messager=create_messager(
+            MessagerTransportConfig(backend="inprocess", team_name=descriptor.team_name)
+        ),
+    )
+    _attach_evolved_cache(team_backend, descriptor.team_name)
+
+    runtime = ClaudeSdkRuntime(member_name=descriptor.member_name, options=_FakeOptions())
+    runtime.bind_team_tools(
+        team_backend=team_backend,
+        role="teammate",
+        teammate_mode="build_mode",
+        dispatch_mode="autonomous",
+        lifecycle="temporary",
+        language="cn",
+        team_name=descriptor.team_name,
+    )
+
+    assert runtime._sdk_mcp_tool_set is not None
+    send_message = next(
+        tool for tool in runtime._sdk_mcp_tool_set.server["tools"] if tool.name == "send_message"
+    )
+    content_desc = send_message.input_schema["properties"]["content"]["description"]
+    assert _EVO_PARAM_MARKER in content_desc, (
+        f"claude C-class bind did not carry evolved tool-param: {content_desc!r}"
+    )

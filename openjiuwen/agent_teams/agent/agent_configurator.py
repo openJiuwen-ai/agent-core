@@ -437,6 +437,17 @@ class AgentConfigurator:
             # a session restart. Silently skipped when evolution is off or no
             # shared workspace_manager is wired.
             self._prepare_external_cli_workspace(spec, ctx)
+            # This branch returns above before the regular
+            # ``_attach_workspace_cache`` call in the DeepAgent path, so the
+            # member's ``TeamBackend`` never inherits the leader's manager —
+            # ``workspace_cache`` stays None and ``bind_team_tools`` builds the
+            # translator with ``ws_cache=None``, falling back to framework
+            # defaults instead of the team's evolved C-class tool
+            # descriptions/params. Reuse the same attach entry as in-process
+            # members so external-CLI cache reads route through the shared
+            # manager (no second attach path).
+            resolved_language = self._blueprint.language if self._blueprint else "cn"
+            self._attach_workspace_cache(spec, ctx, resolved_language)
             return member_runtime
 
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
@@ -1081,8 +1092,17 @@ class AgentConfigurator:
         (in-process teammate sharing the leader's manager via
         ``share_workspace_cache_with``) is reused, never re-created.
 
-        Skips silently when the member has no team context (single-agent or
-        external CLI members without a team spec).
+        Also called from the external-CLI branch of ``setup_agent``: that
+        branch returns before the DeepAgent path, but the member's
+        ``TeamBackend`` still needs its cache reads routed to the shared
+        manager so ``bind_team_tools`` (in-process claude SDK path) sees
+        evolved C-class tool descriptions/params. When the leader's manager
+        already carries a cache (the normal case for a spawned teammate), the
+        reuse branch below attaches it and returns; a cache-less manager
+        falls through to create one.
+
+        Skips silently when the member has no team context (single-agent
+        without a team spec) or evolution is off.
         """
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
         member_name = ctx.member_name
