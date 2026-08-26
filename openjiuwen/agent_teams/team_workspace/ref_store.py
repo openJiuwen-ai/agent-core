@@ -31,7 +31,7 @@ import json
 import shutil
 from pathlib import Path
 
-from openjiuwen.agent_teams.skill.file_lock import cross_process_file_lock
+from openjiuwen.agent_teams.skill.file_lock import cross_process_file_lock, lock_path_for
 from openjiuwen.agent_teams.team_workspace.paths import (
     MEMBER_MODE_DYNAMIC,
     MEMBER_MODE_PREDEFINED,
@@ -107,10 +107,20 @@ class MemberRefStore:
                 teams.remove(team_name)
             if not teams:
                 refs_path.unlink(missing_ok=True)
-                return 0
-            data["teams"] = teams
-            self._write(refs_path, data)
-            return len(teams)
+                dropped_payload = True
+            else:
+                data["teams"] = teams
+                self._write(refs_path, data)
+                return len(teams)
+        # Outside the lock: the sidecar (``.<name>.lock``) is held open by
+        # portalocker while the context is active, so it can only be unlinked
+        # after release. Dropping the payload (``.refs.json``) on zero must
+        # take its sidecar with it — otherwise a 0-byte orphan lingers next to
+        # a dir that is intentionally kept (predefined) or reclaimed by rmtree
+        # elsewhere. Best-effort: a missing sidecar is fine.
+        if dropped_payload:
+            lock_path_for(refs_path).unlink(missing_ok=True)
+        return 0
 
     def get_ref_count(
         self,

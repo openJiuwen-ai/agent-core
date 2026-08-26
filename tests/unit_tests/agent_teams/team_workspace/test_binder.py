@@ -18,9 +18,10 @@ from openjiuwen.agent_teams.team_workspace import (
     TeamMemberBinding,
     prepare_member_workspace,
 )
+from openjiuwen.agent_teams.skill.file_lock import lock_path_for
 from openjiuwen.agent_teams.team_workspace.dir_links import is_dir_link
 from openjiuwen.agent_teams.team_workspace.paths import member_real_dir
-from openjiuwen.agent_teams.team_workspace.ref_store import MemberRefStore
+from openjiuwen.agent_teams.team_workspace.ref_store import REFS_FILE_NAME, MemberRefStore
 
 
 @pytest.fixture(autouse=True)
@@ -358,3 +359,58 @@ def test_cleanup_team_prefix_off_predefined_preserves_shared_dir() -> None:
     assert MemberRefStore().get_ref_teams(
         "teamA", "shared", mode=MEMBER_MODE_PREDEFINED
     ) == [], "disbanded team dropped from predefined ref list"
+
+
+@pytest.mark.level0
+def test_cleanup_team_reclaims_dir_and_lock_sidecar_on_last_ref() -> None:
+    """Regresses a lock-sidecar leak on a prefix-off dynamic member shared by
+    two teams: after both teams are cleaned up, the real dir AND the
+    ``..refs.json.lock`` sidecar must both be gone.
+
+    The rmtree of the real dir reclaims the lock sidecar naturally (it is a
+    child of the real dir); this test pins that the normal last-ref path does
+    not leave the sidecar behind.
+    """
+    binder = MemberWorkspaceBinder()
+    binder.setup(_binding_prefix_off("teamA", "worker", MEMBER_MODE_DYNAMIC))
+    binder.setup(_binding_prefix_off("teamB", "worker", MEMBER_MODE_DYNAMIC))
+    real = member_real_dir(
+        "teamA", "worker", MEMBER_MODE_DYNAMIC, member_workspace_prefix=False
+    )
+    lock_sidecar = lock_path_for(real / REFS_FILE_NAME)
+    assert lock_sidecar.exists(), "precondition: lock sidecar created on setup"
+
+    binder.cleanup_team("teamA")
+    assert real.is_dir(), "dir kept while teamB still references it"
+    binder.cleanup_team("teamB")
+
+    assert not real.exists(), "real dir reclaimed after last team ref released"
+    assert not lock_sidecar.exists(), "lock sidecar removed with the real dir"
+    assert not is_dir_link(
+        apaths.team_member_workspace_dir("teamB", "worker")
+    ), "teamB link removed"
+
+
+@pytest.mark.level0
+def test_cleanup_team_drops_lock_sidecar_for_predefined_without_rmtree() -> None:
+    """A predefined shared dir is preserved on team delete (shared-asset
+    semantics), but its ``.refs.json`` is removed when the last team ref drops
+    (``remove_ref`` on zero). The lock sidecar must be removed too — otherwise
+    a 0-byte ``..refs.json.lock`` lingers next to a dir whose payload is gone.
+
+    The rmtree path can't cover this (the dir is intentionally kept), so the
+    sidecar has to be dropped explicitly when ``.refs.json`` is unlinked.
+    """
+    binder = MemberWorkspaceBinder()
+    binder.setup(_binding_prefix_off("teamA", "shared", MEMBER_MODE_PREDEFINED))
+    real = member_real_dir(
+        "teamA", "shared", MEMBER_MODE_PREDEFINED, member_workspace_prefix=False
+    )
+    lock_sidecar = lock_path_for(real / REFS_FILE_NAME)
+    assert lock_sidecar.exists(), "precondition: lock sidecar created on setup"
+
+    binder.cleanup_team("teamA")
+
+    assert real.is_dir(), "predefined shared dir preserved (not rmtree'd)"
+    assert not (real / REFS_FILE_NAME).exists(), "predefined refs file dropped on zero"
+    assert not lock_sidecar.exists(), "lock sidecar removed even when dir is kept"
