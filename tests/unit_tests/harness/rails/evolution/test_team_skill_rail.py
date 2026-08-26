@@ -904,7 +904,7 @@ def test_team_signal_and_review_trigger_constructor_values():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def test_team_signal_and_review_trigger_defaults_off():
+def test_team_signal_and_review_trigger_defaults():
     tmp = Path(tempfile.mkdtemp(prefix="team_skill_test_"))
     try:
         rail = _team_skill_rail(
@@ -914,7 +914,7 @@ def test_team_signal_and_review_trigger_defaults_off():
             async_evolution=False,
         )
 
-        assert rail.signal_trigger is False
+        assert rail.signal_trigger is True
         assert rail.review_trigger is False
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
