@@ -5,9 +5,29 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
+
+
+def _resolve_rebuild_write_target(
+    rebuild_context: dict[str, Any] | None,
+    *,
+    skill_name: str,
+) -> tuple[str, bool]:
+    """Return (write target path, whether it is an absolute skill_md_path)."""
+    raw = ""
+    if rebuild_context:
+        raw = str(rebuild_context.get("skill_md_path") or "").strip()
+    if raw:
+        try:
+            return str(Path(raw).expanduser().resolve()), True
+        except OSError:
+            return raw, True
+    if skill_name:
+        return f"{skill_name}/SKILL.md", False
+    return "the target SKILL.md", False
 
 
 def format_relevant_index_preview(index_preview: dict[str, Any] | None) -> str:
@@ -141,7 +161,17 @@ def build_rebuild_command_prompt(
     min_score = rebuild_context.get("min_score") if rebuild_context else None
     min_score_line = f"Min score threshold: {min_score}\n" if min_score is not None else ""
     skill_name = str(normalized_subject.get("name") or "").strip()
-    target_skill_md = f"{skill_name}/SKILL.md" if skill_name else "the target SKILL.md"
+    target_skill_md, has_absolute_target = _resolve_rebuild_write_target(
+        rebuild_context,
+        skill_name=skill_name,
+    )
+    absolute_target_constraint = ""
+    if has_absolute_target:
+        absolute_target_constraint = (
+            f"- Absolute write target (only): `{target_skill_md}`. "
+            "Do not glob/search by relative skill name or under agent cwd; "
+            "write_file/edit_file only that path.\n"
+        )
     return (
         f"Please perform skill evolution operation `evolve_rebuild` for subject "
         f"{json.dumps(normalized_subject, ensure_ascii=False)}.\n"
@@ -155,6 +185,7 @@ def build_rebuild_command_prompt(
         "with the complete rebuilt body (overwrite/update that file on disk).\n"
         "Confirm the disk write succeeded (e.g. re-read or tool success) before finishing.\n"
         "Hard constraints (violations mean the rebuild is incomplete):\n"
+        f"{absolute_target_constraint}"
         f"- You MUST write to `{target_skill_md}` via write_file/edit_file; "
         "chat drafts, skill_tool, or skill_complete alone do NOT count as writing.\n"
         "- Do NOT call todo_complete / todo_complete_batch / skill_complete until AFTER "

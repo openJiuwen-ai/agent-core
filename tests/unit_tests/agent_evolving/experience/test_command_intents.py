@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from openjiuwen.harness.rails.evolution.commands import (
     build_evolve_review_command_prompt,
     build_rebuild_command_prompt,
@@ -63,7 +65,30 @@ def test_build_rebuild_command_prompt_returns_prompt():
     assert prompt
     assert "MUST call write_file or edit_file" in prompt
     assert "`skill-a/SKILL.md`" in prompt
+    assert "Absolute write target (only):" not in prompt
     assert "Do NOT call todo_complete" in prompt
     assert "Do NOT mark Write/Confirm" in prompt
     assert "reset evolutions.json" not in prompt
     assert "Do NOT edit, rewrite, or clear evolutions.json" in prompt
+
+
+def test_build_rebuild_command_prompt_uses_absolute_skill_md_path(tmp_path: Path):
+    skill_md = tmp_path / "Beer" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("# Beer\n", encoding="utf-8")
+    abs_path = str(skill_md.resolve())
+
+    prompt = build_rebuild_command_prompt(
+        subject={"kind": "skill", "name": "Beer"},
+        user_intent="merge experiences",
+        rebuild_context={
+            "records": [],
+            "overflow_index": {"items": []},
+            "skill_md_path": abs_path,
+        },
+    )
+
+    assert f"`{abs_path}`" in prompt
+    assert "`Beer/SKILL.md`" not in prompt
+    assert "Absolute write target (only):" in prompt
+    assert "Do not glob/search by relative skill name or under agent cwd" in prompt
