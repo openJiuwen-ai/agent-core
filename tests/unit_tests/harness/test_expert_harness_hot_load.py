@@ -239,13 +239,13 @@ async def test_hot_bind_skill_failure_leaves_no_residue(tmp_path: Path) -> None:
     existing_skill = workspace / "skills" / "ok-skill"
     existing_skill.mkdir(parents=True)
     (existing_skill / "SKILL.md").write_text(
-        "---\ndescription: ok skill\n---\n\n# ok-skill\n",
+        "---\nname: ok-skill\ndescription: ok skill\n---\n\n# ok-skill\n",
         encoding="utf-8",
     )
     skill_dir = workspace / "extra_skills" / "fail-skill"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\ndescription: fail skill\n---\n\n# fail-skill\n",
+        "---\nname: fail-skill\ndescription: fail skill\n---\n\n# fail-skill\n",
         encoding="utf-8",
     )
     agent = create_deep_agent(
@@ -325,7 +325,7 @@ async def test_load_ability_binds_tool_rail_skill_and_unloads(tmp_path: Path) ->
     skill_dir = workspace / "extra_skills" / "ability-skill"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\ndescription: ability hot-load skill\n---\n\n# ability-skill\n",
+        "---\nname: ability-skill\ndescription: ability hot-load skill\n---\n\n# ability-skill\n",
         encoding="utf-8",
     )
 
