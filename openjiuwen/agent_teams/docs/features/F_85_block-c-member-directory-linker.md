@@ -61,6 +61,11 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
   "跑 team 外"，team 内路径永远有效，store 无需感知 link，缺口 3 从根上消失。
 - **refs 定位带 mode**：predefined 成员的真实目录在 `.agent_teams/<member>`，refs
   查询/释放必须带 `mode` 才能定位 `.refs.json`（`binder.release(..., mode=...)`）。
+- **refs 只属于 link-out 成员**：只有真实目录被 link 出 team 树、且可能跨 team 共享
+  的成员才写 `.refs.json` —— 即 `dynamic`（teammate / human_agent）与 `predefined`。
+  `leader` / `external_cli` / 其余 role 的真实目录在 team 树内、不 link 出去、不跨 team
+  共享，**不写 `.refs.json`**：它随 team 树 `shutil.rmtree` 一起回收，ref 是只写不读的
+  死文件（`delete_if_zero` 对非 dynamic 永远 False，cleanup 扫描也不进入 team 树内）。
 - **动态成员 per-team 隔离**：`team#member` 是两个 team 各自的真实目录，refs 不跨
   team 累计；跨 team 共享只发生在 predefined（`.agent_teams/<member>`，refs 累计 teams）。
 - **链接感知清理**：junction 若被 `shutil.rmtree` 会下钻删 target 内容（共享资产）。
@@ -69,6 +74,16 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
   该成员是 `TEAMMATE`/`HUMAN_AGENT` 才建 team 外真实目录 + link，其余（leader /
   `EXTERNAL_CLI` / `BRIDGE_AGENT` / `WORKER`）一律 team 内真实目录，不扫别人的目录、不
   全队扫描、不依赖黑名单。成员真实目录创建只由 `prepare_member_workspace`（即 `MemberWorkspaceBinder.setup`）负责，不再有独立的全队迁移器。
+- **cleanup_team 从 link 反向解析真实目录**：`MemberWorkspaceBinder.cleanup_team(team_name)`
+  是删 team 前的一站式清理，**从 team 树内 link 反向解析真实目录**：遍历
+  `{team_home}/workspaces/<member>_workspace`，对每个 link `os.readlink` 拿真实目录 →
+  读其 `.refs.json` → `remove_ref(本 team)` → count 归零且 `kind == dynamic` 才
+  `shutil.rmtree` 真实目录，`predefined` 只删 link（共享资产保留），无 refs / team 不在
+  refs 列表仅删 link。**不遍历 `get_agent_teams_home()`、不依赖 `<team>#` 目录名前缀** ——
+  成员→真实目录的映射始终来自 team 树内 link，因此 `member_workspace_prefix=False`
+  （真实目录为无前缀 `.agent_teams/<member>`）与 prefix 开一样被正确回收。link 失败
+  retreat 回退的真实目录（普通目录，在 team 树内）随 `cleanup_team` 直接 rmtree。必须在
+  `shutil.rmtree(team_home)` 之前调（否则 junction 下钻 + 孤儿真实目录残留）。
 
 ## 验证基线
 
@@ -84,3 +99,20 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
    归入 team 内真实目录（兜底退回），不会被别的成员 configure 扫描时 link 出去。
 3. WORKER（swarmflow）保持现役 `ensure_team_member_workspace_link`，不参与 binder/refs。
 4. distributed workspace（git push/pull）跨节点一致性只保证 LOCAL 模式。
+
+## 后续修复（2026-08-26）
+
+初版 `cleanup_team` 先无差别删光 `workspaces/` 下 link，再按 `<team>#` 前缀扫
+`.agent_teams/` 释放动态真实目录 —— 先删 link 等于扔掉成员→真实目录映射，逼自己靠
+目录名前缀猜，导致两个缺口（commit `3bc6ac743`）：
+
+- `member_workspace_prefix=False` 的动态成员真实目录（`.agent_teams/<member>`，无 `#`）
+  不在前缀扫描范围，删 team 时残留 + `.refs.json` 悬空。
+- leader / external_cli 被 `_setup_leader` 写了只写不读的死 `.refs.json`（真实目录在 team
+  树内、无 link、不共享）。
+
+修复：`cleanup_team` 改为从 team 树内 link 反向解析（`os.readlink`）真实目录，按
+`.refs.json` 内容释放，不扫 team 外、不依赖前缀；`_setup_leader` 去掉 `add_ref`。
+删除 `cleanup_team_links` / `cleanup_team_dynamic_members` / `release_predefined_refs`
+（从-link-解析统一取代，无生产调用者）。回归测试：`test_binder.py` + `test_manager.py`
+167 passed。
