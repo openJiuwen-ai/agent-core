@@ -24,6 +24,10 @@ from pydantic import (
 )
 
 from openjiuwen.core.common.logging import sys_operation_logger, LogEventType
+from openjiuwen.core.sys_operation.local.output_encoding import (
+    IncrementalCommandDecoder,
+    decode_command_output,
+)
 
 
 class StreamEventType(str, Enum):
@@ -80,10 +84,11 @@ class AsyncProcessHandler:
     def __init__(self,
                  process: asyncio.subprocess.Process,
                  chunk_size: int = 1024,
-                 encoding: str = "utf-8",
+                 encoding: Optional[str] = None,
                  timeout: int = 300):
         self._process = process
         self._chunk_size = chunk_size
+        # None → heuristic (UTF-8 first). A concrete codec locks decode.
         self._encoding = encoding
         self._overall_timeout = timeout
         self._queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
@@ -147,7 +152,7 @@ class AsyncProcessHandler:
         ]
 
         def _decode(buf: bytearray) -> str:
-            return buf.decode(self._encoding, errors='replace')
+            return decode_command_output(bytes(buf), encoding=self._encoding)
 
         async def _finish_readers(grace: float) -> None:
             try:
@@ -345,17 +350,24 @@ class AsyncProcessHandler:
         """
         try:
             total_num = 0
+            decoder = IncrementalCommandDecoder(self._encoding)
             while True:
                 chunk = await stream.read(self._chunk_size)
                 # Terminate loop when stream has no more data
                 if not chunk:
+                    data = decoder.feed(b"", final=True)
+                    if data:
+                        await self._queue.put(StreamEvent(type=stream_type, data=data))
+                        total_num += 1
                     sys_operation_logger.info("Receive stream eof",
                                               event_type=LogEventType.SYS_OP_STREAM,
                                               metadata={"total_num": total_num,
                                                         "returncode": self._process.returncode,
                                                         "queue_size": self._queue.qsize()})
                     break
-                data = chunk.decode(self._encoding, errors="replace")
+                data = decoder.feed(chunk, final=False)
+                if not data:
+                    continue
                 event = StreamEvent(type=stream_type, data=data)
                 await self._queue.put(event)
                 total_num += 1
@@ -449,15 +461,16 @@ class OperationUtils:
     @staticmethod
     def create_handler(process: asyncio.subprocess.Process,
                        chunk_size: int = 1024,
-                       encoding: str = "utf-8",
+                       encoding: Optional[str] = None,
                        timeout: int = 300) -> AsyncProcessHandler:
         """Factory method to create an AsyncProcessHandler instance.
 
         Args:
             process: asyncio subprocess process instance to monitor and handle
             chunk_size: Max byte size for each stream read operation (default: 1024)
-            encoding: Text encoding for decoding stream binary data to string,
-                common values: utf-8, gbk, latin-1 (default: utf-8)
+            encoding: Text encoding for decoding stream binary data to string.
+                None (default) uses UTF-8-first heuristic. Pass utf-8/gbk/latin-1
+                to lock a codec.
             timeout: Overall timeout duration (in seconds) for the entire stream processing loop,
                 prevents infinite blocking of the handler (default: 300)
 
