@@ -282,17 +282,7 @@ class TodoCreateTool(TodoTool):
                     reason=f"Task at index {i} is missing a 'content' field"
                 )
             active_form = task_data.get("activeForm", "")
-            if not active_form:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Task at index {i} is missing a 'activeForm' field"
-                )
             description = task_data.get("description", "")
-            if not description:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Task at index {i} is missing a 'description' field"
-                )
             # Prefer model-provided id; fall back to uuid only when absent
             task_id = str(task_data.get("id") or "").strip()
             if not task_id:

@@ -17,8 +17,7 @@ TODO_CREATE_DESCRIPTION_CN = """
 
 ## 使用方式
 
-入参为 JSON 数组（每个任务必须包含 id 字段）：
-    {"tasks": [{"id": "translate_doc", "content": "翻译文档", "activeForm": "正在翻译文档", "description": "将文档翻译为目标语言", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "分析代码架构", "activeForm": "正在分析代码架构", "description": "梳理代码模块结构与依赖关系", "selected_model_id": "smart"}]}
+入参为任务数组。每个任务必填：`id`、`content`。可选：`activeForm`、`description`、`selected_model_id`。
 
 ## 规则
 
@@ -35,8 +34,7 @@ Create a todo list for the current session to track progress, organize complex t
 
 ## Usage
 
-Input is a JSON array (each task must include an id field):
-    {"tasks": [{"id": "translate_doc", "content": "Translate document", "activeForm": "Translating document", "description": "Translate the document into the target language", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "Analyze code architecture", "activeForm": "Analyzing code architecture", "description": "Map out module structure and dependencies", "selected_model_id": "smart"}]}
+Input is a task array. Required per task: `id`, `content`. Optional: `activeForm`, `description`, `selected_model_id`.
 
 ## Rules
 
@@ -277,9 +275,9 @@ TODO_CREATE_PARAMS: Dict[str, Dict[str, str]] = {
             "- id：任务唯一标识符，由你自行指定，必须简短且语义清晰（如 \"translate_doc\"、\"analyze_code\"），"
             "禁止使用随机字符或 UUID；同一会话内 ID 不得重复；后续 todo_modify 按此 ID 精准定位任务\n"
             "- content：任务摘要描述\n"
+            "可选字段：\n"
             "- activeForm：content 的进行语态（如 content 为「翻译文档」，activeForm 为「正在翻译文档」）\n"
             "- description：任务详细内容\n"
-            "可选字段：\n"
             "- selected_model_id：执行任务的模型 ID，见系统提示词「模型选择策略」"
         ),
         "en": (
@@ -288,10 +286,10 @@ TODO_CREATE_PARAMS: Dict[str, Dict[str, str]] = {
             "(e.g. 'translate_doc', 'analyze_code'); do NOT use random chars or UUIDs; "
             "IDs must be unique within a session; todo_modify uses this ID to locate tasks precisely\n"
             "- content: task summary description\n"
+            "Optional fields:\n"
             "- activeForm: present-tense form of content "
             "(e.g., content 'Translate document' -> activeForm 'Translating document')\n"
             "- description: detailed task content\n"
-            "Optional field:\n"
             "- selected_model_id: model ID, see 'Model Selection Strategy' in system prompt"
         ),
     },
@@ -397,7 +395,7 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
                         "description": item_props["description"],
                         "selected_model_id": item_props["selected_model_id"],
                     },
-                    "required": ["id", "content", "activeForm", "description"],
+                    "required": ["id", "content"],
                 },
             },
         },
