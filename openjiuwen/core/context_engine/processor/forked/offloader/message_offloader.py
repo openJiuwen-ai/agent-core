@@ -54,7 +54,7 @@ class MessageSummaryOffloaderConfig(BaseModel):
     """Context-token-capacity ratio above which one TTL tool message is processed."""
 
     protected_tool_names: list[str] = Field(
-        default_factory=lambda: ["read_file"]
+        default_factory=lambda: ["read_file", "skill_tool"]
     )
     """Tool names, or ``tool:argument-pattern`` entries, that must remain inline."""
 
