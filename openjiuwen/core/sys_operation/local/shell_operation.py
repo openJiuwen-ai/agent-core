@@ -520,7 +520,7 @@ class ShellOperation(BaseShellOperation):
             proc = await self._create_subprocess(command, actual_cwd, exec_env, shell_type=shell_type_enum)
             track_sid = _track_shell_process(proc)
 
-            encoding = (options or {}).get("encoding", self._detect_shell_encoding())
+            encoding = (options or {}).get("encoding")
             process_handler = OperationUtils.create_handler(process=proc, encoding=encoding, timeout=timeout)
             try:
                 invoke_data = await process_handler.invoke()
@@ -670,7 +670,7 @@ class ShellOperation(BaseShellOperation):
             track_sid = _track_shell_process(process)
 
             chunk_size = (options or {}).get("chunk_size", 1024)
-            encoding = (options or {}).get("encoding", self._detect_shell_encoding())
+            encoding = (options or {}).get("encoding")
             process_handler = OperationUtils.create_handler(process=process, chunk_size=chunk_size, encoding=encoding,
                                                             timeout=timeout)
 
