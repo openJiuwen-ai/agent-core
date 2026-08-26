@@ -93,3 +93,48 @@ def test_project_cwd_keeps_member_workspace_private(monkeypatch):
     assert agent_spec.project_root == project_dir
     assert agent_spec.workspace.root_path != project_dir
     assert "dev-writer" in agent_spec.workspace.root_path
+
+
+def test_team_policy_uses_flat_workspace_mount(monkeypatch):
+    """The policy prompt must match the flat filesystem mount contract."""
+    captured = {}
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(workspace=None, sys_operation=None, model=None)
+
+    monkeypatch.setattr(configurator_module.TeamHarness, "build", fake_build)
+
+    team_name = "oc_team_preset-research-insight_officeclaw_1a03cd0f2a9_26b2ec1a2e78"
+    configurator = AgentConfigurator(
+        card=AgentCard(id="team", name="team", description="team")
+    )
+    configurator.workspace_manager = SimpleNamespace(
+        workspace_path="/shared/team-workspace",
+        mount_into_workspace=lambda workspace_root: None,
+    )
+    spec = TeamAgentSpec(
+        team_name=team_name,
+        agents={"leader": DeepAgentSpec(), "teammate": DeepAgentSpec()},
+    )
+    team_spec = TeamSpec(
+        team_name=team_name,
+        display_name="team",
+        leader_member_name="leader",
+    )
+
+    configurator.setup_agent(
+        spec,
+        TeamRuntimeContext(
+            role=TeamRole.TEAMMATE,
+            member_name="researcher",
+            team_spec=team_spec,
+        ),
+    )
+
+    policy_rail = next(
+        rail
+        for rail in captured["agent_spec"].rails
+        if rail.type == "core.team.policy"
+    )
+    assert policy_rail.params["team_workspace_mount"] == ".team/"

@@ -255,7 +255,7 @@ def build_team_info_text(
         team_info: Mapping with optional ``team_name``, ``display_name`` and
             ``desc`` keys (the shape returned by ``TeamBackend.get_team_info``).
         team_workspace_mount: Agent-relative mount point of the team shared
-            workspace (e.g. ``.team/{team_name}/``). When set, the body appends
+            workspace (normally ``.team/``). When set, the body appends
             a bullet telling the LLM how to read/write team-shared files from
             its own workspace.
         team_workspace_path: Absolute path of the team shared workspace on disk.
