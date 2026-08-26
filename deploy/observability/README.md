@@ -235,14 +235,14 @@ Or in PowerShell:
 
 3. **Databases**: For production, use managed Postgres and ClickHouse instead of docker-compose volumes.
 
-4. **Remove debug exporter**: In `otel-collector-config.yaml`, remove `debug` from exporters once stable:
-   ```yaml
-   exporters: [otlphttp/langfuse]
-   ```
+4. **OTel Collector 日志已静默**：已移除 `debug` exporter，且 `service.telemetry.logs.level` 设为 `error`，调试时再加回。
+
+5. **ClickHouse 日志已关闭**：`clickhouse-logs.xml` 挂载进容器，用于关闭其内部日志。
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `docker-compose.yml` | Service orchestration: OTel Collector, Langfuse, Postgres, ClickHouse, Redis, MinIO |
-| `otel-collector-config.yaml` | Collector pipeline: receivers, processors, exporters |
+| `otel-collector-config.yaml` | Collector pipeline: receivers, processors, exporters (debug exporter removed, collector logs level=error) |
+| `clickhouse-logs.xml` | 挂载进 ClickHouse 容器，用于关闭其内部日志 |
