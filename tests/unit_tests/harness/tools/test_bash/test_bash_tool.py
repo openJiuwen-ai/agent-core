@@ -340,3 +340,45 @@ class TestBashToolHistoryPath(unittest.TestCase):
         path = tool._build_history_path(session)
         filename = os.path.basename(path)
         assert filename == "file_ops_myagent_sess123.json"
+
+
+# ── nul-redirect normalization (Windows reserved-name guard) ──
+
+class TestNulRedirectNormalization:
+    """cmd-style `>nul` redirects must be rewritten to `/dev/null` so MSYS/Git
+    Bash (which does not treat `nul` as a device) does not create a real, hard-to
+    -delete `nul` file in the workdir. `null` (4 letters) and bare `nul` as an
+    argument must be left untouched."""
+
+    @staticmethod
+    def _norm():
+        from openjiuwen.core.sys_operation.local import shell_operation as _so
+        return _so._normalize_windows_paths_for_bash
+
+    @pytest.mark.parametrize("cmd,expected", [
+        ("echo hi > nul", "echo hi >/dev/null"),
+        ("echo hi >nul", "echo hi >/dev/null"),
+        ("echo hi 2> nul", "echo hi 2>/dev/null"),
+        ("echo hi 2>nul", "echo hi 2>/dev/null"),
+        ("echo hi 1>nul", "echo hi 1>/dev/null"),
+        ("echo hi &>nul", "echo hi &>/dev/null"),
+        ("echo hi >>nul", "echo hi >>/dev/null"),
+        ("echo hi >NUL", "echo hi >/dev/null"),
+        ("ping -n 5 127.0.0.1 > nul", "ping -n 5 127.0.0.1 >/dev/null"),
+    ])
+    def test_nul_redirect_rewritten(self, cmd, expected):
+        assert self._norm()(cmd) == expected
+
+    @pytest.mark.parametrize("cmd", [
+        "echo null",            # 'null' is a real filename, not the null device
+        "echo hi > null",       # 'null' (4 letters) — must not be rewritten
+        "echo hi > /dev/null",  # already bash-style
+        "cat nul",              # bare nul as a read argument, not a redirect
+        "echo nul",             # bare nul as an echo argument
+        "echo a>nulled",        # 'nulled' — nul not at a word boundary
+        "ls",
+        "echo hi",
+    ])
+    def test_non_target_untouched(self, cmd):
+        assert self._norm()(cmd) == cmd
+

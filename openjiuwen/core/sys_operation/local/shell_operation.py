@@ -139,6 +139,14 @@ _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s
 # Unix-style absolute paths (/some/path). Requires ≥1 non-separator char after '/' so bare '/'
 # and short escape sequences (/n, /t …) are excluded.
 _UNIX_ABS_PATH_PATTERN = re.compile(r"(?:^|[\s\"'(=,])(/[a-zA-Z0-9_.][^\s\"'|&;()*?]*)")
+# cmd-style redirects to the Windows null device, e.g. ">nul", "2>nul", ">>nul",
+# "&>nul", "1>nul" (case-insensitive, optional spaces, `nul` as a standalone word).
+# MSYS/Git Bash does not treat `nul` as a device — it would create a real 0-byte file
+# named `nul` (a Windows reserved name that then resists deletion via the normal Win32
+# API). Rewrite such redirects to `/dev/null` before handing the command to bash.
+# `null` (4 letters) is left untouched because `\bnul\b` requires a word boundary
+# after the `l`.
+_NUL_REDIRECT_PATTERN = re.compile(r"(?i)([12&]?>>?)(\s*)\bnul\b")
 
 
 def _track_shell_process(proc: asyncio.subprocess.Process) -> str | None:
@@ -320,7 +328,13 @@ def _normalize_windows_paths_for_bash(command: str) -> str:
         return f"{quote}{value}{quote}" if quote else value
 
     normalized = _QUOTED_WINDOWS_PATH_PATTERN.sub(replace_path, command)
-    return _UNQUOTED_WINDOWS_PATH_PATTERN.sub(replace_path, normalized)
+    normalized = _UNQUOTED_WINDOWS_PATH_PATTERN.sub(replace_path, normalized)
+    # cmd-style ">nul"/"2>nul"/... → "/dev/null" (MSYS bash would otherwise create an
+    # undeletable real `nul` file; see _NUL_REDIRECT_PATTERN).
+    normalized = _NUL_REDIRECT_PATTERN.sub(
+        lambda m: m.group(1) + "/dev/null", normalized
+    )
+    return normalized
 
 
 @operation(name="shell", mode=OperationMode.LOCAL, description="local shell operation")
