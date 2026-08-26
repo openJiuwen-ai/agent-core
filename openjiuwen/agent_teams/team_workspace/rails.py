@@ -71,9 +71,12 @@ class TeamWorkspaceRail(DeepAgentRail):
         """
         tool_name = ctx.inputs.tool_name
         tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
-        path = tool_args.get("file_path", "")
+        raw_path = str(tool_args.get("file_path", ""))
+        path = self._canonicalize_team_path(raw_path)
         if not path or not path.startswith(self.TEAM_PREFIX):
             return
+        if path != raw_path:
+            tool_args["file_path"] = path
 
         # Read path: pull before read (distributed mode, throttled)
         if tool_name in self.READ_TOOLS:
@@ -139,6 +142,14 @@ class TeamWorkspaceRail(DeepAgentRail):
             return
         self._last_pull_time = now
         await self._ws.pull()
+
+    def _canonicalize_team_path(self, path: str) -> str:
+        """Rewrite a legacy hub path onto the flat ``.team`` mount."""
+        normalized = str(path or "").replace("\\", "/")
+        if not normalized.startswith(self.TEAM_PREFIX):
+            return path
+        relative = self._resolve_workspace_relative(normalized)
+        return f"{self.TEAM_PREFIX}{relative}"
 
     def _resolve_workspace_relative(self, path: str) -> str:
         """Extract the workspace-relative path from a .team/ prefixed path.
