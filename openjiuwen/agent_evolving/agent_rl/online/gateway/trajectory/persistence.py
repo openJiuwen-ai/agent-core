@@ -7,14 +7,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..message_utils import extract_last_user_instruction
 from .judge_dispatcher import JudgeDispatcher
+from .pending_judge_store import PendingJudgeStore
 from .rail_ingest import RailBatchIngestor
 from .sample_payloads import build_sample, coerce_logprobs
 from .sample_recorder import SampleRecorder
 from .task_reward import TaskReward, TaskRewardProjector
+
+if TYPE_CHECKING:
+    from ...backends.rl.redis_store import RedisTrajectoryStore
+    from ...backends.sft.redis_store import RedisSFTStore
 
 _SINGLE_USER_DEFAULT_ID = "jiuwenclaw-web"
 _UNINDEXED_FILTER_SCAN_LIMIT = 1000000
@@ -27,31 +32,44 @@ class GatewayTrajectoryRuntime:
         self,
         config: Any,
         *,
+        redis: Optional[Any] = None,
         trajectory_store: Optional[Any] = None,
+        sft_store: Optional[Any] = None,
         pending_judge_store: Optional[Any] = None,
         task_reward_redis: Optional[Any] = None,
     ) -> None:
-        if trajectory_store is None:
-            raise ValueError("GatewayTrajectoryRuntime requires trajectory_store")
-        if pending_judge_store is None:
-            raise ValueError("GatewayTrajectoryRuntime requires pending_judge_store")
+        if redis is None and trajectory_store is None:
+            raise ValueError("GatewayTrajectoryRuntime requires injected stores or a redis client")
         os.makedirs(config.record_dir, exist_ok=True)
         self._default_user_id = _SINGLE_USER_DEFAULT_ID if getattr(config, "single_user_default", False) else ""
-        self._trajectory_store = trajectory_store
+        if trajectory_store is None or (sft_store is None and redis is not None):
+            from ...backends.rl.redis_store import RedisTrajectoryStore
+            from ...backends.sft.redis_store import RedisSFTStore
+
+            self._trajectory_store = trajectory_store or RedisTrajectoryStore(redis)
+            self._sft_store = sft_store or RedisSFTStore(redis)
+        else:
+            self._trajectory_store = trajectory_store
+            self._sft_store = sft_store
         self._sample_recorder = SampleRecorder(
             sample_file=os.path.join(config.record_dir, "samples.jsonl"),
             dump_token_ids=config.dump_token_ids,
         )
-        self._pending_judge_store = pending_judge_store
+        if pending_judge_store is not None:
+            self._pending_judge_store = pending_judge_store
+        elif redis is not None:
+            self._pending_judge_store = PendingJudgeStore(redis=redis)
+        else:
+            self._pending_judge_store = None
         self._task_reward_projector: TaskRewardProjector | None = None
-        if task_reward_redis is not None:
+        if task_reward_redis is not None and self._pending_judge_store is not None:
             self._task_reward_projector = TaskRewardProjector(
                 redis=task_reward_redis,
                 pending_store=self._pending_judge_store,
                 record_samples_once=self._record_samples_once,
             )
-        self._judge_dispatcher: JudgeDispatcher
-        self._rail_ingestor: RailBatchIngestor
+        self._judge_dispatcher: JudgeDispatcher | None = None
+        self._rail_ingestor: RailBatchIngestor | None = None
         self.set_judge_scorer(None)
 
     @property
@@ -60,9 +78,15 @@ class GatewayTrajectoryRuntime:
 
     @property
     def rail_ingestor(self) -> RailBatchIngestor:
+        if self._rail_ingestor is None:
+            raise RuntimeError("rail_ingestor is not initialized")
         return self._rail_ingestor
 
     def set_judge_scorer(self, judge_scorer: Optional[Any]) -> None:
+        if self._pending_judge_store is None:
+            self._judge_dispatcher = None
+            self._rail_ingestor = None
+            return
         judge_dispatcher = JudgeDispatcher(
             pending_store=self._pending_judge_store,
             record_sample=self.record_sample,
@@ -77,10 +101,14 @@ class GatewayTrajectoryRuntime:
 
     async def stage_gateway_sample(self, sample: dict[str, Any]) -> None:
         """Persist one committed gateway call for delayed judging."""
+        if self._pending_judge_store is None:
+            raise ValueError("gateway trajectory collection requires a pending judge store")
         await self._pending_judge_store.put(sample)
 
     async def on_gateway_followup(self, session_id: str, messages: list[dict[str, Any]]) -> int:
         """Use latest user message as feedback for oldest pending call."""
+        if self._judge_dispatcher is None:
+            raise ValueError("gateway trajectory collection requires a pending judge store")
         feedback = extract_last_user_instruction(messages)
         return await self._judge_dispatcher.on_prev_feedback(
             session_id,
@@ -89,10 +117,14 @@ class GatewayTrajectoryRuntime:
 
     async def flush_gateway_session(self, session_id: str) -> int:
         """Apply existing session-done judge semantics to pending gateway calls."""
+        if self._judge_dispatcher is None:
+            raise ValueError("gateway trajectory collection requires a pending judge store")
         return await self._judge_dispatcher.on_session_done(session_id)
 
     async def discard_gateway_session(self, session_id: str) -> int:
         """Remove aborted calls without judging or publishing training samples."""
+        if self._pending_judge_store is None:
+            raise ValueError("gateway trajectory collection requires a pending judge store")
         return len(await self._pending_judge_store.pop_all(session_id))
 
     async def submit_task_reward(self, session_id: str, reward: TaskReward) -> int:
@@ -110,6 +142,36 @@ class GatewayTrajectoryRuntime:
         await self._trajectory_store.save_sample(normalized, user_id=normalized_user_id)
         await self._sample_recorder.record_sample(normalized)
 
+    async def record_sft_raw(self, raw: dict[str, Any]) -> None:
+        if self._sft_store is None:
+            raise ValueError("SFT upload requires an SFT store or a Redis client")
+        normalized = dict(raw)
+        normalized_user_id = str(
+            normalized.get("user_id")
+            or normalized.get("tenant_id")
+            or self._default_user_id
+            or ""
+        ).strip()
+        if not normalized_user_id:
+            raise ValueError("missing user_id; SFT raw upload requires a stable user id")
+        normalized["user_id"] = normalized_user_id
+        await self._sft_store.save_raw(normalized, user_id=normalized_user_id)
+
+    async def record_sft_sample(self, sample: dict[str, Any]) -> None:
+        if self._sft_store is None:
+            raise ValueError("SFT upload requires an SFT store or a Redis client")
+        normalized = dict(sample)
+        normalized_user_id = str(
+            normalized.get("user_id")
+            or normalized.get("tenant_id")
+            or self._default_user_id
+            or ""
+        ).strip()
+        if not normalized_user_id:
+            raise ValueError("missing user_id; SFT sample upload requires a stable user id")
+        normalized["user_id"] = normalized_user_id
+        await self._sft_store.save_sample(normalized, user_id=normalized_user_id)
+
     async def batch_create_trajectories(self, payload: dict[str, Any]) -> dict[str, Any]:
         protocol_version = str(payload.get("protocol_version") or "")
         if protocol_version == "rail-v1":
@@ -120,6 +182,27 @@ class GatewayTrajectoryRuntime:
                 "duplicate": 0,
                 "items": [],
                 "legacy_result": result,
+            }
+        if protocol_version in {"sft-raw-v1", "sft-sample-v1"}:
+            try:
+                if protocol_version == "sft-raw-v1":
+                    await self.record_sft_raw(payload)
+                else:
+                    await self.record_sft_sample(payload)
+            except Exception as exc:
+                return {
+                    "accepted": 0,
+                    "rejected": 1,
+                    "duplicate": 0,
+                    "items": [{"status": "rejected", "error": str(exc)}],
+                    "protocol_version": protocol_version,
+                }
+            return {
+                "accepted": 1,
+                "rejected": 0,
+                "duplicate": 0,
+                "items": [{"status": "pending", "protocol_version": protocol_version}],
+                "protocol_version": protocol_version,
             }
         if protocol_version not in {"agent-rollout-v1", "online-rl-sample-v1", ""}:
             raise ValueError(f"unsupported protocol_version: {protocol_version}")
@@ -167,11 +250,8 @@ class GatewayTrajectoryRuntime:
         limit: int = 100,
     ) -> dict[str, Any]:
         normalized_limit = max(1, int(limit))
-        has_unindexed_filter = any(
-            value
-            for value in (model_id, session_id, task_id, source, policy_version)
-        )
-        fetch_limit = _UNINDEXED_FILTER_SCAN_LIMIT if has_unindexed_filter else normalized_limit
+        has_extra_filters = any((model_id, session_id, task_id, source, policy_version))
+        fetch_limit = _UNINDEXED_FILTER_SCAN_LIMIT if has_extra_filters else normalized_limit
         samples = await self._trajectory_store.list_samples(
             user_id=user_id,
             status=status,
@@ -214,13 +294,9 @@ class GatewayTrajectoryRuntime:
         if hasattr(self._trajectory_store, "management_stats"):
             stats = await self._trajectory_store.management_stats(user_id=user_id, model_id=model_id)
         else:
-            samples = await self._trajectory_store.list_samples(user_id=user_id, limit=1000000)
+            samples = await self._trajectory_store.list_samples(user_id=user_id, limit=_UNINDEXED_FILTER_SCAN_LIMIT)
             if model_id:
-                samples = [
-                    sample
-                    for sample in samples
-                    if str(sample.get("model") or sample.get("model_id") or "") == model_id
-                ]
+                samples = [sample for sample in samples if self._matches(sample, model_id=model_id)]
             stats = {"total": len(samples), "by_status": {}, "by_source": {}}
             for sample in samples:
                 item_status = str(sample.get("_store_status") or "pending")
@@ -247,6 +323,19 @@ class GatewayTrajectoryRuntime:
     async def snapshot_stats(self) -> dict[str, Any]:
         sample_stats = await self._sample_recorder.snapshot_stats()
         train_stats = await self._trajectory_store.stats()
+        if self._sft_store is None:
+            sft_stats = {
+                "pending_raw": 0,
+                "processing_raw": 0,
+                "processed_raw": 0,
+                "failed_raw": 0,
+                "pending_samples": 0,
+                "training_samples": 0,
+                "trained_samples": 0,
+                "failed_samples": 0,
+            }
+        else:
+            sft_stats = await self._sft_store.stats()
         return {
             "total_samples": sample_stats["total_samples"],
             "trajectory_store_backend": self.store_backend,
@@ -255,6 +344,14 @@ class GatewayTrajectoryRuntime:
             "trajectory_store_training": train_stats["training_samples"],
             "trajectory_store_trained": train_stats["trained_samples"],
             "trajectory_store_failed": train_stats["failed_samples"],
+            "sft_pending_raw": sft_stats["pending_raw"],
+            "sft_processing_raw": sft_stats["processing_raw"],
+            "sft_processed_raw": sft_stats["processed_raw"],
+            "sft_failed_raw": sft_stats["failed_raw"],
+            "sft_pending_samples": sft_stats["pending_samples"],
+            "sft_training_samples": sft_stats["training_samples"],
+            "sft_trained_samples": sft_stats["trained_samples"],
+            "sft_failed_samples": sft_stats["failed_samples"],
         }
 
     def _trajectory_to_samples(

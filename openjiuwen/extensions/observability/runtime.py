@@ -116,6 +116,12 @@ class ObservabilityRuntime:
                 logger.info("observability disabled by config")
                 return
             if self._provider is not None:
+                # JiuwenSwarm creates online rails through a no-arg plugin API,
+                # so `agent_evolving.agent_rl.online.core.rail_factory` may
+                # initialize this shared provider first. A later caller can
+                # still supply an exporter override that must not be dropped.
+                if span_exporter_override is not None:
+                    self._provider.add_span_processor(SimpleSpanProcessor(span_exporter_override))
                 self.add_span_processors(additional_span_processors)
                 return
             if self._initializing:
