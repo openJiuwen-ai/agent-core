@@ -169,18 +169,17 @@ class OnlineEvolutionOrchestrator:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> EvolutionContext:
         skill_content = await self._store.read_skill_content(skill_name, strict=True)
-        existing_desc_records = await self._store.get_pending_records(
-            skill_name,
-            EvolutionTarget.DESCRIPTION,
-        )
-        existing_body_records = await self._store.get_pending_records(
-            skill_name,
-            EvolutionTarget.BODY,
-        )
-        existing_script_records = await self._store.get_pending_records(
-            skill_name,
-            EvolutionTarget.SCRIPT,
-        )
+        # Use all persisted entries (pending + applied) so accepted experiences
+        # are not regenerated as duplicates.
+        existing_desc_records = (
+            await self._store.load_evolution_log(skill_name, EvolutionTarget.DESCRIPTION)
+        ).entries
+        existing_body_records = (
+            await self._store.load_evolution_log(skill_name, EvolutionTarget.BODY)
+        ).entries
+        existing_script_records = (
+            await self._store.load_evolution_log(skill_name, EvolutionTarget.SCRIPT)
+        ).entries
         message_list = list(messages or [])
         language = str((metadata or {}).get("language") or "cn")
         return EvolutionContext(

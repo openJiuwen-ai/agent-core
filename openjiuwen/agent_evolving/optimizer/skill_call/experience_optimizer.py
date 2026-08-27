@@ -19,6 +19,13 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
     LLMInvokePolicy,
     invoke_text_with_retry_and_prompt,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_dedup import (
+    collect_existing_records,
+    filter_duplicate_candidates,
+    filter_duplicate_drafts,
+    filter_duplicate_records,
+    filter_uncovered_signals,
+)
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser import (
     ParsedExperienceDraft,
     normalize_root_cause,
@@ -491,9 +498,27 @@ class SkillExperienceOptimizer(BaseOptimizer):
         """Generate and parse evolution records from LLM output."""
         if not ctx.signals:
             return []
+        existing = collect_existing_records(ctx)
+        uncovered = filter_uncovered_signals(ctx.signals, existing)
+        if not uncovered:
+            logger.info(
+                "[SkillExperienceOptimizer] skip generation: all %d signal(s) already covered (skill=%s)",
+                len(ctx.signals),
+                ctx.skill_name,
+            )
+            return []
+        if len(uncovered) != len(ctx.signals):
+            logger.info(
+                "[SkillExperienceOptimizer] dropped %d already-covered signal(s) (skill=%s)",
+                len(ctx.signals) - len(uncovered),
+                ctx.skill_name,
+            )
+            ctx.signals = uncovered
         if self._profile == "team":
-            return await self._generate_team_records(ctx)
-        return await self._generate_regular_records(ctx)
+            records = await self._generate_team_records(ctx)
+        else:
+            records = await self._generate_regular_records(ctx)
+        return filter_duplicate_records(records, existing)
 
     def _build_generation_inputs(self, ctx: EvolutionContext) -> dict:
         """Shared prompt inputs for analyzer / single-stage paths."""
@@ -591,7 +616,10 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 data = _parse_analyzer_response(retry_raw)
         if data is None:
             return None
-        data["candidates"] = _filter_analyzer_candidates(data.get("candidates", []))
+        data["candidates"] = filter_duplicate_candidates(
+            _filter_analyzer_candidates(data.get("candidates", [])),
+            collect_existing_records(ctx),
+        )
         analyzer_preview = json.dumps(data, ensure_ascii=False)
         if len(analyzer_preview) > _ANALYZER_LOG_MAX_CHARS:
             analyzer_preview = analyzer_preview[:_ANALYZER_LOG_MAX_CHARS] + "..."
@@ -727,6 +755,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             empty_log_message="LLM returned empty content, skipping",
             generated_log_prefix="",
             default_root_cause=default_root_cause,
+            existing=collect_existing_records(ctx),
         )
 
     @staticmethod
@@ -788,6 +817,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             empty_log_message="team profile returned empty content, skipping",
             generated_log_prefix="team profile ",
             default_root_cause=self._root_cause_from_signals(ctx.signals),
+            existing=collect_existing_records(ctx),
         )
 
     def _default_existing_summary(self) -> str:
@@ -809,13 +839,14 @@ class SkillExperienceOptimizer(BaseOptimizer):
         empty_log_message: str,
         generated_log_prefix: str,
         default_root_cause: Optional[str] = None,
+        existing: Optional[List[EvolutionRecord]] = None,
     ) -> List[EvolutionRecord]:
         source = signals[0].signal_type
         merged_context = _build_context(signals)
         fallback_cause = normalize_root_cause(default_root_cause)
         text_records: List[EvolutionRecord] = []
         script_records: List[EvolutionRecord] = []
-        for draft in drafts:
+        for draft in filter_duplicate_drafts(drafts, existing or []):
             patch = draft.patch
             if patch.action == "skip":
                 logger.info(

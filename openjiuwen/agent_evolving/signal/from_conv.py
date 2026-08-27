@@ -547,7 +547,11 @@ class ConversationSignalDetector:
             return self._fallback_user_feedback_signals(last_user_message, skill_names)
 
         return [
-            self._make_user_feedback_signal(excerpt, skill_name)
+            self._make_user_feedback_signal(
+                excerpt,
+                skill_name,
+                user_message=last_user_message,
+            )
             for skill_name, excerpt in pairs
         ]
 
@@ -699,17 +703,25 @@ class ConversationSignalDetector:
         if not names or not text:
             return []
         if _CORRECTION_PATTERN.search(text):
-            return [self._make_user_feedback_signal(text, name) for name in names]
+            return [
+                self._make_user_feedback_signal(text, name, user_message=text)
+                for name in names
+            ]
         return []
 
     @staticmethod
-    def _make_user_feedback_signal(excerpt: str, skill_name: str) -> EvolutionSignal:
+    def _make_user_feedback_signal(
+        excerpt: str,
+        skill_name: str,
+        user_message: str = "",
+    ) -> EvolutionSignal:
         return make_evolution_signal(
             signal_type=USER_INTENT_SIGNAL,
             section="Instructions",
             excerpt=excerpt[:600],
             skill_name=skill_name,
             source="passive_conversation",
+            context={"user_message": (user_message or excerpt)[:200]},
         )
 
     @staticmethod

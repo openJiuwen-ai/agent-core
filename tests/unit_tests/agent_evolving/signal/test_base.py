@@ -56,5 +56,5 @@ def test_make_signal_fingerprint_reads_tool_name_from_context() -> None:
         "execution_failure",
         "bash",
         "skill-a",
-        "tool timeout",
+        "tooltimeout",
     )

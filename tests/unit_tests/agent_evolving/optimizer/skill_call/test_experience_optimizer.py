@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -429,7 +429,8 @@ class TestSkillExperienceOptimizerGenerate:
                 "target": "body",
                 "section": "Troubleshooting",
                 "summary": "When tool calls time out, retry with a shorter prompt.",
-                "content": "A",
+                "content": "Retry timed-out tool calls with a shorter prompt and narrower scope.",
+                "root_cause": "timeout retry guidance for tool calls",
                 "merge_target": None,
             },
             {
@@ -437,18 +438,43 @@ class TestSkillExperienceOptimizerGenerate:
                 "target": "description",
                 "section": "Instructions",
                 "summary": "Clarify selection wording when users ask for audits.",
-                "content": "B",
+                "content": "Clarify audit-selection wording before invoking downstream review tools.",
+                "root_cause": "audit wording clarity for selection flows",
                 "merge_target": None,
             },
-            {"action": "append", "target": "body", "section": "Examples", "content": "C", "merge_target": None},
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Examples",
+                "content": "Add a worked example that shows how to recover from empty tool output.",
+                "summary": "Document a recovery example for empty tool output.",
+                "root_cause": "examples section update for empty output",
+                "merge_target": None,
+            },
             {"action": "append", "target": "body", "section": "Examples", "content": "   ", "merge_target": None},
             *[
                 {
                     "action": "append",
                     "target": "body",
                     "section": "Troubleshooting",
-                    "summary": f"Extra tip {idx}",
-                    "content": f"EXTRA{idx}",
+                    "summary": [
+                        "Retry policy note for transient network failures",
+                        "Backoff policy note for rate-limited APIs",
+                        "Fallback policy note for empty tool responses",
+                        "Escalation policy note for repeated tool failures",
+                    ][idx],
+                    "content": [
+                        "Network retry matrix with capped attempts and jitter.",
+                        "Rate limit backoff table keyed by HTTP status codes.",
+                        "Empty tool output playbook with safe default responses.",
+                        "Repeated failure escalation ladder for human review.",
+                    ][idx],
+                    "root_cause": [
+                        "retry policy note for transient network failures",
+                        "backoff policy note for rate limited apis",
+                        "fallback policy note for empty tool responses",
+                        "escalation policy note for repeated tool failures",
+                    ][idx],
                     "merge_target": None,
                 }
                 for idx in range(4)
@@ -458,8 +484,24 @@ class TestSkillExperienceOptimizerGenerate:
                     "action": "append",
                     "target": "script",
                     "section": "Scripts",
-                    "summary": f"Script tip {idx}",
-                    "content": f"print({idx})",
+                    "summary": [
+                        "Automation script note for post-timeout cleanup",
+                        "Automation script note for rollback after failed deploy",
+                        "Automation script note for log collection after errors",
+                        "Automation script note for cache invalidation after retries",
+                    ][idx],
+                    "content": [
+                        "print('cleanup orphaned temp files after timeout')",
+                        "print('rollback deployment artifacts after failed deploy')",
+                        "print('collect stderr logs after tool errors')",
+                        "print('invalidate cache entries after retry storms')",
+                    ][idx],
+                    "root_cause": [
+                        "automation script note for post timeout cleanup",
+                        "automation script note for rollback after failed deploy",
+                        "automation script note for log collection after errors",
+                        "automation script note for cache invalidation after retries",
+                    ][idx],
                     "script_filename": f"s{idx}.py",
                     "script_language": "python",
                     "script_purpose": "demo",
@@ -478,15 +520,22 @@ class TestSkillExperienceOptimizerGenerate:
             existing_desc_records=[make_record("ev_d1", "desc old")],
             existing_body_records=[make_record("ev_b1", "body old")],
         )
-        records = await optimizer.generate_records(ctx)
+        with patch(
+            "openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer.filter_duplicate_drafts",
+            side_effect=lambda drafts, existing: list(drafts),
+        ), patch(
+            "openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer.filter_duplicate_records",
+            side_effect=lambda records, existing: list(records),
+        ):
+            records = await optimizer.generate_records(ctx)
         text_records = [record for record in records if record.change.target != EvolutionTarget.SCRIPT]
         script_records = [record for record in records if record.change.target == EvolutionTarget.SCRIPT]
         assert len(text_records) == 5
         assert len(script_records) == 3
-        assert text_records[0].change.content == "A"
+        assert text_records[0].change.content == "Retry timed-out tool calls with a shorter prompt and narrower scope."
         assert text_records[0].summary == "When tool calls time out, retry with a shorter prompt."
-        assert text_records[0].root_cause == "skill_instruction_gap：test signal"
-        assert text_records[1].change.content == "B"
+        assert text_records[0].root_cause == "timeout retry guidance for tool calls"
+        assert text_records[1].change.content == "Clarify audit-selection wording before invoking downstream review tools."
         assert text_records[1].summary == "Clarify selection wording when users ask for audits."
         assert llm.invoke.await_args_list[0].kwargs["timeout"] == 150
         assert llm.invoke.await_count == 2
@@ -1295,19 +1344,84 @@ class TestScriptLimit:
             for i in range(4)
         ]
         patches = [
-            {"action": "append", "target": "body", "section": "Troubleshooting", "content": f"T{i}"}
-            for i in range(6)
+            {
+                "action": "append",
+                "target": "body",
+                "section": "Troubleshooting",
+                "content": text,
+                "summary": summary,
+                "root_cause": root_cause,
+            }
+            for summary, text, root_cause in [
+                (
+                    "Alpha timeout recovery guidance",
+                    "Shorter prompts reduce timeout risk on large tool payloads.",
+                    "alpha timeout recovery guidance for tool calls",
+                ),
+                (
+                    "Beta audit checklist guidance",
+                    "Audit checklist wording must precede downstream review tools.",
+                    "audit checklist guidance for selection flows",
+                ),
+                (
+                    "Gamma empty output recovery guidance",
+                    "Safe defaults prevent blank tool output from blocking progress.",
+                    "empty output recovery guidance for tool failures",
+                ),
+                (
+                    "Delta reviewer escalation guidance",
+                    "Repeated failures should trigger reviewer handoff with context.",
+                    "reviewer escalation guidance for repeated failures",
+                ),
+                (
+                    "Epsilon tool retry backoff guidance",
+                    "Exponential backoff caps protect upstream APIs from retry storms.",
+                    "tool retry backoff guidance for transient errors",
+                ),
+                (
+                    "Zeta failure context packaging guidance",
+                    "Package logs and user intent before opening failure tickets.",
+                    "failure context packaging guidance for debugging",
+                ),
+            ]
         ] + [
             {
                 "action": "append",
                 "target": "script",
                 "section": "Scripts",
-                "content": f"print({i})",
-                "script_filename": f"s{i}.py",
+                "content": content,
+                "summary": summary,
+                "root_cause": root_cause,
+                "script_filename": filename,
                 "script_language": "python",
                 "script_purpose": "test",
             }
-            for i in range(4)
+            for summary, content, root_cause, filename in [
+                (
+                    "Script alpha cleanup routine",
+                    "print('script alpha cleanup routine after timeout')",
+                    "script alpha cleanup routine after timeout",
+                    "s0.py",
+                ),
+                (
+                    "Script beta rollback routine",
+                    "print('script beta rollback routine after failed deploy')",
+                    "script beta rollback routine after failed deploy",
+                    "s1.py",
+                ),
+                (
+                    "Script gamma log collection routine",
+                    "print('script gamma log collection routine after errors')",
+                    "script gamma log collection routine after errors",
+                    "s2.py",
+                ),
+                (
+                    "Script delta cache invalidation routine",
+                    "print('script delta cache invalidation routine after retries')",
+                    "script delta cache invalidation routine after retries",
+                    "s3.py",
+                ),
+            ]
         ]
         llm.invoke = AsyncMock(side_effect=_two_stage_llm_side_effect(candidates, patches))
         optimizer = SkillExperienceOptimizer(llm=llm, model="dummy", language="en", two_stage=True)
@@ -1319,13 +1433,30 @@ class TestScriptLimit:
             existing_desc_records=[],
             existing_body_records=[],
         )
-        records = await optimizer.generate_records(ctx)
+        with patch(
+            "openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer.filter_duplicate_drafts",
+            side_effect=lambda drafts, existing: list(drafts),
+        ), patch(
+            "openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer.filter_duplicate_records",
+            side_effect=lambda records, existing: list(records),
+        ):
+            records = await optimizer.generate_records(ctx)
         text_recs = [r for r in records if r.change.target != EvolutionTarget.SCRIPT]
         script_recs = [r for r in records if r.change.target == EvolutionTarget.SCRIPT]
         assert len(text_recs) == 5
         assert len(script_recs) == 3
-        assert [r.change.content for r in text_recs] == ["T0", "T1", "T2", "T3", "T4"]
-        assert [r.change.content for r in script_recs] == ["print(0)", "print(1)", "print(2)"]
+        assert [r.change.content for r in text_recs] == [
+            "Shorter prompts reduce timeout risk on large tool payloads.",
+            "Audit checklist wording must precede downstream review tools.",
+            "Safe defaults prevent blank tool output from blocking progress.",
+            "Repeated failures should trigger reviewer handoff with context.",
+            "Exponential backoff caps protect upstream APIs from retry storms.",
+        ]
+        assert [r.change.content for r in script_recs] == [
+            "print('script alpha cleanup routine after timeout')",
+            "print('script beta rollback routine after failed deploy')",
+            "print('script gamma log collection routine after errors')",
+        ]
 
 
 class TestBackwardContextBinding:
