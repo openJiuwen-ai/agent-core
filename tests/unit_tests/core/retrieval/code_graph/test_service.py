@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -234,7 +235,7 @@ async def test_disk_cache_roundtrip(repo: Path, tmp_path: Path) -> None:
     config = CodeGraphConfig(cache_dir=str(cache), max_files=1000)
     first = CodeGraphService(repo, config)
     await first.ensure_ready()
-    assert list(cache.glob("*.pkl"))
+    assert list(cache.rglob("*.pkl"))
 
     second = CodeGraphService(repo, config)
     loaded = await second.ensure_ready()
@@ -294,11 +295,29 @@ async def test_search_code_finds_body_term_absent_from_name(service: CodeGraphSe
 
 
 @pytest.mark.asyncio
-async def test_search_text_finds_markdown_chunk(service: CodeGraphService) -> None:
+async def test_search_text_finds_markdown_chunk(repo: Path, tmp_path: Path) -> None:
+    service = CodeGraphService(
+        repo,
+        CodeGraphConfig(
+            cache_dir=str(tmp_path / "md-cache"),
+            max_files=1000,
+            query_timeout_seconds=10,
+            index_text_files=True,
+        ),
+    )
     result = await service.search_text("sidereal tracking offset", limit=5)
     assert result["status"] == "COMPLETE"
     files = {item["file"] for item in result["chunks"]}
     assert "README.md" in files
+
+
+@pytest.mark.asyncio
+async def test_search_text_skips_markdown_by_default(service: CodeGraphService) -> None:
+    result = await service.search_text("sidereal tracking offset", limit=5)
+    assert result["status"] == "COMPLETE"
+    files = {item["file"] for item in result["chunks"]}
+    assert "README.md" not in files
+    assert any(path.endswith("convert.py") for path in files)
 
 
 @pytest.mark.asyncio
@@ -307,6 +326,7 @@ async def test_search_text_finds_a_definition_body(service: CodeGraphService) ->
     assert result["status"] == "COMPLETE"
     files = {item["file"] for item in result["chunks"]}
     assert any("user.py" in file for file in files)
+    assert result["matches"] is result["chunks"]
 
 
 @pytest.mark.asyncio
@@ -330,7 +350,7 @@ async def test_read_symbol_returns_definition_span(service: CodeGraphService) ->
         else resolved["matches"][0]["symbol_id"]
     )
     result = await service.read_symbol(symbol_id, context_before=500, context_after=500)
-    assert result["status"] in {"COMPLETE", "STALE"}
+    assert result["status"] == "COMPLETE"
     assert result["symbol_id"] == symbol_id
     assert "create_user" in str(result.get("content") or "")
     assert int(result["symbol_start_line"]) >= 1
@@ -441,4 +461,92 @@ async def test_old_cache_version_is_ignored(repo: Path, tmp_path: Path) -> None:
     path = store._path(key)  # noqa: SLF001
     path.write_bytes(pickle.dumps({"version": 1, "index": "stale"}, protocol=4))
     assert store.load(key) is None
+
+
+@pytest.mark.asyncio
+async def test_read_symbol_stays_complete_after_clean_overlay_build(repo: Path, tmp_path: Path) -> None:
+    reset_code_graph_manager()
+    cache = tmp_path / "cache-outside"
+    manager = CodeGraphManager(max_cached_repos=2)
+    cfg = CodeGraphConfig(cache_dir=str(cache), max_files=100, freshness_check_interval_ms=0)
+    service = await manager.get_service(repo, cfg, ensure=True)
+    resolved = await service.resolve_symbol("create_user", kind="method")
+    assert resolved["status"] in {"COMPLETE", "AMBIGUOUS"}
+    symbol_id = (
+        resolved["symbol_id"]
+        if resolved["status"] == "COMPLETE"
+        else resolved["matches"][0]["symbol_id"]
+    )
+    result = await service.read_symbol(symbol_id)
+    assert result["status"] == "COMPLETE"
+    assert service.is_stale() is False
+
+
+@pytest.mark.asyncio
+async def test_read_symbol_complete_when_checkpoint_is_inside_git_tree(tmp_path: Path) -> None:
+    import subprocess
+
+    reset_code_graph_manager()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src.py").write_text("def keep():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    cache = repo / ".code_graph_cache"
+    manager = CodeGraphManager(max_cached_repos=2)
+    cfg = CodeGraphConfig(cache_dir=str(cache), max_files=50, freshness_check_interval_ms=0)
+    service = await manager.get_service(repo, cfg, ensure=True)
+    (cache / "noise.pkl").write_bytes(b"checkpoint")
+    resolved = await service.resolve_symbol("keep")
+    assert resolved["status"] == "COMPLETE"
+    result = await service.read_symbol(resolved["symbol_id"])
+    assert result["status"] == "COMPLETE"
+    assert service.is_stale() is False
+
+
+@pytest.mark.asyncio
+async def test_source_edit_makes_index_stale_until_refresh(tmp_path: Path) -> None:
+    reset_code_graph_manager()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src.py").write_text("def keep():\n    return 1\n", encoding="utf-8")
+    manager = CodeGraphManager(max_cached_repos=2)
+    cfg = CodeGraphConfig(cache_dir=str(tmp_path / "cache"), max_files=50, freshness_check_interval_ms=0)
+    service = await manager.get_service(repo, cfg, ensure=True)
+    assert service.is_stale() is False
+    (repo / "src.py").write_text(
+        "def keep():\n    return 1\n\ndef added_later():\n    return 2\n",
+        encoding="utf-8",
+    )
+    assert service.is_stale() is True
+    await manager.ensure_fresh(repo, cfg)
+    assert service.is_stale() is False
+    resolved = await service.resolve_symbol("added_later")
+    assert resolved["status"] == "COMPLETE"
+
+
+@pytest.mark.asyncio
+async def test_two_services_on_same_realpath_share_generation(tmp_path: Path) -> None:
+    reset_code_graph_manager()
+    real = tmp_path / "repo"
+    real.mkdir()
+    (real / "src.py").write_text("def keep():\n    return 1\n", encoding="utf-8")
+    alias = tmp_path / "alias"
+    os.symlink(real, alias)
+    manager = CodeGraphManager(max_cached_repos=2)
+    cfg = CodeGraphConfig(cache_dir=str(tmp_path / "cache"), max_files=50)
+    first = await manager.get_service(real, cfg, ensure=True)
+    second = await manager.get_service(alias, cfg, ensure=True)
+    assert first is second
+    from openjiuwen.core.retrieval.code_graph.identity import RepoIdentity
+
+    assert RepoIdentity.from_path(real).repo_id == RepoIdentity.from_path(alias).repo_id
 

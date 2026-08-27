@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from openjiuwen.core.common.logging import retrieval_logger as logger
+from openjiuwen.core.retrieval.code_graph.budgets import (
+    cancel_requested,
+    raise_if_resource_limits,
+    raise_limit_exceeded,
+)
 from openjiuwen.core.retrieval.code_graph.indexing.builder import (
     definition_documents,
     extract_one_file,
@@ -15,6 +20,7 @@ from openjiuwen.core.retrieval.code_graph.indexing.builder import (
     text_documents,
 )
 from openjiuwen.core.retrieval.code_graph.indexing.language_registry import language_from_path
+from openjiuwen.core.retrieval.code_graph.identity import canonical_workspace_path
 from openjiuwen.core.retrieval.code_graph.models import (
     CodeGraphConfig,
     CodeGraphIndex,
@@ -39,6 +45,7 @@ class RefreshResult:
     failed: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     revision: int = 0
+    cancelled: bool = False
 
     @property
     def changed(self) -> bool:
@@ -65,6 +72,8 @@ def refresh_index_files(
     index: CodeGraphIndex,
     paths: list[str],
     config: CodeGraphConfig | None = None,
+    *,
+    cancel: object | None = None,
 ) -> RefreshResult:
     """Re-parse ``paths`` in place and re-resolve the edges they can affect.
 
@@ -75,12 +84,16 @@ def refresh_index_files(
     snapshot as if it were current.
     """
     cfg = config or CodeGraphConfig()
-    root = Path(index.repo_root).resolve()
+    root = Path(canonical_workspace_path(index.repo_root))
     result = RefreshResult(revision=index.revision)
     dropped_files: set[str] = set()
     added_documents: list[tuple[LexicalDocument, list[str]]] = []
 
     for rel in _normalize(root, paths, result):
+        if cancel_requested(cancel):
+            result.cancelled = True
+            result.warnings.append("incremental refresh cancelled")
+            return result
         absolute = root / rel
         if not absolute.is_file():
             if rel in index.extracted or rel in index.file_hashes:
@@ -120,11 +133,19 @@ def refresh_index_files(
             for symbol in parsed.extracted.symbols:
                 added_documents.extend(definition_documents(symbol, parsed.text))
         result.updated.append(rel)
+        raise_if_resource_limits(cfg)
 
     index.stale_files = sorted(set(index.stale_files) - set(result.updated) | set(result.failed))
+    if cancel_requested(cancel):
+        result.cancelled = True
+        result.warnings.append("incremental refresh cancelled")
+        return result
     if result.changed:
         resolve_relations(index)
+        raise_if_resource_limits(cfg, source_bytes=_source_bytes_on_disk(root, index))
         index.file_count = len({sym.file for sym in index.symbols.values() if sym.kind == SymbolKind.FILE})
+        if index.file_count > cfg.max_files:
+            raise_limit_exceeded("max_files", index.file_count, cfg.max_files)
         index.lexical = update_documents(
             index.lexical if index.lexical is not None else LexicalIndexBuilder().freeze(),
             dropped_files=dropped_files,
@@ -136,9 +157,19 @@ def refresh_index_files(
     # snapshot, rebuilds the whole repository, and throws away the session index
     # — the exact cost this refresh exists to avoid. Files it could not parse are
     # reported through ``stale_files`` instead.
-    index.snapshot = compute_snapshot(root)
+    index.snapshot = compute_snapshot(root, cfg)
     result.revision = index.revision
     return result
+
+
+def _source_bytes_on_disk(root: Path, index: CodeGraphIndex) -> int:
+    total = 0
+    for rel in index.file_hashes:
+        try:
+            total += (root / rel).stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _normalize(root: Path, paths: list[str], result: RefreshResult) -> list[str]:
@@ -150,7 +181,7 @@ def _normalize(root: Path, paths: list[str], result: RefreshResult) -> list[str]
         candidate = Path(raw)
         absolute = candidate if candidate.is_absolute() else root / candidate
         try:
-            rel = absolute.resolve().relative_to(root).as_posix()
+            rel = Path(canonical_workspace_path(absolute)).relative_to(root).as_posix()
         except ValueError:
             result.warnings.append(f"path outside repository ignored: {raw}")
             continue

@@ -124,7 +124,7 @@ def test_the_snapshot_follows_the_working_tree_so_no_rebuild_is_triggered(repo: 
     from openjiuwen.core.retrieval.code_graph.snapshot import compute_snapshot
 
     assert index.snapshot != before
-    assert index.snapshot == compute_snapshot(repo)
+    assert index.snapshot == compute_snapshot(repo, _config())
 
 
 def test_a_file_that_cannot_be_read_is_reported_as_stale(repo: Path, index: CodeGraphIndex, monkeypatch) -> None:

@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Session-sticky services: an edited repo refreshes instead of rebuilding."""
+"""Shared workspace graphs: conversations do not fork a private index."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from openjiuwen.core.retrieval.code_graph.identity import RepoIdentity
 from openjiuwen.core.retrieval.code_graph.indexing.builder import build_index
 from openjiuwen.core.retrieval.code_graph.manager import CodeGraphManager, reset_code_graph_manager
 from openjiuwen.core.retrieval.code_graph.models import CodeGraphConfig
@@ -51,19 +52,20 @@ def _count_builds(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     builds = {"n": 0}
     real = build_index
 
-    def counting(repo_root, config):
+    def counting(repo_root, config, **kwargs):
         builds["n"] += 1
-        return real(repo_root, config)
+        return real(repo_root, config, **kwargs)
 
     monkeypatch.setattr("openjiuwen.core.retrieval.code_graph.service.build_index", counting)
+    monkeypatch.setattr("openjiuwen.core.retrieval.code_graph.manager.build_index", counting)
     return builds
 
 
 @pytest.mark.asyncio
-async def test_the_same_session_gets_the_same_service(repo: Path) -> None:
+async def test_the_same_workspace_gets_the_same_service(repo: Path) -> None:
     manager = CodeGraphManager(max_cached_repos=4)
     first = await manager.get_session_service(repo, _config(), session_id="s-1")
-    second = await manager.get_session_service(repo, _config(), session_id="s-1")
+    second = await manager.get_session_service(repo, _config(), session_id="s-2")
 
     assert first is second
 
@@ -72,58 +74,80 @@ async def test_the_same_session_gets_the_same_service(repo: Path) -> None:
 async def test_a_refresh_after_an_edit_does_not_rebuild_the_repo(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     builds = _count_builds(monkeypatch)
     manager = CodeGraphManager(max_cached_repos=4)
-    service = await manager.get_session_service(repo, _config(), session_id="s-1")
-    await service.ensure_ready()
+    service = await manager.get_service(repo, _config(), ensure=True)
     assert builds["n"] == 1
+    entry = manager._peek_entry(repo, _config())
+    assert entry is not None
+    entry.last_full_build_seconds = 5.0
 
-    # Snapshots are mtime-based, so an edit within the same tick would be invisible.
     time.sleep(0.01)
     (repo / "src" / "user.py").write_text(
         SAMPLE + "\n\ndef delete_user(name: str) -> None:\n    return None\n",
         encoding="utf-8",
     )
-    payload = await service.refresh_files(["src/user.py"])
+    manager.mark_dirty(repo, ["src/user.py"], config=_config())
+    payload = await service.search_code("delete_user")
 
-    assert payload["updated"] == ["src/user.py"]
-    assert builds["n"] == 1
-    matches = await service.search_code("delete_user")
-    assert any("delete_user" in row["symbol_id"] for row in matches["matches"])
+    assert payload["status"] in {"COMPLETE", "PARTIAL"}
+    assert any("delete_user" in row["symbol_id"] for row in payload["matches"])
     assert builds["n"] == 1
 
 
 @pytest.mark.asyncio
-async def test_a_session_edit_does_not_leak_into_the_shared_index(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_an_edit_is_visible_to_the_shared_index(repo: Path) -> None:
     manager = CodeGraphManager(max_cached_repos=4)
-    shared = await manager.get_service(repo, _config(), ensure=True)
-    shared_index = await shared.ensure_ready()
-    session = await manager.get_session_service(repo, _config(), session_id="s-1")
+    cfg = _config()
+    first = await manager.get_service(repo, cfg, ensure=True)
+    second = await manager.get_session_service(repo, cfg, session_id="other")
 
     time.sleep(0.01)
     (repo / "src" / "user.py").write_text(
-        SAMPLE + "\n\ndef only_in_session() -> None:\n    return None\n",
+        SAMPLE + "\n\ndef only_after_edit() -> None:\n    return None\n",
         encoding="utf-8",
     )
-    await session.refresh_files(["src/user.py"])
+    manager.mark_dirty(repo, ["src/user.py"], config=cfg)
+    result = await second.search_code("only_after_edit")
 
-    session_index = await session.ensure_ready()
-    assert "src/user.py::only_in_session" in session_index.symbols
-    assert "src/user.py::only_in_session" not in shared_index.symbols
-
-
-@pytest.mark.asyncio
-async def test_dropping_a_session_releases_its_service(repo: Path) -> None:
-    manager = CodeGraphManager(max_cached_repos=4)
-    first = await manager.get_session_service(repo, _config(), session_id="s-1")
-    manager.drop_session("s-1")
-    second = await manager.get_session_service(repo, _config(), session_id="s-1")
-
-    assert first is not second
+    assert any("only_after_edit" in row["symbol_id"] for row in result["matches"])
+    assert first is second
 
 
 @pytest.mark.asyncio
-async def test_two_sessions_of_one_repo_are_isolated(repo: Path) -> None:
+async def test_two_conversations_build_once(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    builds = _count_builds(monkeypatch)
     manager = CodeGraphManager(max_cached_repos=4)
-    one = await manager.get_session_service(repo, _config(), session_id="s-1")
-    two = await manager.get_session_service(repo, _config(), session_id="s-2")
+    await manager.get_session_service(repo, _config(), session_id="s-1")
+    await manager.get_session_service(repo, _config(), session_id="s-2")
 
-    assert one is not two
+    assert builds["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_second_window_uses_the_graph_the_first_window_just_published(repo: Path) -> None:
+    manager = CodeGraphManager(max_cached_repos=4)
+    cfg = _config()
+    window_a = await manager.get_service(repo, cfg, ensure=True)
+    window_b = await manager.get_session_service(repo, cfg, session_id="chat-2")
+    assert window_a is window_b
+
+    (repo / "src" / "user.py").write_text(
+        SAMPLE + "\n\ndef added_by_chat_one() -> None:\n    return None\n",
+        encoding="utf-8",
+    )
+    manager.mark_dirty(repo, ["src/user.py"], config=cfg)
+    await window_a.search_code("added_by_chat_one")
+    payload = await window_b.resolve_symbol("added_by_chat_one")
+    assert payload["status"] == "COMPLETE"
+    assert any("added_by_chat_one" in str(row) for row in (payload.get("matches") or []))
+
+
+@pytest.mark.asyncio
+async def test_config_change_rebuilds_the_same_shared_entry(repo: Path) -> None:
+    manager = CodeGraphManager(max_cached_repos=4)
+    first_cfg = CodeGraphConfig(cache_dir=None, max_files=100)
+    second_cfg = CodeGraphConfig(cache_dir=None, max_files=80)
+    first = await manager.get_service(repo, first_cfg, ensure=True)
+    second = await manager.get_service(repo, second_cfg, ensure=True)
+    assert first is second
+    assert RepoIdentity.from_path(repo).repo_id in manager._entries
+    assert len(manager._entries) == 1
