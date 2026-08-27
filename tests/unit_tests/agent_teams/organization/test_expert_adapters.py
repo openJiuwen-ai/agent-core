@@ -120,6 +120,7 @@ class FakeLauncher:
         agent_group_name: str,
         session_id: str,
         display_name: str | None = None,
+        share_db_from_team_id: str | None = None,
     ) -> LaunchedExpertTeam:
         self.launch_calls.append(
             {
@@ -127,6 +128,7 @@ class FakeLauncher:
                 "agent_group_name": agent_group_name,
                 "session_id": session_id,
                 "display_name": display_name,
+                "share_db_from_team_id": share_db_from_team_id,
             }
         )
         if self.fail_launch:
@@ -277,6 +279,7 @@ async def test_create_and_invite_expert_team_success(active_organization_runtime
             "agent_group_name": "sample-expert-group",
             "session_id": session_id,
             "display_name": "Sample Experts",
+            "share_db_from_team_id": "team-a",
         }
     ]
     assert launcher.stop_calls == []

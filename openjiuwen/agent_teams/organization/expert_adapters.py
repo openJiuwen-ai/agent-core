@@ -65,8 +65,13 @@ class ExpertTeamLauncher(Protocol):
         agent_group_name: str,
         session_id: str,
         display_name: str | None = None,
+        share_db_from_team_id: str | None = None,
     ) -> LaunchedExpertTeam:
-        """Activate a new Team from an AgentGroup; team_id must be unique."""
+        """Activate a new Team from an AgentGroup; team_id must be unique.
+
+        ``share_db_from_team_id`` asks the host to reuse that team's TeamDatabase
+        instance so ``invite_team`` can bind the new Team into the organization.
+        """
 
     async def stop(self, *, team_id: str, session_id: str) -> None:
         """Stop a temporary Team after a failed invite or aborted launch."""

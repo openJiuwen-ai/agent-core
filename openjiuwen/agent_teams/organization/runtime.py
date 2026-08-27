@@ -428,6 +428,7 @@ class OrganizationRuntimeManager:
             agent_group_name=group_name,
             session_id=session_id,
             display_name=display_name,
+            share_db_from_team_id=owner_team_id,
         )
         try:
             organization = await self.invite_team(
