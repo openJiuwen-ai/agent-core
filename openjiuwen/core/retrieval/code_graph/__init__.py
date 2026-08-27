@@ -3,6 +3,7 @@
 """Internal Code Graph engine. Not re-exported from ``openjiuwen.core.retrieval``."""
 
 from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus, status_payload
+from openjiuwen.core.retrieval.code_graph.identity import RepoIdentity
 from openjiuwen.core.retrieval.code_graph.manager import (
     CodeGraphManager,
     get_code_graph_manager,
@@ -29,6 +30,7 @@ __all__ = [
     "CodeGraphConfig",
     "CodeGraphIndex",
     "CodeGraphManager",
+    "RepoIdentity",
     "CodeGraphService",
     "CodeGraphStatus",
     "CodeMatch",

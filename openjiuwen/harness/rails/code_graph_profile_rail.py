@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus
@@ -54,12 +55,14 @@ class CodeGraphProfileRail(DeepAgentRail):
     """Register the tools, prompt, and run state for one Code Graph profile.
 
     Priority 99 runs after ``SysOperationRail`` (100), so grep and the write
-    tools already exist when this rail registers find_* tools. When the
-    parser can index, it then drops grep/glob so the model cannot ignore the
-    graph. If the parser is missing, or a graph tool later returns
-    ``UNAVAILABLE``, those search tools stay (or come back). Locate-exam
-    mode never restores them. Localization does not finish the host agent:
-    the same agent owns the later edit.
+    tools already exist when this rail registers find_* tools. ``profile=off``
+    is a no-op: the host stays on grep / read / edit. When the parser can
+    index, ``profile=graph`` drops grep/glob so the model cannot ignore the
+    graph. If the parser is missing, registration fails, or a graph tool
+    later returns ``UNAVAILABLE``, those search tools stay (or come back)
+    and the host is the original agent again. Locate-exam mode never
+    restores them. Localization does not finish the host agent: the same
+    agent owns the later edit.
     """
 
     priority = 99
@@ -83,52 +86,52 @@ class CodeGraphProfileRail(DeepAgentRail):
         self._hidden_search: list[tuple[Any, Any]] = []
         self._section: PromptSection | None = None
         self._agent: Any = None
+        self._warmup_started = False
 
     def init(self, agent: Any) -> None:
         from openjiuwen.harness.deep_agent import DeepAgent
 
         if self.profile == CodeGraphProfile.OFF:
             return
-        _warn_if_parser_missing()
         deep_config = getattr(agent, "deep_config", None)
         if not (isinstance(agent, DeepAgent) and deep_config and hasattr(agent, "ability_manager")):
             logger.warning(
                 "CodeGraphProfileRail: host is not a DeepAgent with an ability_manager, skipping"
             )
             return
+        if not _parser_ready():
+            _warn_if_parser_missing()
+            return
         self._agent = agent
         if not self.sys_operation:
             self.set_sys_operation(deep_config.sys_operation)
         if not self.workspace:
             self.set_workspace(deep_config.workspace)
-        repo_root = resolve_repo_root(
-            explicit=self.repo_root,
-            project_root=getattr(deep_config, "project_root", None),
-            cwd=getattr(deep_config, "cwd", None),
-            workspace_root=getattr(self.workspace, "root_path", None) if self.workspace else None,
-        )
+        repo_root = self._live_repo_root(agent)
         config = getattr(deep_config, "code_graph_config", None) or self.config
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        # Graph-on-coding-agent pins one index this session may refresh in place.
-        self.session_id = (
-            f"{agent_id or uuid4().hex}" if self.profile == CodeGraphProfile.GRAPH else ""
-        )
+        # Conversation / run id is only for locate episode memory, never the
+        # workspace graph cache key.
+        self.session_id = ""
+        graph_config = config if isinstance(config, CodeGraphConfig) else CodeGraphConfig()
         context = CodeGraphToolContext(
             repo_root=repo_root,
-            config=config if isinstance(config, CodeGraphConfig) else CodeGraphConfig(),
+            config=graph_config,
             language=getattr(deep_config, "language", None) or "en",
             agent_id=agent_id,
             session_id=self.session_id,
             policy=FIND_GRAPH_QUERY_POLICY,
+            resolve_root=lambda: self._live_repo_root(agent),
         )
         self.repo_root = repo_root
-        bind_code_graph_runtime(
-            agent,
-            session_id=self.session_id,
-            repo_root=repo_root,
-            config=context.config,
-        )
+        hidden: list[tuple[Any, Any]] = []
         try:
+            bind_code_graph_runtime(
+                agent,
+                session_id=self.session_id,
+                repo_root=repo_root,
+                config=context.config,
+            )
             self.run_state = self._new_run_state()
             bind_code_graph_runtime(
                 agent,
@@ -148,8 +151,15 @@ class CodeGraphProfileRail(DeepAgentRail):
                 agent.ability_manager.add_ability(tool.card, tool)
                 self._tools.append(tool)
             self._inject_prompt(agent)
-            if self._tools and _parser_ready():
-                self._hidden_search = _hide_text_search_tools(agent)
+            if self._tools:
+                hidden = _hide_text_search_tools(agent)
+                self._hidden_search = hidden
+            if isinstance(config, CodeGraphConfig) and self._tools:
+                from openjiuwen.core.retrieval.code_graph.manager import configure_code_graph_manager
+                from openjiuwen.core.retrieval.code_graph.watch import start_workspace_watch
+
+                configure_code_graph_manager(config)
+                start_workspace_watch(repo_root, config)
             logger.info(
                 "CodeGraphProfileRail: profile=%s tools=%d repo=%s hidden_search=%d",
                 self.profile.value,
@@ -159,8 +169,8 @@ class CodeGraphProfileRail(DeepAgentRail):
             )
         except Exception as exc:  # noqa: BLE001 — never fail agent creation
             logger.warning("CodeGraphProfileRail: registration failed: %s", exc)
-            self._tools = []
-            self._hidden_search = []
+            self._hidden_search = list(self._hidden_search or hidden)
+            self._restore_baseline(agent)
 
     def _new_run_state(self) -> CodeGraphRunState:
         budget = CodeGraphBudget(
@@ -194,6 +204,11 @@ class CodeGraphProfileRail(DeepAgentRail):
 
     async def on_user_message(self, ctx: AgentCallbackContext) -> None:
         """Bind the coding task itself; there is no TaskTool request to parse."""
+        self._schedule_warmup(
+            self._live_repo_root(ctx.agent),
+            getattr(getattr(ctx.agent or self._agent, "deep_config", None), "code_graph_config", None)
+            or self.config,
+        )
         state = self.run_state
         if state is None or (state.bound and (state.request.query or "").strip()):
             return
@@ -205,13 +220,37 @@ class CodeGraphProfileRail(DeepAgentRail):
             return
         self._bind_task(text)
 
+    def _schedule_warmup(self, repo_root: str, config: CodeGraphConfig | None) -> None:
+        """Start the index as soon as the project is known. Do not block init."""
+        if self._warmup_started or self.profile == CodeGraphProfile.OFF or not self._tools:
+            return
+        if not repo_root or not isinstance(config, CodeGraphConfig):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._warmup_started = True
+
+        async def _warm() -> None:
+            try:
+                from openjiuwen.core.retrieval.code_graph.manager import get_code_graph_manager
+
+                await get_code_graph_manager(config).ensure_fresh(repo_root, config)
+            except Exception as exc:  # noqa: BLE001 — first find_* still retries
+                logger.warning("CodeGraphProfileRail: warmup failed: %s", exc)
+
+        loop.create_task(_warm())
+
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Put grep/glob back when the graph cannot run. Locate exam does not."""
+        """Report file mutations and restore grep/glob if the graph dies."""
+        if self._tools:
+            self._report_workspace_mutation(ctx)
         if not self._hidden_search:
             return
         if self._is_locate_exam():
             return
-        if not _graph_tool_returned_unavailable(ctx):
+        if not _graph_tool_needs_search_fallback(ctx):
             return
         agent = ctx.agent if ctx.agent is not None else self._agent
         if agent is None:
@@ -220,9 +259,48 @@ class CodeGraphProfileRail(DeepAgentRail):
         self._hidden_search = []
         if restored:
             logger.warning(
-                "CodeGraphProfileRail: graph UNAVAILABLE; restored %s",
+                "CodeGraphProfileRail: graph needs text search; restored %s",
                 ",".join(GRAPH_HIDDEN_SEARCH_TOOLS),
             )
+
+    def _live_repo_root(self, agent: Any | None = None) -> str:
+        """Resolve the workspace the agent is actually in, including worktrees."""
+        try:
+            from openjiuwen.harness.tools.worktree.session import get_current_session
+
+            session = get_current_session()
+            worktree_path = getattr(session, "worktree_path", None) if session is not None else None
+            if worktree_path:
+                return str(Path(worktree_path).resolve())
+        except Exception:  # noqa: BLE001
+            pass
+        host = agent if agent is not None else self._agent
+        deep_config = getattr(host, "deep_config", None) if host is not None else None
+        return resolve_repo_root(
+            explicit=self.repo_root,
+            project_root=getattr(deep_config, "project_root", None),
+            cwd=getattr(deep_config, "cwd", None),
+            workspace_root=getattr(self.workspace, "root_path", None) if self.workspace else None,
+        )
+
+    def _report_workspace_mutation(self, ctx: AgentCallbackContext) -> None:
+        inputs = ctx.inputs
+        if not isinstance(inputs, ToolCallInputs):
+            return
+        name = (inputs.tool_name or "").strip()
+        if not name:
+            return
+        root = self._live_repo_root(ctx.agent)
+        from openjiuwen.core.retrieval.code_graph.manager import get_code_graph_manager
+
+        manager = get_code_graph_manager(self.config)
+        if name in {"write_file", "edit_file"}:
+            path = _changed_path_from_tool(inputs)
+            if path:
+                manager.mark_dirty(root, [path], source=name, config=self.config)
+            return
+        if name in {"bash", "powershell"}:
+            manager.mark_dirty_unknown(root, reason="shell", config=self.config)
 
     def _is_locate_exam(self) -> bool:
         mode = (self.prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
@@ -262,10 +340,20 @@ class CodeGraphProfileRail(DeepAgentRail):
             bind_run_state(state, session)
 
     def uninit(self, agent: Any) -> None:
-        if self.session_id:
-            from openjiuwen.core.retrieval.code_graph.manager import get_code_graph_manager
+        # Drop graph tools and put grep back. The shared workspace index stays.
+        self._restore_baseline(agent)
 
-            get_code_graph_manager().drop_session(self.session_id)
+    def _restore_baseline(self, agent: Any) -> None:
+        """Return the host to grep / read / edit. Safe to call twice."""
+        hidden = self._hidden_search
+        self._hidden_search = []
+        if hidden:
+            restored = _restore_text_search_tools(agent, hidden)
+            if restored:
+                logger.warning(
+                    "CodeGraphProfileRail: restored %s after graph teardown",
+                    ",".join(GRAPH_HIDDEN_SEARCH_TOOLS),
+                )
         ability_manager = getattr(agent, "ability_manager", None)
         for tool in self._tools:
             try:
@@ -276,8 +364,6 @@ class CodeGraphProfileRail(DeepAgentRail):
                     "CodeGraphProfileRail: failed to remove %s: %s", tool.card.name, exc
                 )
         self._tools = []
-        self._hidden_search = []
-        self._agent = agent
         builder = getattr(agent, "system_prompt_builder", None)
         if builder is not None and self._section is not None:
             try:
@@ -287,6 +373,7 @@ class CodeGraphProfileRail(DeepAgentRail):
         self._section = None
         if getattr(agent, "code_graph_runtime", None) is not None:
             agent.code_graph_runtime = None
+        self._warmup_started = False
         self._agent = None
 
 
@@ -345,13 +432,36 @@ def _lookup_tool_resource(card: Any) -> Any:
 
 
 def _graph_tool_returned_unavailable(ctx: AgentCallbackContext) -> bool:
+    return _graph_tool_needs_search_fallback(ctx)
+
+
+def _graph_tool_needs_search_fallback(ctx: AgentCallbackContext) -> bool:
     inputs = ctx.inputs
     if not isinstance(inputs, ToolCallInputs):
         return False
     name = (inputs.tool_name or "").strip()
     if name not in _GRAPH_TOOL_NAMES:
         return False
-    return _tool_status(inputs.tool_result) == CodeGraphStatus.UNAVAILABLE.value
+    return _tool_status(inputs.tool_result) in {
+        CodeGraphStatus.UNAVAILABLE.value,
+    }
+
+
+def _changed_path_from_tool(inputs: ToolCallInputs) -> str:
+    args = getattr(inputs, "tool_args", None) or {}
+    if isinstance(args, dict):
+        for key in ("path", "file_path", "file"):
+            value = args.get(key)
+            if value:
+                return str(value)
+    result = getattr(inputs, "tool_result", None)
+    data = getattr(result, "data", None)
+    if isinstance(data, dict):
+        for key in ("file_path", "path", "file"):
+            value = data.get(key)
+            if value:
+                return str(value)
+    return ""
 
 
 def _tool_status(result: Any) -> str:

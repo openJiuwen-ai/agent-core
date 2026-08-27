@@ -13,7 +13,12 @@ from typing import Sequence
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import retrieval_logger as logger
-from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus, status_payload
+from openjiuwen.core.retrieval.code_graph.errors import (
+    CodeGraphBusy,
+    CodeGraphLimitExceeded,
+    CodeGraphStatus,
+    status_payload,
+)
 from openjiuwen.core.retrieval.code_graph.indexing.builder import build_index
 from openjiuwen.core.retrieval.code_graph.indexing.parser import parser_available, parser_unavailable_reason
 from openjiuwen.core.retrieval.code_graph.indexing.refresh import refresh_index_files
@@ -57,6 +62,7 @@ from openjiuwen.core.retrieval.code_graph.query.trace_call_chain import (
     TraceLimits,
     trace_call_chain as query_trace_call_chain,
 )
+from openjiuwen.core.retrieval.code_graph.identity import RepoIdentity, canonical_workspace_path
 from openjiuwen.core.retrieval.code_graph.snapshot import compute_snapshot
 from openjiuwen.core.retrieval.code_graph.store.index_store import DiskIndexStore
 
@@ -85,12 +91,12 @@ class CodeGraphService:
         persist_index: bool = True,
         session_scoped: bool = False,
     ) -> None:
-        self.repo_root = Path(repo_root).resolve()
+        self.repo_root = Path(canonical_workspace_path(repo_root))
         self.config = config or CodeGraphConfig()
         self._index = index
         self._snapshot: str | None = index.snapshot if index is not None else None
         self._store = (
-            DiskIndexStore(self.config.cache_dir, max_size_mb=self.config.max_index_size_mb)
+            DiskIndexStore(self.config.cache_dir, max_size_mb=max(1, self.config.disk_quota_bytes() // (1024 * 1024)))
             if persist_index and self.config.cache_dir
             else None
         )
@@ -100,6 +106,8 @@ class CodeGraphService:
         # repository snapshot invalidate it would rebuild the whole repository
         # after every edit and discard the refreshes already applied.
         self._session_scoped = session_scoped
+        self._entry = None
+        self._query_hold: CodeGraphStatus | None = None
 
     @property
     def available(self) -> bool:
@@ -122,30 +130,75 @@ class CodeGraphService:
             session_scoped=True,
         )
 
+    def bind_entry(self, entry: object) -> None:
+        """Attach this façade to the shared workspace GraphEntry."""
+        self._entry = entry
+
+    @property
+    def lifecycle_entry(self):
+        return self._entry
+
+    def adopt_index(self, index: CodeGraphIndex) -> None:
+        """Point the façade at a generation that the registry just published."""
+        self._index = index
+        self._snapshot = index.snapshot
+
+    def clear_index(self) -> None:
+        """Drop a cached generation so no conversation keeps reading it."""
+        self._index = None
+        self._snapshot = None
+
     def cache_key(self, snapshot: str | None = None) -> str:
-        snap = snapshot or self._snapshot or compute_snapshot(self.repo_root)
-        return f"{self.repo_root.name}-{snap}-{self.config.config_hash()}"
+        snap = snapshot or self._snapshot or self.current_snapshot()
+        identity = RepoIdentity.from_path(self.repo_root)
+        return f"{identity.repo_id}/{snap}-{self.config.config_hash()}"
 
     def current_snapshot(self) -> str:
-        return compute_snapshot(self.repo_root)
+        extra: tuple[str, ...] = ()
+        previous: tuple[str, ...] = ()
+        entry = self._entry
+        if entry is not None:
+            extra = tuple(getattr(entry, "dirty_paths", ()) or ())
+            active = getattr(entry, "active", None)
+            token = getattr(active, "token", None) if active is not None else None
+            if token is not None:
+                previous = tuple(getattr(token, "dirty_paths", ()) or ())
+        return compute_snapshot(
+            self.repo_root,
+            self.config,
+            extra_paths=extra,
+            previous_dirty_paths=previous,
+        )
 
     def is_stale(self) -> bool:
         if self._index is None or self._snapshot is None:
             return True
-        if self._session_scoped:
-            return False
         return self._snapshot != self.current_snapshot()
 
     async def ensure_ready(self) -> CodeGraphIndex:
         """Load or build the index. One build flight per service+snapshot."""
         if not parser_available():
+            if self._index is not None:
+                return self._index
             raise build_error(
                 StatusCode.RETRIEVAL_CODE_GRAPH_INIT_FAILED,
                 error_msg=parser_unavailable_reason(),
             )
         self._assert_repo_root()
+        if self._entry is not None:
+            from openjiuwen.core.retrieval.code_graph.manager import get_code_graph_manager
+
+            manager = getattr(self._entry, "manager", None) or get_code_graph_manager()
+            try:
+                generation = await manager.ensure_fresh(self.repo_root, self.config)
+            except CodeGraphBusy as exc:
+                if exc.index is not None:
+                    self.adopt_index(exc.index)  # type: ignore[arg-type]
+                raise
+            self.adopt_index(generation.index)
+            return generation.index
         started = time.perf_counter()
-        if self._session_scoped and self._index is not None:
+        if self._session_scoped and self._index is not None and not self.is_stale():
             self._record_index_event("index_memory", started, self._index, cache_hit=True)
             return self._index
         snapshot = self.current_snapshot()
@@ -374,8 +427,9 @@ class CodeGraphService:
         if isinstance(matches, dict):
             return matches
         status = CodeGraphStatus.NO_MATCH if not matches else CodeGraphStatus.COMPLETE
-        return status_payload(
+        return self._status_payload(
             status,
+            index,
             message="no matching symbols" if not matches else f"found {len(matches)} symbols",
             extra={
                 "matches": [item.to_dict() for item in matches],
@@ -410,22 +464,28 @@ class CodeGraphService:
         if isinstance(matches, dict):
             return matches
         if not matches:
-            return status_payload(
-                CodeGraphStatus.NO_MATCH,
-                message="no exact symbol match; try find_code_symbols",
-                extra={"matches": [], "index_snapshot": index.snapshot},
+            return self._mark_incomplete(
+                status_payload(
+                    CodeGraphStatus.NO_MATCH,
+                    message="no exact symbol match; try find_code_symbols",
+                    extra={"matches": [], "index_snapshot": index.snapshot},
+                ),
+                index,
             )
         if len(matches) > 1:
-            return status_payload(
-                CodeGraphStatus.AMBIGUOUS,
-                message=(
-                    f"{len(matches)} symbols share this name; pass kind or path_hint, "
-                    "or call find_code_symbols"
+            return self._mark_incomplete(
+                status_payload(
+                    CodeGraphStatus.AMBIGUOUS,
+                    message=(
+                        f"{len(matches)} symbols share this name; pass kind or path_hint, "
+                        "or call find_code_symbols"
+                    ),
+                    extra={
+                        "matches": [item.to_dict() for item in matches],
+                        "index_snapshot": index.snapshot,
+                    },
                 ),
-                extra={
-                    "matches": [item.to_dict() for item in matches],
-                    "index_snapshot": index.snapshot,
-                },
+                index,
             )
         hit = matches[0]
         actions: list[dict[str, object]] = [
@@ -459,21 +519,24 @@ class CodeGraphService:
                     ),
                 }
             )
-        return status_payload(
-            CodeGraphStatus.COMPLETE,
-            message=f"resolved {hit.name}",
-            extra={
-                "matches": [hit.to_dict()],
-                "symbol_id": hit.symbol_id,
-                "name": hit.name,
-                "kind": hit.kind,
-                "file": hit.file,
-                "start_line": hit.start_line,
-                "end_line": hit.end_line,
-                "qualified_name": hit.qualified_name,
-                "index_snapshot": index.snapshot,
-                "next_actions": actions,
-            },
+        return self._mark_incomplete(
+            status_payload(
+                CodeGraphStatus.COMPLETE,
+                message=f"resolved {hit.name}",
+                extra={
+                    "matches": [hit.to_dict()],
+                    "symbol_id": hit.symbol_id,
+                    "name": hit.name,
+                    "kind": hit.kind,
+                    "file": hit.file,
+                    "start_line": hit.start_line,
+                    "end_line": hit.end_line,
+                    "qualified_name": hit.qualified_name,
+                    "index_snapshot": index.snapshot,
+                    "next_actions": actions,
+                },
+            ),
+            index,
         )
 
     async def read_symbol(
@@ -506,16 +569,22 @@ class CodeGraphService:
             if len(resolved) == 1:
                 symbol = index.symbols.get(resolved[0].symbol_id)
             elif len(resolved) > 1:
-                return status_payload(
-                    CodeGraphStatus.AMBIGUOUS,
-                    message="symbol_id is not unique; pass the full symbol_id from resolve_symbol",
-                    extra={"matches": [item.to_dict() for item in resolved]},
+                return self._mark_incomplete(
+                    status_payload(
+                        CodeGraphStatus.AMBIGUOUS,
+                        message="symbol_id is not unique; pass the full symbol_id from resolve_symbol",
+                        extra={"matches": [item.to_dict() for item in resolved]},
+                    ),
+                    index,
                 )
         if symbol is None:
-            return status_payload(
-                CodeGraphStatus.NO_MATCH,
-                message=f"unknown symbol_id: {needle}",
-                extra={"symbol_id": needle},
+            return self._mark_incomplete(
+                status_payload(
+                    CodeGraphStatus.NO_MATCH,
+                    message=f"unknown symbol_id: {needle}",
+                    extra={"symbol_id": needle},
+                ),
+                index,
             )
         before = min(MAX_SYMBOL_CONTEXT, max(0, int(context_before or 0)))
         after = min(MAX_SYMBOL_CONTEXT, max(0, int(context_after or 0)))
@@ -576,7 +645,7 @@ class CodeGraphService:
                 "end_line": symbol_end,
             }
             payload["message"] = f"definition of {symbol.name}"
-        return payload
+        return self._mark_incomplete(payload, index)
 
     async def list_symbols(
         self,
@@ -608,8 +677,9 @@ class CodeGraphService:
         if isinstance(symbols, dict):
             return symbols
         status = CodeGraphStatus.NO_MATCH if not symbols else CodeGraphStatus.COMPLETE
-        return status_payload(
+        return self._status_payload(
             status,
+            index,
             message="no symbols in scope" if not symbols else f"listed {len(symbols)} symbols",
             extra={
                 "symbols": [item.to_dict() for item in symbols],
@@ -643,8 +713,9 @@ class CodeGraphService:
         if isinstance(hits, dict):
             return hits
         status = CodeGraphStatus.NO_MATCH if not hits else CodeGraphStatus.COMPLETE
-        return status_payload(
+        return self._status_payload(
             status,
+            index,
             message="no related symbols" if not hits else f"expanded {len(hits)} related symbols",
             extra={
                 "related": [item.to_dict() for item in hits],
@@ -757,7 +828,11 @@ class CodeGraphService:
         if isinstance(chunks, dict):
             return chunks
         status = CodeGraphStatus.NO_MATCH if not chunks else CodeGraphStatus.COMPLETE
-        extra: dict[str, object] = {"chunks": chunks, "index_snapshot": index.snapshot}
+        extra: dict[str, object] = {
+            "chunks": chunks,
+            "matches": chunks,
+            "index_snapshot": index.snapshot,
+        }
         if not chunks:
             stats = corpus_query_stats(index, query)
             extra["corpus"] = stats
@@ -771,8 +846,9 @@ class CodeGraphService:
                 message += f"; tokens absent: {', '.join(str(item) for item in absent[:8])}"
         else:
             message = f"found {len(chunks)} text chunks"
-        return status_payload(
+        return self._status_payload(
             status,
+            index,
             message=message,
             extra=extra,
         )
@@ -795,8 +871,9 @@ class CodeGraphService:
         if isinstance(payload, dict) and payload.get("status"):
             return payload
         tree = payload if isinstance(payload, dict) else {}
-        return status_payload(
+        return self._status_payload(
             CodeGraphStatus.COMPLETE,
+            index,
             message="repository structure",
             extra={**tree, "index_snapshot": index.snapshot},
         )
@@ -849,19 +926,22 @@ class CodeGraphService:
         evidence_id = f"read:{rel}:{start}:{end}:{digest}"
         stale = self.is_stale()
         status = CodeGraphStatus.STALE if stale else CodeGraphStatus.COMPLETE
-        return status_payload(
-            status,
-            message="source excerpt" if not stale else "index snapshot is stale; source still returned",
-            extra={
-                "file": rel,
-                "start_line": start,
-                "end_line": end,
-                "content": numbered,
-                "evidence_id": evidence_id,
-                "content_hash": digest,
-                "index_snapshot": index.snapshot,
-                "line_count": len(lines),
-            },
+        return self._mark_incomplete(
+            status_payload(
+                status,
+                message="source excerpt" if not stale else "index snapshot is stale; source still returned",
+                extra={
+                    "file": rel,
+                    "start_line": start,
+                    "end_line": end,
+                    "content": numbered,
+                    "evidence_id": evidence_id,
+                    "content_hash": digest,
+                    "index_snapshot": index.snapshot,
+                    "line_count": len(lines),
+                },
+            ),
+            index,
         )
 
     async def expand_file_defs(
@@ -884,8 +964,9 @@ class CodeGraphService:
         if isinstance(definitions, dict):
             return definitions
         status = CodeGraphStatus.NO_MATCH if not definitions else CodeGraphStatus.COMPLETE
-        return status_payload(
+        return self._status_payload(
             status,
+            index,
             message="no definitions in file" if not definitions else f"listed {len(definitions)} definitions",
             extra={
                 "file": file.replace("\\", "/").lstrip("./"),
@@ -908,14 +989,16 @@ class CodeGraphService:
             return result
         klass, related = result if isinstance(result, tuple) else (None, [])
         if klass is None:
-            return status_payload(
+            return self._status_payload(
                 CodeGraphStatus.NO_MATCH,
+                index,
                 message=f"no class-like symbol for {symbol_id}",
                 extra={"symbol_id": symbol_id, "related": [], "index_snapshot": index.snapshot},
             )
         status = CodeGraphStatus.NO_MATCH if not related else CodeGraphStatus.COMPLETE
-        return status_payload(
+        return self._status_payload(
             status,
+            index,
             message="no inheritance neighbors" if not related else f"expanded {len(related)} inheritance neighbors",
             extra={
                 "symbol_id": klass.symbol_id,
@@ -943,9 +1026,16 @@ class CodeGraphService:
         return resolved
 
     async def _ready_for_query(self) -> CodeGraphIndex:
-        if self.is_stale() and self._index is not None:
+        self._query_hold = None
+        if self._entry is None and self.is_stale() and self._index is not None:
             logger.info("code_graph index stale for %s; rebuilding", self.repo_root)
-        return await self.ensure_ready()
+        try:
+            return await self.ensure_ready()
+        except CodeGraphBusy as exc:
+            self._query_hold = exc.status
+            if exc.index is not None:
+                return exc.index  # type: ignore[return-value]
+            raise
 
     async def _run_query(
         self,
@@ -989,7 +1079,30 @@ class CodeGraphService:
             result_count=count,
             **(extra or {}),
         )
+        if isinstance(result, dict):
+            return self._mark_incomplete(result, self._index)
         return result
+
+    def _status_payload(
+        self,
+        status: CodeGraphStatus,
+        index: CodeGraphIndex | None,
+        *,
+        message: str,
+        extra: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return self._mark_incomplete(status_payload(status, message=message, extra=extra), index)
+
+    def _mark_incomplete(self, payload: dict[str, object], _index: CodeGraphIndex | None) -> dict[str, object]:
+        if self._query_hold in {CodeGraphStatus.BUILDING, CodeGraphStatus.STALE}:
+            if payload.get("status") == CodeGraphStatus.COMPLETE.value:
+                payload["status"] = self._query_hold.value
+            payload["index_state"] = self._query_hold.value.lower()
+        payload.setdefault(
+            "index_state",
+            "ready",
+        )
+        return payload
 
     def _record_index_event(
         self,
@@ -1031,6 +1144,17 @@ class CodeGraphService:
     @staticmethod
     def _failure_payload(exc: Exception) -> dict[str, object]:
         from openjiuwen.core.common.exception.errors import BaseError
+
+        if isinstance(exc, CodeGraphLimitExceeded):
+            extra = {"index_state": "unavailable", **exc.payload_extra()}
+            return status_payload(CodeGraphStatus.UNAVAILABLE, message=exc.message, extra=extra)
+
+        if isinstance(exc, CodeGraphBusy):
+            extra = {"index_state": exc.status.value.lower()}
+            index = exc.index
+            if index is not None:
+                extra["index_snapshot"] = getattr(index, "snapshot", "")
+            return status_payload(exc.status, message=exc.message, extra=extra)
 
         message = str(exc)
         status = CodeGraphStatus.UNAVAILABLE

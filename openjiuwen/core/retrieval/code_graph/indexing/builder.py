@@ -43,27 +43,38 @@ from openjiuwen.core.retrieval.code_graph.query.lexical import (
     tokenize,
 )
 from openjiuwen.core.retrieval.code_graph.query.search_code import definition_doc_id
+from openjiuwen.core.retrieval.code_graph.identity import canonical_workspace_path
 from openjiuwen.core.retrieval.code_graph.snapshot import compute_snapshot
+from openjiuwen.core.retrieval.code_graph.budgets import (
+    cancel_requested,
+    raise_if_resource_limits,
+    raise_limit_exceeded,
+)
 
 
-def build_index(repo_root: str | Path, config: CodeGraphConfig | None = None) -> CodeGraphIndex:
+def build_index(
+    repo_root: str | Path,
+    config: CodeGraphConfig | None = None,
+    *,
+    cancel: object | None = None,
+) -> CodeGraphIndex:
     """Parse ``repo_root`` and return a queryable in-memory index."""
     cfg = config or CodeGraphConfig()
-    root = Path(repo_root).resolve()
+    root = Path(canonical_workspace_path(repo_root))
     index = CodeGraphIndex(
         repo_root=str(root),
-        snapshot=compute_snapshot(root),
+        snapshot=compute_snapshot(root, cfg),
         config_hash=cfg.config_hash(),
     )
-    files = list(_iter_source_files(root, cfg))
-    if len(files) > cfg.max_files:
-        index.warnings.append(
-            f"repository has {len(files)} source files; indexing the first {cfg.max_files}"
-        )
-        files = files[: cfg.max_files]
+    files = _admit_source_files(list(_iter_source_files(root, cfg)), cfg)
 
-    sources: dict[str, str] = {}
+    lexical_builder = LexicalIndexBuilder()
+    source_bytes = 0
+    parsed_count = 0
+    raise_if_resource_limits(cfg, source_bytes=0)
     for path in files:
+        if cancel_requested(cancel):
+            raise InterruptedError("code_graph indexing cancelled")
         rel = path.relative_to(root).as_posix()
         parsed = extract_one_file(path, rel, cfg)
         if parsed is None:
@@ -73,16 +84,47 @@ def build_index(repo_root: str | Path, config: CodeGraphConfig | None = None) ->
             continue
         if parsed.extracted is None:
             continue
-        sources[rel] = parsed.text
+        source_bytes += len(parsed.text.encode("utf-8", errors="replace"))
         index.extracted[rel] = parsed.extracted
         index.file_hashes[rel] = parsed.content_hash
         for symbol in parsed.extracted.symbols:
             index.add_symbol(symbol)
+            if cfg.index_definition_bodies:
+                for document, tokens in definition_documents(symbol, parsed.text):
+                    lexical_builder.add(document, tokens)
+        parsed_count += 1
+        if parsed_count == 1 or parsed_count % 8 == 0:
+            raise_if_resource_limits(cfg, source_bytes=source_bytes)
 
     resolve_relations(index)
+    raise_if_resource_limits(cfg, source_bytes=source_bytes)
     index.file_count = len({sym.file for sym in index.symbols.values() if sym.kind == SymbolKind.FILE})
-    index.lexical = _build_lexical_index(index, sources, root, cfg)
+    if cfg.index_text_files:
+        for rel, text in _iter_text_documents(root, cfg):
+            for document, tokens in text_documents(rel, text, cfg):
+                lexical_builder.add(document, tokens)
+    index.lexical = lexical_builder.freeze()
     return index
+
+
+def _admit_source_files(files: list[Path], cfg: CodeGraphConfig) -> list[Path]:
+    """Skip oversized files; refuse the whole repository when a cap is crossed."""
+    eligible: list[Path] = []
+    total = 0
+    for path in files:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        if size > cfg.max_file_bytes:
+            continue
+        eligible.append(path)
+        total += size
+        if len(eligible) > cfg.max_files:
+            raise_limit_exceeded("max_files", len(eligible), cfg.max_files)
+        if total > cfg.max_source_bytes:
+            raise_limit_exceeded("max_source_bytes", total, cfg.max_source_bytes)
+    return eligible
 
 
 @dataclass
@@ -149,16 +191,20 @@ def resolve_relations(index: CodeGraphIndex) -> None:
 
 
 def _iter_source_files(root: Path, config: CodeGraphConfig) -> list[Path]:
-    skip_dirs = set(config.exclude_dirs)
     gitignore = _load_gitignore(root)
     collected: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=config.follow_symlinks):
+        current = Path(dirpath)
+        rel_dir = "" if current == root else current.relative_to(root).as_posix()
         dirnames[:] = [
             name
             for name in dirnames
-            if name not in skip_dirs and not name.endswith(".egg-info")
+            if not config.excludes_dir_name(name)
+            and not (
+                gitignore
+                and _is_ignored(name if not rel_dir else f"{rel_dir}/{name}", gitignore)
+            )
         ]
-        current = Path(dirpath)
         for name in filenames:
             path = current / name
             rel = path.relative_to(root).as_posix()
@@ -198,6 +244,10 @@ def _is_ignored(rel: str, patterns: list[str]) -> bool:
         if pattern.endswith("/**") and rel.startswith(pattern[:-3]):
             return True
         if "/" not in pattern and fnmatch.fnmatch(rel, f"**/{pattern}"):
+            return True
+        # ``htmlcov/`` in gitignore must drop the directory and everything in it.
+        # Matching only the basename left coverage HTML in the walk.
+        if rel == pattern or rel.startswith(f"{pattern}/"):
             return True
     return False
 
@@ -655,17 +705,21 @@ def _chunk_text(text: str, size: int, overlap: int) -> list[tuple[int, int, str,
 
 
 def _iter_text_documents(root: Path, config: CodeGraphConfig) -> list[tuple[str, str]]:
-    skip_dirs = set(config.exclude_dirs)
     gitignore = _load_gitignore(root)
     extensions = {ext.lower() for ext in config.text_file_extensions}
     collected: list[tuple[str, str]] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=config.follow_symlinks):
+        current = Path(dirpath)
+        rel_dir = "" if current == root else current.relative_to(root).as_posix()
         dirnames[:] = [
             name
             for name in dirnames
-            if name not in skip_dirs and not name.endswith(".egg-info")
+            if not config.excludes_dir_name(name)
+            and not (
+                gitignore
+                and _is_ignored(name if not rel_dir else f"{rel_dir}/{name}", gitignore)
+            )
         ]
-        current = Path(dirpath)
         for name in filenames:
             path = current / name
             suffix = path.suffix.lower()

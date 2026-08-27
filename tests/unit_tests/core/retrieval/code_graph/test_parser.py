@@ -163,6 +163,67 @@ def test_python_grammar_is_cached_true_when_so_is_nested_under_version_libs(
     assert parser_mod.python_grammar_is_cached() is True
 
 
+def test_uncached_sidecar_language_does_not_disable_python_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache = tmp_path / "libs"
+    cache.mkdir()
+    (cache / "libtree_sitter_python.so").write_bytes(b"")
+    calls: list[str] = []
+
+    def _get(name: str) -> object:
+        calls.append(name)
+        return object()
+
+    fake = types.ModuleType("tree_sitter_language_pack")
+    fake.get_parser = _get
+    fake.cache_dir = lambda: str(cache)
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    parser_mod._reset_parser_state()
+
+    assert parser_mod.parse_source_as(SourceLanguage.YAML, b"a: 1\n") is None
+    assert parser_mod.parse_source_as(SourceLanguage.GO, b"package main\n") is None
+    assert parser_mod.parse_source_as(SourceLanguage.HTML, b"<p></p>\n") is None
+    assert parser_mod.parser_available() is True
+    parser_mod.parse_source_as(SourceLanguage.PYTHON, b"x = 1\n")
+    assert "yaml" not in calls
+    assert "go" not in calls
+    assert "html" not in calls
+    assert "python" in calls
+
+
+@pytest.mark.usefixtures("allow_parser_download")
+def test_sidecar_download_error_does_not_disable_python_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cache = tmp_path / "libs"
+    cache.mkdir()
+    (cache / "libtree_sitter_python.so").write_bytes(b"")
+    calls: list[str] = []
+
+    def _get(name: str) -> object:
+        calls.append(name)
+        if name != "python":
+            raise DownloadError(
+                "Failed to download parsers-linux-x86_64.tar.zst: timeout: global"
+            )
+        return object()
+
+    fake = types.ModuleType("tree_sitter_language_pack")
+    fake.get_parser = _get
+    fake.cache_dir = lambda: str(cache)
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    parser_mod._reset_parser_state()
+
+    assert parser_mod.parse_source_as(SourceLanguage.YAML, b"a: 1\n") is None
+    assert parser_mod.parser_available() is True
+    parser_mod.parse_source_as(SourceLanguage.PYTHON, b"x = 1\n")
+    assert "yaml" in calls
+    assert "python" in calls
+    parser_mod.parse_source_as(SourceLanguage.YAML, b"b: 2\n")
+    assert calls.count("yaml") == 1
+
+
 def test_index_does_not_download_when_grammar_is_uncached(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

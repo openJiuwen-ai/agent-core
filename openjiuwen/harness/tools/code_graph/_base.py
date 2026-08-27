@@ -44,8 +44,9 @@ class CodeGraphToolContext:
     agent_id: str | None = None
     run_state: CodeGraphRunState | None = None
     policy: GraphQueryPolicy = DEFAULT_GRAPH_QUERY_POLICY
-    # Pins one index this session may refresh in place instead of a full rebuild.
+    # Conversation / locate-run id. Never used as the graph cache key.
     session_id: str = ""
+    resolve_root: Any = None
 
 
 def trim_payload(payload: dict[str, Any], policy: GraphQueryPolicy) -> dict[str, Any]:
@@ -101,17 +102,24 @@ class CodeGraphBaseTool(Tool):
     async def stream(self, inputs: dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
         yield await self.invoke(inputs, **kwargs)
 
+    def current_repo_root(self) -> str:
+        resolver = getattr(self.context, "resolve_root", None)
+        if callable(resolver):
+            try:
+                resolved = resolver()
+            except Exception:  # noqa: BLE001 — fall back to the bound root
+                resolved = None
+            if resolved:
+                return str(Path(resolved).resolve())
+        return self.context.repo_root
+
     async def _service(self) -> CodeGraphService:
         from openjiuwen.core.retrieval.code_graph.manager import get_code_graph_manager
 
-        manager = get_code_graph_manager()
-        if self.context.session_id:
-            return await manager.get_session_service(
-                self.context.repo_root,
-                self.context.config,
-                session_id=self.context.session_id,
-            )
-        return await manager.get_service(self.context.repo_root, self.context.config, ensure=False)
+        manager = get_code_graph_manager(self.context.config)
+        root = self.current_repo_root()
+        self.context.repo_root = root
+        return await manager.get_service(root, self.context.config, ensure=True)
 
     @property
     def policy(self) -> GraphQueryPolicy:

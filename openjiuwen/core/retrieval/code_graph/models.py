@@ -9,6 +9,7 @@ graph in ``openjiuwen.core.retrieval.graph_knowledge_base``.
 
 from __future__ import annotations
 
+import fnmatch
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Mapping, Sequence
@@ -75,20 +76,47 @@ DEFAULT_EXCLUDE_DIRS: tuple[str, ...] = (
     ".svn",
     ".idea",
     ".vscode",
+    ".cursor",
+    ".claude",
     ".venv",
     "venv",
     "node_modules",
+    "bower_components",
     "__pycache__",
     ".mypy_cache",
     ".pytest_cache",
     ".tox",
+    ".nox",
     ".ruff_cache",
+    ".hypothesis",
+    ".nyc_output",
+    ".ipynb_checkpoints",
+    ".cache",
+    ".code_graph_cache",
+    ".parcel-cache",
+    ".turbo",
+    ".next",
+    ".nuxt",
+    ".output",
+    ".svelte-kit",
     "dist",
     "build",
+    "_build",
+    "_site",
     "target",
     "vendor",
     "eggs",
+    "htmlcov",
+    "coverage",
+    "__snapshots__",
+    "playwright-report",
+    ".worktrees",
+    "_worktrees",
 )
+
+# Directory names that are not a fixed basename (``eggs`` vs ``foo.egg-info``).
+# Walks prune these as directories; ``exclude_globs`` only matches files.
+DEFAULT_EXCLUDE_DIR_GLOBS: tuple[str, ...] = ("*.egg-info",)
 
 SEARCHABLE_SYMBOL_KINDS: frozenset[SymbolKind] = frozenset(
     {
@@ -117,7 +145,7 @@ LEXICAL_TOKENIZER_VERSION = "ident-camel-v1"
 # Bump whenever index contents or stored relation fields change shape. It feeds
 # ``CodeGraphConfig.config_hash()``, so an older on-disk index can never be
 # loaded into a newer reader.
-INDEX_SCHEMA_VERSION = 7
+INDEX_SCHEMA_VERSION = 8
 
 
 class CallResolution(StrEnum):
@@ -166,6 +194,14 @@ DEFAULT_EXCLUDE_GLOBS: tuple[str, ...] = (
     "*.class",
     "*.o",
     "*.a",
+    "*.min.js",
+    "*.min.mjs",
+    "*.min.cjs",
+    "*.min.css",
+    "*.map",
+    "*.snap",
+    "coverage.xml",
+    "*.lcov",
 )
 
 
@@ -174,14 +210,41 @@ class CodeGraphConfig:
     """Resource limits and cache settings for a Code Graph index."""
 
     cache_dir: str | None = None
-    max_files: int = 50000
+    # Laptop-safe product defaults. A 16GB machine also hosts the LLM client
+    # and multiple chats; the graph must not take the rest of RAM or disk.
+    # User-facing repo + resource caps. Time is not an admission or wait
+    # limit: an admitted repo waits until the new graph is ready.
+    max_files: int = 5000
     max_file_bytes: int = 1_048_576
+    max_source_bytes: int = 41_943_040
     max_index_size_mb: int = 1024
+    max_cache_size_mb: int | None = 2048
+    max_process_index_memory_mb: int = 1536
     query_timeout_seconds: float = 10.0
-    index_timeout_seconds: float = 120.0
+    index_timeout_seconds: float = 90.0
+    query_wait_seconds: float | None = None
+    first_build_wait_seconds: float | None = None
+    # Process RSS (RAM) gate, not disk and not back-calculated from 2000/16MB.
+    # 16GB laptop policy: AgentServer + LLM client + up to 3 cached graphs
+    # should not take the rest of RAM. Measured product path at the default
+    # admission edge (~2000 files / 16MB): one graph ≈ +0.3–0.6GB RSS.
+    # Full agent-core (over the 8s package) ≈ +1.2GB. 4GB is "process already
+    # too big, do not start another build", not "one graph needs 4GB".
+    max_build_rss_mb: int = 4096
+    watch_interval_seconds: float = 2.0
     max_ast_depth: int = 12
-    max_cached_repos: int = 4
+    max_cached_repos: int = 3
+    memory_idle_ttl_seconds: float = 1800.0
+    disk_ttl_days: int = 14
+    # 0 = always recompute the workspace token before a query. A positive
+    # window can skip that walk during a find_* burst, but then a Shell/IDE
+    # edit with no mark_dirty looks READY on the old generation.
+    freshness_check_interval_ms: int = 0
+    incremental_max_files: int = 60
+    small_repo_rebuild_seconds: float = 1.0
+    max_concurrent_builds: int = 1
     exclude_dirs: tuple[str, ...] = DEFAULT_EXCLUDE_DIRS
+    exclude_dir_globs: tuple[str, ...] = DEFAULT_EXCLUDE_DIR_GLOBS
     exclude_globs: tuple[str, ...] = DEFAULT_EXCLUDE_GLOBS
     follow_symlinks: bool = False
     # Retrieval (does not affect the on-disk index hash).
@@ -189,10 +252,32 @@ class CodeGraphConfig:
     search_backend: str = "bm25"
     # Lexical index settings (do affect the on-disk index hash).
     index_definition_bodies: bool = True
-    index_text_files: bool = True
+    index_text_files: bool = False
     text_chunk_chars: int = 1000
     text_chunk_overlap: int = 200
     text_file_extensions: tuple[str, ...] = TEXT_FILE_EXTENSIONS
+
+    def resolved_wait_seconds(self, *, first_build: bool) -> float | None:
+        """Optional wait before BUILDING. ``None`` means wait until ready.
+
+        Product yaml does not set a wait. Tests may set the explicit fields.
+        A timeout never serves an old generation.
+        """
+        explicit = self.first_build_wait_seconds if first_build else self.query_wait_seconds
+        if explicit is None:
+            return None
+        return max(0.1, float(explicit))
+
+    def disk_quota_bytes(self) -> int:
+        """Directory quota for on-disk checkpoints (not a single-index RSS cap)."""
+        mb = self.max_cache_size_mb if self.max_cache_size_mb is not None else self.max_index_size_mb
+        return max(1, int(mb)) * 1024 * 1024
+
+    def excludes_dir_name(self, name: str) -> bool:
+        """True when a walk should prune this directory name."""
+        if name in self.exclude_dirs:
+            return True
+        return any(fnmatch.fnmatch(name, glob) for glob in self.exclude_dir_globs)
 
     def config_hash(self) -> str:
         """Stable hash of settings that affect index contents."""
@@ -202,8 +287,10 @@ class CodeGraphConfig:
         payload = {
             "max_files": self.max_files,
             "max_file_bytes": self.max_file_bytes,
+            "max_source_bytes": self.max_source_bytes,
             "max_ast_depth": self.max_ast_depth,
             "exclude_dirs": list(self.exclude_dirs),
+            "exclude_dir_globs": list(self.exclude_dir_globs),
             "exclude_globs": list(self.exclude_globs),
             "follow_symlinks": self.follow_symlinks,
             "index_definition_bodies": self.index_definition_bodies,

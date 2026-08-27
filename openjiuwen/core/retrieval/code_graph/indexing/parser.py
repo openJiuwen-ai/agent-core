@@ -49,7 +49,10 @@ def parser_unavailable_reason() -> str:
     """Human-readable reason the parser cannot run."""
     if _BACKEND_UNAVAILABLE:
         return _BACKEND_UNAVAILABLE
-    _load_get_parser()
+    if _load_get_parser() is None:
+        return _PARSER_IMPORT_ERROR or _LANGUAGE_PACK_REQUIRED
+    if _should_avoid_uncached_fetch("python"):
+        return _LANGUAGE_PACK_REQUIRED
     return _PARSER_IMPORT_ERROR or "tree-sitter parser is not available"
 
 
@@ -178,14 +181,28 @@ def _reset_parser_state() -> None:
 
 @lru_cache(maxsize=None)
 def _parser_for(lang_id: str) -> Any | None:
-    """Return a cached tree-sitter parser, or ``None`` after a failed load."""
+    """Return a cached tree-sitter parser, or ``None`` after a failed load.
+
+    Two layers, on purpose:
+
+    * Admission (``parser_available``) is Python-only. The product graph is
+      Python-first: no pack / no cached Python grammar means the whole
+      backend is off and grep comes back.
+    * Per-file parse treats every language the same. An uncached or failed
+      grammar skips that language's files. YAML/HTML/TS/Go missing cache
+      must not UNAVAILABLE a repo that still has Python. Python missing is
+      already the admission check, so this path never disables the backend.
+    """
     if _BACKEND_UNAVAILABLE:
         return None
     get_parser = _load_get_parser()
     if get_parser is None:
         return None
     if _should_avoid_uncached_fetch(lang_id):
-        _disable_backend_for_uncached_grammar(lang_id)
+        logger.warning(
+            "code_graph skipping %s: grammar is not cached locally",
+            lang_id,
+        )
         return None
     try:
         return get_parser(lang_id)
@@ -208,18 +225,13 @@ def _network_fetch_allowed() -> bool:
     return flag in _DOWNLOAD_ALLOWED
 
 
-def _disable_backend_for_uncached_grammar(lang_id: str) -> None:
-    global _BACKEND_UNAVAILABLE, _PARSER_IMPORT_ERROR
-    _BACKEND_UNAVAILABLE = _LANGUAGE_PACK_REQUIRED
-    _PARSER_IMPORT_ERROR = _BACKEND_UNAVAILABLE
-    logger.warning("%s", _LANGUAGE_PACK_REQUIRED)
-
-
 def _mark_backend_failure(lang_id: str, exc: BaseException) -> None:
     global _BACKEND_UNAVAILABLE, _PARSER_IMPORT_ERROR
-    if _is_download_backend_error(exc):
+    if lang_id == "python" and _is_download_backend_error(exc):
         _BACKEND_UNAVAILABLE = f"{_LANGUAGE_PACK_REQUIRED} ({exc})"
         _PARSER_IMPORT_ERROR = _BACKEND_UNAVAILABLE
+        logger.warning("%s", _BACKEND_UNAVAILABLE)
+        return
     logger.warning("code_graph parser unavailable for %s: %s", lang_id, exc)
 
 

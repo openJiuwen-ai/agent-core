@@ -40,9 +40,15 @@ These tools index the repository so you can find code before you edit it.
   Do not look for a submit tool — keep going with edit_file / write_file.
 - A truncated or timed-out query is one query cut short: narrow the symbol or
   path and continue, or move to read_file.
-- If a Code Graph tool returns UNAVAILABLE, grep and glob are restored. Use
-  them (and read_file) and keep going. A single ERROR is not that: narrow the
-  query and retry the graph, or read_file.
+- If a Code Graph tool returns BUILDING, keep using these tools (retry shortly).
+  grep stays hidden while Code Graph is enabled.
+- If a tool returns STALE, trust the old graph for what it did find and
+  continue. Do not wait for a perfect refresh.
+- If a Code Graph tool returns UNAVAILABLE, the repository exceeded indexing
+  limits (file count, source bytes, symbols, edges, or process memory) or the
+  parser is missing. grep and glob are restored only then. Use them (and
+  read_file) and keep going. A single ERROR is not that: narrow the query and
+  retry the graph, or read_file.
 """
 
 GRAPH_PROFILE_PROMPT_CN = """\
@@ -63,9 +69,13 @@ Code Graph（profile: graph）：
   源码并跑相关测试。没有 submit 工具：继续用 edit_file / write_file。
 - 单次查询被截断或超时只是这一次被裁剪：缩小 symbol 或路径后继续，或改用
   read_file。
-- 若 Code Graph 工具返回 UNAVAILABLE，会恢复 grep/glob。用它们（以及
-  read_file）继续做。单次 ERROR 不是这种失败：缩小查询再试图工具，或改用
-  read_file。
+- 若工具返回 BUILDING，继续用这些图工具（稍后重试）。启用 Code Graph 时
+  grep 保持隐藏。
+- 若工具返回 STALE，旧图找到的结果可以继续用，不要为了 100% 新鲜而停住。
+- 若 Code Graph 工具返回 UNAVAILABLE，说明仓库超过索引上限（文件数、源码
+  字节、符号、边或进程内存）或缺少 parser。只有这时才恢复 grep/glob。用它们
+  （以及 read_file）继续做。单次 ERROR 不是这种失败：缩小查询再试图工具，
+  或改用 read_file。
 """
 
 LOCATE_EXAM_PROMPT_EN = """\
