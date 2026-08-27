@@ -1,0 +1,40 @@
+--- a/openjiuwen/core/foundation/llm/model.py
++++ b/openjiuwen/core/foundation/llm/model.py
+@@ -22,6 +22,25 @@
+ from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+ from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
+ from openjiuwen.core.runner.callback import trigger
+ 
++async def _wait_for_no_await(coro, timeout):
++    """wait 但超时后不 await 被取消的任务（替代 asyncio.wait_for）。
++
++    asyncio.wait_for 超时后 await task——若任务的 finally 卡住
++    （openai __stream__ 的 aclose 卡在僵死 TCP 连接上），wait_for
++    永不返回，TimeoutError 永不抛，LLM 调用挂起无任何日志
++    （2026-08-06 实测：DeepSeek 流僵死 16 分钟，agentserver 0.3% CPU 空转）。
++
++    关键差异：不能用 asyncio.wait_for（它超时后 await 被卡任务，finally
++    的 sleep 吞取消 → 永不返回）。改用 asyncio.wait({task}, timeout)——
++    超时后 task 仍在 pending，手动 cancel 且**不 await**，立即抛超时；
++    任务在后台收尾，事件循环不受阻塞（已用隔离测试验证）。
++    """
++    task = asyncio.ensure_future(coro)
++    done, _pending = await asyncio.wait({task}, timeout=timeout)
++    if task in done:
++        return task.result()
++    task.cancel()  # 不 await——让任务后台收尾，不阻塞本协程
++    raise asyncio.TimeoutError()
++
+ 
+ class Model:
+     """Unified LLM invocation entry point
+@@ -196,7 +215,7 @@
+                 if next_timeout is None:
+                     chunk = await stream_iterator.__anext__()
+                 else:
+-                    chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
++                    chunk = await _wait_for_no_await(
++                        stream_iterator.__anext__(), timeout=next_timeout)
+             except StopAsyncIteration:
+                 break
+             except asyncio.TimeoutError as exc:
