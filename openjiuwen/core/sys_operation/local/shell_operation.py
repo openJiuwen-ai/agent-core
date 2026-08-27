@@ -139,6 +139,20 @@ _UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s
 # Unix-style absolute paths (/some/path). Requires ≥1 non-separator char after '/' so bare '/'
 # and short escape sequences (/n, /t …) are excluded.
 _UNIX_ABS_PATH_PATTERN = re.compile(r"(?:^|[\s\"'(=,])(/[a-zA-Z0-9_.][^\s\"'|&;()*?]*)")
+# cmd-style redirects to the Windows null device, e.g. ">nul", "2>nul", ">>nul",
+# "&>nul", "1>nul" (case-insensitive, optional spaces). The trailing negative
+# lookahead requires `nul` to be a complete shell token, so filename continuations
+# like `nul.txt`/`nul/foo`/`nul-foo` are NOT matched (only the bare null device is).
+# MSYS/Git Bash does not treat `nul` as a device — `>nul` would create a real 0-byte
+# file named `nul` (a Windows reserved name that resists deletion via the normal Win32
+# API). Rather than silently rewriting the command (a regex rewriter cannot reliably
+# tell a real redirect from `>nul` inside heredocs, `[[ ]]` tests, command substitution,
+# or quoted search patterns), we *detect* CMD-style `>nul` redirects with this pattern
+# and reject the command up front via `_reject_cmd_null_redirect_for_bash`, pointing the
+# caller at `/dev/null` or `shell_type='cmd'`. The negative lookahead `(?![\w./\\-])`
+# restricts the match to a complete shell token so `nul.txt`/`nul/foo`/`nul-foo`
+# (filename continuations, not the bare null device) are not flagged.
+_NUL_REDIRECT_PATTERN = re.compile(r"(?i)([12&]?>>?)(\s*)\bnul\b(?![\w./\\-])")
 
 
 def _track_shell_process(proc: asyncio.subprocess.Process) -> str | None:
@@ -313,6 +327,38 @@ def _looks_like_posix(command: str) -> bool:
     return any(_segment_base_command(segment) in _POSIX_COMMANDS for segment in _split_shell_segments(command or ""))
 
 
+def _reject_cmd_null_redirect_for_bash(command: str) -> None:
+    """Reject CMD-style null redirects before running a command under bash/sh.
+
+    MSYS/Git Bash does not treat `nul` as a device, so `>nul`/`2>nul`/... would create
+    a real, hard-to-delete `nul` file. Rather than silently rewriting the command —
+    which a regex-based rewriter cannot do safely, since it cannot distinguish a real
+    redirect from `>nul` inside heredoc bodies, ``[[ ]]`` test expressions, command
+    substitution, or quoted search patterns — raise a clear error directing the caller
+    to use ``/dev/null`` (the bash null device) or to run with ``shell_type='cmd'``,
+    where ``>nul`` is the correct null device.
+
+    Detection uses `_NUL_REDIRECT_PATTERN`, which requires ``nul`` to be a complete
+    shell token (``nul.txt``/``nul/foo``/``nul-foo`` are filename continuations and are
+    not flagged). Occurrences of ``>nul`` inside quotes, after a backslash escape, or
+    in heredoc/``[[ ]]`` bodies may also trigger this error; that is the accepted,
+    recoverable failure mode (a loud, actionable error is preferable to silently
+    rewriting the command and changing its meaning). The BashTool prompt steers command
+    generation toward ``/dev/null`` so this branch is reached only rarely.
+    """
+    if _NUL_REDIRECT_PATTERN.search(command):
+        raise build_error(
+            StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
+            execution="_reject_cmd_null_redirect_for_bash",
+            error_msg=(
+                "CMD-style redirect target 'nul' cannot be used as the null device in "
+                "bash/sh (Git Bash treats it as a real, undeletable reserved-name file). "
+                "Use '/dev/null' instead, or execute the command with shell_type='cmd' "
+                "where '>nul' is the correct null device."
+            ),
+        )
+
+
 def _normalize_windows_paths_for_bash(command: str) -> str:
     def replace_path(match: re.Match[str]) -> str:
         value = match.group("path").replace("\\", "/")
@@ -320,7 +366,8 @@ def _normalize_windows_paths_for_bash(command: str) -> str:
         return f"{quote}{value}{quote}" if quote else value
 
     normalized = _QUOTED_WINDOWS_PATH_PATTERN.sub(replace_path, command)
-    return _UNQUOTED_WINDOWS_PATH_PATTERN.sub(replace_path, normalized)
+    normalized = _UNQUOTED_WINDOWS_PATH_PATTERN.sub(replace_path, normalized)
+    return normalized
 
 
 @operation(name="shell", mode=OperationMode.LOCAL, description="local shell operation")
@@ -415,6 +462,7 @@ class ShellOperation(BaseShellOperation):
                 if _looks_like_posix(command):
                     exe = _available_bash(allow_wsl=False)
                     if exe:
+                        _reject_cmd_null_redirect_for_bash(command)
                         return [exe, "-lc", _normalize_windows_paths_for_bash(command)], False, "bash"
                 return command, True, "cmd"
             if shell_type == ShellType.POWERSHELL:
@@ -430,6 +478,7 @@ class ShellOperation(BaseShellOperation):
                     raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,
                                       execution="_resolve_execution_plan",
                                       error_msg=f"shell '{shell_type.value}' is not available on this system")
+                _reject_cmd_null_redirect_for_bash(command)
                 return [exe, "-lc" if shell_type == ShellType.BASH else "-c",
                         _normalize_windows_paths_for_bash(command)], False, shell_type.value
             raise build_error(StatusCode.SYS_OPERATION_SHELL_EXECUTION_ERROR,

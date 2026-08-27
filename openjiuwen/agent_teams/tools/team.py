@@ -295,7 +295,6 @@ class TeamBackend:
         # resolved, so ``clean_team`` wipes the real locations instead of
         # only the default ones.
         self._cleanup_paths: set[str] = set()
-
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
 
     def register_cleanup_path(self, path: Optional[str]) -> None:
@@ -1019,14 +1018,18 @@ class TeamBackend:
 
         Returns a snapshot only when all three conditions hold at once,
         checked in order task -> member -> message:
-            1. At least one task exists and every task is terminal
-               (``TASK_TERMINAL_STATUSES``).
+            1. No active task -- an empty board is valid; when tasks exist
+               they must all be terminal (``TASK_TERMINAL_STATUSES``).
             2. Every member -- including the leader -- is in a settled
                status (``MEMBER_SETTLED_STATUSES``).
-            3. No message is left unread by any member, broadcasts
-               included. Completion is judged strictly: any undelivered
-               message -- direct or fan-out broadcast -- blocks the team
-               from concluding.
+            3. No message is left unread by any reachable member,
+               broadcasts included. Completion is judged strictly: any
+               undelivered message -- direct or fan-out broadcast -- blocks
+               the team from concluding.
+
+        This is the single source of truth for round completion; the
+        periodic POLL_TASK path closes the stream only when this returns
+        a snapshot.
 
         Read-only; safe to call repeatedly. Queries the member DAO directly
         so the leader itself is part of the roster check (``list_members``
@@ -1037,8 +1040,6 @@ class TeamBackend:
             otherwise ``None``.
         """
         tasks = await self.task_manager.list_tasks()
-        if not tasks:
-            return None
         if any(task.status not in TASK_TERMINAL_STATUSES for task in tasks):
             return None
 

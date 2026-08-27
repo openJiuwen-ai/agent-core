@@ -1068,12 +1068,16 @@ async def test_is_team_completed_pending_task_returns_none(agent_team, db):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_is_team_completed_empty_task_list_returns_none(agent_team, db):
-    """An empty task board is not a completed team."""
+async def test_is_team_completed_empty_task_list_returns_snapshot(agent_team, db):
+    """An empty task board with all members settled and no unread messages
+    IS a completed team (taskless / discussion round)."""
     await _seed_member(db, "leader1", MemberStatus.READY.value)
     await _seed_member(db, "member1", MemberStatus.READY.value)
 
-    assert await agent_team.is_team_completed() is None
+    snapshot = await agent_team.is_team_completed()
+    assert snapshot is not None
+    assert snapshot.task_count == 0
+    assert snapshot.member_count == 2
 
 
 @pytest.mark.asyncio
