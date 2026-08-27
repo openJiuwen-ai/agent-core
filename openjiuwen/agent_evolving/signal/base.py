@@ -7,6 +7,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
+import re
+
+_FINGERPRINT_FOLD_RE = re.compile(r"[\s\-_/\\|.,;:!?，。；：、！？·•\"'`“”‘’()\[\]{}<>]+")
 
 
 class EvolutionCategory(str, Enum):
@@ -92,19 +95,24 @@ def make_signal_fingerprint(signal: EvolutionSignal) -> Tuple[str, str, str, str
 
     Used by signal detection and SkillEvolutionRail to keep fingerprints consistent.
 
+    Prefer ``context.user_message`` when present so LLM-paraphrased excerpts of the
+    same user feedback still collapse to one fingerprint.
+
     Args:
         signal: EvolutionSignal to fingerprint.
 
     Returns:
-        Tuple of (signal_type, context.tool_name, skill_name, excerpt[:200]).
+        Tuple of (signal_type, context.tool_name, skill_name, folded excerpt key).
     """
     context = signal.context or {}
     tool_name = context.get("tool_name")
+    stable = str(context.get("user_message") or signal.excerpt or "")
+    excerpt_key = _FINGERPRINT_FOLD_RE.sub("", stable.strip().lower())[:160]
     return (
         signal.signal_type,
         str(tool_name) if tool_name is not None else "",
         signal.skill_name or "",
-        signal.excerpt[:200],
+        excerpt_key,
     )
 
 

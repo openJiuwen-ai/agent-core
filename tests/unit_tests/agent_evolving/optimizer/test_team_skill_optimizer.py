@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -144,16 +144,16 @@ async def test_team_profile_limits_text_and_script_records() -> None:
         return_value=SimpleNamespace(
             content="""
 [
-  {"action":"append","target":"body","section":"Workflow","summary":"A","content":"A","merge_target":null},
-  {"action":"append","target":"body","section":"Collaboration","summary":"B","content":"B","merge_target":null},
-  {"action":"append","target":"body","section":"Constraints","summary":"C","content":"C","merge_target":null},
-  {"action":"append","target":"body","section":"Instructions","summary":"D","content":"D","merge_target":null},
-  {"action":"append","target":"body","section":"Examples","summary":"E","content":"E","merge_target":null},
-  {"action":"append","target":"body","section":"Troubleshooting","summary":"F","content":"F","merge_target":null},
-  {"action":"append","target":"script","section":"Scripts","summary":"S1","content":"print(1)","script_filename":"a.py","script_language":"python","script_purpose":"demo"},
-  {"action":"append","target":"script","section":"Scripts","summary":"S2","content":"print(2)","script_filename":"b.py","script_language":"python","script_purpose":"demo"},
-  {"action":"append","target":"script","section":"Scripts","summary":"S3","content":"print(3)","script_filename":"c.py","script_language":"python","script_purpose":"demo"},
-  {"action":"append","target":"script","section":"Scripts","summary":"S4","content":"print(4)","script_filename":"d.py","script_language":"python","script_purpose":"demo"}
+  {"action":"append","target":"body","section":"Workflow","summary":"Workflow guidance alpha for team coordination","content":"Workflow alpha detail about reviewer routing after failures.","root_cause":"workflow alpha coordination gap","merge_target":null},
+  {"action":"append","target":"body","section":"Collaboration","summary":"Collaboration guidance beta for reviewer handoff","content":"Collaboration beta detail about async handoff timing.","root_cause":"collaboration beta handoff gap","merge_target":null},
+  {"action":"append","target":"body","section":"Constraints","summary":"Constraints guidance gamma for timeout policy","content":"Constraints gamma detail about hard review timeouts.","root_cause":"constraints gamma timeout gap","merge_target":null},
+  {"action":"append","target":"body","section":"Instructions","summary":"Instructions guidance delta for audit steps","content":"Instructions delta detail about audit checklist ordering.","root_cause":"instructions delta audit gap","merge_target":null},
+  {"action":"append","target":"body","section":"Examples","summary":"Examples guidance epsilon for failure replay","content":"Examples epsilon detail about replaying failed tool calls.","root_cause":"examples epsilon replay gap","merge_target":null},
+  {"action":"append","target":"body","section":"Troubleshooting","summary":"Troubleshooting guidance zeta for retry policy","content":"Troubleshooting zeta detail about exponential backoff.","root_cause":"troubleshooting zeta retry gap","merge_target":null},
+  {"action":"append","target":"script","section":"Scripts","summary":"Cleanup script for orphaned temp files","content":"print('cleanup orphaned temp files after timeout')","root_cause":"script one automation gap","script_filename":"a.py","script_language":"python","script_purpose":"demo"},
+  {"action":"append","target":"script","section":"Scripts","summary":"Rollback script for failed deploy artifacts","content":"print('rollback deployment artifacts after failed deploy')","root_cause":"script two automation gap","script_filename":"b.py","script_language":"python","script_purpose":"demo"},
+  {"action":"append","target":"script","section":"Scripts","summary":"Log collection script for tool stderr","content":"print('collect stderr logs after tool errors')","root_cause":"script three automation gap","script_filename":"c.py","script_language":"python","script_purpose":"demo"},
+  {"action":"append","target":"script","section":"Scripts","summary":"Cache invalidation script for retry storms","content":"print('invalidate cache entries after retry storms')","root_cause":"script four automation gap","script_filename":"d.py","script_language":"python","script_purpose":"demo"}
 ]
 """
         )
@@ -169,9 +169,26 @@ async def test_team_profile_limits_text_and_script_records() -> None:
         existing_script_records=[],
     )
 
-    records = await optimizer.generate_records(ctx)
+    with patch(
+        "openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer.filter_duplicate_drafts",
+        side_effect=lambda drafts, existing: list(drafts),
+    ), patch(
+        "openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer.filter_duplicate_records",
+        side_effect=lambda records, existing: list(records),
+    ):
+        records = await optimizer.generate_records(ctx)
 
     text_records = [record for record in records if record.change.target != EvolutionTarget.SCRIPT]
     script_records = [record for record in records if record.change.target == EvolutionTarget.SCRIPT]
-    assert [record.change.content for record in text_records] == ["A", "B", "C", "D", "E"]
-    assert [record.change.content for record in script_records] == ["print(1)", "print(2)", "print(3)"]
+    assert [record.change.content for record in text_records] == [
+        "Workflow alpha detail about reviewer routing after failures.",
+        "Collaboration beta detail about async handoff timing.",
+        "Constraints gamma detail about hard review timeouts.",
+        "Instructions delta detail about audit checklist ordering.",
+        "Examples epsilon detail about replaying failed tool calls.",
+    ]
+    assert [record.change.content for record in script_records] == [
+        "print('cleanup orphaned temp files after timeout')",
+        "print('rollback deployment artifacts after failed deploy')",
+        "print('collect stderr logs after tool errors')",
+    ]

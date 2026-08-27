@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from openjiuwen.agent_evolving.checkpointing.types import EvolutionLog
 from openjiuwen.agent_evolving.experience.online_orchestrator import OnlineEvolutionOrchestrator
 from openjiuwen.agent_evolving.signal import make_evolution_signal
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -30,7 +31,9 @@ def _make_orchestrator(*, skill_exists: bool = True, process_result=None):
     store.skill_exists.return_value = skill_exists
     store.skill_definition_exists.return_value = skill_exists
     store.read_skill_content = AsyncMock(return_value="# skill")
-    store.get_pending_records = AsyncMock(side_effect=[[], [], []])
+    store.load_evolution_log = AsyncMock(
+        side_effect=lambda name, target=None: EvolutionLog.empty(skill_id=name)
+    )
 
     updater = Mock()
     updater.bind = Mock()

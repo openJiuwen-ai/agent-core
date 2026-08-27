@@ -452,7 +452,10 @@ class TestConversationSignalDetector:
         assert len(signals) == 1
         assert signals[0].signal_type == "user_intent"
         assert signals[0].skill_name == "my_skill"
-        assert signals[0].context == {"source": "passive_conversation"}
+        assert signals[0].context == {
+            "source": "passive_conversation",
+            "user_message": "不对，你应该先检查文件是否存在",
+        }
 
     @staticmethod
     @pytest.mark.asyncio
