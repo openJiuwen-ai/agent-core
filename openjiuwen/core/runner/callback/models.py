@@ -17,6 +17,7 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
+    FrozenSet,
     List,
     Optional,
     Set,
@@ -196,6 +197,17 @@ class ChainResult:
     error: Optional[Exception] = None
 
 
+@dataclass(frozen=True)
+class CallbackCallShape:
+    """Cached argument rules for one callback."""
+
+    callback: Callable
+    custom_signature: Any
+    positional_limit: Optional[int]
+    accepted_keywords: Optional[FrozenSet[str]]
+    needs_session: bool
+
+
 @dataclass
 class CallbackInfo:
     """Metadata and configuration for a registered callback.
@@ -213,6 +225,7 @@ class CallbackInfo:
         created_at: Timestamp when callback was registered
         wrapper: Optional wrapper function returned by decorator (for unregistering)
         callback_type: Semantic type marker, e.g. "transform"
+        call_shape: Cached argument rules for trigger-time calls
     """
     callback: Callable[..., Awaitable[Any]]
     priority: int
@@ -226,6 +239,11 @@ class CallbackInfo:
     created_at: float = field(default_factory=time.time)
     wrapper: Optional[Callable[..., Awaitable[Any]]] = None
     callback_type: str = ""
+    call_shape: Optional[CallbackCallShape] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __hash__(self) -> int:
         """Hash based on callback identity.
