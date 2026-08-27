@@ -531,6 +531,7 @@ class ReadFileTool(Tool):
         return (
             not self._is_image(file_path)
             and not self._is_pdf(file_path)
+            and not self._is_office_doc(file_path)
             and not file_path.lower().endswith(".ipynb")
         )
 
