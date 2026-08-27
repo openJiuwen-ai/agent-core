@@ -49,7 +49,7 @@ _POSIX_COMMANDS = frozenset({
     "sort", "uniq", "wc", "du", "df", "pwd", "which", "mkdir",
 })
 _QUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?P<quote>['\"])(?P<path>[A-Za-z]:\\[^'\"]+)(?P=quote)")
-_UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/'\"])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
+_UNQUOTED_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s|&;]+)")
 # Unix-style absolute paths (/some/path). Requires ≥1 non-separator char after '/' so bare '/'
 # and short escape sequences (/n, /t …) are excluded.
 _UNIX_ABS_PATH_PATTERN = re.compile(r"(?:^|[\s\"'(=,])(/[a-zA-Z0-9_.][^\s\"'|&;()*?]*)")

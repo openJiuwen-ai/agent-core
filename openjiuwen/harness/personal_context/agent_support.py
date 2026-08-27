@@ -45,7 +45,10 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.rails import SecurityRail, SysOperationRail
+from openjiuwen.harness.personal_context.file_tools import (
+    make_personal_context_file_tools as _make_personal_context_file_tools,
+)
+from openjiuwen.harness.rails import SecurityRail
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.rails.tool_call_resilience_rail import ToolCallResilienceRail
 from openjiuwen.harness.workspace.workspace import Workspace
@@ -91,9 +94,6 @@ _REPAIRABLE_INVOKE_STATUSES = frozenset(
     }
 )
 
-# The model never receives a shell tool. GrepTool still needs one tightly scoped
-# command backend, and it constructs every command itself.
-_PERSONAL_CONTEXT_INTERNAL_GREP_ALLOWLIST = ["rg", "grep", "Select-String"]
 _URL_USERINFO_REDACTION_PATTERN = re.compile(r"(?i)(\b(?:https?|ftp|file)://)[^@\s/?#]+@")
 _URL_QUERY_REDACTION_PATTERN = re.compile(r"(?i)(\b(?:https?|ftp|file)://[^\s/?#]+(?:/[^\s?#]*)?)[?#][^\s]*")
 _REDACTION_PATTERNS = (
@@ -480,7 +480,7 @@ def _clean_redo_query(original_query: str, errors: Sequence[str]) -> str:
 
 def _make_sys_operation(sandbox: Path) -> SysOperation:
     config = LocalWorkConfig(
-        shell_allowlist=list(_PERSONAL_CONTEXT_INTERNAL_GREP_ALLOWLIST),
+        shell_allowlist=[],
         sandbox_root=[str(sandbox)],
         restrict_to_sandbox=True,
         dangerous_patterns=[],
@@ -529,16 +529,11 @@ def _make_agent(
     sandbox: Path,
     context_processor_rail: ContextProcessorRail,
 ) -> tuple[object, list[AgentRail]]:
-    sys_operation_rail = SysOperationRail(
-        with_code_tool=False,
-        with_shell_tools=False,
-        read_only=False,
-        enable_read_image_multimodal=False,
-    )
+    sys_operation = _make_sys_operation(sandbox)
+    file_tools = _make_personal_context_file_tools(sys_operation, sandbox)
     security_rail = SecurityRail()
     tool_resilience_rail = ToolCallResilienceRail()
     rails: list[AgentRail] = [
-        sys_operation_rail,
         context_processor_rail,
         security_rail,
         tool_resilience_rail,
@@ -573,10 +568,11 @@ def _make_agent(
             ".agent_history directory, context, inputs, tmp, and materialized-source. "
             "Never write to .agent_history yourself. Return only a brief confirmation after the work is complete."
         ),
+        tools=file_tools,
         rails=rails,
         subagents=[],
         workspace=workspace,
-        sys_operation=_make_sys_operation(sandbox),
+        sys_operation=sys_operation,
         auto_create_workspace=False,
         restrict_to_work_dir=True,
         enable_task_loop=False,
@@ -737,6 +733,15 @@ async def _cleanup_runtime(
             if uninit is not None:
                 await _maybe_await(uninit(agent))
         except BaseException:
+            pass
+    if agent is not None:
+        try:
+            ability_manager = getattr(agent, "ability_manager", None)
+            teardown_tools = getattr(ability_manager, "teardown_tools", None)
+            if teardown_tools is not None:
+                await _maybe_await(teardown_tools())
+        except BaseException:
+            # Cleanup must not mask the invoke/validation error or cancellation.
             pass
 
 

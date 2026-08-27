@@ -36,14 +36,23 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 from openjiuwen.harness.rails import SecurityRail
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.rails.tool_call_resilience_rail import ToolCallResilienceRail
-from openjiuwen.harness.tools.filesystem import GrepTool
 
 
-def test_personal_context_internal_shell_allowlist_is_grep_only() -> None:
-    assert agent_support._PERSONAL_CONTEXT_INTERNAL_GREP_ALLOWLIST == [
-        "rg",
+def test_personal_context_file_tools_are_exactly_the_six_bounded_tools(
+    tmp_path: Path,
+) -> None:
+    tools = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        tmp_path,
+    )
+
+    assert [tool.card.name for tool in tools] == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "list_files",
         "grep",
-        "Select-String",
     ]
 
 
@@ -55,8 +64,11 @@ async def test_personal_context_grep_accepts_bounded_regex_and_rejects_escape(
     sandbox = tmp_path / "sandbox (safe) [1]"
     sandbox.mkdir()
     (sandbox / "notes.md").write_text("Alpha(42)[ok]\n", encoding="utf-8")
-    operation = agent_support._make_sys_operation(sandbox)
-    tool = GrepTool(operation, "en")
+    tools = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        sandbox,
+    )
+    tool = next(tool for tool in tools if tool.card.name == "grep")
     set_cwd(str(sandbox))
     try:
         result = await tool.invoke(
@@ -73,6 +85,37 @@ async def test_personal_context_grep_accepts_bounded_regex_and_rejects_escape(
         ).casefold()
     finally:
         set_cwd(original_cwd)
+
+
+@pytest.mark.asyncio
+async def test_personal_context_grep_bounds_results_without_shell(
+    tmp_path: Path,
+) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    (sandbox / "many.md").write_text(
+        "\n".join(f"match-{index}" for index in range(20)),
+        encoding="utf-8",
+    )
+    tools = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        sandbox,
+    )
+    tool = next(tool for tool in tools if tool.card.name == "grep")
+
+    result = await tool.invoke(
+        {
+            "pattern": "match-",
+            "path": ".",
+            "head_limit": 3,
+            "offset": 2,
+        }
+    )
+
+    assert result.success is True
+    assert result.data["count"] == 3
+    assert result.data["appliedOffset"] == 2
+    assert result.data["appliedLimit"] == 3
 
 
 @pytest.mark.parametrize(
@@ -281,6 +324,15 @@ async def test_real_factory_cleanup_unregisters_every_explicit_and_default_rail(
     context_rail = agent_support._make_context_processor_rail(model_client, model_request)
     agent, rails = agent_support._make_agent(model, tmp_path, context_rail)
 
+    assert all(type(rail).__name__ != "SysOperationRail" for rail in rails)
+    assert {card.name for card in cast(Any, agent).ability_manager.list()} == {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "list_files",
+        "grep",
+    }
     await cast(Any, agent).ensure_initialized()
     configured = cast(Any, agent).configured_rails()
     assert configured == rails
@@ -289,6 +341,7 @@ async def test_real_factory_cleanup_unregisters_every_explicit_and_default_rail(
 
     await agent_support._cleanup_runtime(agent, rails, None, [], None)
     assert cast(Any, agent).configured_rails() == []
+    assert cast(Any, agent).ability_manager.list() == []
 
 
 @pytest.mark.asyncio
@@ -641,10 +694,19 @@ class _FakeReactAgent:
         self._events.append(("clear_session", session_id))
 
 
+class _FakeAbilityManager:
+    def __init__(self, events: list[tuple[str, Any]]) -> None:
+        self._events = events
+
+    def teardown_tools(self) -> None:
+        self._events.append(("tool_teardown", None))
+
+
 class _FakeAgent:
     def __init__(self, events: list[tuple[str, Any]], outputs: list[object]) -> None:
         self.card = object()
         self.react_agent = _FakeReactAgent(events)
+        self.ability_manager = _FakeAbilityManager(events)
         self._events = events
         self._outputs = outputs
         self.invocations: list[tuple[object, object]] = []
@@ -708,7 +770,6 @@ def _patch_agent_runtime(
     created: dict[str, Any] = {
         "agents": [],
         "sessions": [],
-        "rails": [],
         "processor_rails": [],
         "security_rails": [],
         "resilience_rails": [],
@@ -726,17 +787,6 @@ def _patch_agent_runtime(
         session = _FakeSession(session_id, events)
         created["sessions"].append(session)
         return session
-
-    def fake_rail(**kwargs: object) -> object:
-        events.append(("rail", kwargs))
-
-        class Rail:
-            def uninit(self, agent: object) -> None:
-                events.append(("rail_uninit", agent))
-
-        rail = Rail()
-        created["rails"].append(rail)
-        return rail
 
     def fake_context_processor_rail(model_client: object, model_request: object) -> object:
         events.append(("context_processor_rail", (model_client, model_request)))
@@ -774,7 +824,6 @@ def _patch_agent_runtime(
     monkeypatch.setattr(agent_support, "Model", _FakeModel)
     monkeypatch.setattr(agent_support, "create_deep_agent", fake_create_deep_agent)
     monkeypatch.setattr(agent_support, "create_agent_session", fake_create_session)
-    monkeypatch.setattr(agent_support, "SysOperationRail", fake_rail)
     monkeypatch.setattr(agent_support, "SecurityRail", fake_security_rail)
     monkeypatch.setattr(agent_support, "ToolCallResilienceRail", fake_resilience_rail)
     monkeypatch.setattr(agent_support, "_make_context_processor_rail", fake_context_processor_rail)
@@ -807,7 +856,7 @@ async def test_run_personal_context_agent_creates_unique_session_and_returns_tex
     assert session.session_id.startswith("personal-context-agent-")
     assert len(session.session_id) > len("personal-context-agent-")
     assert [event[0] for event in events].count("clear_session") == 1
-    assert [event[0] for event in events].count("rail_uninit") == 1
+    assert [event[0] for event in events].count("tool_teardown") == 1
     assert [event[0] for event in events].count("context_processor_rail_uninit") == 1
     assert [event[0] for event in events].count("security_rail_uninit") == 1
     assert [event[0] for event in events].count("resilience_rail_uninit") == 1
@@ -1411,7 +1460,7 @@ async def test_run_personal_context_agent_always_cleans_session_and_rail_on_disk
         )
 
     assert "clear_session" in [event[0] for event in events]
-    assert "rail_uninit" in [event[0] for event in events]
+    assert "tool_teardown" in [event[0] for event in events]
     assert [event[0] for event in events].count("security_rail_uninit") == 1
     assert [event[0] for event in events].count("resilience_rail_uninit") == 1
     assert len(created["agents"][0].invocations) == 1
@@ -1445,16 +1494,19 @@ async def test_run_personal_context_agent_configures_explicit_sandbox(
         validate_result=lambda _text, _path: [],
     )
 
-    rail_kwargs = next(event[1] for event in events if event[0] == "rail")
-    assert rail_kwargs["with_code_tool"] is False
-    assert rail_kwargs["with_shell_tools"] is False
-    assert rail_kwargs["read_only"] is False
     factory_kwargs = next(event[1] for event in events if event[0] == "create_agent")
     assert factory_kwargs["rails"] == [
-        created["rails"][0],
         created["processor_rails"][0],
         created["security_rails"][0],
         created["resilience_rails"][0],
+    ]
+    assert [tool.card.name for tool in factory_kwargs["tools"]] == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "list_files",
+        "grep",
     ]
     system_prompt = factory_kwargs["system_prompt"]
     assert "inputs" in system_prompt
@@ -1489,5 +1541,5 @@ async def test_run_personal_context_agent_configures_explicit_sandbox(
     work_config = sys_card["work_config"]
     assert work_config["restrict_to_sandbox"] is True
     assert work_config["sandbox_root"] == [str(sandbox.resolve())]
-    assert work_config["shell_allowlist"] == ["rg", "grep", "Select-String"]
+    assert work_config["shell_allowlist"] == []
     assert work_config["dangerous_patterns"] == []
