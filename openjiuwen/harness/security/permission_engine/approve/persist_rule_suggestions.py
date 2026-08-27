@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Permission suggestion builders for allow_always persistence."""
+"""HITL persist-rule suggestion builders for allow_always / session remember."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ import shlex
 from dataclasses import dataclass
 from typing import Any
 
-from openjiuwen.harness.security.shell_ast import (
+from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
+    canonicalize_shell_command_for_permission,
+)
+from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import (
     ShellAstParseResult,
     ShellSubcommand,
     parse_shell_for_permission,
@@ -17,7 +20,9 @@ from openjiuwen.harness.security.shell_ast import (
 
 logger = logging.getLogger(__name__)
 
-_SHELL_SUGGESTION_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_SUGGESTION_TOOLS = frozenset({
+    "bash", "powershell", "mcp_exec_command", "create_terminal",
+})
 _PATH_SUGGESTION_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",
@@ -52,8 +57,8 @@ def build_permission_suggestions(
             return []
         return build_shell_permission_suggestions(
             tool_name,
-            command,
-            shell_ast_result=shell_ast_result,
+            canonicalize_shell_command_for_permission(command),
+            shell_ast_result=None,
         )
     if tool_name in _PATH_SUGGESTION_TOOLS:
         suggestion = _build_path_permission_suggestion(tool_name, tool_args)
@@ -67,7 +72,8 @@ def build_shell_permission_suggestions(
         *,
         shell_ast_result: ShellAstParseResult | None = None,
 ) -> list[PermissionSuggestion]:
-    shell_ast_result = shell_ast_result or parse_shell_for_permission(command)
+    command = canonicalize_shell_command_for_permission(command)
+    shell_ast_result = parse_shell_for_permission(command)
     flags = shell_ast_result.flags
 
     if shell_ast_result.kind == "too_complex":

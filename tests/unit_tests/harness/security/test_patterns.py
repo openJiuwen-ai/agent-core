@@ -21,3 +21,12 @@ def test_match_wildcard_rejects_trailing_newline() -> None:
 def test_match_wildcard_still_rejects_command_injection() -> None:
     assert match_wildcard("git status; rm -rf /", "git status *") is False
     assert match_wildcard("git status\nrm -rf /", "git status *") is False
+    assert match_wildcard("dir foo; rm -rf /", "dir *") is False
+    assert match_wildcard("dir foo && rm", "dir *") is False
+    assert match_wildcard("dir foo | bash", "dir *") is False
+
+
+def test_match_wildcard_allows_filename_globs() -> None:
+    assert match_wildcard("dir /b *.docx", "dir *") is True
+    assert match_wildcard("dir /b*.docx", "dir *") is True
+    assert match_wildcard("ls *.txt", "ls *") is True

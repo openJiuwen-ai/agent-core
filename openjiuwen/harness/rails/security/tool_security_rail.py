@@ -7,6 +7,7 @@ for ASK decisions using the built-in interrupt rail flow.
 """
 from __future__ import annotations
 
+import inspect
 import json
 from copy import deepcopy
 
@@ -22,17 +23,17 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.security.core import PermissionEngine
-from openjiuwen.harness.security.host import (
+from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
     PermissionSceneHookInput,
     ToolPermissionHost,
 )
-from openjiuwen.harness.security.models import (
+from openjiuwen.harness.security.permission_engine.models import (
     PermissionConfirmResponse,
     PermissionLevel,
     PermissionResult,
 )
-from openjiuwen.harness.security.models import PermissionsSection
+from openjiuwen.harness.security.permission_engine.models import PermissionsSection
 from openjiuwen.harness.security.patterns import (
     merge_permission_allow_rule_into_permissions,
     write_permissions_section_to_agent_config_yaml,
@@ -44,6 +45,7 @@ TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
     "paid_search": "mcp_paid_search",
     "fetch_webpage": "mcp_fetch_webpage",
+    "web_fetch_webpage": "mcp_fetch_webpage",
     "exec_command": "mcp_exec_command",
 }
 
@@ -155,21 +157,24 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         session: Any,
         auto_confirm_key: str,
         persisted: bool,
+        permanent: bool = False,
     ) -> bool:
         """Whether to store auto-confirm in session state.
 
-        Session auto-confirm is stored when:
-        - ``approved`` and ``auto_confirm`` are both True (user wants to remember)
-        - A valid session and auto_confirm_key exist
-        - The rule has NOT already been persisted to disk (persisted rules are
-          loaded by PermissionEngine at session start, so no need for session-level
-          duplication)
+        Store when the user wants to remember (``approved`` + ``auto_confirm``)
+        and a valid session key exists.
 
-        ``persist_allow`` is a separate decision: when True, the allow rule is also
-        written to disk (via ``_persist_allow_always``); when False, only the
-        session-level auto_confirm is stored.
+        Skip only when a **permanent** (disk) rule was actually persisted:
+        those rules are reloaded from the host snapshot on the next check.
+        Session-overlay persist must still store auto-confirm, because
+        ``first_check`` reloads the disk snapshot and would otherwise drop
+        in-memory session rules.
         """
-        return bool(approved and auto_confirm and session is not None and auto_confirm_key and not persisted)
+        if not (approved and auto_confirm and session is not None and auto_confirm_key):
+            return False
+        if permanent and persisted:
+            return False
+        return True
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
@@ -284,19 +289,56 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return []
 
     def _persist_allow_always(
-        self, normalized_name: str, tool_args: dict
+        self,
+        normalized_name: str,
+        tool_args: dict,
+        *,
+        session_id: str | None = None,
     ) -> bool:
-        """工具级「始终允许」与 file_guard 路径白名单：先合并磁盘，再写盘。"""
+        """永久允许：merge 后走 ``persist_allow_rule``（无 Host 则写 YAML）。"""
+        return self._persist_merged_allow(
+            normalized_name,
+            tool_args,
+            persist_hook=self._host.persist_allow_rule,
+            write_yaml_fallback=True,
+            session_id=session_id,
+        )
+
+    def _persist_session_allow(
+        self,
+        normalized_name: str,
+        tool_args: dict,
+        *,
+        session_id: str | None = None,
+    ) -> bool:
+        """会话内记住：merge 后走 ``persist_session_allow_rule``（无钩子则只更新内存）。"""
+        return self._persist_merged_allow(
+            normalized_name,
+            tool_args,
+            persist_hook=self._host.persist_session_allow_rule,
+            write_yaml_fallback=False,
+            session_id=session_id,
+        )
+
+    def _persist_merged_allow(
+        self,
+        normalized_name: str,
+        tool_args: dict,
+        *,
+        persist_hook: Any,
+        write_yaml_fallback: bool,
+        session_id: str | None = None,
+    ) -> bool:
+        """工具级记住与 file_guard 路径白名单：先合并快照，再写盘。"""
         from openjiuwen.harness.security.patterns import merge_file_guard_access_allows
 
-        # Read from on-disk snapshot first (via host callback) so that
-        # entries the user already deleted from config.yaml are NOT
-        # restored.  Fall back to engine.config only when snapshot is
-        # unavailable.
         base_cfg: PermissionsSection | None = None
         if self._host.get_permissions_snapshot is not None:
             try:
-                snap = self._host.get_permissions_snapshot()
+                snap = self._invoke_permissions_hook(
+                    self._host.get_permissions_snapshot,
+                    session_id=session_id,
+                )
                 if isinstance(snap, dict):
                     base_cfg = cast(PermissionsSection, snap)
             except Exception:
@@ -322,10 +364,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         prev_cfg = deepcopy(self._engine.config)
         self.update_config(cfg)
 
-        if self._host.persist_allow_rule is not None:
+        if persist_hook is not None:
             try:
                 persisted = bool(
-                    self._host.persist_allow_rule(cast(dict[str, Any], cfg))
+                    self._invoke_permissions_hook(
+                        persist_hook,
+                        cast(dict[str, Any], cfg),
+                        session_id=session_id,
+                    )
                 )
             except Exception:
                 logger.warning(
@@ -335,16 +381,18 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 persisted = False
             if not persisted:
                 self.update_config(prev_cfg)
-        else:
-            if not write_permissions_section_to_agent_config_yaml(
-                self._host.permission_yaml_path,
-                cfg,
-            ):
-                self.update_config(prev_cfg)
-                persisted = False
-            else:
-                persisted = True
-        return persisted
+            return persisted
+
+        if not write_yaml_fallback:
+            return True
+
+        if not write_permissions_section_to_agent_config_yaml(
+            self._host.permission_yaml_path,
+            cfg,
+        ):
+            self.update_config(prev_cfg)
+            return False
+        return True
 
     async def resolve_interrupt(
         self,
@@ -357,6 +405,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         normalized_name = self._normalize_tool_name(tool_name)
         tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
+        session_id = self._resolve_session_id(ctx)
 
         logger.info(
             "[PermissionEngine] permission.rail.resolve tool=%s normalized=%s "
@@ -400,7 +449,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             fresh: dict | None = None
             if self._host.get_permissions_snapshot is not None:
                 try:
-                    snap = self._host.get_permissions_snapshot()
+                    snap = self._invoke_permissions_hook(
+                        self._host.get_permissions_snapshot,
+                        session_id=session_id,
+                    )
                     fresh = snap if isinstance(snap, dict) else None
                 except Exception:
                     logger.debug(
@@ -478,8 +530,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         )
                     confirm_payload = ext_out
                     persisted = False
-                    if confirm_payload.approved and confirm_payload.auto_confirm and confirm_payload.persist_allow:
-                        persisted = self._persist_allow_always(normalized_name, tool_args)
+                    if confirm_payload.wants_permanent_persist():
+                        persisted = self._persist_allow_always(
+                            normalized_name, tool_args, session_id=session_id
+                        )
+                    elif confirm_payload.wants_session_persist():
+                        persisted = self._persist_session_allow(
+                            normalized_name, tool_args, session_id=session_id
+                        )
                     logger.info(
                         "[PermissionEngine] permission.persist.result tool=%s "
                         "confirm_path=hosted persisted=%s persist_allow=%s",
@@ -493,11 +551,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         session=ctx.session,
                         auto_confirm_key=auto_confirm_key,
                         persisted=persisted,
+                        permanent=confirm_payload.wants_permanent_persist(),
                     ):
                         self._store_auto_confirm(ctx, auto_confirm_key)
                     if confirm_payload.approved:
                         decision = (
-                            "allow_always_persist" if confirm_payload.persist_allow
+                            "allow_always_persist" if confirm_payload.wants_permanent_persist()
                             else "allow_always_session" if confirm_payload.auto_confirm
                             else "allow_once"
                         )
@@ -528,24 +587,29 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
+                metadata=self._build_interrupt_metadata(tool_call, result),
             ))
 
         logger.info("[PermissionEngine] permission.rail.user_response tool=%s", tool_name)
         payload = self.parse_confirm_payload(user_input)
         if payload is None:
-            message = self._build_message(tool_call, PermissionResult(
+            invalid = PermissionResult(
                 permission=PermissionLevel.ASK,
                 matched_rule=None,
                 reason="Invalid confirmation payload",
-            ))
+            )
+            message = self._build_message(tool_call, invalid)
             return self.interrupt(InterruptRequest(
                 message=message,
                 payload_schema=ConfirmPayload.to_schema(),
+                metadata=self._build_interrupt_metadata(tool_call, invalid),
             ))
 
         persisted = False
-        if payload.approved and payload.auto_confirm and payload.persist_allow:
-            persisted = self._persist_allow_always(normalized_name, tool_args)
+        if payload.wants_permanent_persist():
+            persisted = self._persist_allow_always(
+                normalized_name, tool_args, session_id=session_id
+            )
             logger.info(
                 "[PermissionEngine] permission.persist.result tool=%s confirm_path=%s persisted=%s persist_allow=%s",
                 tool_name,
@@ -553,11 +617,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 persisted,
                 payload.persist_allow,
             )
-        elif payload.approved and payload.auto_confirm and not payload.persist_allow:
+        elif payload.wants_session_persist():
+            persisted = self._persist_session_allow(
+                normalized_name, tool_args, session_id=session_id
+            )
             logger.info(
-                "[PermissionEngine] permission.session_only tool=%s confirm_path=%s auto_confirm_key=%s",
+                "[PermissionEngine] permission.session_persist.result tool=%s "
+                "confirm_path=%s persisted=%s auto_confirm_key=%s",
                 tool_name,
                 self._confirm_path_label(),
+                persisted,
                 auto_confirm_key,
             )
 
@@ -567,12 +636,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             session=ctx.session,
             auto_confirm_key=auto_confirm_key,
             persisted=persisted,
+            permanent=payload.wants_permanent_persist(),
         ):
             self._store_auto_confirm(ctx, auto_confirm_key)
 
         if payload.approved:
             decision = (
-                "allow_always_persist" if payload.persist_allow
+                "allow_always_persist" if payload.wants_permanent_persist()
                 else "allow_always_session" if payload.auto_confirm
                 else "allow_once"
             )
@@ -673,15 +743,46 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return None
 
     @staticmethod
+    def _hook_accepts_keyword(hook: Any, name: str) -> bool:
+        try:
+            params = inspect.signature(hook).parameters
+        except (TypeError, ValueError):
+            return False
+        if name in params:
+            return True
+        return any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+
+    @staticmethod
+    def _invoke_permissions_hook(
+        hook: Any,
+        *args: Any,
+        session_id: str | None = None,
+    ) -> Any:
+        """Call a host callback, forwarding session_id when the hook accepts it."""
+        if session_id and PermissionInterruptRail._hook_accepts_keyword(
+            hook, "session_id"
+        ):
+            return hook(*args, session_id=session_id)
+        return hook(*args)
+
+    @staticmethod
     def _resolve_session_id(ctx: AgentCallbackContext) -> str | None:
         session = getattr(ctx, "session", None)
-        if session is None:
-            return None
-
-        for attr_name in ("get_session_id", "session_id"):
-            value = PermissionInterruptRail._read_session_attr_value(session, attr_name)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        if session is not None:
+            for attr_name in ("get_session_id", "session_id"):
+                value = PermissionInterruptRail._read_session_attr_value(
+                    session, attr_name
+                )
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        extra = getattr(ctx, "extra", None)
+        if isinstance(extra, dict):
+            for key in ("session_id", "conversation_id"):
+                value = extra.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         return None
 
     @staticmethod
@@ -696,27 +797,35 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_call: Optional[ToolCall],
         result: PermissionResult,
     ) -> str:
+        from openjiuwen.harness.security.permission_engine.approve.ask_presentation import (
+            build_permission_ask_presentation,
+            render_ask_presentation_message,
+        )
+
         tool_name = tool_call.name if tool_call else ""
         tool_args = self.parse_tool_args(tool_call)
+        presentation = build_permission_ask_presentation(tool_name, tool_args, result)
+        hint = self._build_always_allow_hint(tool_call)
+        return render_ask_presentation_message(presentation, always_allow_hint=hint)
 
-        parts = [
-            f"**工具 `{tool_name}` 需要授权才能执行**\n\n",
-            "请确认是否允许该操作。\n\n",
-        ]
+    def _build_interrupt_metadata(
+        self,
+        tool_call: Optional[ToolCall],
+        result: PermissionResult,
+    ) -> dict:
+        from openjiuwen.harness.security.permission_engine.approve.ask_presentation import (
+            build_permission_ask_presentation,
+        )
 
-        args_preview = self.format_args_preview(tool_args)
-        if args_preview and args_preview != "{}":
-            parts.append(f"参数：\n```json\n{args_preview}\n```\n")
-
-        parts.append(f"\n匹配规则：`{result.matched_rule or 'N/A'}`")
-
-        external_paths = getattr(result, "external_paths", None) or []
-        if external_paths:
-            parts.append(f"\n\n**外部路径：** `{', '.join(external_paths)}`")
-
-        parts.append(self._build_always_allow_hint(tool_call))
-
-        return "".join(parts)
+        tool_name = tool_call.name if tool_call else ""
+        tool_args = self.parse_tool_args(tool_call)
+        presentation = build_permission_ask_presentation(tool_name, tool_args, result)
+        return {
+            "ask_category": presentation.category,
+            "ask_title": presentation.title,
+            "ask_summary": presentation.summary,
+            "matched_rule": result.matched_rule or "",
+        }
 
     def _build_always_allow_hint(self, tool_call: Optional[ToolCall]) -> str:
         if tool_call is None:
