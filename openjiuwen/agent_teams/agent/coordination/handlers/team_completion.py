@@ -117,6 +117,20 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             return
 
         snapshot = await team_backend.is_team_completed()
+        # Emergency rollback: when ``TeamSpec.enable_taskless_completion`` is
+        # False, an empty task board must never auto-complete — skip the
+        # publish boundary and faithfully restore the pre-fix hang.
+        # ``is_team_completed`` above still ran and returned its snapshot (the
+        # toggle gates only this publish boundary, not the snapshot itself).
+        # When no team spec is wired, fall through to the default (True)
+        # publish path rather than derefing None.
+        team_spec = self._blueprint.team_spec
+        if snapshot is not None and snapshot.task_count == 0:
+            if team_spec is not None and not team_spec.enable_taskless_completion:
+                # Keep falling-edge re-arm consistent; the rising-edge guard
+                # stays disarmed so a later toggle-back-to-True tick can emit.
+                self._team_completed_emitted = False
+                return
         if snapshot is None:
             # Falling edge: re-arm so the next rising edge emits again.
             self._team_completed_emitted = False

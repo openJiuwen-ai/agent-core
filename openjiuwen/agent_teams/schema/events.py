@@ -191,11 +191,12 @@ class TeamStandbyEvent(BaseEventMessage):
 class TeamCompletedEvent(BaseEventMessage):
     """Event published when the whole team has reached a completed state.
 
-    All three conditions hold at once: every task is terminal, every member
-    (including the leader) is in a settled status, and no direct
-    (point-to-point) message is left unread by any member. Broadcast
-    messages are excluded from the unread check. Team-scoped — member_name
-    stays at its default None.
+    All three conditions hold at once: no active task is left (an empty
+    board is valid; when tasks exist they must all be terminal), every
+    member (including the leader) is in a settled status, and no message
+    (direct or broadcast) is left unread by any reachable member; messages
+    to the ``user`` pseudo-member and to SHUTDOWN members are auto-read and
+    do not block. Team-scoped — member_name stays at its default None.
     """
     member_count: int = Field(..., description="Total team member count at completion time")
     task_count: int = Field(..., description="Total task count at completion time")

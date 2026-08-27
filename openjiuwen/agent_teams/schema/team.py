@@ -47,9 +47,11 @@ class MemberOpResult:
 class TeamCompletionSnapshot:
     """Counts captured the moment a team satisfies all completion conditions.
 
-    Returned by ``TeamBackend.is_team_completed`` when every member is
-    settled, every task is terminal, and no message is left unread. Purely
-    informational — consumers re-query the backend if they need detail.
+    Returned by ``TeamBackend.is_team_completed``, the single source of
+    truth for round completion, when no active task is left (an empty board
+    is valid; when tasks exist they must all be terminal), every member is
+    settled, and no message is left unread. Purely informational --
+    consumers re-query the backend if they need detail.
     """
 
     member_count: int
@@ -363,6 +365,19 @@ class TeamSpec(BaseModel):
 
     Carried on the runtime spec so external CLI member MCP tools expose the
     same plan/build-mode tool set described by the spawned system prompt.
+    """
+    enable_taskless_completion: bool = True
+    """Emergency-rollback switch for the taskless-completion publish gate.
+
+    Defaults to ``True`` (fixed behavior): an empty task board with all
+    members idle completes the team and publishes ``TEAM_COMPLETED``,
+    as restored by the taskless-completion fix. Set to ``False`` to make
+    ``TeamCompletionHandler.on_poll_task`` skip that publish for empty-board
+    rounds, faithfully restoring the pre-fix hang for emergency use.
+
+    The toggle gates only the *publish boundary* in ``on_poll_task``;
+    ``TeamBackend.is_team_completed`` always returns the correct snapshot
+    regardless of this value (it never reads it).
     """
     metadata: dict = Field(default_factory=dict)
     model_pool: list[ModelPoolEntry] = Field(default_factory=list)
