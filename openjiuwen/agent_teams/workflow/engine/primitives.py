@@ -46,6 +46,7 @@ from .errors import BudgetExhausted, WorkflowAborted, WorkflowError
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
+from .verify import Reviewer, SCORE_SCHEMA, VERDICT_SCHEMA, VerifyResult, VerifyVote, settle_verify_tally
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -645,6 +646,157 @@ def _make_record(spec: _JournalRecordInput) -> dict:
         "result": payload,
         "raw_text": spec.raw_text,
     }
+
+
+# ─────────────────────────── verify ───────────────────────────
+def _reviewer_call(i: int, reviewer: Reviewer, *, base: str, phase: str | None, options: dict | None):
+    """Build the zero-arg thunk that runs one reviewer as a structured ``agent()``.
+
+    A verdict reviewer votes against ``VERDICT_SCHEMA`` (pass/fail + feedback),
+    a score reviewer against ``SCORE_SCHEMA`` (0-1 + feedback). Reviewer-level
+    options override the ``verify()``-level ones. The thunk is meant for
+    :func:`parallel`, which gives each reviewer its own structural journal key.
+    """
+    schema = VERDICT_SCHEMA if reviewer.kind == "verdict" else SCORE_SCHEMA
+    rlabel = reviewer.label or f"{base}-{i}"
+    merged = {**(options or {}), **(reviewer.options or {})} or None
+
+    async def _call():
+        return await agent(
+            reviewer.prompt,
+            label=rlabel,
+            phase=phase,
+            schema=schema,
+            options=merged,
+        )
+
+    return _call
+
+
+def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[VerifyVote], dict]:
+    """Fold each reviewer's raw vote (or ``None`` when it did not vote) into votes + a tally.
+
+    A ``None`` raw (``agent()`` failed / skipped) marks the reviewer as
+    not-voted: it contributes its pool's *total* but not its *voted* count, so
+    ``settle_verify_tally`` yields undecided rather than a silent pass.
+    """
+    votes: list[VerifyVote] = []
+    verdict_total = verdict_voted = verdict_fail = 0
+    score_total = score_voted = 0
+    score_sum = 0.0
+
+    for reviewer, raw in zip(reviewers, raws):
+        if reviewer.kind == "verdict":
+            verdict_total += 1
+            if raw is None:
+                votes.append(VerifyVote(kind="verdict"))
+                continue
+            decision = raw.get("decision")
+            fail = decision == "fail"
+            if decision in ("pass", "fail"):
+                verdict_voted += 1
+                if fail:
+                    verdict_fail += 1
+                decision_pass = not fail
+            else:
+                decision_pass = None  # malformed decision: not counted, vote reads undecided
+            votes.append(VerifyVote(kind="verdict", decision=decision_pass, feedback=raw.get("feedback", "")))
+        else:
+            score_total += 1
+            if raw is None:
+                votes.append(VerifyVote(kind="score"))
+                continue
+            score = raw.get("score")
+            if isinstance(score, (int, float)):
+                score_voted += 1
+                score_sum += float(score)
+            else:
+                score = None  # malformed score: not counted, vote reads undecided
+            votes.append(VerifyVote(kind="score", score=score, feedback=raw.get("feedback", "")))
+
+    tally = {
+        "verdict_total": verdict_total,
+        "verdict_voted": verdict_voted,
+        "verdict_fail_count": verdict_fail,
+        "score_count": score_total,
+        "score_voted": score_voted,
+        "score_avg": (score_sum / score_voted) if score_voted else None,
+    }
+    return votes, tally
+
+
+def _aggregate_feedback(reviewers: Sequence[Reviewer], votes: Sequence[VerifyVote]) -> str:
+    """Join every reviewer's non-empty feedback into an attributed block for rework.
+
+    Mirrors the scheduled ``format_fail_feedback`` shape (``- reviewer: text``),
+    attributing each line by the reviewer's label (falling back to its kind).
+    """
+    lines = []
+    for reviewer, vote in zip(reviewers, votes):
+        fb = (vote.feedback or "").strip()
+        if not fb:
+            continue
+        name = reviewer.label or reviewer.kind
+        lines.append(f"- {name}: {fb}")
+    return "\n".join(lines)
+
+
+async def verify(
+    reviewers: Sequence[Reviewer],
+    *,
+    threshold: float = 0.85,
+    label: str | None = None,
+    phase: str | None = None,
+    options: dict | None = None,
+) -> VerifyResult:
+    """Run one review round over ``reviewers`` and return a structured verdict.
+
+    Each reviewer is a single structured ``agent()`` call fanned out via
+    :func:`parallel` (each vote gets its own journal key, so resume replays the
+    reviewer calls). Votes are folded by :func:`_collect` and judged by
+    ``settle_verify_tally``.
+
+    This is a **single-shot** round: it does not wait on or drive a rework loop.
+    A reviewer whose ``agent()`` returned ``None`` counts as not-voted, so the
+    round returns ``verdict=None`` (undecided) unless every reviewer of every
+    pool has voted. An empty ``reviewers`` list is rejected.
+
+    Args:
+        reviewers: The reviewers to run. Must be non-empty.
+        threshold: Minimum average score for the score pool to pass.
+        label: Base label for reviewer progress events (fallback name prefix).
+        phase: Phase attributed to every reviewer ``agent()`` call.
+        options: Default ``options`` bag applied to every reviewer (reviewer-level
+            options take precedence).
+
+    Returns:
+        A ``VerifyResult`` with the round verdict, per-reviewer votes and the
+        aggregated review feedback.
+
+    Raises:
+        WorkflowError: If ``reviewers`` is empty.
+    """
+    rt = _rt.get()
+    reviewers = list(reviewers)
+    if not reviewers:
+        raise WorkflowError("verify() requires at least one reviewer")
+    base = label or "verify"
+
+    _emit_log(rt, f"verify: dispatching {len(reviewers)} reviewer(s)")
+    raws = await parallel(
+        [_reviewer_call(i, r, base=base, phase=phase, options=options) for i, r in enumerate(reviewers)]
+    )
+
+    votes, tally = _collect(reviewers, raws)
+    verdict = settle_verify_tally(tally, threshold)
+    result = VerifyResult(
+        verdict=verdict,
+        votes=votes,
+        feedback=_aggregate_feedback(reviewers, votes),
+        passed=verdict == "pass",
+    )
+    _emit_log(rt, f"verify: verdict={verdict} (threshold={threshold})")
+    return result
 
 
 # ─────────────────────── stateful sessions ───────────────────────

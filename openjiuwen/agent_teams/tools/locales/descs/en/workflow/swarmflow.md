@@ -80,6 +80,7 @@ async def run(args):
     - `timeout` the per-call timeout in seconds for this worker.
     - `isolation='worktree'`: run the worker in a fresh git worktree, **EXPENSIVE** (~200-500ms setup + disk per worker), use **ONLY** when workers mutate files in parallel and would otherwise conflict; the worktree is auto-removed if unchanged.
     - `agent_type`: use a named specialist subagent (e.g. a class of teammate on the team) instead of the default worker, resolved from the same registry as the team; composes with `schema` (the specialist's system prompt gets a structured-output instruction appended). (Interface in place, execution coming.)
+- `await verify(reviewers, *, threshold=0.85, label=None, phase=None, options=None)` — run one **multi-reviewer acceptance round** on a deliverable and return a structured `VerifyResult` (`{verdict: "pass"|"fail"|None, votes, feedback, passed}`). Each reviewer is a parallel structured `agent()`: `verdict`-kind votes pass/fail (one-vote veto), `score`-kind votes 0–1 (the average must reach `threshold`). A reviewer that did not vote → `verdict=None` (undecided); the script decides whether to retry or give up. **Single-shot, no auto-rework** — return `feedback` so the script can have the executor redo the deliverable and `verify()` again. **Recommended: build reviewers with the business helper `build_reviewers(deliverable, specs, ...)`** from a `type` (`verifier` / `inspector` / `challenger`) plus the deliverable (inline text or file paths) — fewer tokens, consistent prompts, automatic type→kind mapping; only construct `Reviewer{kind, prompt, label, options}` directly for a fully custom prompt (see "Verify (verify)").
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` — a **stateful** multi-turn agent that remembers across turns; the second turn need not restate the first. `notify=True` pushes one-way, returns `None`.
 - `await s.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` — derive an **independent branch** from an `agent_session` (`fork_mode` is one of five): `full` inherits everything; `before`/`after` keep the turns before / from the N-th round on; `keep_before_compact_after`/`keep_after_compact_before` keep one side and summarise the other. `keep_rounds` is in **rounds** (each `send()` is one round): **required for every mode but `full`** (omitting it raises — no truncation without a split point); a value beyond the parent's actual round count degrades to full-context with a warning, not an error. The parent's context is frozen at the fork call — the two lines are fully independent afterwards; a child can keep `send`ing and can `fork` again (chained). `human_session` does not support `fork`.
   - **Chained-fork rule**: **do not `fork` a forked child that has not sent a message yet** — it degrades to a mirror fallback (ToolMessage lost). Every session you `fork` must have `send`t at least once; to derive from a parent's earlier state, use that parent's `fork_mode` + `keep_rounds` (e.g. `before`/`after`) instead of forking an unsent child and re-forking it.
@@ -139,9 +140,28 @@ that middle `transform` needs no barrier — rewrite as a pipeline with the tran
 - `resume_id` = a prior run's **run_id** (the handle this tool returns). On resume it is **content-addressed**: unchanged `agent()` calls reuse cached results instantly; an upstream prompt change flips the downstream signature and re-runs it automatically (no manual marking). **Same script + same args → 100% cache hit.**
 - Maintained by the async-tool execution framework via a content-addressed journal (same model as the reference tool's runId). (Execution coming.)
 
+## Verify (verify): multi-reviewer gating of a deliverable
+
+When you need quality gating on your own deliverable, use `verify()` instead of hand-writing "spawn N agents, collect votes, judge yourself" boilerplate, and collects per-vote `feedback` for a rework pass.
+
+**When to use `verify()` (not a bare `agent`):** any work that *judges a deliverable against acceptance criteria* — including **compiling, running, and checking each criterion** — is a reviewer's job (especially a `verifier`); use `verify()` rather than hand-writing one `agent(schema=...)` to collect an unstructured result. Every reviewer is an ordinary worker (inheriting the worker's tools — `bash` / `read_file` / `write_file`), so any reviewer can compile, run, and test — hand acceptance judging to a reviewer and `verify()` collects the votes and returns a structured `verdict` (semantics in the `verify` primitive above). **Build reviewers with `build_reviewers(deliverable, specs, ...)` (recommended)** — fewer tokens, prompts from the `swarmflow_reviewer_*` templates stay consistent, and type→kind is mapped for you; only construct `Reviewer` directly for a fully custom prompt. **A bare `agent` is for *producing* content (writing code, retrieval, summarising); judging whether a deliverable meets the bar goes through `verify()`.** See "Code skeletons" below for runnable examples.
+
+**Reviewer types and when to use each (composition guidance)**: `verify()` does not pick your reviewer composition for you — the script decides it by the deliverable's importance and openness. Baseline:
+
+| type | When to use | How many |
+|---|---|---|
+| `verifier` | Almost any deliverable worth gating; the basic quality guarantee; check each acceptance-criteria item | ≥1, the backbone; **verify / test-type deliverables need just 1** |
+| `inspector` | Key deliverables needing multi-dimensional scoring / consumed downstream, high norms & consistency requirements | by criticality; skip for light deliverables |
+| `challenger` | Deliverables with no deterministic criteria — open / design / planning / research, decisive or policy-level impact downstream | required for those; skip for verify / test-type deliverables |
+
+Composition baseline: **light gate** = 1 `verifier`; **key deliverable** = `verifier` + `inspector` (multiple inspectors can split dimensions); **open / high-risk design** = `verifier` + `challenger` (add `inspector` if needed). A script may call `verify()` repeatedly with different compositions for deliverables at different stages.
+
+**Two gates**: `verifier` is the **minimum bar** — it only asks "are the acceptance criteria met" (pass/fail). `inspector` is the **quality bar** — it scores each dimension and fails unless the average reaches 0.85, catching deliverables that are **functionally complete but mediocre** (e.g. code that compiles but is unmaintainable). For **key final / downstream-consumed deliverables**, `verifier` alone is not enough — add `inspector` to enforce quality; for one-off, light, disposable intermediate artifacts, `verifier` alone suffices.
+
+**Default composition**: **design documents / architecture / final deliverables** → `verifier` + `inspector` (functional floor + enforced quality — this is the default, don't use `verifier` alone); **implementation code** → `verifier` (compile/run acceptance) plus `inspector` if consumed downstream; **open-ended design / no deterministic bar** → add `challenger` on top. When unsure, default to `verifier` + `inspector`.
+
 ## Orchestration pattern library (compose by scale)
-- **Adversarial verify**: spawn N independent skeptics per finding, each told to **refute**; kill it if a majority refute — stops plausible-but-wrong findings.
-- **Perspective-diverse verify**: give each verifier a distinct lens (correctness / security / performance / does-it-reproduce) instead of N identical refuters.
+- **Verify**: run a multi-reviewer round on a deliverable — `verifier` checks "does it meet the bar" (one-vote veto), `inspector` scores "how good it is" (avg ≥ 0.85), `challenger` finds "unseen blind spots" (adversarial); compose by deliverable nature (see "Verify (verify)").
 - **Judge panel**: generate N independent attempts from different angles → score in parallel → synthesize from the winner, grafting the runners-up's best ideas.
 - **Loop-until-count**: accumulate to a target — `while len(bugs) < 10: ...`, pushing fresh findings each round.
 - **Loop-until-dry**: for unknown-size discovery, keep spawning finders until K consecutive rounds add nothing new (simple counters miss the tail).
@@ -153,34 +173,38 @@ that middle `transform` needs no barrier — rewrite as a pipeline with the tran
 These patterns are **not exhaustive** — compose novel harnesses when the task calls for it (tournament brackets, self-repair loops, staged escalation, and so on).
 
 ## Code skeletons (real swarmflow API)
-Multi-dimension review — pipeline by default, each dimension verifies the moment its review completes ('bugs' verifies while 'perf' is still reviewing, no wasted wall-clock):
+
+**Adversarial verify (pipeline by default)** — review several dimensions in parallel ('bugs' / 'perf'); the moment a dimension's review completes, run a `verify()` one-vote-veto round over its findings ('bugs' verifies while 'perf' is still reviewing, no wasted wall-clock). **Build reviewers with `build_reviewers` (recommended)**: a single `challenger` is the adversarial form (any reviewer voting fail drops the finding); for a multi-perspective pass, put several `challenger` specs with different `instruction`s (see the "Multi-perspective review + loop-until-dry" example below):
 
 ```python
+# from swarmflow import agent, parallel, compact, verify
+# from openjiuwen.agent_teams.workflow.review import build_reviewers
+
 async def run(args):
     dims = [{"key": "bugs", "prompt": "find bugs"}, {"key": "perf", "prompt": "find perf issues"}]
 
     async def review(_prev, d, _i):
         return await agent(d["prompt"], label=f"review:{d['key']}", phase="Review", schema=FINDINGS)
 
-    async def verify(rev, _d, _i):
+    async def adjudicate(rev, _d, _i):              # use verify() + build_reviewers to judge each finding (one-vote veto)
         findings = rev["findings"] if rev else []
-        return await parallel([
-            (lambda f=f: agent(f"Adversarially verify: {f['title']}", phase="Verify", schema=VERDICT))
-            for f in findings
-        ])
+        if not findings:
+            return []
 
-    results = await pipeline(dims, review, verify)
-    return {"confirmed": [f for rev in compact(results) for f in compact(rev) if f.get("is_real")]}
+        async def judge(f):
+            r = await verify(build_reviewers(
+                f["title"],                          # the finding is the deliverable under review
+                [{"type": "challenger", "instruction": "Adversarially judge whether the finding is real and reproducible"}],
+            ))
+            return f if r.passed else None          # confirmed only if the adversarial review passes
+
+        return compact(await parallel([(lambda f=f: judge(f)) for f in findings]))
+
+    results = await pipeline(dims, review, adjudicate)
+    return {"confirmed": [f for rev in compact(results) for f in rev]}
 ```
 
-Barrier-is-correct — dedup all findings before expensive verification (genuinely needs them all at once):
-
-```python
-async def run(args):
-    raw = await parallel([(lambda d=d: agent(d, schema=FINDINGS)) for d in DIMENSIONS])
-    deduped = dedupe_by_file_and_line([f for r in compact(raw) for f in r["findings"]])  # plain code, not an agent
-    return await parallel([(lambda f=f: agent(verify_prompt(f), schema=VERDICT)) for f in deduped])
-```
+> **When you need a barrier (parallel) over pipeline**: to dedup / merge the *full* set of findings before expensive verification, you genuinely need them all at once — that is when you use `parallel` to collect → dedup in plain code → then `verify()` each. Otherwise don't reach for a barrier just because it "looks cleaner" (see "pipeline or parallel").
 
 Loop-until-count — accumulate to a target:
 
@@ -206,9 +230,12 @@ async def run(args):
     return {"bugs": bugs}
 ```
 
-Composing patterns — exhaustive review (find → dedup vs `seen` → diverse-lens panel → loop-until-dry). Keep spawning finders until two consecutive rounds add nothing; judge each fresh finding concurrently, each via 3 distinct lenses, confirm only on a majority. **Dedup against `seen`, not `confirmed`**, or judge-rejected findings reappear every round and it never converges. Note `parallel` can nest `parallel`:
+**Multi-perspective review + loop-until-dry (composing patterns)** — exhaustive review (find → dedup vs `seen` → diverse-lens review → loop-until-dry). Keep spawning finders until two consecutive rounds add nothing; judge each fresh finding concurrently via `verify()` + `build_reviewers` with a **multi-perspective** pass — three `challenger`s on `correctness`/`security`/`repro`, **one-vote veto** (any lens failing drops it; the single reviewer in the previous example is its degenerate form). **Dedup against `seen`, not `confirmed`**, or judge-rejected findings reappear every round and it never converges. Note `parallel` can nest `parallel`:
 
 ```python
+from swarmflow import agent, parallel, compact, verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
+
 async def run(args):
     seen, confirmed, dry = set(), [], 0
     while dry < 2:                                  # stop after two empty rounds
@@ -221,15 +248,65 @@ async def run(args):
         for b in fresh:
             seen.add(b["id"])
 
-        async def judge(bug):                       # per finding: 3 lenses vote concurrently, real if >= 2
-            votes = compact(await parallel([
-                (lambda lens=lens: agent(f'Judge "{bug["desc"]}" via the {lens} lens — real?', phase="Verify", schema=VERDICT))
-                for lens in ("correctness", "security", "repro")
-            ]))
-            return bug if sum(1 for v in votes if v.get("real")) >= 2 else None
+        async def judge(bug):                       # verify() + build_reviewers: one-vote veto across the 3 lenses
+            r = await verify(build_reviewers(
+                bug["desc"],                         # the finding is the deliverable under review
+                [
+                    {"type": "challenger", "instruction": "Judge via the correctness lens — is the finding real?"},
+                    {"type": "challenger", "instruction": "Judge via the security lens — is the finding real?"},
+                    {"type": "challenger", "instruction": "Judge via the repro lens — is the finding real?"},
+                ],
+            ))
+            return bug if r.passed else None        # confirmed only if all 3 lenses pass
 
         confirmed.extend(compact(await parallel([(lambda b=b: judge(b)) for b in fresh])))
     return {"confirmed": confirmed}
+```
+
+Write → compile / run acceptance (verifier builds on the spot) → package — when the deliverable is code, let a `verifier` compile and run and check the acceptance criteria, instead of writing a separate compile agent:
+
+```python
+from swarmflow import agent, verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
+
+async def run(args):
+    code = await agent("…write the code…", label="code")
+    r = await verify(build_reviewers(
+        [f"{PROJ}/src/main.cpp", f"{PROJ}/include/shape.h"],  # file paths; the verifier read_file's them
+        [{"type": "verifier", "instruction": "Compile and run: g++ must build it and the program output must match the acceptance criteria"}],
+        acceptance="…acceptance criteria…",
+        language="en",
+    ))
+    if not r.passed:
+        code = await agent(f"Fix the code per feedback:\n{r.feedback}\nOriginal code: {code}")
+        # verify() again (wrap in a loop until it passes or the round cap)
+    pkg = await agent("…package the zip…", label="package")
+    return {"code": code, "verify": r, "package": pkg}
+```
+
+Quality bar (inspector) — for **key final / downstream-consumed** deliverables, `verifier` (the minimum bar) alone is not enough; add `inspector` to score each dimension and pass only when the average reaches 0.85. Per-dimension scores are in `r.votes[i].score`, the reasons in `r.votes[i].feedback`:
+
+```python
+# from swarmflow import verify
+# from openjiuwen.agent_teams.workflow.review import build_reviewers
+
+async def run(args):
+    r = await verify(build_reviewers(
+        f"{PROJ}/src/main.cpp",                    # or a list of file paths
+        [{"type": "inspector", "instruction": (
+            "| Dimension | Weight | What to check |\n"
+            "| --- | --- | --- |\n"
+            "| Maintainability | 0.4 | Clear layering, consistent naming, no duplication |\n"
+            "| Extensibility | 0.3 | Adding types/logic without touching core |\n"
+            "| Robustness | 0.2 | Edge cases and error handling |\n"
+            "| Documentation | 0.1 | Comments on key logic, build notes |"
+        )}],
+        acceptance="…acceptance criteria…",
+    ))
+    if r.passed:
+        scores = [v.score for v in r.votes if v.score is not None]
+        log(f"quality {sum(scores)/len(scores):.2f} (per-dimension: {[(v.score, v.feedback[:40]) for v in r.votes]})")
+    # avg < 0.85 → r.passed=False; rework per r.feedback then verify() again
 ```
 
 Use this tool for multi-step orchestration where control flow should be **deterministic** (loops, conditionals, fan-out) rather than model-driven.
