@@ -569,7 +569,8 @@ class BrowserBookmarksFetchService(ContextFetchService):
                 yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
                 return
             for batch_index in range(0, len(candidates), _BATCH_SIZE):
-                chunk = candidates[batch_index : batch_index + _BATCH_SIZE]
+                end = batch_index + _BATCH_SIZE
+                chunk = candidates[batch_index:end]
                 items: list[RawChangeItem] = []
                 for candidate in chunk:
                     raw_bookmark = candidate.get("bookmark")

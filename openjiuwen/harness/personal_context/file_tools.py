@@ -64,8 +64,10 @@ def _expand_braces(pattern: str) -> list[str]:
     match = re.search(r"\{([^{}]*)\}", pattern)
     if match is None:
         return [pattern]
-    prefix = pattern[: match.start()]
-    suffix = pattern[match.end() :]
+    start = match.start()
+    end = match.end()
+    prefix = pattern[:start]
+    suffix = pattern[end:]
     expanded: list[str] = []
     for option in match.group(1).split(","):
         expanded.extend(_expand_braces(prefix + option.strip() + suffix))
@@ -262,7 +264,8 @@ def _search_bounded(sandbox: Path, inputs: dict[str, Any]) -> ToolOutput:
         maximum=_MAX_HEAD_LIMIT,
     )
     effective_limit = requested_limit or _MAX_HEAD_LIMIT
-    selected = raw_lines[offset : offset + effective_limit]
+    end = offset + effective_limit
+    selected = raw_lines[offset:end]
     was_truncated = len(raw_lines) - offset > effective_limit
     content = "\n".join(selected)
     data: dict[str, Any] = {

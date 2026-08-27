@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from typing import Mapping
+from typing import Mapping, cast
 
 _SELECTION_KEY = "_selection"
 _RECEIPT_FIELDS = ("resource_lane", "stable_id", "revision_id", "candidate_time")
@@ -141,8 +141,7 @@ def select_latest_candidates(
     if not isinstance(candidates, tuple):
         raise ValueError("candidates must be a tuple")
     selection = _selection_copy(cursor)
-    completed_receipts = selection["completed"]
-    assert isinstance(completed_receipts, list)
+    completed_receipts = cast(list[dict[str, str]], selection["completed"])
     completed_keys = {_version_key(receipt) for receipt in completed_receipts}
     known_revisions: dict[tuple[str, str], set[str]] = {}
     for receipt in completed_receipts:
@@ -202,8 +201,7 @@ def record_completed_candidates(
         raise ValueError("completed candidates must be a tuple")
     updated = deepcopy(cursor) if cursor is not None else {}
     selection = _selection_copy(updated)
-    receipts = selection["completed"]
-    assert isinstance(receipts, list)
+    receipts = cast(list[dict[str, str]], selection["completed"])
     earliest = selection["earliest_considered"]
     by_key = {_version_key(receipt): receipt for receipt in receipts}
     latest = selection["latest_seen_time"]
@@ -235,14 +233,11 @@ def compact_cursor(
 
     if not isinstance(cursor, dict):
         raise ValueError("cursor must be an object")
-    if (
-        isinstance(hard_limit_bytes, bool)
-        or isinstance(target_bytes, bool)
-        or not isinstance(hard_limit_bytes, int)
-        or not isinstance(target_bytes, int)
-        or target_bytes <= 0
-        or hard_limit_bytes < target_bytes
-    ):
+    if isinstance(hard_limit_bytes, bool) or not isinstance(hard_limit_bytes, int):
+        raise ValueError("cursor byte limits are invalid")
+    if isinstance(target_bytes, bool) or not isinstance(target_bytes, int):
+        raise ValueError("cursor byte limits are invalid")
+    if target_bytes <= 0 or hard_limit_bytes < target_bytes:
         raise ValueError("cursor byte limits are invalid")
     compacted = deepcopy(cursor)
     if _encoded_size(compacted) <= target_bytes:
@@ -250,8 +245,7 @@ def compact_cursor(
     if _SELECTION_KEY not in compacted:
         raise ValueError("cursor cannot be compacted below the hard limit")
     selection = _selection_copy(compacted)
-    receipts = selection["completed"]
-    assert isinstance(receipts, list)
+    receipts = cast(list[dict[str, str]], selection["completed"])
     existing_cutoff = selection["earliest_considered"]
     if existing_cutoff is not None:
         receipts = [
@@ -265,7 +259,7 @@ def compact_cursor(
     ordered_times = sorted(groups, key=_time_sort_value)
     while len(ordered_times) > 1:
         retained_times = ordered_times[1:]
-        retained = [receipt for timestamp in retained_times for receipt in groups[timestamp]]
+        retained = [receipt for timestamp in retained_times for receipt in groups.get(timestamp, [])]
         cutoff = retained_times[0]
         if existing_cutoff is not None and _time_sort_value(existing_cutoff) > _time_sort_value(cutoff):
             cutoff = str(existing_cutoff)
@@ -276,7 +270,7 @@ def compact_cursor(
         if _encoded_size(compacted) <= target_bytes:
             return compacted
     selection["completed"] = sorted(
-        [receipt for timestamp in ordered_times for receipt in groups[timestamp]],
+        [receipt for timestamp in ordered_times for receipt in groups.get(timestamp, [])],
         key=_receipt_sort_key,
     )
     if ordered_times:

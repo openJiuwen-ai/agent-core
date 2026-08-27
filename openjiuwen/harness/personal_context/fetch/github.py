@@ -245,8 +245,6 @@ async def _request_json(
             operation_name="rest_json",
             classify=_github_read_retry_reason,
         )
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         raise _coerce_fetch_error("GitHub request failed", exc) from None
 
@@ -294,8 +292,6 @@ async def _download_archive(url: str, token: str) -> bytes:
             operation_name="archive_http_read",
             classify=_github_read_retry_reason,
         )
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         raise _coerce_fetch_error("GitHub archive download failed", exc) from None
 
@@ -456,7 +452,7 @@ def _readme_text(readme: Mapping[str, object], *, owner: str, repo: str) -> str:
     if readme.get("encoding") == "base64":
         try:
             text = base64.b64decode("".join(content.split()), validate=True).decode("utf-8")
-        except (UnicodeDecodeError, ValueError) as exc:
+        except ValueError as exc:
             raise _fetch_error("GitHub README is not valid UTF-8 base64", exc) from None
     else:
         text = content
@@ -540,9 +536,9 @@ class GitHubFetchService(ContextFetchService):
             head_sha = _head_sha(metadata)
             head_time = _head_time(metadata)
             needs_exact_head = any(resource in resources for resource in ("readme", "code"))
-            if ("code" in resources and head_sha is None) or (
-                needs_exact_head and head_time is None and self._config.time_range.get("mode") != "all"
-            ):
+            code_head_missing = "code" in resources and head_sha is None
+            timed_head_missing = needs_exact_head and head_time is None
+            if code_head_missing or (timed_head_missing and self._config.time_range.get("mode") != "all"):
                 branch = _as_object(
                     await _request_json(
                         f"{_API_ROOT}/repos/{owner}/{repo}/branches/{quote(default_branch, safe='')}",
@@ -552,8 +548,11 @@ class GitHubFetchService(ContextFetchService):
                 )
                 head_sha = head_sha or _head_sha(branch)
                 head_time = head_time or _head_time(branch)
-            if "code" in resources and head_sha is None:
-                raise _fetch_error("GitHub default branch has no valid head SHA")
+            code_head_sha: str | None = None
+            if "code" in resources:
+                if head_sha is None:
+                    raise _fetch_error("GitHub default branch has no valid head SHA")
+                code_head_sha = head_sha
 
             candidates: list[dict[str, object]] = []
             if "readme" in resources:
@@ -639,21 +638,20 @@ class GitHubFetchService(ContextFetchService):
                     if candidate is not None:
                         candidates.append(candidate)
 
-            if "code" in resources:
-                assert head_sha is not None
+            if code_head_sha is not None:
                 code_path = str(_candidate_path(self._home, self._config.service_id).resolve())
                 item = RawChangeItem(
                     logical_id=f"github:{owner}/{repo}:repository:code",
-                    revision_id=head_sha,
+                    revision_id=code_head_sha,
                     operation="upsert",
                     title=f"{owner}/{repo} code",
-                    content=f"GitHub repository code snapshot at commit {head_sha}.",
-                    original_ref=f"https://github.com/{owner}/{repo}/tree/{head_sha}",
+                    content=f"GitHub repository code snapshot at commit {code_head_sha}.",
+                    original_ref=f"https://github.com/{owner}/{repo}/tree/{code_head_sha}",
                     metadata={
                         "resource": "code",
                         "repository": f"github:{owner}/{repo}",
                         "default_branch": default_branch,
-                        "head_sha": head_sha,
+                        "head_sha": code_head_sha,
                         "materialized_source_path": code_path,
                     },
                 )
@@ -666,7 +664,7 @@ class GitHubFetchService(ContextFetchService):
                     extra={
                         "owner": owner,
                         "repo": repo,
-                        "head_sha": head_sha,
+                        "head_sha": code_head_sha,
                         "materialized_source_path": code_path,
                     },
                 )
@@ -697,7 +695,8 @@ class GitHubFetchService(ContextFetchService):
                 yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
                 return
             for index in range(0, len(candidates), _BATCH_SIZE):
-                chunk = candidates[index : index + _BATCH_SIZE]
+                end = index + _BATCH_SIZE
+                chunk = candidates[index:end]
                 items: list[RawChangeItem] = []
                 materialized_path: str | None = None
                 materialized_revision: str | None = None

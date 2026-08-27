@@ -147,8 +147,8 @@ def _parse_cli_json(stdout: str) -> object:
                 continue
             try:
                 value, _ = decoder.raw_decode(text[index:])
-            except json.JSONDecodeError as exc:
-                last_error = exc
+            except json.JSONDecodeError as decode_error:
+                last_error = decode_error
                 continue
             return value
     raise _fetch_error("lark-cli did not return JSON", last_error)
@@ -316,8 +316,6 @@ async def _run_lark_cli(
 ) -> tuple[str, str]:
     try:
         return await _run_lark_cli_once(argv, timeout_seconds=timeout_seconds, cwd=cwd)
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         raise _coerce_lark_cli_error(exc) from None
 
@@ -332,8 +330,6 @@ async def _run_lark_cli_read(
             operation_name="cli_read",
             classify=_lark_cli_retry_reason,
         )
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         raise _coerce_lark_cli_error(exc) from None
 
@@ -350,8 +346,6 @@ async def _run_lark_cli_read_json(argv: list[str], *, timeout_seconds: float = _
             operation_name="cli_json_read",
             classify=_lark_cli_retry_reason,
         )
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         raise _coerce_lark_cli_error(exc) from None
 
@@ -853,8 +847,6 @@ async def _download_wiki_file(argv: list[str], *, sandbox_root: Path) -> tuple[s
             operation_name="cli_file_download",
             classify=_lark_cli_retry_reason,
         )
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
         raise _coerce_lark_cli_error(exc) from None
 
@@ -905,7 +897,8 @@ class FeishuFetchService(ContextFetchService):
                 yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
                 return
             for index in range(0, len(candidates), _BATCH_SIZE):
-                items = [await self._read_candidate(candidate) for candidate in candidates[index : index + _BATCH_SIZE]]
+                end = index + _BATCH_SIZE
+                items = [await self._read_candidate(candidate) for candidate in candidates[index:end]]
                 yield FetchBatch(
                     batch_id=f"batch-{index // _BATCH_SIZE}",
                     items=tuple(items),

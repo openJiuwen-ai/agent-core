@@ -140,8 +140,6 @@ async def retry_provider_read(
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             result = await operation()
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             reason = classify(exc)
             if reason not in _REASON_KINDS:

@@ -123,7 +123,8 @@ class ToutiaoReaderFetchService(ContextFetchService):
                     return
                 for index in range(0, len(candidates), _BATCH_SIZE):
                     items: list[RawChangeItem] = []
-                    for candidate in candidates[index : index + _BATCH_SIZE]:
+                    end = index + _BATCH_SIZE
+                    for candidate in candidates[index:end]:
                         raw_article = candidate.get("article")
                         if not isinstance(raw_article, Mapping):
                             raise _fetch_error("Toutiao candidate has no article metadata")

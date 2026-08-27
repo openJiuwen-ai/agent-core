@@ -9,6 +9,7 @@ import os
 import stat as stat_module
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -108,13 +109,9 @@ class LocalFilesFetchService(ContextFetchService):
                 chunk = candidates[start:end]
                 materialized: list[dict[str, Any]] = []
                 for candidate in chunk:
-
-                    async def materialize_candidate() -> dict[str, Any]:
-                        return await asyncio.to_thread(_materialize_candidate, candidate)
-
                     materialized.append(
                         await retry_provider_read(
-                            materialize_candidate,
+                            partial(asyncio.to_thread, _materialize_candidate, candidate),
                             provider="local_files",
                             operation_name="file_read",
                             classify=classify_file_error,

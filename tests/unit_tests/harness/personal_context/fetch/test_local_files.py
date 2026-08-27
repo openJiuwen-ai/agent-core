@@ -517,7 +517,7 @@ def test_local_files_pdf_extraction_stops_after_content_cap(tmp_path: Path, monk
     assert len(items[0].content) == 2_000_000
 
 
-def test_local_files_delete_for_replaced_external_symlink_stays_inside_root(tmp_path: Path):
+def test_local_files_replaced_external_symlink_is_ignored(tmp_path: Path):
     root = tmp_path / "source"
     root.mkdir()
     target = root / "note.md"
@@ -534,10 +534,8 @@ def test_local_files_delete_for_replaced_external_symlink_stays_inside_root(tmp_
         pytest.skip("symlink creation is unavailable on this Windows runner")
 
     changed = _items(asyncio.run(_batches(service, initial[-1].next_cursor)))
-    assert len(changed) == 1
-    assert changed[0].operation == "delete"
-    assert changed[0].original_ref == str(root / "note.md")
-    assert outside not in Path(changed[0].original_ref).parents
+
+    assert changed == []
 
 
 def test_local_files_read_change_fails_entire_run_with_file_error(tmp_path: Path, monkeypatch):

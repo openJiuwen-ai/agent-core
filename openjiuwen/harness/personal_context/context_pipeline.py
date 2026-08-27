@@ -1037,33 +1037,56 @@ def _resolve_short_references(
         except (OSError, UnicodeError) as exc:
             raise _pipeline_error("candidate Markdown could not be read for source reference resolution") from exc
         display_numbers: dict[str, int] = {}
-
-        def replace(match: re.Match[str], *, current_page: Path = page) -> str:
-            token = match.group(0)
-            source_id = alias_targets.get(token)
-            if source_id is None:
-                raise _pipeline_error("candidate contains an unknown short source reference")
-            source_path = validated_sources.get(source_id)
-            if source_path is None:
-                source_path = _reference_source_path(source_root, source_id, error=_pipeline_error)
-                validated_sources[source_id] = source_path
-            try:
-                relative_target = os.path.relpath(
-                    source_path,
-                    start=(final_context_root / current_page.relative_to(context_root)).parent,
-                ).replace("\\", "/")
-            except ValueError as exc:
-                raise _pipeline_error("candidate source reference cannot be made relative") from exc
-            display_number = display_numbers.setdefault(source_id, len(display_numbers) + 1)
-            return f"[来源{display_number}]({_markdown_link_target(relative_target)})"
-
-        resolved = _SHORT_REFERENCE.sub(replace, text)
+        resolved = _SHORT_REFERENCE.sub(
+            _short_reference_replacer(
+                context_root=context_root,
+                current_page=page,
+                final_context_root=final_context_root,
+                source_root=source_root,
+                alias_targets=alias_targets,
+                validated_sources=validated_sources,
+                display_numbers=display_numbers,
+            ),
+            text,
+        )
         if "[[ref:" in resolved:
             raise _pipeline_error("candidate contains a malformed or unresolved short source reference")
         if resolved != text:
             replacements[page] = resolved.encode("utf-8")
     for page, data in replacements.items():
         _atomic_write(page, data)
+
+
+def _short_reference_replacer(
+    *,
+    context_root: Path,
+    current_page: Path,
+    final_context_root: Path,
+    source_root: Path,
+    alias_targets: Mapping[str, str],
+    validated_sources: dict[str, Path],
+    display_numbers: dict[str, int],
+) -> Callable[[re.Match[str]], str]:
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        source_id = alias_targets.get(token)
+        if source_id is None:
+            raise _pipeline_error("candidate contains an unknown short source reference")
+        source_path = validated_sources.get(source_id)
+        if source_path is None:
+            source_path = _reference_source_path(source_root, source_id, error=_pipeline_error)
+            validated_sources[source_id] = source_path
+        try:
+            relative_target = os.path.relpath(
+                source_path,
+                start=(final_context_root / current_page.relative_to(context_root)).parent,
+            ).replace("\\", "/")
+        except ValueError as exc:
+            raise _pipeline_error("candidate source reference cannot be made relative") from exc
+        display_number = display_numbers.setdefault(source_id, len(display_numbers) + 1)
+        return f"[来源{display_number}]({_markdown_link_target(relative_target)})"
+
+    return replace
 
 
 def _classify_reference_target(
@@ -2179,7 +2202,8 @@ class ContextPipelineService:
                             "Use only read_file, write_file, edit_file, glob, list_files, and grep. Never execute "
                             "code or use unlisted tools. For large files, each write_file or edit_file call may add "
                             "no more than 2000 characters of Markdown. Start a new page with a bounded first section, "
-                            "then append bounded sections with edit_file and a short unique tail anchor. Do not rewrite "
+                            "then append bounded sections with edit_file and a short unique tail anchor. "
+                            "Do not rewrite "
                             "a complete large file when only one section changes. "
                             "inputs/ and materialized-source/ are read-only. Use tmp/ for scratch files; tmp/ is "
                             "never published. Keep page paths below sandbox/context, ending in .md. Never use parent "
@@ -3328,10 +3352,10 @@ def _validate_description_navigation(
                     or resolved_source_root is None
                     or not target_path.is_relative_to(resolved_source_root)
                 ):
-                    raise error("candidate description navigation leaves Context")
+                    raise error("candidate description navigation leaves Context") from None
                 source_relative = target_path.relative_to(resolved_source_root)
                 if len(source_relative.parts) != 1 or source_relative.suffix.casefold() != ".md":
-                    raise error("candidate atomic source reference is invalid")
+                    raise error("candidate atomic source reference is invalid") from None
                 _reference_source_path(source_root, source_relative.stem, error=error)
                 continue
             candidate_target = context_root / relative_target
