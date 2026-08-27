@@ -84,6 +84,7 @@ class OrganizationRuntimeManager:
         self._team_activator: Callable[[str, str], Awaitable[str | None]] | None = None
         self._expert_group_catalog: ExpertGroupCatalog | None = None
         self._expert_team_launcher: ExpertTeamLauncher | None = None
+        self._expert_adapter_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
 
     def set_leader_turn_runner(self, runner: Callable[[str, str, object], Awaitable[bool]]) -> None:
         """Set the host-owned path used to run an autonomous leader turn."""
@@ -111,6 +112,28 @@ class OrganizationRuntimeManager:
         """Set the host adapter that launches expert Teams for organization invite."""
 
         self._expert_team_launcher = launcher
+
+    def set_expert_adapter_installer(
+        self, installer: Callable[["OrganizationRuntimeManager"], None] | None
+    ) -> None:
+        """Register a host callback that injects Catalog/Launcher on first use.
+
+        The installer should be idempotent and must not run package scans itself;
+        it only constructs and ``set_*`` the adapters. Listing/launch still happen
+        when tools call ``list_expert_groups`` / ``create_and_invite_expert_team``.
+        """
+
+        self._expert_adapter_installer = installer
+
+    def _ensure_expert_adapters(self) -> None:
+        """Lazily run the host installer once Catalog or Launcher is still missing."""
+
+        if self._expert_group_catalog is not None and self._expert_team_launcher is not None:
+            return
+        installer = self._expert_adapter_installer
+        if installer is None:
+            return
+        installer(self)
 
     async def ensure_control_tools(self, agent: "TeamAgent", *, session_id: str) -> None:
         """Mount organization bootstrap tools on a running team leader."""
@@ -386,6 +409,7 @@ class OrganizationRuntimeManager:
     ) -> list[dict[str, Any]]:
         """List host-validated AgentGroup templates; does not create Teams."""
 
+        self._ensure_expert_adapters()
         if self._expert_group_catalog is None:
             return []
         return [
@@ -404,6 +428,7 @@ class OrganizationRuntimeManager:
     ) -> dict[str, Any]:
         """Launch an expert Team from an AgentGroup package and invite it."""
 
+        self._ensure_expert_adapters()
         if self._expert_team_launcher is None:
             raise ValueError("expert team launcher is not configured")
         group_name = str(agent_group_name or "").strip()

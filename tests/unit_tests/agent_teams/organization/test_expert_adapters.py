@@ -353,3 +353,70 @@ def test_control_tools_include_expert_group_tools():
     ]
     assert "org_list_expert_groups" in names
     assert "org_create_and_invite_expert_team" in names
+
+
+@pytest.mark.asyncio
+async def test_expert_adapter_installer_runs_on_first_list(active_organization_runtime):
+    org_runtime, _, _session_id = active_organization_runtime
+    calls: list[object] = []
+
+    def _install(runtime: OrganizationRuntimeManager) -> None:
+        calls.append(runtime)
+        runtime.set_expert_group_catalog(
+            FakeCatalog(
+                [
+                    ExpertGroupDescriptor(
+                        agent_group_name="lazy-group",
+                        display_name="Lazy",
+                        capabilities=("analysis",),
+                    )
+                ]
+            )
+        )
+        runtime.set_expert_team_launcher(
+            FakeLauncher(team_id="team-b", leader_id="leader-team-b")
+        )
+
+    org_runtime.set_expert_adapter_installer(_install)
+    assert org_runtime._expert_group_catalog is None
+    assert org_runtime._expert_team_launcher is None
+
+    groups = await org_runtime.list_expert_groups()
+    assert len(calls) == 1
+    assert [item["agent_group_name"] for item in groups] == ["lazy-group"]
+
+    # Second list does not re-install (adapters already present).
+    await org_runtime.list_expert_groups()
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expert_adapter_installer_runs_on_first_create(active_organization_runtime):
+    org_runtime, _, session_id = active_organization_runtime
+    await org_runtime.create_organization(
+        organization_id="org-1",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    calls: list[object] = []
+
+    def _install(runtime: OrganizationRuntimeManager) -> None:
+        calls.append(runtime)
+        runtime.set_expert_team_launcher(
+            FakeLauncher(
+                team_id="team-b",
+                leader_id="leader-team-b",
+                agent_group_name="sample-expert-group",
+            )
+        )
+        runtime.set_expert_group_catalog(FakeCatalog([]))
+
+    org_runtime.set_expert_adapter_installer(_install)
+    result = await org_runtime.create_and_invite_expert_team(
+        organization_id="org-1",
+        owner_team_id="team-a",
+        agent_group_name="sample-expert-group",
+        session_id=session_id,
+    )
+    assert len(calls) == 1
+    assert result["team_id"] == "team-b"
