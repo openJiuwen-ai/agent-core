@@ -637,6 +637,32 @@ class TeamBackend:
             permissions_override=permissions_override,
         )
 
+        # Resolve the latest identity from the evolvable md before writing the
+        # db row. ``write_member_identity`` builds the in-team link, reads /
+        # protects the evolved md (never overwriting an evolved file), primes the
+        # shared cache, and returns the body that should be persisted. With the
+        # evolution switch off (or no cache), the spec baseline value stands and
+        # the db row is written unchanged. This closes the first-roster race: by
+        # the time the leader renders the roster, the cache already carries the
+        # evolved value and the db row is an evolved-value snapshot, not the spec
+        # baseline.
+        desc_to_write, prompt_to_write = desc, prompt
+        if self._spec_evolution_enabled and self.workspace_cache is not None:
+            from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+            resolved_desc, resolved_prompt = WorkspaceAssembler(
+                cache=self.workspace_cache
+            ).write_member_identity(
+                team_name=self.team_name,
+                member_name=member_name,
+                member_desc=desc,
+                member_prompt=prompt,
+            )
+            if resolved_desc is not None:
+                desc_to_write = resolved_desc
+            if resolved_prompt is not None:
+                prompt_to_write = resolved_prompt
+
         success = await self.db.member.create_member(
             member_name=member_name,
             team_name=self.team_name,
@@ -644,10 +670,10 @@ class TeamBackend:
             agent_card=agent_card.model_dump_json(),
             status=status,
             role=role.value,
-            desc=desc,
+            desc=desc_to_write,
             execution_status=execution_status,
             mode=mode.value,
-            prompt=prompt,
+            prompt=prompt_to_write,
             options=options,
         )
         if not success:
