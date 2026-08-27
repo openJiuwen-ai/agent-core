@@ -77,7 +77,8 @@ class MemberWorkspaceBinder:
             return self._setup_predefined(binding)
         return self._setup_dynamic(binding)
 
-    def _setup_leader(self, binding: TeamMemberBinding) -> Path:
+    @staticmethod
+    def _setup_leader(binding: TeamMemberBinding) -> Path:
         root = team_member_workspace_dir(binding.team_name, binding.member_name)
         root.mkdir(parents=True, exist_ok=True)
         # Leaders (and external_cli / other non-dynamic roles that fall back to
@@ -284,14 +285,13 @@ class MemberWorkspaceBinder:
             remove_dir_link(link)
             return
         refs_path = real_dir / REFS_FILE_NAME
-        data = MemberRefStore._read(refs_path)
-        if data is None:
+        refs = MemberRefStore.load_refs(refs_path)
+        if refs is None:
             # No refs file (leader never writes one; or a stale link to a dir
             # that never got a ref). Just drop the link.
             remove_dir_link(link)
             return
-        kind = data.get("kind") or MEMBER_MODE_DYNAMIC
-        teams = MemberRefStore._teams(data)
+        kind, teams = refs
         if team_name not in teams:
             # This team is not in the ref list — nothing to release.
             remove_dir_link(link)

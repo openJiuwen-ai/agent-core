@@ -216,6 +216,21 @@ class MemberRefStore:
         ) / _REFS_FILE
 
     @staticmethod
+    def load_refs(refs_path: Path) -> tuple[str, list[str]] | None:
+        """Read a member's ``.refs.json``; return ``(kind, teams)`` or ``None``.
+
+        Public read accessor so callers (the binder cleanup path) need not
+        reach into the private ``_read`` / ``_teams`` helpers. ``kind`` falls
+        back to ``dynamic`` when the field is absent (legacy / partial writes).
+        Returns ``None`` when the file does not exist or is malformed.
+        """
+        data = MemberRefStore._read(refs_path)
+        if data is None:
+            return None
+        kind = data.get("kind") or MEMBER_MODE_DYNAMIC
+        return kind, MemberRefStore._teams(data)
+
+    @staticmethod
     def _teams(data: dict) -> list[str]:
         """Return the team list, normalizing legacy ``{"count": n}`` files."""
         teams = data.get("teams")
