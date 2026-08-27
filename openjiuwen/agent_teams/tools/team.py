@@ -115,6 +115,7 @@ class TeamBackend:
         enable_task_verification: bool = False,
         enable_fork: bool = False,
         evolution_enabled: bool = True,
+        member_workspace_prefix: bool = True,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
@@ -247,6 +248,12 @@ class TeamBackend:
         # framework / DB). No runtime override — unlike enable_hitt, build_team
         # cannot flip it.
         self._spec_evolution_enabled: bool = evolution_enabled
+        # Dynamic-member workspace isolation switch (mirrors
+        # ``TeamAgentSpec.member_workspace_prefix``). Spawn-time workspace
+        # setup reads it so dynamic members get the same real-directory
+        # shape (``team#member`` vs plain ``member``) as the in-process
+        # ``prepare_member_workspace`` path.
+        self._member_workspace_prefix: bool = member_workspace_prefix
         # True once build_team took over a team that already existed rather
         # than creating one, so the tool result can say which it was.
         self._team_taken_over: bool = False
@@ -638,16 +645,33 @@ class TeamBackend:
         )
 
         # Resolve the latest identity from the evolvable md before writing the
-        # db row. ``write_member_identity`` builds the in-team link, reads /
-        # protects the evolved md (never overwriting an evolved file), primes the
-        # shared cache, and returns the body that should be persisted. With the
-        # evolution switch off (or no cache), the spec baseline value stands and
-        # the db row is written unchanged. This closes the first-roster race: by
-        # the time the leader renders the roster, the cache already carries the
-        # evolved value and the db row is an evolved-value snapshot, not the spec
-        # baseline.
+        # db row. ``prepare_member_workspace`` builds the in-team root first
+        # (link for dynamic/predefined, in-team real dir for external_cli/leader)
+        # so the md write below lands through that path — ``write_member_identity``
+        # only writes/protects the B-class md and primes the shared cache, never
+        # creating the workspace directory. Idempotent: a leader whose root was
+        # already built by its own ``setup_agent`` re-runs ``prepare_member_workspace``
+        # harmlessly (binder reuse). With the evolution switch off (or no cache),
+        # the spec baseline value stands and the db row is written unchanged.
+        # This closes the first-roster race: by the time the leader renders the
+        # roster, the cache already carries the evolved value and the db row is an
+        # evolved-value snapshot, not the spec baseline.
         desc_to_write, prompt_to_write = desc, prompt
         if self._spec_evolution_enabled and self.workspace_cache is not None:
+            from openjiuwen.agent_teams.team_workspace.binder import (
+                prepare_member_workspace,
+            )
+
+            prepare_member_workspace(
+                team_name=self.team_name,
+                member_name=member_name,
+                role=role,
+                leader_member_name=self.leader_member_name,
+                predefined_members={
+                    m.member_name for m in self.predefined_members
+                },
+                member_workspace_prefix=self._member_workspace_prefix,
+            )
             from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
 
             resolved_desc, resolved_prompt = WorkspaceAssembler(

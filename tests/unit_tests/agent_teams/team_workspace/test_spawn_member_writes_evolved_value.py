@@ -292,3 +292,58 @@ async def test_spawn_member_evolution_off_keeps_spec_baseline(env):
     assert member.prompt == _DB_PROMPT
     assert not _card_path(_TEAM).exists(), "evolution off must not seed card.md"
     assert not _prompt_path(_TEAM).exists(), "evolution off must not seed member_prompt.md"
+
+
+# ── Fix: non-leader member workspace is a symlink, not an in-team real dir ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_spawn_member_non_leader_root_is_link_not_real_dir(env):
+    """Regression guard: before the fix, ``spawn_member`` →
+    ``write_member_identity`` → ``atomic_write``'s ``parent.mkdir`` created the
+    in-team root as a real directory BEFORE ``binder.setup`` could link it, so
+    the binder's reuse-first short-circuited and dynamic/predefined members
+    ended up as in-team real directories (linker semantics broken).
+
+    After the fix, ``spawn_member`` calls ``prepare_member_workspace`` FIRST
+    (binder builds the link), then writes the md through that link — so the
+    non-leader member root is a link to the team-external real directory, not a
+    plain in-team directory.
+    """
+    import os
+
+    from openjiuwen.agent_teams.team_workspace.dir_links import is_dir_link
+    from openjiuwen.agent_teams.team_workspace.paths import member_real_dir
+
+    db = env["db"]
+    messager = env["messager"]
+
+    cache = WorkspaceCache(WorkspaceStore(), _TEAM, language="cn")
+    bk = _make_backend(db, messager, cache=cache)
+    await _build_team_and_spawn_predefined(bk)
+
+    root = team_member_workspace_dir(_TEAM, _MEMBER)
+    # The non-leader root must be a link (dynamic member flattened out of the
+    # team tree), not a plain in-team real directory left by the old race.
+    assert root.exists(), "member workspace root should exist"
+    assert is_dir_link(root), (
+        f"non-leader member root must be a link (linker semantics), but "
+        f"{root} is a plain directory — the spawn_member→write_member_identity "
+        f"race regressed. islink={os.path.islink(root)}"
+    )
+    # The link points at the team-external real directory (member_workspace_prefix
+    # defaults True → ``{team}#{member}`` shape).
+    expected_real = member_real_dir(
+        _TEAM, _MEMBER, "dynamic", member_workspace_prefix=True
+    )
+    assert expected_real.is_dir(), (
+        f"team-external real dir {expected_real} should have been created by the binder"
+    )
+    # The md was written through the link → it lands in the external real dir.
+    card_in_real = expected_real / "prompts" / "identity" / "card.md"
+    assert card_in_real.is_file(), (
+        f"card.md should have been written through the link into the real dir; "
+        f"expected it at {card_in_real}"
+    )
+

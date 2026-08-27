@@ -128,15 +128,18 @@ class WorkspaceAssembler:
         member_desc: str | None = None,
         member_prompt: str | None = None,
     ) -> tuple[str | None, str | None]:
-        """Build the in-team link, write/protect B-class md, prime cache, return bodies.
+        """Write/protect B-class md, prime cache, return bodies.
 
-        First ``ensure_team_member_workspace_link`` so the team-internal path
-        is a symlink to a reused standalone workspace (or a plain dir for a
-        first-time member) — ``write_card`` / ``write_member_prompt`` then read
-        through that link. ``card.md`` (body = desc only) + ``member_prompt.md``,
-        values from the member's DB row (ctx.desc / ctx.prompt). ``display_name``
-        never rides the file. The final file state (body *and* ``updated_at``) is
-        primed into the shared cache so the read side does not re-read the file.
+        The caller (``spawn_member`` / ``_assemble_member_workspace``) is
+        responsible for ensuring the member workspace root exists first via
+        ``prepare_member_workspace``; this method only writes ``card.md`` /
+        ``member_prompt.md`` through that path and primes the shared cache. It
+        never creates the workspace directory itself, so it cannot race the
+        binder's link creation. ``card.md`` (body = desc only) +
+        ``member_prompt.md``, values from the member's DB row (ctx.desc /
+        ctx.prompt). ``display_name`` never rides the file. The final file state
+        (body *and* ``updated_at``) is primed into the shared cache so the read
+        side does not re-read the file.
 
         Returns ``(desc_body, prompt_body)`` — the evolved md body when the file
         was already evolved (write skipped, evolution wins), the newly-written
@@ -145,9 +148,6 @@ class WorkspaceAssembler:
         identity known at spawn time instead of the spec baseline, closing the
         first-roster race where the roster is delivered before member spawn.
         """
-        from openjiuwen.agent_teams.workspace_layout import ensure_team_member_workspace_link
-
-        ensure_team_member_workspace_link(team_name, member_name)
         desc_content = self._store.write_card(team_name, member_name, member_desc)
         prompt_content = self._store.write_member_prompt(team_name, member_name, member_prompt)
         if self._cache is not None:

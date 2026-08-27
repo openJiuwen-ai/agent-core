@@ -957,6 +957,7 @@ class AgentConfigurator:
             enable_task_verification=spec.enable_task_verification,
             enable_fork=spec.enable_fork,
             evolution_enabled=spec.evolution_enabled,
+            member_workspace_prefix=spec.member_workspace_prefix,
             external_cli_agents=spec.external_cli_agents,
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,

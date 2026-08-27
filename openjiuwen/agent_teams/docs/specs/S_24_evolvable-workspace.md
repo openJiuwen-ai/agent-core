@@ -42,7 +42,7 @@
 11. **写盘三路拆分 + 幂等**：按值源与依赖分三个挂载点（`on` 时各写一次，全幂等）：
     - **A/C（系统模板 + tool 描述/参数，值源框架源）→ `coordination.start`** 团队级一次（kernel），teammate 的 `start` 重复调用幂等无害。
     - **B-team（team_card/team_prompt，值源 build_team 的 desc 参数）→ `build_team` 的 create_team 之后 + `_reattach_team`**；`team_prompt` 是只写不读到模型字段（build_team 无 prompt 参数）。
-    - **B-member（card/member_prompt，值源演进 md 经 `write_member_identity` 返回）→ `spawn_member` 写 db 前（取演进值 prime cache + 写 db 快照）+ 装配期 `_assemble_member_workspace`（spawn 期幂等重跑）**。`write_member_identity` 内部建 link（`ensure_team_member_workspace_link`）+ 读/保护演进 md + prime cache + 返回演进值。db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新，md 没演进退 db（=演进快照）。统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。
+    - **B-member（card/member_prompt，值源演进 md 经 `write_member_identity` 返回）→ `spawn_member` 写 db 前（非 leader 先 `prepare_member_workspace` 建 root + 取演进值 prime cache + 写 db 快照）+ 装配期 `_assemble_member_workspace`（spawn 期幂等重跑）**。`write_member_identity` 只读/保护演进 md + prime cache + 返回演进值，**不建目录不碰 link**（root 由调用前的 `prepare_member_workspace` 保证：非 leader 在 spawn_member、leader 在 setup_agent）。db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新，md 没演进退 db（=演进快照）。统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。
     - **`off` 时三处都不写**（`TeamBackend._spec_evolution_enabled` 守卫）。cache 对象只在 `_attach_workspace_cache` 判断 `on` 时创建（`off` 不建，`manager.workspace_cache = None`）。in-process 队友经 `share_workspace_cache_with` 共享 leader 的 manager 引用（同一 cache 实例），复用分支（manager 已有 cache）命中即返回（S7 read-once）。
 
 ## 接口契约
@@ -149,7 +149,8 @@ class WorkspaceAssembler:
                               member_desc: str | None, member_prompt: str | None
                               ) -> tuple[str | None, str | None]:
         # B 类 member 级（card.md + member_prompt.md）；值源演进 md；挂载点：spawn_member 写 db 前 + 装配期
-        # 内部建 link(ensure_team_member_workspace_link) → 写/保护演进 md → prime cache → 返回演进值(供 db 写入)
+        # 只写/保护演进 md → prime cache → 返回演进值(供 db 写入)；不建 workspace 目录
+        # root(link/真实目录)由调用前的 prepare_member_workspace 保证(spawn_member 对非 leader、setup_agent 对 leader)
 ```
 
 ### `WorkspaceLayout`（路径单一真相，无状态静态方法）
@@ -229,7 +230,7 @@ spawn 后永不变，`_IDENTITY_EMITTED` 基线门控只投递一次。`member_p
 
 - **A/C**：`coordination.start` 的 `workspace_manager.initialize` 之后，`WorkspaceAssembler(cache).write_system_and_tool_prompts(team_name, language)`——团队级一次（值源框架源，不依赖 team row）；teammate 的 `start` 幂等重跑无害。**冷启动时序**：leader `start` 写 A/C 基线 → build_team（第一轮工具调用）→ teammate 装配读到已就绪基线。
 - **B-team**：`build_team` 的 `create_team` 成功之后 + `_reattach_team`，`WorkspaceAssembler(cache).write_team_identity(team_name, team_desc=..., team_prompt=...)`；`off` 时 `TeamBackend._spec_evolution_enabled` 守卫跳过。值来自 build_team 的 `desc` 参数（不查 `get_team_info`——避免冷启动 None 坑）。
-- **B-member**：`spawn_member` 写 db 前（取演进值 + prime cache + 写 db 演进快照）+ `_assemble_member_workspace`（spawn 期幂等重跑），`WorkspaceAssembler(cache).write_member_identity(...)`——内部建 link（`ensure_team_member_workspace_link`）→ store 写/保护演进 md 返回最终 body → `cache.fill_member_field` → 返回 body 供 db 写入。`off` 时跳过（不写不 fill，db 用 spec 裸值）。
+- **B-member**：`spawn_member` 写 db 前（非 leader 先 `prepare_member_workspace` 建 root link/真实目录 + 取演进值 + prime cache + 写 db 演进快照）+ `_assemble_member_workspace`（spawn 期幂等重跑），`WorkspaceAssembler(cache).write_member_identity(...)`——只写/保护演进 md 返回最终 body → `cache.fill_member_field` → 返回 body 供 db 写入；root 由调用前的 `prepare_member_workspace` 保证（非 leader 在 spawn_member、leader 在 setup_agent），write_member_identity 不建目录不碰 link。`off` 时跳过（不写不 fill，db 用 spec 裸值）。
 
 > **时序约束**：cache attach 必须在 `TeamHarness.build`（rails mint）之前——rail 工厂构造期把 `backend.workspace_cache` 绑进 A 类 loader 闭包，若 mint 时 cache 未 attach（首次 build / COLD_RECOVER 新实例），loader 退化为 framework 只读，团队的演进提示词值永远不会到达模型。
 

@@ -80,7 +80,7 @@ DB 裸值，已落盘文件保留但不生效。
 |---|---|---|---|
 | A/C（系统模板 + tool 描述/参数） | 框架源（`_framework_body` / `descs/`） | `coordination.start`（团队级一次） | 不依赖 team row、不依赖成员；teammate 的 `start` 幂等重跑无害 |
 | B-team（team_card / team_prompt） | build_team 的 `desc` 参数 | `build_team`（create_team 后）+ `_reattach_team` | 不查 `get_team_info`（冷启动 team row 不存在 → None 坑）；`team_prompt` 是只写不读到模型字段（build_team 无 prompt 参数） |
-| B-member（card / member_prompt） | 演进 md 经 `write_member_identity` 返回（spawn_member 阶段建 link 读演进值） | `spawn_member` 写 db 前 + 装配期 `_assemble_member_workspace`（幂等重跑） | 值源演进值（经 link 读 md）；db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新。消除首次 roster race（首次 roster 前 cache 已 prime 演进值 / db 已是演进快照） |
+| B-member（card / member_prompt） | 演进 md 经 `write_member_identity` 返回（spawn_member 阶段非 leader 先 `prepare_member_workspace` 建 root link/真实目录读演进值） | `spawn_member` 写 db 前 + 装配期 `_assemble_member_workspace`（幂等重跑） | 值源演进值（经 link 读 md）；db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新。消除首次 roster race（首次 roster 前 cache 已 prime 演进值 / db 已是演进快照）。`write_member_identity` 不建目录不碰 link，root 由 `prepare_member_workspace` 保证 |
 
 挂载点不依赖 `workspace_manager.initialize`（A/C 只依赖 team_name + 框架源）——ST 不配
 `workspace` 段（manager 为 None）时 A/C 仍要写。
@@ -151,19 +151,23 @@ B 类 member 级由 `_assemble_member_workspace` 在成员 spawn / 恢复时写�
 DB 值（`team_info` 行存在）才写。读侧 `TeamBackend` overlay（`get_member` / `list_members` /
 `get_team_info`）用 cache 演进值覆盖 DB 裸值；`display_name` 不演进（回退 DB 列）。
 
-**D8.1（2026-08-27 修订）：B-member db 演进快照 + 首次 roster race 修复**
+**D8.1：B-member db 演进快照 + 首次 roster race 闭合**
 
-原 D8 描述 db 存"裸值"（spec 基线）、overlay 用 md 演进值覆盖。问题：`_assemble_member_workspace`
-在 spawn 期（成员启动时）才装配，leader 首次 roster 在 `build_team` 后、spawn 前投递 → cache 空
-→ overlay 退 db 基线值 = 旧值（race）。
+B-member 的 db 列存"入队演进快照"（复用成员=演进值；首次成员=基线值），文件存演进值；`display_name` 不演进。后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新演进值，md 没演进退 db（=入队演进快照，正确）。
 
-修订：`spawn_member` 写 db 前调 `WorkspaceAssembler(cache=).write_member_identity(...)`（内部建 link
-+ 读/保护演进 md + prime cache + 返回演进值），用返回值写 db。结果：
+**实现边界**：`spawn_member` 写 db 前完成两步——
+1. `prepare_member_workspace`：按 role 白名单建成员 in-team root（dynamic/predefined → team 外真实目录 + in-team 软链接；external_cli/leader → in-team 真实目录，不 link）。这是成员 workspace 目录与链接的**唯一创建点**，幂等（binder reuse-first：root 已是 link/真实目录则跳过）。
+2. `WorkspaceAssembler(cache=).write_member_identity(...)`：只读/保护演进 md（`_evolved_content` 保护已演进文件）+ prime cache + 返回演进 body 供 db 写入。**不建目录、不碰 link**——root 由上一步保证就位。
+
+`write_member_identity` 永远不创建 workspace 目录：md 写入透过已就位的 root（link → 写 team 外真实目录；真实目录 → 写 in-team）。这保证 binder 的链接创建不会被 md 写入的 `mkdir` 抢先短路。
+
+leader 时序：leader 的 `spawn_member` 在自身 `setup_agent` 之后调用（leader 进程先起来 → 进循环 → 调 build_team），故 leader 的 root 由 `setup_agent`（configurator:473 的 `prepare_member_workspace`，LEADER mode）建；spawn_member 再调 `prepare_member_workspace` 幂等（binder 对已存在的 leader 真实目录跳过）。非 leader 的 `spawn_member` 在 `setup_agent` 之前（DB 行先写 → startup 拉起），故非 leader 的 root 由 `spawn_member` 首次建，`setup_agent` 后续幂等跳过。
+
 - db = 入队演进快照（复用成员=演进值；首次成员=基线值）。
 - cache 在 spawn_member 阶段已 prime 演进值 → 首次 roster overlay 命中演进值。
 - 后续演进只更 md，不回写 db；overlay 永远读 md 最新，md 没演进退 db（=演进快照，正确）。
 - 统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。
-- 幂等：spawn 期 `_assemble_member_workspace` 重跑，link 已建不重建、演进文件 `_evolved_content`
+- 幂等：spawn 期 `_assemble_member_workspace` 重跑，root 已建不重建、演进文件 `_evolved_content`
   skip、`fill_member_field` dict 赋值，均无副作用。
 
 **统一覆盖原则（防霰弹式）**：B 类演进覆盖只发生在 `TeamBackend` 的三个 overlay 方法里。任何
@@ -316,8 +320,9 @@ cache 的存在、各自维护"演进优先/DB 回退"逻辑，新增缺口时�
 - **UT**：`tests/unit_tests/agent_teams/team_workspace/`（cache fill / lazy / invalidate / store
   返回 body / assembler 三方法）全过；`tests/unit_tests/agent_teams/test_team_context_inject.py`
   （身份块注入：演进注入 / 基线 fallback / 无 backend fallback / None member 抑制）。
-  `test_spawn_member_writes_evolved_value.py`（D8.1 修订：db 写演进快照 / 首次成员 db 基线 /
-  首次 roster 读演进值 race 闭合 / evolution off 保持基线，真实 leader 时序先 attach cache 再 build_team）。
+  `test_spawn_member_writes_evolved_value.py`（D8.1：db 写演进快照 / 首次成员 db 基线 /
+  首次 roster 读演进值 race 闭合 / evolution off 保持基线 / 非 leader root 是 link 非 in-team 真实目录，
+  真实 leader 时序先 attach cache 再 build_team）。
 - **ST**（真实模型，全在独立分支验证，ST 文件不进 commit）：
 
 | ST | 结果 | 说明 |
