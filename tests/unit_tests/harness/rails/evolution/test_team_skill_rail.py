@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 from openjiuwen.agent_evolving.checkpointing.types import (
+    EvolutionLog,
     EvolutionPatch,
     EvolutionRecord,
     EvolutionTarget,
@@ -745,8 +746,11 @@ async def test_stage_evolution_from_signals_does_not_hardcode_workflow_signal_se
         rail = TeamSkillRail.__new__(TeamSkillRail)
         rail._store = MagicMock()
         rail._store.skill_exists.return_value = True
+        rail._store.skill_definition_exists.return_value = True
         rail._store.read_skill_content = AsyncMock(return_value="current")
-        rail._store.get_pending_records = AsyncMock(side_effect=[[], [], []])
+        rail._store.load_evolution_log = AsyncMock(
+            side_effect=lambda name, target=None: EvolutionLog.empty(skill_id=name)
+        )
         rail._experience_skill_ops = {}
         rail._pending_record_snapshots = {}
         rail._pending_host_events = []

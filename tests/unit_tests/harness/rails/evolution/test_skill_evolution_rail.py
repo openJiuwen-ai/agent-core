@@ -15,6 +15,7 @@ import pytest
 
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 from openjiuwen.agent_evolving.checkpointing.types import (
+    EvolutionLog,
     EvolutionPatch,
     EvolutionRecord,
     EvolutionTarget,
@@ -100,6 +101,11 @@ def _make_rail(
     )
     rail._evolution_store = Mock()
     rail._evolution_store.read_skill_content = AsyncMock(return_value="# skill")
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    rail._evolution_store.skill_definition_exists = Mock(return_value=True)
+    rail._evolution_store.load_evolution_log = AsyncMock(
+        side_effect=lambda name, target=None: EvolutionLog.empty(skill_id=name)
+    )
     rail._evolution_store.get_pending_records = AsyncMock(return_value=[])
     rail._evolution_store.append_record = AsyncMock()
     rail._evolver = Mock()
@@ -1817,7 +1823,7 @@ def test_detect_signals_deduplicates_with_processed_keys(tmp_path, monkeypatch):
 
     assert len(first) == 1
     assert len(second) == 0
-    assert ("execution_failure", "bash", "skill-a", "same-excerpt") in rail.processed_signal_keys
+    assert ("execution_failure", "bash", "skill-a", "sameexcerpt") in rail.processed_signal_keys
 
 
 def test_detect_signals_clears_processed_keys_when_exceed_limit(tmp_path, monkeypatch):
@@ -1846,7 +1852,19 @@ async def test_stage_evolution_from_signals_builds_context(tmp_path):
     new_record = _make_record("skill-a", content="new")
 
     rail._evolution_store.read_skill_content = AsyncMock(return_value="# skill")
-    rail._evolution_store.get_pending_records = AsyncMock(side_effect=[[old_desc], [old_body], []])
+    rail._evolution_store.skill_exists = Mock(return_value=True)
+    rail._evolution_store.skill_definition_exists = Mock(return_value=True)
+
+    async def _load_evolution_log(name, target=None):
+        if target == EvolutionTarget.DESCRIPTION:
+            return EvolutionLog(skill_id=name, entries=[old_desc])
+        if target == EvolutionTarget.BODY:
+            return EvolutionLog(skill_id=name, entries=[old_body])
+        if target == EvolutionTarget.SCRIPT:
+            return EvolutionLog(skill_id=name, entries=[])
+        return EvolutionLog.empty(skill_id=name)
+
+    rail._evolution_store.load_evolution_log = AsyncMock(side_effect=_load_evolution_log)
     rail._evolver.generate_records = AsyncMock(return_value=[new_record])
 
     rail._online_updater.bind = Mock()
