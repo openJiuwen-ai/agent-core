@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Rail for retrying stalled or looping LLM streams."""
+"""Rail for retrying stalled or looping LLM streams and transient invoke failures."""
 
 from __future__ import annotations
 
@@ -19,17 +19,50 @@ _STREAM_TIMEOUT_MARKERS = (
     "LLM stream timeout",
     "stream frame timeout",
 )
+_TRANSIENT_TYPE_MARKERS = (
+    "apiconnectionerror",
+    "connecterror",
+    "connecttimeout",
+    "readtimeout",
+    "apitimeouterror",
+    "timeoutexception",
+    "remotedisconnected",
+    "connectionreseterror",
+    "brokenpipeerror",
+)
+_TRANSIENT_MESSAGE_MARKERS = (
+    "connection error",
+    "connection reset",
+    "connection refused",
+    "request timed out",
+    "read timeout",
+    "connect timeout",
+    "timed out while awaiting",
+)
+_NON_RETRYABLE_MESSAGE_MARKERS = (
+    "too many requests",
+    "error code: 429",
+    "rate limit",
+    "invalid api key",
+    "authentication",
+    "unauthorized",
+    "maximum context length",
+    "context length",
+    "prompt is too long",
+    "maximum input length",
+)
 # Whole-call retry backoff (seconds) before the 1st/2nd/... retry attempt.
 # The last value is reused if there are more retries than entries.
 _DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
 
 
 class LLMRetryRail(DeepAgentRail):
-    """Retry selected streaming model failures.
+    """Retry selected model-call failures.
 
-    The rail handles two model-call failure modes:
+    The rail handles three model-call failure modes:
       - repeated output suffixes in reasoning/content streams
       - stream frame timeout errors raised by ``Model.stream``
+      - transient invoke transport/timeouts (connection errors, read timeouts)
 
     Repetition detection is provider-agnostic. It only keeps a bounded tail of
     text and checks whether that tail ends with a short snippet repeated many
@@ -49,6 +82,7 @@ class LLMRetryRail(DeepAgentRail):
             repeat_window_chars: int = 1024,
             single_char_repeat_count: int = 100,
             backoff_seconds: Optional[List[float]] = None,
+            retry_transient_invoke_errors: bool = True,
     ) -> None:
         super().__init__()
         if max_retries < 0:
@@ -78,8 +112,10 @@ class LLMRetryRail(DeepAgentRail):
         self.repeat_window_chars = repeat_window_chars
         self.single_char_repeat_count = single_char_repeat_count
         self.backoff_seconds = backoff
+        self.retry_transient_invoke_errors = retry_transient_invoke_errors
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
+        self.transient_invoke_retry_count = 0
 
     def backoff_delay(self, retry_index: int) -> float:
         """Return the sleep (seconds) before the retry at ``retry_index`` (0-based).
@@ -94,6 +130,7 @@ class LLMRetryRail(DeepAgentRail):
         """Reset retry counters at the start of each agent invocation."""
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
+        self.transient_invoke_retry_count = 0
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Install a per-model-call stream chunk inspector."""
@@ -129,6 +166,10 @@ class LLMRetryRail(DeepAgentRail):
 
         if self._is_stream_timeout_exception(ctx.exception):
             self._request_retry_or_reset(ctx, "stream_timeout")
+            return
+
+        if self.retry_transient_invoke_errors and self._is_transient_invoke_exception(ctx.exception):
+            self._request_retry_or_reset(ctx, "transient_invoke")
 
     def _append_and_check(self, state: Dict[str, str], field_name: str, text: str) -> None:
         tail = (state.get(field_name, "") + text)[-self.repeat_window_chars:]
@@ -213,6 +254,20 @@ class LLMRetryRail(DeepAgentRail):
                 self.repeat_retry_count = 0
             return
 
+        if reason == "transient_invoke":
+            if self.transient_invoke_retry_count < self.max_retries:
+                delay = self.backoff_delay(self.transient_invoke_retry_count)
+                self.transient_invoke_retry_count += 1
+                logger.warning(
+                    "[LLMRetryRail] retrying model call after transient invoke error "
+                    f"({self.transient_invoke_retry_count}/{self.max_retries}) after {delay:.2f}s backoff: "
+                    f"{ctx.exception!r}"
+                )
+                ctx.request_retry(delay_seconds=delay)
+            else:
+                self.transient_invoke_retry_count = 0
+            return
+
         if self.stream_timeout_retry_count < self.max_retries:
             delay = self.backoff_delay(self.stream_timeout_retry_count)
             self.stream_timeout_retry_count += 1
@@ -234,6 +289,37 @@ class LLMRetryRail(DeepAgentRail):
             return False
         message = str(exc)
         return any(marker in message for marker in _STREAM_TIMEOUT_MARKERS)
+
+    @staticmethod
+    def _is_transient_invoke_exception(exc: Optional[BaseException]) -> bool:
+        if exc is None:
+            return False
+
+        seen: set[int] = set()
+        current: Optional[BaseException] = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if LLMRetryRail._is_non_retryable_exception(current):
+                return False
+            if LLMRetryRail._looks_transient_exception(current):
+                return True
+            current = current.__cause__ or current.__context__
+
+        return LLMRetryRail._looks_transient_exception(exc)
+
+    @staticmethod
+    def _is_non_retryable_exception(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return any(marker in message for marker in _NON_RETRYABLE_MESSAGE_MARKERS)
+
+    @staticmethod
+    def _looks_transient_exception(exc: BaseException) -> bool:
+        type_name = type(exc).__name__.lower()
+        if any(marker in type_name for marker in _TRANSIENT_TYPE_MARKERS):
+            return True
+
+        message = str(exc).lower()
+        return any(marker in message for marker in _TRANSIENT_MESSAGE_MARKERS)
 
 
 __all__ = [
