@@ -889,6 +889,11 @@ def rail(
                                 exc_info=True
                             )
 
+                    if ctx.has_force_finish_request:
+                        ff = ctx.consume_force_finish()
+                        exc_to_raise = None
+                        return ff.result if ff is not None else {}
+
                     retry_request = ctx.consume_retry_request()
                     if not retry_request:
                         raise

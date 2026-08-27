@@ -56,18 +56,28 @@ class BrowserWorkingContextProcessor(ContextProcessor):
             store.commit_pending_from_messages(session, context.get_messages())
 
         prompt_text = store.render_and_consume_one_step(session)
-        context_window.context_messages = [
+        retained_messages = [
             self._prompt_safe_message(message)
             for message in context_window.context_messages
             if not self._is_working_context_message(message)
         ]
-        context_window.context_messages.append(
-            UserMessage(
-                name=_BROWSER_WORKING_CONTEXT_MESSAGE_NAME,
-                metadata={_BROWSER_WORKING_CONTEXT_METADATA_KEY: True},
-                content=prompt_text,
-            )
+        working_context_message = UserMessage(
+            name=_BROWSER_WORKING_CONTEXT_MESSAGE_NAME,
+            metadata={_BROWSER_WORKING_CONTEXT_METADATA_KEY: True},
+            content=prompt_text,
         )
+        insert_at = next(
+            (
+                index
+                for index, message in enumerate(retained_messages)
+                if message.name in {"current_browser_state", "browser_state_progress"}
+                or message.metadata.get("browser_state_context")
+                or message.metadata.get("browser_state_progress_context")
+            ),
+            len(retained_messages),
+        )
+        retained_messages.insert(insert_at, working_context_message)
+        context_window.context_messages = retained_messages
         return None, context_window
 
     @staticmethod

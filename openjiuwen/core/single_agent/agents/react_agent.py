@@ -1135,6 +1135,7 @@ class ReActAgent(BaseAgent):
                 else:
                     raise
             ctx.inputs.response = ai_message
+            self._raise_for_model_response_error(ai_message)
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
@@ -1214,6 +1215,7 @@ class ReActAgent(BaseAgent):
                 logprobs=accumulated_chunk.logprobs,
             )
         ctx.inputs.response = ai_message
+        self._raise_for_model_response_error(ai_message)
         if ai_message.usage_metadata:
 
             perf_metrics = {}
@@ -1237,6 +1239,21 @@ class ReActAgent(BaseAgent):
                 },
             ))
         return ai_message
+
+    @staticmethod
+    def _raise_for_model_response_error(message: AssistantMessage) -> None:
+        """Turn provider error responses into rail-visible exceptions."""
+        finish_reason = str(getattr(message, "finish_reason", "") or "").strip().lower()
+        usage = getattr(message, "usage_metadata", None)
+        code = int(getattr(usage, "code", 0) or 0)
+        if finish_reason not in {"error", "failed"} and code == 0:
+            return
+        error_message = str(getattr(usage, "err_msg", "") or getattr(message, "content", "") or "")
+        raise RuntimeError(
+            "model_provider_response_error: "
+            f"code={code}, finish_reason={finish_reason or 'unknown'}, "
+            f"message={error_message[:500] or 'provider returned no error detail'}"
+        )
 
     @staticmethod
     def _messages_contain_image_input(messages: Optional[List[Any]]) -> bool:

@@ -23,6 +23,10 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_cont
     BrowserStateContextProcessor,
     BrowserStateContextProcessorConfig,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context import (
+    BROWSER_TASK_STATE_KEY,
+    BrowserWorkingContextStore,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_browser_state_metadata_js,
 )
@@ -51,6 +55,27 @@ def _state(url: str) -> dict:
             "pixels_above": 400,
             "pixels_below": 1280,
         },
+        "page_state": {
+            "page_id": "page-current",
+            "generation_id": "g0",
+            "url": url,
+            "title": "Current page",
+            "interactives": [
+                {
+                    "target_id": "t_g0_1",
+                    "generation_id": "g0",
+                    "role": "button",
+                    "text": "Continue",
+                    "match_count": 1,
+                    "visible": True,
+                    "enabled": True,
+                    "actionable": True,
+                }
+            ],
+            "cards": [],
+            "field_coverage": [],
+            "blockers": [],
+        },
         "dom": '- button "Continue" [ref=e7]',
     }
 
@@ -61,6 +86,115 @@ def _window_message(window: ContextWindow, name: str) -> UserMessage:
     message = matches[0]
     assert isinstance(message, UserMessage)
     return message
+
+
+def test_completed_parallel_calls_form_one_refresh_action_group() -> None:
+    messages = [
+        AssistantMessage(
+            content="",
+            tool_calls=[
+                ToolCall(id="mutate", type="function", name="browser_navigate", arguments="{}"),
+                ToolCall(id="probe", type="function", name="browser_probe_cards", arguments="{}"),
+            ],
+        ),
+        ToolMessage(tool_call_id="probe", content="{}"),
+        ToolMessage(tool_call_id="mutate", content="{}"),
+    ]
+
+    group_id, refresh_ids = BrowserStateContextProcessor._completed_refresh_action_group(messages)
+
+    assert group_id
+    assert refresh_ids == {"mutate"}
+
+
+@pytest.mark.asyncio
+async def test_parallel_read_probes_merge_once_without_full_browser_capture() -> None:
+    provider = AsyncMock()
+    provider.capture_browser_state.return_value = _state("https://example.test/initial")
+    compact_state = _state("https://example.test/results")
+    compact_state["page_state"]["cards"] = [
+        {
+            "target_id": "t_g0_2",
+            "generation_id": "g0",
+            "title": "Result",
+        }
+    ]
+    provider.capture_compact_browser_state.return_value = compact_state
+    engine = ContextEngine()
+    context = await engine.create_context(
+        "browser-read-group-test",
+        processors=[
+            (
+                "BrowserStateContextProcessor",
+                BrowserStateContextProcessorConfig(provider=provider),
+            )
+        ],
+    )
+    await context.add_messages(UserMessage(content="compare results"))
+    await context.get_context_window()
+    await context.add_messages(
+        [
+            AssistantMessage(
+                content="",
+                tool_calls=[
+                    ToolCall(id="cards", type="function", name="browser_probe_cards", arguments="{}"),
+                    ToolCall(
+                        id="controls",
+                        type="function",
+                        name="browser_probe_interactives",
+                        arguments="{}",
+                    ),
+                ],
+            ),
+            ToolMessage(tool_call_id="controls", content="{}"),
+            ToolMessage(tool_call_id="cards", content="{}"),
+        ]
+    )
+
+    window = await context.get_context_window()
+
+    assert provider.capture_browser_state.await_count == 1
+    provider.capture_compact_browser_state.assert_awaited_once()
+    assert "t_g0_2" in _window_message(window, "current_browser_state").content
+
+
+@pytest.mark.asyncio
+async def test_denied_browser_action_reuses_cached_state_without_observation() -> None:
+    provider = AsyncMock()
+    provider.capture_browser_state.return_value = _state("https://example.test/current")
+    engine = ContextEngine()
+    context = await engine.create_context(
+        "browser-denied-group-test",
+        processors=[
+            (
+                "BrowserStateContextProcessor",
+                BrowserStateContextProcessorConfig(provider=provider),
+            )
+        ],
+    )
+    await context.add_messages(UserMessage(content="inspect current page"))
+    initial_window = await context.get_context_window()
+    await context.add_messages(
+        [
+            AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="denied", type="function", name="browser_evaluate", arguments="{}")],
+            ),
+            ToolMessage(
+                tool_call_id="denied",
+                content='{"ok":false,"executed":false,"state_changed":false,"denied":true}',
+                metadata={"executed": False, "state_changed": False, "denied": True},
+            ),
+        ]
+    )
+
+    denied_window = await context.get_context_window()
+
+    assert provider.capture_browser_state.await_count == 1
+    assert _window_message(denied_window, "current_browser_state") is _window_message(
+        initial_window,
+        "current_browser_state",
+    )
 
 
 async def _add_completed_browser_action(
@@ -100,11 +234,10 @@ async def test_processor_reuses_cached_browser_state_without_navigation() -> Non
     _, window = await processor.on_get_context_window(None, window)
 
     assert provider.capture_browser_state.await_count == 1
-    assert len(window.context_messages) == 3
+    assert len(window.context_messages) == 2
     assert window.context_messages[0].content == "original request"
 
     state_message = _window_message(window, "current_browser_state")
-    progress_message = _window_message(window, "browser_state_progress")
     assert state_message is original_state_message
     assert state_message.name == "current_browser_state"
     assert state_message.metadata["browser_state_context"] is True
@@ -113,11 +246,10 @@ async def test_processor_reuses_cached_browser_state_without_navigation() -> Non
     assert "https://other.example" in state_message.content
     assert '"scroll_y": 400' in state_message.content
     assert '"page_change"' not in state_message.content
-    assert "[ref=e7]" in state_message.content
+    assert '"target_id": "t_g0_1"' in state_message.content
+    assert "[ref=e7]" not in state_message.content
     assert "image_url" not in state_message.content
-    assert '"page_change": "initial"' in progress_message.content
-    assert progress_message.metadata[PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY] is True
-    assert window.context_messages.index(progress_message) > window.context_messages.index(state_message)
+    assert all(message.name != "browser_state_progress" for message in window.context_messages)
     provider.capture_browser_state.assert_awaited_with()
 
 
@@ -230,17 +362,13 @@ async def test_context_engine_refreshes_state_after_completed_mutating_tool(
     pending_state = _window_message(pending_window, "current_browser_state")
     refreshed_state = _window_message(refreshed_window, "current_browser_state")
     reused_state = _window_message(reused_window, "current_browser_state")
-    refreshed_progress = _window_message(refreshed_window, "browser_state_progress")
     assert "https://first.example" in first_state.content
     assert cached_state is first_state
     assert pending_state is first_state
     assert "https://second.example" in refreshed_state.content
     assert refreshed_state is not first_state
-    assert '"page_change": "changed"' in refreshed_progress.content
-    assert '"observable_progress": true' in refreshed_progress.content
-    assert '"consecutive_no_progress": 0' in refreshed_progress.content
     assert reused_state is refreshed_state
-    assert len(first_window.context_messages) == 3
+    assert len(first_window.context_messages) == 2
     assert provider.capture_browser_state.await_count == 2
 
 
@@ -269,22 +397,14 @@ async def test_context_engine_injects_new_capture_after_evaluate_and_reports_unc
 
     initial_state = _window_message(initial_window, "current_browser_state")
     unchanged_state = _window_message(unchanged_window, "current_browser_state")
-    progress = _window_message(unchanged_window, "browser_state_progress")
     assert unchanged_state is not initial_state
     assert unchanged_state.content == initial_state.content
-    assert '"page_change": "unchanged"' in progress.content
-    assert '"observable_progress": false' in progress.content
-    assert '"consecutive_no_progress": 1' in progress.content
-    assert "<required_next_action>" in progress.content
-    assert "NO OBSERVABLE PROGRESS. Do not repeat the previous action." in progress.content
-    assert "</required_next_action>" in progress.content
-    assert unchanged_window.context_messages.index(progress) > unchanged_window.context_messages.index(unchanged_state)
-    assert unchanged_window.context_messages[-1] is progress
+    assert unchanged_window.context_messages[-1] is unchanged_state
     assert provider.capture_browser_state.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_persisted_prompt_attachments_remain_before_browser_state_and_progress_tail() -> None:
+async def test_persisted_prompt_attachments_remain_with_browser_state_tail() -> None:
     provider = AsyncMock()
     provider.capture_browser_state.return_value = _state("https://tail.example")
     manager = PromptAttachmentManager()
@@ -314,8 +434,7 @@ async def test_persisted_prompt_attachments_remain_before_browser_state_and_prog
     assert isinstance(attachment, SystemMessage)
     assert "The following dynamic context" in attachment.content
     assert "runtime attachment" in attachment.content
-    assert window.context_messages[-2].name == "current_browser_state"
-    assert window.context_messages[-1].name == "browser_state_progress"
+    assert window.context_messages[-1].name == "current_browser_state"
 
 
 @pytest.mark.asyncio
@@ -354,20 +473,12 @@ async def test_no_progress_count_increments_and_resets_after_changed_state() -> 
     )
     changed_window = await context.get_context_window()
 
-    first_progress = _window_message(first_unchanged_window, "browser_state_progress")
-    second_progress = _window_message(second_unchanged_window, "browser_state_progress")
-    changed_progress = _window_message(changed_window, "browser_state_progress")
     first_unchanged_state = _window_message(first_unchanged_window, "current_browser_state")
     second_unchanged_state = _window_message(second_unchanged_window, "current_browser_state")
-    assert '"consecutive_no_progress": 1' in first_progress.content
-    assert '"consecutive_no_progress": 2' in second_progress.content
     assert first_unchanged_state is not initial_state
     assert second_unchanged_state is not first_unchanged_state
     assert first_unchanged_state.content == initial_state.content
     assert second_unchanged_state.content == first_unchanged_state.content
-    assert '"page_change": "changed"' in changed_progress.content
-    assert '"observable_progress": true' in changed_progress.content
-    assert '"consecutive_no_progress": 0' in changed_progress.content
     assert _window_message(changed_window, "current_browser_state") is not second_unchanged_state
     assert provider.capture_browser_state.await_count == 4
 
@@ -431,14 +542,12 @@ async def test_processor_injects_explicit_unavailable_state_without_stale_image(
 
     _, window = await processor.on_get_context_window(None, window)
 
-    assert len(window.context_messages) == 2
+    assert len(window.context_messages) == 1
     state_content = _window_message(window, "current_browser_state").content
-    progress_content = _window_message(window, "browser_state_progress").content
     assert "browser disconnected" in state_content
-    assert "[DOM snapshot unavailable]" in state_content
+    assert '"page_state": {}' in state_content
     assert "image_url" not in state_content
-    assert '"page_change": "unknown"' in progress_content
-    assert "browser disconnected" in progress_content
+    assert processor._page_change == "unknown"
 
 
 @pytest.mark.asyncio
@@ -453,14 +562,12 @@ async def test_processor_load_state_resets_page_change_baseline() -> None:
 
     _, first_window = await processor.on_get_context_window(None, window)
     first_state = _window_message(first_window, "current_browser_state")
-    first_progress = _window_message(first_window, "browser_state_progress")
+    assert processor._page_change == "initial"
     processor.load_state({})
     _, restored_window = await processor.on_get_context_window(None, first_window)
 
     restored_state = _window_message(restored_window, "current_browser_state")
-    restored_progress = _window_message(restored_window, "browser_state_progress")
-    assert '"page_change": "initial"' in first_progress.content
-    assert '"page_change": "initial"' in restored_progress.content
+    assert processor._page_change == "initial"
     assert "https://second.example" in restored_state.content
     assert restored_state is not first_state
     assert provider.capture_browser_state.await_count == 2
@@ -500,7 +607,8 @@ async def test_runtime_combines_snapshot_with_page_metadata() -> None:
     assert "page.screenshot" not in run_code
     assert state["ok"] is True
     assert state["url"] == "https://example.test/docs"
-    assert state["dom"] == '- link "Docs" [ref=e3]'
+    assert state["dom"] == ""
+    assert state["page_state"]["interactives"][0]["text"] == "Docs"
     assert "screenshot" not in state
     target = runtime._ensure_page_state().resolve_target(generation_id="g0", ref="e3")
     assert target is not None
@@ -543,8 +651,10 @@ async def test_runtime_automatic_capture_replaces_refs_after_url_generation_sync
     first_state = await runtime.capture_browser_state()
     second_state = await runtime.capture_browser_state()
 
-    assert first_state["dom"] == '- button "First" [ref=e1]'
-    assert second_state["dom"] == '- button "Second" [ref=e2]'
+    assert first_state["dom"] == ""
+    assert second_state["dom"] == ""
+    assert first_state["page_state"]["interactives"][0]["text"] == "First"
+    assert second_state["page_state"]["interactives"][0]["text"] == "Second"
     assert runtime.generation_id == "g1"
     assert runtime._ensure_page_state().resolve_target(generation_id="g1", ref="e2") is not None
     with pytest.raises(ValueError, match="Stale AX ref e1 belongs to g0"):
@@ -585,4 +695,55 @@ def test_browser_state_metadata_probe_collects_tabs_and_position_without_screens
     assert "page.context().pages()" in js
     assert "page_position" in js
     assert "pixels_below" in js
+    assert "form_values" in js
+    assert "selected_filters" in js
+    assert "result_count" in js
     assert "page.screenshot" not in js
+
+
+@pytest.mark.asyncio
+async def test_processor_requires_replan_for_semantic_loop_even_when_dom_changes() -> None:
+    state = _state("https://shop.example/search")
+    state["dom"] = '- button "Different DOM" [ref=e9]'
+    state["semantic_state"] = {
+        "url": "https://shop.example/search",
+        "form_values": [{"key": "query", "value": "headphones"}],
+        "selected_filters": [{"key": "price", "value": "0-100"}],
+        "result_count": 10,
+        "field_coverage": ["title"],
+    }
+    state["semantic_progress"] = {
+        "progress": "state_revisit",
+        "observable_progress": False,
+        "consecutive_no_progress": 3,
+        "state_revisit": True,
+        "state_revisit_count": 3,
+        "aba_loop": True,
+        "repeated_filter_state": True,
+        "replan_required": True,
+        "replan_reason": ["three_semantic_state_revisits"],
+    }
+
+    class Session:
+        def __init__(self) -> None:
+            self.state = {
+                BROWSER_TASK_STATE_KEY: BrowserRuntimeRail._build_phase_state("find headphones"),
+            }
+
+        def get_state(self, key):
+            return self.state.get(key)
+
+        def update_state(self, value):
+            self.state.update(value)
+
+    from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
+
+    session = Session()
+    state["semantic_progress"]["revision"] = 1
+    BrowserWorkingContextStore.sync_semantic_progress(session, state["semantic_progress"])
+
+    task_state = session.get_state(BROWSER_TASK_STATE_KEY)
+    assert task_state["semantic_progress"]["aba_loop"] is True
+    assert task_state["replan_required"] is True
+    assert task_state["status"] == "replan_required"
+    assert task_state["next_action_class"] == "materially_different_strategy"

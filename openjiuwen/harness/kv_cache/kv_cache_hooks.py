@@ -20,7 +20,10 @@ def affinity_enabled(deep_agent: Any) -> bool:
 
 
 def is_sticky_subagent_type(subagent_type: str) -> bool:
-    return str(subagent_type or "").strip() in ("browser_agent", "verification_agent")
+    # Browser process/profile reuse is owned by BrowserServiceRegistry. Keeping
+    # its model session sticky would leak the previous query's tools/PageState
+    # into an unrelated TaskTool call.
+    return str(subagent_type or "").strip() == "verification_agent"
 
 
 def resolve_sub_session_id(

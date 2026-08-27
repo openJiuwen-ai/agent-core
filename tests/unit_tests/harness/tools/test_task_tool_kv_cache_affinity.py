@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -48,7 +48,7 @@ def _make_tool(*, enabled: bool = True, subagent: _FakeSubAgent | None = None) -
 
 
 @pytest.mark.asyncio
-async def test_sticky_subagent_prefetches_before_invoke_and_offloads_after_success() -> None:
+async def test_browser_subagent_uses_fresh_session_and_evicts_after_success() -> None:
     subagent = _FakeSubAgent("browser")
     tool, model = _make_tool(subagent=subagent)
 
@@ -65,29 +65,20 @@ async def test_sticky_subagent_prefetches_before_invoke_and_offloads_after_succe
         )
 
     assert result.success is True
-    assert subagent.inputs[0]["conversation_id"] == "parent_session_sub_browser_agent"
+    sub_session_id = subagent.inputs[0]["conversation_id"]
+    assert re.fullmatch(r"parent_session_sub_browser_agent_[0-9a-f]{8}", sub_session_id)
     assert subagent.inputs[0]["parent_session_id"] == "parent_session"
-    assert dispatch_mock.call_args_list == [
-        call(
-            model,
-            "prefetch",
-            session_id="parent_session_sub_browser_agent",
-            parent_session_id="parent_session",
-            enabled=True,
-        ),
-        call(
-            model,
-            "offload",
-            session_id="parent_session_sub_browser_agent",
-            parent_session_id="parent_session",
-            enabled=True,
-        ),
-    ]
-    evict_mock.assert_not_awaited()
+    dispatch_mock.assert_not_called()
+    evict_mock.assert_awaited_once_with(
+        model,
+        session_id=sub_session_id,
+        parent_session_id="parent_session",
+        enabled=True,
+    )
 
 
 @pytest.mark.asyncio
-async def test_sticky_subagent_failure_evicts_and_keeps_original_exception() -> None:
+async def test_browser_subagent_failure_evicts_fresh_session_and_keeps_original_exception() -> None:
     subagent = _FakeSubAgent("browser", error=RuntimeError("subagent boom"))
     tool, model = _make_tool(subagent=subagent)
 
@@ -104,16 +95,12 @@ async def test_sticky_subagent_failure_evicts_and_keeps_original_exception() -> 
                 session=Session(session_id="parent_session"),
             )
 
-    dispatch_mock.assert_called_once_with(
-        model,
-        "prefetch",
-        session_id="parent_session_sub_browser_agent",
-        parent_session_id="parent_session",
-        enabled=True,
-    )
+    sub_session_id = subagent.inputs[0]["conversation_id"]
+    assert re.fullmatch(r"parent_session_sub_browser_agent_[0-9a-f]{8}", sub_session_id)
+    dispatch_mock.assert_not_called()
     evict_mock.assert_awaited_once_with(
         model,
-        session_id="parent_session_sub_browser_agent",
+        session_id=sub_session_id,
         parent_session_id="parent_session",
         enabled=True,
     )
@@ -235,8 +222,12 @@ async def test_affinity_disabled_preserves_baseline_invoke_and_skips_helpers() -
     assert subagent.inputs == [
         {
             "query": "run task",
-            "conversation_id": "parent_session_sub_browser_agent",
+            "conversation_id": subagent.inputs[0]["conversation_id"],
         }
     ]
+    assert re.fullmatch(
+        r"parent_session_sub_browser_agent_[0-9a-f]{8}",
+        subagent.inputs[0]["conversation_id"],
+    )
     dispatch_mock.assert_not_called()
     evict_mock.assert_not_awaited()

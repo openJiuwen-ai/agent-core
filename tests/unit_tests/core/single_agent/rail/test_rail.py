@@ -422,6 +422,31 @@ class TestRailExceptionRetry(
             ("after", 1),
         ]
 
+    async def test_on_model_exception_can_force_finish(self):
+        """on_model_exception may end the run with a structured result."""
+        agent, _ = _make_agent()
+        expected = {
+            "output": '{"status":"failed","error":"provider_unavailable"}',
+            "result_type": "error",
+        }
+
+        class FinishRail(AgentRail):
+            async def on_model_exception(self, ctx):
+                ctx.request_force_finish(expected)
+
+        await agent.register_rail(FinishRail())
+        mock_llm = MockLLMModel()
+
+        async def failed_invoke(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("provider timeout")
+
+        mock_llm.invoke = failed_invoke
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            result = await agent.invoke({"query": "finish on provider failure"})
+
+        assert result == expected
+
     async def test_on_tool_exception_can_request_retry(
         self,
     ):

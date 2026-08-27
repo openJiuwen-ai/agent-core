@@ -31,7 +31,6 @@ CORE_BROWSER_TOOL_NAMES: tuple[str, ...] = (
     "browser_tabs",
     "browser_take_screenshot",
     "browser_type",
-    "browser_wait_for",
 )
 
 ADVANCED_CODE_BROWSER_TOOL_NAMES: tuple[str, ...] = ("browser_run_code",)

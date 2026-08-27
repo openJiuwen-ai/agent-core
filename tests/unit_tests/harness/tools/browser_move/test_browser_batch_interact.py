@@ -10,6 +10,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,7 +18,9 @@ from openjiuwen.harness.tools.browser_move.controllers import action as controll
 from openjiuwen.harness.tools.browser_move.controllers.action import (
     _build_batch_interact_script,
     _build_drag_script,
+    _compact_extraction_provenance,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
 
 
 def _run(coro: Any) -> Any:
@@ -84,14 +87,63 @@ def test_batch_interact_script_contains_realistic_playwright_locators() -> None:
     assert "setTimeout" not in js
 
 
+def test_batch_click_retries_only_transient_actionability_failures_within_same_timeout() -> None:
+    js = _build_batch_interact_script(
+        {
+            "steps": [
+                {"op": "click", "role": "button", "name": "Search"},
+                {"op": "wait_for_url", "url_contains": "/results"},
+            ],
+            "timeout_ms": 2500,
+        }
+    )
+
+    assert "clickWithTransientRetry" in js
+    assert "intercept|not stable|outside of the viewport" in js
+    assert "for (let attempt = 0; attempt < 2; attempt += 1)" in js
+    assert "timeout - (Date.now() - started)" in js
+
+
+def test_batch_extraction_provenance_keeps_selector_raw_text_and_generation() -> None:
+    provenance = _compact_extraction_provenance(
+        [
+            {
+                "op": "extract_text",
+                "ok": True,
+                "field": "title",
+                "selector": "article:nth-of-type(1) h2",
+                "raw_text": "Original\n title",
+            },
+            {
+                "op": "extract_value",
+                "ok": False,
+                "field": "price",
+                "selector": "#price",
+                "raw_text": "99",
+            },
+        ],
+        "g12",
+    )
+
+    assert provenance == {
+        "title": {
+            "selector": "article:nth-of-type(1) h2",
+            "raw_text": "Original\n title",
+            "generation_id": "g12",
+        }
+    }
+
+
 def test_drag_script_uses_playwright_wait_for_timeout_instead_of_global_settimeout() -> None:
-    js = _build_drag_script({
-        "coord_source_x": 1,
-        "coord_source_y": 2,
-        "coord_target_x": 10,
-        "coord_target_y": 20,
-        "delay_ms": 5,
-    })
+    js = _build_drag_script(
+        {
+            "coord_source_x": 1,
+            "coord_source_y": 2,
+            "coord_target_x": 10,
+            "coord_target_y": 20,
+            "delay_ms": 5,
+        }
+    )
 
     assert "page.waitForTimeout" in js
     assert "setTimeout" not in js
@@ -169,10 +221,7 @@ def test_batch_interact_action_rejects_more_than_25_steps() -> None:
     controller.register_example_actions()
     controller.bind_code_executor(fake_code_executor)
 
-    steps = [
-        {"op": "click", "selector": f"#button-{index}"}
-        for index in range(30)
-    ]
+    steps = [{"op": "click", "selector": f"#button-{index}"} for index in range(30)]
     result = _run(
         controller.run_action(
             "browser_batch_interact",
@@ -469,9 +518,7 @@ def test_batch_interact_returns_compact_condition_observations() -> None:
         )
     )
 
-    assert result["conditions"][0]["observed"] == {
-        "url": "https://example.test/results"
-    }
+    assert result["conditions"][0]["observed"] == {"url": "https://example.test/results"}
     assert result["conditions"][1]["observed"] == {"count": 10}
     assert "url" not in result
     assert "title" not in result
@@ -503,7 +550,80 @@ def test_batch_interact_script_uses_fail_fast_targets_and_condition_waits() -> N
     assert "op === 'wait_for_result_count'" in js
     assert "op === 'wait_for_dom_text_change'" in js
     assert "op === 'wait_for_stable'" in js
+    assert "op === 'wait_for_tab'" in js
+    assert "initialTabCount" in js
+    assert "page.context().pages()" in js
+    assert "await matchedPage.bringToFront()" in js
     assert "visible_text_preview" not in js
+
+
+def test_wait_for_tab_is_a_valid_condition_and_activates_new_tab(tmp_path: Path) -> None:
+    assert (
+        controller.validate_batch_steps(
+            [
+                {"op": "click", "selector": "#open"},
+                {"op": "wait_for_tab", "url_contains": "/new"},
+            ]
+        )
+        == []
+    )
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed; skipping generated JavaScript execution test")
+
+    js_function = _build_batch_interact_script(
+        {
+            "steps": [
+                {"op": "click", "selector": "#open"},
+                {"op": "wait_for_tab", "url_contains": "/new"},
+            ],
+            "timeout_ms": 500,
+            "condition_timeout_ms": 1000,
+            "generation_id": "g2",
+        }
+    )
+    runner = tmp_path / "run_wait_for_tab.js"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            const fn = ({js_function});
+            const calls = [];
+            const pages = [];
+            const context = {{ pages: () => pages }};
+            const newPage = {{
+              context: () => context,
+              url: () => 'https://example.test/new',
+              title: async () => 'New tab',
+              bringToFront: async () => calls.push('activated'),
+            }};
+            class FakeLocator {{
+              first() {{ return this; }}
+              async count() {{ return 1; }}
+              async waitFor() {{}}
+              async isVisible() {{ return true; }}
+              async isEnabled() {{ return true; }}
+              async click() {{ pages.push(newPage); }}
+            }}
+            const oldPage = {{
+              context: () => context,
+              locator: () => new FakeLocator(),
+              url: () => 'https://example.test/old',
+              title: async () => 'Old tab',
+            }};
+            pages.push(oldPage);
+            fn(oldPage).then((result) => console.log(JSON.stringify({{ result, calls }})));
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run([node, str(runner)], check=True, text=True, capture_output=True)
+    payload = json.loads(completed.stdout)
+    assert payload["result"]["ok"] is True
+    assert payload["result"]["url"] == "https://example.test/new"
+    assert payload["result"]["conditions"][0]["observed"]["count"] == 2
+    assert payload["calls"] == ["activated"]
 
 
 def test_batch_preflight_rejects_later_ambiguous_target_before_any_click(tmp_path: Path) -> None:
@@ -628,11 +748,40 @@ def test_batch_interact_script_runs_against_playwright_like_form_stub(tmp_path: 
     payload = json.loads(completed.stdout)
 
     assert payload["result"]["ok"] is True
-    assert [step["op"] for step in payload["result"]["steps"]] == [
-        step["op"] for step in _realistic_booking_steps()
-    ]
+    assert [step["op"] for step in payload["result"]["steps"]] == [step["op"] for step in _realistic_booking_steps()]
     assert ["fill", "label", "First name", "John", 3000] in payload["calls"]
     assert ["keyboard.type", "Singapore", 0] in payload["calls"]
     assert ["click", "text", "Singapore (SIN)", 3000] in payload["calls"]
     assert any(call[0] == "selectOption" and call[3] == {"label": "Singapore"} for call in payload["calls"])
     assert ["setChecked", "label", "Male", True, 3000] in payload["calls"]
+
+
+def test_safe_read_selector_preflight_requires_one_visible_match() -> None:
+    runtime = BrowserAgentRuntime.__new__(BrowserAgentRuntime)
+    runtime._call_playwright_run_code_unsafe = AsyncMock(
+        return_value='{"ok":true,"results":[{"index":0,"selector":".title","match_count":1,"visible":true}]}'
+    )
+
+    _run(runtime._validate_safe_read_locators(
+        [{"op": "extract_text", "selector": ".title", "field": "title"}]
+    ))
+
+    runtime._call_playwright_run_code_unsafe.return_value = (
+        '{"ok":true,"results":[{"index":0,"selector":".title",'
+        '"match_count":2,"visible":true}]}'
+    )
+    with pytest.raises(ValueError, match="exactly one visible element"):
+        _run(runtime._validate_safe_read_locators(
+            [{"op": "extract_text", "selector": ".title", "field": "title"}]
+        ))
+
+
+def test_batch_target_contract_requires_target_id_for_mutations() -> None:
+    errors = BrowserAgentRuntime._validate_batch_target_contract(
+        [{"op": "click", "selector": "#submit"}]
+    )
+
+    assert errors == ["steps[0] op=click requires target_id from the current PageState"]
+    assert BrowserAgentRuntime._validate_batch_target_contract(
+        [{"op": "extract_text", "selector": ".title", "field": "title"}]
+    ) == []

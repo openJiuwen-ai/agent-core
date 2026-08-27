@@ -175,17 +175,15 @@ def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
     assert "observable condition waits" in english
     assert "navigate directly to that URL" in english
     assert "Stop immediately" in english
-    assert "Every model call includes the latest complete <browser_state> observation" in english
+    assert "one runtime-maintained <browser_working_context>" in english
     assert "A fresh browser capture occurs initially" in english
-    assert "page_change=unchanged" in english
-    assert "<required_next_action>" in english
+    assert "runtime directive requires replanning" in english
     assert "直接构造搜索结果 URL" in chinese
     assert "可观察条件" in chinese
     assert "直接导航该 URL" in chinese
     assert "立即结束" in chinese
-    assert "<browser_state_progress>" in chinese
-    assert "page_change=unchanged" in chinese
-    assert "<required_next_action>" in chinese
+    assert "<browser_working_context>" in chinese
+    assert "runtime 要求重新规划" in chinese
     assert "browser_run_code_unsafe" not in english
     assert "browser_run_code_unsafe" not in chinese
     assert "makes a browser_run_code tool visible" in english
@@ -343,6 +341,7 @@ def test_default_wiring_adds_browser_state_and_windows_large_tool_results() -> N
         "browser_probe_interactives",
         "browser_probe_cards",
         "browser_snapshot",
+        "browser_evaluate",
     ]
     assert config.keep_last_k == 1
     assert processor_map["BrowserWorkingContextProcessor"].max_recent_steps > 0
@@ -378,8 +377,8 @@ def test_caller_context_processor_rail_is_augmented_with_browser_state() -> None
     # processor rather than competing with a second context rail.
     assert context_rails == [caller_rail]
     assert [key for key, _ in caller_rail._user_processors] == [
-        "BrowserWorkingContextProcessor",
         "BrowserStateContextProcessor",
+        "BrowserWorkingContextProcessor",
     ]
 
 

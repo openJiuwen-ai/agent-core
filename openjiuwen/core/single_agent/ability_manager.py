@@ -760,7 +760,7 @@ class AbilityManager:
                         if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                     ]
                     for tool_name in tools_to_remove:
-                        removed_card = self._tools.pop(tool_name, None)
+                        self._tools.pop(tool_name, None)
                     self._mcp_tool_allowlists.pop(server_id, None)
                 removed = mcp_server
             if removed is not None:
@@ -787,7 +787,7 @@ class AbilityManager:
                             if tool_card.id and tool_card.id.startswith(f"{server_id}.")
                         ]
                         for tool_name in tools_to_remove:
-                            removed_card = self._tools.pop(tool_name, None)
+                            self._tools.pop(tool_name, None)
                         self._mcp_tool_allowlists.pop(server_id, None)
                     removed = mcp_server
                 result.append(removed)
@@ -1179,7 +1179,17 @@ class AbilityManager:
             tag=None,
     ) -> Tuple[Any, ToolMessage]:
         """Execute one tool call under rail lifecycle events."""
-        skip_result = ctx.extra.pop("_skip_tool", None)
+        skip_result = None
+        skip_requests = ctx.extra.get("_skip_tool_calls")
+        tool_call_id = str(tool_call.id or "")
+        if isinstance(skip_requests, dict) and tool_call_id:
+            skip_result = skip_requests.pop(tool_call_id, None)
+            if not skip_requests:
+                ctx.extra.pop("_skip_tool_calls", None)
+        if not skip_result:
+            # Backward compatibility for rails that still use the legacy
+            # invocation-wide scalar. Parallel calls share ctx.extra.
+            skip_result = ctx.extra.pop("_skip_tool", None)
 
         if skip_result:
             return ctx.inputs.tool_result, ctx.inputs.tool_msg
