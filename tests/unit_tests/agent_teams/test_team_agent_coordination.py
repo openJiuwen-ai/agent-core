@@ -3944,3 +3944,54 @@ async def test_rearm_allows_completion_to_conclude_again():
 
     # Two rising edges → two markers + two sentinels.
     assert agent._stream_controller.stream_queue.qsize() == 4
+
+
+@pytest.mark.level0
+def test_team_spec_enable_taskless_completion_defaults_true():
+    """The toggle defaults to True (fixed behavior); False rolls back to
+    'empty board never auto-completes' for emergency use."""
+    spec = TeamSpec(team_name="t", display_name="t")
+    assert spec.enable_taskless_completion is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_skips_publish_when_taskless_disabled():
+    """enable_taskless_completion=False + empty board: skip the TEAM_COMPLETED
+    publish (emergency rollback at the publish boundary). is_team_completed
+    is still consulted and returns its snapshot — the toggle never gates the
+    snapshot itself, only the publish boundary downstream of it.
+    """
+    agent = _make_leader()
+    handler = agent._coordination.dispatcher.team_completion
+    handler._blueprint.team_spec.enable_taskless_completion = False
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=0)
+    messager = _wire_completion_handler(agent, snapshot)
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await handler.on_poll_task(event)
+
+    # Snapshot path ran; publish + finalize are suppressed by the gate.
+    handler._infra.team_backend.is_team_completed.assert_awaited_once()
+    messager.publish.assert_not_awaited()
+    agent.finalize_non_contributing_worktrees.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_completion_publishes_taskless_when_enabled():
+    """enable_taskless_completion=True (default) + empty board: publish
+    TEAM_COMPLETED — the fixed behavior the toggle gates. Guards against the
+    gate over-blocking when the toggle is left at its default.
+    """
+    agent = _make_leader()
+    snapshot = TeamCompletionSnapshot(member_count=1, task_count=0)
+    messager = _wire_completion_handler(agent, snapshot)
+
+    event = InnerEventMessage(event_type=InnerEventType.POLL_TASK, payload={})
+    await agent._coordination.dispatcher.team_completion.on_poll_task(event)
+
+    messager.publish.assert_awaited_once()
+    published = messager.publish.await_args.kwargs["message"]
+    assert published.event_type == TeamEvent.TEAM_COMPLETED
+    assert published.payload["task_count"] == 0
