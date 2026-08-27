@@ -170,6 +170,40 @@ async def test_prompt_attachment_snapshot_precedes_the_first_user_message():
 
 
 @pytest.mark.asyncio
+async def test_prompt_attachment_snapshot_stays_in_history_order_without_window_mutator():
+    manager = PromptAttachmentManager(language="en")
+    await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="initial runtime state",
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+
+    snapshot = await manager.sync_to_context(context, "sess1")
+    await context.add_messages(UserMessage(content="query"))
+
+    window = await context.get_context_window(
+        system_messages=[SystemMessage(content="base system")],
+    )
+
+    assert window.system_messages == [SystemMessage(content="base system")]
+    assert window.context_messages == [snapshot, context.get_messages()[-1]]
+    assert window.get_messages() == [
+        SystemMessage(content="base system"),
+        snapshot,
+        context.get_messages()[-1],
+    ]
+
+
+@pytest.mark.asyncio
 async def test_prompt_attachment_internal_metadata_does_not_emit_a_delta():
     manager = PromptAttachmentManager(language="en")
     item = await manager.add_section(
@@ -215,27 +249,29 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
         "ctx1",
         "sess1",
         ContextEngineConfig(),
-        history_messages=[
+        history_messages=[],
+        processors=[],
+    )
+    snapshot = await manager.sync_to_context(context, "sess1")
+    await context.add_messages(
+        [
             UserMessage(content="query"),
             AssistantMessage(
                 content="",
                 tool_calls=[ToolCall(id="call-1", type="function", name="read_file", arguments="{}")],
             ),
             ToolMessage(content="file contents", tool_call_id="call-1"),
-        ],
-        processors=[],
-        window_mutators=[manager.make_window_mutator("sess1")],
+        ]
     )
-    snapshot = await manager.sync_to_context(context, "sess1")
 
     window = await context.get_context_window(
         system_messages=[SystemMessage(content="base system")],
     )
 
-    assert window.system_messages == [SystemMessage(content="base system"), snapshot]
-    assert window.context_messages == context.get_messages()[:-1]
+    assert window.system_messages == [SystemMessage(content="base system")]
+    assert window.context_messages == context.get_messages()
+    assert window.context_messages[0] == snapshot
     assert window.context_messages[-1].content == "file contents"
-    assert all(message.content != snapshot.content for message in window.context_messages)
 
     await manager.update_content_by_id(runtime.id, content="updated runtime", session_id="sess1")
     delta = await manager.sync_to_context(context, "sess1")
@@ -244,7 +280,8 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
     window = await context.get_context_window(
         system_messages=[SystemMessage(content="base system")],
     )
-    assert window.system_messages == [SystemMessage(content="base system"), snapshot]
+    assert window.system_messages == [SystemMessage(content="base system")]
+    assert window.context_messages[0].content == snapshot.content
     assert window.context_messages[-2].content == "file contents"
     assert window.context_messages[-1].content == delta.content
     assert window.get_messages()[1].content == snapshot.content

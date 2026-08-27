@@ -71,18 +71,14 @@ async def test_personal_context_grep_accepts_bounded_regex_and_rejects_escape(
     tool = next(tool for tool in tools if tool.card.name == "grep")
     set_cwd(str(sandbox))
     try:
-        result = await tool.invoke(
-            {"pattern": r"Alpha\([0-9]+\)\[ok\]", "path": str(sandbox)}
-        )
+        result = await tool.invoke({"pattern": r"Alpha\([0-9]+\)\[ok\]", "path": str(sandbox)})
         assert result.success is True
 
         outside = tmp_path / "outside.md"
         outside.write_text("Alpha(42)[ok]\n", encoding="utf-8")
         escaped = await tool.invoke({"pattern": "Alpha", "path": str(outside)})
         assert escaped.success is False
-        assert "outside" in str(escaped.error).casefold() or "sandbox" in str(
-            escaped.error
-        ).casefold()
+        assert "outside" in str(escaped.error).casefold() or "sandbox" in str(escaped.error).casefold()
     finally:
         set_cwd(original_cwd)
 
@@ -638,9 +634,7 @@ def test_discard_length_tail_rejects_non_length_result(finish_reason: str) -> No
 
 def test_discard_length_tail_rejects_non_tail_result() -> None:
     result = AssistantMessage(content="partial", finish_reason="max_tokens")
-    context = _FakeContext(
-        [UserMessage(content="build"), result, AssistantMessage(content="later")]
-    )
+    context = _FakeContext([UserMessage(content="build"), result, AssistantMessage(content="later")])
     original = context.get_messages()
     agent = SimpleNamespace(_get_context_or_error=lambda **_kwargs: context)
 
@@ -915,10 +909,7 @@ async def test_length_stop_continues_same_agent_before_validation(
     assert "Continue the unfinished original" in continuation
     assert "validate" not in continuation.casefold()
     assert all(
-        not (
-            isinstance(message, AssistantMessage)
-            and message.finish_reason in {"length", "max_tokens"}
-        )
+        not (isinstance(message, AssistantMessage) and message.finish_reason in {"length", "max_tokens"})
         for message in agent.context_history
     )
     agent_support.validate_personal_context_messages(agent.context_history)
@@ -929,10 +920,7 @@ async def test_length_continuation_exhausts_after_three_automatic_attempts(
     tmp_path: Path,
 ) -> None:
     events: list[tuple[str, Any]] = []
-    outputs = [
-        AssistantMessage(content=f"partial-{index}", finish_reason="length")
-        for index in range(4)
-    ]
+    outputs = [AssistantMessage(content=f"partial-{index}", finish_reason="length") for index in range(4)]
     agent = _FakeAgent(events, outputs)
     session = _FakeSession("session", events)
     sandbox = tmp_path / "sandbox"
@@ -953,9 +941,7 @@ async def test_length_continuation_exhausts_after_three_automatic_attempts(
     assert invocation_failed is True
     assert len(agent.invocations) == 4
     assert validation_calls == []
-    assert all(
-        not isinstance(message, AssistantMessage) for message in agent.context_history
-    )
+    assert all(not isinstance(message, AssistantMessage) for message in agent.context_history)
     agent_support.validate_personal_context_messages(agent.context_history)
 
 

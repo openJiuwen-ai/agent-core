@@ -543,6 +543,7 @@ def _make_agent(
     # SOUL.md, memory, skills, ...), which is outside the PersonalContext sandbox contract.
     workspace = Workspace(root_path=str(sandbox), language="en")
     workspace.directories.clear()
+    factory_options: dict[str, Any] = {_DEFAULT_RETRY_RAIL_FLAG: False}
     agent = create_deep_agent(
         model,
         system_prompt=(
@@ -580,7 +581,7 @@ def _make_agent(
         parallel_tool_calls=False,
         enable_read_image_multimodal=False,
         max_iterations=100,
-        **{_DEFAULT_RETRY_RAIL_FLAG: False},
+        **factory_options,
     )
     return agent, rails
 

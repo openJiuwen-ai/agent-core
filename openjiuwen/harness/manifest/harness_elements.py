@@ -97,6 +97,14 @@ def _parent_model(context: Any) -> Any:
 class ProgressiveToolInput(ConstructionInput):
     """Construction inputs for progressive tool disclosure."""
 
+    search_limit: int = param_field(
+        default=5,
+        description=(
+            "Server-side maximum number of matching tools returned by tool_search "
+            "(capped at 20; not exposed to the model)."
+        ),
+    )
+
 
 def _build_progressive_tool_rail(params: dict[str, Any], context: Any) -> ProgressiveToolRail:
     """Build ProgressiveToolRail from extras model + workspace/language."""
@@ -108,6 +116,7 @@ def _build_progressive_tool_rail(params: dict[str, Any], context: Any) -> Progre
         language=getattr(context, "language", None) or "cn",
     )
     config.progressive_tool_enabled = True
+    config.tool_search_limit = p.get("search_limit", 5)
     return ProgressiveToolRail(config)
 
 

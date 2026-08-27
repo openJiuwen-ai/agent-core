@@ -288,7 +288,6 @@ async def test_persisted_prompt_attachments_remain_before_browser_state_and_prog
     provider = AsyncMock()
     provider.capture_browser_state.return_value = _state("https://tail.example")
     manager = PromptAttachmentManager()
-    manager_mutator = manager.make_window_mutator("browser-state-tail-test")
     await manager.add_section(
         session_id="browser-state-tail-test",
         section="runtime",
@@ -306,13 +305,12 @@ async def test_persisted_prompt_attachments_remain_before_browser_state_and_prog
             )
         ],
     )
-    engine.register_window_mutator(manager_mutator)
-    await context.add_messages(UserMessage(content="original request"))
     await manager.sync_to_context(context, "browser-state-tail-test")
+    await context.add_messages(UserMessage(content="original request"))
 
     window = await context.get_context_window()
 
-    attachment = window.system_messages[-1]
+    attachment = window.context_messages[0]
     assert isinstance(attachment, SystemMessage)
     assert "The following dynamic context" in attachment.content
     assert "runtime attachment" in attachment.content

@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
-from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
@@ -319,7 +319,7 @@ def _make_bounded_grep_tool(sandbox: Path) -> LocalFunction:
 def make_personal_context_file_tools(
     operation: SysOperation,
     sandbox: Path,
-) -> list[Tool]:
+) -> list[Tool | ToolCard]:
     """Return the exact model-visible file tool set for PersonalContext."""
 
     return [
