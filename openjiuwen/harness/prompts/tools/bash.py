@@ -312,6 +312,17 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
             "non-WSL-stub PATH bash is available."
         ),
     },
+    "env": {
+        "cn": (
+            "可选：附加环境变量（string→string），会合并进子进程环境（覆盖同名已有变量）。"
+            "通常由上层 rail / 调用方注入，无需在对话中手动填写敏感凭证。"
+        ),
+        "en": (
+            "Optional extra environment variables (string→string) merged into the subprocess "
+            "environment (overrides existing keys). Typically injected by an upstream rail or "
+            "caller; do not put secrets in the chat prompt."
+        ),
+    },
 }
 
 
@@ -320,7 +331,7 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
 
     Property order follows Claude Code convention: core params first
     (command, timeout, description, run_in_background), then
-    project-specific params (workdir, max_output_chars, shell_type).
+    project-specific params (workdir, max_output_chars, shell_type, env).
     """
     p = BASH_PARAMS
     lang = language if language in ("cn", "en") else "cn"
@@ -338,6 +349,11 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
                 "type": "string",
                 "enum": ["auto", "cmd", "powershell", "bash", "sh"],
                 "description": p["shell_type"][lang],
+            },
+            "env": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": p["env"][lang],
             },
         },
         "required": ["command"],

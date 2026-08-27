@@ -418,3 +418,45 @@ class TestNulRedirectNormalization:
         assert self._norm()("echo hi >nul") == "echo hi >nul"
         assert self._norm()("echo hi 2>nul") == "echo hi 2>nul"
 
+
+# ── env / environment forwarding ──────────────────────────────
+
+class TestBashToolEnvParsing(unittest.TestCase):
+    """Unit tests for env parsing — no Runner required."""
+
+    def test_parse_env_alias(self):
+        parsed = BashTool._parse_inputs({
+            "command": "echo hi",
+            "env": {"FOO": "bar", "EMPTY": ""},
+        })
+        assert parsed.environment == {"FOO": "bar"}
+
+    def test_parse_environment_preferred_over_env(self):
+        parsed = BashTool._parse_inputs({
+            "command": "echo hi",
+            "env": {"A": "1"},
+            "environment": {"B": "2"},
+        })
+        assert parsed.environment == {"B": "2"}
+
+    def test_parse_invalid_env_ignored(self):
+        parsed = BashTool._parse_inputs({"command": "echo hi", "env": "not-a-dict"})
+        assert parsed.environment is None
+
+
+@pytest.mark.asyncio
+async def test_env_injected_into_subprocess(sys_op) -> None:
+    tool = BashTool(sys_op)
+    if os.name == "nt":
+        command = "echo %OJ_BASH_ENV_PROBE%"
+        shell_type = "cmd"
+    else:
+        command = "echo $OJ_BASH_ENV_PROBE"
+        shell_type = "bash"
+    res = await tool.invoke({
+        "command": command,
+        "shell_type": shell_type,
+        "env": {"OJ_BASH_ENV_PROBE": "from-env"},
+    })
+    assert res.success is True
+    assert "from-env" in res.data["content"]

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import errno
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +42,7 @@ def test_mount_into_workspace_uses_symlink(monkeypatch, tmp_path):
 
     manager.mount_into_workspace(str(workspace_root))
 
-    expected_link = os.path.join(str(workspace_root), ".team", "team-alpha")
+    expected_link = os.path.join(str(workspace_root), ".team")
     assert calls == [(manager.workspace_path, expected_link, True)]
 
 
@@ -62,7 +63,7 @@ def test_mount_into_workspace_falls_back_to_copy_on_permission_error(monkeypatch
 
     manager.mount_into_workspace(str(workspace_root))
 
-    copied_mount = workspace_root / ".team" / "team-alpha"
+    copied_mount = workspace_root / ".team"
     assert copied_mount.is_dir()
     assert not copied_mount.is_symlink()
     assert (copied_mount / "artifact.txt").read_text(encoding="utf-8") == "shared"
@@ -72,7 +73,7 @@ def test_mount_into_workspace_falls_back_to_copy_on_permission_error(monkeypatch
 def test_mount_into_workspace_replaces_stale_directory_and_merges_files(monkeypatch, tmp_path):
     manager = _make_manager(tmp_path)
     workspace_root = tmp_path / "agent-workspace"
-    stale_mount = workspace_root / ".team" / "team-alpha"
+    stale_mount = workspace_root / ".team"
     stale_artifacts = stale_mount / "artifacts"
     canonical_artifacts = tmp_path / "shared-workspace" / "artifacts"
     stale_artifacts.mkdir(parents=True)
@@ -89,13 +90,49 @@ def test_mount_into_workspace_replaces_stale_directory_and_merges_files(monkeypa
 
     manager.mount_into_workspace(str(workspace_root))
 
-    expected_link = os.path.join(str(workspace_root), ".team", "team-alpha")
+    expected_link = os.path.join(str(workspace_root), ".team")
     assert calls == [(manager.workspace_path, expected_link)]
     assert (canonical_artifacts / "only-stale.md").read_text(encoding="utf-8") == "from stale"
     assert (canonical_artifacts / "existing.md").read_text(encoding="utf-8") == "new"
     assert not stale_mount.exists()
-    backups = list((workspace_root / ".team").glob("team-alpha.stale-*"))
+    backups = list(workspace_root.glob(".team.stale-*"))
     assert len(backups) == 1
+
+
+@pytest.mark.level0
+def test_merge_existing_mount_contents_skips_directory_links(monkeypatch, tmp_path):
+    """A legacy Windows junction must not be traversed as stale content."""
+    manager = _make_manager(tmp_path)
+    mount_path = tmp_path / "agent-workspace" / ".team"
+    legacy_junction = mount_path / manager.team_name
+    legacy_junction.mkdir(parents=True)
+    (legacy_junction / "must-not-copy.md").write_text("junction target", encoding="utf-8")
+
+    monkeypatch.setattr(
+        manager,
+        "_is_directory_link",
+        lambda path: os.path.normpath(path) == os.path.normpath(legacy_junction),
+    )
+
+    manager._merge_existing_mount_contents(str(mount_path))
+
+    assert not (Path(manager.workspace_path) / "must-not-copy.md").exists()
+    assert not (Path(manager.workspace_path) / manager.team_name).exists()
+
+
+@pytest.mark.level0
+def test_merge_existing_mount_contents_flattens_legacy_hub_directory(tmp_path):
+    manager = _make_manager(tmp_path)
+    mount_path = tmp_path / "agent-workspace" / ".team"
+    legacy_artifacts = mount_path / manager.team_name / "artifacts"
+    legacy_artifacts.mkdir(parents=True)
+    (legacy_artifacts / "report.md").write_text("legacy", encoding="utf-8")
+
+    manager._merge_existing_mount_contents(str(mount_path))
+
+    migrated = Path(manager.workspace_path) / "artifacts" / "report.md"
+    assert migrated.read_text(encoding="utf-8") == "legacy"
+    assert not (Path(manager.workspace_path) / manager.team_name).exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
@@ -128,12 +165,34 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
 
     manager.mount_into_workspace(str(workspace_root))
 
-    expected_link = os.path.join(str(workspace_root), ".team", "team-alpha")
+    expected_link = os.path.join(str(workspace_root), ".team")
     assert len(junction_calls) == 1
     assert junction_calls[0]["command"][1:] == ["/c", "mklink", "/J", expected_link, manager.workspace_path]
     assert junction_calls[0]["capture_output"] is True
     assert junction_calls[0]["text"] is True
     assert junction_calls[0]["check"] is False
+
+
+@pytest.mark.level0
+def test_windows_junction_error_uses_stdout_when_stderr_is_none(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="The filename or extension is too long.",
+            stderr=None,
+        )
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.team_workspace.manager.subprocess.run",
+        fake_run,
+    )
+
+    with pytest.raises(OSError, match="filename or extension is too long"):
+        TeamWorkspaceManager._create_windows_junction(
+            str(tmp_path / "target"),
+            str(tmp_path / "link"),
+        )
+
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
 @pytest.mark.level0

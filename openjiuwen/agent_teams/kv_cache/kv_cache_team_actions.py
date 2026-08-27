@@ -158,11 +158,12 @@ async def reset_session(
 
     Mirrors ``delete_team`` but scoped to a single ``session_id``: captures
     the evict plan (``prepare_action``), delegates to
-    ``manager.reset_session`` (which drops the session's dynamic tables and
-    releases its checkpoint while keeping team_info / roster / team_home /
-    binding), then executes the captured evict and discards the manifest.
-    Idempotent: ``manager.reset_session`` no-ops when the checkpoint is
-    already released.
+    ``manager.reset_session`` (which drops the session's dynamic task tables
+    and clears the team's pending_resume marker while keeping the checkpoint
+    bucket -> COLD_RECOVER, team_info / roster / team_home / binding), then
+    executes the captured evict and discards the manifest. Idempotent:
+    ``manager.reset_session`` no-ops when the session has no checkpoint
+    bucket.
     """
     prepared = await prepare_action(
         manager,
@@ -171,23 +172,32 @@ async def reset_session(
         session_id=session_id,
     )
 
-    reset = await manager.reset_session(
-        team_name=team_name,
-        session_id=session_id,
-        force=force,
-    )
-    if not reset:
-        return reset
-
-    if prepared:
-        await execute_action(
-            manager,
-            action="evict",
+    try:
+        reset = await manager.reset_session(
             team_name=team_name,
             session_id=session_id,
-            reason="session_reset",
+            force=force,
         )
-    _discard(manager, team_name=team_name, session_ids=[session_id])
+        if not reset:
+            return reset
+
+        if prepared:
+            await execute_action(
+                manager,
+                action="evict",
+                team_name=team_name,
+                session_id=session_id,
+                reason="session_reset",
+            )
+    finally:
+        # Always discard the captured manifest. ``execute_action`` already
+        # discards on the success path, but the ``not reset`` (False) and
+        # ``CancelledError`` paths skip it -- without this the manifest would
+        # linger in the process-global ``_MANIFESTS`` (keyed by the singleton
+        # manager) until a later ``prepare_action`` overwrites the same
+        # ``(team_name, session_id)`` key. Idempotent pop, so the success path
+        # double-discard is a no-op.
+        _discard(manager, team_name=team_name, session_ids=[session_id])
     return True
 
 
