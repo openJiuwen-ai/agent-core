@@ -649,7 +649,14 @@ def _make_record(spec: _JournalRecordInput) -> dict:
 
 
 # ─────────────────────────── verify ───────────────────────────
-def _reviewer_call(i: int, reviewer: Reviewer, *, base: str, phase: str | None, options: dict | None):
+def _reviewer_call(
+    i: int,
+    reviewer: Reviewer,
+    *,
+    base: str,
+    phase: str | None,  # pylint: disable=huawei-redefined-outer-name
+    options: dict | None,
+):
     """Build the zero-arg thunk that runs one reviewer as a structured ``agent()``.
 
     A verdict reviewer votes against ``VERDICT_SCHEMA`` (pass/fail + feedback),
@@ -746,7 +753,7 @@ async def verify(
     *,
     threshold: float = 0.85,
     label: str | None = None,
-    phase: str | None = None,
+    phase: str | None = None,  # pylint: disable=huawei-redefined-outer-name
     options: dict | None = None,
 ) -> VerifyResult:
     """Run one review round over ``reviewers`` and return a structured verdict.
