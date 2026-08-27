@@ -73,6 +73,33 @@ async def _empty_outputs() -> Any:
         yield None
 
 
+@pytest.mark.level0
+def test_external_cli_team_context_uses_only_absolute_workspace_path(tmp_path):
+    """External members must not receive the in-process-only mount path."""
+    team_name = "oc_team_preset-research-insight_officeclaw_1a03cd0f2a9_26b2ec1a2e78"
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name=team_name,
+        workspace={"enabled": True, "root_path": str(tmp_path)},
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="researcher",
+        team_spec=TeamSpec(team_name=team_name, display_name="Team"),
+    )
+
+    tracker = spawn_mod._build_team_context_tracker(
+        _FakeTeamAgent(spec),
+        spec,
+        ctx,
+        "researcher",
+        team_name,
+    )
+
+    assert tracker._team_workspace_mount is None
+    assert tracker._team_workspace_path == str(tmp_path)
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_external_cli_spawn_stops_runtime_on_cancel(monkeypatch):

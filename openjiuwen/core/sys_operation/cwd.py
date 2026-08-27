@@ -149,10 +149,9 @@ def set_workspace(path: str) -> None:
 def get_team_workspace() -> str | None:
     """Get the team shared workspace root for the current agent context.
 
-    Returns the path owned by ``TeamWorkspaceManager`` and mounted
-    into agent workspaces as ``.team/{team_id}/``.  Returns ``None``
-    when the agent is not part of a team or the team has no
-    shared workspace.
+    Returns the path owned by ``TeamWorkspaceManager`` and mounted into agent
+    workspaces as ``.team``. Returns ``None`` when the agent is not part of a
+    team or the team has no shared workspace.
     """
     return _state().team_workspace
 
