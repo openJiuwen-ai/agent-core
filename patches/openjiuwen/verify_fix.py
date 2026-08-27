@@ -17,6 +17,10 @@ async def _wait_for_no_await(coro, timeout):
     if task in done:
         return task.result()
     task.cancel()
+    try:
+        await asyncio.wait({task}, timeout=0.1)
+    except asyncio.CancelledError:
+        pass
     raise asyncio.TimeoutError()
 
 

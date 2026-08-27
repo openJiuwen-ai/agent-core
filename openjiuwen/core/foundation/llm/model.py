@@ -34,7 +34,14 @@ async def _wait_for_no_await(coro, timeout):
     done, _pending = await asyncio.wait({task}, timeout=timeout)
     if task in done:
         return task.result()
-    task.cancel()  # 不 await——让任务后台收尾，不阻塞本协程
+    task.cancel()
+    # 短暂收尾窗口：让可取消的 async generator 真正停止（否则调用方
+    # 随后 aclose() 会撞上 "asynchronous generator is already running"）。
+    # 用 asyncio.wait 的 timeout 特性——卡死任务不阻塞，窗口后照常抛超时。
+    try:
+        await asyncio.wait({task}, timeout=0.1)
+    except asyncio.CancelledError:
+        pass
     raise asyncio.TimeoutError()
 
 
