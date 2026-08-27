@@ -576,14 +576,23 @@ class _TeamRunnerMixin:
         session_id: str,
         force: bool = True,
     ) -> bool:
-        """Reset a single team session: drop its task board + release its
-        checkpoint while keeping team_info / roster / team_home / binding.
+        """Reset a single team session: drop its task board + clear its
+        pending_resume marker while keeping the checkpoint bucket (->
+        COLD_RECOVER), team_info / roster / team_home / binding.
 
         Session-scoped counterpart to ``delete_agent_team``: delegates to
         ``kv_cache_team_actions.reset_session`` (which evicts the captured
         caches around ``TeamRuntimeManager.reset_session``). Next chat.send on
-        the same session_id hits ``NEW_TEAM_IN_SESSION`` (fresh empty board,
-        members re-dispatched from the preserved roster).
+        the same session_id hits ``COLD_RECOVER`` (preserved team memory +
+        history, empty task board, leader re-plans fresh -- no paused-round
+        resume).
+
+        Returns ``True`` on full success (or idempotent no-op when the session
+        has no checkpoint). Returns ``False`` if either core clear step failed
+        inside ``TeamRuntimeManager.reset_session`` -- callers MUST retry reset
+        before the next chat.send (the marker/task-board may otherwise survive
+        and a stale paused round resumes); the kv_cache evict is skipped on
+        ``False``.
         """
         from openjiuwen.agent_teams.kv_cache import kv_cache_team_actions
 

@@ -23,8 +23,8 @@ present it writes `pending_create`. `TeamAgent._mark_team_built` and
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-05-12 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md` |
+| 最近一次修订日期 | 2026-08-19 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_74_reset-clears-pending-resume.md` |
 
 ## 范围 / 边界
 
@@ -125,13 +125,22 @@ state["teams"][team_name] = {
     "model_allocator_state": Optional[dict],
     "lifecycle":             Optional["running" | "paused"],
     "db_state":              Optional["pending_create" | "created" | "cleaned"],
+    "pending_resume":        Optional[{"query": str}],   # leader 冷恢复续跑标记
 }
 ```
 
+`pending_resume`（leader-only）由 `kernel.pause` 经 `merge_pending_resume` 写、
+由 `kernel.resume_paused_round` / `manager.reset_session` /
+`manager.release_session` 经 `clear_pending_resume` 清，使 `pause -> stop ->
+start` 等价于 `pause -> resume`（见 [[F_61]]、[[F_74]]）。`delete_team` 整桶
+`checkpointer.release`，`pending_resume` 随之消失。
+
 任何代码改写这个 bucket，必须经 `runtime/metadata.py` 的
 `read_team_namespace` / `merge_team_namespace` / `write_team_namespace`
-/ `remove_team_namespace`。直接 `session.update_state({"spec": ...})` 之类的
-"在 root 上 update" 是非法操作——`session.update_state` 在顶层做的是浅合并，
+/ `remove_team_namespace` / `clear_pending_resume`。直接
+`session.update_state({"spec": ...})` 之类的"在 root 上 update"是非法操作——
+`session.update_state` 经 `StateCollection` 走 `update_dict` **深合并**（顶层
+key 合并而非替换，子 key 仅在入参为 `None` 时经 `delete_by_key` 删除），
 绕过 namespace 入口会污染其它 team 的 bucket。
 
 ### I-7 协调层调用契约
@@ -309,6 +318,8 @@ TEAM_DB_STATE_PENDING_CREATE = "pending_create"
 TEAM_DB_STATE_CREATED = "created"
 TEAM_DB_STATE_CLEANED = "cleaned"
 
+TEAM_PENDING_RESUME_KEY = "pending_resume"
+
 def read_teams_bucket(session) -> dict[str, dict[str, Any]]: ...
 def read_team_namespace(session, team_name: str) -> dict[str, Any] | None: ...
 def read_team_names_in_session(session) -> list[str]: ...
@@ -316,13 +327,24 @@ def read_team_db_state(session, team_name: str) -> str | None: ...
 def write_team_namespace(session, team_name: str, payload: dict[str, Any]) -> None: ...
 def merge_team_namespace(session, team_name: str, partial: dict[str, Any]) -> None: ...
 def merge_team_db_state(session, team_name: str, state: str) -> None: ...
+def read_pending_resume(session, team_name: str) -> dict[str, Any] | None: ...
+def merge_pending_resume(session, team_name: str, payload: dict[str, Any]) -> None: ...
+def clear_pending_resume(session, team_name: str) -> bool: ...
 def remove_team_namespace(session, team_name: str) -> bool: ...
 ```
 
-写语义统一：先 `read_teams_bucket` 取当前 map，本地 mutate 后整张 map 一起写
-回 `session.update_state({TEAMS_KEY: teams})`。这是因为 `update_state` 在 root
-做的是浅合并——如果只回写 `teams[team_name]`，会把别的 team bucket 抹掉。
-**该模块是 namespace 写入的唯一合法入口**，I-6 不变量靠它收敛。
+写语义分两类（都收敛在本模块，I-6 不变量靠它）：
+
+- **加/改 key**（`merge_*`、`write_team_namespace`）：先 `read_teams_bucket`
+  取当前 map，本地 mutate 后整张 map 写回
+  `session.update_state({TEAMS_KEY: teams})`。深合并把新/覆盖的 key 并入，
+  不影响其它 team bucket。
+- **删 key**（`clear_pending_resume`、`remove_team_namespace`）：**不能**用
+  "整张 map 写回"——深合并不删 key，写回缺该 key 的 map 会让旧 key 原样存活。
+  必须对该子 key 发**定向 `None`**（`{TEAMS_KEY: {team_name:
+  {TEAM_PENDING_RESUME_KEY: None}}}` / `{TEAMS_KEY: {team_name: None}}`），
+  触发 `update_dict` 的 `delete_by_key` 才真正删除。删前先查存在性，幂等
+  （不存在返回 `False`，不写）。
 
 ### `openjiuwen.agent_teams.context`
 
