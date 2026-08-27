@@ -428,20 +428,30 @@ class TTSERail(EvolutionRail):
         if not facts and not tips:
             logger.info("[TTSERail] embedding recall empty; skip TTSE section")
             return ""
-        logger.info(
-            "[TTSERail] injection via embedding recall facts=%s tips=%s",
-            len(facts),
-            len(tips),
-        )
+        self._log_injected_rules(facts, tips, retrieved=True)
         return build_section_text(facts, tips, retrieved=True)
+
+    @staticmethod
+    def _log_injected_rules(facts: list, tips: list, *, retrieved: bool) -> None:
+        """Log the concrete FACT/TIP texts selected for prompt injection."""
+        mode = "embedding top-K" if retrieved else "whole bank"
+        if facts:
+            for idx, record in enumerate(facts, start=1):
+                text = record.get("text", record) if isinstance(record, dict) else str(record)
+                logger.info("[TTSERail] inject fact %s/%s (%s): %s", idx, len(facts), mode, text)
+        if tips:
+            for idx, record in enumerate(tips, start=1):
+                text = record.get("text", record) if isinstance(record, dict) else str(record)
+                logger.info("[TTSERail] inject tip %s/%s (%s): %s", idx, len(tips), mode, text)
+        if not facts and not tips:
+            logger.info("[TTSERail] inject %s: no facts or tips selected", mode)
 
     def _build_injection_body(self) -> str:
         """Whole-bank render (count-sorted). Used when no embedding provider."""
-        return build_section_text(
-            self._ttse_store.facts_records(),
-            self._ttse_store.tips_records(),
-            retrieved=False,
-        )
+        facts = self._ttse_store.facts_records()
+        tips = self._ttse_store.tips_records()
+        self._log_injected_rules(facts, tips, retrieved=False)
+        return build_section_text(facts, tips, retrieved=False)
 
     # ------------------------------------------------------------------
     # Query extraction helpers
