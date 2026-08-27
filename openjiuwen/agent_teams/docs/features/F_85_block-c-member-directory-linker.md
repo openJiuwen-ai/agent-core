@@ -5,7 +5,7 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-08-20 |
-| 范围 | 新增 `agent_teams/team_workspace/paths.py`（真实目录公式纯函数）、`dir_links.py`（symlink → junction 链接原语）、`ref_store.py`（`.refs.json` 引用计数）、`binder.py`（建真实目录 + link + refs）、`migrator.py`（旧布局迁移）、`assembler.py`（mode 判定 + migrator + binder 组合）；改 `agent_teams/agent/agent_configurator.py`（workspace 装配替换 `ensure_team_member_workspace_link` 调用点）、`tools/team.py`（`_remove_cleanup_paths` 链接感知）、`schema/blueprint.py` + `schema/team.py`（`member_workspace_prefix` 开关）、`team_workspace/__init__.py`（导出）；`docs/specs/S_13` 修订；测试 `tests/unit_tests/agent_teams/team_workspace/test_workspace_paths.py`、`test_dir_links.py`、`test_ref_store.py`、`test_binder.py`、`test_migrator.py` + `test_team.py` 链接感知追加 |
+| 范围 | 新增 `agent_teams/team_workspace/paths.py`（真实目录公式纯函数）、`dir_links.py`（symlink → junction 链接原语）、`ref_store.py`（`.refs.json` 引用计数）、`binder.py`（建真实目录 + link + refs）、`assembler.py`（mode 判定 + binder 组合）；改 `agent_teams/agent/agent_configurator.py`（workspace 装配替换 `ensure_team_member_workspace_link` 调用点）、`tools/team.py`（`_remove_cleanup_paths` 链接感知）、`schema/blueprint.py` + `schema/team.py`（`member_workspace_prefix` 开关）、`team_workspace/__init__.py`（导出）；`docs/specs/S_13` 修订；测试 `tests/unit_tests/agent_teams/team_workspace/test_workspace_paths.py`、`test_dir_links.py`、`test_ref_store.py`、`test_binder.py` + `test_team.py` 链接感知追加 |
 | 测试基线 | Block C 单测 28 passed / 0 failed；装配级 ST（`block_c_workspace_st.py`，未提交）17 passed；冒烟验证 35 checks |
 | Refs | 设计文档 `doc/analysis/evolvable-team/design-v5/2026-08-20-block-c-topology-v3.md` |
 
@@ -65,23 +65,16 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
   team 累计；跨 team 共享只发生在 predefined（`.agent_teams/<member>`，refs 累计 teams）。
 - **链接感知清理**：junction 若被 `shutil.rmtree` 会下钻删 target 内容（共享资产）。
   `_remove_cleanup_paths` 先 `is_dir_link` → `remove_dir_link`，非链接才 rmtree。
-- **迁移器回滚**：旧布局真实目录 rename 到 team 外后 link 失败，回滚回 team 内。
-- **去掉全队扫描 + 黑名单，改每成员按 role 自判**：原 `prepare_member_workspace`
-  寄生调用 `TeamWorkspaceMigrator().migrate(team)` 做全队扫描，每个成员 configure 时
-  都扫一遍 `<team>/workspaces/`，把非 leader / 非 predefined 的真实目录一律当 dynamic
-  rename 出去 + link。这会把外部 CLI 成员的 in-team 真实目录也搬出去（外部 CLI 成员走
-  early-return 不经装配段，但其目录已由 A 块 `_prepare_external_cli_workspace` 建在 team
-  内，扫描时被当 dynamic 误搬）。此前用 `external_cli_members` 黑名单（依赖
-  `_external_cli_specs` 内存缓存）补救，但该缓存在 fresh build + 预定义外部 CLI 成员路径下
-  为空，仍误搬。重构后 binder 只对**当前 configure 的成员**按 role 白名单判定：该成员是
-  `TEAMMATE`/`HUMAN_AGENT` 才建 team 外真实目录 + link，否则一律 team 内，不再扫别人的目录。
-  migrator 类本体保留（一次性 legacy 迁移语义不变，只是不再由装配段寄生调用）。
+- **每成员按 role 白名单自判**：binder 只对**当前 configure 的成员**按 role 白名单判定——
+  该成员是 `TEAMMATE`/`HUMAN_AGENT` 才建 team 外真实目录 + link，其余（leader /
+  `EXTERNAL_CLI` / `BRIDGE_AGENT` / `WORKER`）一律 team 内真实目录，不扫别人的目录、不
+  全队扫描、不依赖黑名单。成员真实目录创建只由 `prepare_member_workspace`（即 `MemberWorkspaceBinder.setup`）负责，不再有独立的全队迁移器。
 
 ## 验证基线
 
 - 单测 28 个（`team_workspace/` 5 文件 + `test_team.py` 链接感知 2 个；含 role 白名单 + 外部 CLI 不被 link 出去回归 2 项）。
 - 装配级 ST 17 项（真实 `TeamAgentSpec` 数据流 → 真实装配 → 文件系统断言，无 API key）。
-- 冒烟 35 checks（隔离 home，覆盖建链 / 复用 / 释放 / 清理 / 迁移全链路）。
+- 冒烟 35 checks（隔离 home，覆盖建链 / 复用 / 释放 / 清理全链路）。
 
 ## 已知遗留
 

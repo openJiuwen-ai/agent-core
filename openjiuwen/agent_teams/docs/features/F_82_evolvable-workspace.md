@@ -169,6 +169,13 @@ leader 时序：leader 的 `spawn_member` 在自身 `setup_agent` 之后调用�
 - 统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。
 - 幂等：spawn 期 `_assemble_member_workspace` 重跑，root 已建不重建、演进文件 `_evolved_content`
   skip、`fill_member_field` dict 赋值，均无副作用。
+- 恢复时不补 link：成员若以 in-team 真实目录形态留下（link 建不出退回 team 内，或历史会话残留），
+  `prepare_member_workspace` 的 binder reuse-first 对 `root.is_dir()` 原样复用、不补建 link、不补 ref
+  计数。这是有意为之——补 link 等于把已有真实目录内容迁出到 team 外真实目录再建 link，是 legacy→design-v5
+  的一次性迁移语义，历史会话状态不可控（真实目录 / 残缺 / 残留 link 混杂），强行统一成 link 形态要处理目标
+  已存在、内容冲突、迁移原子性中断等边界。收益（跨 team 共享预定义、ref 计数清理）不抵风险；in-team 真实
+  目录是成员的稳定访问路径（`team_member_workspace_dir`），cwd / memory / skills / `.team` mount 均正常，
+  不补 link 不影响功能。新会话首次 spawn 走本 D8.1 路径正常 link 出去，仅历史会话保持原样。
 
 **统一覆盖原则（防霰弹式）**：B 类演进覆盖只发生在 `TeamBackend` 的三个 overlay 方法里。任何
 下游代码需要"给模型看的 desc/prompt"时，必须经 `TeamBackend` 方法获取（或从该方法的返回值
@@ -289,11 +296,6 @@ mtime 无法表达"框架默认变化 → 自动升级"（基线也变了）；�
 冷启动时序坑：leader `start` 早于 `build_team`（build_team 是第一轮工具调用），start 时 team row
 不存在 → B-team 值取不到（`get_team_info` 返回 None）。且不加守卫时 teammate 的 `start` 各写一次
 = 又 N 倍。
-
-> **澄清（2026-08-27）**：R6 否决的是"移到 `coordination.start`"。D8.1 的修订把 B-member 的演进值
-> 读取移到 `spawn_member` 写 db 前——`spawn_member` 在 `build_team` 的 `create_team` 成功之后调用，
-> team row 已存在，且经 link 读的是演进 md（不查 `get_team_info`），故 R6 的冷启动时序坑不适用。
-> `_assemble_member_workspace`（装配期）仍是 spawn 期幂等重跑，未被移除。
 
 ### R7：按角色（leader 守卫）收敛写盘
 

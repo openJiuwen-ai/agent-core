@@ -22,7 +22,7 @@
 
 **这个规约不管：**
 
-- 成员—团队拓扑、拉平、junction、引用计数、迁移（binder / ref_store / migrator）。
+- 成员—团队拓扑、拉平、junction、引用计数（binder / ref_store）。
 - message/task 正文的 session 文件外置——归 `S_23_session-file-data-store`。
 - tool 的 `type`/`required`/`enum` 等 schema 结构——归 `S_12_schema-data-models`。
 - 共享 workspace 的锁/版本/同步（`TeamWorkspaceManager` / `WorkspaceFileLock` 等）——归 `S_13_team-workspace`。
@@ -42,7 +42,7 @@
 11. **写盘三路拆分 + 幂等**：按值源与依赖分三个挂载点（`on` 时各写一次，全幂等）：
     - **A/C（系统模板 + tool 描述/参数，值源框架源）→ `coordination.start`** 团队级一次（kernel），teammate 的 `start` 重复调用幂等无害。
     - **B-team（team_card/team_prompt，值源 build_team 的 desc 参数）→ `build_team` 的 create_team 之后 + `_reattach_team`**；`team_prompt` 是只写不读到模型字段（build_team 无 prompt 参数）。
-    - **B-member（card/member_prompt，值源演进 md 经 `write_member_identity` 返回）→ `spawn_member` 写 db 前（非 leader 先 `prepare_member_workspace` 建 root + 取演进值 prime cache + 写 db 快照）+ 装配期 `_assemble_member_workspace`（spawn 期幂等重跑）**。`write_member_identity` 只读/保护演进 md + prime cache + 返回演进值，**不建目录不碰 link**（root 由调用前的 `prepare_member_workspace` 保证：非 leader 在 spawn_member、leader 在 setup_agent）。db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新，md 没演进退 db（=演进快照）。统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。
+    - **B-member（card/member_prompt，值源演进 md 经 `write_member_identity` 返回）→ `spawn_member` 写 db 前（非 leader 先 `prepare_member_workspace` 建 root + 取演进值 prime cache + 写 db 快照）+ 装配期 `_assemble_member_workspace`（spawn 期幂等重跑）**。`write_member_identity` 只读/保护演进 md + prime cache + 返回演进值，**不建目录不碰 link**（root 由调用前的 `prepare_member_workspace` 保证：非 leader 在 spawn_member、leader 在 setup_agent）。db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新，md 没演进退 db（=演进快照）。统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。binder reuse-first：恢复遇已有 in-team 真实目录原样复用、不补 link、不补 ref（补 link 是 legacy 迁移语义，历史会话状态不可控且收益不抵风险，详见 F_82 D8.1）。
     - **`off` 时三处都不写**（`TeamBackend._spec_evolution_enabled` 守卫）。cache 对象只在 `_attach_workspace_cache` 判断 `on` 时创建（`off` 不建，`manager.workspace_cache = None`）。in-process 队友经 `share_workspace_cache_with` 共享 leader 的 manager 引用（同一 cache 实例），复用分支（manager 已有 cache）命中即返回（S7 read-once）。
 
 ## 接口契约

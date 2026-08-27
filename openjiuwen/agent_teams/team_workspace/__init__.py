@@ -11,9 +11,9 @@ Two families of functionality merged in this package:
 - evolvable workspace (assembly/read):
   ``WorkspaceAssembler``, ``WorkspaceStore``, ``WorkspaceCache``,
   ``SessionFileStore``.
-- block C member-directory topology (link/migrate/refs):
+- block C member-directory topology (link/refs):
   ``prepare_member_workspace``, ``MemberWorkspaceBinder``,
-  ``TeamMemberBinding``, ``TeamWorkspaceMigrator``, ``MemberRefStore``,
+  ``TeamMemberBinding``, ``MemberRefStore``,
   ``MEMBER_MODE_*``, ``member_dir_name``, ``member_real_dir``,
   ``create_dir_link``, ``is_dir_link``, ``remove_dir_link``.
 """
@@ -30,7 +30,6 @@ from openjiuwen.agent_teams.team_workspace.dir_links import (
     remove_dir_link,
 )
 from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
-from openjiuwen.agent_teams.team_workspace.migrator import TeamWorkspaceMigrator
 from openjiuwen.agent_teams.team_workspace.models import (
     ConflictStrategy,
     TeamWorkspaceConfig,
@@ -81,6 +80,5 @@ __all__ = [
     "MemberRefStore",
     "TeamMemberBinding",
     "MemberWorkspaceBinder",
-    "TeamWorkspaceMigrator",
     "prepare_member_workspace",
 ]
