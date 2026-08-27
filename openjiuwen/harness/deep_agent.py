@@ -842,22 +842,55 @@ class DeepAgent(BaseAgent):
 
     def _resolve_context_window_tokens(self) -> int:
         """Resolve the configured model context window size."""
-        config = self._get_react_config().context_engine_config
-        model_name = None
-        if self._react_agent is not None:
-            model_name = getattr(self._get_react_config(), "model_name", None)
-        if config is not None and getattr(config, "model_name", None):
-            model_name = config.model_name
+        react_config = self._get_react_config()
+        config = react_config.context_engine_config
+        model_config = getattr(react_config, "model_config_obj", None)
+        model_name = (
+            getattr(react_config, "model_name", None)
+            or getattr(model_config, "model_name", None)
+            or getattr(config, "model_name", None)
+        )
+        global_context_window = getattr(config, "context_window_tokens", None)
+        model_context_window = getattr(model_config, "context_window", None)
+        if not (
+            isinstance(global_context_window, int)
+            and global_context_window > 0
+        ):
+            model_context_window_override = getattr(
+                config,
+                "model_context_window_tokens_override",
+                None,
+            )
+            global_context_window = (
+                model_context_window_override
+                if isinstance(model_context_window_override, int)
+                and model_context_window_override > 0
+                else model_context_window
+            )
 
         return ContextUtils.resolve_context_max(
             model_name=model_name,
-            fallback_context_window_tokens=(
-                config.context_window_tokens if config is not None else None
-            ),
+            fallback_context_window_tokens=global_context_window,
             model_context_window_tokens=(
                 config.model_context_window_tokens if config is not None else None
             ),
         )
+
+    def update_model_context(
+        self,
+        *,
+        model_name: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+    ) -> None:
+        """Refresh selected-model context metadata on the live inner agent."""
+        if self._react_agent is None:
+            return
+        update_context = getattr(self._react_agent, "update_model_context", None)
+        if callable(update_context):
+            update_context(
+                model_name=model_name,
+                context_window_tokens=context_window_tokens,
+            )
 
     def get_context_usage(
         self,
