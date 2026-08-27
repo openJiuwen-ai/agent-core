@@ -92,12 +92,13 @@ agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
 claude = ["claude-agent-sdk>=0.2.115"]
 codex = ["openai-codex>=0.144.4"]
 ssh = ["asyncssh>=2.24.0"]
-observability = [
+tracer-otel = [
     "opentelemetry-api>=1.25.0",
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
+observability = ["openjiuwen[tracer-otel]"]
 mobile-gui = [
     # Install: pip install 'openjiuwen[mobile-gui]'
     "uiautomator2>=3.2.0",

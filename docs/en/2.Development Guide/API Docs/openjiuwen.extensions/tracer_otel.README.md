@@ -2,6 +2,12 @@
 
 `openjiuwen.extensions.tracer_otel` is an optional OpenTelemetry tracing extension that converts the Agent and workflow execution events emitted by the framework's built-in Tracer into OTel spans, exporting them to backends such as Jaeger, Zipkin, or an OTLP Collector.
 
+Install the optional dependencies before use:
+
+```bash
+pip install "openjiuwen[tracer-otel]"
+```
+
 This extension is independent of `agent_teams.observability` and does **not** call the global `trace.set_tracer_provider()`, so it can coexist with `init_observability()` without conflict.
 
 **Modules**:
