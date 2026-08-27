@@ -80,7 +80,7 @@ DB 裸值，已落盘文件保留但不生效。
 |---|---|---|---|
 | A/C（系统模板 + tool 描述/参数） | 框架源（`_framework_body` / `descs/`） | `coordination.start`（团队级一次） | 不依赖 team row、不依赖成员；teammate 的 `start` 幂等重跑无害 |
 | B-team（team_card / team_prompt） | build_team 的 `desc` 参数 | `build_team`（create_team 后）+ `_reattach_team` | 不查 `get_team_info`（冷启动 team row 不存在 → None 坑）；`team_prompt` 是只写不读到模型字段（build_team 无 prompt 参数） |
-| B-member（card / member_prompt） | ctx 演进值（`build_context_from_db` → `get_member` overlay） | 装配期 `_assemble_member_workspace` | 值源是演进值，移 spawn_member 会降级为 spec 裸值丢演进值；每成员只 2 文件，放大可控 |
+| B-member（card / member_prompt） | 演进 md 经 `write_member_identity` 返回（spawn_member 阶段建 link 读演进值） | `spawn_member` 写 db 前 + 装配期 `_assemble_member_workspace`（幂等重跑） | 值源演进值（经 link 读 md）；db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新。消除首次 roster race（首次 roster 前 cache 已 prime 演进值 / db 已是演进快照） |
 
 挂载点不依赖 `workspace_manager.initialize`（A/C 只依赖 team_name + 框架源）——ST 不配
 `workspace` 段（manager 为 None）时 A/C 仍要写。
@@ -150,6 +150,21 @@ dict，下次 run 第一次 `get*` 重读）。运行期不监听文件变化（
 B 类 member 级由 `_assemble_member_workspace` 在成员 spawn / 恢复时写；team 级仅当 ctx 带
 DB 值（`team_info` 行存在）才写。读侧 `TeamBackend` overlay（`get_member` / `list_members` /
 `get_team_info`）用 cache 演进值覆盖 DB 裸值；`display_name` 不演进（回退 DB 列）。
+
+**D8.1（2026-08-27 修订）：B-member db 演进快照 + 首次 roster race 修复**
+
+原 D8 描述 db 存"裸值"（spec 基线）、overlay 用 md 演进值覆盖。问题：`_assemble_member_workspace`
+在 spawn 期（成员启动时）才装配，leader 首次 roster 在 `build_team` 后、spawn 前投递 → cache 空
+→ overlay 退 db 基线值 = 旧值（race）。
+
+修订：`spawn_member` 写 db 前调 `WorkspaceAssembler(cache=).write_member_identity(...)`（内部建 link
++ 读/保护演进 md + prime cache + 返回演进值），用返回值写 db。结果：
+- db = 入队演进快照（复用成员=演进值；首次成员=基线值）。
+- cache 在 spawn_member 阶段已 prime 演进值 → 首次 roster overlay 命中演进值。
+- 后续演进只更 md，不回写 db；overlay 永远读 md 最新，md 没演进退 db（=演进快照，正确）。
+- 统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。
+- 幂等：spawn 期 `_assemble_member_workspace` 重跑，link 已建不重建、演进文件 `_evolved_content`
+  skip、`fill_member_field` dict 赋值，均无副作用。
 
 **统一覆盖原则（防霰弹式）**：B 类演进覆盖只发生在 `TeamBackend` 的三个 overlay 方法里。任何
 下游代码需要"给模型看的 desc/prompt"时，必须经 `TeamBackend` 方法获取（或从该方法的返回值
@@ -271,6 +286,11 @@ mtime 无法表达"框架默认变化 → 自动升级"（基线也变了）；�
 不存在 → B-team 值取不到（`get_team_info` 返回 None）。且不加守卫时 teammate 的 `start` 各写一次
 = 又 N 倍。
 
+> **澄清（2026-08-27）**：R6 否决的是"移到 `coordination.start`"。D8.1 的修订把 B-member 的演进值
+> 读取移到 `spawn_member` 写 db 前——`spawn_member` 在 `build_team` 的 `create_team` 成功之后调用，
+> team row 已存在，且经 link 读的是演进 md（不查 `get_team_info`），故 R6 的冷启动时序坑不适用。
+> `_assemble_member_workspace`（装配期）仍是 spawn 期幂等重跑，未被移除。
+
 ### R7：按角色（leader 守卫）收敛写盘
 
 "谁是 leader"与写盘无语义关系——代码要有业务含义，写盘与角色无关，靠挂载点 + 幂等保证，不靠
@@ -296,6 +316,8 @@ cache 的存在、各自维护"演进优先/DB 回退"逻辑，新增缺口时�
 - **UT**：`tests/unit_tests/agent_teams/team_workspace/`（cache fill / lazy / invalidate / store
   返回 body / assembler 三方法）全过；`tests/unit_tests/agent_teams/test_team_context_inject.py`
   （身份块注入：演进注入 / 基线 fallback / 无 backend fallback / None member 抑制）。
+  `test_spawn_member_writes_evolved_value.py`（D8.1 修订：db 写演进快照 / 首次成员 db 基线 /
+  首次 roster 读演进值 race 闭合 / evolution off 保持基线，真实 leader 时序先 attach cache 再 build_team）。
 - **ST**（真实模型，全在独立分支验证，ST 文件不进 commit）：
 
 | ST | 结果 | 说明 |
