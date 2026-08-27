@@ -63,8 +63,12 @@ RequestPermissionConfirmationHook = Callable[
 class ToolPermissionHost:
     """由 Agent 服务或 CLI 在构造 DeepAgent / PermissionInterruptRail 时注入。"""
 
-    get_permissions_snapshot: Callable[[], dict[str, Any]] | None = None
-    """返回与 ``config['permissions']`` 同结构的 dict，用于热同步磁盘配置。"""
+    get_permissions_snapshot: Callable[..., dict[str, Any]] | None = None
+    """返回与 ``config['permissions']`` 同结构的 dict，用于热同步磁盘配置。
+
+    护栏在 ``first_check`` / persist 时调用。若回调接受 ``session_id``，
+    会传入 ``ctx.session`` 解析出的 id，便于叠会话 overlay；不接受则保持无参调用。
+    """
 
     persist_allow_rule: Callable[[dict[str, Any]], bool] | None = None
     """自定义「永久允许」写盘；入参为护栏已合并好的整份 ``permissions`` dict。
@@ -75,10 +79,12 @@ class ToolPermissionHost:
     写入 ``permission_yaml_path``。产品层应写入 User 文件，不要整段覆盖 Global ``tools``。
     """
 
-    persist_session_allow_rule: Callable[[dict[str, Any]], bool] | None = None
+    persist_session_allow_rule: Callable[..., bool] | None = None
     """自定义「会话内记住」写盘；入参同 ``persist_allow_rule``。
 
-    产品层应写入该 ``session_id`` 的 Session 文件。未设置时护栏只更新内存配置，
+    产品层应写入该 ``session_id`` 的 Session 文件。护栏会在回调接受
+    ``session_id`` 关键字时传入 ``ctx.session`` 解析出的 id——中断恢复
+    时 ContextVar 可能为空，不能只靠请求上下文。未设置时护栏只更新内存配置，
     不写 YAML（无 Host demo 可依赖进程内 ``update_config``）。
     """
 
