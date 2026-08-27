@@ -15,6 +15,7 @@ import pytest_asyncio
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation.cwd import set_workspace
+from openjiuwen.core.common.exception.errors import ExecutionError
 from openjiuwen.harness.tools import BashTool
 
 
@@ -345,40 +346,75 @@ class TestBashToolHistoryPath(unittest.TestCase):
 # ── nul-redirect normalization (Windows reserved-name guard) ──
 
 class TestNulRedirectNormalization:
-    """cmd-style `>nul` redirects must be rewritten to `/dev/null` so MSYS/Git
-    Bash (which does not treat `nul` as a device) does not create a real, hard-to
-    -delete `nul` file in the workdir. `null` (4 letters) and bare `nul` as an
-    argument must be left untouched."""
+    """CMD-style ``>nul``/``2>nul`` redirects must NOT be silently rewritten for
+    bash/sh — MSYS/Git Bash does not treat ``nul`` as a device and would create a
+    real, hard-to-delete ``nul`` file. Instead of rewriting (a half parser that
+    mis-handles heredocs, ``[[ ]]`` tests, command substitution, and quoted
+    patterns), the command is *rejected* up front via
+    ``_reject_cmd_null_redirect_for_bash`` with a clear error directing the caller
+    to ``/dev/null`` or ``shell_type='cmd'``. The path normalizer no longer touches
+    ``nul`` at all.
+    """
+
+    @staticmethod
+    def _reject():
+        from openjiuwen.core.sys_operation.local import shell_operation as _so
+        return _so._reject_cmd_null_redirect_for_bash
 
     @staticmethod
     def _norm():
         from openjiuwen.core.sys_operation.local import shell_operation as _so
         return _so._normalize_windows_paths_for_bash
 
-    @pytest.mark.parametrize("cmd,expected", [
-        ("echo hi > nul", "echo hi >/dev/null"),
-        ("echo hi >nul", "echo hi >/dev/null"),
-        ("echo hi 2> nul", "echo hi 2>/dev/null"),
-        ("echo hi 2>nul", "echo hi 2>/dev/null"),
-        ("echo hi 1>nul", "echo hi 1>/dev/null"),
-        ("echo hi &>nul", "echo hi &>/dev/null"),
-        ("echo hi >>nul", "echo hi >>/dev/null"),
-        ("echo hi >NUL", "echo hi >/dev/null"),
-        ("ping -n 5 127.0.0.1 > nul", "ping -n 5 127.0.0.1 >/dev/null"),
+    @pytest.mark.parametrize("cmd", [
+        "echo hi > nul",
+        "echo hi >nul",
+        "echo hi 2> nul",
+        "echo hi 2>nul",
+        "echo hi 1>nul",
+        "echo hi &>nul",
+        "echo hi >>nul",
+        "echo hi >NUL",
+        "ping -n 5 127.0.0.1 > nul",
     ])
-    def test_nul_redirect_rewritten(self, cmd, expected):
-        assert self._norm()(cmd) == expected
+    def test_cmd_null_redirect_rejected(self, cmd):
+        with pytest.raises(ExecutionError):
+            self._reject()(cmd)
 
     @pytest.mark.parametrize("cmd", [
-        "echo null",            # 'null' is a real filename, not the null device
-        "echo hi > null",       # 'null' (4 letters) — must not be rewritten
-        "echo hi > /dev/null",  # already bash-style
+        "echo null",            # 'null' (4 letters) — not the null device
+        "echo hi > null",       # 'null' (4 letters) — not the null device
+        "echo hi > /dev/null",  # already the bash null device
         "cat nul",              # bare nul as a read argument, not a redirect
         "echo nul",             # bare nul as an echo argument
-        "echo a>nulled",        # 'nulled' — nul not at a word boundary
+        "echo a>nulled",        # 'nulled' — nul is not a complete token
+        "echo hi >nul.txt",     # 'nul.txt' — filename continuation, not the device
+        "echo hi >nul/foo",     # 'nul/foo' — path component, not the device
+        "echo hi >nul-foo",     # 'nul-foo' — hyphenated filename, not the device
         "ls",
         "echo hi",
     ])
-    def test_non_target_untouched(self, cmd):
-        assert self._norm()(cmd) == cmd
+    def test_non_target_not_rejected(self, cmd):
+        self._reject()(cmd)  # must not raise
+
+    @pytest.mark.parametrize("cmd", [
+        "grep '>nul' build.log",   # single-quoted literal — also flagged (known tradeoff)
+        'grep ">nul" build.log',   # double-quoted literal — also flagged (known tradeoff)
+        "echo \\>nul",             # escaped `>` — also flagged (known tradeoff)
+    ])
+    def test_quoted_or_escaped_nul_also_rejected(self, cmd):
+        """Known, accepted limitation: token-based detection cannot distinguish a real
+        CMD-null redirect from ``>nul`` inside quotes, after a backslash escape, or in
+        heredoc/``[[ ]]`` bodies. These are also rejected — a loud, recoverable error is
+        preferred over silently rewriting the command and changing its meaning. The
+        BashTool prompt steers generation toward ``/dev/null`` so this is rare.
+        """
+        with pytest.raises(ExecutionError):
+            self._reject()(cmd)
+
+    def test_normalizer_does_not_rewrite_nul(self):
+        """The path normalizer must not touch ``nul`` — rewriting was removed in favor
+        of up-front rejection."""
+        assert self._norm()("echo hi >nul") == "echo hi >nul"
+        assert self._norm()("echo hi 2>nul") == "echo hi 2>nul"
 
