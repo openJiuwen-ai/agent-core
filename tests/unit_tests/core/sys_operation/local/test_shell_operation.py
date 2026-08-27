@@ -554,3 +554,46 @@ async def test_execute_cmd_rejected_by_sandbox(tmp_path):
     finally:
         Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows Git Bash null-device integration test")
+async def test_bash_dev_null_does_not_create_nul_file(work_dir):
+    """Regression for the Windows ``nul`` reserved-name bug.
+
+    Redirecting to the bash null device (``/dev/null``) must not leave a ``nul`` file
+    in the workdir, and a CMD-style ``>nul`` must be rejected up front rather than
+    silently executed — under Git Bash/MSYS ``>nul`` does not target the null device
+    but creates an undeletable reserved-name ``nul`` file. Only runs on Windows where
+    Git Bash is actually available.
+    """
+    import openjiuwen.core.sys_operation.local.shell_operation as shell_operation
+    from openjiuwen.core.sys_operation.cwd import init_cwd
+
+    if not shell_operation._available_bash(allow_wsl=False):
+        pytest.skip("Git Bash not available")
+
+    init_cwd(work_dir)
+    await Runner.start()
+    card_id = "test_bash_nul"
+    config = LocalWorkConfig(shell_allowlist=None)
+    card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL, work_config=config)
+    Runner.resource_mgr.add_sys_operation(card)
+    op = Runner.resource_mgr.get_sys_operation(card_id)
+    try:
+        # 1) /dev/null happy path: no `nul` file must appear in the workdir
+        result = await op.shell().execute_cmd("echo hi > /dev/null", shell_type="bash")
+        assert result.data is not None and result.data.exit_code == 0, result.message
+        nul_files = [p for p in pathlib.Path(work_dir).rglob("*") if p.name.lower() == "nul"]
+        assert not nul_files, f"unexpected `nul` file created: {nul_files}"
+
+        # 2) CMD-style >nul must be rejected (not silently executed), and the
+        #    rejection must prevent the undeletable `nul` file from being created.
+        result = await op.shell().execute_cmd("echo hi >nul", shell_type="bash")
+        assert result.code != StatusCode.SUCCESS.code, "CMD >nul should be rejected, not executed"
+        assert "/dev/null" in (result.message or ""), "rejection should guide to /dev/null"
+        nul_files = [p for p in pathlib.Path(work_dir).rglob("*") if p.name.lower() == "nul"]
+        assert not nul_files, "rejection must prevent the `nul` file from being created"
+    finally:
+        Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+        await Runner.stop()
