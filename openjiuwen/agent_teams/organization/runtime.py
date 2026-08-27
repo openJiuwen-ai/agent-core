@@ -19,6 +19,10 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTeamJoinedEvent,
     OrgTopic,
 )
+from openjiuwen.agent_teams.organization.expert_adapters import (
+    ExpertGroupCatalog,
+    ExpertTeamLauncher,
+)
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
 from openjiuwen.agent_teams.organization.schema import OrgTaskStatus, OrganizationSpec
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
@@ -78,6 +82,8 @@ class OrganizationRuntimeManager:
         self._leader_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._configured_team_provider: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None
         self._team_activator: Callable[[str, str], Awaitable[str | None]] | None = None
+        self._expert_group_catalog: ExpertGroupCatalog | None = None
+        self._expert_team_launcher: ExpertTeamLauncher | None = None
 
     def set_leader_turn_runner(self, runner: Callable[[str, str, object], Awaitable[bool]]) -> None:
         """Set the host-owned path used to run an autonomous leader turn."""
@@ -95,6 +101,16 @@ class OrganizationRuntimeManager:
         """Set the host callback that activates one configured team on invitation."""
 
         self._team_activator = activator
+
+    def set_expert_group_catalog(self, catalog: ExpertGroupCatalog) -> None:
+        """Set the host adapter that lists validated AgentGroup packages."""
+
+        self._expert_group_catalog = catalog
+
+    def set_expert_team_launcher(self, launcher: ExpertTeamLauncher) -> None:
+        """Set the host adapter that launches expert Teams for organization invite."""
+
+        self._expert_team_launcher = launcher
 
     async def ensure_control_tools(self, agent: "TeamAgent", *, session_id: str) -> None:
         """Mount organization bootstrap tools on a running team leader."""
@@ -364,6 +380,74 @@ class OrganizationRuntimeManager:
         if self._configured_team_provider is None:
             return []
         return await self._configured_team_provider(session_id)
+
+    async def list_expert_groups(
+        self, *, capabilities: set[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """List host-validated AgentGroup templates; does not create Teams."""
+
+        if self._expert_group_catalog is None:
+            return []
+        return [
+            descriptor.to_dict()
+            for descriptor in self._expert_group_catalog.list(capabilities=capabilities)
+        ]
+
+    async def create_and_invite_expert_team(
+        self,
+        *,
+        organization_id: str,
+        owner_team_id: str,
+        agent_group_name: str,
+        session_id: str,
+        display_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Launch an expert Team from an AgentGroup package and invite it."""
+
+        if self._expert_team_launcher is None:
+            raise ValueError("expert team launcher is not configured")
+        group_name = str(agent_group_name or "").strip()
+        if not group_name:
+            raise ValueError("agent_group_name is required")
+
+        _, owner_backend = await self._resolve_leader(owner_team_id, session_id)
+        manager = get_process_org_manager(
+            organization_id=organization_id,
+            db=owner_backend.db,
+            messager=owner_backend.messager,
+            session_id=session_id,
+        )
+        organization = await manager.get_organization()
+        if organization is None:
+            raise ValueError(f"organization not found: {organization_id}")
+        if organization.owner_team_id != owner_team_id:
+            raise ValueError("only the organization owner team can create expert teams")
+
+        launched = await self._expert_team_launcher.launch(
+            organization_id=organization_id,
+            agent_group_name=group_name,
+            session_id=session_id,
+            display_name=display_name,
+        )
+        try:
+            organization = await self.invite_team(
+                organization_id=organization_id,
+                inviter_team_id=owner_team_id,
+                target_team_id=launched.team_id,
+                session_id=session_id,
+            )
+        except Exception:
+            await self._expert_team_launcher.stop(
+                team_id=launched.team_id,
+                session_id=session_id,
+            )
+            raise
+
+        return {
+            "organization": organization.model_dump(),
+            **launched.to_dict(),
+            "agent_group_name": launched.agent_group_name or group_name,
+        }
 
     async def _bind_team(self, *, agent: "TeamAgent", backend: TeamBackend, manager: Any, session_id: str) -> None:
         from openjiuwen.agent_teams.organization.transport_api import TransportAPI

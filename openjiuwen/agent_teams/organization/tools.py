@@ -231,6 +231,88 @@ class OrgActivateAndInviteTeamTool(OrgInviteTeamTool):
         }
 
 
+class OrgListExpertGroupsTool(_OrgControlTool):
+    """List host-validated AgentGroup templates available for on-demand launch."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_list_expert_groups",
+            description=(
+                "List available expert-group (AgentGroup) templates. "
+                "Returns package metadata only; does not create or start a Team."
+            ),
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "capabilities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional capability tags; return groups that include all of them.",
+                },
+            },
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        raw_capabilities = inputs.get("capabilities")
+        capability_filter: set[str] | None = None
+        if isinstance(raw_capabilities, list):
+            capability_filter = {str(item).strip() for item in raw_capabilities if str(item).strip()}
+            if not capability_filter:
+                capability_filter = None
+        groups = await self.runtime_manager.list_expert_groups(capabilities=capability_filter)
+        return ToolOutput(success=True, data={"expert_groups": groups})
+
+
+class OrgCreateAndInviteExpertTeamTool(_OrgControlTool):
+    """Launch an expert Team from an AgentGroup package and invite it as owner."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_create_and_invite_expert_team",
+            description=(
+                "Create a Team from an expert-group (AgentGroup) package and invite it "
+                "into this organization. Only the organization owner may call this."
+            ),
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "organization_id": {"type": "string"},
+                "agent_group_name": {
+                    "type": "string",
+                    "description": "AgentGroup package name from org_list_expert_groups.",
+                },
+                "display_name": {"type": "string"},
+            },
+            "required": ["organization_id", "agent_group_name"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        try:
+            data = await self.runtime_manager.create_and_invite_expert_team(
+                organization_id=inputs.get("organization_id", ""),
+                owner_team_id=self.team_id,
+                agent_group_name=inputs.get("agent_group_name", ""),
+                session_id=self.session_id,
+                display_name=inputs.get("display_name"),
+            )
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+        data["next_action"] = (
+            "The expert Team is now an organization member. "
+            "Use org_create_task / org_delegate_task to assign work; "
+            "do not treat the AgentGroup package name as a running team_id."
+        )
+        return ToolOutput(success=True, data=data)
+
+
 class OrgViewOrganizationTool(_OrgControlTool):
     """Read organization ownership and members from the shared database."""
 
@@ -818,6 +900,8 @@ def create_org_control_tools(
         OrgListAvailableTeamsTool(runtime_manager, team_id, session_id),
         OrgListConfiguredTeamsTool(runtime_manager, team_id, session_id),
         OrgActivateAndInviteTeamTool(runtime_manager, team_id, session_id),
+        OrgListExpertGroupsTool(runtime_manager, team_id, session_id),
+        OrgCreateAndInviteExpertTeamTool(runtime_manager, team_id, session_id),
         OrgViewOrganizationTool(runtime_manager, team_id, session_id),
     ]
 
@@ -846,6 +930,8 @@ __all__ = [
     "OrgListAvailableTeamsTool",
     "OrgListConfiguredTeamsTool",
     "OrgActivateAndInviteTeamTool",
+    "OrgListExpertGroupsTool",
+    "OrgCreateAndInviteExpertTeamTool",
     "OrgViewOrganizationTool",
     "OrgClaimTaskTool",
     "OrgCreateTaskTool",
