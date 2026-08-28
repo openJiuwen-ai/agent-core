@@ -919,7 +919,8 @@ class OrgTaskManager:
             await self.messager.publish(OrgTopic.TASK.build(session_id, self.organization_id), message)
         if isinstance(event, OrgLeaderMessageEvent):
             await self.messager.publish(OrgTopic.LEADER.build(session_id, self.organization_id), message)
-        if team_inbox_id:
+        # Leader inbox delivery is owned by TransportAPI.deliver; skip duplicate TEAM_INBOX publish.
+        if team_inbox_id and not isinstance(event, OrgLeaderMessageEvent):
             await self.messager.publish(OrgTopic.TEAM_INBOX.build(session_id, self.organization_id, team_inbox_id), message)
 
     async def publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:

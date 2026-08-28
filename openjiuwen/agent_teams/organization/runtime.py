@@ -712,17 +712,30 @@ class OrganizationRuntimeManager:
             )
 
         async def _on_inbox_event(message: Any) -> None:
-            if getattr(message, "event_type", None) != OrgEvent.TASK_DELEGATED:
+            event_type = getattr(message, "event_type", None)
+            if event_type == OrgEvent.TASK_DELEGATED:
+                event = message.get_payload()
+                if not isinstance(event, OrgTaskDelegatedEvent):
+                    return
+                self._schedule_delegated_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    task_id=event.task_id,
+                    organization_id=manager.organization_id,
+                )
                 return
-            event = message.get_payload()
-            if not isinstance(event, OrgTaskDelegatedEvent):
-                return
-            self._schedule_delegated_turn(
-                team_id=backend.team_name,
-                session_id=session_id,
-                task_id=event.task_id,
-                organization_id=manager.organization_id,
-            )
+            if event_type == OrgEvent.LEADER_MESSAGE:
+                payload = getattr(message, "payload", None) or {}
+                message_id = payload.get("message_id")
+                if not message_id:
+                    return
+                self._schedule_leader_message_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    message_id=message_id,
+                    from_team_id=str(payload.get("from_team_id") or message.sender_id or ""),
+                    organization_id=manager.organization_id,
+                )
 
         await self._subscribe_once(
             messager=messager,
@@ -815,6 +828,23 @@ class OrganizationRuntimeManager:
             "Inspect it with org_view_tasks(action='get'), then use org_update_task(action='start') "
             "when you are ready, execute it through your team workflow, and complete it with "
             "the resulting output context and output abstract."
+        )
+        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+
+    def _schedule_leader_message_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        message_id: str,
+        from_team_id: str,
+        organization_id: str,
+    ) -> None:
+        prompt = (
+            f"Leader message {message_id} arrived in organization {organization_id} "
+            f"from team {from_team_id}. Inspect it with org_view_tasks(action='messages'), "
+            "read the persisted content, and respond with any required cross-team coordination "
+            "or task-pool updates."
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 

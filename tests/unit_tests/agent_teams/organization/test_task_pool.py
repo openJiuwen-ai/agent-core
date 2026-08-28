@@ -9,9 +9,11 @@ from sqlalchemy import select
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
     OrgEventMessage,
+    OrgLeaderMessageEvent,
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
+    OrgTaskDelegatedEvent,
     OrgTopic,
 )
 from openjiuwen.agent_teams.organization.pool import clear_process_org_managers
@@ -281,6 +283,104 @@ async def test_org_send_leader_message_tool_delivers_via_transport(org_manager):
 
     messages = await manager.list_leader_messages(team_id="team-b")
     assert messages[0]["content"] == "Please take the API compatibility slice."
+
+
+@pytest.mark.asyncio
+async def test_publish_leader_message_event_skips_team_inbox_delivery(org_manager):
+    manager, messager = org_manager
+    await manager.publish_event(
+        OrgLeaderMessageEvent(
+            organization_id="org-1",
+            team_id="team-a",
+            leader_id="leader-a",
+            message_id="msg-inbox-skip",
+            from_team_id="team-a",
+            to_team_id="team-b",
+        ),
+        team_inbox_id="team-b",
+    )
+
+    inbox_topics = [
+        topic
+        for topic, message in messager.published
+        if message.event_type == OrgEvent.LEADER_MESSAGE
+        and topic == OrgTopic.TEAM_INBOX.build("session-1", "org-1", "team-b")
+    ]
+    assert not inbox_topics
+
+    leader_topics = [
+        topic
+        for topic, message in messager.published
+        if message.event_type == OrgEvent.LEADER_MESSAGE
+        and topic == OrgTopic.LEADER.build("session-1", "org-1")
+    ]
+    assert leader_topics
+
+    await manager.publish_event(
+        OrgTaskDelegatedEvent(
+            organization_id="org-1",
+            team_id="team-a",
+            task_id="task-delegated",
+            delegated_by_team_id="team-a",
+            delegated_to_team_id="team-b",
+            delegated_to_leader_id="leader-b",
+        ),
+        team_inbox_id="team-b",
+    )
+    delegated_inbox_topics = [
+        topic
+        for topic, message in messager.published
+        if message.event_type == OrgEvent.TASK_DELEGATED
+        and topic == OrgTopic.TEAM_INBOX.build("session-1", "org-1", "team-b")
+    ]
+    assert delegated_inbox_topics
+
+
+@pytest.mark.asyncio
+async def test_leader_message_inbox_event_wakes_target_leader(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-leader-message",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-leader-message",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    inbox_topic = OrgTopic.TEAM_INBOX.build(session_id, "org-leader-message", "team-b")
+    handler = next(
+        handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == inbox_topic
+    )
+    message_id = "org-msg-wake-test"
+    await handler(
+        OrgEventMessage(
+            event_type=OrgEvent.LEADER_MESSAGE,
+            payload={
+                "message_id": message_id,
+                "organization_id": "org-leader-message",
+                "from_team_id": "team-a",
+                "to_team_id": "team-b",
+            },
+            sender_id="team-a",
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-b"
+    assert turns[0]["session_id"] == session_id
+    assert message_id in turns[0]["inputs"]["query"]
+    assert "org_view_tasks(action='messages')" in turns[0]["inputs"]["query"]
 
 
 @pytest.mark.asyncio
