@@ -227,18 +227,23 @@ class ContextEvolutionRail(DeepAgentRail):
                     # use ground_truth if available for evaluate_trial
                     # modify evaluate_trial based on use case on trajectory_generator.py
                     feedback, score = _evaluate_trial(self._current_query, trajectory)
-                    logger.info("Running auto-summarize for current trajectory")
-                    await _summarize_trajectories(
-                        self.memory_service,
-                        self.user_id,
-                        SummarizeTrajectoriesInput(
-                            query=self._current_query,
-                            trajectory=[trajectory],
-                            matts_mode="none",
-                            feedback=[feedback],
-                            score=[score],
-                        ),
-                    )
+                    if score is None:
+                        logger.info(
+                            "Skipping auto-summarize: trial is unevaluated (no ground truth)"
+                        )
+                    else:
+                        logger.info("Running auto-summarize for current trajectory")
+                        await _summarize_trajectories(
+                            self.memory_service,
+                            self.user_id,
+                            SummarizeTrajectoriesInput(
+                                query=self._current_query,
+                                trajectory=[trajectory],
+                                matts_mode="none",
+                                feedback=[feedback],
+                                score=[score],
+                            ),
+                        )
             except Exception as exc:
                 logger.error("Auto-summarize in after_task_iteration failed: %s", exc)
 

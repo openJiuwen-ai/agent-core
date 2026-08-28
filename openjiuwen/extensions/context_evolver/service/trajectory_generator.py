@@ -265,7 +265,9 @@ def evaluate_trial(
     question: str,
     output: str,
     ground_truth: Optional[str] = None,
-) -> tuple:
+    *,
+    assume_success_without_ground_truth: bool = False,
+) -> tuple[str, Optional[int]]:
     """Evaluate a single trial and return ``(feedback, score)``.
 
     IMPORTANT
@@ -280,17 +282,22 @@ def evaluate_trial(
 
     When ``ground_truth`` is provided the default implementation performs a
     simple case-insensitive substring check of ``ground_truth`` inside
-    ``output``.  When ``ground_truth`` is omitted (or ``None``) no correctness
-    check is performed and the trial is assumed successful (score=1).
+    ``output``.  When ``ground_truth`` is omitted the trial is **unevaluated**:
+    ``feedback="unknown"`` and ``score=None``.  Callers must not treat that
+    as success or failure.  Pass
+    ``assume_success_without_ground_truth=True`` to restore the legacy
+    ``("success", 1)`` default.
     """
     if ground_truth:
         is_correct = ground_truth.lower() in output.lower()
         feedback = "success" if is_correct else "failure"
         score = 1 if is_correct else 0
-    else:
-        # No ground truth available — treat as successful by default.
+    elif assume_success_without_ground_truth:
         feedback = "success"
         score = 1
+    else:
+        feedback = "unknown"
+        score = None
     return feedback, score
 
 
@@ -362,7 +369,12 @@ async def _run_trials_inner(
 
             # Evaluate the trial using the pluggable evaluate_trial function
             feedback, score = evaluate_trial(question, output, ground_truth=ground_truth)
-            status = "SUCCESS" if score == 1 else "FAILURE"
+            if score is None:
+                status = "UNEVALUATED"
+            elif score == 1:
+                status = "SUCCESS"
+            else:
+                status = "FAILURE"
             logger.info("      Result: %s (Output: %s...)", status, output[:50])
 
             context = agent.context_engine.get_context(
@@ -501,24 +513,43 @@ async def run_trials(
         agent, params.question, params.ground_truth, matts_k, self_refine
     )
 
-    # Unpack per-trial results into aligned lists for summarization
-    trajectories = [t.trajectory for t in trial_outputs]
-    feedbacks = [t.feedback for t in trial_outputs]
-    scores = [t.score if t.score is not None else 0 for t in trial_outputs]
+    # Unpack per-trial results into aligned lists for summarization.
+    # Unevaluated trials (no ground truth) are omitted so they are not
+    # written back as success or failure labels.
+    trajectories: List[Optional[str]] = []
+    feedbacks: List[Any] = []
+    scores: List[int] = []
+    skipped_unevaluated = 0
+    for trial in trial_outputs:
+        if trial.trajectory is not None and trial.score is None:
+            skipped_unevaluated += 1
+            continue
+        trajectories.append(trial.trajectory)
+        feedbacks.append(trial.feedback)
+        scores.append(trial.score if trial.score is not None else 0)
+
+    if skipped_unevaluated:
+        logger.warning(
+            "Skipped %s unevaluated trial(s) with no ground truth",
+            skipped_unevaluated,
+        )
 
     # add ground_truth, feedback and score if needed depending on the algorithm and dataset
-    summary_result = await summarize_trajectories(
-        params.memory_service,
-        params.user_id,
-        SummarizeTrajectoriesInput(
-            query=params.question,
-            trajectory=trajectories,
-            matts_mode=params.matts_mode,
-            ground_truth=params.ground_truth,
-            feedback=feedbacks,
-            score=scores,
-        ),
-    )
+    if not trajectories:
+        summary_result = None
+    else:
+        summary_result = await summarize_trajectories(
+            params.memory_service,
+            params.user_id,
+            SummarizeTrajectoriesInput(
+                query=params.question,
+                trajectory=trajectories,
+                matts_mode=params.matts_mode,
+                ground_truth=params.ground_truth,
+                feedback=feedbacks,
+                score=scores,
+            ),
+        )
 
     # Persist updated memories back to the backend (standalone mode)
     if persistence_helper is not None and hasattr(params.memory_service, "vector_store"):
