@@ -46,6 +46,5 @@ class GatewayConfig:
     upstream_retry_max_backoff_sec: float = 2.0
     anthropic_max_completion_tokens: int = 0
     tool_parser_name: str = ""
-    disable_gateway_trajectory_collection: bool = False
     single_user_default: bool = True
     instance_id: str = field(default_factory=lambda: uuid.uuid4().hex)

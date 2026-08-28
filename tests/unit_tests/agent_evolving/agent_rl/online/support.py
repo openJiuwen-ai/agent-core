@@ -8,7 +8,6 @@ from typing import Any
 from fakeredis.aioredis import FakeRedis
 
 from openjiuwen.agent_evolving.agent_rl.online.gateway.app.server import build_gateway_app
-from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.types import CollectionSessionSpec
 
 
 class InMemoryRedis(FakeRedis):
@@ -57,19 +56,6 @@ class _InertTrainingTaskStore:
         del task_id, status, error
         return None
 
-
-def collection_spec(**overrides: Any) -> CollectionSessionSpec:
-    values = {
-        "session_id": "session-1",
-        "collection_mode": "gateway",
-        "model_id": "model-1",
-        "tokenizer_revision": "tokenizer-r1",
-        "template_revision": "template-r1",
-    }
-    values.update(overrides)
-    return CollectionSessionSpec(**values)
-
-
 def openai_response(
     *,
     prompt_ids: list[int] | None = None,
@@ -106,7 +92,6 @@ def openai_response(
 def gateway_test_app(
     *,
     forwarder: Any,
-    collector: Any = None,
     trajectory_runtime: Any = None,
     **config_overrides: Any,
 ) -> Any:
@@ -133,5 +118,4 @@ def gateway_test_app(
         trajectory_runtime=trajectory_runtime or _InertTrajectoryRuntime(),
         training_task_store=_InertTrainingTaskStore(),
         close_resources=close_resources,
-        collector=collector,
     )

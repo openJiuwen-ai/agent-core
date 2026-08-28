@@ -9,13 +9,11 @@ import os
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Optional
 
-from ..message_utils import extract_last_user_instruction
 from .judge_dispatcher import JudgeDispatcher
 from .pending_judge_store import PendingJudgeStore
 from .rail_ingest import RailBatchIngestor
 from .sample_payloads import build_sample, coerce_logprobs
 from .sample_recorder import SampleRecorder
-from .task_reward import TaskReward, TaskRewardProjector
 
 if TYPE_CHECKING:
     from ...backends.rl.redis_store import RedisTrajectoryStore
@@ -36,7 +34,6 @@ class GatewayTrajectoryRuntime:
         trajectory_store: Optional[Any] = None,
         sft_store: Optional[Any] = None,
         pending_judge_store: Optional[Any] = None,
-        task_reward_redis: Optional[Any] = None,
     ) -> None:
         if redis is None and trajectory_store is None:
             raise ValueError("GatewayTrajectoryRuntime requires injected stores or a redis client")
@@ -61,13 +58,6 @@ class GatewayTrajectoryRuntime:
             self._pending_judge_store = PendingJudgeStore(redis=redis)
         else:
             self._pending_judge_store = None
-        self._task_reward_projector: TaskRewardProjector | None = None
-        if task_reward_redis is not None and self._pending_judge_store is not None:
-            self._task_reward_projector = TaskRewardProjector(
-                redis=task_reward_redis,
-                pending_store=self._pending_judge_store,
-                record_samples_once=self._record_samples_once,
-            )
         self._judge_dispatcher: JudgeDispatcher | None = None
         self._rail_ingestor: RailBatchIngestor | None = None
         self.set_judge_scorer(None)
@@ -98,40 +88,6 @@ class GatewayTrajectoryRuntime:
             judge_dispatcher=judge_dispatcher,
             default_user_id=self._default_user_id,
         )
-
-    async def stage_gateway_sample(self, sample: dict[str, Any]) -> None:
-        """Persist one committed gateway call for delayed judging."""
-        if self._pending_judge_store is None:
-            raise ValueError("gateway trajectory collection requires a pending judge store")
-        await self._pending_judge_store.put(sample)
-
-    async def on_gateway_followup(self, session_id: str, messages: list[dict[str, Any]]) -> int:
-        """Use latest user message as feedback for oldest pending call."""
-        if self._judge_dispatcher is None:
-            raise ValueError("gateway trajectory collection requires a pending judge store")
-        feedback = extract_last_user_instruction(messages)
-        return await self._judge_dispatcher.on_prev_feedback(
-            session_id,
-            {"raw_user_text": feedback},
-        )
-
-    async def flush_gateway_session(self, session_id: str) -> int:
-        """Apply existing session-done judge semantics to pending gateway calls."""
-        if self._judge_dispatcher is None:
-            raise ValueError("gateway trajectory collection requires a pending judge store")
-        return await self._judge_dispatcher.on_session_done(session_id)
-
-    async def discard_gateway_session(self, session_id: str) -> int:
-        """Remove aborted calls without judging or publishing training samples."""
-        if self._pending_judge_store is None:
-            raise ValueError("gateway trajectory collection requires a pending judge store")
-        return len(await self._pending_judge_store.pop_all(session_id))
-
-    async def submit_task_reward(self, session_id: str, reward: TaskReward) -> int:
-        """Project a terminal verifier reward onto all calls captured for a task."""
-        if self._task_reward_projector is None:
-            raise ValueError("terminal task rewards require a Redis storage backend")
-        return await self._task_reward_projector.project(session_id, reward)
 
     async def record_sample(self, sample: dict[str, Any]) -> None:
         normalized = dict(sample)

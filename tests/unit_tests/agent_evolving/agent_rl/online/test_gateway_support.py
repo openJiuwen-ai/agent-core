@@ -8,7 +8,6 @@ import pytest
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.extensions.observability import semconv
-from tests.unit_tests.agent_evolving.agent_rl.online.support import InMemoryRedis
 
 
 def _canonical_llm_trajectory(
@@ -49,22 +48,6 @@ def _canonical_llm_trajectory(
             ]
         }
     )
-
-
-@pytest.fixture
-def disable_sample_debug_dump(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep Redis pipeline unit tests free of debug-file I/O."""
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import persistence
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_recorder import SampleRecorder
-
-    async def skip_debug_dump(self, sample):
-        del self, sample
-
-    monkeypatch.setattr(SampleRecorder, "record_sample", skip_debug_dump)
-    monkeypatch.setattr(persistence.os, "makedirs", lambda *args, **kwargs: None)
-
-
-_FakeRedis = InMemoryRedis
 
 
 class _FakeResponse:
@@ -169,17 +152,64 @@ async def test_judge_scorer_retries_length_and_sanitizes_prompt():
         http_client=client,
     )
 
-    result = await scorer.score(
-        response_text="<tag>resp</tag>",
-        instruction_text="<tool_call>plan</tool_call>",
-        followup_user_feedback="next",
+    score = await scorer.score(
+        {
+            "model": "policy",
+            "messages": [
+                {"role": "user", "content": "<tool_call>plan</tool_call>"},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "secret"}}]},
+            ],
+            "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {}}}],
+        },
+        {"choices": [{"message": {"role": "assistant", "content": "<tag>resp</tag>"}}]},
+        "next",
     )
 
-    assert result["overall_raw"] == 8
+    assert score == 0.8
     assert len(client.calls) == 2
     prompt = client.calls[0][1]["json"]["messages"][0]["content"]
     assert "[tool_call block]" in prompt
     assert "[tag]resp[/tag]" in prompt
+    assert "[image]" in prompt
+    assert "lookup" in prompt
+
+
+@pytest.mark.asyncio
+async def test_judge_scorer_rejects_unparsable_vote() -> None:
+    from openjiuwen.agent_evolving.agent_rl.online.judge.judge_scorer import JudgeScorer
+
+    client = _FakeAsyncClient(response=_FakeResponse(payload={"choices": [{"message": {"content": "invalid"}}]}))
+    scorer = JudgeScorer(
+        judge_url="http://judge.local",
+        judge_model="judge-model",
+        http_client=client,
+    )
+
+    with pytest.raises(ValueError, match="unparsable"):
+        await scorer.score(
+            {"model": "policy", "messages": [{"role": "user", "content": "question"}]},
+            {"choices": [{"message": {"role": "assistant", "content": "answer"}}]},
+            "feedback",
+        )
+
+
+@pytest.mark.asyncio
+async def test_judge_scorer_rejects_json_without_scores() -> None:
+    from openjiuwen.agent_evolving.agent_rl.online.judge.judge_scorer import JudgeScorer
+
+    client = _FakeAsyncClient(response=_FakeResponse(payload={"choices": [{"message": {"content": "{}"}}]}))
+    scorer = JudgeScorer(
+        judge_url="http://judge.local",
+        judge_model="judge-model",
+        http_client=client,
+    )
+
+    with pytest.raises(ValueError, match="unparsable"):
+        await scorer.score(
+            {"model": "policy", "messages": [{"role": "user", "content": "question"}]},
+            {"choices": [{"message": {"role": "assistant", "content": "answer"}}]},
+            "feedback",
+        )
 
 
 @pytest.mark.asyncio
@@ -206,103 +236,6 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
     assert trajectory is not None
     assert trajectory["user_id"] == "jiuwenclaw-web"
     assert json.loads((tmp_path / "samples.jsonl").read_text(encoding="utf-8").strip())["user_id"] == "jiuwenclaw-web"
-
-
-@pytest.mark.asyncio
-async def test_gateway_pending_sample_survives_runtime_recreation(
-    tmp_path: Path,
-    disable_sample_debug_dump: None,
-):
-    del disable_sample_debug_dump
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.pending_judge_store import PendingJudgeStore
-    from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
-
-    class _Judge:
-        async def score(self, **kwargs):
-            del kwargs
-            return {"score": 0.6, "votes": [8], "details": {}}
-
-    redis = _FakeRedis()
-    config = GatewayConfig(port=18080, model_id="model-1", record_dir=str(tmp_path))
-    first_runtime = GatewayTrajectoryRuntime(
-        config,
-        trajectory_store=RedisTrajectoryStore(redis),
-        pending_judge_store=PendingJudgeStore(redis=redis),
-    )
-    await first_runtime.stage_gateway_sample(
-        {
-            "sample_id": "gateway:session-restart:1:0",
-            "user_id": "user-1",
-            "session_id": "session-restart",
-            "trajectory_id": "gateway:session-restart:1",
-            "step_index": 0,
-            "turn_num": 1,
-            "request": {"messages": [{"role": "user", "content": "before restart"}]},
-            "trajectory": {
-                "prompt_ids": [11],
-                "response_ids": [12],
-                "response_logprobs": [-0.3],
-                "response_text": "persisted response",
-            },
-        }
-    )
-
-    recreated_runtime = GatewayTrajectoryRuntime(
-        config,
-        trajectory_store=RedisTrajectoryStore(redis),
-        pending_judge_store=PendingJudgeStore(redis=redis),
-    )
-    recreated_runtime.set_judge_scorer(_Judge())
-    judged = await recreated_runtime.on_gateway_followup(
-        "session-restart",
-        [{"role": "user", "content": "after restart"}],
-    )
-
-    assert judged == 1
-    stored = json.loads(await redis.hget("rl:traj:gateway:session-restart:1:0", "sample_json"))
-    assert stored["trajectory"]["response_ids"] == [12]
-    assert stored["judge"]["score"] == 0.6
-
-
-@pytest.mark.asyncio
-async def test_task_reward_projector_finalizes_pending_sample_once() -> None:
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.pending_judge_store import PendingJudgeStore
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.task_reward import TaskReward, TaskRewardProjector
-
-    redis = InMemoryRedis()
-    pending = PendingJudgeStore(redis=redis)
-    await pending.put(
-        {
-            "sample_id": "sample-1",
-            "session_id": "session-1",
-            "trajectory_id": "trajectory-1",
-            "step_index": 0,
-        }
-    )
-    recorded = []
-
-    async def record(samples):
-        recorded.extend(samples)
-        return {sample["sample_id"] for sample in samples}
-
-    projector = TaskRewardProjector(redis=redis, pending_store=pending, record_samples_once=record)
-    reward = TaskReward(
-        reward_id="reward-1",
-        attempt_id="attempt-1",
-        task_id="task-1",
-        training_key="train-1",
-        score=1.0,
-        passed=True,
-    )
-
-    assert await projector.project("session-1", reward) == 1
-    assert await projector.project("session-1", reward) == 1
-    assert len(recorded) == 1
-    assert recorded[0]["user_id"] == "train-1"
-    assert recorded[0]["judge"] == {"score": 1.0, "source": "benchmark_verifier", "reward_id": "reward-1"}
-    assert await pending.get_by_session("session-1") == []
 
 
 def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_response():

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from typing import Any
 
 import httpx
@@ -31,33 +30,12 @@ class _Forwarder:
         )
 
 
-class _Capture:
-    def __init__(self) -> None:
-        self.responses: list[Mapping[str, Any]] = []
-
-    async def commit(self, response: Mapping[str, Any]) -> None:
-        self.responses.append(response)
-
-
-class _Collector:
-    def __init__(self) -> None:
-        self.requests: list[Mapping[str, Any]] = []
-        self.capture_result = _Capture()
-
-    async def capture(self, session_id: str, request: Mapping[str, Any]) -> _Capture:
-        assert session_id == "anthropic-session"
-        self.requests.append(request)
-        return self.capture_result
-
-
 def _build_app(
     *,
     forwarder: _Forwarder,
-    collector: Any = None,
 ):
     return gateway_test_app(
         forwarder=forwarder,
-        collector=collector,
         model_id="default-model",
     )
 
@@ -152,38 +130,6 @@ def test_anthropic_system_prompt_and_mid_turn_reminder_are_preserved() -> None:
 
     assert converted["messages"][0] == {"role": "system", "content": "You are a coding agent."}
     assert converted["messages"][1]["content"] == "Fix it.\n<system-reminder>\nRun tests.\n</system-reminder>"
-
-
-@pytest.mark.asyncio
-async def test_anthropic_gateway_capture_uses_normalized_request_and_exact_upstream_truth() -> None:
-    forwarder = _Forwarder()
-    collector = _Collector()
-    app = _build_app(forwarder=forwarder, collector=collector)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gateway") as client:
-        response = await client.post(
-            "/v1/messages",
-            headers={"x-user-id": "user-1", "x-session-id": "anthropic-session"},
-            json={
-                "model": "client-model",
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 32,
-            },
-        )
-        stats = await client.get("/v1/gateway/stats")
-
-    assert response.status_code == 200
-    assert len(collector.requests) == 1
-    capture_request = collector.requests[0]
-    assert capture_request["session_id"] == "anthropic-session"
-    assert capture_request["user_id"] == "user-1"
-    assert capture_request["messages"] == [{"role": "user", "content": "ping"}]
-    assert capture_request["max_tokens"] == 32
-    assert forwarder.bodies[0]["return_token_ids"] is True
-    assert forwarder.bodies[0]["logprobs"] is True
-    assert forwarder.bodies[0]["top_logprobs"] == 1
-    assert len(collector.capture_result.responses) == 1
-    snapshot = stats.json()["collection"]
-    assert (snapshot["attempts"], snapshot["successes"], snapshot["dropped_samples"]) == (1, 1, 0)
 
 
 @pytest.mark.asyncio

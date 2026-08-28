@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
@@ -145,6 +146,35 @@ class LocalTrajectoryStore:
             state["samples"][sample_id] = normalized
 
         await self._state.transact(_save)
+
+    async def save_samples_once(
+        self,
+        samples: Sequence[dict[str, Any]],
+        *,
+        user_id: str = "online",
+    ) -> set[str]:
+        prepared: list[dict[str, Any]] = []
+        for sample in samples:
+            sample_id = str(sample.get("sample_id") or "").strip()
+            if not sample_id:
+                raise ValueError("sample_id is required")
+            normalized = copy.deepcopy(sample)
+            normalized["user_id"] = str(normalized.get("user_id") or user_id or "online")
+            normalized["_store_status"] = "pending"
+            normalized.setdefault("created_at", _now_iso())
+            prepared.append(normalized)
+
+        def _save(state: dict[str, Any]) -> set[str]:
+            saved_ids: set[str] = set()
+            for normalized in prepared:
+                sample_id = str(normalized["sample_id"])
+                if sample_id in state["samples"]:
+                    continue
+                state["samples"][sample_id] = normalized
+                saved_ids.add(sample_id)
+            return saved_ids
+
+        return await self._state.transact(_save)
 
     async def get_pending_count(self, user_id: str) -> int:
         def _count(state: dict[str, Any]) -> int:

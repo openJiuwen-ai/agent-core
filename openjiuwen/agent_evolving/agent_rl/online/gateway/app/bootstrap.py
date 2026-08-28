@@ -13,9 +13,6 @@ from typing import Any, Optional
 import httpx
 from fastapi import FastAPI
 
-from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.ports import GatewayCollector
-from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.runtime import GatewayTrajectoryCollector
-
 from ...core.store_factory import (
     backend_from_env,
     build_gateway_store_bundle,
@@ -76,9 +73,6 @@ def _build_config_from_env() -> GatewayConfig:
         upstream_retry_max_backoff_sec=float(_env("UPSTREAM_RETRY_MAX_BACKOFF_SEC", "2.0")),
         anthropic_max_completion_tokens=int(_env("ANTHROPIC_MAX_COMPLETION_TOKENS", "0")),
         tool_parser_name=_env("TOOL_PARSER_NAME", ""),
-        disable_gateway_trajectory_collection=_env(
-            "DISABLE_GATEWAY_TRAJECTORY_COLLECTION", "",
-        ).lower() in ("1", "true"),
     )
 
 
@@ -87,7 +81,6 @@ def build_app_from_config(
     *,
     http_client: Any = None,
     redis_client: Any = None,
-    collector: GatewayCollector | None = None,
 ) -> FastAPI:
     """Assemble gateway app from config and injectable dependencies."""
     logging.basicConfig(
@@ -130,7 +123,6 @@ def build_app_from_config(
         trajectory_store=store_bundle.trajectory_store,
         sft_store=store_bundle.sft_store,
         pending_judge_store=store_bundle.pending_judge_store,
-        task_reward_redis=redis_client,
     )
     training_task_store = store_bundle.training_task_store
 
@@ -149,6 +141,7 @@ def build_app_from_config(
     if config.lora_repo_root:
         try:
             from ....storage.lora_repo import LoRARepository
+
             lora_repo = LoRARepository(config.lora_repo_root)
         except Exception:
             logger.warning("LoRA repo not available at %s", config.lora_repo_root)
@@ -160,19 +153,6 @@ def build_app_from_config(
             with suppress(Exception):
                 await redis_client.aclose()
 
-    gateway_collection_enabled = _env("ENABLE_GATEWAY_TRAJECTORY_COLLECTION", "").lower() in ("1", "true", "yes", "on")
-    if (
-        collector is None
-        and gateway_collection_enabled
-        and not getattr(config, "disable_gateway_trajectory_collection", False)
-    ):
-        if redis_client is None:
-            raise ValueError("gateway trajectory collection requires a Redis storage backend")
-        collector = GatewayTrajectoryCollector(
-            redis=redis_client,
-            sample_pipeline=trajectory_runtime,
-        )
-
     return build_gateway_app(
         config=config,
         forwarder=forwarder,
@@ -181,5 +161,4 @@ def build_app_from_config(
         training_task_store=training_task_store,
         close_resources=close_resources,
         lora_repo=lora_repo,
-        collector=collector,
     )

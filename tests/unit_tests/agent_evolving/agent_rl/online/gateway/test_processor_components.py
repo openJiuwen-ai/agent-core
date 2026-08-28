@@ -30,13 +30,13 @@ class _FakeForwarder:
 
 class _FakeJudgeScorer:
     def __init__(self, score_result=None) -> None:
-        self.calls: list[dict] = []
+        self.calls: list[tuple] = []
         self.closed = False
-        self.score_result = score_result or {"score": 0.75, "votes": ["ok"], "details": {}}
+        self.score_result = 0.75 if score_result is None else score_result
 
-    async def score(self, **kwargs):
-        self.calls.append(kwargs)
-        return dict(self.score_result)
+    async def score(self, *args):
+        self.calls.append(args)
+        return self.score_result
 
     async def close(self) -> None:
         self.closed = True
@@ -329,7 +329,6 @@ async def test_processor_chat_completion_proxies_without_turn_or_sample_work():
     runtime = GatewayCompletionRuntime(
         config=SimpleNamespace(llm_api_key=""),
         forwarder=forwarder,
-        collector=None,
     )
 
     request = SimpleNamespace(headers={"x-request-id": "trace-9", "x-user-id": "user-9"})
@@ -346,7 +345,7 @@ async def test_processor_chat_completion_proxies_without_turn_or_sample_work():
 @pytest.mark.asyncio
 async def test_judge_dispatcher_scores_session_done_sample_without_followup_feedback():
     recorder = _FakeRecorder()
-    scorer = _FakeJudgeScorer({"score": 0.25, "votes": [6.25], "details": {"overall": 6.25}})
+    scorer = _FakeJudgeScorer(0.25)
     sample = {
         "sample_id": "sample-1",
         "user_id": "user-1",
@@ -365,7 +364,7 @@ async def test_judge_dispatcher_scores_session_done_sample_without_followup_feed
 
     assert count == 1
     assert len(scorer.calls) == 1
-    assert scorer.calls[0]["instruction_text"] == "hello"
-    assert scorer.calls[0]["followup_user_feedback"] == ""
+    assert scorer.calls[0][0] == sample["request"]
+    assert scorer.calls[0][2] == ""
     assert recorder.samples[0]["judge"]["score"] == 0.25
     assert recorder.samples[0]["judge_feedback"]["tag"] == "session_done"

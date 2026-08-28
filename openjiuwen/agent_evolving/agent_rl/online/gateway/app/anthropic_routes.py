@@ -52,7 +52,6 @@ def create_anthropic_router(
         except AnthropicRequestError as exc:
             return anthropic_error_response(400, str(exc))
 
-        capture_metadata: dict[str, Any] | None = None
         max_completion_tokens = max(0, int(getattr(config, "anthropic_max_completion_tokens", 0)))
         requested_max_tokens = body.get("max_tokens")
         if (
@@ -61,14 +60,6 @@ def create_anthropic_router(
             and requested_max_tokens > max_completion_tokens
         ):
             body["max_tokens"] = max_completion_tokens
-            capture_metadata = {
-                "_gateway_request_adjustments": {
-                    "anthropic_max_tokens": {
-                        "requested": requested_max_tokens,
-                        "effective": max_completion_tokens,
-                    }
-                }
-            }
             logger.info(
                 "[Gateway] clamped Anthropic max_tokens requested=%d effective=%d",
                 requested_max_tokens,
@@ -79,7 +70,6 @@ def create_anthropic_router(
             response_json, client_wants_stream = await completion_runtime.execute(
                 request=request,
                 body=body,
-                capture_metadata=capture_metadata,
             )
         except HTTPException as exc:
             return anthropic_error_response(exc.status_code, str(exc.detail))

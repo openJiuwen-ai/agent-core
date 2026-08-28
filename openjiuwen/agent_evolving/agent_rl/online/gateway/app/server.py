@@ -20,7 +20,6 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from openjiuwen.agent_evolving.agent_rl.online.gateway.collector.ports import GatewayCollector
 from openjiuwen.core.common.logging import logger
 
 from ....storage.lora_repo import LoRAPublishRequest
@@ -30,7 +29,6 @@ from ...lora_runtime import lora_id as build_lora_id
 from ..trajectory import GatewayTrajectoryRuntime
 from ..upstream import Forwarder, UpstreamGatewayClient
 from .anthropic_routes import create_anthropic_router
-from .collection_routes import create_collection_router
 from .completion_runtime import GatewayCompletionRuntime
 from .http_helpers import build_upstream_headers, ensure_gateway_auth, stream_chat_response
 
@@ -39,7 +37,6 @@ async def _snapshot_stats(
     *,
     trajectory_runtime: GatewayTrajectoryRuntime,
     total_requests: int,
-    completion_runtime: GatewayCompletionRuntime,
 ) -> dict[str, Any]:
     trajectory_stats = await trajectory_runtime.snapshot_stats()
     return {
@@ -47,7 +44,6 @@ async def _snapshot_stats(
         "total_samples": trajectory_stats["total_samples"],
         "trajectory_store_total": trajectory_stats["trajectory_store_total"],
         "trajectory_store_pending": trajectory_stats["trajectory_store_pending"],
-        "collection": completion_runtime.collection_stats(),
         "sft_pending_raw": trajectory_stats.get("sft_pending_raw", 0),
         "sft_pending_samples": trajectory_stats.get("sft_pending_samples", 0),
     }
@@ -196,7 +192,6 @@ def build_gateway_app(
     training_task_store: TrainingTaskStore,
     close_resources: Callable[[], Awaitable[None]],
     lora_repo: Any = None,
-    collector: GatewayCollector | None = None,
 ) -> FastAPI:
     """Assemble FastAPI app and bind gateway public/internal routes."""
     metrics_lock = asyncio.Lock()
@@ -205,7 +200,6 @@ def build_gateway_app(
     completion_runtime = GatewayCompletionRuntime(
         config=config,
         forwarder=forwarder,
-        collector=collector,
         lora_repo=lora_repo,
     )
 
@@ -332,14 +326,7 @@ def build_gateway_app(
             await close_resources()
 
     app = FastAPI(title="Online-RL Gateway", lifespan=_lifespan)
-    app.state.trajectory_collector = collector
     app.state.gateway_instance_id = gateway_instance_id
-    app.include_router(
-        create_collection_router(
-            config=config,
-            collection_manager=collector,
-        )
-    )
     app.include_router(
         create_anthropic_router(
             config=config,
@@ -360,7 +347,6 @@ def build_gateway_app(
         return await _snapshot_stats(
             trajectory_runtime=trajectory_runtime,
             total_requests=request_count,
-            completion_runtime=completion_runtime,
         )
 
     @app.post("/v1/training/tasks")
