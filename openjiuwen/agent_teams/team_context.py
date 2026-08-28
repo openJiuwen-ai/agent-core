@@ -350,13 +350,44 @@ class TeamContextTracker:
         real one lands moments later: the member is told the same thing twice,
         the first time wrongly. The probe reads 0 while the row is missing, so it
         moves on its own once the team is created.
+
+        Probe + stamp fallback are symmetric with :meth:`_identity_body`: a
+        stamped ``updated_at`` keeps the wall-clock comparison (only a moved
+        mtime re-fires), while a *blank* field (``present=False`` — the
+        evolution party edited ``team_card.md`` without stamping it) is an
+        explicit "must update" signal that re-announces regardless of the
+        baseline and stamps a single timestamp back into the file + baseline
+        in one move (next probe is stable, no re-fire). Without this the
+        member_prompt/roster channels absorb a blank field fine but team_card
+        alone never re-delivered: ``max(db, 0)`` floored on the DB column and
+        never moved, so the evolved team desc never reached any member. The
+        probe source is the team_card md alone (not the ``get_team_updated_at``
+        max that also folds in team_prompt + the DB column): team_prompt's body
+        never enters the block, and the DB column advances on its own via a
+        ``build_team`` mutation which the team_card md probe stays under.
         """
         if self._team_backend is None:
             return None
-        mtime = await self._team_backend.get_team_updated_at()
-        if mtime == baseline.get(_TEAM_INFO_MTIME):
-            return None
-        updated[_TEAM_INFO_MTIME] = mtime
+        mtime, present = await self._team_backend.get_team_updated_at_state()
+        if present:
+            # A stamped ``updated_at`` keeps the wall-clock comparison: only a
+            # moved mtime re-fires, and the baseline records the probe value so
+            # a stable file does not loop.
+            if mtime == baseline.get(_TEAM_INFO_MTIME):
+                return None
+            baseline_mtime = mtime
+        else:
+            # ``present=False`` (a blank ``updated_at`` — the evolution party
+            # edited the ``team_card.md`` body without stamping the field) is an
+            # explicit "must update" signal: re-announce regardless of the
+            # baseline. A single timestamp T is then stamped into the file (meta
+            # only, the evolved body is preserved) and recorded as the new
+            # baseline — both share T, so the next probe reads ``present=True,
+            # mtime=T`` → ``T == baseline`` → no re-fire: a blank field forces
+            # exactly one re-delivery, never a loop.
+            baseline_mtime = get_current_time()
+            await self._team_backend.stamp_team_card_updated_at(baseline_mtime)
+        updated[_TEAM_INFO_MTIME] = baseline_mtime
         info = await self._team_backend.get_team_info()
         if info is None:
             return None

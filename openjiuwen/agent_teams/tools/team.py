@@ -1434,6 +1434,43 @@ class TeamBackend:
         )
         return max(db_ts, md_max)
 
+    async def get_team_updated_at_state(self) -> tuple[int, bool]:
+        """Probe the team_card ``updated_at`` plus its presence flag.
+
+        Counterpart of :meth:`get_team_updated_at` narrowed to the team_card
+        md file (the only team B-class file whose body enters the team-info
+        block; ``team_prompt`` is a write-only placeholder whose body never
+        renders). Also surfaces whether the frontmatter carried an explicit
+        ``updated_at`` integer so the team-info re-announce path can treat
+        ``present=False`` (a blank field — the evolution party edited the
+        ``team_card.md`` body without stamping it) as an explicit "must
+        update" signal, symmetric with :meth:`get_member_updated_at_state`.
+
+        Returns:
+            ``(updated_at_ms, present)`` — ``(0, True)`` when the cache is
+            absent (evolution off) or the ``team_card.md`` file is missing
+            (no "must update" signal; the DB column floors the probe).
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return (0, True)
+        return cache.get_team_updated_at_state("desc")
+
+    async def stamp_team_card_updated_at(self, ts: int) -> None:
+        """Stamp ``ts`` into ``team_card.md``'s ``updated_at`` (meta only).
+
+        Thin forward to the workspace cache, which owns all md-file IO. Called
+        by the team-info re-announce path right after a "must update" decision
+        so the comparison baseline and the file's ``updated_at`` share one
+        timestamp (next probe is stable, no re-fire). No-op when the cache is
+        absent (evolution off / single-agent). Symmetric with
+        :meth:`stamp_member_prompt_updated_at`.
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return
+        cache.stamp_team_updated_at("desc", ts)
+
     async def get_member_updated_at(self, member_name: str, field: str) -> int:
         """Probe one member's md ``updated_at`` for change detection.
 

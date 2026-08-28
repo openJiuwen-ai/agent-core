@@ -290,6 +290,83 @@ class WorkspaceCache:
         content = self._team_values[field]
         return content.updated_at if content is not None else 0
 
+    def get_team_updated_at_state(
+        self,
+        field: Literal["desc", "prompt"],
+    ) -> tuple[int, bool]:
+        """Return ``(updated_at, present)`` for a team B-class file.
+
+        Counterpart of :meth:`get_team_updated_at` that also surfaces whether
+        the frontmatter carried an explicit ``updated_at`` integer. The
+        team-info re-announce probe uses ``present=False`` (a blank field —
+        the evolution party edited the ``team_card.md`` body without stamping
+        it) as an explicit "must update" signal distinct from the ``0`` a
+        *missing* file produces (``content is None`` → ``(0, True)``, no
+        update). Shares the single file read with :meth:`get_team_updated_at`
+        / :meth:`get_team_field` via the resident ``_team_values`` entry.
+        """
+        if field not in self._team_values:
+            root = self._store.team_workspace_root(self._team_name)
+            if field == "desc":
+                path = WorkspaceLayout.team_card_file(root)
+            else:
+                path = WorkspaceLayout.team_prompt_file(root)
+            self._team_values[field] = self._read_file_content(path)
+        content = self._team_values[field]
+        if content is None:
+            # Missing file → (0, True): no "must update" signal. Distinct
+            # from a present file whose blank ``updated_at`` yields
+            # ``(0, False)``.
+            return (0, True)
+        return (content.updated_at, content.updated_at_present)
+
+    def stamp_team_updated_at(
+        self,
+        field: Literal["desc", "prompt"],
+        ts: int,
+    ) -> None:
+        """Stamp ``ts`` into the team B-class file's ``updated_at`` (meta only).
+
+        Called by the team-info re-announce path right after it decides a
+        blank ``updated_at`` means "must update": one timestamp is used both
+        for the comparison baseline and the file's ``updated_at``, so the next
+        probe reads a stable non-zero value and does not re-fire. Only the
+        frontmatter changes — the body, baseline hash and ``evolved`` flag
+        are preserved (the evolution party's edit wins). Updates the resident
+        ``_team_values`` entry so a later ``get_team_updated_at_state`` in the
+        same run is a dict hit, not a re-read.
+        """
+        root = self._store.team_workspace_root(self._team_name)
+        if field == "desc":
+            path = WorkspaceLayout.team_card_file(root)
+        else:
+            path = WorkspaceLayout.team_prompt_file(root)
+        try:
+            text = path.read_text(encoding="utf-8")
+            meta, body = read_frontmatter(text)
+            meta["updated_at"] = ts
+            atomic_write(path, write_frontmatter(meta, body))
+        except (OSError, ValueError) as exc:
+            team_logger.warning(
+                "[workspace] %s updated_at stamp failed: %s", path, exc
+            )
+            return
+        # Refresh the resident entry so the stamped value is visible to a
+        # same-run probe without a disk re-read. Reuse the already-read body
+        # and baseline; only ``updated_at`` / ``updated_at_present`` move.
+        old = self._team_values.get(field)
+        if old is not None:
+            self._team_values[field] = FileContent(
+                kind=old.kind,
+                name=old.name,
+                language=old.language,
+                baseline_sha256=old.baseline_sha256,
+                updated_at=ts,
+                body=old.body,
+                evolved=old.evolved,
+                updated_at_present=True,
+            )
+
     # ── C-class ────────────────────────────────────────────────────────────
 
     def get_tool_md(self, desc_key: str) -> str | None:
