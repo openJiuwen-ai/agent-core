@@ -578,6 +578,92 @@ class TestConversationSignalDetector:
         assert signals == []
 
 
+class TestCollectSkillsFromMessages:
+    @staticmethod
+    def test_collect_skills_from_skill_tool_result_directory() -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc_skill",
+                        "name": "skill_tool",
+                        "arguments": '{"skill_name": "天气"}',
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_skill",
+                "name": "skill_tool",
+                "content": (
+                    "success=True data={'skill_directory': "
+                    "'/workspace/skills/tianqi-weather', 'skill_content': 'body'}"
+                ),
+            },
+        ]
+        detector = ConversationSignalDetector(existing_skills={"tianqi-weather"})
+
+        assert detector.collect_skills_from_messages(messages) == ["tianqi-weather"]
+
+    @staticmethod
+    def test_collect_skills_prefers_existing_argument_skill_name() -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "tc_skill",
+                        "name": "skill_tool",
+                        "arguments": '{"skill_name": "weather-assistant"}',
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_skill",
+                "name": "skill_tool",
+                "content": (
+                    "success=True data={'skill_directory': "
+                    "'E:\\\\skills\\\\weather-assistant', 'skill_content': 'body'}"
+                ),
+            },
+        ]
+        detector = ConversationSignalDetector(existing_skills={"weather-assistant"})
+
+        assert detector.collect_skills_from_messages(messages) == ["weather-assistant"]
+
+    @staticmethod
+    def test_collect_skills_deduplicates_repeated_skill_tool_loads() -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "tc1", "name": "skill_tool", "arguments": '{"skill_name": "天气"}'}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc1",
+                "name": "skill_tool",
+                "content": "success=True data={'skill_directory': '/skills/tianqi-weather'}",
+            },
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "tc2", "name": "skill_tool", "arguments": '{"skill_name": "天气"}'}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc2",
+                "name": "skill_tool",
+                "content": "success=True data={'skill_directory': '/skills/tianqi-weather'}",
+            },
+        ]
+        detector = ConversationSignalDetector(existing_skills={"tianqi-weather"})
+
+        assert detector.collect_skills_from_messages(messages) == ["tianqi-weather"]
+
+
 class TestConversationSignalDetectorCollaborationBoundary:
     """Ordinary conversation detector leaves team collaboration to team evolution."""
 
