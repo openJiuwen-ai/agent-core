@@ -186,6 +186,8 @@ def test_worktrees_dir_is_excluded_by_default() -> None:
     assert ".cursor" in DEFAULT_EXCLUDE_DIRS
     assert ".claude" in DEFAULT_EXCLUDE_DIRS
     assert ".code_graph_cache" in DEFAULT_EXCLUDE_DIRS
+    assert "vendor" in DEFAULT_EXCLUDE_DIRS
+    assert "third_party" in DEFAULT_EXCLUDE_DIRS
 
 
 def test_default_excludes_are_generic_artifact_names() -> None:
@@ -228,11 +230,17 @@ def test_generated_output_dirs_are_not_walked(tmp_path: Path) -> None:
     (repo / "src" / "main.py").write_text("def main():\n    return 1\n", encoding="utf-8")
     (repo / "_build" / "html" / "page.py").write_text("def noise():\n    return 0\n", encoding="utf-8")
     (repo / ".next" / "chunk.js").write_text("function noise() {}\n", encoding="utf-8")
+    (repo / "vendor" / "lib").mkdir(parents=True)
+    (repo / "third_party" / "lib").mkdir(parents=True)
+    (repo / "vendor" / "lib" / "dep.py").write_text("def dep():\n    return 0\n", encoding="utf-8")
+    (repo / "third_party" / "lib" / "dep.py").write_text("def dep():\n    return 0\n", encoding="utf-8")
     files = _iter_source_files(repo, CodeGraphConfig())
     rels = [path.relative_to(repo).as_posix() for path in files]
     assert "src/main.py" in rels
     assert not any(rel.startswith("_build/") for rel in rels)
     assert not any(rel.startswith(".next/") for rel in rels)
+    assert not any(rel.startswith("vendor/") for rel in rels)
+    assert not any(rel.startswith("third_party/") for rel in rels)
 
 
 def test_default_config_skips_manual_text_files(tmp_path: Path) -> None:

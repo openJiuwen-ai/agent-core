@@ -364,7 +364,7 @@ def _resolve_call_target(
     name = call.callee_name
     if not name:
         return None, CallResolution.UNRESOLVED
-    if name in index.symbols:
+    if "::" in name and name in index.symbols:
         return name, CallResolution.EXACT
 
     receiver = (call.receiver or "").strip()

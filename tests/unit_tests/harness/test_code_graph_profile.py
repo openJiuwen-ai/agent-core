@@ -565,7 +565,9 @@ async def test_graph_profile_restores_grep_when_graph_is_unavailable(
     )
     assert agent.ability_manager.get("grep") is not None
     assert agent.ability_manager.get("glob") is not None
-    assert agent.ability_manager.get("find_code_symbols") is not None
+    assert agent.ability_manager.get("find_code_symbols") is None
+    assert agent.ability_manager.get("search_source_text") is None
+    assert agent.ability_manager.get("resolve_symbol") is None
     assert agent.ability_manager.get("read_file") is not None
     assert agent.ability_manager.get("edit_file") is not None
 
@@ -601,6 +603,47 @@ async def test_graph_profile_warms_the_index_on_user_message(
     await asyncio.sleep(0.05)
     assert seen
     assert agent.ability_manager.get("grep") is None
+    assert agent.ability_manager.get("find_code_symbols") is not None
+
+
+@pytest.mark.asyncio
+async def test_graph_profile_warmup_limit_drops_graph_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openjiuwen.core.retrieval.code_graph.errors import CodeGraphLimitExceeded
+
+    monkeypatch.setattr(profile_rail_mod, "_parser_ready", lambda: True)
+
+    async def fake_fresh(self, repo_root, config=None, **kwargs):
+        del self, repo_root, config, kwargs
+        raise CodeGraphLimitExceeded(
+            "too many files",
+            limit="max_files",
+            observed=5001,
+            cap=5000,
+        )
+
+    monkeypatch.setattr(
+        "openjiuwen.core.retrieval.code_graph.manager.CodeGraphManager.ensure_fresh",
+        fake_fresh,
+    )
+    agent = await _code_agent(
+        tmp_path,
+        code_graph_profile="graph",
+        inject_builtin_plan_agents=False,
+    )
+    rail = agent.find_rails_by_type((CodeGraphProfileRail,))[0]
+    await rail.on_user_message(
+        AgentCallbackContext(
+            agent=agent,
+            inputs=UserMessageInputs(parts=["where is UserService?"]),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert agent.ability_manager.get("grep") is not None
+    assert agent.ability_manager.get("glob") is not None
+    assert agent.ability_manager.get("find_code_symbols") is None
+    assert agent.ability_manager.get("search_source_text") is None
 
 
 @pytest.mark.asyncio
@@ -728,6 +771,16 @@ async def test_write_file_marks_the_shared_workspace_dirty(
     )
     rail = agent.find_rails_by_type((CodeGraphProfileRail,))[0]
     manager = get_code_graph_manager()
+    published: list[str] = []
+
+    async def fake_fresh(self, repo_root, config=None, **kwargs):
+        del self, config, kwargs
+        published.append(str(repo_root))
+
+    monkeypatch.setattr(
+        "openjiuwen.core.retrieval.code_graph.manager.CodeGraphManager.ensure_fresh",
+        fake_fresh,
+    )
     await manager.get_service(tmp_path, rail.config, ensure=False)
     await rail.after_tool_call(
         AgentCallbackContext(
@@ -741,7 +794,49 @@ async def test_write_file_marks_the_shared_workspace_dirty(
     )
     stats = manager.stats(tmp_path)
     assert "src/user.py" in stats["dirty_paths"]
+    assert published
     reset_code_graph_manager()
+
+
+@pytest.mark.asyncio
+async def test_write_over_limit_restores_grep_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openjiuwen.core.retrieval.code_graph.errors import CodeGraphLimitExceeded
+
+    monkeypatch.setattr(profile_rail_mod, "_parser_ready", lambda: True)
+    agent = await _code_agent(
+        tmp_path,
+        code_graph_profile="graph",
+        inject_builtin_plan_agents=False,
+    )
+    rail = agent.find_rails_by_type((CodeGraphProfileRail,))[0]
+
+    async def fake_fresh(self, repo_root, config=None, **kwargs):
+        del self, repo_root, config, kwargs
+        raise CodeGraphLimitExceeded(
+            "too many files",
+            limit="max_files",
+            observed=3,
+            cap=1,
+        )
+
+    monkeypatch.setattr(
+        "openjiuwen.core.retrieval.code_graph.manager.CodeGraphManager.ensure_fresh",
+        fake_fresh,
+    )
+    await rail.after_tool_call(
+        AgentCallbackContext(
+            agent=agent,
+            inputs=ToolCallInputs(
+                tool_name="write_file",
+                tool_args={"path": "src/extra.py"},
+                tool_result={"status": "ok"},
+            ),
+        )
+    )
+    assert agent.ability_manager.get("grep") is not None
+    assert agent.ability_manager.get("find_code_symbols") is None
 
 
 @pytest.mark.asyncio

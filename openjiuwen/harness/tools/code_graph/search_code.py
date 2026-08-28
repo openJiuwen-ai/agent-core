@@ -81,7 +81,6 @@ class FindCodeSymbolsTool(CodeGraphBaseTool):
             state.search_cache[query_hash] = dict(output.data)
         elif state.diminishing_returns(DIMINISHING_RETURN_STREAK):
             self._note_diminishing_returns(output.data, state)
-        self._persist_session()
         return output
 
     def _repeat_response(self, query_hash: str) -> ToolOutput | None:
@@ -99,7 +98,6 @@ class FindCodeSymbolsTool(CodeGraphBaseTool):
             budget = self._touch_budget()
             if budget is not None:
                 return budget
-            self._persist_session()
             return ToolOutput(
                 success=True,
                 data=status_payload(

@@ -70,6 +70,7 @@ class DiskIndexStore:
             index,
             last_full_build_seconds=last_full_build_seconds,
         )
+        self._drop_superseded(path)
         self._enforce_quota()
         used = self.used_bytes()
         if used > self.max_size_bytes:
@@ -249,6 +250,20 @@ class DiskIndexStore:
             logger.warning("code_graph manifest load failed for %s: %s", path, exc)
             return None
         return payload if isinstance(payload, dict) else None
+
+    def _drop_superseded(self, keep: Path) -> None:
+        """Remove older pickles in the same repo folder after the pointer moved."""
+        parent = keep.parent
+        if not parent.is_dir():
+            return
+        keep_resolved = keep.resolve()
+        for path in parent.glob("*.pkl"):
+            try:
+                if path.resolve() == keep_resolved:
+                    continue
+                path.unlink()
+            except OSError as exc:
+                logger.warning("code_graph superseded cache delete failed for %s: %s", path, exc)
 
     def _active_index_paths(self) -> set[Path]:
         protected: set[Path] = set()

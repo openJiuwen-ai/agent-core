@@ -105,6 +105,7 @@ DEFAULT_EXCLUDE_DIRS: tuple[str, ...] = (
     "_site",
     "target",
     "vendor",
+    "third_party",
     "eggs",
     "htmlcov",
     "coverage",

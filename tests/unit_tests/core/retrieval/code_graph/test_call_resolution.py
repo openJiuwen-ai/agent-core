@@ -381,3 +381,37 @@ def test_find_callers_does_not_surface_unresolved_name_matches(
         for item in index.unresolved_calls
     )
 
+
+def test_call_exact_only_when_callee_is_symbol_id() -> None:
+    from openjiuwen.core.retrieval.code_graph.indexing.builder import _resolve_call_target
+    from openjiuwen.core.retrieval.code_graph.indexing.symbol_extractor import PendingCall
+    from openjiuwen.core.retrieval.code_graph.models import CodeGraphIndex, Symbol, SymbolKind
+
+    index = CodeGraphIndex(repo_root=".", snapshot="s", config_hash="c")
+    index.add_symbol(
+        Symbol(
+            symbol_id="pkg/a.py::foo",
+            name="foo",
+            kind=SymbolKind.FUNCTION,
+            file="pkg/a.py",
+            start_line=1,
+            end_line=2,
+        )
+    )
+
+    def resolve(callee: str) -> tuple[str | None, CallResolution]:
+        return _resolve_call_target(
+            index,
+            PendingCall(caller_id="pkg/b.py::bar", callee_name=callee, file="pkg/b.py"),
+            import_targets={},
+            class_methods={},
+            class_ids_by_name={},
+        )
+
+    target, resolution = resolve("pkg/a.py::foo")
+    assert target == "pkg/a.py::foo"
+    assert resolution is CallResolution.EXACT
+    target, resolution = resolve("foo")
+    assert target == "pkg/a.py::foo"
+    assert resolution is CallResolution.UNIQUE
+

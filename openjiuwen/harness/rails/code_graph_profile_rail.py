@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus
+from openjiuwen.core.retrieval.code_graph.errors import CodeGraphLimitExceeded, CodeGraphStatus
 from openjiuwen.core.retrieval.code_graph.models import CodeGraphConfig
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -39,7 +39,8 @@ from openjiuwen.harness.tools.code_graph import (
 from openjiuwen.harness.tools.code_graph._base import CodeGraphToolContext
 
 # ``profile: graph`` hides grep/glob while the index works. Missing parser or
-# UNAVAILABLE restores them. Locate exam uses its own hide list.
+# UNAVAILABLE drops find_* and restores grep/glob. Locate exam keeps graph
+# tools and never restores grep.
 GRAPH_HIDDEN_SEARCH_TOOLS = ("grep", "glob")
 _GRAPH_TOOL_NAMES = frozenset(LOCATE_EXAM_TOOL_NAMES)
 
@@ -58,11 +59,11 @@ class CodeGraphProfileRail(DeepAgentRail):
     tools already exist when this rail registers find_* tools. ``profile=off``
     is a no-op: the host stays on grep / read / edit. When the parser can
     index, ``profile=graph`` drops grep/glob so the model cannot ignore the
-    graph. If the parser is missing, registration fails, or a graph tool
-    later returns ``UNAVAILABLE``, those search tools stay (or come back)
-    and the host is the original agent again. Locate-exam mode never
-    restores them. Localization does not finish the host agent: the same
-    agent owns the later edit.
+    graph. If the parser is missing, registration fails, warmup hits a
+    repo cap, or a graph tool later returns ``UNAVAILABLE``, find_* come
+    off and grep/glob come back. Locate-exam mode never restores them.
+    Localization does not finish the host agent: the same agent owns the
+    later edit.
     """
 
     priority = 99
@@ -237,31 +238,37 @@ class CodeGraphProfileRail(DeepAgentRail):
                 from openjiuwen.core.retrieval.code_graph.manager import get_code_graph_manager
 
                 await get_code_graph_manager(config).ensure_fresh(repo_root, config)
+            except CodeGraphLimitExceeded as exc:
+                logger.warning("CodeGraphProfileRail: warmup failed: %s", exc)
+                self.abandon_graph(reason=str(exc))
             except Exception as exc:  # noqa: BLE001 — first find_* still retries
                 logger.warning("CodeGraphProfileRail: warmup failed: %s", exc)
 
         loop.create_task(_warm())
 
-    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Report file mutations and restore grep/glob if the graph dies."""
-        if self._tools:
-            self._report_workspace_mutation(ctx)
-        if not self._hidden_search:
+    def abandon_graph(self, agent: Any | None = None, *, reason: str = "") -> None:
+        """Drop find_* and put grep/glob back. Locate exam keeps graph tools."""
+        if self._is_locate_exam():
             return
+        host = agent if agent is not None else self._agent
+        if host is None:
+            return
+        if reason:
+            logger.warning("CodeGraphProfileRail: abandoning graph (%s)", reason)
+        self._restore_baseline(host)
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Report file mutations. Over-limit UNAVAILABLE drops the graph tools."""
+        if self._tools:
+            await self._report_workspace_mutation(ctx)
         if self._is_locate_exam():
             return
         if not _graph_tool_needs_search_fallback(ctx):
             return
-        agent = ctx.agent if ctx.agent is not None else self._agent
-        if agent is None:
-            return
-        restored = _restore_text_search_tools(agent, self._hidden_search)
-        self._hidden_search = []
-        if restored:
-            logger.warning(
-                "CodeGraphProfileRail: graph needs text search; restored %s",
-                ",".join(GRAPH_HIDDEN_SEARCH_TOOLS),
-            )
+        self.abandon_graph(
+            ctx.agent if ctx.agent is not None else self._agent,
+            reason="UNAVAILABLE",
+        )
 
     def _live_repo_root(self, agent: Any | None = None) -> str:
         """Resolve the workspace the agent is actually in, including worktrees."""
@@ -283,7 +290,7 @@ class CodeGraphProfileRail(DeepAgentRail):
             workspace_root=getattr(self.workspace, "root_path", None) if self.workspace else None,
         )
 
-    def _report_workspace_mutation(self, ctx: AgentCallbackContext) -> None:
+    async def _report_workspace_mutation(self, ctx: AgentCallbackContext) -> None:
         inputs = ctx.inputs
         if not isinstance(inputs, ToolCallInputs):
             return
@@ -298,9 +305,20 @@ class CodeGraphProfileRail(DeepAgentRail):
             path = _changed_path_from_tool(inputs)
             if path:
                 manager.mark_dirty(root, [path], source=name, config=self.config)
+                await self._publish_after_write(manager, root)
             return
         if name in {"bash", "powershell"}:
             manager.mark_dirty_unknown(root, reason="shell", config=self.config)
+
+    async def _publish_after_write(self, manager: Any, root: str) -> None:
+        """Refresh and checkpoint so ``updated_at`` tracks this write."""
+        try:
+            await manager.ensure_fresh(root, self.config)
+        except CodeGraphLimitExceeded as exc:
+            if not self._is_locate_exam():
+                self.abandon_graph(reason=str(exc))
+        except Exception:  # noqa: BLE001 — write already succeeded
+            logger.warning("CodeGraphProfileRail: publish after write failed for %s", root, exc_info=True)
 
     def _is_locate_exam(self) -> bool:
         mode = (self.prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
@@ -341,7 +359,17 @@ class CodeGraphProfileRail(DeepAgentRail):
 
     def uninit(self, agent: Any) -> None:
         # Drop graph tools and put grep back. The shared workspace index stays.
+        self._drop_localization_session()
         self._restore_baseline(agent)
+
+    def _drop_localization_session(self) -> None:
+        """This rail's locator episode can go; other windows keep theirs."""
+        state = self.run_state
+        if state is None:
+            return
+        from openjiuwen.harness.tools.code_graph.session import drop_localization
+
+        drop_localization(artifact_id=state.artifact_id, session_key=state.session_key)
 
     def _restore_baseline(self, agent: Any) -> None:
         """Return the host to grep / read / edit. Safe to call twice."""
