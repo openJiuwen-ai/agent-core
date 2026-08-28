@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from ...abstract.store import TrajectorySampleStore
 from .._inmemory_queue import InMemoryStatusQueue
 
 

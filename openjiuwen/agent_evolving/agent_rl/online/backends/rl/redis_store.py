@@ -14,9 +14,9 @@ from typing import Any, Optional
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
-_DEFAULT_KEY_PREFIX = "rl:traj"
-_DEFAULT_IDX_PREFIX = "rl:traj_idx"
-_DEFAULT_USERS_SET_KEY = "rl:traj_users"
+_DEFAULT_KEY_PREFIX = "rl:v1:traj"
+_DEFAULT_IDX_PREFIX = "rl:v1:traj_idx"
+_DEFAULT_USERS_SET_KEY = "rl:v1:traj_users"
 
 logger = logging.getLogger(__name__)
 

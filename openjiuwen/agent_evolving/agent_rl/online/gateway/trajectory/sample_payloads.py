@@ -6,9 +6,18 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ..common import fit_list, utc_now_iso
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _fit_list(values: list[float], expected_len: int) -> list[float]:
+    if expected_len <= 0:
+        return []
+    return (values[:expected_len] + [0.0] * expected_len)[:expected_len]
 
 
 def coerce_logprobs(values: Any, expected_len: int) -> list[float]:
@@ -20,7 +29,7 @@ def coerce_logprobs(values: Any, expected_len: int) -> list[float]:
                 out.append(float(item))
             except (TypeError, ValueError):
                 continue
-    return fit_list(out, expected_len)
+    return _fit_list(out, expected_len)
 
 
 def build_sample(
@@ -52,7 +61,7 @@ def build_sample(
     input_ids = prompt_ids + response_ids
     sample = {
         "sample_id": sample_id or str(uuid.uuid4()),
-        "created_at": created_at or utc_now_iso(),
+        "created_at": created_at or _utc_now_iso(),
         "user_id": user_id,
         "session_id": session_id,
         "turn_num": turn_num,

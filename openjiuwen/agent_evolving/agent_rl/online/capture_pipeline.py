@@ -23,6 +23,7 @@ from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.sample_payload
 from openjiuwen.agent_evolving.agent_rl.online.task_registry import (
     FinishReason,
     TaskConflictError,
+    TaskNotFoundError,
     TaskRecord,
     TaskRegistry,
     TaskStatus,
@@ -187,7 +188,7 @@ class CapturePipeline:
     async def _require_task(self, rl_task_id: str) -> TaskRecord:
         task = await self._registry.get(rl_task_id)
         if task is None:
-            raise TaskConflictError(f"unknown RL Task: {rl_task_id}")
+            raise TaskNotFoundError(f"unknown RL Task: {rl_task_id}")
         return task
 
     @staticmethod
@@ -202,7 +203,7 @@ class CapturePipeline:
         if not isinstance(request, Mapping):
             raise ValueError("request must be an object")
         normalized = CapturePipeline._json_value(request)
-        if normalized.get("model") != task.policy_lora_name:
+        if normalized.get("model") != task.policy_model:
             raise TaskConflictError("request model does not match Task policy")
         if not isinstance(normalized.get("messages"), list):
             raise ValueError("request messages must be a list")
@@ -210,6 +211,14 @@ class CapturePipeline:
             raise ValueError("RL capture requires n=1")
         if task.reward_mode.value == "delayed_feedback" and not str(agent_turn_id or "").strip():
             raise ValueError("agent_turn_id is required for delayed_feedback Task")
+        normalized["logprobs"] = True
+        normalized["top_logprobs"] = 1
+        normalized["return_token_ids"] = True
+        if normalized.get("stream") is True:
+            stream_options = normalized.get("stream_options")
+            if not isinstance(stream_options, dict):
+                stream_options = {}
+            normalized["stream_options"] = {**stream_options, "include_usage": True}
         return normalized
 
     @staticmethod
@@ -219,7 +228,7 @@ class CapturePipeline:
         normalized = CapturePipeline._json_value(response)
         if normalized.get("object") != "chat.completion":
             raise ValueError("response object must be chat.completion")
-        if normalized.get("model") != task.policy_lora_name:
+        if normalized.get("model") != task.policy_model:
             raise TaskConflictError("response model does not match Task policy")
         choices = normalized.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:

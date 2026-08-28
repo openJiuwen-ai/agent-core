@@ -3001,6 +3001,7 @@ online-rl = [
     { name = "omegaconf" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 pgvector = [
@@ -3128,6 +3129,7 @@ requires-dist = [
     { name = "openjiuwen", extras = ["all-mq", "all-storage", "all-vector", "all-a2a"], marker = "extra == 'all'" },
     { name = "openjiuwen", extras = ["pgvector", "chromadb", "gaussvector"], marker = "extra == 'all-vector'" },
     { name = "openjiuwen", extras = ["pulsar"], marker = "extra == 'all-mq'" },
+    { name = "openjiuwen", extras = ["redis"], marker = "extra == 'online-rl'" },
     { name = "openjiuwen", extras = ["sqlite", "postgres", "mysql", "gaussdb", "redis", "elasticsearch", "obs"], marker = "extra == 'all-storage'" },
     { name = "openpyxl", specifier = ">=3.1.0" },
     { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = ">=1.25.0" },

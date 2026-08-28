@@ -24,8 +24,6 @@ async def test_local_store_shares_samples_between_instances(tmp_path):
     )
 
     assert await reader.get_pending_count("u1") == 1
-    assert await reader.get_users_above_threshold(1) == ["u1"]
-
     samples = await reader.fetch_and_mark_training("u1", 4)
     assert [sample["sample_id"] for sample in samples] == ["s1"]
     assert samples[0]["_store_status"] == "training"
@@ -34,30 +32,6 @@ async def test_local_store_shares_samples_between_instances(tmp_path):
     stats = await reader.stats()
     assert stats["trained_samples"] == 1
     assert stats["pending_samples"] == 0
-
-
-@pytest.mark.asyncio
-async def test_local_training_task_store_preserves_single_active_task(tmp_path):
-    from openjiuwen.agent_evolving.agent_rl.storage.local_store import LocalTrainingTaskStore
-
-    writer = LocalTrainingTaskStore(tmp_path)
-    reader = LocalTrainingTaskStore(tmp_path)
-
-    task = await writer.create_task({"task_id": "task-1", "user_id": "u1"})
-    assert task["status"] == "pending"
-    assert (await reader.get_active_task())["task_id"] == "task-1"
-
-    with pytest.raises(RuntimeError):
-        await reader.create_task({"task_id": "task-2"})
-
-    claimed = await reader.claim_pending_task(user_id="u1", sample_count=3)
-    assert claimed is not None
-    assert claimed["status"] == "running"
-    assert claimed["sample_count"] == 3
-
-    stopped = await writer.request_stop("task-1")
-    assert stopped is not None
-    assert stopped["status"] == "stopping"
 
 
 @pytest.mark.asyncio

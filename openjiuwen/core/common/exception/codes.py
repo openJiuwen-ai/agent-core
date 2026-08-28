@@ -717,6 +717,28 @@ class StatusCode(Enum):
     AGENT_RL_REWARD_NOT_FOUND = (
         172071, "agent_rl reward function not found, name='{name}'")
 
+    # AgentRL - Online Service 172080 - 172099
+    AGENT_RL_SERVICE_PARAM_ERROR = (
+        172080, "agent_rl service parameter error, reason: {error_msg}")
+    AGENT_RL_TRAINING_SAMPLES_INVALID = (
+        172081, "agent_rl training samples are invalid, reason: {error_msg}")
+    AGENT_RL_TRAINING_RUN_NOT_FOUND = (
+        172082, "agent_rl training run not found, training_run_id='{training_run_id}'")
+    AGENT_RL_TRAJECTORY_RUNTIME_ERROR = (
+        172083, "agent_rl trajectory runtime error, reason: {error_msg}")
+    AGENT_RL_PPO_EXECUTION_ERROR = (
+        172084, "agent_rl ppo execution error, reason: {error_msg}")
+    AGENT_RL_PPO_SCHEDULER_RUNTIME_ERROR = (
+        172085, "agent_rl ppo scheduler runtime error, reason: {error_msg}")
+    AGENT_RL_LORA_CALL_FAILED = (
+        172086, "agent_rl lora control call failed, reason: {error_msg}")
+    AGENT_RL_VERIFICATION_UPSTREAM_CALL_FAILED = (
+        172087, "agent_rl verification upstream call failed, reason: {error_msg}")
+    AGENT_RL_RECORD_TYPE_ERROR = (
+        172088, "agent_rl record type error, record_type='{record_type}'")
+    AGENT_RL_SERVICE_CONFIG_ERROR = (
+        172089, "agent_rl service configuration error, reason: {error_msg}")
+
     # Optimization Toolchain - Prompt Builder 173000 - 173999
     TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR = (
         173000, "toolchain meta_template execution error, reason: {error_msg}"

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -15,6 +16,8 @@ from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
 _KEY_PREFIX = "rl:v1"
+_ACTIVE_TASKS_KEY = f"{_KEY_PREFIX}:tasks:active"
+_TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
 class RewardMode(str, Enum):
@@ -51,13 +54,20 @@ class TaskSpec:
     model_id: str
     policy_lora_name: str
     reward_mode: RewardMode
+    policy_model: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("rl_task_id", "agent_session_id", "model_id", "policy_lora_name"):
             if not str(getattr(self, field_name)).strip():
                 raise ValueError(f"{field_name} is required")
+        if _TASK_ID_PATTERN.fullmatch(str(self.rl_task_id)) is None:
+            raise ValueError("rl_task_id must contain 1-64 letters, digits, underscores, or hyphens")
         if not isinstance(self.reward_mode, RewardMode):
             object.__setattr__(self, "reward_mode", RewardMode(self.reward_mode))
+        if self.policy_model is None:
+            object.__setattr__(self, "policy_model", self.policy_lora_name)
+        elif not self.policy_model.strip():
+            raise ValueError("policy_model is required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +83,13 @@ class TaskRecord:
     created_at: str
     finished_at: str | None = None
     finish_reason: FinishReason | None = None
+    policy_model: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.policy_model is None:
+            object.__setattr__(self, "policy_model", self.policy_lora_name)
+        elif not self.policy_model.strip():
+            raise ValueError("policy_model is required")
 
     @classmethod
     def create(cls, spec: TaskSpec) -> "TaskRecord":
@@ -106,6 +123,7 @@ class TaskRecord:
             model_id=str(values["model_id"]),
             policy_lora_name=str(values["policy_lora_name"]),
             reward_mode=RewardMode(values["reward_mode"]),
+            policy_model=str(values.get("policy_model", values["policy_lora_name"])),
             status=TaskStatus(values["status"]),
             created_at=str(values["created_at"]),
             finished_at=values.get("finished_at"),
@@ -123,6 +141,10 @@ class TaskStartResult:
 
 class TaskConflictError(RuntimeError):
     """The requested Task operation conflicts with durable state."""
+
+
+class TaskNotFoundError(TaskConflictError):
+    """The requested RL Task does not exist."""
 
 
 class TurnClosedError(TaskConflictError):
@@ -174,6 +196,7 @@ class TaskRegistry:
                     pipe.multi()
                     pipe.set(task_key, json.dumps(record.to_dict(), sort_keys=True))
                     pipe.set(active_key, record.rl_task_id)
+                    pipe.sadd(_ACTIVE_TASKS_KEY, record.rl_task_id)
                     await pipe.execute()
                     return TaskStartResult(record, created=True)
                 except WatchError:
@@ -204,6 +227,27 @@ class TaskRegistry:
 
         return await self._finish(rl_task_id, TaskStatus.ABORTED, reason)
 
+    async def active_tasks(self) -> list[TaskRecord]:
+        """Return active Tasks from the versioned recovery index."""
+
+        task_ids = sorted(self._text(value) for value in await self._redis.smembers(_ACTIVE_TASKS_KEY))
+        tasks: list[TaskRecord] = []
+        stale_ids: list[str] = []
+        for task_id in task_ids:
+            task = await self.get(task_id)
+            if task is not None and task.status is TaskStatus.ACTIVE:
+                tasks.append(task)
+            else:
+                stale_ids.append(task_id)
+        if stale_ids:
+            await self._redis.srem(_ACTIVE_TASKS_KEY, *stale_ids)
+        return tasks
+
+    async def recover_active(self) -> list[TaskRecord]:
+        """Abort Tasks left active by a previous Service process."""
+
+        return [await self.abort(task.rl_task_id, FinishReason.SERVICE_RESTARTED) for task in await self.active_tasks()]
+
     # pylint: disable-next=too-many-locals
     async def _begin_capture(
         self,
@@ -223,7 +267,7 @@ class TaskRegistry:
                     await pipe.watch(task_key, capture_key, current_turn_key, transition_key, closed_turns_key)
                     task_payload = await pipe.get(task_key)
                     if task_payload is None:
-                        raise TaskConflictError(f"unknown RL Task: {rl_task_id}")
+                        raise TaskNotFoundError(f"unknown RL Task: {rl_task_id}")
                     task = TaskRecord.from_json(task_payload)
                     if task.status is not TaskStatus.ACTIVE:
                         raise TaskConflictError(f"RL Task is not active: {rl_task_id}")
@@ -289,7 +333,7 @@ class TaskRegistry:
                     await pipe.watch(task_key, capture_key)
                     task_payload = await pipe.get(task_key)
                     if task_payload is None:
-                        raise TaskConflictError(f"unknown RL Task: {rl_task_id}")
+                        raise TaskNotFoundError(f"unknown RL Task: {rl_task_id}")
                     task = TaskRecord.from_json(task_payload)
                     capture_payload = await pipe.get(capture_key)
                     if capture_payload is None or task.status is not TaskStatus.ACTIVE:
@@ -346,7 +390,7 @@ class TaskRegistry:
                     await pipe.watch(task_key, publish_key, capture_ids_key)
                     task_payload = await pipe.get(task_key)
                     if task_payload is None:
-                        raise TaskConflictError(f"unknown RL Task: {rl_task_id}")
+                        raise TaskNotFoundError(f"unknown RL Task: {rl_task_id}")
                     task = TaskRecord.from_json(task_payload)
                     if task.status is not TaskStatus.ACTIVE:
                         raise TaskConflictError(f"RL Task is not active: {rl_task_id}")
@@ -410,7 +454,7 @@ class TaskRegistry:
                     await pipe.watch(task_key, capture_key)
                     task_payload = await pipe.get(task_key)
                     if task_payload is None:
-                        raise TaskConflictError(f"unknown RL Task: {rl_task_id}")
+                        raise TaskNotFoundError(f"unknown RL Task: {rl_task_id}")
                     task = TaskRecord.from_json(task_payload)
                     capture_payload = await pipe.get(capture_key)
                     if capture_payload is None:
@@ -454,7 +498,7 @@ class TaskRegistry:
     async def _claim_terminal_reward(self, rl_task_id: str, reward: float) -> tuple[list[dict[str, Any]], int, bool]:
         task = await self.get(rl_task_id)
         if task is None:
-            raise TaskConflictError(f"unknown RL Task: {rl_task_id}")
+            raise TaskNotFoundError(f"unknown RL Task: {rl_task_id}")
         if task.reward_mode is not RewardMode.TERMINAL:
             raise TaskConflictError("terminal reward is not valid for delayed_feedback Task")
         if task.status is not TaskStatus.FINALIZED:
@@ -504,6 +548,7 @@ class TaskRegistry:
         if not isinstance(reason, FinishReason):
             reason = FinishReason(reason)
         task_key = self._task_key(rl_task_id)
+        capture_ids_key = self._capture_ids_key(rl_task_id)
         open_captures_key = self._open_capture_ids_key(rl_task_id)
         committed_captures_key = self._committed_capture_ids_key(rl_task_id)
         while True:
@@ -512,7 +557,7 @@ class TaskRegistry:
                     await pipe.watch(task_key, open_captures_key, committed_captures_key)
                     payload = await pipe.get(task_key)
                     if payload is None:
-                        raise TaskConflictError(f"unknown RL Task: {rl_task_id}")
+                        raise TaskNotFoundError(f"unknown RL Task: {rl_task_id}")
                     record = TaskRecord.from_json(payload)
                     if record.status is not TaskStatus.ACTIVE:
                         return record
@@ -525,6 +570,7 @@ class TaskRegistry:
                     unpublished_ids = (
                         await pipe.smembers(committed_captures_key) if status is TaskStatus.ABORTED else ()
                     )
+                    open_capture_ids = await pipe.smembers(open_captures_key) if status is TaskStatus.ABORTED else ()
                     finished = replace(
                         record,
                         status=status,
@@ -535,8 +581,15 @@ class TaskRegistry:
                     pipe.set(task_key, json.dumps(finished.to_dict(), sort_keys=True))
                     if active_id is not None and self._text(active_id) == rl_task_id:
                         pipe.delete(active_key)
+                    pipe.srem(_ACTIVE_TASKS_KEY, rl_task_id)
                     for capture_id in unpublished_ids:
                         pipe.delete(self._pending_sample_key(rl_task_id, self._text(capture_id)))
+                    for capture_id in open_capture_ids:
+                        pipe.delete(self._capture_key(rl_task_id, self._text(capture_id)))
+                    if open_capture_ids:
+                        pipe.srem(capture_ids_key, *open_capture_ids)
+                    if status is TaskStatus.ABORTED:
+                        pipe.delete(open_captures_key)
                     await pipe.execute()
                     return finished
                 except WatchError:
@@ -549,6 +602,7 @@ class TaskRegistry:
             and record.agent_session_id == spec.agent_session_id
             and record.model_id == spec.model_id
             and record.policy_lora_name == spec.policy_lora_name
+            and record.policy_model == spec.policy_model
             and record.reward_mode is spec.reward_mode
         )
 
@@ -619,6 +673,7 @@ __all__ = [
     "FinishReason",
     "RewardMode",
     "TaskConflictError",
+    "TaskNotFoundError",
     "TaskRecord",
     "TaskRegistry",
     "TaskSpec",

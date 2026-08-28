@@ -8,12 +8,33 @@ from openjiuwen.agent_evolving.agent_rl.online.task_registry import (
     FinishReason,
     RewardMode,
     TaskConflictError,
+    TaskRecord,
     TaskRegistry,
     TaskSpec,
     TaskStatus,
     TurnClosedError,
 )
 from tests.unit_tests.agent_evolving.agent_rl.online.support import InMemoryRedis
+
+
+@pytest.mark.parametrize("task_id", ["task:invalid", "t" * 65])
+def test_task_spec_rejects_unsafe_redis_key_components(task_id: str) -> None:
+    with pytest.raises(ValueError, match="rl_task_id"):
+        TaskSpec(task_id, "session-1", "model-1", "base", RewardMode.TERMINAL)
+
+
+def test_task_record_preserves_public_constructor_compatibility() -> None:
+    record = TaskRecord(
+        "task-1",
+        "session-1",
+        "model-1",
+        "base",
+        RewardMode.TERMINAL,
+        TaskStatus.ACTIVE,
+        "2026-01-01T00:00:00+00:00",
+    )
+
+    assert record.policy_model == "base"
 
 
 @pytest.mark.asyncio
@@ -86,3 +107,18 @@ async def test_turn_publish_claim_prevents_new_capture() -> None:
     assert await registry._claim_turn_publish("task-1", "turn-1") == "claimed"
     with pytest.raises(TurnClosedError, match="closing"):
         await registry._begin_capture("task-1", "capture-2", "turn-1", "request-2")
+
+
+@pytest.mark.asyncio
+async def test_recover_active_aborts_only_indexed_active_tasks() -> None:
+    redis = InMemoryRedis()
+    previous = TaskRegistry(redis=redis)
+    await previous.start(TaskSpec("task-1", "session-1", "model-1", "base", RewardMode.TERMINAL))
+    await previous.start(TaskSpec("task-2", "session-2", "model-1", "base", RewardMode.TERMINAL))
+    await previous.finalize("task-2", FinishReason.USER_STOPPED)
+
+    recovered = await TaskRegistry(redis=redis).recover_active()
+
+    assert [task.rl_task_id for task in recovered] == ["task-1"]
+    assert recovered[0].status is TaskStatus.ABORTED
+    assert recovered[0].finish_reason is FinishReason.SERVICE_RESTARTED

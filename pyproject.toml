@@ -105,6 +105,7 @@ mobile-gui = [
 ]
 
 online-rl = [
+    "openjiuwen[redis]",
     "fastapi>=0.100",
     "uvicorn[standard]",
     "httpx>=0.24",
@@ -171,6 +172,7 @@ A2A = "openjiuwen.extensions.a2a.a2a_server_adapter:A2AServerAdapter"
 openjiuwen = "openjiuwen.harness.cli.cli:cli"
 team-member = "openjiuwen.agent_teams.skill.cli:run"
 openjiuwen-team-mcp = "openjiuwen.agent_teams.mcp.server:main"
+openjiuwen-rl-service = "openjiuwen.agent_evolving.agent_rl.online.service:main"
 
 [project.urls]
 Homepage = "https://openjiuwen.com"

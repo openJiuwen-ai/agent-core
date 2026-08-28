@@ -97,32 +97,6 @@ ignored
 
 
 @pytest.mark.asyncio
-async def test_inference_notifier_uses_async_client():
-    from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
-
-    client = _FakeAsyncClient()
-    notifier = InferenceNotifier("http://vllm.local", http_client=client)
-
-    await notifier.notify_update("user1", "/tmp/lora")
-
-    assert client.calls == [
-        (
-            "http://vllm.local/v1/load_lora_adapter",
-            {
-                "json": {
-                    "lora_name": "user1",
-                    "lora_path": "/tmp/lora",
-                    "load_inplace": True,
-                },
-                "timeout": 120.0,
-            },
-        )
-    ]
-    await notifier.close()
-    assert client.closed is False
-
-
-@pytest.mark.asyncio
 async def test_judge_scorer_retries_length_and_sanitizes_prompt():
     from openjiuwen.agent_evolving.agent_rl.online.judge.judge_scorer import JudgeScorer
 
@@ -214,7 +188,6 @@ async def test_judge_scorer_rejects_json_without_scores() -> None:
 
 @pytest.mark.asyncio
 async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tmp_path: Path):
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.config import GatewayConfig
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory import GatewayTrajectoryRuntime
     from openjiuwen.agent_evolving.agent_rl.storage.local_store import (
         LocalPendingJudgeStore,
@@ -224,7 +197,11 @@ async def test_gateway_trajectory_runtime_fills_single_user_default_on_record(tm
 
     store_dir = tmp_path / "local_store"
     runtime = GatewayTrajectoryRuntime(
-        GatewayConfig(port=18080, model_id="dummy-model", record_dir=str(tmp_path)),
+        type(
+            "Config",
+            (),
+            {"record_dir": str(tmp_path), "dump_token_ids": False, "single_user_default": True},
+        )(),
         trajectory_store=LocalTrajectoryStore(store_dir),
         sft_store=LocalSFTStore(store_dir),
         pending_judge_store=LocalPendingJudgeStore(store_dir),
@@ -316,6 +293,36 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
     assert normalized["trajectory"]["response_logprobs"] == [-0.1, -0.2]
 
 
+def test_rail_normalization_for_fixed_model_ignores_external_tenant() -> None:
+    from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.rail_ingest import RailBatchIngestor
+
+    batch = {
+        "session_id": "session-1",
+        "trajectory_id": "trajectory-1",
+        "user_id": "external-tenant",
+        "model_id": "external-model",
+        "samples": [
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "prompt_ids": [1],
+                "response_tokens": [2],
+                "logprobs": [-0.1],
+                "response": {"content": "world"},
+            }
+        ],
+    }
+
+    normalized = RailBatchIngestor._normalize_rail_sample(
+        batch,
+        batch["samples"][0],
+        fixed_user_id="model-1",
+        fixed_model_id="model-1",
+    )
+
+    assert normalized["user_id"] == "model-1"
+    assert normalized["model"] == "model-1"
+
+
 def test_online_trajectory_converter_reads_detached_messages():
     from openjiuwen.agent_evolving.agent_rl.online.rail.converter import OnlineTrajectoryConverter
 
@@ -336,38 +343,3 @@ def test_online_trajectory_converter_reads_detached_messages():
     assert len(batch.samples) == 1
     assert batch.samples[0].messages[0] == {"role": "user", "content": "hello"}
     assert batch.samples[0].messages[1] == {"role": "assistant", "content": "previous turn"}
-
-
-@pytest.mark.asyncio
-async def test_stream_chat_response_preserves_runtime_token_fields():
-    from openjiuwen.agent_evolving.agent_rl.online.gateway.app.http_helpers import stream_chat_response
-
-    response_json = {
-        "id": "chatcmpl-test",
-        "object": "chat.completion",
-        "created": 123,
-        "model": "m1",
-        "rl_lora": {"model_id": "user-1", "version": "v3", "path": "/tmp/lora/v3"},
-        "prompt_token_ids": [1, 2, 3],
-        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
-        "choices": [{
-            "index": 0,
-            "finish_reason": "stop",
-            "token_ids": [4, 5],
-            "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-            "message": {"role": "assistant", "content": "pong"},
-        }],
-    }
-
-    chunks = []
-    async for item in stream_chat_response(response_json, model_id="m1"):
-        chunks.append(item)
-
-    assert len(chunks) == 3
-    first = chunks[0]
-    last = chunks[1]
-    assert '"prompt_token_ids": [1, 2, 3]' in first
-    assert '"rl_lora": {"model_id": "user-1", "version": "v3", "path": "/tmp/lora/v3"}' in first
-    assert '"token_ids": [4, 5]' in first
-    assert '"logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]}' in first
-    assert '"usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}' in last

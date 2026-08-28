@@ -10,8 +10,8 @@ import json
 import time
 from typing import Any, Optional
 
-_KEY_PREFIX = "pending_judge"
-_SESSION_PREFIX = "pending_judge_session"
+_KEY_PREFIX = "rl:v1:pending_judge"
+_SESSION_PREFIX = "rl:v1:pending_judge_session"
 
 
 def _sample_key(session_id: str, trajectory_id: str, step_index: int) -> str:

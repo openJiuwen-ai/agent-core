@@ -76,8 +76,15 @@ async def test_terminal_capture_is_idempotent_and_published_only_after_reward() 
     request = _request()
     response = _response()
 
-    assert await pipeline.before("task-1", "capture-1", None, request) == request
-    assert await pipeline.before("task-1", "capture-1", None, request) == request
+    injected = await pipeline.before("task-1", "capture-1", None, request)
+    assert injected == {
+        **request,
+        "logprobs": True,
+        "top_logprobs": 1,
+        "return_token_ids": True,
+    }
+    assert await pipeline.before("task-1", "capture-1", None, request) == injected
+    assert "logprobs" not in request
     await pipeline.after("task-1", "capture-1", None, request, response)
     await pipeline.after("task-1", "capture-1", None, request, response)
 
@@ -146,7 +153,12 @@ async def test_delayed_turn_waits_for_captures_and_publishes_atomically() -> Non
         pipeline.after("task-1", "capture-1", "turn-1", first_request, _response(text="one")),
         pipeline.after("task-1", "capture-2", "turn-1", first_request, _response(text="two")),
     )
-    assert await next_before == next_request
+    assert await next_before == {
+        **next_request,
+        "logprobs": True,
+        "top_logprobs": 1,
+        "return_token_ids": True,
+    }
 
     first_turn = await store.list_samples(user_id="model-1", status="pending")
     assert {sample["sample_id"] for sample in first_turn} == {"capture-1", "capture-2"}
