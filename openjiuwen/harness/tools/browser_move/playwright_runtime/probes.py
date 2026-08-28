@@ -204,6 +204,7 @@ def build_interactive_probe_js(
     max_items: int = 50,
     viewport_only: bool = True,
     query: str = "",
+    site_profiles: Optional[List[Dict[str, Any]]] = None,
     generation_id: str = "g0",
 ) -> str:
     """Build browser_run_code JavaScript for compact interactive-element probing."""
@@ -212,6 +213,7 @@ def build_interactive_probe_js(
         "max_items": _clamp_int(max_items, default=50, minimum=1, maximum=100),
         "viewport_only": bool(viewport_only),
         "query": str(query or "").strip().lower(),
+        "site_profiles": site_profiles or [],
         "generation_id": str(generation_id or "g0"),
     }
     params_json = json.dumps(params, ensure_ascii=False)
@@ -226,8 +228,25 @@ async (page) => {{
     const query = String(params.query || '').trim().toLowerCase();
     const generationId = String(params.generation_id || 'g0');
     const host = String(window.location.hostname || '').toLowerCase();
-    const isCtripHost = host === 'ctrip.com' || host.endsWith('.ctrip.com') ||
-      host === 'trip.com' || host.endsWith('.trip.com');
+    const activeControlSemantics = Array.isArray(params.site_profiles)
+      ? params.site_profiles
+          .filter((profile) => (profile.domains || []).some((domain) => {{
+            const value = String(domain || '').toLowerCase();
+            return host === value || host.endsWith(`.${{value}}`);
+          }}))
+          .map((profile) => profile.semantic_rules?.control_semantics)
+          .filter(Boolean)
+      : [];
+
+    const matchesProfilePattern = (value, patterns) => {{
+      return Array.isArray(patterns) && patterns.some((pattern) => {{
+        try {{
+          return new RegExp(String(pattern), 'i').test(String(value || ''));
+        }} catch (_) {{
+          return false;
+        }}
+      }});
+    }};
 
     const selectors = [
       'button',
@@ -456,13 +475,16 @@ async (page) => {{
     }};
 
     const classifyRegion = (el, searchable) => {{
-      if (isCtripHost) {{
-        const context = semanticContext(el);
-        const inPageChrome = Boolean(el.closest && el.closest('header,nav,[class*="header" i]'));
-        const hotelIntent = /(hotel|hotels|hotel-search|hotelsearch)/.test(context) ||
-          /酒店|目的地|入住|退房/.test(`${{context}} ${{String(searchable || '')}}`);
-        if (hotelIntent && !inPageChrome) return 'hotel_search';
-        if (inPageChrome && /(search|query|keyword|搜索)/.test(String(searchable || '').toLowerCase())) {{
+      const semantic = semanticContext(el);
+      const searchableText = String(searchable || '').toLowerCase();
+      const inPageChrome = Boolean(el.closest && el.closest('header,nav,[class*="header" i]'));
+      for (const profile of activeControlSemantics) {{
+        const matchesContext = matchesProfilePattern(
+          `${{semantic}} ${{searchableText}}`,
+          profile.context_patterns
+        );
+        if (matchesContext && !inPageChrome) return String(profile.region || 'main');
+        if (inPageChrome && matchesProfilePattern(searchableText, profile.global_search_patterns)) {{
           return 'global_search';
         }}
       }}
@@ -493,17 +515,17 @@ async (page) => {{
         text || '', name || ''
       ].join(' '), 520).toLowerCase();
       const ancestor = semanticContext(el);
-      if (isCtripHost) {{
-        const hotelContext = /(hotel|hotels|hotel-search|hotelsearch)/.test(ancestor) ||
-          /酒店|目的地|入住|退房/.test(`${{ancestor}} ${{own}}`);
-        if (hotelContext) {{
-          if (/目的地|城市|酒店|关键词|destination|city|hotelname/.test(own) &&
-              ['input', 'textarea'].includes(tag)) return 'hotel_destination';
-          if (/入住|check[-_ ]?in|start[-_ ]?date/.test(own)) return 'hotel_checkin';
-          if (/退房|离店|check[-_ ]?out|end[-_ ]?date/.test(own)) return 'hotel_checkout';
-          if (/搜索|查询|search|submit/.test(own) &&
-              (tag === 'button' || role === 'button' || type === 'submit')) return 'hotel_search_submit';
-          if (/筛选|价格|星级|评分|filter|price|star|rating/.test(own)) return 'hotel_filter';
+      for (const profile of activeControlSemantics) {{
+        if (!matchesProfilePattern(`${{ancestor}} ${{own}}`, profile.context_patterns)) continue;
+        for (const candidate of profile.kinds || []) {{
+          if (!matchesProfilePattern(own, candidate.patterns)) continue;
+          const shapeRestrictions = [candidate.tags, candidate.roles, candidate.types]
+            .some((values) => Array.isArray(values) && values.length);
+          const shapeMatches = !shapeRestrictions ||
+            (candidate.tags || []).includes(tag) ||
+            (candidate.roles || []).includes(role) ||
+            (candidate.types || []).includes(type);
+          if (shapeMatches) return String(candidate.kind || '');
         }}
       }}
       if (
@@ -1293,55 +1315,79 @@ async (page) => {
       };
     };
 
-    const isTaobaoFamilyHost = () => {
-      return host === 'taobao.com' || host.endsWith('.taobao.com') ||
-        host === 'tmall.com' || host.endsWith('.tmall.com');
+    const semanticRules = activeProfiles
+      .map((profile) => profile.semantic_rules || {})
+      .filter((rules) => rules && typeof rules === 'object');
+
+    const matchesProfilePattern = (value, patterns) => {
+      return Array.isArray(patterns) && patterns.some((pattern) => {
+        try {
+          return new RegExp(String(pattern), 'i').test(String(value || ''));
+        } catch (_) {
+          return false;
+        }
+      });
     };
 
-    const isCtripFamilyHost = () => {
-      return host === 'ctrip.com' || host.endsWith('.ctrip.com') ||
-        host === 'trip.com' || host.endsWith('.trip.com');
+    const targetDomainMatches = (targetHost, domains) => {
+      return Array.isArray(domains) && domains.some((domain) => {
+        const value = String(domain || '').toLowerCase();
+        return targetHost === value || targetHost.endsWith(`.${value}`);
+      });
     };
 
-    const ctripHotelDetailKey = (href) => {
-      if (!isCtripFamilyHost()) return '';
-      try {
-        const parsed = new URL(String(href || ''), window.location.href);
-        const targetHost = String(parsed.hostname || '').toLowerCase();
-        if (!(targetHost === 'ctrip.com' || targetHost.endsWith('.ctrip.com') ||
-              targetHost === 'trip.com' || targetHost.endsWith('.trip.com'))) return '';
-        const hotelId = parsed.searchParams.get('hotelId') || parsed.searchParams.get('hotelid') || '';
-        const detailPath = /\/(?:hotels?|hotel)\/(?:detail\/)?(?:\d+|[^/?#]+\.html)(?:\/|$)/i.test(parsed.pathname);
-        if (!hotelId && !detailPath && !/\/hotels?\/detail\/?$/i.test(parsed.pathname)) return '';
-        return hotelId ? `hotel:${hotelId}` : `${parsed.hostname}${parsed.pathname}`.toLowerCase();
-      } catch (_) {
-        return '';
+    const siteDetailLink = (href) => {
+      for (const rules of semanticRules) {
+        const detail = rules.detail_link;
+        if (!detail || typeof detail !== 'object') continue;
+        try {
+          const parsed = new URL(String(href || ''), window.location.href);
+          const targetHost = String(parsed.hostname || '').toLowerCase();
+          if (!targetDomainMatches(targetHost, detail.domains)) continue;
+          const identifier = (detail.query_id_params || [])
+            .map((key) => parsed.searchParams.get(String(key)) || '')
+            .find(Boolean) || '';
+          const pathMatches = matchesProfilePattern(parsed.pathname, detail.path_patterns);
+          if (!identifier && !pathMatches) continue;
+          const prefix = String(detail.key_prefix || 'detail').toLowerCase();
+          return {
+            key: identifier ? `${prefix}:${identifier}` : `${targetHost}${parsed.pathname}`.toLowerCase(),
+            kind: String(detail.kind || 'result').toLowerCase(),
+            deduplicate: rules.deduplicate_detail_links === true
+          };
+        } catch (_) {
+          continue;
+        }
       }
+      return null;
     };
 
-    const isTaobaoProductDetailHref = (href) => {
-      const value = String(href || '').toLowerCase();
-      return Boolean(
-        (value.includes('item.taobao.com/item.htm') || value.includes('detail.tmall.com/item.htm')) &&
-        (value.includes('?id=') || value.includes('&id='))
-      );
+    const sitePrimaryLinkRules = () => {
+      return semanticRules
+        .map((rules) => rules.primary_link)
+        .filter((rules) => rules && typeof rules === 'object');
     };
 
-    const isExcludedTaobaoPrimaryHref = (href) => {
-      const value = String(href || '').toLowerCase();
+    const isProfilePreferredPrimaryHref = (href) => {
+      const value = String(href || '');
+      return sitePrimaryLinkRules().some((rules) => {
+        if (!matchesProfilePattern(value, rules.preferred_patterns)) return false;
+        if (!Array.isArray(rules.required_query_params) || !rules.required_query_params.length) return true;
+        try {
+          const parsed = new URL(value, window.location.href);
+          return rules.required_query_params.some((key) => parsed.searchParams.has(String(key)));
+        } catch (_) {
+          return false;
+        }
+      });
+    };
+
+    const isProfileExcludedPrimaryHref = (href) => {
+      const rules = sitePrimaryLinkRules();
+      if (!rules.length) return false;
+      const value = String(href || '');
       if (!value) return true;
-      return Boolean(
-        value.startsWith('wangwang:') ||
-        value.startsWith('aliim:') ||
-        value.includes('amos.alicdn.com') ||
-        value.includes('wangwang') ||
-        value.includes('/shop/') ||
-        value.includes('shop.taobao.com') ||
-        value.includes('shop.tmall.com') ||
-        value.includes('store.taobao.com') ||
-        value.includes('seller.taobao.com') ||
-        value.includes('contact-seller')
-      );
+      return rules.some((rule) => matchesProfilePattern(value, rule.excluded_patterns));
     };
 
     const linkResult = (link) => {
@@ -1368,22 +1414,21 @@ async (page) => {
     };
 
     const extractPrimaryLink = (root) => {
-      if (isCtripFamilyHost()) {
-        const hotelLink = linkCandidates(root).find((candidate) => {
-          return Boolean(ctripHotelDetailKey(candidate.href || candidate.getAttribute('href') || ''));
+      const candidates = linkCandidates(root);
+      const detailLink = candidates.find((candidate) => {
+        return Boolean(siteDetailLink(candidate.href || candidate.getAttribute('href') || ''));
+      });
+      if (detailLink) return linkResult(detailLink);
+
+      if (sitePrimaryLinkRules().length) {
+        const preferredLink = candidates.find((candidate) => {
+          return isProfilePreferredPrimaryHref(candidate.href || candidate.getAttribute('href') || '');
         });
-        if (hotelLink) return linkResult(hotelLink);
-      }
-      if (isTaobaoFamilyHost()) {
-        const candidates = linkCandidates(root);
-        const productLink = candidates.find((candidate) => {
-          return isTaobaoProductDetailHref(candidate.href || candidate.getAttribute('href') || '');
-        });
-        if (productLink) return linkResult(productLink);
+        if (preferredLink) return linkResult(preferredLink);
 
         const allowedLink = candidates.find((candidate) => {
           const href = candidate.href || candidate.getAttribute('href') || '';
-          return !isExcludedTaobaoPrimaryHref(href) && !isAuthorProfileElement(candidate);
+          return !isProfileExcludedPrimaryHref(href) && !isAuthorProfileElement(candidate);
         });
         return linkResult(allowedLink);
       }
@@ -1450,13 +1495,14 @@ async (page) => {
         isAuthorProfileHref(href);
       const isChat = /(chat|wangwang|aliim|contact-seller)/.test(`${own} ${href}`) ||
         /旺旺|联系卖家/.test(badgeText) ||
-        isExcludedTaobaoPrimaryHref(href) && /(wangwang|aliim|amos)/.test(href);
+        isProfileExcludedPrimaryHref(href) && /(wangwang|aliim|amos)/.test(href);
       const isShop = /(shop|store|seller-card)/.test(`${own} ${href}`) ||
         /店铺|卖家/.test(badgeText) ||
-        isExcludedTaobaoPrimaryHref(href) && /(shop|store|seller)/.test(href);
-      const isProduct = isTaobaoProductDetailHref(href) ||
+        isProfileExcludedPrimaryHref(href) && /(shop|store|seller)/.test(href);
+      const detailLink = siteDetailLink(href);
+      const isProduct = detailLink?.kind === 'product' ||
         /\/item(?:\.|\/)|\/product(?:\.|\/)|\/goods(?:\.|\/)/.test(href);
-      const isHotel = Boolean(ctripHotelDetailKey(href));
+      const isHotel = detailLink?.kind === 'hotel';
       const isSidebar = Boolean(el.closest && el.closest('aside,[role="complementary"]')) ||
         /(sidebar|side-bar|right-rail|right-panel|container-right|main-right)/.test(own);
       const genericPaidLink = /\/(?:paid|premium|sponsored|promotion)(?:[_\-/]|$)/.test(href);
@@ -1487,17 +1533,20 @@ async (page) => {
       else if (isSidebar) region = 'sidebar';
       else if (kind === 'chat') region = 'chat';
 
-      // Site-specific rules are intentionally last and only resolve known ambiguity.
-      if (host === 'zhihu.com' || host.endsWith('.zhihu.com')) {
-        if (href.includes('/market/paid_column/') || href.includes('/paid_column/')) {
+      // Profile rules are intentionally last and only resolve known ambiguity.
+      for (const rules of semanticRules) {
+        if (matchesProfilePattern(href, rules.paid_link_patterns)) {
           region = 'sponsored_result';
           kind = 'paid_column';
           isAd = true;
-        } else if (/精选活动/.test(`${badgeText} ${normalizedRootText.slice(0, 80)}`)) {
+        } else if (matchesProfilePattern(
+          `${badgeText} ${normalizedRootText.slice(0, 80)}`,
+          rules.activity_text_patterns
+        )) {
           region = 'activity';
           kind = 'activity';
           isAd = true;
-        } else if (/推广|广告/.test(badgeText)) {
+        } else if (matchesProfilePattern(badgeText, rules.promotion_text_patterns)) {
           region = 'sponsored_result';
           kind = 'promotion';
           isAd = true;
@@ -1638,16 +1687,17 @@ async (page) => {
     const extractShop = (rootText, root) => extractMetricField(
       rootText,
       root,
-      [
-        '[class*="shop-name" i]',
-        '[class*="store-name" i]',
-        '[class*="seller-name" i]',
-        '[class*="merchant-name" i]',
-        '[data-testid*="shop" i]',
-        '[data-testid*="seller" i]',
-        'a[href*="shop.taobao.com"]',
-        'a[href*="shop.tmall.com"]'
-      ],
+      mergeSelectors(
+        profileSelectors('shop_selectors'),
+        [
+          '[class*="shop-name" i]',
+          '[class*="store-name" i]',
+          '[class*="seller-name" i]',
+          '[class*="merchant-name" i]',
+          '[data-testid*="shop" i]',
+          '[data-testid*="seller" i]'
+        ]
+      ),
       ['shop', 'store', 'merchant', 'seller', '店铺', '商家', '卖家'],
       /(?:shop|store|merchant|seller|店铺|商家|卖家)\s*[:：-]?\s*[^\n|·•,，;；]{2,80}/i
     );
@@ -1852,11 +1902,22 @@ async (page) => {
         depth += 1;
       }
       const context = parts.join(' ');
-      const shopRating = /(shop[-_ ]?rating|seller[-_ ]?(rating|score)|store[-_ ]?(rating|score)|店铺评分|店铺动态评分|描述相符|服务态度|物流服务)/.test(context);
-      const productRating = /(product[-_ ]?rating|item[-_ ]?(rating|score)|review[-_ ]?(rating|score)|商品评分|宝贝评分|商品评价|累计评价)/.test(context);
+      const ratingRules = semanticRules
+        .map((rules) => rules.rating)
+        .filter((rules) => rules && typeof rules === 'object');
+      const shopRating = ratingRules.some((rules) => {
+        return matchesProfilePattern(context, rules.shop_patterns);
+      });
+      const productRating = ratingRules.some((rules) => {
+        return matchesProfilePattern(context, rules.product_patterns);
+      });
       if (shopRating && !productRating) return 'shop_rating';
-      if (productRating || isTaobaoProductDetailHref(primaryLink?.href || '')) return 'product_rating';
-      return isTaobaoFamilyHost() ? 'unknown' : 'rating';
+      if (productRating || siteDetailLink(primaryLink?.href || '')?.kind === 'product') {
+        return 'product_rating';
+      }
+      return ratingRules.some((rules) => rules.unknown_without_match === true)
+        ? 'unknown'
+        : 'rating';
     };
 
     const extractRating = (rootText, root, primaryLink) => {
@@ -1954,7 +2015,7 @@ async (page) => {
           const href = normalize(el.href || el.getAttribute('href') || '', 260);
           const semanticText = `${text} ${href}`.toLowerCase();
           let kind = 'control';
-          if (isTaobaoProductDetailHref(href)) kind = 'product';
+          if (siteDetailLink(href)?.kind === 'product') kind = 'product';
           else if (/(wangwang|aliim|amos|contact-seller|旺旺|联系卖家)/.test(semanticText)) kind = 'chat';
           else if (/(shop|store|seller|店铺|卖家)/.test(semanticText)) kind = 'shop';
           const clickable = Boolean(
@@ -2769,12 +2830,12 @@ async (page) => {
     }
 
     const deduplicated = [];
-    const ctripHotelLinks = new Set();
+    const profileDetailLinks = new Set();
     for (const item of selected) {
-      const hotelKey = ctripHotelDetailKey(item.data.primary_link);
-      if (hotelKey) {
-        if (ctripHotelLinks.has(hotelKey)) continue;
-        ctripHotelLinks.add(hotelKey);
+      const detailLink = siteDetailLink(item.data.primary_link);
+      if (detailLink?.deduplicate && detailLink.key) {
+        if (profileDetailLinks.has(detailLink.key)) continue;
+        profileDetailLinks.add(detailLink.key);
       }
       deduplicated.push(item);
     }

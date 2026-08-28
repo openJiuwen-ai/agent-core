@@ -50,9 +50,13 @@ from .probes import (
 )
 from .page_state import CARD_EVIDENCE_FIELDS, BrowserPageState, BrowserTarget
 from .probe_semantics import normalize_card_probe_payload
-from .semantic_state import SemanticStateTracker
+from .semantic_state import SemanticStateTracker, price_interval_signature
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
-from .site_profiles import builtin_site_profiles, get_selector_cache
+from .site_profiles import (
+    get_selector_cache,
+    infer_profile_evidence_entity,
+    site_profiles_for_url,
+)
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
 
 
@@ -1721,6 +1725,7 @@ class BrowserAgentRuntime:
             max_items=effective_max_items,
             viewport_only=viewport_only,
             query=query,
+            site_profiles=site_profiles_for_url(self._ensure_page_state().url),
             generation_id=self.generation_id,
         )
 
@@ -1790,7 +1795,7 @@ class BrowserAgentRuntime:
                 "page_state": self.export_page_state(),
             }
 
-        site_profiles = builtin_site_profiles()
+        site_profiles = site_profiles_for_url(self._ensure_page_state().url)
         selector_cache = get_selector_cache()
         selector_cache_records = selector_cache.export_for_probe()
 
@@ -3322,14 +3327,16 @@ class BrowserRuntimeRail(AgentRail):
 
     @staticmethod
     def _infer_evidence_entity(normalized_task: str) -> str:
+        profile_entity = infer_profile_evidence_entity(normalized_task)
+        if profile_entity:
+            return profile_entity
         entities = (
-            (("bilibili", "b站", "哔哩哔哩"), "bilibili_search_result"),
-            (("taobao", "tmall", "淘宝", "天猫", "商品"), "product"),
-            (("zhihu", "知乎", "回答"), "article_or_answer"),
-            (("csdn", "article", "文章"), "article"),
-            (("douban", "豆瓣", "电影"), "movie"),
+            (("商品",), "product"),
+            (("回答",), "article_or_answer"),
+            (("article", "文章"), "article"),
+            (("电影",), "movie"),
             (("weather", "天气", "气温"), "weather"),
-            (("hotel", "ctrip", "携程", "酒店"), "hotel"),
+            (("hotel", "酒店"), "hotel"),
             (("video", "视频"), "video"),
         )
         for aliases, entity in entities:
@@ -3660,95 +3667,10 @@ class BrowserRuntimeRail(AgentRail):
             return "script_inspection"
         return name or "other"
 
-    @classmethod
-    def _price_interval_signature(cls, tool_name: str, tool_args: Any) -> str:
-        """Return a price interval only from explicit, structured filter input."""
-
-        normalized_name = str(tool_name or "").strip().lower()
-        if any(token in normalized_name for token in ("evaluate", "run_code")):
-            return ""
-        args = cls._coerce_tool_args(tool_args)
-        if any(key in args for key in ("function", "expression", "script", "code")):
-            return ""
-
-        minimum = cls._numeric_filter_value(
-            args,
-            ("min_price", "price_min", "minimum_price", "price_from", "lowest_price"),
-        )
-        maximum = cls._numeric_filter_value(
-            args,
-            ("max_price", "price_max", "maximum_price", "price_to", "highest_price"),
-        )
-        unbounded_values: list[str] = []
-        explicit_range = args.get("price_range") or args.get("price_interval")
-        if explicit_range not in (None, ""):
-            unbounded_values.extend(cls._numbers_from_filter_value(explicit_range))
-
-        steps = args.get("steps")
-        if isinstance(steps, list):
-            for step in steps:
-                if not isinstance(step, dict):
-                    continue
-                operation = str(step.get("op") or "").strip().lower()
-                if operation not in {
-                    "fill",
-                    "type",
-                    "autocomplete",
-                    "select_option",
-                    "select_visible_text",
-                }:
-                    continue
-                descriptor = " ".join(
-                    str(step.get(key) or "")
-                    for key in ("field", "name", "label", "placeholder", "description")
-                ).lower()
-                if not re.search(r"price|amount|价格|价位", descriptor, re.IGNORECASE):
-                    continue
-                raw_value = next(
-                    (
-                        step.get(key)
-                        for key in ("value", "text_value", "option_value", "option_text", "values")
-                        if step.get(key) not in (None, "")
-                    ),
-                    None,
-                )
-                numbers = cls._numbers_from_filter_value(raw_value)
-                if not numbers:
-                    continue
-                if re.search(r"min|minimum|from|low|最低|起始", descriptor, re.IGNORECASE):
-                    minimum = minimum or numbers[0]
-                elif re.search(r"max|maximum|to|high|最高|截止", descriptor, re.IGNORECASE):
-                    maximum = maximum or numbers[-1]
-                else:
-                    unbounded_values.extend(numbers)
-
-        if not minimum and unbounded_values:
-            minimum = unbounded_values[0]
-        if not maximum and len(unbounded_values) >= 2:
-            maximum = unbounded_values[1]
-        if not minimum and not maximum:
-            return ""
-        return f"{minimum or '*'}:{maximum or '*'}"
-
-    @classmethod
-    def _numeric_filter_value(cls, args: Dict[str, Any], keys: tuple[str, ...]) -> str:
-        for key in keys:
-            numbers = cls._numbers_from_filter_value(args.get(key))
-            if numbers:
-                return numbers[0]
-        return ""
-
     @staticmethod
-    def _numbers_from_filter_value(value: Any) -> list[str]:
-        if isinstance(value, (list, tuple)):
-            return [
-                number
-                for item in value
-                for number in BrowserRuntimeRail._numbers_from_filter_value(item)
-            ][:2]
-        if value in (None, ""):
-            return []
-        return re.findall(r"\d+(?:\.\d+)?", str(value).replace(",", ""))[:2]
+    def _price_interval_signature(tool_name: str, tool_args: Any) -> str:
+        """Delegate cross-site filter normalization to semantic-state logic."""
+        return price_interval_signature(tool_name, tool_args)
 
     @classmethod
     def _classify_action_class(cls, tool_name: str, tool_args: Any, state: Dict[str, Any]) -> str:

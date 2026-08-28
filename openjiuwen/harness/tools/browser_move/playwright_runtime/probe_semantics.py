@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict, Mapping
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
 from .page_state import CARD_EVIDENCE_FIELDS
+from .site_profiles import (
+    apply_site_card_semantics,
+    deduplicate_site_cards,
+    normalize_site_card_fields,
+)
 
 _PROMOTION_TOKEN_RE = re.compile(
     r"(?:^|[\s_\-/])(ad|ads|sponsored|promoted|promotion)(?:$|[\s_\-/])|广告|推广",
@@ -22,18 +27,6 @@ _HOT_SEARCH_TOKEN_RE = re.compile(
     r"(?:$|[\s_\-/])|热搜|热榜",
     re.IGNORECASE,
 )
-_SHOP_RATING_RE = re.compile(
-    r"shop[-_ ]?rating|seller[-_ ]?(?:rating|score)|store[-_ ]?(?:rating|score)|"
-    r"店铺评分|店铺动态评分|描述相符|服务态度|物流服务",
-    re.IGNORECASE,
-)
-_PRODUCT_RATING_RE = re.compile(
-    r"product[-_ ]?rating|item[-_ ]?(?:rating|score)|review[-_ ]?(?:rating|score)|"
-    r"商品评分|宝贝评分|商品评价|累计评价",
-    re.IGNORECASE,
-)
-
-
 def _text(value: Any, limit: int = 1000) -> str:
     return " ".join(str(value or "").split())[:limit]
 
@@ -43,33 +36,6 @@ def _host(value: Any) -> str:
         return (urlsplit(str(value or "")).hostname or "").lower()
     except ValueError:
         return ""
-
-
-def _is_taobao_family(host: str) -> bool:
-    return host == "taobao.com" or host.endswith(".taobao.com") or host == "tmall.com" or host.endswith(".tmall.com")
-
-
-def _is_ctrip_family(host: str) -> bool:
-    return host in {"ctrip.com", "trip.com"} or host.endswith((".ctrip.com", ".trip.com"))
-
-
-def _ctrip_hotel_detail_key(value: Any) -> str:
-    try:
-        parsed = urlsplit(str(value or ""))
-    except ValueError:
-        return ""
-    host = (parsed.hostname or "").lower()
-    if not _is_ctrip_family(host):
-        return ""
-    query = {str(key).lower(): str(item) for key, item in parse_qsl(parsed.query, keep_blank_values=True)}
-    hotel_id = query.get("hotelid", "").strip()
-    detail_path = bool(
-        re.search(r"/(?:hotels?|hotel)/(?:detail/)?(?:\d+|[^/?#]+\.html)(?:/|$)", parsed.path, re.IGNORECASE)
-        or re.search(r"/hotels?/detail/?$", parsed.path, re.IGNORECASE)
-    )
-    if not hotel_id and not detail_path:
-        return ""
-    return f"hotel:{hotel_id}" if hotel_id else f"{host}{parsed.path}".lower()
 
 
 def _generic_card_semantics(card: Mapping[str, Any]) -> tuple[str, str, bool]:
@@ -102,72 +68,6 @@ def _generic_card_semantics(card: Mapping[str, Any]) -> tuple[str, str, bool]:
         if not title and not preview and kind == "result":
             kind = "unknown"
     return region, kind, is_ad
-
-
-def _apply_site_semantics(
-    card: Mapping[str, Any],
-    *,
-    host: str,
-    region: str,
-    kind: str,
-    is_ad: bool,
-) -> tuple[str, str, bool]:
-    """Apply narrow site rules only after the generic classifier."""
-    href = _text(card.get("primary_link") or card.get("href"), 500).lower()
-    title = _text(card.get("title"), 240)
-    preview = _text(card.get("text_preview"), 500)
-    badges = " ".join(_text(item, 100) for item in (card.get("semantic_badges") or []))
-
-    if host == "zhihu.com" or host.endswith(".zhihu.com"):
-        if "/market/paid_column/" in href or "/paid_column/" in href:
-            return "sponsored_result", "paid_column", True
-        if "精选活动" in f"{title} {badges}" or title.strip() == "精选活动":
-            return "activity", "activity", True
-        if _PROMOTION_TOKEN_RE.search(badges) or re.match(r"^\s*(推广|广告)\b", preview):
-            return "sponsored_result", "promotion", True
-        if region == "main_result" and kind not in {"account", "hot_search", "sidebar"} and not is_ad:
-            return "main_result", "result", False
-
-    if _is_ctrip_family(host) and _ctrip_hotel_detail_key(href):
-        return "main_result", "hotel", is_ad
-
-    return region, kind, is_ad
-
-
-def _normalize_taobao_rating(card: Dict[str, Any], host: str) -> None:
-    if not _is_taobao_family(host):
-        return
-
-    rating = card.get("rating")
-    rating_kind = _text(card.get("rating_kind"), 80).lower()
-    if rating_kind == "unknown":
-        statuses = card.get("field_status")
-        field_status = dict(statuses) if isinstance(statuses, Mapping) else {}
-        field_status["rating"] = "unknown"
-        field_status["product_rating"] = "unknown"
-        card["field_status"] = field_status
-        card["rating"] = None
-        card["product_rating"] = None
-        return
-    evidence = " ".join(
-        (
-            rating_kind,
-            _text(card.get("rating_selector_hint"), 400),
-            _text(card.get("rating_raw_text"), 400),
-            _text(card.get("text_preview"), 600),
-        )
-    )
-    shop_match = bool(_SHOP_RATING_RE.search(evidence))
-    product_match = bool(_PRODUCT_RATING_RE.search(evidence))
-    if rating not in (None, "") and shop_match and not product_match:
-        card["shop_rating"] = rating
-        card["rating"] = None
-        card["product_rating"] = None
-        card["rating_kind"] = "shop_rating"
-        return
-    if rating not in (None, ""):
-        card["product_rating"] = rating
-        card["rating_kind"] = "product_rating"
 
 
 def _attach_field_contract(card: Dict[str, Any], generation_id: str) -> None:
@@ -216,28 +116,15 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(cards, list):
         return payload
     host = _host(payload.get("url"))
-    if _is_ctrip_family(host):
-        unique_cards: list[Any] = []
-        seen_hotel_links: set[str] = set()
-        for card in cards:
-            if not isinstance(card, Mapping):
-                unique_cards.append(card)
-                continue
-            hotel_key = _ctrip_hotel_detail_key(card.get("primary_link") or card.get("href"))
-            if hotel_key and hotel_key in seen_hotel_links:
-                continue
-            if hotel_key:
-                seen_hotel_links.add(hotel_key)
-            unique_cards.append(card)
-        cards = unique_cards
-        payload["cards"] = cards
+    cards = deduplicate_site_cards(cards, host=host)
+    payload["cards"] = cards
     generation_id = str(payload.get("generation_id") or "g0")
     result_index = 0
     for card in cards:
         if not isinstance(card, dict):
             continue
         region, kind, is_ad = _generic_card_semantics(card)
-        region, kind, is_ad = _apply_site_semantics(
+        region, kind, is_ad = apply_site_card_semantics(
             card,
             host=host,
             region=region,
@@ -247,7 +134,7 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         card["region"] = region
         card["kind"] = kind
         card["is_ad"] = is_ad
-        _normalize_taobao_rating(card, host)
+        normalize_site_card_fields(card, host=host)
         _attach_field_contract(card, generation_id)
 
         is_natural_result = region == "main_result" and kind in {"result", "product", "hotel"} and not is_ad

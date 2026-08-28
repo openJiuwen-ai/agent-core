@@ -93,6 +93,26 @@ def test_raw_browser_observation_is_written_only_to_audit_artifact(
     assert "private raw card" in stored["raw"]
 
 
+def test_raw_browser_observation_audit_is_disabled_by_default(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    log_path = tmp_path / "browser_agent.log"
+    monkeypatch.setenv("OPENJIUWEN_BROWSER_AGENT_LOG_FILE", str(log_path))
+    monkeypatch.delenv("OPENJIUWEN_BROWSER_AGENT_AUDIT_RAW", raising=False)
+    token = set_browser_agent_log_context(True)
+    try:
+        audit = write_browser_agent_audit_artifact(
+            "card_probe",
+            {"cards": [{"title": "private raw card"}]},
+        )
+    finally:
+        reset_browser_agent_log_context(token)
+
+    assert audit["stored"] is False
+    assert not (tmp_path / "browser_agent_audit").exists()
+
+
 def test_status_logger_summarizes_batch_args_without_values() -> None:
     logger = BrowserSubagentStatusLogger()
 

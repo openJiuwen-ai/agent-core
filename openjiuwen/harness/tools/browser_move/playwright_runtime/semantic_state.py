@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import deque
 from typing import Any, Dict, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -40,6 +41,107 @@ _TRACKING_QUERY_KEYS = {
     "cachebuster",
     "_t",
 }
+
+
+def _coerce_tool_args(tool_args: Any) -> Dict[str, Any]:
+    if isinstance(tool_args, dict):
+        return tool_args
+    if isinstance(tool_args, str):
+        try:
+            parsed = json.loads(tool_args)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _numbers_from_filter_value(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [
+            number
+            for item in value
+            for number in _numbers_from_filter_value(item)
+        ][:2]
+    if value in (None, ""):
+        return []
+    return re.findall(r"\d+(?:\.\d+)?", str(value).replace(",", ""))[:2]
+
+
+def _numeric_filter_value(args: Mapping[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        numbers = _numbers_from_filter_value(args.get(key))
+        if numbers:
+            return numbers[0]
+    return ""
+
+
+def price_interval_signature(tool_name: str, tool_args: Any) -> str:
+    """Return a cross-site price interval from explicit structured filters."""
+    normalized_name = str(tool_name or "").strip().lower()
+    if any(token in normalized_name for token in ("evaluate", "run_code")):
+        return ""
+    args = _coerce_tool_args(tool_args)
+    if any(key in args for key in ("function", "expression", "script", "code")):
+        return ""
+
+    minimum = _numeric_filter_value(
+        args,
+        ("min_price", "price_min", "minimum_price", "price_from", "lowest_price"),
+    )
+    maximum = _numeric_filter_value(
+        args,
+        ("max_price", "price_max", "maximum_price", "price_to", "highest_price"),
+    )
+    unbounded_values: list[str] = []
+    explicit_range = args.get("price_range") or args.get("price_interval")
+    if explicit_range not in (None, ""):
+        unbounded_values.extend(_numbers_from_filter_value(explicit_range))
+
+    steps = args.get("steps")
+    if isinstance(steps, list):
+        for step in steps:
+            if not isinstance(step, Mapping):
+                continue
+            operation = str(step.get("op") or "").strip().lower()
+            if operation not in {
+                "fill",
+                "type",
+                "autocomplete",
+                "select_option",
+                "select_visible_text",
+            }:
+                continue
+            descriptor = " ".join(
+                str(step.get(key) or "")
+                for key in ("field", "name", "label", "placeholder", "description")
+            ).lower()
+            if not re.search(r"price|amount|价格|价位", descriptor, re.IGNORECASE):
+                continue
+            raw_value = next(
+                (
+                    step.get(key)
+                    for key in ("value", "text_value", "option_value", "option_text", "values")
+                    if step.get(key) not in (None, "")
+                ),
+                None,
+            )
+            numbers = _numbers_from_filter_value(raw_value)
+            if not numbers:
+                continue
+            if re.search(r"min|minimum|from|low|最低|起始", descriptor, re.IGNORECASE):
+                minimum = minimum or numbers[0]
+            elif re.search(r"max|maximum|to|high|最高|截止", descriptor, re.IGNORECASE):
+                maximum = maximum or numbers[-1]
+            else:
+                unbounded_values.extend(numbers)
+
+    if not minimum and unbounded_values:
+        minimum = unbounded_values[0]
+    if not maximum and len(unbounded_values) >= 2:
+        maximum = unbounded_values[1]
+    if not minimum and not maximum:
+        return ""
+    return f"{minimum or '*'}:{maximum or '*'}"
 
 
 def _compact_text(value: Any, limit: int = _MAX_TEXT_LENGTH) -> str:

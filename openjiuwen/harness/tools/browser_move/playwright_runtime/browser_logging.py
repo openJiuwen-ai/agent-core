@@ -140,7 +140,7 @@ def browser_agent_log_error(message: str, *args: Any) -> None:
 
 
 def write_browser_agent_audit_artifact(kind: str, raw: Any) -> dict[str, Any]:
-    """Persist a content-addressed raw browser observation outside model context."""
+    """Persist an opted-in, content-addressed raw browser observation."""
     if isinstance(raw, str):
         raw_text = raw
     else:
@@ -154,7 +154,7 @@ def write_browser_agent_audit_artifact(kind: str, raw: Any) -> dict[str, Any]:
     }
     if not is_browser_agent_log_context() or not _env_bool(
         "OPENJIUWEN_BROWSER_AGENT_AUDIT_RAW",
-        default=True,
+        default=False,
     ):
         return audit
 

@@ -19,6 +19,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_card_probe_js,
     build_interactive_probe_js,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
+    builtin_site_profiles,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
 )
@@ -126,24 +129,28 @@ def test_build_card_probe_js_embeds_generation_and_validates_clickability() -> N
 
 
 def test_build_card_probe_js_prefers_taobao_product_ancestor_links() -> None:
-    js = build_card_probe_js(generation_id="g12")
+    js = build_card_probe_js(
+        generation_id="g12",
+        site_profiles=builtin_site_profiles(),
+    )
 
     assert "root.closest('a[href]')" in js
-    assert "isTaobaoProductDetailHref" in js
-    assert "detail.tmall.com/item.htm" in js
-    assert "item.taobao.com/item.htm" in js
-    assert "isExcludedTaobaoPrimaryHref" in js
+    assert '"id": "taobao_marketplace"' in js
+    assert "isProfilePreferredPrimaryHref" in js
+    assert "isProfileExcludedPrimaryHref" in js
+    assert "siteDetailLink" in js
 
 
 def test_build_card_probe_js_prefers_and_deduplicates_ctrip_hotel_detail_links() -> None:
-    js = build_card_probe_js(generation_id="g13")
+    js = build_card_probe_js(
+        generation_id="g13",
+        site_profiles=builtin_site_profiles(),
+    )
 
-    assert "ctripHotelDetailKey" in js
-    assert "hotelId" in js
-    assert "kind = 'hotel'" in js
-    assert "ctripHotelLinks.has(hotelKey)" in js
-    assert "amos.alicdn.com" in js
-    assert "shop.taobao.com" in js
+    assert '"id": "ctrip_hotels"' in js
+    assert '"query_id_params": ["hotelId", "hotelid"]' in js
+    assert "siteDetailLink" in js
+    assert "profileDetailLinks.has(detailLink.key)" in js
 
 
 def test_build_card_probe_js_clamps_max_cards() -> None:

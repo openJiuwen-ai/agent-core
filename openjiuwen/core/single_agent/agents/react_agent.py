@@ -20,7 +20,8 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Un
 
 from pydantic import Field, BaseModel
 
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, raise_error
 from openjiuwen.core.common.logging import logger
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
@@ -1249,10 +1250,19 @@ class ReActAgent(BaseAgent):
         if finish_reason not in {"error", "failed"} and code == 0:
             return
         error_message = str(getattr(usage, "err_msg", "") or getattr(message, "content", "") or "")
-        raise RuntimeError(
-            "model_provider_response_error: "
-            f"code={code}, finish_reason={finish_reason or 'unknown'}, "
+        provider_detail = (
+            f"provider response error: code={code}, "
+            f"finish_reason={finish_reason or 'unknown'}, "
             f"message={error_message[:500] or 'provider returned no error detail'}"
+        )
+        raise_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg=provider_detail,
+            details={
+                "provider_code": code,
+                "finish_reason": finish_reason or "unknown",
+                "provider_message": error_message[:500],
+            },
         )
 
     @staticmethod

@@ -17,6 +17,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_interactive_probe_js,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
+    builtin_site_profiles,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
 )
@@ -54,7 +57,11 @@ def _make_runtime() -> BrowserAgentRuntime:
 
 
 def test_build_interactive_probe_js_contains_high_value_selectors() -> None:
-    js = build_interactive_probe_js(max_items=25, viewport_only=True)
+    js = build_interactive_probe_js(
+        max_items=25,
+        viewport_only=True,
+        site_profiles=builtin_site_profiles(),
+    )
 
     assert "button" in js
     assert "a[href]" in js
