@@ -304,9 +304,7 @@ Environment variables consumed:
 
 ## Usage
 
-- [\_\_init\_\_.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/__init__.py): Lazy-exports `RLOnlineRail` via `__getattr__` (canonical external import path is `openjiuwen.agent_evolving.agent_rl.RLOnlineRail`) and lists it in `__all__`.
-- [workspace.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/launcher/workspace.py) and [services.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/launcher/services.py): Set `USE_RL_ONLINE_RAIL=1`, `TRAJECTORY_GATEWAY_URL`, `RL_ONLINE_TENANT_ID` and other env vars for the spawned JiuwenClaw process (do not import rail classes directly).
-- [server.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/app/server.py): Registers the `POST /v1/gateway/upload/batch` endpoint that receives uploads; consumed by the `RailBatchIngestor` in [rail_ingest.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/trajectory/rail_ingest.py).
-- [test_rl_online_rail.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/test_rl_online_rail.py): Imports and constructs `RLOnlineRail`.
-- [test_online_gateway_e2e.py](file:///Users/dongdong/Desktop/project/agent-core/tests/system_tests/agent_evolving/agent_rl/online/test_online_gateway_e2e.py): Dynamically imports `RLOnlineRail` and `TrajectoryUploader` via `importlib`.
-- [test_gateway_support.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/test_gateway_support.py): Imports `OnlineTrajectoryConverter` and tests `convert` / `to_dict`.
+- `openjiuwen.agent_evolving.agent_rl.__init__` lazy-exports `RLOnlineRail` as the canonical external import.
+- AIGW owns the public `POST /v1/gateway/upload/batch` endpoint and proxies accepted batches to the running RL Service.
+- The Agent lifecycle is external. Applications that opt into `RLOnlineRail` configure it directly; the RL Service does not spawn an Agent.
+- `test_rl_online_rail.py` covers `RLOnlineRail`, `TrajectoryUploader`, and `OnlineTrajectoryConverter`.

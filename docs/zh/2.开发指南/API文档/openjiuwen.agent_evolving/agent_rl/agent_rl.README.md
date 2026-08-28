@@ -45,18 +45,16 @@
 
 | CLASS / FUNCTION | DESCRIPTION |
 |------------------|-------------|
-| [GatewayConfig](./online/gateway.md) | Online-RL Gateway 运行时配置 dataclass。 |
-| [build_app_from_config](./online/gateway.md) | 从 `GatewayConfig` 装配 FastAPI 应用的生产入口。 |
-| [build_gateway_app](./online/gateway.md) | FastAPI 装配，注册路由（`/health`、`/v1/gateway/stats`、`/v1/gateway/upload/batch`、`/v1/chat/completions`、全量代理）。 |
-| [InferenceNotifier](./online/inference.md) | vLLM LoRA 热加载通知器。 |
+| `RLServiceConfig` | 独立 loopback RL Service 的静态配置。 |
+| `build_rl_service_app` | 装配 Task、capture、trajectory 与 Training Run 路由的 RL Service 入口。 |
+| `TaskRegistry` | Redis-backed Task、turn、capture 与 reward 状态所有者。 |
+| `CapturePipeline` | 完整 OpenAI 请求/响应校验与带奖励轨迹发布。 |
 | [JudgeScorer](./online/judge.md) | LLM-as-a-Judge 高层异步评分客户端。 |
-| [evaluate_judge_scores](./online/judge.md) | 核心评分入口，多投票平均并归一化到 `[-1, 1]`。 |
-| [LauncherPaths](./online/launcher.md) | 在线 RL 循环编排的路径布局 dataclass。 |
-| [run_online_rl_loop](./online/launcher.md) | 顶层编排入口，拉起并监管各服务进程。 |
+| [evaluate_judge_scores](./online/judge.md) | 核心评分入口，多投票平均并归一化到 `[0, 1]`。 |
 | [RLOnlineRail](./online/rail.md) | 钩入智能体生命周期的在线 RL 轨迹采集 Rail。 |
 | [TrajectoryUploader](./online/rail.md) | 异步上传 rail-v1 批次到 gateway 的上传器。 |
-| [OnlineTrainingScheduler](./online/scheduler.md) | 后台线程轮询 Redis 并触发 PPO 训练批次的调度器。 |
-| [PPOTrainingExecutor](./online/scheduler.md) | Ray/verl PPO runner 生命周期与批次执行器。 |
+| `TrainingRunner` | 显式固定 batch PPO、LoRA 激活、取消与恢复生命周期。 |
+| `PPOTrainingExecutor` | 由显式 Training Run 调用的 Ray/verl PPO adapter。 |
 
 **Functions**：
 

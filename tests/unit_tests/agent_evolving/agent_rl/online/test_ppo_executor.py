@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.agent_evolving.agent_rl.online.scheduler.ppo_config import _apply_env_overrides
 from openjiuwen.agent_evolving.agent_rl.online.scheduler.ppo_executor import PPOTrainingExecutor
 from openjiuwen.agent_evolving.agent_rl.online.training_runner import TrainingArtifact
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -148,3 +150,15 @@ def test_online_ppo_preserves_captured_old_logprobs() -> None:
     result = BaseVerlTrainingExecutor.compute_old_log_prob(executor, batch, {})
 
     assert torch.equal(result.batch["old_log_probs"], expected)
+
+
+def test_online_ppo_actor_learning_rate_can_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in tuple(os.environ):
+        if name.startswith("ONLINE_RL_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("ONLINE_RL_ACTOR_LEARNING_RATE", "0.0001")
+    config = {"actor_rollout_ref": {"actor": {"optim": {"lr": 0.00001}}}}
+
+    _apply_env_overrides(config)
+
+    assert config["actor_rollout_ref"]["actor"]["optim"]["lr"] == pytest.approx(0.0001)

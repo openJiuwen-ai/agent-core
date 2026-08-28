@@ -1,6 +1,6 @@
 # openjiuwen.agent_evolving.agent_rl.online.judge
 
-LLM-as-a-Judge reward scorer. Scores agent turns along four dimensions (task completion, response quality, tool usage, coherence, each 0-10), normalizes the aggregate to a `[-1, 1]` reward, and supports multi-vote averaging with retry logic. It is the reward source consumed by the gateway's trajectory pipeline (the "delayed judge" flow).
+LLM-as-a-Judge reward scorer. Scores agent turns along four dimensions (task completion, response quality, tool usage, coherence, each 0-10), normalizes the aggregate to a `[0, 1]` reward, and supports multi-vote averaging with retry logic. It is the reward source consumed by the RL Service capture pipeline (the "delayed judge" flow).
 
 The package is layered in three tiers: `scoring.py` (pure prompt/parse/normalize, no I/O) → `evaluator.py` (async HTTP voting engine) → `judge_scorer.py` (high-level client adapter); `judge_server.py` is an optional standalone FastAPI service.
 
@@ -53,7 +53,7 @@ Robustly extracts the judge's JSON score dict from a model response. First tries
 def normalize_overall_score(overall: float) -> float
 ```
 
-Maps a raw 0-10 score to `[-1, 1]` via `(overall - 5.0) / 5.0`.
+Maps a raw 0-10 score to `[0, 1]` via `overall / 10.0`.
 
 **Parameters**:
 
@@ -61,7 +61,7 @@ Maps a raw 0-10 score to `[-1, 1]` via `(overall - 5.0) / 5.0`.
 
 **Returns**:
 
-`float`, the normalized `[-1, 1]` reward.
+`float`, the normalized `[0, 1]` reward.
 
 ## class openjiuwen.agent_evolving.agent_rl.online.judge.evaluator.JudgeEvaluatorConfig
 
@@ -108,7 +108,7 @@ Core scoring entry. Builds messages, runs `config.num_votes` parallel `_query_vo
 
 ```python
 {
-    "score": float,           # normalized [-1, 1]
+    "score": float,           # normalized [0, 1]
     "overall_raw": float,      # averaged raw 0-10 score
     "votes": list[float],      # per-vote overall values
     "details": dict | list,    # single vote dict if num_votes==1 else list
@@ -249,9 +249,7 @@ Entry point. Configures logging, constructs `JudgeConfig`, `create_app`, `uvicor
 
 ## Usage
 
-- [bootstrap.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/app/bootstrap.py): Constructs `JudgeScorer` when `config.judge_url` is set and injects it via `trajectory_runtime.set_judge_scorer(judge_scorer)`. This is the sole production construction site for `JudgeScorer`.
-- [persistence.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/trajectory/persistence.py): `set_judge_scorer` passes it into a new `JudgeDispatcher`.
-- [judge_dispatcher.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/trajectory/judge_dispatcher.py): `_finalize_sample` calls `await self._judge_scorer.score(...)` (exceptions fall back to `{"score": 0.0, ...}`). This is the sole production call site of `JudgeScorer.score`.
-- [test_gateway_support.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/test_gateway_support.py): Tests `JudgeScorer._parse_scores` and the `finish_reason=="length"` retry path.
-- [test_processor_components.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/gateway/test_processor_components.py): Defines a duck-typed `_FakeJudgeScorer` verifying the `.score(...)` interface.
-- Note: `judge_server.py`'s `create_app`/`main`/`JudgeConfig`/`ScoreRequest`/`ScoreResponse` are **not imported by any module**. The launcher starts the judge as a raw vLLM process, not this FastAPI service; this module is an optional standalone service (`python -m judge.judge_server ...`).
+- `service.py` constructs `JudgeScorer` from the RL Service configuration and injects it into `CapturePipeline`.
+- `capture_pipeline.py` calls `JudgeScorer.score(...)` while atomically publishing a completed delayed-feedback turn.
+- `test_gateway_support.py` covers score parsing and the `finish_reason=="length"` retry path.
+- `test_capture_pipeline.py` covers the scorer interface, atomic publication, and Judge failure handling.
