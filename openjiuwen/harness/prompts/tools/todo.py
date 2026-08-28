@@ -397,7 +397,9 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
                         "description": item_props["description"],
                         "selected_model_id": item_props["selected_model_id"],
                     },
-                    "required": ["id", "content", "activeForm", "description"],
+                    # `description` 保持可选：写/编辑等短任务可省略，
+                    # 避免因缺 description 导致 todo_create 失败、被迫与 write 轮合并。
+                    "required": ["id", "content", "activeForm"],
                 },
             },
         },

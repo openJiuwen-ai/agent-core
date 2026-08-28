@@ -282,17 +282,7 @@ class TodoCreateTool(TodoTool):
                     reason=f"Task at index {i} is missing a 'content' field"
                 )
             active_form = task_data.get("activeForm", "")
-            if not active_form:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Task at index {i} is missing a 'activeForm' field"
-                )
             description = task_data.get("description", "")
-            if not description:
-                raise build_error(
-                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
-                    reason=f"Task at index {i} is missing a 'description' field"
-                )
             # Prefer model-provided id; fall back to uuid only when absent
             task_id = str(task_data.get("id") or "").strip()
             if not task_id:
@@ -607,7 +597,9 @@ class TodoModifyTool(TodoTool):
 
     def _validate_single_todo_item(self, todo_data: Dict):
         validation_errors = []
-        required_fields = ["content", "activeForm", "description", "status", "id"]
+        # description / activeForm 保持可选（缺省自动兜底为空串），
+        # 避免因缺字段导致 append/insert 失败、与后续工具轮合并。
+        required_fields = ["content", "status", "id"]
         for field in required_fields:
             if field not in todo_data:
                 validation_errors.append(f"Missing required field: '{field}'")
