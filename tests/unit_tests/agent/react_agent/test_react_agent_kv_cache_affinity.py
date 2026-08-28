@@ -168,6 +168,24 @@ def test_usage_attribution_supports_lightweight_session_and_context() -> None:
     assert attribution["context_owner_id"] == "kv_affinity_agent|session-id|context-id"
 
 
+def test_usage_attribution_falls_back_to_context_session_id() -> None:
+    agent = _agent()
+    session = SimpleNamespace()
+    context = SimpleNamespace(session_id=lambda: "context-session-id")
+    callback_context = SimpleNamespace(
+        session=session,
+        context=context,
+        context_usage_attribution={},
+    )
+
+    attribution = agent._context_usage_attribution(callback_context, session)
+
+    assert attribution["execution_session_id"] == "context-session-id"
+    assert attribution["context_owner_id"] == (
+        "kv_affinity_agent|context-session-id|context-session-id"
+    )
+
+
 @pytest.mark.asyncio
 async def test_append_only_context_window_does_not_evict_kvc() -> None:
     session = Session(session_id="sess_main")
