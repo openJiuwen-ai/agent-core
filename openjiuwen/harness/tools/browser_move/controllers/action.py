@@ -363,7 +363,8 @@ class RuntimeRunner(Protocol):
         session_id: str | None = None,
         request_id: str | None = None,
         timeout_s: int | None = None,
-    ) -> dict[str, Any]: ...
+    ) -> dict[str, Any]:
+        ...
 
 
 _ACTIONS: dict[str, ActionHandler] = {}
@@ -997,7 +998,8 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "      } catch (error) {\n"
         "        lastError = error;\n"
         "        const message = String(error && error.message ? error.message : error).toLowerCase();\n"
-        "        const transient = /(detached|not attached|intercept|not stable|outside of the viewport)/.test(message);\n"
+        "        const transient = /(detached|not attached|intercept|not stable|"
+        "outside of the viewport)/.test(message);\n"
         "        if (!transient || attempt > 0 || Date.now() - started >= timeout) throw error;\n"
         "        await sleep(Math.min(100, Math.max(0, timeout - (Date.now() - started))));\n"
         "      }\n"

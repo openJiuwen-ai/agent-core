@@ -544,14 +544,19 @@ class BrowserPageState:
         stale_name = _compact_text(stale.name or stale.text, 160).lower()
         if not stale_name or not (stale.kind or stale.role):
             return []
-        return [
-            target
-            for target in current_targets
-            if _compact_text(target.name or target.text, 160).lower() == stale_name
-            and (not stale.kind or target.kind == stale.kind)
-            and (not stale.role or target.role == stale.role)
-            and (not stale.region or target.region == stale.region)
-        ]
+        matches: list[BrowserTarget] = []
+        for target in current_targets:
+            target_name = _compact_text(target.name or target.text, 160).lower()
+            if target_name != stale_name:
+                continue
+            if stale.kind and target.kind != stale.kind:
+                continue
+            if stale.role and target.role != stale.role:
+                continue
+            if stale.region and target.region != stale.region:
+                continue
+            matches.append(target)
+        return matches
 
     def update_target_locator(self, target_id: str, locator: Mapping[str, str]) -> None:
         """Replace a current target's internal locator after runtime resolution."""

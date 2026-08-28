@@ -201,7 +201,10 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "resume_task_id": {
         "cn": "仅在继续同一个未完成浏览器任务时，传入上一次 task_tool 返回的 resume_task_id；新任务不要传",
-        "en": "Only when continuing the same unfinished browser task, pass the resume_task_id returned by the previous task_tool call; omit it for a new task",
+        "en": (
+            "Only when continuing the same unfinished browser task, pass the resume_task_id "
+            "returned by the previous task_tool call; omit it for a new task"
+        ),
     },
 }
 

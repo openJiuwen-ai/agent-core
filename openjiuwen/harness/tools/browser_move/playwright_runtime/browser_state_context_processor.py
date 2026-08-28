@@ -189,13 +189,16 @@ class BrowserStateContextProcessor(ContextProcessor):
         action_group_id, refresh_ids, observation_only = cls._completed_state_action_group(messages)
         if observation_only:
             return "", set()
-        mutation_ids = {
-            str(tool_call.id)
-            for message in messages
-            if isinstance(message, AssistantMessage)
-            for tool_call in (message.tool_calls or [])
-            if tool_call.id and str(tool_call.id) in refresh_ids and cls._is_refresh_tool_name(tool_call.name)
-        }
+        mutation_ids: set[str] = set()
+        for message in messages:
+            if not isinstance(message, AssistantMessage):
+                continue
+            for tool_call in message.tool_calls or []:
+                call_id = str(tool_call.id or "")
+                if not call_id or call_id not in refresh_ids:
+                    continue
+                if cls._is_refresh_tool_name(tool_call.name):
+                    mutation_ids.add(call_id)
         return action_group_id, mutation_ids
 
     @classmethod
@@ -225,18 +228,16 @@ class BrowserStateContextProcessor(ContextProcessor):
             call_ids = [str(tool_call.id) for tool_call in tool_calls if tool_call.id]
             if not call_ids or not all(call_id in completed_call_ids for call_id in call_ids):
                 continue
-            group_refresh_ids = {
-                str(tool_call.id)
-                for tool_call in tool_calls
-                if tool_call.id and str(tool_call.id) in executed_call_ids and cls._is_refresh_tool_name(tool_call.name)
-            }
-            group_observation_ids = {
-                str(tool_call.id)
-                for tool_call in tool_calls
-                if tool_call.id
-                and str(tool_call.id) in executed_call_ids
-                and cls._is_observation_tool_name(tool_call.name)
-            }
+            group_refresh_ids: set[str] = set()
+            group_observation_ids: set[str] = set()
+            for tool_call in tool_calls:
+                call_id = str(tool_call.id or "")
+                if not call_id or call_id not in executed_call_ids:
+                    continue
+                if cls._is_refresh_tool_name(tool_call.name):
+                    group_refresh_ids.add(call_id)
+                if cls._is_observation_tool_name(tool_call.name):
+                    group_observation_ids.add(call_id)
             group_browser_ids = group_refresh_ids | group_observation_ids
             if not group_browser_ids:
                 continue

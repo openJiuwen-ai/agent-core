@@ -66,19 +66,24 @@ class BrowserWorkingContextProcessor(ContextProcessor):
             metadata={_BROWSER_WORKING_CONTEXT_METADATA_KEY: True},
             content=prompt_text,
         )
-        insert_at = next(
-            (
-                index
-                for index, message in enumerate(retained_messages)
-                if message.name in {"current_browser_state", "browser_state_progress"}
-                or message.metadata.get("browser_state_context")
-                or message.metadata.get("browser_state_progress_context")
-            ),
-            len(retained_messages),
-        )
+        insert_at = len(retained_messages)
+        for index, message in enumerate(retained_messages):
+            if self._is_browser_state_projection(message):
+                insert_at = index
+                break
         retained_messages.insert(insert_at, working_context_message)
         context_window.context_messages = retained_messages
         return None, context_window
+
+    @staticmethod
+    def _is_browser_state_projection(message: BaseMessage) -> bool:
+        if message.name in {"current_browser_state", "browser_state_progress"}:
+            return True
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        return bool(
+            metadata.get("browser_state_context")
+            or metadata.get("browser_state_progress_context")
+        )
 
     @staticmethod
     def _is_working_context_message(message: BaseMessage) -> bool:

@@ -973,7 +973,7 @@ class BrowserAgentRuntime:
             "page_position": metadata.get("page_position") or {},
             "semantic_state": semantic_state,
             "semantic_progress": semantic_progress,
-            "field_coverage": semantic_state["field_coverage"],
+            "field_coverage": semantic_state.get("field_coverage") or [],
             "page_state": page_state,
             "dom": "",
             "dom_error": dom_error,
@@ -1229,13 +1229,16 @@ class BrowserAgentRuntime:
 
     async def _validate_safe_read_locators(self, steps: list[Dict[str, Any]]) -> None:
         """Validate model-provided read locators once before batch execution."""
-        checks = [
-            {"index": index, "selector": str(step.get("selector") or "")}
-            for index, step in enumerate(steps)
-            if str(step.get("op") or "").strip().lower() in _BATCH_SAFE_READ_SELECTOR_OPS
-            and str(step.get("selector") or "").strip()
-            and not str(step.get("resolved_target_id") or "").strip()
-        ]
+        checks: list[Dict[str, Any]] = []
+        for index, step in enumerate(steps):
+            operation = str(step.get("op") or "").strip().lower()
+            selector = str(step.get("selector") or "").strip()
+            resolved_target_id = str(step.get("resolved_target_id") or "").strip()
+            if operation not in _BATCH_SAFE_READ_SELECTOR_OPS:
+                continue
+            if not selector or resolved_target_id:
+                continue
+            checks.append({"index": index, "selector": selector})
         if not checks:
             return
         script = f"""() => {{
@@ -2254,21 +2257,19 @@ class BrowserRuntimeRail(AgentRail):
         if isinstance(exception, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
             return True
         message = str(exception or "").lower()
-        return any(
-            token in message
-            for token in (
-                "timeout",
-                "timed out",
-                "429",
-                "500",
-                "502",
-                "503",
-                "504",
-                "upstream",
-                "rate limit",
-                "service unavailable",
-            )
+        retryable_tokens = (
+            "timeout",
+            "timed out",
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+            "upstream",
+            "rate limit",
+            "service unavailable",
         )
+        return _contains_any_token(message, retryable_tokens)
 
     def _structured_model_failure(
         self,
@@ -2621,15 +2622,13 @@ class BrowserRuntimeRail(AgentRail):
     @staticmethod
     def _tool_may_change_browser_state(tool_name: str) -> bool:
         normalized = str(tool_name or "").strip().lower()
-        return not any(
-            token in normalized
-            for token in (
-                "browser_probe_cards",
-                "browser_probe_interactives",
-                "browser_snapshot",
-                "browser_find",
-            )
+        observation_tokens = (
+            "browser_probe_cards",
+            "browser_probe_interactives",
+            "browser_snapshot",
+            "browser_find",
         )
+        return not _contains_any_token(normalized, observation_tokens)
 
     def _canonicalize_tool_name(self, tool_name: str) -> str:
         canonical = canonicalize_playwright_tool_name(tool_name)
@@ -3063,7 +3062,8 @@ class BrowserRuntimeRail(AgentRail):
         if state.get("replan_required"):
             runtime_blockers = list(dict.fromkeys([*runtime_blockers, "semantic_replan_required"]))
 
-        if reported_status == "completed" and not runtime_blockers and not missing_fields and runtime_ready:
+        completion_requirements_met = not runtime_blockers and not missing_fields and runtime_ready
+        if reported_status == "completed" and completion_requirements_met:
             state["status"] = "completed"
             state["next_action_class"] = "finish"
             state["terminal_reason"] = "runtime_completion_validated"
@@ -3393,21 +3393,19 @@ class BrowserRuntimeRail(AgentRail):
         serialized = json.dumps(args, ensure_ascii=False).lower()
         if any(token in name for token in ("navigate", "navigate_back", "tabs")):
             return "navigation"
-        filter_terms_present = any(
-            token in serialized
-            for token in (
-                "filter",
-                "sort",
-                "price",
-                "rating",
-                "category",
-                "\u7b5b\u9009",
-                "\u6392\u5e8f",
-                "\u4ef7\u683c",
-                "\u8bc4\u5206",
-                "\u5206\u7c7b",
-            )
+        filter_terms = (
+            "filter",
+            "sort",
+            "price",
+            "rating",
+            "category",
+            "\u7b5b\u9009",
+            "\u6392\u5e8f",
+            "\u4ef7\u683c",
+            "\u8bc4\u5206",
+            "\u5206\u7c7b",
         )
+        filter_terms_present = _contains_any_token(serialized, filter_terms)
         script_tool = any(token in name for token in ("evaluate", "run_code"))
         filter_intent = bool(
             filter_terms_present
@@ -4022,14 +4020,12 @@ class BrowserRuntimeRail(AgentRail):
     @staticmethod
     def _is_replan_exempt_tool(tool_name: str) -> bool:
         normalized_name = str(tool_name or "").strip().lower()
-        return any(
-            token in normalized_name
-            for token in (
-                "browser_recall_offload",
-                "browser_runtime_health",
-                "browser_list_custom_actions",
-            )
+        exempt_tokens = (
+            "browser_recall_offload",
+            "browser_runtime_health",
+            "browser_list_custom_actions",
         )
+        return _contains_any_token(normalized_name, exempt_tokens)
 
     @classmethod
     def _allow_read_only_recovery(
@@ -4681,23 +4677,25 @@ class BrowserRuntimeRail(AgentRail):
             if isinstance(extracted, dict) and extracted:
                 return f"structured extraction returned {len(extracted)} field(s)"
             if isinstance(cards, list) and cards:
-                natural_cards = [
-                    card
-                    for card in cards
-                    if isinstance(card, dict)
-                    and card.get("is_ad") is not True
-                    and str(card.get("region") or "") not in {"hot_search", "sidebar", "account", "chat"}
-                    and str(card.get("kind") or "")
-                    not in {
-                        "hot_search",
-                        "paid_column",
-                        "promotion",
-                        "activity",
-                        "account",
-                        "shop",
-                        "chat",
-                    }
-                ]
+                excluded_regions = {"hot_search", "sidebar", "account", "chat"}
+                excluded_kinds = {
+                    "hot_search",
+                    "paid_column",
+                    "promotion",
+                    "activity",
+                    "account",
+                    "shop",
+                    "chat",
+                }
+                natural_cards = []
+                for card in cards:
+                    if not isinstance(card, dict) or card.get("is_ad") is True:
+                        continue
+                    if str(card.get("region") or "") in excluded_regions:
+                        continue
+                    if str(card.get("kind") or "") in excluded_kinds:
+                        continue
+                    natural_cards.append(card)
                 if natural_cards:
                     return f"card probe returned {len(natural_cards)} structured result(s)"
         return ""
@@ -4716,7 +4714,7 @@ class BrowserRuntimeRail(AgentRail):
         details["completion_evidence"] = completion_evidence[:300]
         phase_order = list(phases)
         try:
-            remaining_phases = phase_order[phase_order.index(phase) + 1 :]
+            remaining_phases = phase_order[phase_order.index(phase) + 1:]
         except ValueError:
             remaining_phases = []
         next_phase = next(

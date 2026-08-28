@@ -56,6 +56,11 @@ _EPHEMERAL_USER_MESSAGE_NAMES = frozenset(
         "browser_state_progress",
     }
 )
+_EPHEMERAL_CONTEXT_METADATA_KEYS = (
+    "browser_working_context",
+    "browser_state_context",
+    "browser_state_progress_context",
+)
 _TERMINAL_TASK_STATUSES = frozenset({"blocked", "partial", "completed"})
 
 
@@ -426,10 +431,10 @@ class BrowserWorkingContextStore:
             },
             "task_state": self._project_task_state(task_state),
             "runtime_directive": self._runtime_directive(task_state),
-            "recent_actions": list(task_state.get("recent_actions") or [])[-self.config.max_recent_steps :],
+            "recent_actions": list(task_state.get("recent_actions") or [])[-self.config.max_recent_steps:],
             "model_notes": {
-                "key_facts": state.current.key_facts[-self.config.max_list_items :],
-                "important_information": state.current.important_information[-self.config.max_list_items :],
+                "key_facts": state.current.key_facts[-self.config.max_list_items:],
+                "important_information": state.current.important_information[-self.config.max_list_items:],
             },
             "retained_tool_evidence": self._compact_retained_tool_evidence(state.recent_steps),
             "next_step_only_tool_content": [
@@ -442,7 +447,7 @@ class BrowserWorkingContextStore:
 
     def _compact_retained_tool_evidence(self, steps: Iterable[BrowserStepRecord]) -> list[Dict[str, Any]]:
         evidence: list[Dict[str, Any]] = []
-        for step in list(steps)[-self.config.max_recent_steps :]:
+        for step in list(steps)[-self.config.max_recent_steps:]:
             for memory in step.tool_memories:
                 if not (memory.durable_content or memory.error):
                     continue
@@ -457,7 +462,7 @@ class BrowserWorkingContextStore:
                         "source": memory.content_source or ("error" if memory.error else "retained"),
                     }
                 )
-        return evidence[-self.config.max_recent_steps :]
+        return evidence[-self.config.max_recent_steps:]
 
     @staticmethod
     def load_task_state(session: Any) -> Dict[str, Any]:
@@ -499,20 +504,21 @@ class BrowserWorkingContextStore:
 
     @staticmethod
     def _merge_semantic_observation(state: Dict[str, Any], progress: Dict[str, Any]) -> None:
-        state["semantic_progress"] = {
-            key: progress.get(key)
-            for key in (
-                "progress",
-                "observable_progress",
-                "consecutive_no_progress",
-                "state_revisit_count",
-                "aba_loop",
-                "repeated_filter_state",
-                "replan_required",
-                "replan_reason",
-            )
-            if key in progress
-        }
+        semantic_progress: Dict[str, Any] = {}
+        semantic_keys = (
+            "progress",
+            "observable_progress",
+            "consecutive_no_progress",
+            "state_revisit_count",
+            "aba_loop",
+            "repeated_filter_state",
+            "replan_required",
+            "replan_reason",
+        )
+        for key in semantic_keys:
+            if key in progress:
+                semantic_progress[key] = progress.get(key)
+        state["semantic_progress"] = semantic_progress
         semantic_state = progress.get("semantic_state")
         if isinstance(semantic_state, dict):
             coverage = semantic_state.get("field_coverage")
@@ -599,9 +605,9 @@ class BrowserWorkingContextStore:
             if isinstance(details, dict)
         }
         semantic_progress = state.get("semantic_progress")
-        compact_semantic = {
-            key: semantic_progress.get(key)
-            for key in (
+        compact_semantic: Dict[str, Any] = {}
+        if isinstance(semantic_progress, dict):
+            semantic_keys = (
                 "progress",
                 "consecutive_no_progress",
                 "state_revisit_count",
@@ -609,8 +615,9 @@ class BrowserWorkingContextStore:
                 "repeated_filter_state",
                 "replan_reason",
             )
-            if isinstance(semantic_progress, dict) and key in semantic_progress
-        }
+            for key in semantic_keys:
+                if key in semantic_progress:
+                    compact_semantic[key] = semantic_progress.get(key)
         return {
             "task_id": state.get("task_id"),
             "goal": _bounded_text(state.get("goal") or state.get("task"), 1_000),
@@ -737,7 +744,7 @@ class BrowserWorkingContextStore:
 
     def _limit_history(self, state: BrowserWorkingContextState) -> None:
         if len(state.recent_steps) > self.config.max_recent_steps:
-            state.recent_steps = state.recent_steps[-self.config.max_recent_steps :]
+            state.recent_steps = state.recent_steps[-self.config.max_recent_steps:]
 
     def _infer_tool_error(self, content: Any) -> Optional[str]:
         text = self.message_content_to_text(content)
@@ -808,14 +815,12 @@ def latest_browser_user_request(messages: Iterable[BaseMessage]) -> str:
         if message.name in _EPHEMERAL_USER_MESSAGE_NAMES:
             continue
         metadata = getattr(message, "metadata", {}) or {}
-        if any(
-            metadata.get(key)
-            for key in (
-                "browser_working_context",
-                "browser_state_context",
-                "browser_state_progress_context",
-            )
-        ):
+        is_ephemeral_context = False
+        for key in _EPHEMERAL_CONTEXT_METADATA_KEYS:
+            if metadata.get(key):
+                is_ephemeral_context = True
+                break
+        if is_ephemeral_context:
             continue
         text = BrowserWorkingContextStore.message_content_to_text(message.content).strip()
         if text:

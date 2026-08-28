@@ -159,16 +159,13 @@ class BrowserTaskProgressState:
             for action in recent_actions[-6:]:
                 if not isinstance(action, dict):
                     continue
-                summary = " ".join(
-                    part
-                    for part in (
-                        str(action.get("action_class") or "").strip(),
-                        str(action.get("target_summary") or "").strip(),
-                        str(action.get("outcome") or "").strip(),
-                        str(action.get("semantic_delta") or "").strip(),
-                    )
-                    if part
+                summary_parts = (
+                    str(action.get("action_class") or "").strip(),
+                    str(action.get("target_summary") or "").strip(),
+                    str(action.get("outcome") or "").strip(),
+                    str(action.get("semantic_delta") or "").strip(),
                 )
+                summary = " ".join(filter(None, summary_parts))
                 if summary:
                     recent_steps.append(summary[:300])
         return recent_steps

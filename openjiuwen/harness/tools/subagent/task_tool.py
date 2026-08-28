@@ -129,20 +129,21 @@ class TaskTool(Tool):
             return data
         data["browser_result"] = browser_result
         data["retryable"] = bool(browser_result.get("retryable"))
-        data["resume_context"] = {
-            key: browser_result.get(key)
-            for key in (
-                "status",
-                "missing_fields",
-                "missing_slots",
-                "requested_slots",
-                "blockers",
-                "evidence",
-                "current_page",
-                "recommended_recovery",
-                "resume_count",
-            )
-        }
+        resume_context: dict[str, Any] = {}
+        resume_keys = (
+            "status",
+            "missing_fields",
+            "missing_slots",
+            "requested_slots",
+            "blockers",
+            "evidence",
+            "current_page",
+            "recommended_recovery",
+            "resume_count",
+        )
+        for key in resume_keys:
+            resume_context[key] = browser_result.get(key)
+        data["resume_context"] = resume_context
         return data
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:

@@ -37,6 +37,8 @@ _WORKING_MEMORY_RECORD_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _REQUEST_STARTED_EXTRA_KEY = "_browser_working_context_request_started"
+
+
 class BrowserWorkingContextRail(AgentRail):
     """Commit one model update plus all tool retention at ReAct step boundaries."""
 
@@ -155,7 +157,15 @@ class BrowserWorkingContextRail(AgentRail):
             )
             suffix = f" Invalid fields: {', '.join(invalid_fields)}." if invalid_fields else ""
             return None, f"Model working-memory record failed validation.{suffix}"
-        if memory.task_list or memory.errors or memory.failures or memory.blockers:
+        runtime_owned_fields_present = any(
+            (
+                memory.task_list,
+                memory.errors,
+                memory.failures,
+                memory.blockers,
+            )
+        )
+        if runtime_owned_fields_present:
             memory = BrowserWorkingMemory(
                 key_facts=memory.key_facts,
                 important_information=memory.important_information,
