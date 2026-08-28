@@ -409,6 +409,29 @@ async def test_read_code_rejects_path_escape(service: CodeGraphService) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_code_rejects_file_over_max_bytes(repo: Path, tmp_path: Path) -> None:
+    (repo / "huge.py").write_text("x = 1\n" + ("# pad\n" * 40), encoding="utf-8")
+    service = CodeGraphService(
+        repo,
+        CodeGraphConfig(cache_dir=str(tmp_path / "cache-small"), max_files=1000, max_file_bytes=32),
+    )
+    result = await service.read_code("huge.py", start_line=1, end_line=2)
+    assert result["status"] == "ERROR"
+    assert "max_file_bytes" in str(result.get("message") or "")
+
+
+@pytest.mark.asyncio
+async def test_read_code_does_not_keep_unread_lines(service: CodeGraphService, repo: Path) -> None:
+    (repo / "window.py").write_text("one\ntwo\nthree\ntail-should-not-appear\n", encoding="utf-8")
+    result = await service.read_code("window.py", start_line=1, end_line=3)
+    assert result["status"] == "COMPLETE"
+    assert "one" in result["content"]
+    assert "three" in result["content"]
+    assert "tail-should-not-appear" not in result["content"]
+    assert result["end_line"] == 3
+
+
+@pytest.mark.asyncio
 async def test_get_repo_structure_lists_top_level(service: CodeGraphService) -> None:
     result = await service.get_repo_structure("create_user")
     assert result["status"] == "COMPLETE"

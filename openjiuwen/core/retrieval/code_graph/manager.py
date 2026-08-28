@@ -49,7 +49,7 @@ _manager_init_lock = threading.Lock()
 
 
 class CodeGraphManager:
-    """Registry of shared ``GraphEntry`` objects keyed by ``(repo_id, config_hash)``."""
+    """Registry of shared ``GraphEntry`` objects keyed by workspace ``repo_id``."""
 
     def __init__(
         self,
@@ -93,6 +93,7 @@ class CodeGraphManager:
             self.reclaim()
             entry = self._entries.get(key)
             if entry is not None and entry.service is not None:
+                self._bind_config(entry, cfg)
                 self._entries.move_to_end(key)
                 service = entry.service
                 flight: asyncio.Future[CodeGraphService] | None = None
@@ -317,6 +318,7 @@ class CodeGraphManager:
             entry = GraphEntry(identity=identity, config_hash=cfg.config_hash(), service=service)
             service.bind_entry(entry)
             self._entries[identity.entry_key(cfg.config_hash())] = entry
+        self._bind_config(entry, cfg)
         entry.manager = self
         return await self._ensure_fresh_or_wait(entry, cfg)
 
@@ -772,23 +774,35 @@ class CodeGraphManager:
             return None
         return DiskIndexStore(cfg.cache_dir, max_size_mb=max(1, cfg.disk_quota_bytes() // (1024 * 1024)))
 
-    def stats(self, repo_root: str | Path | None = None) -> dict[str, object]:
+    def stats(
+        self,
+        repo_root: str | Path | None = None,
+        config: CodeGraphConfig | None = None,
+    ) -> dict[str, object]:
         if repo_root is None:
             return {
                 "entries": len(self._entries),
                 "resident_bytes": self._resident_bytes(),
                 "active_generations": sum(1 for item in self._entries.values() if item.active is not None),
             }
-        entry = self._peek_entry(repo_root, None)
+        entry = self._peek_entry(repo_root, config)
         if entry is None:
             return {"present": False, "state": "absent"}
         entry.normalize_dirty_paths()
         updating = entry.update_task is not None and not entry.update_task.done()
+        cfg = config
+        if cfg is None and entry.service is not None:
+            cfg = getattr(entry.service, "config", None)
+        if cfg is not None:
+            self._bind_config(entry, cfg)
         limit_error = getattr(entry, "limit_error", None)
+        if limit_error is not None and cfg is not None and self._raised_cap_clears_limit(limit_error, cfg):
+            entry.limit_error = None
+            entry.limit_exceeded_digest = None
+            limit_error = None
         dirty = sorted(entry.dirty_paths)
         live_dirty: list[str] = []
         token_stale = False
-        cfg = getattr(entry.service, "config", None) if entry.service is not None else None
         if (
             entry.active is not None
             and entry.last_token is not None
@@ -854,6 +868,12 @@ class CodeGraphManager:
             self._evict_unused_others(cfg, keep=entry)
             raise_if_resource_limits(cfg, rss_bytes=_current_rss_bytes())
             return await self._update_entry_body(entry, cfg, token, cancel)
+
+    def _bind_config(self, entry: GraphEntry, cfg: CodeGraphConfig) -> None:
+        """Keep the shared façade on the live yaml caps. One path, one entry."""
+        entry.config_hash = cfg.config_hash()
+        if entry.service is not None:
+            entry.service.config = cfg
 
     def _raised_cap_clears_limit(self, exc: object, cfg: CodeGraphConfig) -> bool:
         """True when the user raised the cap that previously refused this tree."""

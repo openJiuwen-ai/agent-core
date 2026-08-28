@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -23,9 +24,10 @@ from openjiuwen.harness.schema.code_graph import (
 from openjiuwen.harness.schema.coding_artifacts import LocalizationArtifact, new_loc_id
 
 _lock = threading.Lock()
-_sessions_by_key: dict[str, LocalizationSession] = {}
+_sessions_by_key: OrderedDict[str, LocalizationSession] = OrderedDict()
 _sessions_by_id: dict[str, LocalizationSession] = {}
 
+MAX_LOCALIZATION_SESSIONS = 32
 DIMINISHING_RETURN_STREAK = 3
 
 
@@ -65,7 +67,6 @@ class LocalizationSession:
     empty_gain_streak: int = 0
     warnings: list[str] = field(default_factory=list)
     index_snapshot: str = ""
-    missing_question: str = ""
     artifact: LocalizationArtifact | None = None
     expanded_files: set[str] = field(default_factory=set)
     probed_inheritance: set[str] = field(default_factory=set)
@@ -84,12 +85,41 @@ def reset_localization_sessions() -> None:
         _sessions_by_id.clear()
 
 
+def localization_session_count() -> int:
+    """Test helper: how many locator sessions this process is holding."""
+    with _lock:
+        return len(_sessions_by_key)
+
+
+def drop_localization(*, artifact_id: str = "", session_key: str = "") -> None:
+    """Forget one locator episode. Safe when the ids are empty or unknown."""
+    with _lock:
+        session = _sessions_by_id.get(str(artifact_id or ""))
+        if session is None and session_key:
+            session = _sessions_by_key.get(session_key)
+        if session is None:
+            return
+        _sessions_by_key.pop(session.key, None)
+        _sessions_by_id.pop(session.artifact_id, None)
+
+
+def _touch(session: LocalizationSession) -> None:
+    _sessions_by_key[session.key] = session
+    _sessions_by_key.move_to_end(session.key)
+    _sessions_by_id[session.artifact_id] = session
+    limit = max(1, int(MAX_LOCALIZATION_SESSIONS))
+    while len(_sessions_by_key) > limit:
+        _, oldest = _sessions_by_key.popitem(last=False)
+        _sessions_by_id.pop(oldest.artifact_id, None)
+
+
 def create_localization(repo_root: str, task: str) -> LocalizationSession:
     """First locator run for ``(repo, task)``. Reuses the session if it exists."""
     key = localization_session_key(repo_root, task)
     with _lock:
         existing = _sessions_by_key.get(key)
         if existing is not None:
+            _touch(existing)
             return existing
         session = LocalizationSession(
             artifact_id=new_loc_id(),
@@ -97,19 +127,17 @@ def create_localization(repo_root: str, task: str) -> LocalizationSession:
             task=task,
             key=key,
         )
-        _sessions_by_key[key] = session
-        _sessions_by_id[session.artifact_id] = session
+        _touch(session)
         return session
 
 
-def refine_localization(artifact_id: str, missing_question: str = "") -> LocalizationSession:
-    """Continue an existing locator artifact instead of starting a new run."""
+def refine_localization(artifact_id: str) -> LocalizationSession:
+    """Look up an existing locator artifact. Used to continue the same episode."""
     with _lock:
         session = _sessions_by_id.get(str(artifact_id or ""))
         if session is None:
             raise KeyError(f"unknown localization artifact: {artifact_id}")
-        if missing_question:
-            session.missing_question = str(missing_question)
+        _touch(session)
         return session
 
 
@@ -141,6 +169,7 @@ def persist_run_state(state: CodeGraphRunState) -> LocalizationSession | None:
         session = _sessions_by_id.get(state.artifact_id)
         if session is None:
             return None
+        _touch(session)
         session.selected = list(state.selected)
         session.candidates = dict(state.candidates)
         session.relations = list(state.relations)

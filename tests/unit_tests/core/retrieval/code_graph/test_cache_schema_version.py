@@ -117,6 +117,33 @@ def test_index_stamped_with_an_older_schema_is_rejected(tmp_path: Path) -> None:
     assert store.load(CACHE_KEY) is None
 
 
+def test_save_drops_superseded_pickle_in_the_same_repo(tmp_path: Path) -> None:
+    store = DiskIndexStore(tmp_path / "cache", max_size_mb=8)
+    repo_id = "repo-one"
+    store.save(f"{repo_id}/old-cfg", _index())
+    newer = _index()
+    newer.snapshot = "newer"
+    store.save(f"{repo_id}/new-cfg", newer)
+
+    folder = tmp_path / "cache" / repo_id
+    assert [path.name for path in folder.glob("*.pkl")] == ["new-cfg.pkl"]
+    assert store.load(f"{repo_id}/old-cfg") is None
+    loaded = store.load(f"{repo_id}/new-cfg")
+    assert loaded is not None
+    assert loaded.snapshot == "newer"
+
+
+def test_save_keeps_other_repo_pickles(tmp_path: Path) -> None:
+    store = DiskIndexStore(tmp_path / "cache", max_size_mb=8)
+    store.save("left/snap-cfg", _index())
+    other = _index()
+    other.snapshot = "right"
+    store.save("right/snap-cfg", other)
+
+    assert store.load("left/snap-cfg") is not None
+    assert store.load("right/snap-cfg") is not None
+
+
 def test_config_hash_changes_with_the_schema_version(monkeypatch) -> None:
     config = CodeGraphConfig()
     before = config.config_hash()

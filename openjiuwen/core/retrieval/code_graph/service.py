@@ -67,6 +67,25 @@ from openjiuwen.core.retrieval.code_graph.snapshot import compute_snapshot
 from openjiuwen.core.retrieval.code_graph.store.index_store import DiskIndexStore
 
 MAX_READ_LINES = 400
+
+
+def _read_line_window(path: Path, *, start: int, end: int) -> tuple[list[str], int, str] | None:
+    """Read ``start..end`` only. Does not keep the rest of the file in memory."""
+    hasher = hashlib.sha256()
+    lines: list[str] = []
+    last = 0
+    with path.open("rb") as handle:
+        for idx, raw in enumerate(handle, start=1):
+            last = idx
+            if idx < start:
+                continue
+            if idx > end:
+                break
+            hasher.update(raw)
+            lines.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+    if last == 0 or not lines:
+        return None
+    return lines, start + len(lines) - 1, hasher.hexdigest()[:16]
 # Neighbouring lines around a definition. The model must not open this to hundreds.
 MAX_SYMBOL_CONTEXT = 5
 # Class bodies this long are not a locate answer: read members, not the whole class.
@@ -899,30 +918,43 @@ class CodeGraphService:
                 message=f"file not found: {path}",
                 extra={"file": path},
             )
+        max_bytes = max(1, int(self.config.max_file_bytes))
         try:
-            raw = resolved.read_bytes()
+            size = resolved.stat().st_size
         except OSError as exc:
             return status_payload(
                 CodeGraphStatus.ERROR,
                 message=f"cannot read {path}: {exc}",
                 extra={"file": path},
             )
-        text = raw.decode("utf-8", errors="replace")
-        lines = text.splitlines()
-        if not lines:
+        if size > max_bytes:
+            return status_payload(
+                CodeGraphStatus.ERROR,
+                message=f"file exceeds max_file_bytes ({max_bytes}): {path}",
+                extra={"file": path, "size": size},
+            )
+        start = max(1, int(start_line or 1))
+        requested_end = int(end_line) if end_line is not None else start + MAX_READ_LINES - 1
+        end = max(start, requested_end)
+        if end - start + 1 > MAX_READ_LINES:
+            end = start + MAX_READ_LINES - 1
+        try:
+            window = _read_line_window(resolved, start=start, end=end)
+        except OSError as exc:
+            return status_payload(
+                CodeGraphStatus.ERROR,
+                message=f"cannot read {path}: {exc}",
+                extra={"file": path},
+            )
+        if window is None:
             return status_payload(
                 CodeGraphStatus.ERROR,
                 message=f"file is empty: {path}",
                 extra={"file": path},
             )
-        start = max(1, int(start_line or 1))
-        requested_end = int(end_line) if end_line is not None else start + MAX_READ_LINES - 1
-        end = min(len(lines), max(start, requested_end))
-        if end - start + 1 > MAX_READ_LINES:
-            end = start + MAX_READ_LINES - 1
-        numbered = "\n".join(f"{idx:>6}|{lines[idx - 1]}" for idx in range(start, end + 1))
+        lines, end, digest = window
+        numbered = "\n".join(f"{idx:>6}|{line}" for idx, line in enumerate(lines, start=start))
         rel = resolved.relative_to(self.repo_root).as_posix()
-        digest = hashlib.sha256(raw).hexdigest()[:16]
         evidence_id = f"read:{rel}:{start}:{end}:{digest}"
         stale = self.is_stale()
         status = CodeGraphStatus.STALE if stale else CodeGraphStatus.COMPLETE

@@ -162,10 +162,6 @@ class CodeGraphBaseTool(Tool):
             )
         return None
 
-    def _persist_session(self) -> None:
-        """Graph hops stay in ``run_state``; submit/select persist the packet."""
-        return
-
     async def _invoke_service(
         self,
         operation: Callable[[CodeGraphService], Awaitable[dict[str, Any]]],
@@ -185,7 +181,6 @@ class CodeGraphBaseTool(Tool):
             payload = trim_payload(payload, self.policy)
         if self.context.run_state is not None and isinstance(payload, dict):
             self.context.run_state.remember_payload(payload)
-            self._persist_session()
         success = str(payload.get("status")) not in {
             CodeGraphStatus.UNAVAILABLE.value,
             CodeGraphStatus.ERROR.value,

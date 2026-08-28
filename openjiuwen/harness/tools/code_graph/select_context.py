@@ -154,7 +154,6 @@ class SelectCodeContextTool(CodeGraphBaseTool):
         # Selecting after a commit means the previous packet was not enough, so
         # the run goes back to LOCATING and the artifact keeps its identity.
         state.mark_locating()
-        self._persist_session()
         return ToolOutput(
             success=True,
             data={

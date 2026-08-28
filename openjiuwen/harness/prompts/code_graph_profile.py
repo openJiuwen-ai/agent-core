@@ -46,9 +46,10 @@ These tools index the repository so you can find code before you edit it.
   continue. Do not wait for a perfect refresh.
 - If a Code Graph tool returns UNAVAILABLE, the repository exceeded indexing
   limits (file count, source bytes, symbols, edges, or process memory) or the
-  parser is missing. grep and glob are restored only then. Use them (and
-  read_file) and keep going. A single ERROR is not that: narrow the query and
-  retry the graph, or read_file.
+  parser is missing. Graph tools are then removed and grep/glob come back.
+  Use grep, glob, and read_file. Do not call find_* or search_source_text
+  again. A single ERROR is not that: narrow the query and retry the graph,
+  or read_file.
 """
 
 GRAPH_PROFILE_PROMPT_CN = """\
@@ -73,9 +74,10 @@ Code Graph（profile: graph）：
   grep 保持隐藏。
 - 若工具返回 STALE，旧图找到的结果可以继续用，不要为了 100% 新鲜而停住。
 - 若 Code Graph 工具返回 UNAVAILABLE，说明仓库超过索引上限（文件数、源码
-  字节、符号、边或进程内存）或缺少 parser。只有这时才恢复 grep/glob。用它们
-  （以及 read_file）继续做。单次 ERROR 不是这种失败：缩小查询再试图工具，
-  或改用 read_file。
+  字节、符号、边或进程内存）或缺少 parser。这时会摘掉图工具并恢复
+  grep/glob。用 grep、glob、read_file 继续，不要再调 find_* 或
+  search_source_text。单次 ERROR 不是这种失败：缩小查询再试图工具，或改用
+  read_file。
 """
 
 LOCATE_EXAM_PROMPT_EN = """\

@@ -305,6 +305,29 @@ class CodeGraphResult:
         }
 
 
+# Span identity for select/submit. Source text stays on the tool result, not
+# in the process-level locator session.
+_EVIDENCE_META_KEYS = (
+    "evidence_id",
+    "file",
+    "symbol_id",
+    "name",
+    "kind",
+    "start_line",
+    "end_line",
+    "symbol_start_line",
+    "symbol_end_line",
+    "qualified_name",
+    "large_class",
+    "submit",
+)
+
+
+def compact_tool_evidence(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep locate metadata; drop source text and ranked lists."""
+    return {key: payload[key] for key in _EVIDENCE_META_KEYS if key in payload}
+
+
 @dataclass
 class CodeGraphRunState:
     """Mutable per-invocation state shared by Code Graph tools."""
@@ -360,13 +383,13 @@ class CodeGraphRunState:
         """Index tool hits so select_code_context can only keep real evidence."""
         evidence_id = str(payload.get("evidence_id") or "")
         if evidence_id:
-            self.read_evidence[evidence_id] = payload
+            self.read_evidence[evidence_id] = compact_tool_evidence(payload)
         file_name = str(payload.get("file") or "")
         if file_name:
             self.seen_files.add(file_name.replace("\\", "/"))
         top_id = str(payload.get("symbol_id") or "")
         if top_id and file_name:
-            self.candidates[top_id] = payload
+            self.candidates[top_id] = compact_tool_evidence(payload)
         for key in ("matches", "symbols", "related", "chunks", "definitions", "focus"):
             items = payload.get(key) or []
             if not isinstance(items, list):
@@ -380,7 +403,7 @@ class CodeGraphRunState:
                 symbol_id = str(item.get("symbol_id") or item.get("doc_id") or "")
                 if not symbol_id:
                     continue
-                self.candidates[symbol_id] = item
+                self.candidates[symbol_id] = compact_tool_evidence(item) or item
                 if key == "related":
                     self.relations.append(
                         CodeGraphRelation(
