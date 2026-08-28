@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Un
 from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError, raise_error
+from openjiuwen.core.common.exception.errors import BaseError, build_error, raise_error
 from openjiuwen.core.common.logging import logger
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
@@ -1922,9 +1922,6 @@ class ReActAgent(BaseAgent):
 
         if has_read_file:
             return
-
-        from openjiuwen.core.common.exception.codes import StatusCode
-        from openjiuwen.core.common.exception.errors import build_error
 
         err = build_error(
             StatusCode.AGENT_TOOL_NOT_FOUND,

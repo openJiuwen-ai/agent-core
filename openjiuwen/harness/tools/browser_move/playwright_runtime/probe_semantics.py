@@ -27,6 +27,8 @@ _HOT_SEARCH_TOKEN_RE = re.compile(
     r"(?:$|[\s_\-/])|热搜|热榜",
     re.IGNORECASE,
 )
+
+
 def _text(value: Any, limit: int = 1000) -> str:
     return " ".join(str(value or "").split())[:limit]
 

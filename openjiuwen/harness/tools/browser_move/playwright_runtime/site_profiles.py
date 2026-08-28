@@ -306,7 +306,10 @@ def apply_site_card_semantics(
         return "main_result", str(detail.get("kind") or kind), is_ad
 
     natural_kind = str(rules.get("natural_result_kind") or "").strip()
-    if natural_kind and region == "main_result" and kind not in {"account", "hot_search", "sidebar"} and not is_ad:
+    is_natural_result = (
+        region == "main_result" and kind not in {"account", "hot_search", "sidebar"} and not is_ad
+    )
+    if natural_kind and is_natural_result:
         return "main_result", natural_kind, False
     return region, kind, is_ad
 
