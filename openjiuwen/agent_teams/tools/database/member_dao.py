@@ -5,7 +5,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.schema.status import (
@@ -311,6 +311,59 @@ class MemberDao:
             )
             value = result.scalar_one_or_none()
             return int(value) if value is not None else 0
+
+    async def prune_roster(self, team_name: str, keep: set[str]) -> list[str]:
+        """Delete teammate rows not present in ``keep``.
+
+        The leader and non-teammate rows are protected. An empty ``keep`` is a
+        no-op; pass the leader explicitly for a leader-only roster. Returns the
+        deleted member names.
+        """
+        if not keep:
+            return []
+        from openjiuwen.agent_teams.schema.team import TeamRole
+        from openjiuwen.agent_teams.tools.models import Team
+
+        leader_subq = (
+            select(Team.leader_member_name)
+            .where(Team.team_name == team_name)
+            .scalar_subquery()
+        )
+        conditions = [
+            TeamMember.team_name == team_name,
+            TeamMember.member_name != leader_subq,
+            TeamMember.role == TeamRole.TEAMMATE.value,
+            TeamMember.member_name.notin_(keep),
+        ]
+
+        async with self._sessions.write() as session:
+            target_rows = (
+                await session.execute(
+                    select(TeamMember.member_name).where(*conditions)
+                )
+            ).all()
+            pruned = [row[0] for row in target_rows]
+            if not pruned:
+                return []
+            await session.execute(
+                delete(TeamMember).where(
+                    TeamMember.team_name == team_name,
+                    TeamMember.member_name.in_(pruned),
+                )
+            )
+            await session.execute(
+                update(TeamMember)
+                .where(TeamMember.team_name == team_name)
+                .values(updated_at=get_current_time())
+            )
+            await session.commit()
+            team_logger.info(
+                "Pruned %d roster member(s) for team %s: %s",
+                len(pruned),
+                team_name,
+                pruned,
+            )
+            return pruned
 
     async def update_member_status(
         self,

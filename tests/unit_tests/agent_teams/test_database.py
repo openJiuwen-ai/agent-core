@@ -3773,3 +3773,154 @@ async def test_dynamic_index_migration_rewrites_legacy_task_table(db):
     assert f"ix_{table}_status" in names
     for col in ("team_name", "assignee", "updated_at"):
         assert f"ix_{table}_{col}" not in names
+
+
+class TestPruneRoster:
+    """Tests for ``MemberDao.prune_roster`` (dissolve roster reconciliation).
+
+    Mirrors the spawn path: the leader row is written through ``create_member``
+    with the default teammate role (so its role column literally stores
+    ``teammate``), which is why ``prune_roster`` must protect the leader via
+    ``team_info.leader_member_name`` rather than by role.
+    """
+
+    @staticmethod
+    async def _seed_team(
+        db,
+        *,
+        team_name: str,
+        leader: str,
+        teammates: tuple[str, ...] = (),
+        human_agents: tuple[str, ...] = (),
+    ) -> None:
+        await db.team.create_team(
+            team_name=team_name,
+            display_name=team_name,
+            leader_member_name=leader,
+        )
+        agent_card = AgentCard(name="Agent").model_dump_json()
+        await db.member.create_member(
+            member_name=leader,
+            team_name=team_name,
+            display_name="Leader",
+            agent_card=agent_card,
+            status="ready",
+        )
+        for name in teammates:
+            await db.member.create_member(
+                member_name=name,
+                team_name=team_name,
+                display_name=name,
+                agent_card=agent_card,
+                status="paused",
+            )
+        if human_agents:
+            from openjiuwen.agent_teams.schema.team import TeamRole
+
+            for name in human_agents:
+                await db.member.create_member(
+                    member_name=name,
+                    team_name=team_name,
+                    display_name=name,
+                    agent_card=agent_card,
+                    status="ready",
+                    role=TeamRole.HUMAN_AGENT.value,
+                )
+
+    @staticmethod
+    async def _roster_names(db, team_name: str) -> set[str]:
+        rows = await db.member.get_member_roster(team_name)
+        return {name for name, _display, _status in rows}
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_prune_deletes_non_keep_teammates(self, db):
+        await self._seed_team(
+            db, team_name="prune1", leader="leader", teammates=("m1", "m2"),
+        )
+        pruned = await db.member.prune_roster("prune1", keep={"leader", "m1"})
+        assert pruned == ["m2"]
+        assert await self._roster_names(db, "prune1") == {"leader", "m1"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_prune_protects_leader_even_when_absent_from_keep(self, db):
+        await self._seed_team(
+            db, team_name="prune2", leader="leader", teammates=("m1", "m2"),
+        )
+        # Leader deliberately omitted from keep; leader_member_name must save it
+        # even though its role column is "teammate".
+        pruned = await db.member.prune_roster("prune2", keep={"m1"})
+        assert pruned == ["m2"]
+        assert await self._roster_names(db, "prune2") == {"leader", "m1"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_prune_keeps_non_teammate_roles(self, db):
+        await self._seed_team(
+            db, team_name="prune3", leader="leader", teammates=("m1",),
+            human_agents=("h1",),
+        )
+        # h1 (human_agent) is not in keep and must survive the role guard.
+        pruned = await db.member.prune_roster("prune3", keep={"leader"})
+        assert pruned == ["m1"]
+        assert await self._roster_names(db, "prune3") == {"leader", "h1"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_prune_bumps_surviving_updated_at(self, db):
+        await self._seed_team(
+            db, team_name="prune4", leader="leader", teammates=("m1", "m2"),
+        )
+        before = await db.member.get_member("m1", "prune4")
+        await asyncio.sleep(0.01)  # guarantee updated_at advances past create time
+        await db.member.prune_roster("prune4", keep={"leader", "m1"})
+        after = await db.member.get_member("m1", "prune4")
+        assert before is not None and after is not None
+        assert after.updated_at > before.updated_at
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_prune_no_op_leaves_updated_at_untouched(self, db):
+        await self._seed_team(
+            db, team_name="prune5", leader="leader", teammates=("m1",),
+        )
+        before = (await db.member.get_member("m1", "prune5")).updated_at
+        # keep already contains everyone → nothing to delete, no bump.
+        pruned = await db.member.prune_roster("prune5", keep={"leader", "m1"})
+        assert pruned == []
+        after = (await db.member.get_member("m1", "prune5")).updated_at
+        assert after == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_prune_idempotent(self, db):
+        await self._seed_team(
+            db, team_name="prune6", leader="leader", teammates=("m1", "m2"),
+        )
+        await db.member.prune_roster("prune6", keep={"leader", "m1"})
+        second = await db.member.prune_roster("prune6", keep={"leader", "m1"})
+        assert second == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_prune_empty_keep_is_noop(self, db):
+        # Empty keep = "don't know who to retain" → no-op (fail-open), not a
+        # mass deletion. The dissolve handler relies on this safe default.
+        await self._seed_team(
+            db, team_name="prune7", leader="leader", teammates=("m1", "m2"),
+        )
+        pruned = await db.member.prune_roster("prune7", keep=set())
+        assert pruned == []
+        assert await self._roster_names(db, "prune7") == {"leader", "m1", "m2"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_prune_keep_leader_only_deletes_all_teammates(self, db):
+        # Explicit keep={leader} resets the team to leader-only.
+        await self._seed_team(
+            db, team_name="prune8", leader="leader", teammates=("m1", "m2"),
+        )
+        pruned = await db.member.prune_roster("prune8", keep={"leader"})
+        assert set(pruned) == {"m1", "m2"}
+        assert await self._roster_names(db, "prune8") == {"leader"}
