@@ -11,27 +11,27 @@ workflow/
 │   ├── facade.py        # 脚本 import 的稳定原语面（agent/agent_session/human_session/human/parallel/pipeline/phase/log/...）
 │   ├── seam.py          # Provider 协议 + contextvar（引擎可整体替换的接缝）
 │   ├── provider.py      # EngineProvider（把原语转发到 primitives）
-│   ├── primitives.py    # 原语实现：call-path keys / agent_gate.acquire() 并发 / journal；单轮 agent() + 有状态 AgentSession(send/notify/fork, 含 _member_name 首轮命名) + options bag；phase/log/agent 起止发 progress 事件
-│   ├── journal.py       # content-addressed resume（结构化 call-path 键 + sig；sig 可选折入 session history）
+│   ├── primitives.py    # 原语实现：call-path keys / agent_gate.acquire() 并发 / journal；单轮 agent() + 有状态 AgentSession(send/notify/fork, 含 _member_name 首轮命名) + options bag；phase/log/agent 起止发 progress 事件；缓存命中经 run_id 隔离并重建 per-run 花费（F_87）
+│   ├── journal.py       # content-addressed resume（结构化 call-path 键 + sig）+ run 级记录（get_cached 按 run_id 双重检查 / find_run_record / write_run_record，F_87 / F_88）
 │   ├── loader.py        # AST 提取 META + 确定性 lint + importlib 导入
 │   ├── schema.py        # agent(schema=) 解析/校验（dict / pydantic / None）
 │   ├── progress.py      # WorkflowProgressEvent（业务无关、无时间戳）+ ProgressSink
 │   ├── admission.py     # AgentAdmission 协议 + SemaphoreAdmission（engine 业务无关的并发接缝；见 S_21）
 │   ├── budget.py        # BudgetLedger：run 的 token 账本（total/spent/remaining/exhausted）——可共享引用，backend 记账、engine 只读（见 S_18 / F_66）
 │   ├── cap.py           # resolve_agents_per_run_cap（build 期与运行期共享的 L2 纯函数）
-│   ├── runtime.py       # Runtime：backend / journal / log_sink / progress_sink / agent_gate（替代旧 sem）/ budget（BudgetLedger）/ cap_override（仅 fallback）
+│   ├── runtime.py       # Runtime：backend / journal / log_sink / progress_sink / agent_gate（替代旧 sem）/ budget（BudgetLedger，session 级）/ workflow_budget（per-run BudgetLedger，F_87）/ run_id / current_agent / cap_override（仅 fallback）
 │   ├── runner.py        # run_workflow：装 provider、建 Runtime、发 workflow 起止事件、finally aclose backend
 │   └── backends/{base,mock}.py  # AgentBackend 抽象（run + 可选 open_session/send_turn/close_session/aclose + KNOWN_OPTIONS）+ 离线确定性 MockBackend（含 session 实现）
 ├── backends/
 │   ├── team_worker_backend.py   # TeamWorkerBackend：把每个 agent() 映射成一个 WORKER TeamHarness（核心对接）；委派会话四方法给 AvatarSessionManager
 │   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）+ fork（capture_fork 双来源[live native / checkpointer 恢复] / ensure_member_name 首轮命名 / 稳定 session_id 派生 / fork_data 注入 / 镜像兜底，见 F_81）
-│   ├── budget_rail.py           # SwarmflowBudgetRail：挂在每个 worker/avatar harness 上，after_model_call 读 usage_metadata 记真实 token、超预算 force-finish 就地停 harness（见 F_66）
+│   ├── budget_rail.py           # SwarmflowBudgetRail：挂在每个 worker/avatar harness 上，after_model_call 读 usage_metadata 记真实 token、超预算 force-finish 就地停 harness（见 F_66）；workflow_budget 非 None 时同时记 session 级 + per-run 级两层（F_87）
 │   └── _member_spec.py          # derive_member_spec / derive_member_build_context：worker 与 avatar 共享的 spec / build_context 派生
 │   # StructuredOutputTool 已下沉到 tools/structured_output_tool.py（通用工具，tiny_agent 也复用）；backends/__init__ 仍 re-export
 ├── schema.py            # 4 层 WorkflowRun → PhaseRecord → AgentActivity{prompt,activity,outcome}
 ├── observer.py          # WorkflowObserver：累积 4 层 + 可选 on_event 回调（republish team 事件）；to_frontend stub
 ├── runner.py            # run_swarmflow（真实 worker，接 resume journal 落盘）/ preprocess_swarmflow（MockBackend 预演，不落 journal）
-└── tool_swarmflow.py    # SwarmflowTool：leader 工具，NativeHarness 异步工具框架的第一个实现（AsyncTool 子类，启动即闭合 + 完成回灌）
+└── tool_swarmflow.py    # SwarmflowTool：leader 工具，NativeHarness 异步工具框架的第一个实现（AsyncTool 子类，启动即闭合 + 完成回灌）；_seal_guard 拦截 sealed run_id、relaunch_kind 信号区分 relaunch/resume、_format_early_return 注入改脚本指令、swarmflow_human_reply_topic 路由（F_87 / F_88）
 ```
 
 ## 四条铁律
@@ -72,3 +72,4 @@ workflow/
 - **内联 `script` 源码**由 `SwarmflowTool.invoke`（**同步启动轮内**，admit 之后）经 `materialize_swarmflow_script`（`runner.py`）落到 journal 同目录 `.../workflows/{META.name}/script.py`（幂等——resume 重写同路径），把解析后的绝对 `script_path` 回填进 enriched inputs（`run_background` / resume relaunch 一律从盘加载），并放进 `swarmflow.launched` 回执——leader 重跑 / 迭代直接传该路径，无需重发源码。再复用 path-based 加载链路（importlib 导入 + META 算 journal）；`load_workflow_meta` 从源码字符串取 META 走 `extract_workflow_meta`。`invoke` 校验：`script_path`（磁盘）/ `script`（内联）二者其一即可，`name` / `resume_id` 返回 "not supported yet"。materialize 失败先 `release_workflow(ticket)` 再返回错误。
 - **异步 I/O 约定（本模块所有落盘强制）**：协程内文件读写一律走 `aiofiles`——`aiofiles.open(...)` 写、`aiofiles.os.makedirs(...)` 建目录（范例见 `engine/journal.py` 与 `runner.materialize_swarmflow_script`）。**禁止**在 `async def` 里用同步 `open` / `Path.write_text` / `Path.read_text` / `os.makedirs`（阻塞共享事件循环），**也禁止**用 `asyncio.to_thread` 包一层同步写来充数（函数本就是 async、仓库已有 aiofiles，`to_thread` 是多余的一层）；helper 需要落盘就把它声明成 `async def` 让调用方 `await`，不要为省一个 await 退回同步 I/O。
 - **pause/resume 中断恢复（F_43）**：外部经 `Runner.run_agent_team_streaming(background_task_controller=)` 传入 `BackgroundTaskController`（`runtime/background_task_controller.py`）。`pause()` 三步停 swarmflow——engine `Runtime.abort_event`（`agent()`/`AgentSession.send()` 两 checkpoint：入口 gate 挡新调用 + pre-journal guard 让在途调用不落 WAL，raise `WorkflowAborted`(BaseException) 穿透 parallel/pipeline 的 `except Exception`）→ `TeamWorkerBackend.abort_sessions` → `AvatarSessionManager.abort_all`（abort agent+human session harness、cancel 等真人回复的 future）→ 顶层 task cancel（停 run_once worker + 解栈，WAL 保留）。三步顺序固定（sessions 必须在 cancel 前 abort，否则 supervisor 泄漏）。`resume()` 经 `SwarmflowTool._relaunch(inputs, session_id)` 用同 inputs 重新 launch、绕过 invoke，journal 命中前缀续跑；relaunch 由外部协程驱动、丢 leader 的 session 上下文，故 `_relaunch` 在 `launch_async_tool` 前 `set_session_id(原 session)`（新 task 在 create_task 时继承 context）——否则 resume 用错 journal 路径 + 进度发错 topic（外部 monitor 收不到、drain 卡死）。详见 `F_43` / `S_18`。
+- **run_id 隔离、双层 budget 与终态语义（F_87 / F_88）**：journal 缓存按 `run_id` 双重检查——`get_cached(ks, sig, run_id)` 让旧 run 记录自然失效，缓存命中经记录的 `tokens` 字段重建 per-run 花费（`Runtime.workflow_budget.add(cached_tokens)`），否则撞顶检测失灵。budget 分两层：`Runtime.budget`（session/leader 级，跨 run 共享）+ `Runtime.workflow_budget`（per-run，按 `META["workflow_token_limit"]` 建）；`SwarmflowBudgetRail` 双重计数，`workflow_budget=None` 时退化为纯 session 级。leader/TinyAgent 只算 session 级不算 per-run。`BudgetExhausted.scope` 区分：`workflow`=可重试（同 run_id relaunch），`session`=终端。终态对齐：early_return→`WORKFLOW_PAUSED`（可恢复，`_format_early_return` 注入改脚本指令）、session 撞顶/stop→`WORKFLOW_STOPPED`（终端）、workflow 撞顶→`WORKFLOW_FAILED`（可重试）。seal/pause 两类 run 级记录下沉 journal（`__run__:seal:{run_id}` / `__run__:pause:{run_id}`），`_seal_guard` 拦截 sealed run_id 强制新 run_id；stop 落 LLM 中途时 `CancelledError` 兜底 `task.uncancel()` 补 seal。`WorkflowProgressTeamEvent.relaunch_kind`（`relaunch` 整体替换 / `resume` 增量合并 / `None` 全新）由 `_publish` 透传；`swarmflow_human_reply_topic` run-scoped 避免 reply 路由竞态。

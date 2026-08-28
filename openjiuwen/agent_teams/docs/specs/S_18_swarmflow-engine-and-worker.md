@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-08-20 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md` |
+| 最近一次修订日期 | 2026-08-28 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md` |
 
 ## 范围 / 边界
 
@@ -61,6 +61,27 @@
 - **`BudgetExhausted` 是 `BaseException`**（与 `WorkflowAborted` 同理由：能被 `except Exception` 吞掉的天花板不叫天花板，须穿透 `parallel` / `pipeline` 分支体）。但语义相反——abort 可恢复（resume 重跑），exhausted 是**终态**（重跑只会撞同一个 gate），故 `SwarmflowTool.run_background` 单独捕获它转成 `BackendError`，让 async-tool runtime 注入 leader 读得到的失败；直接放 `BaseException` 上去会静默杀掉 task。
 - **允许小幅越界**：一次调用的用量只有返回后才入账，最后那次可以把 `spent` 顶过 `total`；`remaining()` 因此 clamp 到 0，不返回负数。要不越界就得预知成本——不可能。
 - **作用域是 leader，不是 run**：账本由 `agent_configurator` 在 `role==LEADER and enable_swarmflow` 时建一个，经 `inject_team_handles(SWARMFLOW_BUDGET)` → `TeamToolRail` → `create_team_tools` → `SwarmflowTool` → `run_swarmflow(budget=)` 下发（与 `swarmflow_concurrency` 完全平行的链路）。并发 run 抽同一个池，对齐工具描述里 `spent()`「跨主循环 + 所有工作流共享」的语义。配置入口是 `TeamAgentSpec.swarmflow_budget: int | None`（build 期校验 `>= 1`，与 `validate_swarmflow_concurrency` 同层）；**不是 `swarmflow()` 工具入参**——花钱上限是部署方的决定，不该由 leader 每次现编。
+
+### 双层 Budget 与 run_id 隔离（`F_87`）
+
+- **两层账本分立**：`Runtime.budget`（session/leader 级，跨 run 共享）之外，run 启动时按脚本
+  `META["workflow_token_limit"]` 建 per-run `BudgetLedger` 存 `Runtime.workflow_budget`。
+  `SwarmflowBudgetRail` 在 `after_model_call` 记账时，`workflow_budget` 非 None 则同时往
+  `self._budget.add(tokens)` 与 `self._wf_budget.add(tokens)` 各记一笔；`workflow_budget=None`
+  时退化为纯 session 级（向后兼容未配 `workflow_token_limit` 的脚本）。
+- **leader / TinyAgent 的 token 只算 session，不算 workflow**：leader 与判断意图的 TinyAgent
+  不属于某次 run 的 worker 群，其消耗进 session 账本但不进 per-run 账本——避免一次 run 的撞顶
+  被 leader 自身开销提前触发。`agent_configurator` 在 `enable_swarmflow` 时给 leader 挂
+  `SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None)`（per-run 账本由引擎在 run 启动时注入）。
+- **`BudgetExhausted.scope`**：`scope="workflow"`（per-run 账本撞顶）= 可重试，改脚本或调高
+  `workflow_token_limit` 后同 run_id relaunch；`scope="session"`（leader/session 账本撞顶）=
+  终端，需新建 session 或调高 `swarmflow_budget`。
+- **缓存命中必须重建花费**：`journal.get_cached(ks, sig, run_id)` 命中后，用记录里的 `tokens`
+  字段调 `rt.workflow_budget.add(cached_tokens)` 把当初那笔消耗加回本次 run 的 per-run 账本——
+  否则撞顶检测会把命中缓存当"免费"而失灵。
+- **`run_id` 进 journal 查询，不进 journal 路径**：journal 落盘路径仍由
+  `(team, session, workflow_name)` 决定（不变量），多 run 同名脚本共享同一 journal 文件；
+  `run_id` 只参与记录级的命中判定（`get_cached` 第三参数）。旧 run（无 run_id 字段）自然失效。
 - **Progress 可观测（结果回路与终态）**：
   - per-agent `tokens`：`AgentResult.tokens` → `_BackendCallResult.tokens` → `_emit_agent_completed` / `_emit_agent_failed`（cache-hit 时 `tokens=None`，budget 快照仍带）
   - `budget`：`_budget_snapshot(rt.budget)` → `{total, spent, remaining, scope="leader", exhausted}`
@@ -123,6 +144,47 @@ journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow` 把�
   数据 syscall,保持同步。)
 
 详见 `F_38`(路径接线)、`F_40`(落盘顺序 / WAL / 原子 / 异步)。
+
+### Run 级记录与可恢复性（`F_87` / `F_88`）
+
+journal 在 call-path 记录（`__call__:` 前缀）之外，新增 run 级记录，key 形如
+`__run__:{type}:{run_id}`，复用同一 journal 文件 + WAL 机制：
+
+- **`get_cached(ks, sig, run_id)`**：命中条件从 `(ks, sig)` 升级为 `(ks, sig, run_id)` 三元组。
+  旧 run（无 run_id 字段）自然失效——`run_id=None` 与新 run 的非空 run_id 比对为不等。命中后
+  用记录里的 `tokens` 字段重建 per-run 花费（见双层 Budget 节）。
+- **`find_run_record(run_id, record_type)`**：查某 run 是否有某类记录（当前 `seal` / `pause`）。
+- **`write_run_record(run_id, record_type, payload)`**：写 run 级记录，落 WAL + 刷进 `prior`
+  使同 run 查询可见。
+- **seal 记录**：run 终态时 `_write_seal_record(rt, terminal_status)` 写
+  `__run__:seal:{run_id}`（`terminal_status` = `completed` / `stopped`）。sealed run 不可 resume。
+- **pause 记录**：可恢复中断时 `_write_pause_record(rt, pause_reason)` 写
+  `__run__:pause:{run_id}`（`pause_reason` = `paused` / `early_return` /
+  `workflow_budget_exhausted`）。pause 记录的 run 可同 run_id resume。
+
+事件语义对齐（`F_88`）：
+
+| 场景 | 事件 | status | 记录 | 可恢复 |
+|---|---|---|---|---|
+| 正常完成 | `WORKFLOW_COMPLETED` | completed | seal(completed) | 否（终态） |
+| workflow 级 budget 撞顶 | `WORKFLOW_FAILED` | failed | pause(workflow_budget_exhausted) | 是（改脚本重试） |
+| session 级 budget 撞顶 | `WORKFLOW_STOPPED` | stopped | seal(stopped) | 否（终端） |
+| early_return（改脚本重跑） | `WORKFLOW_PAUSED` | paused | pause(early_return) | 是 |
+| pause/resume | `WORKFLOW_PAUSED` | paused | pause(paused) | 是 |
+| stop | `WORKFLOW_STOPPED` | stopped | seal(stopped) | 否 |
+
+- **CancelledError seal 兜底**：stop 落在 LLM 调用中途时 `WorkflowAborted` checkpoint 来不及触发，
+  `_exec_loaded` 的 `except asyncio.CancelledError` 检查 `rt.abort_event.reason == "stop"`，若然则
+  `task.uncancel()` 后补写 seal 再 raise——保证 stop 永远落 seal。
+- **seal guard**：`SwarmflowTool._seal_guard(script_path, resume_id)` 在 invoke 时若 `resume_id`
+  指向已 seal 的 run（`find_run_record(resume_id, "seal")` 命中），清空 `resume_id` → 强制
+  `new_swarmflow_run_id()`。best-effort，journal 读取失败只 debug log，不阻塞。
+- **`relaunch_kind`**：`WorkflowProgressTeamEvent.relaunch_kind: "relaunch" | "resume" | None`，
+  由 `SwarmflowTool._publish` 从 inputs 透传。`"relaunch"`（脚本编辑重跑，存在 resume_id 时
+  invoke 设置）= 整体替换 phase/agent 树；`"resume"`（pause→resume，`_relaunch` 设置）= 增量合并；
+  `None` = 全新 launch。
+- **`swarmflow_human_reply_topic(session_id, team_name, run_id)`**：human session 真人回复走专用
+  topic（run-scoped，避免与 leader team-event 订阅竞态）。
 
 ## 并发治理（`F_47` / `S_21`）
 
