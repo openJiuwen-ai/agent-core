@@ -313,39 +313,11 @@ class MemberDao:
             return int(value) if value is not None else 0
 
     async def prune_roster(self, team_name: str, keep: set[str]) -> list[str]:
-        """Delete teammate rows outside ``keep`` (leader + non-teammate roles protected).
+        """Delete teammate rows not present in ``keep``.
 
-        Prunes the persisted roster so a subsequent COLD_RECOVER does not
-        revive members removed from the team template. One write transaction:
-
-        1. SELECT the ``member_name`` of rows to delete — teammate-role rows
-           in this team whose name is not in ``keep`` and is not the team's
-           leader (``team_info.leader_member_name``). The leader row is stored
-           with role ``teammate`` (spawn default), so role alone cannot
-           protect it; the leader subquery is authoritative.
-        2. ``DELETE`` those rows.
-        3. When any row was deleted, ``UPDATE`` the surviving rows'
-           ``updated_at`` to now — the roster-mutation probe
-           (:meth:`get_members_max_updated_at`) must move so the recovered
-           leader re-renders the roster delta and stops dispatching to pruned
-           members.
-
-        Human-agent / bridge rows (role ``!= teammate``) are never deleted
-        even when absent from ``keep`` — the cost of mis-removing them
-        outweighs under-cleaning, and legitimate template members are in
-        ``keep`` anyway. Idempotent: a second call deletes nothing and returns
-        ``[]``. If ``team_info.leader_member_name`` is NULL the leader subquery
-        matches no row, so nothing is deleted (fail-closed).
-
-        Args:
-            team_name: Team identifier.
-            keep: Member names to retain. An empty set is a no-op (matches
-                the dissolve handler's fail-open rule — "don't cut when
-                unsure who to keep"); to reset a team to leader-only, pass
-                ``keep={leader_member_name}`` explicitly.
-
-        Returns:
-            The pruned member names (empty on no-op).
+        The leader and non-teammate rows are protected. An empty ``keep`` is a
+        no-op; pass the leader explicitly for a leader-only roster. Returns the
+        deleted member names.
         """
         if not keep:
             return []
