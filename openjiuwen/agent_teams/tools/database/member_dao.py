@@ -5,7 +5,7 @@
 
 from typing import List, Optional
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.schema.status import (
@@ -311,6 +311,87 @@ class MemberDao:
             )
             value = result.scalar_one_or_none()
             return int(value) if value is not None else 0
+
+    async def prune_roster(self, team_name: str, keep: set[str]) -> list[str]:
+        """Delete teammate rows outside ``keep`` (leader + non-teammate roles protected).
+
+        Prunes the persisted roster so a subsequent COLD_RECOVER does not
+        revive members removed from the team template. One write transaction:
+
+        1. SELECT the ``member_name`` of rows to delete — teammate-role rows
+           in this team whose name is not in ``keep`` and is not the team's
+           leader (``team_info.leader_member_name``). The leader row is stored
+           with role ``teammate`` (spawn default), so role alone cannot
+           protect it; the leader subquery is authoritative.
+        2. ``DELETE`` those rows.
+        3. When any row was deleted, ``UPDATE`` the surviving rows'
+           ``updated_at`` to now — the roster-mutation probe
+           (:meth:`get_members_max_updated_at`) must move so the recovered
+           leader re-renders the roster delta and stops dispatching to pruned
+           members.
+
+        Human-agent / bridge rows (role ``!= teammate``) are never deleted
+        even when absent from ``keep`` — the cost of mis-removing them
+        outweighs under-cleaning, and legitimate template members are in
+        ``keep`` anyway. Idempotent: a second call deletes nothing and returns
+        ``[]``. If ``team_info.leader_member_name`` is NULL the leader subquery
+        matches no row, so nothing is deleted (fail-closed).
+
+        Args:
+            team_name: Team identifier.
+            keep: Member names to retain. An empty set is a no-op (matches
+                the dissolve handler's fail-open rule — "don't cut when
+                unsure who to keep"); to reset a team to leader-only, pass
+                ``keep={leader_member_name}`` explicitly.
+
+        Returns:
+            The pruned member names (empty on no-op).
+        """
+        if not keep:
+            return []
+        from openjiuwen.agent_teams.schema.team import TeamRole
+        from openjiuwen.agent_teams.tools.models import Team
+
+        leader_subq = (
+            select(Team.leader_member_name)
+            .where(Team.team_name == team_name)
+            .scalar_subquery()
+        )
+        conditions = [
+            TeamMember.team_name == team_name,
+            TeamMember.member_name != leader_subq,
+            TeamMember.role == TeamRole.TEAMMATE.value,
+            TeamMember.member_name.notin_(keep),
+        ]
+
+        async with self._sessions.write() as session:
+            target_rows = (
+                await session.execute(
+                    select(TeamMember.member_name).where(*conditions)
+                )
+            ).all()
+            pruned = [row[0] for row in target_rows]
+            if not pruned:
+                return []
+            await session.execute(
+                delete(TeamMember).where(
+                    TeamMember.team_name == team_name,
+                    TeamMember.member_name.in_(pruned),
+                )
+            )
+            await session.execute(
+                update(TeamMember)
+                .where(TeamMember.team_name == team_name)
+                .values(updated_at=get_current_time())
+            )
+            await session.commit()
+            team_logger.info(
+                "Pruned %d roster member(s) for team %s: %s",
+                len(pruned),
+                team_name,
+                pruned,
+            )
+            return pruned
 
     async def update_member_status(
         self,
