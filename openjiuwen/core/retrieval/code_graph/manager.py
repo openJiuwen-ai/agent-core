@@ -158,6 +158,11 @@ class CodeGraphManager:
         self._evict_idle()
         self._evict_overflow()
 
+    async def reclaim_locked(self) -> None:
+        """Reclaim while holding the process lock."""
+        async with self._lock:
+            self.reclaim()
+
     def _evict_idle(self) -> None:
         """Drop entries unused longer than ``memory_idle_ttl_seconds``, even under quota."""
         ttl = self.memory_idle_ttl_seconds
@@ -298,7 +303,8 @@ class CodeGraphManager:
         generation.reader_count += 1
         return GraphLease(generation)
 
-    def release(self, lease: GraphLease) -> None:
+    @staticmethod
+    def release(lease: GraphLease) -> None:
         lease.release()
 
     async def ensure_fresh(
@@ -347,12 +353,7 @@ class CodeGraphManager:
             elif entry.limit_error is not None:
                 entry.limit_error = None
                 entry.limit_exceeded_digest = None
-            if (
-                entry.active is not None
-                and not entry.dirty_paths
-                and not entry.dirty_unknown
-                and entry.active.token.digest == token.digest
-            ):
+            if self._entry_matches_token(entry, token):
                 record_code_graph_event("index_memory", (time.perf_counter() - started) * 1000, cache_hit=True)
                 return entry.active
             task = entry.update_task
@@ -384,8 +385,17 @@ class CodeGraphManager:
                 "index is still updating; retry this tool shortly",
             ) from exc
 
+    @staticmethod
+    def _entry_matches_token(entry: GraphEntry, token: WorkspaceToken) -> bool:
+        active = entry.active
+        if active is None:
+            return False
+        if entry.dirty_paths or entry.dirty_unknown:
+            return False
+        return active.token.digest == token.digest
+
+    @staticmethod
     def _fresh_if_clean(
-        self,
         entry: GraphEntry,
         cfg: CodeGraphConfig,
         started: float,
@@ -398,16 +408,12 @@ class CodeGraphManager:
         """
         now = time.time()
         interval = max(0, int(cfg.freshness_check_interval_ms)) / 1000.0
-        if (
-            entry.active is not None
-            and not entry.dirty_paths
-            and not entry.dirty_unknown
-            and interval
-            and now - entry.last_freshness_at < interval
-        ):
-            record_code_graph_event("index_memory", (time.perf_counter() - started) * 1000, cache_hit=True)
-            return entry.active
-        return None
+        if entry.active is None or entry.dirty_paths or entry.dirty_unknown:
+            return None
+        if not interval or now - entry.last_freshness_at >= interval:
+            return None
+        record_code_graph_event("index_memory", (time.perf_counter() - started) * 1000, cache_hit=True)
+        return entry.active
 
     async def _update_entry(
         self,
@@ -631,8 +637,8 @@ class CodeGraphManager:
         )
         return index, published, False
 
+    @staticmethod
     def _plan_update(
-        self,
         entry: GraphEntry,
         cfg: CodeGraphConfig,
         token: WorkspaceToken,
@@ -665,8 +671,8 @@ class CodeGraphManager:
             return "full", []
         return "incremental", paths
 
+    @staticmethod
     def _make_generation(
-        self,
         entry: GraphEntry,
         index: CodeGraphIndex,
         token: WorkspaceToken,
@@ -728,7 +734,8 @@ class CodeGraphManager:
             self._save_checkpoint(store, entry, cfg, index)
             return index, False
 
-    def _restore_full_build_seconds(self, entry: GraphEntry, store: DiskIndexStore) -> None:
+    @staticmethod
+    def _restore_full_build_seconds(entry: GraphEntry, store: DiskIndexStore) -> None:
         if entry.last_full_build_seconds is not None:
             return
         seconds = store.load_full_build_seconds(entry.identity.repo_id)
@@ -754,8 +761,8 @@ class CodeGraphManager:
         except Exception as exc:  # noqa: BLE001 — checkpoint is best effort
             logger.warning("code_graph checkpoint failed: %s", exc)
 
+    @staticmethod
     def _save_checkpoint(
-        self,
         store: DiskIndexStore,
         entry: GraphEntry,
         cfg: CodeGraphConfig,
@@ -769,7 +776,8 @@ class CodeGraphManager:
             last_full_build_seconds=entry.last_full_build_seconds,
         )
 
-    def _store(self, cfg: CodeGraphConfig) -> DiskIndexStore | None:
+    @staticmethod
+    def _store(cfg: CodeGraphConfig) -> DiskIndexStore | None:
         if not cfg.cache_dir:
             return None
         return DiskIndexStore(cfg.cache_dir, max_size_mb=max(1, cfg.disk_quota_bytes() // (1024 * 1024)))
@@ -803,12 +811,10 @@ class CodeGraphManager:
         dirty = sorted(entry.dirty_paths)
         live_dirty: list[str] = []
         token_stale = False
-        if (
-            entry.active is not None
-            and entry.last_token is not None
-            and cfg is not None
-            and not updating
-        ):
+        can_probe_token = False
+        if entry.active is not None and entry.last_token is not None:
+            can_probe_token = cfg is not None and not updating
+        if can_probe_token:
             try:
                 live = compute_workspace_token(
                     entry.identity.canonical_root,
@@ -869,13 +875,15 @@ class CodeGraphManager:
             raise_if_resource_limits(cfg, rss_bytes=_current_rss_bytes())
             return await self._update_entry_body(entry, cfg, token, cancel)
 
-    def _bind_config(self, entry: GraphEntry, cfg: CodeGraphConfig) -> None:
+    @staticmethod
+    def _bind_config(entry: GraphEntry, cfg: CodeGraphConfig) -> None:
         """Keep the shared façade on the live yaml caps. One path, one entry."""
         entry.config_hash = cfg.config_hash()
         if entry.service is not None:
             entry.service.config = cfg
 
-    def _raised_cap_clears_limit(self, exc: object, cfg: CodeGraphConfig) -> bool:
+    @staticmethod
+    def _raised_cap_clears_limit(exc: object, cfg: CodeGraphConfig) -> bool:
         """True when the user raised the cap that previously refused this tree."""
         limit = str(getattr(exc, "limit", "") or "")
         try:
@@ -974,10 +982,10 @@ class CodeGraphManager:
         store = self._store(cfg)
         if store is None or not store.cache_dir.is_dir():
             return
-        protected = {DiskIndexStore._safe_part(keep.identity.repo_id)}
+        protected = {DiskIndexStore.safe_part(keep.identity.repo_id)}
         for key, item in self._entries.items():
             if self._windows_using(key, item):
-                protected.add(DiskIndexStore._safe_part(item.identity.repo_id))
+                protected.add(DiskIndexStore.safe_part(item.identity.repo_id))
         leftovers: list[tuple[float, str]] = []
         for child in store.cache_dir.iterdir():
             if not child.is_dir() or child.name in protected:
@@ -993,7 +1001,8 @@ class CodeGraphManager:
                 return
             store.delete_repo(repo_part)
 
-    def _clear_service_index(self, entry: GraphEntry) -> None:
+    @staticmethod
+    def _clear_service_index(entry: GraphEntry) -> None:
         service = entry.service
         if service is not None:
             service.clear_index()
@@ -1001,7 +1010,8 @@ class CodeGraphManager:
     def _resource_blocks_build(self, cfg: CodeGraphConfig) -> bool:
         return self._rss_blocks_build(cfg) or self._disk_blocks_build(cfg)
 
-    def _rss_blocks_build(self, cfg: CodeGraphConfig) -> bool:
+    @staticmethod
+    def _rss_blocks_build(cfg: CodeGraphConfig) -> bool:
         """True when this process is already too large to start another index build."""
         cap_mb = int(getattr(cfg, "max_build_rss_mb", 4096) or 0)
         if cap_mb <= 0:
@@ -1009,7 +1019,8 @@ class CodeGraphManager:
         current = _current_rss_bytes()
         return current > 0 and current >= cap_mb * 1024 * 1024
 
-    def _disk_blocks_build(self, cfg: CodeGraphConfig) -> bool:
+    @staticmethod
+    def _disk_blocks_build(cfg: CodeGraphConfig) -> bool:
         if not cfg.cache_dir:
             return False
         used = cache_dir_bytes(cfg.cache_dir)

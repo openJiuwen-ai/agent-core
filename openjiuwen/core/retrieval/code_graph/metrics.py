@@ -14,6 +14,13 @@ from typing import Any
 
 _lock = threading.Lock()
 _events: list[dict[str, Any]] = []
+_INDEX_KINDS = {
+    "index_build",
+    "index_cache_hit",
+    "index_memory",
+    "index_refresh",
+    "index_checkpoint",
+}
 
 
 def reset_code_graph_metrics() -> None:
@@ -37,12 +44,7 @@ def record_code_graph_event(kind: str, duration_ms: float, **fields: Any) -> Non
 def snapshot_code_graph_metrics() -> dict[str, Any]:
     with _lock:
         events = [dict(item) for item in _events]
-    index_events = [
-        item
-        for item in events
-        if item.get("kind")
-        in {"index_build", "index_cache_hit", "index_memory", "index_refresh", "index_checkpoint"}
-    ]
+    index_events = [item for item in events if item.get("kind") in _INDEX_KINDS]
     query_events = [item for item in events if str(item.get("kind") or "").startswith("query_")]
     build_ms = sum(item["duration_ms"] for item in index_events if item.get("kind") == "index_build")
     cache_ms = sum(

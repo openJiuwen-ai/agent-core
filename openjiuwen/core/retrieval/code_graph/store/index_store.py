@@ -162,7 +162,8 @@ class DiskIndexStore:
             parts = ["index"]
         return self.cache_dir.joinpath(*parts).with_suffix(".pkl")
 
-    def _load_path(self, path: Path) -> CodeGraphIndex | None:
+    @staticmethod
+    def _load_path(path: Path) -> CodeGraphIndex | None:
         try:
             with path.open("rb") as handle:
                 payload = pickle.load(handle)
@@ -180,7 +181,8 @@ class DiskIndexStore:
             return None
         return index
 
-    def _atomic_pickle(self, path: Path, index: CodeGraphIndex) -> None:
+    @staticmethod
+    def _atomic_pickle(path: Path, index: CodeGraphIndex) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=".codegraph-", suffix=".tmp", dir=path.parent)
         try:
@@ -251,7 +253,8 @@ class DiskIndexStore:
             return None
         return payload if isinstance(payload, dict) else None
 
-    def _drop_superseded(self, keep: Path) -> None:
+    @staticmethod
+    def _drop_superseded(keep: Path) -> None:
         """Remove older pickles in the same repo folder after the pointer moved."""
         parent = keep.parent
         if not parent.is_dir():
@@ -311,5 +314,7 @@ class DiskIndexStore:
                 break
 
     @staticmethod
-    def _safe_part(part: str) -> str:
+    def safe_part(part: str) -> str:
         return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in part) or "index"
+
+    _safe_part = safe_part

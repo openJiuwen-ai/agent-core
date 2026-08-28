@@ -201,7 +201,7 @@ async def test_corrupt_active_pickle_rebuilds_and_ignores_leftover(tmp_path: Pat
     reset_code_graph_manager()
 
     identity = RepoIdentity.from_path(repo)
-    folder = cache / DiskIndexStore._safe_part(identity.repo_id)
+    folder = cache / DiskIndexStore.safe_part(identity.repo_id)
     active_pickles = list(folder.glob("*.pkl"))
     assert len(active_pickles) == 1
     leftover = CodeGraphIndex(repo_root=str(repo), snapshot="ghost", config_hash="old")
