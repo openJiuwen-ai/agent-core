@@ -1115,6 +1115,39 @@ class ReActAgent(BaseAgent):
             sections.append((category, content, str(getattr(section, "carrier", "system_message"))))
         return sections
 
+    @staticmethod
+    def _call_usage_identifier(target: Any, *method_names: str) -> str | None:
+        """Read an optional identifier from a session/context duck type."""
+        if target is None:
+            return None
+        for method_name in method_names:
+            getter = getattr(target, method_name, None)
+            if not callable(getter):
+                continue
+            try:
+                value = getter()
+            except Exception:  # telemetry must not affect model execution
+                continue
+            if value is not None:
+                identifier = str(value).strip()
+                if identifier:
+                    return identifier
+        return None
+
+    @classmethod
+    def _usage_session_id(cls, ctx: AgentCallbackContext) -> str:
+        """Resolve a session id across supported session/context implementations."""
+        session_id = cls._call_usage_identifier(ctx.session, "get_session_id", "session_id")
+        if session_id:
+            return session_id
+        context_id = cls._call_usage_identifier(ctx.context, "session_id")
+        return context_id or "default"
+
+    @classmethod
+    def _usage_context_id(cls, context: Any, fallback: str) -> str:
+        """Resolve a context id with a session-id fallback for lightweight contexts."""
+        return cls._call_usage_identifier(context, "context_id", "session_id") or fallback
+
     def _context_usage_attribution(
         self,
         ctx: AgentCallbackContext,
@@ -1161,7 +1194,7 @@ class ReActAgent(BaseAgent):
         if not member_name:
             member_name = getattr(self, "member_name", None)
 
-        execution_session_id = str(session.get_session_id())
+        execution_session_id = self._usage_session_id(ctx)
         parent_session_id_getter = getattr(session, "get_parent_session_id", None)
         parent_session_id = (
             values.get("parent_session_id")
@@ -1184,7 +1217,7 @@ class ReActAgent(BaseAgent):
             except Exception:  # pragma: no cover - defensive for third-party sessions
                 logger.debug("Failed to resolve session cache identity for usage telemetry", exc_info=True)
 
-        context_id = ctx.context.context_id() if ctx.context is not None else "default"
+        context_id = self._usage_context_id(ctx.context, execution_session_id)
         context_owner_id = values.get("context_owner_id")
         if not context_owner_id:
             owner_parts = [team_id, member_name or agent_id or "agent", execution_session_id, context_id]
@@ -1222,7 +1255,7 @@ class ReActAgent(BaseAgent):
         if session is None:
             return "", 0
         request_id = uuid.uuid4().hex
-        session_id = session.get_session_id()
+        session_id = self._usage_session_id(ctx)
         sequence = self._context_usage_sequences.get(session_id, 0)
         self._context_usage_sequences[session_id] = sequence + 1
         ctx.context_usage_request_id = request_id
@@ -1295,8 +1328,9 @@ class ReActAgent(BaseAgent):
                     logger.debug("Failed to build request-local context usage report", exc_info=True)
 
         request_usage = request_usage_from_metadata(usage_metadata)
+        session_id = self._usage_session_id(ctx)
         scope_key = CacheAggregationKey(
-            session_id=session.get_session_id(),
+            session_id=session_id,
             provider=model_provider,
             model=model_name,
             deployment=str(self._config.api_base or ""),
@@ -1340,7 +1374,7 @@ class ReActAgent(BaseAgent):
                 "management": {},
                 "diagnostics": {"status": "not_collected"},
             }
-            event_session_id = attribution.get("product_session_id") or session.get_session_id()
+            event_session_id = attribution.get("product_session_id") or session_id
             if report is not None:
                 snapshot = analyzer.analyze_from_report(
                     report,

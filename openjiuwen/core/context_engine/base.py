@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
+from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter
 
 

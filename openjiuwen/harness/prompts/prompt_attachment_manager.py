@@ -560,9 +560,12 @@ class PromptAttachmentManager:
 
         async def mutator(context: ModelContext, window: ContextWindow) -> ContextWindow:
             context_history_messages = []
-            for message in context.get_messages(with_history=True):
-                if self._is_history_message(message):
-                    context_history_messages.append(message)
+            if context is not None:
+                get_messages = getattr(context, "get_messages", None)
+                if callable(get_messages):
+                    for message in get_messages(with_history=True):
+                        if self._is_history_message(message):
+                            context_history_messages.append(message)
 
             snapshot_message = None
             candidate_message_groups = (

@@ -250,6 +250,9 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
     assert window.context_messages[-1].content == delta.content
     assert window.get_messages()[1].content == snapshot.content
     assert window.get_messages()[-1].content == delta.content
+
+
+@pytest.mark.asyncio
 async def test_prompt_attachment_window_mutator_marks_homogeneous_usage_category():
     manager = PromptAttachmentManager()
     await manager.add_section(
