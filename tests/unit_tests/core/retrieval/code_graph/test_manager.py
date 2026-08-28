@@ -493,7 +493,7 @@ async def test_disk_quota_keeps_other_repo_while_a_window_is_reading(tmp_path: P
     older_id = RepoIdentity.from_path(older).repo_id
     from openjiuwen.core.retrieval.code_graph.store.index_store import DiskIndexStore
 
-    older_dir = cache / DiskIndexStore._safe_part(older_id)
+    older_dir = cache / DiskIndexStore.safe_part(older_id)
     older_dir.mkdir(parents=True, exist_ok=True)
     (older_dir / "filler.bin").write_bytes(b"x" * (2 * 1024 * 1024))
     manager._entries[older_id].active.reader_count = 1
@@ -518,7 +518,7 @@ async def test_disk_quota_deletes_unused_older_repo_then_builds(tmp_path: Path) 
     older_key = RepoIdentity.from_path(older).repo_id
     from openjiuwen.core.retrieval.code_graph.store.index_store import DiskIndexStore
 
-    older_dir = cache / DiskIndexStore._safe_part(older_key)
+    older_dir = cache / DiskIndexStore.safe_part(older_key)
     older_dir.mkdir(parents=True, exist_ok=True)
     (older_dir / "filler.bin").write_bytes(b"x" * (2 * 1024 * 1024))
     manager._entries[older_key].active.created_at = 1.0

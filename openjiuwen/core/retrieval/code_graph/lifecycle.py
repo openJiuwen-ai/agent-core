@@ -110,11 +110,12 @@ class GraphEntry:
 
     def normalize_dirty_paths(self) -> None:
         """Rewrite leftover absolute / realpath dirty entries to repo-relative."""
-        self.dirty_paths = {
-            rel
-            for raw in self.dirty_paths
-            if (rel := workspace_relative_path(self.identity.canonical_root, raw))
-        }
+        normalized: set[str] = set()
+        for raw in self.dirty_paths:
+            rel = workspace_relative_path(self.identity.canonical_root, raw)
+            if rel:
+                normalized.add(rel)
+        self.dirty_paths = normalized
 
     def mark_dirty_unknown(self) -> None:
         # First build has no published generation yet. A shell command during

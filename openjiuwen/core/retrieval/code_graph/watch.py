@@ -63,13 +63,10 @@ async def _watch_loop(repo_root: str, cfg: CodeGraphConfig, repo_id: str, interv
             if previous is None or previous == token.digest:
                 continue
             manager = get_code_graph_manager(cfg)
-            async with manager._lock:
-                manager.reclaim()
+            await manager.reclaim_locked()
             if token.dirty_paths:
                 manager.mark_dirty(repo_root, list(token.dirty_paths), source="watch", config=cfg)
             else:
                 manager.mark_dirty_unknown(repo_root, reason="watch", config=cfg)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001 — watcher must not kill the agent
             logger.warning("code_graph watch failed for %s: %s", repo_root, exc)

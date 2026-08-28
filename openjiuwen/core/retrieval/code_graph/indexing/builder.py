@@ -190,21 +190,30 @@ def resolve_relations(index: CodeGraphIndex) -> None:
     _resolve_calls(index, extracted, import_targets)
 
 
+def _filter_walk_dirnames(
+    dirnames: list[str],
+    rel_dir: str,
+    config: CodeGraphConfig,
+    gitignore: list[str],
+) -> list[str]:
+    kept: list[str] = []
+    for name in dirnames:
+        if config.excludes_dir_name(name):
+            continue
+        rel = name if not rel_dir else f"{rel_dir}/{name}"
+        if gitignore and _is_ignored(rel, gitignore):
+            continue
+        kept.append(name)
+    return kept
+
+
 def _iter_source_files(root: Path, config: CodeGraphConfig) -> list[Path]:
     gitignore = _load_gitignore(root)
     collected: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=config.follow_symlinks):
         current = Path(dirpath)
         rel_dir = "" if current == root else current.relative_to(root).as_posix()
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if not config.excludes_dir_name(name)
-            and not (
-                gitignore
-                and _is_ignored(name if not rel_dir else f"{rel_dir}/{name}", gitignore)
-            )
-        ]
+        dirnames[:] = _filter_walk_dirnames(dirnames, rel_dir, config, gitignore)
         for name in filenames:
             path = current / name
             rel = path.relative_to(root).as_posix()
@@ -711,15 +720,7 @@ def _iter_text_documents(root: Path, config: CodeGraphConfig) -> list[tuple[str,
     for dirpath, dirnames, filenames in os.walk(root, followlinks=config.follow_symlinks):
         current = Path(dirpath)
         rel_dir = "" if current == root else current.relative_to(root).as_posix()
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if not config.excludes_dir_name(name)
-            and not (
-                gitignore
-                and _is_ignored(name if not rel_dir else f"{rel_dir}/{name}", gitignore)
-            )
-        ]
+        dirnames[:] = _filter_walk_dirnames(dirnames, rel_dir, config, gitignore)
         for name in filenames:
             path = current / name
             suffix = path.suffix.lower()

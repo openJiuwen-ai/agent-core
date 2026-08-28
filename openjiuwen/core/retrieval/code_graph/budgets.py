@@ -28,8 +28,15 @@ def process_rss_bytes() -> int:
     try:
         import subprocess
 
+        ps_bin = ""
+        if os.path.isfile("/bin/ps"):
+            ps_bin = "/bin/ps"
+        elif os.path.isfile("/usr/bin/ps"):
+            ps_bin = "/usr/bin/ps"
+        if not ps_bin:
+            return 0
         completed = subprocess.run(
-            ["ps", "-o", "rss=", "-p", str(os.getpid())],
+            [ps_bin, "-o", "rss=", "-p", str(os.getpid())],
             capture_output=True,
             text=True,
             timeout=1,
