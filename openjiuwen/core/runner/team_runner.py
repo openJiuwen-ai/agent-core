@@ -603,6 +603,53 @@ class _TeamRunnerMixin:
             force=force,
         )
 
+    async def prune_agent_team_roster(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+        keep_members: set[str] | None,
+    ) -> list[str]:
+        """Prune ``team_member`` rows outside ``keep_members`` after a reset.
+
+        Counterpart to :meth:`reset_agent_team_session` for roster
+        reconciliation: when a session's team template has dropped a member,
+        the persisted ``team_member`` row survives ``reset_agent_team_session``
+        (roster is kept for COLD_RECOVER) and would revive the deleted member
+        on the next chat.send. This removes such rows so COLD_RECOVER rebuilds
+        only the surviving roster.
+
+        ``keep_members=None`` is a no-op (caller could not resolve the live
+        template — fail-open, preserve today's behavior). Resolves the shared
+        ``TeamDatabase`` from the session checkpoint (kept by reset, so this
+        is callable after :meth:`reset_agent_team_session` returns) via the
+        same recipe ``delete_team`` uses — independent of the now-evicted live
+        TeamAgent. Raises on database errors so the dissolve caller can fail
+        the response and let the relay retry (prune is idempotent).
+        """
+        if keep_members is None:
+            return []
+        manager = self._get_team_runtime_manager()
+        try:
+            release_info = await manager.resolve_team_session_release_info(session_id)
+        except RuntimeError as exc:
+            team_logger.warning(
+                "prune_agent_team_roster: cannot resolve release info for "
+                "session={} team={}: {} — skipping prune (fail-open)",
+                session_id,
+                team_name,
+                exc,
+            )
+            return []
+        if release_info is None:
+            return []
+
+        from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
+        db = get_shared_db(release_info.db_config)
+        await db.initialize()
+        return await db.member.prune_roster(team_name=team_name, keep=keep_members)
+
     # ------------------------------------------------------------------
     # release helper called from _RunnerImpl.release
     # ------------------------------------------------------------------
@@ -1150,6 +1197,25 @@ class _TeamRunnerClassMixin:
             team_name=team_name,
             session_id=session_id,
             force=force,
+        )
+
+    @classmethod
+    async def prune_agent_team_roster(
+        cls,
+        *,
+        team_name: str,
+        session_id: str,
+        keep_members: set[str] | None,
+    ) -> list[str]:
+        """Prune ``team_member`` rows outside ``keep_members`` (after a reset).
+
+        ``keep_members=None`` skips pruning (no-op). Raises on database errors
+        so the dissolve caller can fail the response and let the relay retry.
+        """
+        return await _global_runner().prune_agent_team_roster(
+            team_name=team_name,
+            session_id=session_id,
+            keep_members=keep_members,
         )
 
 

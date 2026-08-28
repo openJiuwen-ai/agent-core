@@ -891,6 +891,35 @@ async def test_read_file_tool_allows_large_text_with_explicit_limit(sys_op, temp
     assert "line-1" in result.data["content"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extension", [".docx", ".xlsx", ".pptx"])
+async def test_read_file_tool_office_docs_bypass_plain_text_size_limit(
+    sys_op,
+    temp_dir,
+    monkeypatch,
+    extension,
+):
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, f"large{extension}")
+    with open(file_path, "wb") as fh:
+        fh.write(b"A" * (ReadFileTool.MAX_SIZE_BYTES + 1))
+
+    calls = []
+
+    async def read_office_doc(_self, path):
+        calls.append(path)
+        return "     1\tparsed office content"
+
+    monkeypatch.setattr(read_tool, "_read_office_doc", MethodType(read_office_doc, read_tool))
+
+    result = await read_tool.invoke({"file_path": file_path})
+
+    assert result.success is True
+    assert result.data["content"] == "     1\tparsed office content"
+    assert calls == [file_path]
+    assert file_path not in _FILE_READ_REGISTRY
+
+
 def test_read_file_tool_capability_flags_keep_backward_compatibility():
     assert ReadFileTool.is_read_only() is True
     assert ReadFileTool.is_concurrency_safe() is True

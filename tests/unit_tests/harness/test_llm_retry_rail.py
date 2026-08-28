@@ -171,6 +171,48 @@ async def test_before_invoke_resets_retry_counters():
 
     assert rail.repeat_retry_count == 0
     assert rail.stream_timeout_retry_count == 0
+    assert rail.transient_invoke_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_invoke_exception_retries_twice_then_resets():
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    ctx.exception = RuntimeError("Connection error.")
+
+    await rail.on_model_exception(ctx)
+    await rail.on_model_exception(ctx)
+    await rail.on_model_exception(ctx)
+
+    assert ctx.request_retry.call_count == 2
+    assert [call.kwargs["delay_seconds"] for call in ctx.request_retry.call_args_list] == [0.5, 1.0]
+    assert rail.transient_invoke_retry_count == 0
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Connection error.", True),
+        ("Request timed out.", True),
+        ("Too many requests", False),
+        ("maximum context length is 128000", False),
+    ],
+)
+def test_is_transient_invoke_exception(message, expected):
+    assert LLMRetryRail._is_transient_invoke_exception(RuntimeError(message)) is expected
+
+
+@pytest.mark.asyncio
+async def test_transient_invoke_retry_can_be_disabled():
+    rail = LLMRetryRail(max_retries=2, retry_transient_invoke_errors=False)
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    ctx.exception = RuntimeError("Connection error.")
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_not_called()
 
 
 @pytest.mark.asyncio
