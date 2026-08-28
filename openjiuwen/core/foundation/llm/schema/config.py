@@ -19,6 +19,13 @@ class ProviderType(str, Enum):
     SiliconFlow = "SiliconFlow"
     DashScope = "DashScope"
     DeepSeek = "DeepSeek"
+    Moonshot = "Moonshot"
+    MiniMax = "MiniMax"
+    ModelArts = "ModelArts"
+    VolcEngine = "VolcEngine"
+    Qianfan = "Qianfan"
+    Zhipu = "Zhipu"
+    MiMo = "MiMo"
     InferenceAffinity = "InferenceAffinity"
     AscendAffinity = "AscendAffinity"
     IntelliRouter = "intelli_router"
@@ -52,6 +59,15 @@ class LLMExtensionsConfig(BaseModel):
     request_extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReasoningConfig(BaseModel):
+    """Provider-neutral reasoning/thinking request intent."""
+
+    mode: Literal["auto", "enabled", "disabled"] = Field(default="auto")
+    effort: Optional[str] = Field(default=None)
+    budget_tokens: Optional[int] = Field(default=None, ge=0)
+    model_config = {"extra": "forbid"}
+
+
 _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.OpenAI.value,
     ProviderType.OpenRouter.value,
@@ -59,6 +75,13 @@ _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.SiliconFlow.value,
     ProviderType.DashScope.value,
     ProviderType.DeepSeek.value,
+    ProviderType.Moonshot.value,
+    ProviderType.MiniMax.value,
+    ProviderType.ModelArts.value,
+    ProviderType.VolcEngine.value,
+    ProviderType.Qianfan.value,
+    ProviderType.Zhipu.value,
+    ProviderType.MiMo.value,
     ProviderType.InferenceAffinity.value,
 }
 _TOP_LEVEL_API_BASE_PROVIDERS = _TOP_LEVEL_API_KEY_PROVIDERS | {ProviderType.OpenAIAccount.value}
@@ -194,5 +217,9 @@ class ModelRequestConfig(BaseModel):
     context_window: Optional[int] = Field(
         default=None,
         description="Maximum context window supported by the model, in tokens; internal context metadata",
+    )
+    reasoning: Optional[Union[ReasoningConfig, dict[str, Any]]] = Field(
+        default=None,
+        description="Provider-neutral reasoning/thinking request intent. Legacy raw reasoning dicts remain accepted.",
     )
     model_config = {"extra": "allow", "populate_by_name": True}

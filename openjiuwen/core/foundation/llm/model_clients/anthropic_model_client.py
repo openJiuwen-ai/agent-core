@@ -44,6 +44,13 @@ from openjiuwen.core.foundation.llm.headers_helper import (
     build_base_headers,
     merge_request_headers,
 )
+from openjiuwen.core.foundation.llm.reasoning import (
+    UNSET_REASONING,
+    apply_reasoning_plan,
+    is_reasoning_config_intent,
+    reasoning_request_controls,
+    resolve_reasoning_plan,
+)
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema import (
@@ -643,6 +650,11 @@ class AnthropicModelClient(BaseModelClient):
             stream: bool,
             **kwargs,
     ) -> dict:
+        explicit_reasoning = kwargs.pop("reasoning", UNSET_REASONING)
+        reasoning_kwargs = dict(kwargs)
+        if explicit_reasoning is not UNSET_REASONING:
+            reasoning_kwargs["reasoning"] = explicit_reasoning
+
         openai_params = super()._build_request_params(
             messages=messages,
             tools=tools,
@@ -653,6 +665,16 @@ class AnthropicModelClient(BaseModelClient):
             max_tokens=max_tokens,
             stream=stream,
             **kwargs,
+        )
+        apply_reasoning_plan(
+            openai_params,
+            resolve_reasoning_plan(
+                self.model_client_config,
+                self.model_config,
+                request_model=model,
+                explicit_kwargs=reasoning_kwargs,
+            ),
+            override=is_reasoning_config_intent(explicit_reasoning),
         )
 
         oai_messages: List[dict] = openai_params.get("messages") or []
@@ -688,6 +710,22 @@ class AnthropicModelClient(BaseModelClient):
             if key in openai_params:
                 params[key] = openai_params[key]
 
+        # Manual thinking.budget_tokens shares the response ceiling with the
+        # final answer. Official Anthropic and compatible gateways require
+        # max_tokens > budget_tokens; raise the ceiling instead of silently
+        # shrinking the requested thinking depth.
+        thinking_cfg = params.get("thinking")
+        if isinstance(thinking_cfg, Mapping):
+            budget = thinking_cfg.get("budget_tokens")
+            if isinstance(budget, int) and params["max_tokens"] <= budget:
+                llm_logger.debug(
+                    "Anthropic: raising max_tokens from %s to %s so it exceeds "
+                    "thinking.budget_tokens.",
+                    params["max_tokens"],
+                    budget + 1024,
+                )
+                params["max_tokens"] = budget + 1024
+
         # Compatible gateways may add fields that are not keyword parameters
         # in the Anthropic SDK. Send them through extra_body so the SDK merges
         # them into JSON instead of raising TypeError before the HTTP request.
@@ -700,6 +738,15 @@ class AnthropicModelClient(BaseModelClient):
                 extra_body[key] = openai_params[key]
         if extra_body:
             params["extra_body"] = extra_body
+        reasoning_controls = reasoning_request_controls(params)
+        if reasoning_controls:
+            logger.info(
+                "Resolved Anthropic-compatible reasoning request controls: "
+                "model=%s provider=%s controls=%s",
+                params.get("model"),
+                self.model_client_config.client_provider,
+                reasoning_controls,
+            )
         anthropic_tool_choice = _convert_tool_choice(openai_params.get("tool_choice"))
         if anthropic_tool_choice is not None:
             params["tool_choice"] = anthropic_tool_choice

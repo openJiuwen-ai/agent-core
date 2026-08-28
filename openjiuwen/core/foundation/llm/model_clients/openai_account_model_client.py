@@ -12,6 +12,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.headers_helper import build_base_headers, merge_request_headers
+from openjiuwen.core.foundation.llm.reasoning import (
+    UNSET_REASONING,
+    apply_reasoning_plan,
+    resolve_reasoning_plan,
+)
 from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
     DEFAULT_OPENAI_ACCOUNT_BASE_URL as _DEFAULT_OPENAI_ACCOUNT_BASE_URL,
     OpenAIAccountAuthError,
@@ -331,7 +336,10 @@ class OpenAIAccountModelClient(BaseModelClient):
         configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
         final_stop = stop if stop is not None else self.model_config.stop
 
-        reasoning = kwargs.pop("reasoning", {"effort": "medium", "summary": "auto"})
+        explicit_reasoning = kwargs.pop("reasoning", UNSET_REASONING)
+        reasoning_kwargs = dict(kwargs)
+        if explicit_reasoning is not UNSET_REASONING:
+            reasoning_kwargs["reasoning"] = explicit_reasoning
         extra_body = kwargs.pop("extra_body", None)
         tool_choice = kwargs.pop("tool_choice", "auto")
         parallel_tool_calls = kwargs.pop("parallel_tool_calls", True)
@@ -346,10 +354,28 @@ class OpenAIAccountModelClient(BaseModelClient):
                 "max_tokens",
                 "stop",
                 "context_window",
+                "reasoning",
             },
             exclude_none=True,
         )
         request_extra.update(kwargs)
+        reasoning_plan = resolve_reasoning_plan(
+            self.model_client_config,
+            self.model_config,
+            request_model=model,
+            explicit_kwargs=reasoning_kwargs,
+        )
+        reasoning_params: dict[str, Any] = {}
+        apply_reasoning_plan(reasoning_params, reasoning_plan)
+        if "reasoning" in reasoning_params:
+            reasoning = reasoning_params["reasoning"]
+        elif explicit_reasoning is UNSET_REASONING and getattr(self.model_config, "reasoning", None) is None:
+            reasoning = {"effort": "medium", "summary": "auto"}
+        else:
+            reasoning = None
+        resolved_extra_body = dict(reasoning_params.get("extra_body") or {})
+        resolved_extra_body.update(request_extra)
+        resolved_extra_body.update(extra_body or {})
 
         return build_request_body(
             model=final_model,
@@ -363,7 +389,7 @@ class OpenAIAccountModelClient(BaseModelClient):
             include_reasoning_encrypted_content=include_reasoning,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
-            extra_body={**request_extra, **(extra_body or {})} or None,
+            extra_body=resolved_extra_body or None,
         )
 
     async def _invoke_once(

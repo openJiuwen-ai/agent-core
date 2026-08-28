@@ -5,6 +5,12 @@
 from openjiuwen.core.foundation.llm.model import Model, init_model
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.reasoning import (
+    get_provider_reasoning_rules,
+    get_reasoning_capability,
+    get_reasoning_capability_catalog,
+)
+from openjiuwen.core.foundation.llm.reasoning_profiles import ReasoningCapability
 
 # Configuration
 from openjiuwen.core.foundation.llm.schema.config import (
@@ -12,6 +18,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     LLMAuthMode,
     LLMExtensionsConfig,
     KVCacheExtensionConfig,
+    ReasoningConfig,
     ModelRequestConfig,
     ModelClientConfig,
     ProviderType,
@@ -59,8 +66,16 @@ _CONFIG_CLASSES = [
     "LLMAuthMode",
     "LLMExtensionsConfig",
     "KVCacheExtensionConfig",
+    "ReasoningConfig",
     "BaseModelInfo",
     "ModelConfig"
+]
+
+_REASONING_APIS = [
+    "ReasoningCapability",
+    "get_provider_reasoning_rules",
+    "get_reasoning_capability",
+    "get_reasoning_capability_catalog",
 ]
 
 # Message classes
@@ -99,6 +114,7 @@ _PREBUILT_OUTPUT_PARSERS = [
 __all__ = (
     _CORE_CLASSES
     + _CONFIG_CLASSES
+    + _REASONING_APIS
     + _MESSAGE_CLASSES
     + _MESSAGE_CHUNK_CLASSES
     + _TOOL_CLASSES

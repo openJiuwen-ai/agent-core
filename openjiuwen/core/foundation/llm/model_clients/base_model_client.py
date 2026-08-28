@@ -453,6 +453,8 @@ class BaseModelClient(ABC):
                 # Context metadata is consumed by the context engine and must
                 # never be sent as a provider SDK request parameter.
                 "context_window",
+                # Provider-neutral intent; resolved into wire controls separately.
+                "reasoning",
             },
             exclude_none=True
         )

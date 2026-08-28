@@ -170,7 +170,18 @@ def test_anthropic_provider_routes_to_anthropic_client():
 
 
 def test_openai_profiles_route_to_unified_openai_client():
-    for profile in ("openrouter", "siliconflow", "dashscope"):
+    for profile in (
+        "openrouter",
+        "siliconflow",
+        "dashscope",
+        "moonshot",
+        "minimax",
+        "modelarts",
+        "qianfan",
+        "volcengine",
+        "zhipu",
+        "mimo",
+    ):
         config = ModelClientConfig(
             client_provider="OpenAI",
             endpoint_profile=profile,
@@ -183,6 +194,73 @@ def test_openai_profiles_route_to_unified_openai_client():
 
         assert isinstance(client, OpenAIModelClient)
         assert client.model_client_config.endpoint_profile == profile
+
+
+def test_vendor_aliases_route_to_openai_client_by_default():
+    for provider, profile in (
+        ("Moonshot", "moonshot"),
+        ("MiniMax", "minimax"),
+        ("ModelArts", "modelarts"),
+        ("VolcEngine", "volcengine"),
+        ("Qianfan", "qianfan"),
+        ("Zhipu", "zhipu"),
+        ("MiMo", "mimo"),
+    ):
+        config = ModelClientConfig(
+            client_provider=provider,
+            api_key="sk-test",
+            api_base="https://example.test/v1",
+            verify_ssl=False,
+        )
+
+        client = create_model_client(config, _request_config())
+
+        assert isinstance(client, OpenAIModelClient)
+        assert client.model_client_config.client_provider == ProviderType.OpenAI.value
+        assert client.model_client_config.endpoint_profile == profile
+        assert client.model_client_config.legacy_client_provider == provider
+
+
+def test_vendor_aliases_route_to_anthropic_client_when_api_mode_requests_messages():
+    for provider, profile in (
+        ("Moonshot", "moonshot"),
+        ("MiniMax", "minimax"),
+        ("ModelArts", "modelarts"),
+        ("VolcEngine", "volcengine"),
+        ("Qianfan", "qianfan"),
+        ("Zhipu", "zhipu"),
+        ("MiMo", "mimo"),
+    ):
+        config = ModelClientConfig(
+            client_provider=provider,
+            api_mode=LLMApiMode.AnthropicMessages,
+            api_key="sk-test",
+            api_base="https://example.test",
+            verify_ssl=False,
+        )
+
+        client = create_model_client(config, _request_config())
+
+        assert isinstance(client, AnthropicModelClient)
+        assert client.model_client_config.client_provider == ProviderType.Anthropic.value
+        assert client.model_client_config.endpoint_profile == profile
+        assert client.model_client_config.legacy_client_provider == provider
+
+
+def test_openai_provider_with_anthropic_api_mode_routes_to_anthropic_client():
+    config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="minimax",
+        api_mode=LLMApiMode.AnthropicMessages,
+        api_key="sk-test",
+        api_base="https://api.minimaxi.com/anthropic",
+        verify_ssl=False,
+    )
+
+    client = create_model_client(config, _request_config())
+
+    assert isinstance(client, AnthropicModelClient)
+    assert client.model_client_config.endpoint_profile == "minimax"
 
 
 def test_openai_kv_extensions_route_to_unified_openai_client():

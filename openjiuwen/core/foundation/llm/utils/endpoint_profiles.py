@@ -52,6 +52,17 @@ ENDPOINT_PROFILES: dict[str, EndpointProfile] = {
     "openrouter": EndpointProfile(name="openrouter"),
     "siliconflow": EndpointProfile(name="siliconflow"),
     "dashscope": EndpointProfile(name="dashscope"),
+    "moonshot": EndpointProfile(name="moonshot"),
+    "minimax": EndpointProfile(name="minimax"),
+    "modelarts": EndpointProfile(name="modelarts"),
+    "qianfan": EndpointProfile(name="qianfan"),
+    "volcengine": EndpointProfile(name="volcengine"),
+    "zhipu": EndpointProfile(name="zhipu"),
+    "mimo": EndpointProfile(name="mimo"),
+    # Self-hosted vLLM/SGLang-style OpenAI-compatible gateways. These honor
+    # enable_thinking / chat_template_kwargs instead of the official vendor
+    # thinking controls, regardless of which model family they serve.
+    "vllm": EndpointProfile(name="vllm"),
     "ollama": EndpointProfile(
         name="ollama",
         default_api_base="http://localhost:11434/v1",
@@ -60,7 +71,6 @@ ENDPOINT_PROFILES: dict[str, EndpointProfile] = {
         name="lmstudio",
         default_api_base="http://localhost:1234/v1",
     ),
-    "vllm": EndpointProfile(name="vllm"),
     "sglang": EndpointProfile(name="sglang"),
 }
 
@@ -82,6 +92,34 @@ LEGACY_PROVIDER_ALIASES: dict[str, dict[str, Any]] = {
         "client_provider": ProviderType.OpenAI.value,
         "endpoint_profile": "dashscope",
     },
+    ProviderType.Moonshot.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "moonshot",
+    },
+    ProviderType.MiniMax.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "minimax",
+    },
+    ProviderType.ModelArts.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "modelarts",
+    },
+    ProviderType.VolcEngine.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "volcengine",
+    },
+    ProviderType.Qianfan.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "qianfan",
+    },
+    ProviderType.Zhipu.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "zhipu",
+    },
+    ProviderType.MiMo.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "mimo",
+    },
     ProviderType.InferenceAffinity.value: {
         "client_provider": ProviderType.OpenAI.value,
         "endpoint_profile": "openai_compatible",
@@ -102,6 +140,18 @@ LEGACY_PROVIDER_ALIASES: dict[str, dict[str, Any]] = {
         "api_mode": LLMApiMode.Responses.value,
         "auth_mode": LLMAuthMode.OpenAIAccountOAuth.value,
     },
+}
+_ANTHROPIC_COMPATIBLE_PROVIDER_ALIASES = {
+    ProviderType.DeepSeek.value,
+    ProviderType.OpenRouter.value,
+    ProviderType.DashScope.value,
+    ProviderType.Moonshot.value,
+    ProviderType.MiniMax.value,
+    ProviderType.ModelArts.value,
+    ProviderType.VolcEngine.value,
+    ProviderType.Qianfan.value,
+    ProviderType.Zhipu.value,
+    ProviderType.MiMo.value,
 }
 
 
@@ -149,6 +199,10 @@ def normalize_model_client_config(config: ModelClientConfig) -> ModelClientConfi
     alias = LEGACY_PROVIDER_ALIASES.get(provider)
     if not alias:
         return config
+    alias = dict(alias)
+    api_mode = config.api_mode.value if hasattr(config.api_mode, "value") else config.api_mode
+    if api_mode == LLMApiMode.AnthropicMessages.value and provider in _ANTHROPIC_COMPATIBLE_PROVIDER_ALIASES:
+        alias["client_provider"] = ProviderType.Anthropic.value
 
     data = config.model_dump()
     explicit_data = config.model_dump(exclude_unset=True)

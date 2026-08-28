@@ -318,7 +318,7 @@ class TestApplyModelSpecificParams:
         assert "extra_body" not in params
 
 
-class TestDisabledThinkingCompatibility:
+class TestDisabledThinkingIntent:
     @staticmethod
     def _disabled_request_kwargs() -> dict:
         return {
@@ -337,79 +337,6 @@ class TestDisabledThinkingCompatibility:
             },
             "reasoning_effort": "off",
         }
-
-    @pytest.mark.asyncio
-    async def test_invoke_retries_without_disabled_thinking_on_1210_and_caches_by_model(self):
-        client = _make_client()
-        sdk_client = _mock_sdk_client(
-            _unsupported_disabled_thinking_error(),
-            _response("fallback"),
-            _response("cached"),
-            _response("other"),
-        )
-
-        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            result = await client.invoke("hello", **self._disabled_request_kwargs())
-            cached_result = await client.invoke("hello again", **self._disabled_request_kwargs())
-            other_result = await client.invoke(
-                "hello other",
-                model="other-model",
-                **self._disabled_request_kwargs(),
-            )
-
-        assert result.content == "fallback"
-        assert cached_result.content == "cached"
-        assert other_result.content == "other"
-        assert sdk_client.chat.completions.create.call_count == 4
-
-        first_call = sdk_client.chat.completions.create.call_args_list[0].kwargs
-        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
-        cached_call = sdk_client.chat.completions.create.call_args_list[2].kwargs
-        other_model_call = sdk_client.chat.completions.create.call_args_list[3].kwargs
-
-        assert first_call["extra_body"] == {
-            "routing": "blue",
-            "thinking": {"type": "disabled"},
-        }
-        assert first_call["enable_thinking"] is False
-        assert first_call["chat_template_kwargs"]["enable_thinking"] is False
-        assert first_call["reasoning"]["enabled"] is False
-        assert first_call["reasoning_effort"] == "off"
-
-        for call in (retry_call, cached_call):
-            assert call["model"] == "MiniMax-M3"
-            assert call["extra_body"] == {"routing": "blue"}
-            assert "enable_thinking" not in call
-            assert call["chat_template_kwargs"] == {"template": "keep"}
-            assert call["reasoning"] == {"budget": 32}
-            assert "reasoning_effort" not in call
-
-        assert other_model_call["model"] == "other-model"
-        assert other_model_call["extra_body"] == {
-            "routing": "blue",
-            "thinking": {"type": "disabled"},
-        }
-        assert other_model_call["enable_thinking"] is False
-
-    @pytest.mark.asyncio
-    async def test_stream_retries_without_disabled_thinking_on_1210(self):
-        client = _make_client()
-        sdk_client = _mock_sdk_client(
-            _unsupported_disabled_thinking_error(),
-            _stream_response("a", "b"),
-        )
-
-        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            chunks = [chunk.content async for chunk in client.stream("hello", **self._disabled_request_kwargs())]
-
-        assert chunks == ["a", "b"]
-        assert sdk_client.chat.completions.create.call_count == 2
-        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
-        assert retry_call["extra_body"] == {"routing": "blue"}
-        assert "enable_thinking" not in retry_call
-        assert retry_call["chat_template_kwargs"] == {"template": "keep"}
-        assert retry_call["reasoning"] == {"budget": 32}
-        assert "reasoning_effort" not in retry_call
 
     @pytest.mark.asyncio
     async def test_supported_disabled_thinking_request_is_sent_once_unchanged(self):
@@ -431,72 +358,27 @@ class TestDisabledThinkingCompatibility:
         assert sent_call["reasoning"]["enabled"] is False
         assert sent_call["reasoning_effort"] == "off"
 
-    @pytest.mark.parametrize(
-        ("request_kwargs", "error"),
-        [
-            (
-                {"extra_body": {"routing": "blue"}},
-                _unsupported_disabled_thinking_error(),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError(
-                    "Unauthorized",
-                    status_code=401,
-                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
-                ),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError(
-                    "Rate limited",
-                    status_code=429,
-                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
-                ),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                TimeoutError("timed out"),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError(
-                    "Server error",
-                    status_code=500,
-                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
-                ),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError("Bad request: invalid temperature", status_code=400),
-            ),
-        ],
-    )
     @pytest.mark.asyncio
-    async def test_non_compatibility_errors_do_not_retry(self, request_kwargs, error):
+    async def test_rejected_disable_is_not_silently_retried_with_model_defaults(self):
         client = _make_client()
-        sdk_client = _mock_sdk_client(error)
+        sdk_client = _mock_sdk_client(_unsupported_disabled_thinking_error())
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
             with pytest.raises(BaseError):
-                await client.invoke("hello", **request_kwargs)
+                await client.invoke("hello", **self._disabled_request_kwargs())
 
         assert sdk_client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_fallback_failure_is_not_retried_again(self):
+    async def test_stream_rejected_disable_is_not_silently_retried(self):
         client = _make_client()
-        sdk_client = _mock_sdk_client(
-            _unsupported_disabled_thinking_error(),
-            _OpenAIStyleError("fallback failed", status_code=400),
-        )
+        sdk_client = _mock_sdk_client(_unsupported_disabled_thinking_error())
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            with pytest.raises(BaseError) as exc_info:
-                await client.invoke("hello", **self._disabled_request_kwargs())
+            with pytest.raises(BaseError):
+                _ = [chunk async for chunk in client.stream("hello", **self._disabled_request_kwargs())]
 
-        assert "fallback failed" in str(exc_info.value)
-        assert sdk_client.chat.completions.create.call_count == 2
+        assert sdk_client.chat.completions.create.call_count == 1
 
 
 def test_deepseek_endpoint_profile_adds_reasoning_content_to_assistant_messages():
