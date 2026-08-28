@@ -25,6 +25,24 @@ The tools of the [browser sub-agent](../subagents/browser_agent.md) (Playwright 
 | `PowerShellTool` | Execute a PowerShell command and return its output. |
 | `CodeTool` | Execute a code snippet in a sandboxed environment. |
 
+### Code Graph
+
+Registered on the Code Agent when `code_graph_profile="graph"`. Default is `off`. Install `tree-sitter-language-pack` yourself; JiuwenSwarm downloads grammars during `jiuwenswarm-init` / `jiuwenswarm-start`. The coding agent never downloads. If the pack is missing or grammars are not cached, the agent falls back to grep. `prompt_mode="locate"` (eval) also registers `submit_code_context`.
+
+| Tool | Description |
+|---|---|
+| `resolve_symbol` | Resolve an exact class/function/method name to a `symbol_id` |
+| `find_code_symbols` | Candidate definitions when the exact name is unknown |
+| `search_source_text` | Exact literals (errors, config keys, decorators) |
+| `inspect_code_structure` | Members of a file or class |
+| `read_symbol` / `read_code` | Read a definition or numbered source |
+| `find_callers` / `find_callees` / `find_importers` / `find_base_classes` / `find_subclasses` | One-hop graph relations |
+| `trace_call_paths` | Multi-hop call paths |
+| `select_code_context` | Mark a previously read location |
+| `submit_code_context` | Locate-exam only: emit `<PATCH_CONTEXT>` |
+
+See `examples/code_graph/code_agent_graph.py`.
+
 ### Audio
 
 | Tool | Description |

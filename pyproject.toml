@@ -118,6 +118,9 @@ all-storage = ["openjiuwen[sqlite,postgres,mysql,gaussdb,redis,elasticsearch,obs
 all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
 
 cli = ["click>=8.0", "rich>=13.0", "prompt-toolkit>=3.0"]
+code-graph = [
+    "tree-sitter>=0.25.0,<0.26.0",
+]
 
 default = []
 # Includes A2A SDK so the A2A remote/server plugins work when using `openjiuwen[all]`.
@@ -180,6 +183,7 @@ Changelog = "https://gitcode.com/openJiuwen/agent-core/releases"
 
 [tool.uv]
 default-groups = ['dev']
+no-build-package = ["tree-sitter-language-pack"]
 
 [[tool.uv.index]]
 name = "aliyun"

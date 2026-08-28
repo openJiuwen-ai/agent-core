@@ -1333,6 +1333,24 @@ class DeepAgent(BaseAgent):
             pass
         return subagent
 
+    @staticmethod
+    def _merge_subagent_create_kwargs(
+        create_kwargs: dict[str, Any],
+        factory_kwargs: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Combine inherited create kwargs with factory overrides.
+
+        ``factory_kwargs`` wins on overlap. Spreading both dicts into the
+        factory used to raise ``multiple values for keyword argument`` when
+        eval/product specs repeated ``enable_read_image_multimodal``.
+        """
+        merged = dict(create_kwargs)
+        extra = dict(factory_kwargs or {})
+        for key in extra:
+            merged.pop(key, None)
+        merged.update(extra)
+        return merged
+
     def create_subagent(
         self,
         subagent_type: str,
@@ -1496,8 +1514,10 @@ class DeepAgent(BaseAgent):
 
                 return self._bind_inherited_artifact_root(
                     create_code_agent(
-                        **create_kwargs,
-                        **dict(spec.factory_kwargs or {}),
+                        **self._merge_subagent_create_kwargs(
+                            create_kwargs,
+                            spec.factory_kwargs,
+                        ),
                     )
                 )
             if normalized_factory == "research_agent":
@@ -1507,8 +1527,10 @@ class DeepAgent(BaseAgent):
 
                 return self._bind_inherited_artifact_root(
                     create_research_agent(
-                        **create_kwargs,
-                        **dict(spec.factory_kwargs or {}),
+                        **self._merge_subagent_create_kwargs(
+                            create_kwargs,
+                            spec.factory_kwargs,
+                        ),
                     )
                 )
             if normalized_factory in {"mobile_gui_agent", "mobile_agent"}:
@@ -1518,8 +1540,10 @@ class DeepAgent(BaseAgent):
 
                 return self._bind_inherited_artifact_root(
                     create_mobile_gui_agent(
-                        **create_kwargs,
-                        **dict(spec.factory_kwargs or {}),
+                        **self._merge_subagent_create_kwargs(
+                            create_kwargs,
+                            spec.factory_kwargs,
+                        ),
                     )
                 )
 
