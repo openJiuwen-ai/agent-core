@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -149,6 +150,22 @@ def _ctx(agent: ReActAgent, session: Session, context: _FakeContext) -> AgentCal
         inputs=ModelCallInputs(messages=[], tools=[]),
         extra={},
     )
+
+
+def test_usage_attribution_supports_lightweight_session_and_context() -> None:
+    agent = _agent()
+    session = SimpleNamespace(session_id=lambda: "session-id")
+    context = SimpleNamespace(session_id=lambda: "context-id")
+    callback_context = SimpleNamespace(
+        session=session,
+        context=context,
+        context_usage_attribution={},
+    )
+
+    attribution = agent._context_usage_attribution(callback_context, session)
+
+    assert attribution["execution_session_id"] == "session-id"
+    assert attribution["context_owner_id"] == "kv_affinity_agent|session-id|context-id"
 
 
 @pytest.mark.asyncio
