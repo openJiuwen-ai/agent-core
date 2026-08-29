@@ -128,7 +128,13 @@ class SessionSpawnExecutor(TaskExecutor):
                 )
             )
             try:
-                result = await subagent.invoke(subagent_inputs, session=child_session)
+                if affinity_enabled:
+                    result = await subagent.invoke(
+                        subagent_inputs,
+                        session=child_session,
+                    )
+                else:
+                    result = await subagent.invoke(subagent_inputs)
             finally:
                 reset_usage_delegation(delegation_token)
             payload = result.get("output", "") if isinstance(result, dict) else str(result)

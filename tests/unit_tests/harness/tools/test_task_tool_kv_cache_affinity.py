@@ -169,6 +169,7 @@ async def test_runtime_failures_do_not_override_success_result() -> None:
 @pytest.mark.asyncio
 async def test_affinity_disabled_preserves_baseline_invoke() -> None:
     subagent = _FakeSubAgent("browser")
+    subagent.invoke = AsyncMock(wraps=subagent.invoke)
     tool = _make_tool(enabled=False, subagent=subagent)
 
     result = await tool.invoke(
@@ -177,5 +178,6 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
     )
 
     assert result.success is True
+    assert "session" not in subagent.invoke.await_args.kwargs
     assert subagent.sessions == [None]
     assert subagent.inputs == [{"query": "run task", "conversation_id": "parent_session_sub_browser_agent"}]

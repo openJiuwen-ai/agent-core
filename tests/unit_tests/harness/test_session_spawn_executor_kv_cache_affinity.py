@@ -150,7 +150,7 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
     chunks = await _collect(executor, "task-1")
 
     assert chunks[-1].payload.type == EventType.TASK_COMPLETION
-    assert subagent.invoke.await_args.kwargs["session"] is None
+    assert "session" not in subagent.invoke.await_args.kwargs
     assert subagent.invoke.await_args.args[0] == {
         "query": "do work",
         "conversation_id": "parent_session_sub_meta",
