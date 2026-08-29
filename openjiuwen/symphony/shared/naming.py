@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -53,7 +54,8 @@ def to_pascal_path(value: str) -> str:
 
 
 def normalize_name_key(value: str) -> str:
-    return to_kebab_case(value).replace("-", "")
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(character for character in text if unicodedata.category(character)[0] in {"L", "M", "N"})
 
 
 def bounded_edit_distance(left: str, right: str, *, max_distance: int) -> int | None:

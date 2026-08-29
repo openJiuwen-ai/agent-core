@@ -47,7 +47,7 @@ from openjiuwen.symphony.orchestration import (
     PrepareArtifactHook,
 )
 from openjiuwen.symphony.runtime import SymphonyRuntime
-from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec
+from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec, normalize_name_key
 from openjiuwen.symphony.shared.fingerprint import (
     FINGERPRINT_ARTIFACT_FILENAME,
     FINGERPRINT_SCHEMA_VERSION,
@@ -124,6 +124,7 @@ __all__ = [
     "SymphonyRuntime",
     "agent",
     "discovery",
+    "normalize_name_key",
     "retrieval",
     "shared",
 ]
