@@ -220,10 +220,21 @@ class WorkspaceAssembler:
 
         Info log per outcome so the write side is auditable (which file was
         seeded / skipped / upgraded and why).
+
+        Cache-hit guard: a teammate sharing the leader's cache instance sees
+        the leader already primed this name, so the whole read-write-judge
+        pass is skipped. The cache is the single read/write entry point: when
+        a value is resident it is the truth for the whole session, and a
+        teammate re-entering the write path must not re-read the md file
+        (which would pick up an evolution-party edit made mid-session and
+        pollute the stable cache). The guard is on resident state, not on
+        role, so the first writer wins regardless of who it is.
         """
         framework_text = self._framework_body(name, language)
         if framework_text is None:
             return
+        if self._cache is not None and self._cache.has_template(name):
+            return  # leader already primed — teammate keeps the cache stable
         if target.exists():
             try:
                 text = target.read_text(encoding="utf-8")
@@ -298,7 +309,14 @@ class WorkspaceAssembler:
         aggregate the STRINGS dict into a single JSON dict file
         ``tool.param.<lang>.md`` sitting flat at the ``tool/`` root. Never
         depends on ToolCard construction or capability gating.
+
+        Cache-hit guard: once the leader's pass has primed every C-class
+        entry (``mark_tools_loaded``), a teammate sharing the same cache
+        skips the whole pass. The C-class scan is one unit — either every
+        tool md / param is primed or none is — so the single flag covers it.
         """
+        if self._cache is not None and self._cache.is_tools_loaded():
+            return  # leader already primed the C-class tree — teammate skips
         tools_dir = self._tool_dir(team_name)
         self._write_tool_md(tools_dir, language)
         self._write_tool_params(tools_dir, language)
@@ -340,6 +358,8 @@ class WorkspaceAssembler:
         language: str,
     ) -> None:
         """Write the baseline for one tool-level md (same rules as A-class)."""
+        if self._cache is not None and self._cache.has_tool_md(desc_key):
+            return  # leader already primed — teammate keeps the cache stable
         if target.exists():
             try:
                 text = target.read_text(encoding="utf-8")
