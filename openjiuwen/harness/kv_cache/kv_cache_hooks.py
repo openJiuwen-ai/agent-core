@@ -7,11 +7,8 @@ import hashlib
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.kv_cache import (
-    dispatch_session_kv_cache_signal,
-    evict_session_kv_cache,
-    resolve_session_lineage,
-)
+from openjiuwen.core.kv_cache.kv_cache_metadata import resolve_session_lineage
+from openjiuwen.core.session.agent import Session, create_agent_session
 
 
 def affinity_enabled(deep_agent: Any) -> bool:
@@ -50,14 +47,7 @@ def scope_sub_session_id(
         runtime_parent_session_id: str,
         parent_cache_id: str,
 ) -> str:
-    """Disambiguate Team-member children while keeping runtime ids path-safe.
-
-    Team members share one product runtime session id but own different
-    provider-facing cache identities.  Raw cache identities contain ``:`` and
-    therefore cannot safely become Windows workspace/session directory names.
-    A stable digest preserves the existing runtime prefix while separating
-    children created by different members.
-    """
+    """Disambiguate Team-member children while keeping runtime ids path-safe."""
     if not parent_cache_id or parent_cache_id == runtime_parent_session_id:
         return sub_session_id
     digest = hashlib.sha256(parent_cache_id.encode("utf-8")).hexdigest()[:12]
@@ -77,93 +67,39 @@ def resolve_sub_session_id(
     return f"{parent_session_id}_sub_{safe_task_id}"
 
 
-def get_model(deep_agent: Any) -> Any | None:
-    deep_config = getattr(deep_agent, "deep_config", None)
-    return getattr(deep_config, "model", None) if deep_config is not None else None
-
-
-def prefetch_sticky_subagent(
-        deep_agent: Any,
+def create_subagent_session(
+        parent_session: Session,
         *,
-        subagent_type: str,
         sub_session_id: str,
-        parent_session_id: str,
-) -> None:
-    if not affinity_enabled(deep_agent) or not is_sticky_subagent_type(subagent_type):
-        return
-    try:
-        dispatch_session_kv_cache_signal(
-            get_model(deep_agent),
-            "prefetch",
-            session_id=sub_session_id,
-            parent_session_id=parent_session_id,
-            enabled=True,
-        )
-    except Exception as exc:
-        logger.warning(
-            "[HarnessKVC] subagent prefetch failed: sub_session=%s parent_session=%s error=%s",
-            sub_session_id,
-            parent_session_id,
-            exc,
-        )
+        parent_cache_id: str,
+        card: Any = None,
+) -> Session:
+    """Create a child Session that shares its parent's application KVC runtime."""
+    return create_agent_session(
+        session_id=sub_session_id,
+        card=card,
+        parent_session_id=parent_cache_id,
+        kv_cache_runtime=parent_session.get_kv_cache_runtime(),
+    )
+
+
+async def prepare_subagent(session: Session, *, subagent_type: str) -> None:
+    if is_sticky_subagent_type(subagent_type):
+        await session.prepare_kvc()
 
 
 async def finish_subagent(
-        deep_agent: Any,
+        session: Session,
         *,
         subagent_type: str,
-        sub_session_id: str,
-        parent_session_id: str,
         succeeded: bool,
 ) -> None:
     """Offload resumable successful workers; evict terminal/failed workers."""
-    if not affinity_enabled(deep_agent):
+    if succeeded and is_sticky_subagent_type(subagent_type):
+        await session.suspend_kvc()
         return
-    model = get_model(deep_agent)
-    try:
-        if succeeded and is_sticky_subagent_type(subagent_type):
-            dispatch_session_kv_cache_signal(
-                model,
-                "offload",
-                session_id=sub_session_id,
-                parent_session_id=parent_session_id,
-                enabled=True,
-            )
-            return
-        await evict_session_kv_cache(
-            model,
-            session_id=sub_session_id,
-            parent_session_id=parent_session_id,
-            enabled=True,
-        )
-    except Exception as exc:
-        logger.warning(
-            "[HarnessKVC] subagent cleanup failed: sub_session=%s parent_session=%s error=%s",
-            sub_session_id,
-            parent_session_id,
-            exc,
-        )
+    await session.release_kvc()
 
 
-async def evict_subagent(
-        deep_agent: Any,
-        *,
-        sub_session_id: str,
-        parent_session_id: str,
-) -> None:
-    if not affinity_enabled(deep_agent):
-        return
-    try:
-        await evict_session_kv_cache(
-            get_model(deep_agent),
-            session_id=sub_session_id,
-            parent_session_id=parent_session_id,
-            enabled=True,
-        )
-    except Exception as exc:
-        logger.warning(
-            "[HarnessKVC] subagent evict failed: sub_session=%s parent_session=%s error=%s",
-            sub_session_id,
-            parent_session_id,
-            exc,
-        )
+async def evict_subagent(session: Session) -> None:
+    await session.release_kvc()

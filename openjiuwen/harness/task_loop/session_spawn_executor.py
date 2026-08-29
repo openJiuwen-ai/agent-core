@@ -90,6 +90,7 @@ class SessionSpawnExecutor(TaskExecutor):
         )
 
         subagent = None
+        child_session = None
         try:
             if subagent_type == "browser_agent":
                 subagent = self._deep_agent.create_subagent(
@@ -110,6 +111,13 @@ class SessionSpawnExecutor(TaskExecutor):
                 subagent_inputs["delegation_id"] = task_id
                 if parent_invocation_id:
                     subagent_inputs["parent_invocation_id"] = parent_invocation_id
+                child_session = kv_cache_hooks.create_subagent_session(
+                    session,
+                    sub_session_id=cid,
+                    parent_cache_id=parent_session_id,
+                    card=subagent.card,
+                )
+                await child_session.pre_run(inputs=subagent_inputs)
             delegation_token = bind_usage_delegation(
                 build_usage_delegation_attribution(
                     agent_id=getattr(getattr(subagent, "card", None), "id", None),
@@ -120,7 +128,7 @@ class SessionSpawnExecutor(TaskExecutor):
                 )
             )
             try:
-                result = await subagent.invoke(subagent_inputs)
+                result = await subagent.invoke(subagent_inputs, session=child_session)
             finally:
                 reset_usage_delegation(delegation_token)
             payload = result.get("output", "") if isinstance(result, dict) else str(result)
@@ -150,12 +158,9 @@ class SessionSpawnExecutor(TaskExecutor):
         finally:
             if subagent is not None:
                 await cleanup_subagent_task_resources(subagent)
-            if affinity_enabled:
-                await kv_cache_hooks.evict_subagent(
-                    self._deep_agent,
-                    sub_session_id=cid,
-                    parent_session_id=parent_session_id,
-                )
+            if child_session is not None:
+                await kv_cache_hooks.evict_subagent(child_session)
+                await child_session.post_run()
 
     def _build_error_chunk(
         self, task_id: str, error: str
@@ -212,11 +217,12 @@ class SessionSpawnExecutor(TaskExecutor):
             parent_session_id=parent_session_id,
             metadata=meta,
         )
-        await kv_cache_hooks.evict_subagent(
-            self._deep_agent,
+        child_session = kv_cache_hooks.create_subagent_session(
+            session,
             sub_session_id=sub_session_id,
-            parent_session_id=parent_session_id,
+            parent_cache_id=parent_session_id,
         )
+        await kv_cache_hooks.evict_subagent(child_session)
         return True
 
 

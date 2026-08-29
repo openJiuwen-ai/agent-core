@@ -142,6 +142,7 @@ class SubagentControl:
             parent_agent,
             self._config,
             self._semaphore,
+            parent_session=parent_session,
             status_change_handler=self._handle_instance_status_changed,
             activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
             transcript_handler=(self._handle_transcript_message if self._config.enable_transcript_stream else None),

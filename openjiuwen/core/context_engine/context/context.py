@@ -23,7 +23,7 @@ from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
 from openjiuwen.core.context_engine.usage.models import ContextWindowTokenReport
-from openjiuwen.core.foundation.kv_cache import first_changed_index
+from openjiuwen.core.kv_cache.kv_cache_metadata import first_changed_index
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import lazy_callback_framework as _fw

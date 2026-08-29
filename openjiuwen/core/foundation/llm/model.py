@@ -305,36 +305,6 @@ class Model:
                 model_client_config=self.model_client_config,
             )
 
-    async def release(
-            self,
-            session_id: str,
-            messages: List,
-            messages_released_index: int,
-            *,
-            model: Optional[str] = None,
-            tools: Optional[List] = None,
-            tools_released_index: Optional[int] = None,
-    ) -> bool:
-        """Release model cache/resources if the underlying client supports it."""
-        release_fn = getattr(self._client, "release", None)
-        if release_fn is None:
-            return False
-        return await release_fn(
-            session_id=session_id,
-            messages=messages,
-            messages_released_index=messages_released_index,
-            model=model,
-            tools=tools,
-            tools_released_index=tools_released_index,
-        )
-
-    def supports_kv_cache_release(self) -> bool:
-        """Whether underlying client supports KV cache release."""
-        supports_fn = getattr(self._client, "supports_kv_cache_release", None)
-        if callable(supports_fn):
-            return bool(supports_fn())
-        return callable(getattr(self._client, "release", None))
-
     def supports_kv_cache_affinity(self) -> bool:
         """Whether underlying client supports Ascend KV cache affinity actions."""
         supports_fn = getattr(self._client, "supports_kv_cache_affinity", None)
@@ -343,26 +313,6 @@ class Model:
         return all(
             callable(getattr(self._client, name, None))
             for name in ("evict_kvc", "offload_kvc", "prefetch_kvc")
-        )
-
-    def build_kv_cache_invoke_kwargs(
-            self,
-            *,
-            session: object = None,
-            enable_kv_cache_release: bool = False,
-    ) -> dict:
-        """Build extra kwargs for invoke/stream related to KV cache behavior.
-
-        For InferenceAffinity (vLLM):
-          - session_id: use session.get_session_id() if provided
-          - enable_cache_sharing: follow enable_kv_cache_release
-        """
-        build_fn = getattr(self._client, "build_kv_cache_invoke_kwargs", None)
-        if not callable(build_fn):
-            return {}
-        return build_fn(
-            session=session,
-            enable_kv_cache_release=enable_kv_cache_release,
         )
 
     def build_kv_cache_affinity_invoke_kwargs(

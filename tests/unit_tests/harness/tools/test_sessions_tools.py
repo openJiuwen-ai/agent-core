@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.core.common.exception.errors import FrameworkError
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.tools import (
     SESSION_SPAWN_TASK_TYPE,

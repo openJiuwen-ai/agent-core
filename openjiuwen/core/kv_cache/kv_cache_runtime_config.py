@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 
-from openjiuwen.core.foundation.kv_cache.kv_cache_config import (
+from openjiuwen.core.kv_cache.kv_cache_config import (
     KVC_SESSION_EVICT_TIMEOUT_SECONDS,
     KVC_SESSION_OFFLOAD_PREFETCH_TIMEOUT_SECONDS,
     KVC_TERMINAL_CLEANUP_TIMEOUT_SECONDS,

@@ -17,7 +17,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import run_workflow
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
 from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
 from openjiuwen.core.session.agent import Session
 

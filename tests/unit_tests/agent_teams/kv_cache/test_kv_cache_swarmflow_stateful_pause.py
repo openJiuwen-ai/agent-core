@@ -18,7 +18,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import run_workflow
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
 from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
 from openjiuwen.core.session.agent import Session
 

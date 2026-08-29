@@ -15,7 +15,7 @@ from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KV_CACHE_AFFINITY_SESSION_ID_ENV,
     KVCacheIdentity,

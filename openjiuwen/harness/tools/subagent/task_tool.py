@@ -67,6 +67,7 @@ def _summarize_task_description(task_description: Any) -> dict[str, Any]:
 async def _run_subagent_with_observable_stream(
     subagent: Any,
     inputs: dict[str, Any],
+    session: Session | None = None,
 ) -> dict[str, Any]:
     """Run a subagent through its public stream while returning invoke-style output.
 
@@ -76,13 +77,14 @@ async def _run_subagent_with_observable_stream(
     to the parent agent.  Third-party test/adaptor agents that only implement
     ``invoke`` retain their existing behavior.
     """
+    invoke_kwargs = {"session": session} if session is not None else {}
     stream = getattr(subagent, "stream", None)
     if not callable(stream):
-        return await subagent.invoke(inputs)
+        return await subagent.invoke(inputs, **invoke_kwargs)
 
     output_parts: list[str] = []
     terminal_result: dict[str, Any] | None = None
-    async for chunk in stream(inputs):
+    async for chunk in stream(inputs, **invoke_kwargs):
         chunk_type = getattr(chunk, "type", None)
         payload = getattr(chunk, "payload", None)
         if isinstance(chunk, dict):
@@ -321,6 +323,7 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
+        child_session = None
         parent_subject = current_execution_subject()
         parent_subject_id = parent_subject.subject_id if parent_subject else "main"
         subject = ExecutionSubject(
@@ -361,11 +364,11 @@ class TaskTool(Tool):
                 await prepare_subagent_task_resources(subagent)
                 parent_invocation_id = current_usage_invocation_id()
                 if affinity_enabled:
-                    kv_cache_hooks.prefetch_sticky_subagent(
-                        self.parent_agent,
-                        subagent_type=str(subagent_type),
+                    child_session = kv_cache_hooks.create_subagent_session(
+                        parent_session,
                         sub_session_id=sub_session_id,
-                        parent_session_id=parent_cache_id,
+                        parent_cache_id=parent_cache_id,
+                        card=subagent.card,
                     )
                 # Invoke subagent with isolated session_id
                 subagent_inputs = {
@@ -386,6 +389,11 @@ class TaskTool(Tool):
                     subagent_inputs["delegation_id"] = sub_session_id
                     if parent_invocation_id:
                         subagent_inputs["parent_invocation_id"] = parent_invocation_id
+                    await child_session.pre_run(inputs=subagent_inputs)
+                    await kv_cache_hooks.prepare_subagent(
+                        child_session,
+                        subagent_type=str(subagent_type),
+                    )
                 delegation_token = bind_usage_delegation(
                     build_usage_delegation_attribution(
                         agent_id=getattr(getattr(subagent, "card", None), "id", None),
@@ -398,6 +406,7 @@ class TaskTool(Tool):
                     result = await _run_subagent_with_observable_stream(
                         subagent,
                         subagent_inputs,
+                        session=child_session,
                     )
                 finally:
                     reset_usage_delegation(delegation_token)
@@ -424,14 +433,13 @@ class TaskTool(Tool):
                         session_id=sub_session_id,
                     )
                 await cleanup_subagent_task_resources(subagent)
-                if affinity_enabled:
+                if child_session is not None:
                     await kv_cache_hooks.finish_subagent(
-                        self.parent_agent,
+                        child_session,
                         subagent_type=str(subagent_type),
-                        sub_session_id=sub_session_id,
-                        parent_session_id=parent_cache_id,
                         succeeded=succeeded,
                     )
+                    await child_session.post_run()
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

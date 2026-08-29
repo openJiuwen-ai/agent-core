@@ -10,7 +10,7 @@ from openjiuwen.core.session.stream import (
     BaseStreamMode,
     OutputSchema,
 )
-from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KVCacheIdentity,
 )
 from openjiuwen.core.single_agent import (

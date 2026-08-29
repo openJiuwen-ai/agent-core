@@ -590,9 +590,6 @@ class OpenAIModelClient(BaseModelClient):
                 f"raw_samples={raw_samples!r}"
             )
 
-    def supports_kv_cache_release(self) -> bool:
-        return self._kv_cache_mode() == "release"
-
     def supports_kv_cache_affinity(self) -> bool:
         return self._kv_cache_mode() == "affinity"
 
@@ -775,76 +772,6 @@ class OpenAIModelClient(BaseModelClient):
             "parent_session_id": parent_session_id or cache_id,
         }
 
-    def build_kv_cache_invoke_kwargs(
-            self,
-            *,
-            session: object = None,
-            enable_kv_cache_release: bool = False,
-            **_: Any,
-    ) -> dict:
-        if not enable_kv_cache_release or not self.supports_kv_cache_release():
-            return {}
-        extra: dict = {}
-        if session is not None and hasattr(session, "get_session_id"):
-            extra["session_id"] = session.get_session_id()
-        extra["enable_cache_sharing"] = True
-        return extra
-
-    async def release(
-            self,
-            session_id: str,
-            messages: List,
-            messages_released_index: int,
-            *,
-            model: Optional[str] = None,
-            tools: Optional[List] = None,
-            tools_released_index: Optional[int] = None,
-    ) -> bool:
-        if not self.supports_kv_cache_release():
-            return False
-
-        kv_cache = self._kv_cache_config()
-        messages_dict = self._convert_messages_to_dict(messages)
-        tools_dict = self._convert_tools_to_dict(tools)
-        sanitized_messages = self._sanitize_tool_calls(messages_dict)
-        release_params = {
-            "model": model if model else self.model_config.model_name,
-            getattr(kv_cache, "session_field", "cache_salt"): session_id,
-            getattr(kv_cache, "enable_cache_sharing_field", "cache_sharing"): True,
-            "messages": sanitized_messages,
-            "messages_released_index": messages_released_index,
-        }
-        if tools_dict:
-            release_params["tools"] = tools_dict
-        if tools_released_index is not None:
-            release_params["tools_released_index"] = tools_released_index
-
-        url = (
-            f"{self.model_client_config.api_base.rstrip('/')}"
-            f"{getattr(kv_cache, 'release_endpoint', '/release_kv_cache')}"
-        )
-        verify = (
-            SslUtils.create_strict_ssl_context(self.model_client_config.ssl_cert)
-            if self.model_client_config.verify_ssl
-            else False
-        )
-        headers = {"Content-Type": "application/json"}
-        async with httpx.AsyncClient(
-                proxy=UrlUtils.get_global_proxy_url(url),
-                verify=verify,
-                timeout=self.model_client_config.timeout,
-        ) as http_client:
-            response = await http_client.post(url, headers=headers, json=release_params)
-        if 200 <= response.status_code < 300:
-            return True
-        raise build_error(
-            StatusCode.MODEL_CALL_FAILED,
-            error_msg=(
-                f"OpenAI-compatible KV cache release failed: "
-                f"{response.status_code} {response.text}"
-            ),
-        )
-
     async def evict_kvc(self, **kwargs) -> bool:
         return await self._invoke_kv_cache_affinity_action("evict", **kwargs)
 
@@ -949,7 +876,6 @@ class OpenAIModelClient(BaseModelClient):
             - if temperature is not present but top_p is, keep top_p
         """
         session_id = kwargs.pop("session_id", None)
-        enable_cache_sharing = bool(kwargs.pop("enable_cache_sharing", False))
         parent_session_id = kwargs.pop("parent_session_id", None)
         kv_action = kwargs.pop("kv_action", None)
         kv_target = kwargs.pop("target", "session")
@@ -1023,7 +949,7 @@ class OpenAIModelClient(BaseModelClient):
 
         profile_name = self._endpoint_profile_name()
         kv_mode = self._kv_cache_mode()
-        if profile_name == "siliconflow" or kv_mode in {"release", "affinity"}:
+        if profile_name == "siliconflow" or kv_mode == "affinity":
             params["messages"] = self._sanitize_tool_calls(params["messages"])
 
         if is_session_manage_request:
@@ -1031,11 +957,6 @@ class OpenAIModelClient(BaseModelClient):
             params.pop("tools", None)
             params.pop("tool_choice", None)
             params.pop("max_tokens", None)
-
-        if kv_mode == "release" and enable_cache_sharing and session_id:
-            kv_cache = self._kv_cache_config()
-            params[getattr(kv_cache, "enable_cache_sharing_field", "cache_sharing")] = True
-            params[getattr(kv_cache, "session_field", "cache_salt")] = session_id
 
         if kv_mode == "affinity" and session_id:
             kv_cache = self._kv_cache_config()

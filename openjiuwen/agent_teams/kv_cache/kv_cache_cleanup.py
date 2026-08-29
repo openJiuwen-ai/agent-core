@@ -10,7 +10,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.kv_cache import KVC_TERMINAL_CLEANUP_TIMEOUT_SECONDS
+from openjiuwen.core.kv_cache.kv_cache_config import KVC_TERMINAL_CLEANUP_TIMEOUT_SECONDS
 
 
 async def cancellation_safe_release_then_dispose(

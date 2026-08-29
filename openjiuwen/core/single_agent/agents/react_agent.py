@@ -58,9 +58,9 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     SystemMessage
 )
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
-    KVCacheAffinityConfig,
 )
 from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -435,12 +435,10 @@ class ReActAgentConfig(BaseModel):
     def configure_kv_cache_affinity(
             self,
             *,
-            enable_kv_cache_release: bool = False,
             enable_kv_cache_affinity: bool = False,
     ) -> 'ReActAgentConfig':
-        """Configure provider-side KV-cache release or Ascend affinity."""
+        """Configure the unified Ascend KV-cache affinity protocol."""
         self.kv_cache_affinity_config = KVCacheAffinityConfig(
-            enable_kv_cache_release=enable_kv_cache_release,
             enable_kv_cache_affinity=enable_kv_cache_affinity,
         )
         return self

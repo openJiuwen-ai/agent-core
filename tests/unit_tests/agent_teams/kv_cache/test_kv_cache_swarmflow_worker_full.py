@@ -15,7 +15,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.kv_cache import kv_cache_cleanup as cleanup_module
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
 from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 

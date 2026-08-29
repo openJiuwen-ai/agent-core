@@ -15,7 +15,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
 from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache import (
     KVCacheAffinityConfig,
     KVCacheIdentity,
 )
@@ -57,14 +57,8 @@ class _CapturingModel:
         self.prefetch_calls: list[dict[str, Any]] = []
         self.client = _affinity_client()
 
-    def supports_kv_cache_release(self) -> bool:
-        return False
-
     def supports_kv_cache_affinity(self) -> bool:
         return self._supports
-
-    def build_kv_cache_invoke_kwargs(self, **_: Any) -> dict[str, Any]:
-        return {}
 
     def build_kv_cache_affinity_invoke_kwargs(self, **kwargs: Any) -> dict[str, Any]:
         if not self._supports:

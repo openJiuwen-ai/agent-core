@@ -6,7 +6,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KVCacheAffinityConfig,
 )
@@ -40,6 +40,7 @@ def test_child_session_hook_injects_parent_lineage_when_enabled() -> None:
     parent_session = MagicMock()
     parent_session.get_envs.return_value = {"existing": "value"}
     parent_session.get_session_id.return_value = "parent-session"
+    runtime = parent_session.get_kv_cache_runtime.return_value
 
     kwargs = kv_cache_hooks.build_child_session_kwargs(
         _agent(enabled=True),
@@ -50,7 +51,9 @@ def test_child_session_hook_injects_parent_lineage_when_enabled() -> None:
         "envs": {
             "existing": "value",
             KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: "parent-session",
-        }
+        },
+        "parent_session_id": "parent-session",
+        "kv_cache_runtime": runtime,
     }
 
 

@@ -11,7 +11,7 @@ from typing import (
 from openjiuwen.core.session import (
     Config,
 )
-from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KV_CACHE_AFFINITY_SESSION_ID_ENV,
     KVCacheIdentity,
