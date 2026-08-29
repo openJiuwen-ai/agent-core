@@ -498,6 +498,20 @@ class _FakeTeamBackend:
         self.team_mtime_calls += 1
         return self._team_mtime
 
+    async def get_team_updated_at_state(self) -> tuple[int, bool]:
+        """Team-card mtime probe the team-info block's re-announce records.
+
+        Returns a stable ``(self._team_mtime, True)`` so the re-announce path
+        does not fire between rounds — this fake exercises the rail's delivery
+        plumbing, not the team-card-evolution re-announce semantics. Mirrors
+        :meth:`get_member_updated_at_state` at the team level.
+        """
+        return self._team_mtime, True
+
+    async def stamp_team_card_updated_at(self, ts: int) -> None:
+        """No-op: the stable probe above never signals a blank field."""
+        return None
+
     async def get_members_max_updated_at(self) -> int:
         self.members_mtime_calls += 1
         return self._members_mtime
