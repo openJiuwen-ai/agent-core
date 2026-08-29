@@ -129,6 +129,11 @@ class TeamWorkerBackend(AgentBackend):
         self._build_context = build_context
         self._messager = messager
         self._session_id = session_id
+        from openjiuwen.core.session import get_current_session
+
+        current_session = get_current_session()
+        get_runtime = getattr(current_session, "get_kv_cache_runtime", None)
+        self._kv_cache_runtime = get_runtime() if callable(get_runtime) else None
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._run_id = run_id
@@ -247,6 +252,7 @@ class TeamWorkerBackend(AgentBackend):
                 workflow_name=self._workflow_name,
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
+                kv_cache_runtime=self._kv_cache_runtime,
             )
         return self._session_mgr
 
@@ -408,8 +414,6 @@ class TeamWorkerBackend(AgentBackend):
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=True,
-                reason="swarmflow-worker-finish",
-                owner_id=member_name,
             )
             if has_schema:
                 # End the round as soon as structured_output is captured, so the
@@ -426,7 +430,14 @@ class TeamWorkerBackend(AgentBackend):
             user_prompt = prompt
             if has_schema:
                 user_prompt = f"{prompt}\n\n{self._t('structured_output', key='reminder')}"
-            result = await harness.run_once(user_prompt)
+            from openjiuwen.core.session.agent_team import Session as TeamSession
+
+            team_session = TeamSession(
+                session_id=self._session_id,
+                team_id=self._team_name,
+                kv_cache_runtime=self._kv_cache_runtime,
+            )
+            result = await harness.run_once(user_prompt, team_session=team_session)
         except Exception as e:
             team_logger.exception("worker harness run_once failed for %s", member_name)
             raise BackendError(f"worker harness run_once failed for {member_name}: {e}") from e

@@ -18,7 +18,6 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -165,7 +164,6 @@ class CoordinationKernel:
             # runtime's outputs, so the runtime must be started first.
             if resources.harness is not None:
                 await resources.harness.start(team_session=session)
-                await kv_cache_hooks.register_harness_binding(host, resources.harness)
                 await host.stream_controller.start()
         else:
             sess_mgr.release_session()

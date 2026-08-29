@@ -16,7 +16,7 @@ from openjiuwen.core.foundation.kv_cache import (
 
 
 @dataclass(frozen=True, slots=True)
-class KVCacheRuntime:
+class KVCacheCallCapabilities:
     enable_release: bool
     enable_affinity: bool
     supports_release: bool
@@ -35,10 +35,10 @@ class KVCacheModelCallHook:
         self._affinity_warning_logged = False
 
     def resolve_runtime(
-            self,
-            llm: Any,
-            config: KVCacheAffinityConfig | None,
-    ) -> KVCacheRuntime:
+        self,
+        llm: Any,
+        config: KVCacheAffinityConfig | None,
+    ) -> KVCacheCallCapabilities:
         config = config or KVCacheAffinityConfig()
         enable_affinity = config.enable_kv_cache_affinity
         enable_release = config.enable_kv_cache_release
@@ -53,7 +53,7 @@ class KVCacheModelCallHook:
             supports = getattr(llm, "supports_kv_cache_affinity", None)
             supports_affinity = bool(supports()) if callable(supports) else False
 
-        runtime = KVCacheRuntime(
+        runtime = KVCacheCallCapabilities(
             enable_release=enable_release,
             enable_affinity=enable_affinity,
             supports_release=supports_release,
@@ -64,16 +64,12 @@ class KVCacheModelCallHook:
 
     @staticmethod
     def resolve_lineage(
-            runtime: KVCacheRuntime,
-            session: Any,
-            fallback_session_id: str,
+        runtime: KVCacheCallCapabilities,
+        session: Any,
+        fallback_session_id: str,
     ) -> tuple[str | None, str | None]:
         if runtime.enable_release and runtime.supports_release:
-            session_id = (
-                session.get_session_id()
-                if session is not None
-                else fallback_session_id
-            )
+            session_id = session.get_session_id() if session is not None else fallback_session_id
             return session_id, None
         if runtime.enable_affinity and runtime.supports_affinity:
             session_id, parent_session_id = resolve_session_lineage(session)
@@ -83,15 +79,15 @@ class KVCacheModelCallHook:
         return None, None
 
     async def handle_context_window_change(
-            self,
-            *,
-            runtime: KVCacheRuntime,
-            llm: Any,
-            context: Any,
-            context_window: Any,
-            session_id: str | None,
-            parent_session_id: str | None,
-            model_name: str,
+        self,
+        *,
+        runtime: KVCacheCallCapabilities,
+        llm: Any,
+        context: Any,
+        context_window: Any,
+        session_id: str | None,
+        parent_session_id: str | None,
+        model_name: str,
     ) -> None:
         if runtime.enable_release and runtime.supports_release:
             await self._release_changed_window(
@@ -113,54 +109,58 @@ class KVCacheModelCallHook:
 
     @staticmethod
     def build_invoke_kwargs(
-            *,
-            runtime: KVCacheRuntime,
-            llm: Any,
-            session: Any,
-            session_id: str | None,
-            parent_session_id: str | None,
-            context_window: Any,
+        *,
+        runtime: KVCacheCallCapabilities,
+        llm: Any,
+        session: Any,
+        session_id: str | None,
+        parent_session_id: str | None,
+        context_window: Any,
     ) -> dict:
         extra_kwargs: dict = {}
         build_release = getattr(llm, "build_kv_cache_invoke_kwargs", None)
         if runtime.enable_release and runtime.supports_release and callable(build_release):
-            extra_kwargs.update(build_release(
-                session=session,
-                enable_kv_cache_release=True,
-            ))
+            extra_kwargs.update(
+                build_release(
+                    session=session,
+                    enable_kv_cache_release=True,
+                )
+            )
         build_affinity = getattr(llm, "build_kv_cache_affinity_invoke_kwargs", None)
         if runtime.enable_affinity and runtime.supports_affinity and callable(build_affinity):
-            extra_kwargs.update(build_affinity(
-                session=session,
-                session_id=session_id,
-                parent_session_id=parent_session_id,
-                enable_kv_cache_affinity=True,
-            ))
+            extra_kwargs.update(
+                build_affinity(
+                    session=session,
+                    session_id=session_id,
+                    parent_session_id=parent_session_id,
+                    enable_kv_cache_affinity=True,
+                )
+            )
             messages = context_window.get_messages()
-            if messages and KVCacheModelCallHook._is_ephemeral_tail_message(
-                    messages[-1]
-            ):
+            if messages and KVCacheModelCallHook._is_ephemeral_tail_message(messages[-1]):
                 # The protocol defines manage_request=False as normal
                 # inference followed by edits. The attachment is the final
                 # message, so evict its half-open range [len - 1, len).
-                extra_kwargs.update({
-                    "kv_action": "evict",
-                    "target": "messages",
-                    "manage_request": False,
-                    "msg_start": len(messages) - 1,
-                    "msg_end": len(messages),
-                })
+                extra_kwargs.update(
+                    {
+                        "kv_action": "evict",
+                        "target": "messages",
+                        "manage_request": False,
+                        "msg_start": len(messages) - 1,
+                        "msg_end": len(messages),
+                    }
+                )
         return extra_kwargs
 
     async def _evict_changed_window(
-            self,
-            *,
-            llm: Any,
-            context: Any,
-            context_window: Any,
-            session_id: str | None,
-            parent_session_id: str | None,
-            model_name: str,
+        self,
+        *,
+        llm: Any,
+        context: Any,
+        context_window: Any,
+        session_id: str | None,
+        parent_session_id: str | None,
+        model_name: str,
     ) -> None:
         if not session_id:
             logger.warning("Skip Ascend KV cache window diff eviction because session_id is empty.")
@@ -232,16 +232,13 @@ class KVCacheModelCallHook:
     @staticmethod
     def _is_ephemeral_tail_message(message: Any) -> bool:
         metadata = getattr(message, "metadata", None)
-        return (
-            isinstance(metadata, dict)
-            and metadata.get(KV_CACHE_EPHEMERAL_TAIL_METADATA) is True
-        )
+        return isinstance(metadata, dict) and metadata.get(KV_CACHE_EPHEMERAL_TAIL_METADATA) is True
 
     @classmethod
     def _is_attachment_tail_only_change(
-            cls,
-            change: Any,
-            context_window: Any,
+        cls,
+        change: Any,
+        context_window: Any,
     ) -> bool:
         """Return whether only an already-evicted attachment tail moved.
 
@@ -267,19 +264,16 @@ class KVCacheModelCallHook:
 
         old_body = old_messages[:-1]
         new_body = new_messages[:-1]
-        return (
-            len(new_body) >= len(old_body)
-            and new_body[:len(old_body)] == old_body
-        )
+        return len(new_body) >= len(old_body) and new_body[: len(old_body)] == old_body
 
     @staticmethod
     async def _release_changed_window(
-            *,
-            llm: Any,
-            context: Any,
-            context_window: Any,
-            session_id: str | None,
-            model_name: str,
+        *,
+        llm: Any,
+        context: Any,
+        context_window: Any,
+        session_id: str | None,
+        model_name: str,
     ) -> None:
         if not session_id:
             logger.warning("Skip KV cache release because session_id is empty.")
@@ -291,11 +285,7 @@ class KVCacheModelCallHook:
         release_kwargs = {
             "session_id": session_id,
             "messages": change.old_messages,
-            "messages_released_index": (
-                change.msg_start
-                if change.msg_start is not None
-                else len(change.old_messages)
-            ),
+            "messages_released_index": (change.msg_start if change.msg_start is not None else len(change.old_messages)),
             "model": model_name,
         }
         if change.tools_start is not None:
@@ -320,30 +310,21 @@ class KVCacheModelCallHook:
             return
         if not released:
             logger.warning(
-                "KV cache release returned false; continue normal inference. "
-                "session_id=%s msg_start=%s tools_start=%s",
+                "KV cache release returned false; continue normal inference. session_id=%s msg_start=%s tools_start=%s",
                 session_id,
                 change.msg_start,
                 change.tools_start,
             )
 
-    def _warn_unsupported(self, runtime: KVCacheRuntime) -> None:
-        if (
-                runtime.enable_release
-                and not runtime.supports_release
-                and not self._release_warning_logged
-        ):
+    def _warn_unsupported(self, runtime: KVCacheCallCapabilities) -> None:
+        if runtime.enable_release and not runtime.supports_release and not self._release_warning_logged:
             logger.warning(
                 "KVCacheAffinityConfig.enable_kv_cache_release is True, "
                 "but the current LLM does not support KV cache release; "
                 "KV cache release will not take effect."
             )
             self._release_warning_logged = True
-        if (
-                runtime.enable_affinity
-                and not runtime.supports_affinity
-                and not self._affinity_warning_logged
-        ):
+        if runtime.enable_affinity and not runtime.supports_affinity and not self._affinity_warning_logged:
             logger.warning(
                 "KVCacheAffinityConfig.enable_kv_cache_affinity is True, "
                 "but the current LLM does not support Ascend KV cache affinity; "
@@ -365,13 +346,10 @@ def build_child_session_kwargs(agent: Any, parent_session: Any) -> dict:
         parent_cache_id, _ = resolve_session_lineage(parent_session)
     except Exception as exc:
         logger.warning(
-            "KVC child lineage resolution failed; using runtime session: "
-            "session_id=%s error=%s",
+            "KVC child lineage resolution failed; using runtime session: session_id=%s error=%s",
             runtime_session_id,
             exc,
         )
         parent_cache_id = runtime_session_id
-    child_envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = (
-        parent_cache_id or runtime_session_id
-    )
+    child_envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = parent_cache_id or runtime_session_id
     return {"envs": child_envs}

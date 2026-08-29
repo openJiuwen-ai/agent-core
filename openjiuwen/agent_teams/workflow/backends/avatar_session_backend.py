@@ -28,7 +28,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import cancellation_safe_evict_then_dispose
+from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import (
+    cancellation_safe_release_then_dispose,
+)
 from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
@@ -165,6 +167,7 @@ class AvatarSessionManager:
         human_timeout: float | None = None,
         budget: BudgetLedger | None = None,
         workflow_budget: BudgetLedger | None = None,
+        kv_cache_runtime: Any = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
         self._workflow_budget = workflow_budget
@@ -196,6 +199,7 @@ class AvatarSessionManager:
         # None falls back to the legacy session+team scope.
         self._run_id = run_id
         self._workflow_name = workflow_name
+        self._kv_cache_runtime = kv_cache_runtime
         self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
@@ -511,12 +515,12 @@ class AvatarSessionManager:
         state = self._sessions.pop(session_id, None)
         if state is None or state.harness is None:
             return
-        binding = kv_cache_hooks.build_current_harness_binding(state.harness)
+        session = state.harness.current_session()
+        release_kvc = getattr(session, "release_kvc", None)
         try:
-            await cancellation_safe_evict_then_dispose(
-                binding=binding,
+            await cancellation_safe_release_then_dispose(
+                release_kvc=release_kvc if callable(release_kvc) else None,
                 dispose=state.harness.dispose,
-                reason="swarmflow-stateful-session-close",
                 owner_id=session_id,
             )
         finally:
@@ -660,7 +664,11 @@ class AvatarSessionManager:
         """Build the team session carrying the avatar's stable child session id."""
         from openjiuwen.core.session.agent_team import Session as TeamSession
 
-        return TeamSession(session_id=state.session_id, team_id=self._team_name)
+        return TeamSession(
+            session_id=state.session_id,
+            team_id=self._team_name,
+            kv_cache_runtime=self._kv_cache_runtime,
+        )
 
     async def _seed_fork_context(self, harness: Any, state: _SessionState, fork_data: dict) -> None:
         """Inject the fork snapshot into the child avatar's context engine.

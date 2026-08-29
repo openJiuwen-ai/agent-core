@@ -1,6 +1,3 @@
-# coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-
 from types import SimpleNamespace
 
 import pytest
@@ -8,29 +5,40 @@ import pytest
 from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 
 
-class _RaisingRegistry:
-    async def mark_ready_resident(self, member_id: str) -> None:
-        raise RuntimeError(f"mark failed: {member_id}")
+class Session:
+    def __init__(self) -> None:
+        self.parent = None
+        self.released = False
 
-    async def evict_member(self, member_id: str, *, reason: str) -> bool:
-        raise RuntimeError(f"evict member failed: {member_id}:{reason}")
+    def bind_parent_session_id(self, parent: str) -> None:
+        self.parent = parent
 
-    async def build_action_plan(self, action: str) -> None:
-        raise RuntimeError(f"plan failed: {action}")
+    async def release_kvc(self) -> bool:
+        self.released = True
+        return True
 
 
-def _agent(registry: object | None = None) -> SimpleNamespace:
-    return SimpleNamespace(
-        card=SimpleNamespace(id="coder"),
-        member_name="Coder",
-        resources=SimpleNamespace(team_kv_cache_registry=registry),
-    )
+class Harness:
+    def __init__(self) -> None:
+        self.deep_config = SimpleNamespace(
+            kv_cache_affinity_config=SimpleNamespace(
+                enable_kv_cache_affinity=True,
+            )
+        )
 
 
 @pytest.mark.asyncio
-async def test_kv_cache_hooks_are_best_effort_when_registry_raises() -> None:
-    agent = _agent(_RaisingRegistry())
+async def test_one_shot_hook_binds_parent_and_releases_session() -> None:
+    harness = Harness()
+    session = Session()
 
-    await kv_cache_hooks.mark_ready_resident(agent)
-    await kv_cache_hooks.evict_member(agent, reason="member-shutdown")
-    assert await kv_cache_hooks.build_action_plan(agent, "evict") is None
+    assert kv_cache_hooks.configure_harness_session_hooks(
+        harness,
+        product_session_id="product",
+        evict_on_finish=True,
+    ) is True
+    kv_cache_hooks.on_harness_session_created(harness, session)
+    await kv_cache_hooks.after_harness_session_finished(harness, session)
+
+    assert session.parent == "product"
+    assert session.released is True
