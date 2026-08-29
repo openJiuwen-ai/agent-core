@@ -11,9 +11,13 @@ for this request.
 - Only target roles from selected optimization targets.
 - All `target_path` and `declared_write_paths` must be relative, non-absolute, contain no `..`.
 - Use only the action groups present in the run-specific action contract. The
-  standard local surfaces are `prompt`, `skill`, and `tool`.
-- Use only `add`, `modify`, and `remove` operations.
-- `candidate_query` must remain empty; this package creates local artifacts and does not search external registries.
+  standard local surfaces are `prompt`, `skill`, `tool`, and `rail`.
+- Use only `add`, `modify`, `remove`, and explicitly offered `skill/search` operations.
+- If `skill/search` is offered and a local `skill/add` should recover from a
+  failed or unavailable search, set the add action to `run_if=dependency_failed`
+  and depend on the search action.
+- `candidate_query` must be non-empty only for `skill/search`; all other actions
+  keep it empty.
 - `install_ref` must always be empty.
 - `allowed_tools` may only include `read_file`, `write_file`, `edit_file`.
 - Prefer modifying an existing surface over creating a new one when it can address the evidence.
@@ -21,16 +25,16 @@ for this request.
   explaining why the selected surface is the smallest evidence-backed change.
 - Treat Configuration, Control, Action, and Instruction as distinct optimization
   levers. Prompt and Skill are Instruction surfaces; Tool is an Action surface;
-  Control changes are outside this package's current surface.
-  Never encode an unavailable Configuration or Control change as a Prompt or
-  Skill. Return an empty plan and preserve the deferred capability request.
+  Rail is a Control surface. Never encode an unavailable Configuration change
+  as a Prompt or Skill. Return an empty plan and preserve the deferred
+  capability request.
 - An empty patch, missing persistent edit, excessive investigation, or failure
   to finish is an execution outcome, not reusable Skill content. Do not create
   a Prompt or Skill whose effect is merely "produce a patch", "stop
   investigating", "commit to an edit", or "finish the implementation". If the
-  trace had already justified the concrete edit but runtime control prevented
-  action, preserve a deferred Control request. Otherwise optimize only the
-  earlier evidence-backed semantic decision that prevented discovery.
+  trace had already justified the concrete edit, use `rail` for the bounded
+  runtime Control transition when `rail` is offered. Otherwise optimize only
+  the earlier evidence-backed semantic decision that prevented discovery.
 - The immutable hypothesis includes an optimizer-only `lever_policy`. Stay within
   its recommended lever. Use the experiment Journal and Lever Scoreboard only to
   choose among surfaces inside that lever; a different lever requires a new
@@ -41,9 +45,24 @@ for this request.
   action with "both issues", "all issues", a second failure mode, or behavior
   observed only in another case. Plan a separate action when another issue has
   a different causal mechanism.
+- One issue may use at most three actions when its required behavior needs
+  multiple package surfaces or registration steps. All such actions must keep
+  the same role and single `attributed_issue_ids` value, and their `depends_on`
+  edges must form one connected bundle. Never connect actions from different
+  issues or roles.
+- Use multiple actions only when each action is necessary for the same required
+  behavior. Do not bundle independent quality improvements merely because they
+  touch the same role.
 - For `missed_exploration_or_capability`, use `skill/add` only when the current
-  trace identifies a reusable methodology that can be encoded locally.
+  trace and another independent case identify the same reusable methodology
+  that can be encoded locally. One case or one verifier subitem must use the
+  declared prompt-section fallback; a task-agnostic paraphrase does not count as
+  a second observation.
 - For `skill/add`, target `skills/<snake_name>/SKILL.md`, declare `["skills/<snake_name>/SKILL.md", "skills/skills.yaml"]`, and create a package-local skill from scratch. Use underscores in `<snake_name>`, not hyphens. The created `SKILL.md` must include YAML frontmatter whose `name` exactly equals `<snake_name>` and whose non-empty `description` combines broad task-area trigger terms, the concrete failure pattern, and the final verification moment when the role should consult the skill. Generalize from the evidence mechanism: concrete filenames, DOM ids, role names, and task nouns may appear only as examples, never as the skill trigger or required procedure. The description and expected effect must remain applicable after those case-specific names are replaced, and the procedure must state how it transfers to at least two distinct artifact or task contexts.
+- A new Skill trigger must be observable before the missed decision from public
+  task wording, input/artifact shape, or early tool evidence. Do not encode case
+  IDs, verifier/test IDs, benchmark-only expected counts, known answer rows, or
+  the observed exception filenames in the runtime Skill body.
 - Before choosing `skill/add`, name the causal discriminator the source trace missed,
   such as root-owner versus local-object lookup, iterable versus iterator
   protocol, lifecycle ordering, unit conversion, or async completion ownership.
@@ -110,9 +129,10 @@ for this request.
   lifecycle event once via steering and then yield; it must not duplicate a
   static Prompt or Skill inside Python source.
 - Never output `config`, `mcp`, `subagent`, `dependency`, `documentation`, `memory`, `knowledge`, `context`, `workflow`, `install`, or global environment actions.
-- If a selected role has attributed issues that explicitly recommend different supported local surfaces (`prompt`, `tool`, `skill`, `rail`) and the action definitions include those surfaces, include at least one action for each explicitly recommended surface unless another action on that same surface already addresses it.
+- If a selected role has attributed issues that explicitly recommend different supported local surfaces (`prompt`, `tool`, `skill`, `rail`) and the action definitions include those surfaces, keep each issue in its own action bundle; never connect or justify actions across those issues.
 - For each selected target whose `optimization_surfaces` contains a supported local surface from the action definitions, include at least one action for that target on one of those surfaces.
-- Keep `depends_on` empty unless strictly necessary.
+- Keep `depends_on` empty for a one-action repair. For a related multi-action
+  repair, use dependencies to make the shared issue bundle explicit.
 - Put every action in exactly one wave.
 ## Evidence-To-Component Selection
 - First map evidence to the smallest loadable ExpertHarness surface that can change the behavior.
@@ -133,16 +153,19 @@ for this request.
 - Use `skill/add` when the evidence-backed procedure is specific enough to
   write as a package-local skill.
 - Use `tool/add` only when the member needs a deterministic executable capability that cannot be represented as prompt or skill content.
+- Use `rail/add` only when evidence identifies lifecycle, routing, retry, or
+  diagnosis-to-action control that cannot be delivered reliably as static
+  instructions.
 - If the evidence is too weak to choose one of these surfaces, or the diagnosed
   lever is not executable in the current action contract, return an empty plan.
   Do not disguise a `config` or environment defect as an Instruction change;
-  preserve it as a deferred capability request.
+  use `rail` for an evidence-backed runtime Control defect when offered.
 
 ## Prompt Surface Selection Contract
 - `identity.md` is only for role identity and duty-boundary changes. If you target it, set `constraints.surface_scope` to `role_identity` or `duty_boundary`.
 - `soul.md` is only for a small number of durable operating principles that should affect most tasks for this role. If you target it, set `constraints.surface_scope` to `durable_operating_principle`.
 - Concrete workflows, checklists, verification procedures, task-specific recovery procedures, and multi-step operating routines must use `prompt_sections/files/*.md` plus `prompt_sections/sections.yaml`. Set `constraints.section_name` and, when useful, `constraints.priority`.
-- `skill` is for reusable methodology or domain capability that should be discovered as a skill, not for one-off wording changes.
+- `skill` is for reusable methodology or domain capability that should be discovered as a skill, not for one-off wording changes. Creating one requires the same mechanism in at least two distinct cases; a single case belongs in a prompt section until a second independent observation supports promotion.
 - A reusable skill must encode an invariant, decision rule, or verification method rather than the literal repair for one observed case. If the proposed skill would stop making sense after replacing the evidence's filenames, identifiers, and product nouns, use a bounded prompt change or return an empty plan instead.
 - `tool` is only for deterministic executable capability. Do not add it when a
   prompt section or skill is enough.

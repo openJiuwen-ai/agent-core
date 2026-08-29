@@ -82,6 +82,94 @@ class BrowserTaskProgressState:
             last_worker_final=str(data.get("last_worker_final") or "").strip(),
         )
 
+    @classmethod
+    def from_task_state(cls, data: Optional[Dict[str, Any]]) -> "BrowserTaskProgressState":
+        """Build the legacy progress DTO from runtime-owned task state."""
+
+        if not isinstance(data, dict) or not data:
+            return cls()
+        completed_steps, remaining_steps, completion_evidence = cls._phase_progress(data)
+        completion_evidence.extend(cls._evidence_summaries(data))
+        recent_steps = cls._recent_action_summaries(data)
+        current_phase = str(data.get("current_phase") or "").strip()
+        next_action = str(data.get("next_action_class") or current_phase).strip()
+        last_page = data.get("last_page") if isinstance(data.get("last_page"), dict) else {}
+        return cls(
+            request_id=str(data.get("task_id") or "").strip(),
+            status=str(data.get("status") or "unknown").strip() or "unknown",
+            completed_steps=completed_steps,
+            remaining_steps=remaining_steps,
+            next_step=next_action,
+            completion_evidence=completion_evidence[-10:],
+            missing_requirements=[str(item) for item in data.get("blockers") or [] if str(item).strip()],
+            recent_tool_steps=recent_steps,
+            last_page_url=str(last_page.get("url") or "").strip(),
+            last_page_title=str(last_page.get("title") or "").strip(),
+            last_worker_final=str(data.get("last_worker_final") or "").strip(),
+        )
+
+    @staticmethod
+    def _phase_progress(data: Dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+        phases = data.get("phases") if isinstance(data.get("phases"), dict) else {}
+        completed_steps: list[str] = []
+        remaining_steps: list[str] = []
+        completion_evidence: list[str] = []
+        for phase_name, details in phases.items():
+            if not isinstance(details, dict):
+                continue
+            phase_label = str(phase_name).strip()
+            if details.get("status") == "completed":
+                completed_steps.append(phase_label)
+                evidence = str(details.get("completion_evidence") or "").strip()
+                if evidence:
+                    completion_evidence.append(f"{phase_label}: {evidence}")
+            else:
+                remaining_steps.append(phase_label)
+        return completed_steps, remaining_steps, completion_evidence
+
+    @staticmethod
+    def _evidence_summaries(data: Dict[str, Any]) -> list[str]:
+        summaries: list[str] = []
+        evidence_records = data.get("structured_evidence")
+        if isinstance(evidence_records, list):
+            for record in evidence_records[-3:]:
+                if not isinstance(record, dict):
+                    continue
+                fields = ", ".join(str(item) for item in record.get("fields") or [])
+                if fields:
+                    summaries.append(f"{record.get('kind') or 'evidence'}: {fields}")
+        evidence_slots = data.get("evidence_slots")
+        if isinstance(evidence_slots, list):
+            for slot in evidence_slots[-4:]:
+                if not isinstance(slot, dict):
+                    continue
+                label = "/".join(
+                    str(slot.get(key) or "") for key in ("entity", "variant", "field")
+                ).strip("/")
+                value = str(slot.get("value") or "").strip()
+                if label and value:
+                    summaries.append(f"{label}: {value[:160]}")
+        return summaries
+
+    @staticmethod
+    def _recent_action_summaries(data: Dict[str, Any]) -> list[str]:
+        recent_steps: list[str] = []
+        recent_actions = data.get("recent_actions")
+        if isinstance(recent_actions, list):
+            for action in recent_actions[-6:]:
+                if not isinstance(action, dict):
+                    continue
+                summary_parts = (
+                    str(action.get("action_class") or "").strip(),
+                    str(action.get("target_summary") or "").strip(),
+                    str(action.get("outcome") or "").strip(),
+                    str(action.get("semantic_delta") or "").strip(),
+                )
+                summary = " ".join(filter(None, summary_parts))
+                if summary:
+                    recent_steps.append(summary[:300])
+        return recent_steps
+
     def is_empty(self) -> bool:
         return (
             self.status == "unknown"

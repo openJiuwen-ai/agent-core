@@ -1036,32 +1036,57 @@ def _resolve_short_references(
             text = page.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise _pipeline_error("candidate Markdown could not be read for source reference resolution") from exc
-
-        def replace(match: re.Match[str], *, current_page: Path = page) -> str:
-            token = match.group(0)
-            source_id = alias_targets.get(token)
-            if source_id is None:
-                raise _pipeline_error("candidate contains an unknown short source reference")
-            source_path = validated_sources.get(source_id)
-            if source_path is None:
-                source_path = _reference_source_path(source_root, source_id, error=_pipeline_error)
-                validated_sources[source_id] = source_path
-            try:
-                relative_target = os.path.relpath(
-                    source_path,
-                    start=(final_context_root / current_page.relative_to(context_root)).parent,
-                ).replace("\\", "/")
-            except ValueError as exc:
-                raise _pipeline_error("candidate source reference cannot be made relative") from exc
-            return f"[{source_id}]({_markdown_link_target(relative_target)})"
-
-        resolved = _SHORT_REFERENCE.sub(replace, text)
+        display_numbers: dict[str, int] = {}
+        resolved = _SHORT_REFERENCE.sub(
+            _short_reference_replacer(
+                context_root=context_root,
+                current_page=page,
+                final_context_root=final_context_root,
+                source_root=source_root,
+                alias_targets=alias_targets,
+                validated_sources=validated_sources,
+                display_numbers=display_numbers,
+            ),
+            text,
+        )
         if "[[ref:" in resolved:
             raise _pipeline_error("candidate contains a malformed or unresolved short source reference")
         if resolved != text:
             replacements[page] = resolved.encode("utf-8")
     for page, data in replacements.items():
         _atomic_write(page, data)
+
+
+def _short_reference_replacer(
+    *,
+    context_root: Path,
+    current_page: Path,
+    final_context_root: Path,
+    source_root: Path,
+    alias_targets: Mapping[str, str],
+    validated_sources: dict[str, Path],
+    display_numbers: dict[str, int],
+) -> Callable[[re.Match[str]], str]:
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        source_id = alias_targets.get(token)
+        if source_id is None:
+            raise _pipeline_error("candidate contains an unknown short source reference")
+        source_path = validated_sources.get(source_id)
+        if source_path is None:
+            source_path = _reference_source_path(source_root, source_id, error=_pipeline_error)
+            validated_sources[source_id] = source_path
+        try:
+            relative_target = os.path.relpath(
+                source_path,
+                start=(final_context_root / current_page.relative_to(context_root)).parent,
+            ).replace("\\", "/")
+        except ValueError as exc:
+            raise _pipeline_error("candidate source reference cannot be made relative") from exc
+        display_number = display_numbers.setdefault(source_id, len(display_numbers) + 1)
+        return f"[来源{display_number}]({_markdown_link_target(relative_target)})"
+
+    return replace
 
 
 def _classify_reference_target(
@@ -2008,11 +2033,7 @@ class ContextPipelineService:
 
         documents: list[dict[str, object]] = []
         blocks: list[dict[str, object]] = []
-        deleted_ids: list[str] = []
         for item in batch.items:
-            if item.operation == "delete":
-                deleted_ids.append(item.logical_id)
-                continue
             markdown = _normalize_markdown(item.content or "")
             document: dict[str, object] = {
                 "logical_id": item.logical_id,
@@ -2037,7 +2058,7 @@ class ContextPipelineService:
         return {
             "documents": documents,
             "blocks": blocks,
-            "deleted_ids": deleted_ids,
+            "deleted_ids": [],
             "actual_profile": "deterministic",
         }
 
@@ -2178,6 +2199,12 @@ class ContextPipelineService:
                             "inputs/deleted/; "
                             "read it only when needed for organizing the candidate and do not copy the list into "
                             "your reply. "
+                            "Use only read_file, write_file, edit_file, glob, list_files, and grep. Never execute "
+                            "code or use unlisted tools. For large files, each write_file or edit_file call may add "
+                            "no more than 2000 characters of Markdown. Start a new page with a bounded first section, "
+                            "then append bounded sections with edit_file and a short unique tail anchor. "
+                            "Do not rewrite "
+                            "a complete large file when only one section changes. "
                             "inputs/ and materialized-source/ are read-only. Use tmp/ for scratch files; tmp/ is "
                             "never published. Keep page paths below sandbox/context, ending in .md. Never use parent "
                             "traversal or create a business page named description.md. Do not add YAML/frontmatter, "
@@ -2186,8 +2213,8 @@ class ContextPipelineService:
                             "tmp/, and the optional materialized source copy. This is a "
                             "disposable PersonalContext sandbox: do not follow generic soft-delete/archive rules, "
                             "do not "
-                            "create .archive, .deleted, recycle-bin, or any other root entry, and delete "
-                            "temporary files directly with the allowed tools. The only permitted sandbox-root "
+                            "create .archive, .deleted, recycle-bin, or any other root entry. PersonalContext cleans "
+                            "scratch files after the attempt. The only permitted sandbox-root "
                             "entries are framework-created .agent_history, context, inputs, tmp, "
                             "and materialized-source. Keep ordinary "
                             "pages that are not part of this batch unchanged. Write all final wiki Markdown in "
@@ -2250,6 +2277,7 @@ class ContextPipelineService:
                     baseline=context_baseline,
                     changed_paths=changed_paths,
                     baseline_root=self._context_root,
+                    final_context_root=self._context_root,
                     source_root=self._source_meta_root,
                     deleted_source_ids=deleted_source_ids,
                     require_description=candidate == "agent",
@@ -2406,7 +2434,11 @@ class ContextPipelineService:
                     processed=processed,
                     fallback_references=tuple(alias_targets or ()),
                 )
-            _validate_candidate(candidate_context)
+            _validate_candidate(
+                candidate_context,
+                final_context_root=self._context_root,
+                source_root=self._source_meta_root,
+            )
             if alias_targets is not None:
                 _resolve_short_references(
                     candidate_context,
@@ -2863,6 +2895,7 @@ def _validate_filesystem_agent_result(
             baseline=context_baseline,
             changed_paths=changed_paths,
             baseline_root=baseline_root,
+            final_context_root=final_context_root,
             source_root=source_root,
             deleted_source_ids=deleted_source_ids,
             materialized_baseline=materialized_baseline,
@@ -2909,6 +2942,7 @@ def _validate_agent_candidate(
     baseline: Mapping[str, tuple[int, str]],
     changed_paths: set[str],
     baseline_root: Path | None = None,
+    final_context_root: Path | None = None,
     source_root: Path | None = None,
     deleted_source_ids: set[str] | None = None,
     materialized_baseline: Mapping[str, tuple[int, str]] | None = None,
@@ -3021,6 +3055,8 @@ def _validate_agent_candidate(
         _validate_unchanged_tree(materialized_root, materialized_baseline, name="materialized-source")
     _validate_description_navigation(
         context_root,
+        final_context_root=final_context_root or baseline_root,
+        source_root=source_root,
         repairable=True,
         allowed_missing=allowed_missing_pages,
     )
@@ -3245,7 +3281,12 @@ def _load_agent_json(text: str, *, error_message: str) -> object:
     raise _pipeline_error(error_message)
 
 
-def _validate_candidate(context_root: Path) -> None:
+def _validate_candidate(
+    context_root: Path,
+    *,
+    final_context_root: Path | None = None,
+    source_root: Path | None = None,
+) -> None:
     _assert_no_symlinks(context_root)
     description = context_root / "description.md"
     try:
@@ -3257,18 +3298,25 @@ def _validate_candidate(context_root: Path) -> None:
     for entry in context_root.rglob("*"):
         if entry.is_file() and entry.suffix.casefold() != ".md":
             raise _publish_error("candidate Context contains a non-Markdown file")
-    _validate_description_navigation(context_root)
+    _validate_description_navigation(
+        context_root,
+        final_context_root=final_context_root,
+        source_root=source_root,
+    )
 
 
 def _validate_description_navigation(
     context_root: Path,
     *,
+    final_context_root: Path | None = None,
+    source_root: Path | None = None,
     repairable: bool = False,
     allowed_missing: set[str] | None = None,
 ) -> None:
-    """Require Context navigation in description.md to resolve safely."""
+    """Require Context navigation and verified source links to resolve safely."""
 
-    resolved_context = context_root.resolve()
+    resolved_final_context = (final_context_root or context_root).resolve()
+    resolved_source_root = source_root.resolve() if source_root is not None else None
     error = _pipeline_error if repairable else _publish_error
     for page in context_root.rglob("description.md"):
         try:
@@ -3293,12 +3341,25 @@ def _validate_description_navigation(
                     target = titled.group(1)
             if target.startswith(("/", "\\")) or re.fullmatch(r"[A-Za-z]:.*", target) is not None:
                 raise error("candidate description navigation leaves Context")
-            target_path = (page.parent / target).resolve()
+            page_relative = page.relative_to(context_root)
+            logical_page = resolved_final_context / page_relative
+            target_path = (logical_page.parent / target).resolve()
             try:
-                relative_target = target_path.relative_to(resolved_context).as_posix()
-            except ValueError as exc:
-                raise error("candidate description navigation leaves Context") from exc
-            if not target_path.exists() and allowed_missing is not None and relative_target in allowed_missing:
+                relative_target = target_path.relative_to(resolved_final_context).as_posix()
+            except ValueError:
+                if (
+                    source_root is None
+                    or resolved_source_root is None
+                    or not target_path.is_relative_to(resolved_source_root)
+                ):
+                    raise error("candidate description navigation leaves Context") from None
+                source_relative = target_path.relative_to(resolved_source_root)
+                if len(source_relative.parts) != 1 or source_relative.suffix.casefold() != ".md":
+                    raise error("candidate atomic source reference is invalid") from None
+                _reference_source_path(source_root, source_relative.stem, error=error)
                 continue
-            if not target_path.exists() or target_path.is_symlink():
+            candidate_target = context_root / relative_target
+            if not candidate_target.exists() and allowed_missing is not None and relative_target in allowed_missing:
+                continue
+            if not candidate_target.exists() or candidate_target.is_symlink():
                 raise error("candidate description navigation target is missing")

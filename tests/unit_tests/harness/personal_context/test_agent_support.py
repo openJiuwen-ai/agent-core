@@ -18,6 +18,7 @@ from openjiuwen.core.context_engine.processor.compressor.round_level_compressor 
     RoundLevelCompressor,
     RoundLevelCompressorConfig,
 )
+from openjiuwen.core.sys_operation.cwd import get_cwd, set_cwd
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -37,67 +38,80 @@ from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.rails.tool_call_resilience_rail import ToolCallResilienceRail
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "$HOME",
-        "$env:PATH",
-        "%USERPROFILE%",
-        "${OUTSIDE}",
-        "~\\outside.txt",
-        "~alice\\profile.txt",
-        "Get-Content subdir/../../outside.txt",
-        "Get-Content subdir\\..\\..\\outside.txt",
-        "Get-Content \\\\server\\share\\file.txt",
-        "Get-Content \\\\127.0.0.1\\share\\file.txt",
-        "Get-Content //host/share/file.txt",
-        "/proc/self/environ",
-        "ls\nGet-Content secret.txt",
-        "ls; Get-Content secret.txt",
-        "ls && Get-Content secret.txt",
-        "ls || Get-Content secret.txt",
-        "ls | Select-String secret",
-        "echo secret > outside.txt",
-        "echo secret >> outside.txt",
-        "Start-Process calc.exe",
-        "reg add HKCU\\Software\\personal_context",
-        "sc.exe stop service",
-        "schtasks /create",
-        "taskkill /f /im agent.exe",
-        "rm -r -f outside",
-        "rm -f --recursive outside",
-        "Remove-Item outside -Force -Recurse",
-        "rd /q /s outside",
-        "del /s /f outside",
-        "Get-Content https://example.invalid/remote.txt",
-        "Get-Content ftp://example.invalid/remote.txt",
-        "Get-Content file:///C:/Users/alice/secret.txt",
-        "Get-Content file://server/share/secret.txt",
-        "Get-Content C:/Windows/win.ini",
-        "Get-Content /Windows/win.ini",
-        "Get-Content ([Environment]::GetFolderPath('UserProfile'))",
-        "Get-Content (Get-Item env:USERPROFILE).Value",
-        "Get-Content variable:HOME",
-        "Get-Content function:prompt",
-        "Get-Content registry::HKEY_CURRENT_USER\\Software",
-        "Get-Content HKLM:\\Software",
-        "Get-Content HKCU:\\Software",
-        "Get-Content HKCR:\\Software",
-        "Get-Content wsman:\\localhost",
-        "Get-Content cert:LocalMachine\\Root",
-        "Get-Content alias:ls",
-        "find . -exec Get-Content secret.txt \\;",
-        "find . -execdir Get-Content secret.txt \\;",
-        "find . -delete",
-    ],
-)
-def test_personal_context_shell_patterns_reject_escape_and_process_commands(command: str) -> None:
-    assert any(re.search(pattern, command) for pattern in agent_support._PERSONAL_CONTEXT_DANGEROUS_PATTERNS)
+def test_personal_context_file_tools_are_exactly_the_six_bounded_tools(
+    tmp_path: Path,
+) -> None:
+    tools = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        tmp_path,
+    )
+
+    assert [tool.card.name for tool in tools] == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "list_files",
+        "grep",
+    ]
 
 
-@pytest.mark.parametrize("command", ["head", "tail", "wc", "touch", "Test-Path", "Copy-Item", "Move-Item"])
-def test_personal_context_shell_allowlist_contains_local_file_helpers(command: str) -> None:
-    assert command in agent_support._PERSONAL_CONTEXT_SHELL_ALLOWLIST
+@pytest.mark.asyncio
+async def test_personal_context_grep_accepts_bounded_regex_and_rejects_escape(
+    tmp_path: Path,
+) -> None:
+    original_cwd = get_cwd()
+    sandbox = tmp_path / "sandbox (safe) [1]"
+    sandbox.mkdir()
+    (sandbox / "notes.md").write_text("Alpha(42)[ok]\n", encoding="utf-8")
+    tools = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        sandbox,
+    )
+    tool = next(tool for tool in tools if tool.card.name == "grep")
+    set_cwd(str(sandbox))
+    try:
+        result = await tool.invoke({"pattern": r"Alpha\([0-9]+\)\[ok\]", "path": str(sandbox)})
+        assert result.success is True
+
+        outside = tmp_path / "outside.md"
+        outside.write_text("Alpha(42)[ok]\n", encoding="utf-8")
+        escaped = await tool.invoke({"pattern": "Alpha", "path": str(outside)})
+        assert escaped.success is False
+        assert "outside" in str(escaped.error).casefold() or "sandbox" in str(escaped.error).casefold()
+    finally:
+        set_cwd(original_cwd)
+
+
+@pytest.mark.asyncio
+async def test_personal_context_grep_bounds_results_without_shell(
+    tmp_path: Path,
+) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    (sandbox / "many.md").write_text(
+        "\n".join(f"match-{index}" for index in range(20)),
+        encoding="utf-8",
+    )
+    tools = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        sandbox,
+    )
+    tool = next(tool for tool in tools if tool.card.name == "grep")
+
+    result = await tool.invoke(
+        {
+            "pattern": "match-",
+            "path": ".",
+            "head_limit": 3,
+            "offset": 2,
+        }
+    )
+
+    assert result.success is True
+    assert result.data["count"] == 3
+    assert result.data["appliedOffset"] == 2
+    assert result.data["appliedLimit"] == 3
 
 
 @pytest.mark.parametrize(
@@ -306,6 +320,15 @@ async def test_real_factory_cleanup_unregisters_every_explicit_and_default_rail(
     context_rail = agent_support._make_context_processor_rail(model_client, model_request)
     agent, rails = agent_support._make_agent(model, tmp_path, context_rail)
 
+    assert all(type(rail).__name__ != "SysOperationRail" for rail in rails)
+    assert {card.name for card in cast(Any, agent).ability_manager.list()} == {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "list_files",
+        "grep",
+    }
     await cast(Any, agent).ensure_initialized()
     configured = cast(Any, agent).configured_rails()
     assert configured == rails
@@ -314,6 +337,7 @@ async def test_real_factory_cleanup_unregisters_every_explicit_and_default_rail(
 
     await agent_support._cleanup_runtime(agent, rails, None, [], None)
     assert cast(Any, agent).configured_rails() == []
+    assert cast(Any, agent).ability_manager.list() == []
 
 
 @pytest.mark.asyncio
@@ -565,6 +589,76 @@ async def test_iteration_reminder_fires_after_complete_tool_group_at_20_40_60_80
     assert isinstance(history[3], UserMessage)
 
 
+class _FakeContext:
+    def __init__(self, messages: list[BaseMessage]) -> None:
+        self.messages = messages
+
+    def get_messages(self) -> list[BaseMessage]:
+        return list(self.messages)
+
+    def pop_messages(self, size: int = 1) -> list[BaseMessage]:
+        popped = self.messages[-size:]
+        del self.messages[-size:]
+        return popped
+
+
+def test_discard_length_tail_keeps_completed_tool_pair() -> None:
+    tool_call = ToolCall(id="call-1", type="function", name="write_file", arguments="{}")
+    truncated = AssistantMessage(content="partial", finish_reason="length")
+    history: list[BaseMessage] = [
+        UserMessage(content="build"),
+        AssistantMessage(content="", tool_calls=[tool_call]),
+        ToolMessage(content="written", tool_call_id="call-1"),
+        UserMessage(content="continue"),
+        truncated,
+    ]
+    expected = history[:-1]
+    context = _FakeContext(history)
+    agent = SimpleNamespace(_get_context_or_error=lambda **_kwargs: context)
+
+    assert agent_support._discard_length_limited_tail(agent, "session", truncated) is True
+    assert context.get_messages() == expected
+    agent_support.validate_personal_context_messages(context.get_messages())
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", "null"])
+def test_discard_length_tail_rejects_non_length_result(finish_reason: str) -> None:
+    result = AssistantMessage(content="done", finish_reason=finish_reason)
+    context = _FakeContext([UserMessage(content="build"), result])
+    original = context.get_messages()
+    agent = SimpleNamespace(_get_context_or_error=lambda **_kwargs: context)
+
+    assert agent_support._discard_length_limited_tail(agent, "session", result) is False
+    assert context.get_messages() == original
+
+
+def test_discard_length_tail_rejects_non_tail_result() -> None:
+    result = AssistantMessage(content="partial", finish_reason="max_tokens")
+    context = _FakeContext([UserMessage(content="build"), result, AssistantMessage(content="later")])
+    original = context.get_messages()
+    agent = SimpleNamespace(_get_context_or_error=lambda **_kwargs: context)
+
+    assert agent_support._discard_length_limited_tail(agent, "session", result) is False
+    assert context.get_messages() == original
+
+
+def test_discard_length_tail_rejects_unclosed_tool_history() -> None:
+    tool_call = ToolCall(id="call-1", type="function", name="write_file", arguments="{}")
+    result = AssistantMessage(content="partial", finish_reason="length")
+    context = _FakeContext(
+        [
+            UserMessage(content="build"),
+            AssistantMessage(content="", tool_calls=[tool_call]),
+            result,
+        ]
+    )
+    original = context.get_messages()
+    agent = SimpleNamespace(_get_context_or_error=lambda **_kwargs: context)
+
+    assert agent_support._discard_length_limited_tail(agent, "session", result) is False
+    assert context.get_messages() == original
+
+
 class _FakeModel:
     def __init__(self, **kwargs: object) -> None:
         self.kwargs = kwargs
@@ -594,15 +688,32 @@ class _FakeReactAgent:
         self._events.append(("clear_session", session_id))
 
 
+class _FakeAbilityManager:
+    def __init__(self, events: list[tuple[str, Any]]) -> None:
+        self._events = events
+
+    def teardown_tools(self) -> None:
+        self._events.append(("tool_teardown", None))
+
+
 class _FakeAgent:
     def __init__(self, events: list[tuple[str, Any]], outputs: list[object]) -> None:
         self.card = object()
         self.react_agent = _FakeReactAgent(events)
+        self.ability_manager = _FakeAbilityManager(events)
         self._events = events
         self._outputs = outputs
         self.invocations: list[tuple[object, object]] = []
         self.seeded_context: list[BaseMessage] | None = None
-        self.context_history: list[BaseMessage] = []
+        self.context = _FakeContext([])
+
+    @property
+    def context_history(self) -> list[BaseMessage]:
+        return self.context.messages
+
+    @context_history.setter
+    def context_history(self, messages: list[BaseMessage]) -> None:
+        self.context.messages = messages
 
     async def create_new_context_engine(self, *, session_id: str, messages: list[BaseMessage]) -> str:
         self.seeded_context = list(messages)
@@ -613,6 +724,10 @@ class _FakeAgent:
     def get_current_context(self, *, session_id: str) -> list[BaseMessage]:
         self._events.append(("get_context", session_id))
         return list(self.context_history)
+
+    def _get_context_or_error(self, *, session_id: str) -> _FakeContext:
+        self._events.append(("get_context_object", session_id))
+        return self.context
 
     async def invoke(self, request: object, *, session: object) -> object:
         self.invocations.append((request, session))
@@ -649,7 +764,6 @@ def _patch_agent_runtime(
     created: dict[str, Any] = {
         "agents": [],
         "sessions": [],
-        "rails": [],
         "processor_rails": [],
         "security_rails": [],
         "resilience_rails": [],
@@ -667,17 +781,6 @@ def _patch_agent_runtime(
         session = _FakeSession(session_id, events)
         created["sessions"].append(session)
         return session
-
-    def fake_rail(**kwargs: object) -> object:
-        events.append(("rail", kwargs))
-
-        class Rail:
-            def uninit(self, agent: object) -> None:
-                events.append(("rail_uninit", agent))
-
-        rail = Rail()
-        created["rails"].append(rail)
-        return rail
 
     def fake_context_processor_rail(model_client: object, model_request: object) -> object:
         events.append(("context_processor_rail", (model_client, model_request)))
@@ -715,7 +818,6 @@ def _patch_agent_runtime(
     monkeypatch.setattr(agent_support, "Model", _FakeModel)
     monkeypatch.setattr(agent_support, "create_deep_agent", fake_create_deep_agent)
     monkeypatch.setattr(agent_support, "create_agent_session", fake_create_session)
-    monkeypatch.setattr(agent_support, "SysOperationRail", fake_rail)
     monkeypatch.setattr(agent_support, "SecurityRail", fake_security_rail)
     monkeypatch.setattr(agent_support, "ToolCallResilienceRail", fake_resilience_rail)
     monkeypatch.setattr(agent_support, "_make_context_processor_rail", fake_context_processor_rail)
@@ -748,7 +850,7 @@ async def test_run_personal_context_agent_creates_unique_session_and_returns_tex
     assert session.session_id.startswith("personal-context-agent-")
     assert len(session.session_id) > len("personal-context-agent-")
     assert [event[0] for event in events].count("clear_session") == 1
-    assert [event[0] for event in events].count("rail_uninit") == 1
+    assert [event[0] for event in events].count("tool_teardown") == 1
     assert [event[0] for event in events].count("context_processor_rail_uninit") == 1
     assert [event[0] for event in events].count("security_rail_uninit") == 1
     assert [event[0] for event in events].count("resilience_rail_uninit") == 1
@@ -765,6 +867,117 @@ async def test_run_personal_context_agent_creates_unique_session_and_returns_tex
     ]
     assert all(asyncio.iscoroutinefunction(callback) for _, callback in react_agent.registered_callbacks)
     assert react_agent.unregistered_callbacks == react_agent.registered_callbacks
+
+
+@pytest.mark.asyncio
+async def test_length_stop_continues_same_agent_before_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, Any]] = []
+    created = _patch_agent_runtime(
+        monkeypatch,
+        outputs_by_agent=[
+            [
+                AssistantMessage(content="partial", finish_reason="length"),
+                AssistantMessage(content="done", finish_reason="stop"),
+            ]
+        ],
+        events=events,
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    validation_calls: list[str] = []
+    messages = [UserMessage(content="build context")]
+
+    output = await agent_support.run_personal_context_agent(
+        model_client=cast(Any, object()),
+        model_request=cast(Any, object()),
+        sandbox_path=sandbox,
+        messages=messages,
+        validate_result=lambda text, _path: validation_calls.append(text) or [],
+    )
+
+    agent = created["agents"][0]
+    assert output == "done"
+    assert len(created["agents"]) == 1
+    assert len(agent.invocations) == 2
+    assert agent.invocations[0][1] is agent.invocations[1][1]
+    assert validation_calls == ["done"]
+    assert messages == [UserMessage(content="build context")]
+    continuation = cast(dict[str, str], agent.invocations[1][0])["query"]
+    assert "Continue the unfinished original" in continuation
+    assert "validate" not in continuation.casefold()
+    assert all(
+        not (isinstance(message, AssistantMessage) and message.finish_reason in {"length", "max_tokens"})
+        for message in agent.context_history
+    )
+    agent_support.validate_personal_context_messages(agent.context_history)
+
+
+@pytest.mark.asyncio
+async def test_length_continuation_exhausts_after_three_automatic_attempts(
+    tmp_path: Path,
+) -> None:
+    events: list[tuple[str, Any]] = []
+    outputs = [AssistantMessage(content=f"partial-{index}", finish_reason="length") for index in range(4)]
+    agent = _FakeAgent(events, outputs)
+    session = _FakeSession("session", events)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    validation_calls: list[str] = []
+
+    result, errors, invocation_failed = await agent_support._invoke_and_validate(
+        agent,
+        session,
+        [UserMessage(content="build context")],
+        sandbox,
+        lambda text, _path: validation_calls.append(text) or [],
+        query="build context",
+    )
+
+    assert result == ""
+    assert errors == ["agent length continuation exhausted"]
+    assert invocation_failed is True
+    assert len(agent.invocations) == 4
+    assert validation_calls == []
+    assert all(not isinstance(message, AssistantMessage) for message in agent.context_history)
+    agent_support.validate_personal_context_messages(agent.context_history)
+
+
+@pytest.mark.asyncio
+async def test_length_continuation_rejects_unsafe_history_without_appending_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, Any]] = []
+    truncated = AssistantMessage(content="partial", finish_reason="max_tokens")
+    agent = _FakeAgent(events, [truncated])
+    session = _FakeSession("session", events)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    validation_calls: list[str] = []
+    monkeypatch.setattr(
+        agent_support,
+        "_discard_length_limited_tail",
+        lambda *_args, **_kwargs: False,
+    )
+
+    result, errors, invocation_failed = await agent_support._invoke_and_validate(
+        agent,
+        session,
+        [UserMessage(content="build context")],
+        sandbox,
+        lambda text, _path: validation_calls.append(text) or [],
+        query="build context",
+    )
+
+    assert result == ""
+    assert errors == ["agent length continuation history is unsafe"]
+    assert invocation_failed is True
+    assert len(agent.invocations) == 1
+    assert validation_calls == []
+    assert agent.context_history == [UserMessage(content="build context"), truncated]
 
 
 @pytest.mark.asyncio
@@ -995,7 +1208,7 @@ async def test_run_personal_context_agent_seeds_closed_history_and_uses_only_cur
     "first_output",
     ["", AssistantMessage(content="x" * (agent_support._MAX_AGENT_OUTPUT_CHARS + 1))],
 )
-async def test_run_personal_context_agent_repairs_bounded_output_validation_errors(
+async def test_run_personal_context_agent_accepts_valid_sandbox_when_confirmation_is_empty_or_oversize(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     first_output: object,
@@ -1003,7 +1216,7 @@ async def test_run_personal_context_agent_repairs_bounded_output_validation_erro
     events: list[tuple[str, Any]] = []
     created = _patch_agent_runtime(
         monkeypatch,
-        outputs_by_agent=[[first_output, AssistantMessage(content="fixed")]],
+        outputs_by_agent=[[first_output]],
         events=events,
     )
     sandbox = tmp_path / "sandbox"
@@ -1022,9 +1235,39 @@ async def test_run_personal_context_agent_repairs_bounded_output_validation_erro
         validate_result=validate,
     )
 
+    assert output == ""
+    assert len(created["agents"][0].invocations) == 1
+    assert validation_calls == [""]
+
+
+@pytest.mark.asyncio
+async def test_run_personal_context_agent_repairs_incomplete_sandbox_after_empty_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[tuple[str, Any]] = []
+    created = _patch_agent_runtime(
+        monkeypatch,
+        outputs_by_agent=[["", AssistantMessage(content="fixed")]],
+        events=events,
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    validation_errors = iter([["candidate incomplete"], []])
+
+    output = await agent_support.run_personal_context_agent(
+        model_client=cast(Any, object()),
+        model_request=cast(Any, object()),
+        sandbox_path=sandbox,
+        messages=[
+            UserMessage(content="old request"),
+            AssistantMessage(content="old answer"),
+            UserMessage(content="summarize"),
+        ],
+        validate_result=lambda _text, _path: next(validation_errors),
+    )
+
     assert output == "fixed"
     assert len(created["agents"][0].invocations) == 2
-    assert validation_calls == ["fixed"]
 
 
 @pytest.mark.asyncio
@@ -1203,7 +1446,7 @@ async def test_run_personal_context_agent_always_cleans_session_and_rail_on_disk
         )
 
     assert "clear_session" in [event[0] for event in events]
-    assert "rail_uninit" in [event[0] for event in events]
+    assert "tool_teardown" in [event[0] for event in events]
     assert [event[0] for event in events].count("security_rail_uninit") == 1
     assert [event[0] for event in events].count("resilience_rail_uninit") == 1
     assert len(created["agents"][0].invocations) == 1
@@ -1237,15 +1480,19 @@ async def test_run_personal_context_agent_configures_explicit_sandbox(
         validate_result=lambda _text, _path: [],
     )
 
-    rail_kwargs = next(event[1] for event in events if event[0] == "rail")
-    assert rail_kwargs["with_code_tool"] is False
-    assert rail_kwargs["read_only"] is False
     factory_kwargs = next(event[1] for event in events if event[0] == "create_agent")
     assert factory_kwargs["rails"] == [
-        created["rails"][0],
         created["processor_rails"][0],
         created["security_rails"][0],
         created["resilience_rails"][0],
+    ]
+    assert [tool.card.name for tool in factory_kwargs["tools"]] == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "list_files",
+        "grep",
     ]
     system_prompt = factory_kwargs["system_prompt"]
     assert "inputs" in system_prompt
@@ -1254,7 +1501,11 @@ async def test_run_personal_context_agent_configures_explicit_sandbox(
     assert "small runs" in system_prompt
     assert "every bounded source preview" in system_prompt
     assert "large runs" in system_prompt
-    assert "direct file tools" in system_prompt
+    assert "read_file, write_file, edit_file, glob, list_files, and grep" in system_prompt
+    assert "no more than 2000 characters" in system_prompt
+    assert "bash" not in system_prompt.casefold()
+    assert "powershell" not in system_prompt.casefold()
+    assert "delete that temporary file" not in system_prompt
     assert "validate.py" in system_prompt
     assert "one lightweight self-check" in system_prompt
     assert "personal_context_provenance_manifest.json" not in system_prompt
@@ -1273,6 +1524,8 @@ async def test_run_personal_context_agent_configures_explicit_sandbox(
     assert factory_kwargs["max_iterations"] == 100
     _, sys_card = factory_kwargs["sys_operation"]
     assert sys_card["mode"] == "local"
-    assert sys_card["work_config"]["restrict_to_sandbox"] is True
-    assert sys_card["work_config"]["sandbox_root"] == [str(sandbox.resolve())]
-    assert sys_card["work_config"]["shell_allowlist"]
+    work_config = sys_card["work_config"]
+    assert work_config["restrict_to_sandbox"] is True
+    assert work_config["sandbox_root"] == [str(sandbox.resolve())]
+    assert work_config["shell_allowlist"] == []
+    assert work_config["dangerous_patterns"] == []

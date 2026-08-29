@@ -40,7 +40,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.core.common.logging import team_logger
 
 # Async row lookups the expansion needs. Narrow callables rather than a DB
@@ -170,6 +170,7 @@ async def expand_message(
     task_getter: TaskGetter,
     member_getter: MemberGetter,
     language: str,
+    loader: TemplateLoader = load_template,
 ) -> ExpandedMessage:
     """Render one message row into the text to deliver.
 
@@ -178,13 +179,17 @@ async def expand_message(
     by ``meta.refs``, and returns the document; any failure (template gone,
     task row deleted, unreadable meta) degrades to ``fallback_line`` so a
     delivery never dies on a rendering problem.
+
+    ``loader`` lets a team handler bind its per-team workspace cache at
+    construction — scheduler_* templates then read evolved workspace
+    values; the default stays framework read-only.
     """
     meta = parse_meta(getattr(msg, "meta", None))
     if meta is None:
         return ExpandedMessage(body=msg.content, is_template=False)
     try:
         values = await _resolve_namespaces(meta, task_getter=task_getter, member_getter=member_getter)
-        template = load_template(str(meta["template"]), language)
+        template = loader(str(meta["template"]), language)
         return ExpandedMessage(body=_substitute(template.content, values), is_template=True)
     except Exception:
         team_logger.warning(

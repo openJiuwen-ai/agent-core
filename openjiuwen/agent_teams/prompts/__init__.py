@@ -17,7 +17,11 @@ Layout:
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.loader import (
+    TemplateLoader,
+    load_template,
+    make_template_loader,
+)
 from openjiuwen.agent_teams.prompts.messages import (
     RosterDelta,
     build_identity_text,
@@ -47,32 +51,22 @@ from openjiuwen.agent_teams.prompts.sections import (
     build_team_workflow_section,
 )
 from openjiuwen.agent_teams.prompts.team_plan_agent import (
-    DEFAULT_TEAM_PLAN_AGENT_SYSTEM_PROMPT,
     TEAM_PLAN_AGENT_DESC,
-    TEAM_PLAN_AGENT_SYSTEM_PROMPT_CN,
-    TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN,
     apply_team_plan_agent_prompt,
     build_team_plan_agent_card,
 )
 from openjiuwen.agent_teams.prompts.team_plan_mode import (
-    TEAM_PLAN_MODE_PROMPT_CN,
-    TEAM_PLAN_MODE_PROMPT_EN,
     build_team_plan_mode_prompt,
-    build_team_plan_mode_prompt_template,
     build_team_plan_mode_section,
     get_team_plan_mode_prompt,
 )
 
 __all__ = [
     "MtimeSectionCache",
-    "DEFAULT_TEAM_PLAN_AGENT_SYSTEM_PROMPT",
     "RosterDelta",
     "TEAM_PLAN_AGENT_DESC",
-    "TEAM_PLAN_AGENT_SYSTEM_PROMPT_CN",
-    "TEAM_PLAN_AGENT_SYSTEM_PROMPT_EN",
-    "TEAM_PLAN_MODE_PROMPT_CN",
-    "TEAM_PLAN_MODE_PROMPT_EN",
     "TeamSectionName",
+    "TemplateLoader",
     "apply_team_plan_agent_prompt",
     "build_identity_text",
     "build_leader_bootstrap_section",
@@ -90,7 +84,6 @@ __all__ = [
     "build_team_lifecycle_section",
     "build_team_member_system_prompt",
     "build_team_plan_mode_prompt",
-    "build_team_plan_mode_prompt_template",
     "build_team_plan_mode_section",
     "build_team_role_section",
     "build_team_static_sections",
@@ -101,4 +94,5 @@ __all__ = [
     "get_team_plan_mode_prompt",
     "labels_for",
     "load_template",
+    "make_template_loader",
 ]

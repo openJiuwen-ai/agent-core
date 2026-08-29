@@ -46,6 +46,7 @@ from .errors import BudgetExhausted, WorkflowAborted, WorkflowError
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
+from .verify import Reviewer, SCORE_SCHEMA, VERDICT_SCHEMA, VerifyResult, VerifyVote, settle_verify_tally
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -647,6 +648,164 @@ def _make_record(spec: _JournalRecordInput) -> dict:
     }
 
 
+# ─────────────────────────── verify ───────────────────────────
+def _reviewer_call(
+    i: int,
+    reviewer: Reviewer,
+    *,
+    base: str,
+    phase: str | None,  # pylint: disable=huawei-redefined-outer-name
+    options: dict | None,
+):
+    """Build the zero-arg thunk that runs one reviewer as a structured ``agent()``.
+
+    A verdict reviewer votes against ``VERDICT_SCHEMA`` (pass/fail + feedback),
+    a score reviewer against ``SCORE_SCHEMA`` (0-1 + feedback). Reviewer-level
+    options override the ``verify()``-level ones. The thunk is meant for
+    :func:`parallel`, which gives each reviewer its own structural journal key.
+    """
+    schema = VERDICT_SCHEMA if reviewer.kind == "verdict" else SCORE_SCHEMA
+    rlabel = reviewer.label or f"{base}-{i}"
+    merged = {**(options or {}), **(reviewer.options or {})} or None
+
+    async def _call():
+        return await agent(
+            reviewer.prompt,
+            label=rlabel,
+            phase=phase,
+            schema=schema,
+            options=merged,
+        )
+
+    return _call
+
+
+def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[VerifyVote], dict]:
+    """Fold each reviewer's raw vote (or ``None`` when it did not vote) into votes + a tally.
+
+    A ``None`` raw (``agent()`` failed / skipped) marks the reviewer as
+    not-voted: it contributes its pool's *total* but not its *voted* count, so
+    ``settle_verify_tally`` yields undecided rather than a silent pass.
+    """
+    votes: list[VerifyVote] = []
+    verdict_total = verdict_voted = verdict_fail = 0
+    score_total = score_voted = 0
+    score_sum = 0.0
+
+    for reviewer, raw in zip(reviewers, raws):
+        if reviewer.kind == "verdict":
+            verdict_total += 1
+            if raw is None:
+                votes.append(VerifyVote(kind="verdict"))
+                continue
+            decision = raw.get("decision")
+            fail = decision == "fail"
+            if decision in ("pass", "fail"):
+                verdict_voted += 1
+                if fail:
+                    verdict_fail += 1
+                decision_pass = not fail
+            else:
+                decision_pass = None  # malformed decision: not counted, vote reads undecided
+            votes.append(VerifyVote(kind="verdict", decision=decision_pass, feedback=raw.get("feedback", "")))
+        else:
+            score_total += 1
+            if raw is None:
+                votes.append(VerifyVote(kind="score"))
+                continue
+            score = raw.get("score")
+            if isinstance(score, (int, float)):
+                score_voted += 1
+                score_sum += float(score)
+            else:
+                score = None  # malformed score: not counted, vote reads undecided
+            votes.append(VerifyVote(kind="score", score=score, feedback=raw.get("feedback", "")))
+
+    tally = {
+        "verdict_total": verdict_total,
+        "verdict_voted": verdict_voted,
+        "verdict_fail_count": verdict_fail,
+        "score_count": score_total,
+        "score_voted": score_voted,
+        "score_avg": (score_sum / score_voted) if score_voted else None,
+    }
+    return votes, tally
+
+
+def _aggregate_feedback(reviewers: Sequence[Reviewer], votes: Sequence[VerifyVote]) -> str:
+    """Join every reviewer's non-empty feedback into an attributed block for rework.
+
+    Mirrors the scheduled ``format_fail_feedback`` shape (``- reviewer: text``),
+    attributing each line by the reviewer's label (falling back to its kind).
+    """
+    lines = []
+    for reviewer, vote in zip(reviewers, votes):
+        fb = (vote.feedback or "").strip()
+        if not fb:
+            continue
+        name = reviewer.label or reviewer.kind
+        lines.append(f"- {name}: {fb}")
+    return "\n".join(lines)
+
+
+async def verify(
+    reviewers: Sequence[Reviewer],
+    *,
+    threshold: float = 0.85,
+    label: str | None = None,
+    phase: str | None = None,  # pylint: disable=huawei-redefined-outer-name
+    options: dict | None = None,
+) -> VerifyResult:
+    """Run one review round over ``reviewers`` and return a structured verdict.
+
+    Each reviewer is a single structured ``agent()`` call fanned out via
+    :func:`parallel` (each vote gets its own journal key, so resume replays the
+    reviewer calls). Votes are folded by :func:`_collect` and judged by
+    ``settle_verify_tally``.
+
+    This is a **single-shot** round: it does not wait on or drive a rework loop.
+    A reviewer whose ``agent()`` returned ``None`` counts as not-voted, so the
+    round returns ``verdict=None`` (undecided) unless every reviewer of every
+    pool has voted. An empty ``reviewers`` list is rejected.
+
+    Args:
+        reviewers: The reviewers to run. Must be non-empty.
+        threshold: Minimum average score for the score pool to pass.
+        label: Base label for reviewer progress events (fallback name prefix).
+        phase: Phase attributed to every reviewer ``agent()`` call.
+        options: Default ``options`` bag applied to every reviewer (reviewer-level
+            options take precedence).
+
+    Returns:
+        A ``VerifyResult`` with the round verdict, per-reviewer votes and the
+        aggregated review feedback.
+
+    Raises:
+        WorkflowError: If ``reviewers`` is empty.
+    """
+    rt = _rt.get()
+    reviewers = list(reviewers)
+    if not reviewers:
+        raise WorkflowError("verify() requires at least one reviewer")
+    base = label or "verify"
+
+    _emit_log(rt, f"verify: dispatching {len(reviewers)} reviewer(s)")
+    raws = await parallel(
+        [_reviewer_call(i, r, base=base, phase=phase, options=options) for i, r in enumerate(reviewers)]
+    )
+
+    votes, tally = _collect(reviewers, raws)
+    verdict = settle_verify_tally(tally, threshold)
+    result = VerifyResult(
+        verdict=verdict,
+        votes=votes,
+        feedback=_aggregate_feedback(reviewers, votes),
+        passed=verdict == "pass",
+    )
+    _emit_log(rt, f"verify: verdict={verdict} (threshold={threshold})")
+    return result
+
+
 # ─────────────────────── stateful sessions ───────────────────────
 def _jsonable(result: Any, model) -> Any:
     """A JSON-able form of a turn result for the history mirror (cf. ``_make_record``)."""
@@ -701,7 +860,7 @@ class AgentSession:
 
     __slots__ = (
         "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
-        "_history", "_sid", "_in_flight",
+        "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
     )
 
     def __init__(
@@ -713,6 +872,8 @@ class AgentSession:
         options: dict | None = None,
         _human: bool = False,
         _node_type: str = "agent_session",
+        _fork_data: dict | None = None,
+        _history: list[dict] | None = None,
     ) -> None:
         self._label = label
         self._phase = phase
@@ -720,9 +881,11 @@ class AgentSession:
         self._options = dict(options or {})
         self._human = _human
         self._node_type = _node_type
-        self._history: list[dict] = []
+        self._history: list[dict] = list(_history) if _history else []
         self._sid: str | None = None
+        self._member_name: str | None = None
         self._in_flight = False
+        self._fork_data = _fork_data
 
     @overload
     async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
@@ -780,6 +943,13 @@ class AgentSession:
                 agent_id=ks,
                 correlation_id=correlation_id,
             )
+
+            # Reserve the member identity on the FIRST turn regardless of cache
+            # hit, so a fully-hit resume still knows this session's member name
+            # (fork() needs it to locate the parent's persisted context). Only
+            # runs once — no avatar, no LLM, no spawn/budget slot.
+            if self._member_name is None and not self._human:
+                await self._ensure_member_name(rt, opts)
 
             cached = rt.journal.get_cached(ks, sig)
             if cached is not None:  # resume hit — no backend, no harness, no person
@@ -850,6 +1020,64 @@ class AgentSession:
         sid, self._sid = self._sid, None
         await rt.backend.close_session(sid)
 
+    async def fork(
+        self,
+        *,
+        fork_mode: str = "full",
+        keep_rounds: int | None = None,
+        label: str | None = None,
+        phase: str | None = None,  # pylint: disable=huawei-redefined-outer-name
+        instructions: str | None = None,
+        options: dict | None = None,
+    ) -> "AgentSession":
+        """Fork this session into a fresh, independent session (context inherited).
+
+        The five ``fork_mode`` values mirror the team fork modes (``full`` /
+        ``before`` / ``after`` / ``keep_before_compact_after`` /
+        ``keep_after_compact_before``); ``keep_rounds`` is the split point in
+        **rounds** (each prior ``send()`` is one round) for the truncating /
+        compacting modes. Every mode but ``full`` requires ``keep_rounds`` —
+        omitting it raises (there is no truncation without a split point).
+        ``keep_rounds`` beyond the parent's actual round count is not an error;
+        the backend warns and silently falls back to a full-context fork (the
+        team fork's "wrong name → full" guard). The parent context is captured
+        **eagerly** here (the fork point), so later ``send()``s on this session
+        do not affect the child.
+
+        The child inherits this session's ``_history`` mirror (resume-signature
+        consistency) and, when the backend returns a ``fork_data`` snapshot, a
+        full context including ToolMessage. A fork of a ``human_session`` is
+        rejected. The child is ``_node_type="agent_session_fork"`` when the
+        parent has history (so a fork turn is observable as a branch), else a
+        plain ``agent_session`` (a parent that never sent has nothing to
+        inherit).
+        """
+        if self._human:
+            raise WorkflowError("fork() is only supported on agent_session")
+        if fork_mode != "full" and keep_rounds is None:
+            raise WorkflowError(
+                "fork() requires keep_rounds unless fork_mode='full'"
+                f" (fork_mode={fork_mode!r} has no split point without it)"
+            )
+        fork_data = None
+        if self._member_name is not None:
+            rt = _rt.get()
+            fork_data = await rt.backend.capture_fork(
+                self._member_name,
+                keep_rounds=keep_rounds,
+                fork_mode=fork_mode,
+            )
+        return AgentSession(
+            label=label if label is not None else self._label,
+            phase=phase if phase is not None else self._phase,
+            instructions=instructions if instructions is not None else self._instructions,
+            options={**self._options, **(options or {})},
+            _human=False,
+            _node_type="agent_session_fork" if self._history else "agent_session",
+            _history=[dict(m) for m in self._history],
+            _fork_data=fork_data,
+        )
+
     async def _drive(self, rt, req: _TurnRequest):
         """Open the session lazily, then run one turn through the retry helper.
 
@@ -898,16 +1126,37 @@ class AgentSession:
         phase_seg = f"{phase}#{disambig}" if disambig else phase
         return f"{phase_seg}:{label}:{turn}"
 
+    async def _ensure_member_name(self, rt, opts) -> None:
+        """Reserve this session's member identity (once), no avatar built.
+
+        Runs on the first turn regardless of cache hit so a fully-hit resume
+        still knows the member name ``fork()`` needs to locate the parent's
+        persisted context. Pure in-process backend bookkeeping (a counter
+        increment) — no harness, no LLM, no spawn/budget slot.
+        """
+        if self._member_name is not None:
+            return
+        self._member_name = await rt.backend.ensure_member_name(
+            kind="agent",
+            opts=opts,
+        )
+
     async def _ensure_open(self, rt, opts) -> None:
         """Open the backend session on the first real turn (one avatar per session)."""
         if self._sid is not None:
             return
         if not self._human:
             rt.spawn_count += 1  # the avatar is this session's one spawned agent
+        # Reuse the identity already reserved on the first turn (cache-hit or
+        # miss) so we never re-mint a name and drift the counter across a resume.
+        if not self._human:
+            await self._ensure_member_name(rt, opts)
         self._sid = await rt.backend.open_session(
             kind="human" if self._human else "agent",
             instructions=self._instructions,
             opts=opts,
+            fork_data=self._fork_data,
+            member_name=self._member_name,
         )
 
     def _append_history(self, prompt: str, result: Any, model_cls) -> None:

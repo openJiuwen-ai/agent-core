@@ -56,19 +56,34 @@ class BrowserWorkingContextProcessor(ContextProcessor):
             store.commit_pending_from_messages(session, context.get_messages())
 
         prompt_text = store.render_and_consume_one_step(session)
-        context_window.context_messages = [
+        retained_messages = [
             self._prompt_safe_message(message)
             for message in context_window.context_messages
             if not self._is_working_context_message(message)
         ]
-        context_window.context_messages.append(
-            UserMessage(
-                name=_BROWSER_WORKING_CONTEXT_MESSAGE_NAME,
-                metadata={_BROWSER_WORKING_CONTEXT_METADATA_KEY: True},
-                content=prompt_text,
-            )
+        working_context_message = UserMessage(
+            name=_BROWSER_WORKING_CONTEXT_MESSAGE_NAME,
+            metadata={_BROWSER_WORKING_CONTEXT_METADATA_KEY: True},
+            content=prompt_text,
         )
+        insert_at = len(retained_messages)
+        for index, message in enumerate(retained_messages):
+            if self._is_browser_state_projection(message):
+                insert_at = index
+                break
+        retained_messages.insert(insert_at, working_context_message)
+        context_window.context_messages = retained_messages
         return None, context_window
+
+    @staticmethod
+    def _is_browser_state_projection(message: BaseMessage) -> bool:
+        if message.name in {"current_browser_state", "browser_state_progress"}:
+            return True
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        return bool(
+            metadata.get("browser_state_context")
+            or metadata.get("browser_state_progress_context")
+        )
 
     @staticmethod
     def _is_working_context_message(message: BaseMessage) -> bool:

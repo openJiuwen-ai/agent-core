@@ -9,7 +9,7 @@ import json
 import re
 from typing import Any
 
-from openjiuwen.agent_teams.external.descriptor import TEAM_JOIN_ENV
+from openjiuwen.agent_teams.external.descriptor import MCP_SERVER_ENV_VARS
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
@@ -191,7 +191,7 @@ def codex_mcp_config_overrides(
         overrides.append(f"mcp_servers.{key}.args={json.dumps(args)}")
     overrides.extend(
         [
-            f"mcp_servers.{key}.env_vars={json.dumps([TEAM_JOIN_ENV])}",
+            f"mcp_servers.{key}.env_vars={json.dumps(MCP_SERVER_ENV_VARS)}",
             f"mcp_servers.{key}.startup_timeout_sec={_MCP_STARTUP_TIMEOUT_S}",
             f"mcp_servers.{key}.required=true",
         ]

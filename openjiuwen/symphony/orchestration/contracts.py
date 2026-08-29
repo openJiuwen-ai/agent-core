@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,32 @@ class GraphBuildResult:
     version: str
     graph_path: Path
     generated_at: str
+
+
+@dataclass(frozen=True)
+class GraphMutationDelta:
+    """Materialized graph changes produced by one atomic mutation batch."""
+
+    added_node_count: int = 0
+    updated_node_count: int = 0
+    removed_node_count: int = 0
+    added_edge_count: int = 0
+    removed_edge_count: int = 0
+
+
+@dataclass(frozen=True)
+class GraphMutationResult:
+    """Result of atomically applying one homogeneous Skill mutation batch."""
+
+    request_id: str
+    operation: Literal["add", "update", "delete"]
+    status: Literal["published", "noop"]
+    previous_version: str
+    version: str
+    source_snapshot_id: str
+    changed_capability_ids: tuple[str, ...]
+    delta: GraphMutationDelta
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
 
 
 class CapabilityGraph(dict[str, Any]):

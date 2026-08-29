@@ -170,6 +170,25 @@ def read_source_metadata(path: Path) -> dict[str, object]:
     return dict(values)
 
 
+def read_source_detail(source_root: Path, source_id: str) -> dict[str, object]:
+    """Read one source by stable ID and expose only the public detail fields."""
+
+    if not isinstance(source_id, str) or _SOURCE_ID.fullmatch(source_id) is None:
+        _source_error("atomic source ID is invalid")
+    _assert_no_symlink_chain(source_root)
+    metadata = read_source_metadata(source_root / f"{source_id}.md")
+    return {
+        "source_id": metadata["source_id"],
+        "title": metadata["title"],
+        "source_type": metadata["source_type"],
+        "locator": metadata["locator"],
+        "provider": metadata["provider"],
+        "service_id": metadata["service"],
+        "first_seen": metadata["first_seen"],
+        "last_seen": metadata["last_seen"],
+    }
+
+
 def upsert_source_metadata(
     source_root: Path,
     item: RawChangeItem,
@@ -217,6 +236,7 @@ def upsert_source_metadata(
 
 __all__ = [
     "normalize_source_locator",
+    "read_source_detail",
     "read_source_metadata",
     "source_id_for_locator",
     "upsert_source_metadata",

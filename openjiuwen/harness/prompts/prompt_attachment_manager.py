@@ -491,6 +491,22 @@ class PromptAttachmentManager:
                         self._items.pop(expired_session_id, None)
         return self._stable_sort(result)
 
+    def has_history_snapshot(
+        self,
+        context: ModelContext,
+        session_id: str,
+    ) -> bool:
+        """Return whether ``context`` contains this session's full snapshot.
+
+        Runtime rails use this before replacing an attachment section with a
+        delta.  If context compaction or recreation removed the historical
+        snapshot, the next update must be rendered as a full snapshot so the
+        model does not receive an orphaned delta.
+        """
+
+        _, has_snapshot = self._read_history_state(context, session_id)
+        return has_snapshot
+
     async def sync_to_context(
         self,
         context: ModelContext,
@@ -674,22 +690,6 @@ class PromptAttachmentManager:
     @staticmethod
     def _state_by_section(prompt_attachments: Iterable[PromptAttachment]) -> dict[str, str]:
         return {item.section: hash_prompt_attachment(item) for item in prompt_attachments}
-
-    @staticmethod
-    def _is_history_message(message: BaseMessage) -> bool:
-        metadata = getattr(message, "metadata", {}) or {}
-        return isinstance(message, SystemMessage) and bool(
-            metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY)
-        )
-
-    @staticmethod
-    def _is_snapshot_history_message(message: BaseMessage) -> bool:
-        metadata = getattr(message, "metadata", {}) or {}
-        return (
-            PromptAttachmentManager._is_history_message(message)
-            and metadata.get(_PROMPT_ATTACHMENT_HISTORY_MODE_KEY)
-            == _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT
-        )
 
     @staticmethod
     def _read_history_state(context: ModelContext, session_id: str) -> tuple[dict[str, str], bool]:

@@ -25,6 +25,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context import (
+    BROWSER_TASK_STATE_KEY,
     BROWSER_TOOL_MEMORY_METADATA_KEY,
     BROWSER_WORKING_MEMORY_RECORD_BEGIN,
     BROWSER_WORKING_MEMORY_RECORD_END,
@@ -180,12 +181,11 @@ def test_model_memory_survives_and_internal_update_is_not_user_facing() -> None:
     assert response.content == "Continuing."
     state = BrowserWorkingContextStore(config).load(session)
     assert len(state.recent_steps) == 1
-    assert state.current.task_list[0].task == "Collect the account status"
+    assert state.current.task_list == []
     assert state.current.key_facts == ["The account page is reachable."]
 
     processor = BrowserWorkingContextProcessor(config)
     prompt = _inject(processor, context).context_messages[-1].content
-    assert "Collect the account status" in prompt
     assert "The account page is reachable." in prompt
 
 
@@ -194,17 +194,19 @@ def test_missing_model_update_does_not_erase_last_valid_state() -> None:
     rail = BrowserWorkingContextRail(config)
     session = _FakeSession()
     context = _FakeContext(session)
-    valid_response = _response(_memory("Keep this confirmed task", status="completed"))
+    valid_response = _response(
+        _memory("Keep this confirmed task", status="completed", key_facts=["Confirmed fact"])
+    )
     _run(rail.after_model_call(_model_ctx(rail, session, context, valid_response)))
 
     missing_update = AssistantMessage(content="Visible answer without internal state")
     _run(rail.after_model_call(_model_ctx(rail, session, context, missing_update)))
 
     state = BrowserWorkingContextStore(config).load(session)
-    assert state.current.task_list[0].task == "Keep this confirmed task"
-    assert state.current.task_list[0].status == "completed"
-    assert state.recent_steps[-1].model_memory == state.current
-    assert state.recent_steps[-1].model_update_error == ("Model omitted the required working-memory record.")
+    assert state.current.task_list == []
+    assert state.current.key_facts == ["Confirmed fact"]
+    assert len(state.recent_steps) == 1
+    assert state.recent_steps[-1].model_update_error is None
     assert missing_update.content == "Visible answer without internal state"
 
 
@@ -231,7 +233,7 @@ def test_tool_call_without_record_carries_memory_forward_without_an_error() -> N
     pending_state = BrowserWorkingContextStore(config).load(session)
     assert pending_state.pending_step is not None
     assert pending_state.pending_step.model_update_error is None
-    assert pending_state.pending_step.model_memory == pending_state.current
+    assert pending_state.pending_step.model_memory is None
     assert response.content == ""
 
     context.messages.append(ToolMessage(content="navigation complete", tool_call_id="call-1"))
@@ -239,8 +241,8 @@ def test_tool_call_without_record_carries_memory_forward_without_an_error() -> N
 
     committed_state = BrowserWorkingContextStore(config).load(session)
     assert committed_state.pending_step is None
-    assert committed_state.recent_steps[-1].model_update_error is None
-    assert committed_state.current.task_list[0].task == "Inspect the checkout flow"
+    assert committed_state.recent_steps == []
+    assert committed_state.current.task_list == []
 
 
 def test_rail_enforces_fallback_update_when_model_omits_block() -> None:
@@ -262,11 +264,8 @@ def test_rail_enforces_fallback_update_when_model_omits_block() -> None:
     _run(rail.after_model_call(model_ctx))
 
     state = BrowserWorkingContextStore(config).load(session)
-    assert [item.model_dump() for item in state.current.task_list] == [
-        {"task": "Inspect the checkout flow", "status": "pending"},
-    ]
-    assert state.recent_steps[-1].model_memory == state.current
-    assert state.recent_steps[-1].model_update_error == "Model omitted the required working-memory record."
+    assert state.current.task_list == []
+    assert state.recent_steps == []
     assert response.content == "Inspecting checkout now."
 
 
@@ -298,11 +297,8 @@ def test_rail_rejects_incomplete_update_and_enforces_complete_fallback() -> None
     _run(rail.after_model_call(model_ctx))
 
     state = BrowserWorkingContextStore(config).load(session)
-    assert state.current.model_dump() == _memory("Inspect checkout")
-    assert state.recent_steps[-1].model_update_error == (
-        "Model working-memory record omitted required fields: "
-        "blockers, errors, failures, important_information, key_facts."
-    )
+    assert state.current.task_list == []
+    assert state.recent_steps[-1].model_update_error is None
     assert response.content == ""
 
 
@@ -534,17 +530,12 @@ def test_processor_guidance_defines_each_working_memory_field() -> None:
     processor = BrowserWorkingContextProcessor(BrowserWorkingContextProcessorConfig(language="en"))
     prompt = _inject(processor, _FakeContext(_FakeSession())).context_messages[-1].content
 
-    assert "task_list: the complete ordered plan" in prompt
-    assert "errors: concise tool, page, or runtime error messages" in prompt
-    assert "failures: actions or approaches that did not achieve their intended result" in prompt
-    assert "blockers: unresolved conditions currently preventing progress" in prompt
-    assert "key_facts: verified task-relevant facts" in prompt
-    assert "important_information: other durable operational context" in prompt
-    assert "Use an empty list [] when a field has no relevant entries" in prompt
-    assert "Do not invent facts or mark a task completed without evidence" in prompt
-    assert "This record is plain assistant text for framework bookkeeping" in prompt
-    assert "not a tool, function, or ability" in prompt
-    assert "Never place it in tool_calls" in prompt
+    assert "runtime-maintained browser task context" in prompt
+    assert "field coverage, blockers, evidence, and recent actions as authoritative" in prompt
+    assert "Do not rewrite or echo this context" in prompt
+    assert '"key_facts"' in prompt
+    assert '"important_information"' in prompt
+    assert '"task_list"' not in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_BEGIN in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_END in prompt
     assert "<browser_context_update>" not in prompt
@@ -558,21 +549,14 @@ def test_processor_renders_chinese_guidance_with_stable_schema_keys() -> None:
 
     prompt = _inject(processor, context).context_messages[-1].content
 
-    assert "这是浏览器子代理的持久工作上下文" in prompt
-    assert "当助理响应不调用工具时" in prompt
-    assert "不是工具、函数或能力" in prompt
-    assert "不得将其放入 tool_calls" in prompt
+    assert "这是由 runtime 维护的浏览器任务上下文" in prompt
+    assert "不要重写或复述这些内容" in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_BEGIN in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_END in prompt
     assert "<browser_context_update>" not in prompt
-    assert '"task_list"' in prompt
-    assert '"pending|completed"' in prompt
-    assert "errors：与恢复有关的简明工具、页面或运行时错误消息" in prompt
-    assert "failures：未达到预期结果且不应原样重复的操作或方法" in prompt
-    assert "blockers：当前阻止某项待处理任务继续推进的未解决条件" in prompt
-    assert "key_facts：有浏览器或工具证据支持、与任务相关且已核实的事实" in prompt
-    assert "important_information：后续步骤或接替代理需要" in prompt
-    assert "字段没有相关内容时使用空列表 []" in prompt
+    assert '"task_list"' not in prompt
+    assert '"key_facts"' in prompt
+    assert '"important_information"' in prompt
 
 
 def test_history_limit_discards_old_steps_without_local_compaction() -> None:
@@ -593,7 +577,8 @@ def test_history_limit_discards_old_steps_without_local_compaction() -> None:
 
     state = BrowserWorkingContextStore(config).load(session)
     assert [step.step_number for step in state.recent_steps] == [3, 4]
-    assert state.current.task_list[0].task == "Task 4"
+    assert state.current.task_list == []
+    assert state.current.key_facts == ["Fact 4"]
 
     prompt = (
         _inject(
@@ -647,7 +632,7 @@ def test_follow_up_and_new_agent_instance_reuse_completed_session_memory() -> No
     state = BrowserWorkingContextStore(config).load(session)
     assert state.request_sequence == 2
     assert state.request_kind == "follow_up"
-    assert state.current.task_list[0].status == "completed"
+    assert state.current.task_list == []
     assert state.current.important_information == ["Order 123 is shipped."]
     assert context.messages[-1].content == "Order 123 is shipped."
 
@@ -661,7 +646,7 @@ def test_follow_up_and_new_agent_instance_reuse_completed_session_memory() -> No
     )
     assert "Now check its tracking link" in prompt
     assert "Order 123 is shipped." in prompt
-    assert "reconcile the list with the new request" in prompt
+    assert "runtime-maintained" in prompt
 
 
 def test_inner_model_boundary_restores_and_reconciles_follow_up_when_outer_session_is_absent() -> None:
@@ -710,10 +695,7 @@ def test_inner_model_boundary_restores_and_reconciles_follow_up_when_outer_sessi
     assert state.request_sequence == 2
     assert state.request_kind == "follow_up"
     assert state.active_request == "Now check its tracking link"
-    assert [item.model_dump() for item in state.current.task_list] == [
-        {"task": "Check the order", "status": "completed"},
-        {"task": "Now check its tracking link", "status": "pending"},
-    ]
+    assert state.current.task_list == []
     assert state.current.key_facts == ["Order 123 belongs to Alice."]
 
 
@@ -763,11 +745,8 @@ def test_missing_model_update_carries_forward_reconciled_state_with_an_explicit_
     _run(rail.after_model_call(_model_ctx(rail, session, context, response)))
 
     state = BrowserWorkingContextStore(config).load(session)
-    assert [item.model_dump() for item in state.current.task_list] == [
-        {"task": "Inspect the account", "status": "pending"},
-    ]
-    assert state.recent_steps[-1].model_memory == state.current
-    assert state.recent_steps[-1].model_update_error == "Model omitted the required working-memory record."
+    assert state.current.task_list == []
+    assert state.recent_steps == []
 
 
 def test_checkpointed_state_is_restored_by_a_reconstructed_agent_session() -> None:
@@ -817,10 +796,7 @@ def test_checkpointed_state_is_restored_by_a_reconstructed_agent_session() -> No
     assert restored.request_sequence == 2
     assert restored.request_kind == "follow_up"
     assert restored.current.key_facts == ["Order 123 was found."]
-    assert [item.model_dump() for item in restored.current.task_list] == [
-        {"task": "Find the order", "status": "completed"},
-        {"task": "Track it", "status": "pending"},
-    ]
+    assert restored.current.task_list == []
     assert len(restored.recent_steps) == 1
     prompt = (
         _inject(
@@ -832,7 +808,7 @@ def test_checkpointed_state_is_restored_by_a_reconstructed_agent_session() -> No
     )
     assert '"kind": "follow_up"' in prompt
     assert "Order 123 was found." in prompt
-    assert '"recent_durable_steps": [' in prompt
+    assert '"model_notes": {' in prompt
 
 
 def test_retained_values_are_length_bounded() -> None:
@@ -895,7 +871,68 @@ def test_processor_replaces_only_its_own_ephemeral_message() -> None:
     _, rendered = _run(processor.on_get_context_window(context, window))
 
     assert len(rendered.context_messages) == 2
-    assert rendered.context_messages[0] is browser_state
-    assert "fresh observation" in rendered.context_messages[0].content
-    assert "stale durable view" not in rendered.context_messages[1].content
-    assert "<browser_working_context>" in rendered.context_messages[1].content
+    assert rendered.context_messages[1] is browser_state
+    assert "fresh observation" in rendered.context_messages[1].content
+    assert "stale durable view" not in rendered.context_messages[0].content
+    assert "<browser_working_context>" in rendered.context_messages[0].content
+
+
+def test_processor_projects_runtime_task_state_before_current_page_state() -> None:
+    config = BrowserWorkingContextProcessorConfig()
+    processor = BrowserWorkingContextProcessor(config)
+    session = _FakeSession()
+    session.update_state(
+        {
+            BROWSER_TASK_STATE_KEY: {
+                "task_id": "task-1",
+                "goal": "Find the product title and price",
+                "task_type": "simple",
+                "status": "replan_required",
+                "current_phase": "extraction",
+                "phases": {
+                    "extraction": {
+                        "status": "replan_required",
+                        "attempts": 3,
+                        "budget": 20,
+                        "completion_condition": "requested fields have evidence",
+                    }
+                },
+                "required_fields": ["title", "price"],
+                "field_coverage": ["title"],
+                "blockers": [],
+                "replan_required": True,
+                "replan_count": 1,
+                "failed_strategies": ["script_exploration"],
+                "next_action_class": "materially_different_strategy",
+                "recent_actions": [
+                    {
+                        "seq": 3,
+                        "phase": "extraction",
+                        "action_class": "script_exploration",
+                        "target_summary": '{"tool":"browser_evaluate","expression_sha256":"abcd"}',
+                        "outcome": "success",
+                        "semantic_delta": "no_progress",
+                        "new_evidence_fields": [],
+                        "elapsed_ms": 40,
+                    }
+                ],
+                "structured_evidence": [],
+            }
+        }
+    )
+    context = _FakeContext(session)
+    current_state = UserMessage(
+        name="current_browser_state",
+        metadata={"browser_state_context": True},
+        content="<browser_state>current</browser_state>",
+    )
+    window = ContextWindow(context_messages=[current_state])
+
+    _, rendered = _run(processor.on_get_context_window(context, window))
+
+    assert rendered.context_messages[-1] is current_state
+    prompt = rendered.context_messages[-2].content
+    assert '"runtime_directive": "replan_before_browser_action"' in prompt
+    assert '"field_coverage": [' in prompt
+    assert '"semantic_delta": "no_progress"' in prompt
+    assert "script_exploration" in prompt

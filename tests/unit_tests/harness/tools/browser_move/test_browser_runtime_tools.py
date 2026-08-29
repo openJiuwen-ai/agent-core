@@ -356,6 +356,16 @@ def test_batch_interact_schema_supports_single_action_and_exposes_condition_wait
     assert "wait_for_result_count" in operations
     assert "wait_for_dom_text_change" in operations
     assert "wait_for_stable" in operations
+    assert "wait_for_tab" in operations
+    assert "sleep" not in operations
+    step_properties = steps_schema["items"]["properties"]
+    assert "min_tabs" in step_properties
+    assert "title_contains" in step_properties
+    assert "activate" in step_properties
+    assert "ms" not in step_properties
+    assert "wait_after_ms" not in step_properties
+    assert "wait_after_type_ms" not in step_properties
+    assert "wait_after_each_ms" not in tool.card.input_params["properties"]
     assert "default 2500" in (
         tool.card.input_params["properties"]["timeout_ms"]["description"].lower()
     )

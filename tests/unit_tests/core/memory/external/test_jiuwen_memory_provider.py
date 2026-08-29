@@ -269,6 +269,19 @@ async def test_search_top_k_capped_to_max():
 
 
 @pytest.mark.asyncio
+async def test_search_top_k_none_falls_back_to_default():
+    """Regression: an explicit ``top_k: None`` (LLMs do this) must not crash
+    ``int(None)``. It should fall back to the default and still POST."""
+    fake = _fake_http()
+    provider = await _init(JiuwenMemoryProvider(), fake)
+    fake.post = AsyncMock(return_value=_mock_response({"hits": []}))
+    out = await provider.handle_tool_call("mem2_search", {"query": "q", "top_k": None})
+    data = json.loads(out)
+    assert "error" not in data
+    assert fake.post.call_args.kwargs["json"]["k"] == 10  # falls back to default
+
+
+@pytest.mark.asyncio
 async def test_search_empty_query_returns_error_without_posting():
     """Empty query is treated as missing → error, no HTTP call."""
     fake = _fake_http()

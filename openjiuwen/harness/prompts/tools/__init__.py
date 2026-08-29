@@ -117,6 +117,9 @@ from openjiuwen.harness.prompts.tools.task_tool import (
 from openjiuwen.harness.prompts.tools.tool_search import (
     ToolSearchMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.tool_call import (
+    ToolCallMetadataProvider,
+)
 from openjiuwen.harness.prompts.tools.todo import (
     TodoCreateMetadataProvider,
     TodoGetMetadataProvider,
@@ -163,6 +166,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     GrepMetadataProvider(),
     ListSkillMetadataProvider(),
     ToolSearchMetadataProvider(),
+    ToolCallMetadataProvider(),
     SessionsListMetadataProvider(),
     SessionsSpawnMetadataProvider(),
     SessionsCancelMetadataProvider(),

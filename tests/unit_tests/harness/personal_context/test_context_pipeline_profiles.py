@@ -30,8 +30,8 @@ def _config(profile: str) -> PersonalContextConfig:
     request = {"model": "test"}
     return PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": True,
+            "collection_enabled": True,
+            "agent_use_enabled": False,
             "strategy_profile": profile,
             "model_client": model if profile != "rules" else None,
             "model_request": request if profile != "rules" else None,
@@ -81,7 +81,7 @@ def _top_level_headings(markdown: str) -> list[str]:
     return headings
 
 
-def _processing_batch(item_count: int, *, include_delete: bool = False) -> FetchBatch:
+def _processing_batch(item_count: int) -> FetchBatch:
     items = [
         RawChangeItem(
             logical_id=f"notes/{index}",
@@ -94,18 +94,6 @@ def _processing_batch(item_count: int, *, include_delete: bool = False) -> Fetch
         )
         for index in range(item_count)
     ]
-    if include_delete:
-        items.append(
-            RawChangeItem(
-                logical_id="notes/deleted",
-                revision_id="rev-deleted",
-                operation="delete",
-                title="Deleted",
-                content=None,
-                original_ref="file:///notes/deleted",
-                metadata={},
-            )
-        )
     return FetchBatch(batch_id="batch-processing", items=items)
 
 
@@ -232,7 +220,7 @@ async def test_processing_is_deterministic_for_every_total_profile(
     profile: str,
 ) -> None:
     service = ContextPipelineService(home=tmp_path, config=_config(profile), input_queue=asyncio.Queue())
-    batch = _processing_batch(2, include_delete=True)
+    batch = _processing_batch(2)
 
     class UnexpectedProcessingModel:
         def __init__(self, **kwargs: object) -> None:
@@ -256,7 +244,7 @@ async def test_processing_is_deterministic_for_every_total_profile(
     assert [document["title"] for document in documents] == ["Note 0", "Note 1"]
     assert [document["markdown"] for document in documents] == ["Source content 0.\n", "Source content 1.\n"]
     assert all(document["actual_profile"] == "deterministic" for document in documents)
-    assert result["deleted_ids"] == ["notes/deleted"]
+    assert result["deleted_ids"] == []
     blocks = result["blocks"]
     assert isinstance(blocks, list)
     assert [block["logical_id"] for block in blocks] == ["notes/0", "notes/1"]
@@ -1330,8 +1318,8 @@ def test_run_finish_rewrites_preview_and_writes_complete_briefing_without_trunca
     source_root.mkdir()
     config = PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": True,
+            "collection_enabled": True,
+            "agent_use_enabled": False,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -1340,6 +1328,8 @@ def test_run_finish_rewrites_preview_and_writes_complete_briefing_without_trunca
                     "service_id": "local",
                     "provider": "local_files",
                     "enabled": True,
+                    "interval_seconds": 60,
+                    "time_range": {"mode": "all"},
                     "source": {"root_dir": str(source_root)},
                     "credentials": {},
                 }
@@ -1678,6 +1668,9 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
         assert "At most one complete page may be submitted per model response" in prompt
         assert "continue with later tool calls until every planned topic page" in prompt
         assert "Every upsert source with distinct, non-duplicative key facts" in prompt
+        assert "no more than 2000 characters" in prompt
+        assert "delete temporary files directly" not in prompt
+        assert "shell" not in prompt.casefold()
         assert "relative to the Markdown file that contains the link" in prompt
         assert "Do not leave links to planned pages that you did not create" in prompt
         assert "perform one lightweight check of the internal Context links" in prompt
@@ -2077,6 +2070,73 @@ def test_description_navigation_must_resolve_inside_context(tmp_path: Path, targ
 
     with pytest.raises(Exception) as raised:
         context_pipeline._validate_description_navigation(context)
+
+    assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
+
+
+def test_description_navigation_accepts_verified_source_metadata_links(tmp_path: Path) -> None:
+    candidate, final_context_root, source_root, source_id = _reference_graph_roots(tmp_path)
+    root_link = _source_link(
+        page_relative="description.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    nested_link = _source_link(
+        page_relative="topics/description.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    _write_context_pages(
+        candidate,
+        {
+            "description.md": f"# Context\n\n- [Evidence]({root_link.split('](', 1)[1][:-1]})\n",
+            "topics/description.md": f"# Topics\n\n- [Evidence]({nested_link.split('](', 1)[1][:-1]})\n",
+        },
+    )
+
+    context_pipeline._validate_description_navigation(
+        candidate,
+        final_context_root=final_context_root,
+        source_root=source_root,
+    )
+
+
+def test_agent_candidate_accepts_verified_source_metadata_in_descriptions(tmp_path: Path) -> None:
+    candidate, final_context_root, source_root, source_id = _reference_graph_roots(tmp_path)
+    root_link = _source_link(
+        page_relative="description.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    _write_context_pages(candidate, {"description.md": f"# Context\n\n{root_link}\n"})
+
+    _validate_agent_candidate(
+        candidate,
+        baseline=context_pipeline._snapshot_managed_files(candidate),
+        changed_paths=set(),
+        baseline_root=final_context_root,
+        final_context_root=final_context_root,
+        source_root=source_root,
+    )
+
+
+@pytest.mark.parametrize("target", ["../source-meta/src_missing.md", "../other/metadata.md"])
+def test_description_navigation_rejects_unverified_source_metadata_links(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    candidate, final_context_root, source_root, _ = _reference_graph_roots(tmp_path)
+    _write_context_pages(candidate, {"description.md": f"# Context\n\n- [Evidence]({target})\n"})
+
+    with pytest.raises(Exception) as raised:
+        context_pipeline._validate_description_navigation(
+            candidate,
+            final_context_root=final_context_root,
+            source_root=source_root,
+        )
 
     assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
 
@@ -3469,11 +3529,9 @@ def test_short_references_resolve_at_each_context_depth(tmp_path: Path) -> None:
         alias_targets={"[[ref:0]]": source_id},
     )
 
-    assert f"[{source_id}](../source-meta/{source_id}.md)" in (candidate / "root.md").read_text(encoding="utf-8")
-    assert f"[{source_id}](../../source-meta/{source_id}.md)" in (candidate / "level/page.md").read_text(
-        encoding="utf-8"
-    )
-    assert f"[{source_id}](../../../source-meta/{source_id}.md)" in (candidate / "level/deep/page.md").read_text(
+    assert f"[来源1](../source-meta/{source_id}.md)" in (candidate / "root.md").read_text(encoding="utf-8")
+    assert f"[来源1](../../source-meta/{source_id}.md)" in (candidate / "level/page.md").read_text(encoding="utf-8")
+    assert f"[来源1](../../../source-meta/{source_id}.md)" in (candidate / "level/deep/page.md").read_text(
         encoding="utf-8"
     )
     root_text = (candidate / "root.md").read_text(encoding="utf-8")
@@ -3502,9 +3560,39 @@ def test_short_references_resolve_multiple_and_repeated_tokens(tmp_path: Path) -
     )
 
     text = page.read_text(encoding="utf-8")
-    assert text.count(f"[{first_id}](../../source-meta/{first_id}.md)") == 2
-    assert text.count(f"[{second_id}](../../source-meta/{second_id}.md)") == 1
+    assert text.count(f"[来源1](../../source-meta/{first_id}.md)") == 2
+    assert text.count(f"[来源2](../../source-meta/{second_id}.md)") == 1
+    assert first_id not in text.replace(f"../../source-meta/{first_id}.md", "")
+    assert second_id not in text.replace(f"../../source-meta/{second_id}.md", "")
     assert "[[ref:" not in text
+
+
+def test_short_reference_numbers_restart_for_each_page(tmp_path: Path) -> None:
+    final_context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    candidate = tmp_path / "sandbox" / "context"
+    first_id = _write_atomic_source(source_root)
+    second_id = _write_atomic_source(source_root, locator="https://example.test/pr/2", title="Source Two")
+    _write_context_pages(
+        candidate,
+        {
+            "first.md": "# First\n\n[[ref:0]] then [[ref:1]].\n",
+            "second.md": "# Second\n\n[[ref:1]].\n",
+        },
+    )
+
+    context_pipeline._resolve_short_references(
+        candidate,
+        final_context_root=final_context_root,
+        source_root=source_root,
+        alias_targets={"[[ref:0]]": first_id, "[[ref:1]]": second_id},
+    )
+
+    assert "[来源1]" in (candidate / "first.md").read_text(encoding="utf-8")
+    assert "[来源2]" in (candidate / "first.md").read_text(encoding="utf-8")
+    second_text = (candidate / "second.md").read_text(encoding="utf-8")
+    assert "[来源1]" in second_text
+    assert "[来源2]" not in second_text
 
 
 @pytest.mark.parametrize(

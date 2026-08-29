@@ -76,7 +76,8 @@ with no memory of this conversation
 The result returned by the subagent is not visible to the user. To show the \
 user the result, you should send a text message back to the user with a \
 concise summary of the result.
-- Each task_tool invocation starts fresh — provide a complete task description.
+- Each task_tool invocation starts fresh by default — provide a complete task description. Only pass the returned resume_task_id when explicitly continuing the same unfinished browser task.
+- For browser_agent results, treat browser_result.status and its evidence as authoritative. If retryable=true, you may make at most one focused continuation with the same resume_task_id, using missing_slots and recommended_recovery instead of restarting the full task or changing requested_slots. If retryable=false, report the completed/partial/blocked result without launching another browser task.
 - The subagent's outputs should generally be trusted.
 - Clearly tell the subagent whether you expect it to write code or just to do \
 research (search, file reads, web fetches, etc.), since it is not aware of \
@@ -142,7 +143,8 @@ task_tool 启动专门的子代理来自主处理复杂任务。每种子代理�
 - task_description 应包含完整的上下文信息——子代理没有本次对话的任何记忆
 - 子代理完成后会返回一条消息给你。该结果对用户不可见。\
 如需向用户展示结果，你应发送一条文字消息，简明总结子代理的结果。
-- 每次 task_tool 调用都是全新启动——请提供完整的任务描述。
+- 每次 task_tool 调用默认都是全新启动——请提供完整的任务描述。只有明确继续同一个未完成的浏览器任务时，才传入上次返回的 resume_task_id。
+- 对 browser_agent 结果，以 browser_result.status 及其 evidence 为准。仅当 retryable=true 时，才可使用同一 resume_task_id 做至多一次定向续跑；续跑应针对 missing_slots 和 recommended_recovery，不要从头重做整个任务，也不要改变 requested_slots。retryable=false 时直接说明 completed/partial/blocked 结果，不要再次启动浏览器任务。
 - 子代理的输出通常应当被信任。
 - 明确告知子代理你期望它写代码还是仅做调研\
 （搜索、读文件、抓取网页等），因为它不知道用户的意图。
@@ -197,6 +199,13 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
         "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
     },
+    "resume_task_id": {
+        "cn": "仅在继续同一个未完成浏览器任务时，传入上一次 task_tool 返回的 resume_task_id；新任务不要传",
+        "en": (
+            "Only when continuing the same unfinished browser task, pass the resume_task_id "
+            "returned by the previous task_tool call; omit it for a new task"
+        ),
+    },
 }
 
 
@@ -225,6 +234,10 @@ def get_task_tool_input_params(language: str = "cn") -> Dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": p["browser_capabilities"].get(language, p["browser_capabilities"]["cn"]),
+            },
+            "resume_task_id": {
+                "type": "string",
+                "description": p["resume_task_id"].get(language, p["resume_task_id"]["cn"]),
             },
         },
         "required": ["subagent_type", "task_description"],

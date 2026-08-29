@@ -158,16 +158,12 @@ def collect_jsonl_pre_investigation_successful_skill_usage(
 
 
 def _successful_tool_steps(value: Any):
-    if isinstance(value, dict):
-        if _tool_step_succeeded(value):
-            detail = value.get("detail")
-            if isinstance(detail, dict):
-                yield value, detail
-        for nested in value.values():
-            yield from _successful_tool_steps(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            yield from _successful_tool_steps(nested)
+    for step in _ordered_steps(value):
+        if not _tool_step_succeeded(step):
+            continue
+        detail = step.get("detail")
+        if isinstance(detail, dict):
+            yield step, detail
 
 
 def _ordered_steps(value: Any):
@@ -179,7 +175,26 @@ def _ordered_steps(value: Any):
                 if isinstance(step, dict):
                     yield step
             return
-        if "kind" in value and "detail" in value:
+        messages = value.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                tool_calls = message.get("tool_calls")
+                for call in tool_calls if isinstance(tool_calls, list) else []:
+                    if not isinstance(call, dict):
+                        continue
+                    yield {
+                        "kind": "tool",
+                        "error": str(call.get("error", "") or "") or None,
+                        "detail": {
+                            "tool_name": str(call.get("name", "") or ""),
+                            "call_args": call.get("input"),
+                            "call_result": call.get("output"),
+                        },
+                    }
+            return
+        if ("kind" in value or "type" in value) and "detail" in value:
             yield value
             return
         for nested in value.values():
@@ -191,7 +206,8 @@ def _ordered_steps(value: Any):
 
 def _tool_step_succeeded(step: dict[str, Any]) -> bool:
     """Return whether a structured Tool step represents a real successful run."""
-    if str(step.get("kind", "") or "").strip().lower() != "tool":
+    step_type = step.get("kind") or step.get("type")
+    if str(step_type or "").strip().lower() != "tool":
         return False
     detail = step.get("detail")
     if not isinstance(detail, dict):
@@ -234,7 +250,7 @@ def _is_persistent_edit_step(step: dict[str, Any]) -> bool:
         "write_file",
     }:
         return True
-    if tool_name not in {"bash", "shell", "shell_command"}:
+    if tool_name not in {"bash", "code", "python", "shell", "shell_command"}:
         return False
     command = _command_from_args(detail)
     if not command:
@@ -250,6 +266,7 @@ def _is_persistent_edit_step(step: dict[str, Any]) -> bool:
         r"\bopen\s*\([^\n)]*,\s*['\"](?:w|a|x|[rwa]b|[rwa]\+)['\"]",
         r"\.(?:write_text|write_bytes|touch|unlink|rename|replace)\s*\(",
         r"\bshutil\.(?:copy|copy2|copyfile|move|rmtree)\s*\(",
+        r"\.(?:save|to_csv|to_excel|to_json|to_parquet)\s*\(",
     )
     return any(re.search(pattern, command, flags=re.IGNORECASE) for pattern in mutation_patterns)
 
@@ -267,7 +284,7 @@ def _command_from_args(detail: dict[str, Any]) -> str:
             elif key in {"tool_input", "input"}:
                 return payload
         if isinstance(payload, dict):
-            command = payload.get("command") or payload.get("cmd")
+            command = payload.get("command") or payload.get("cmd") or payload.get("code")
             if isinstance(command, str):
                 return command
     return ""

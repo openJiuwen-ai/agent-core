@@ -38,6 +38,7 @@ from openjiuwen.rsi.member_optimizer.agents.output import (
     extract_agent_text,
     parse_json_object_response,
 )
+from openjiuwen.rsi.member_optimizer.execution_contract import action_bundle_key
 from openjiuwen.rsi.member_optimizer.schema import (
     MemberActionExecutionResult,
     MemberActionMergeResult,
@@ -394,6 +395,14 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
             "approximate an available parser, compiler, linter, or test command "
             "with a weaker string heuristic, and do not create a passive validator."
         )
+    if action.action_group == "rail" and action.operation == "add":
+        class_hint = class_name or "a descriptive AgentRail subclass"
+        return (
+            f"Create `{target_path}` with a loadable `{class_hint}` class that "
+            "inherits from `openjiuwen.core.single_agent.rail.base.AgentRail`. "
+            "Also update `rails/rails.yaml` with a `rails` entry containing "
+            "`file` and `class_name`. Keep the rail lightweight and dependency-free."
+        )
     if action.action_group == "skill" and action.operation == "add":
         return (
             f"Create `{target_path}` as a package-local skill. It must be a "
@@ -438,8 +447,8 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
             "`skills/skills.yaml` is declared, keep it valid YAML and mount the "
             "parent `skills` directory."
         )
-    if action.action_group == "tool":
-        manifest = "tools/tools.yaml"
+    if action.action_group in {"tool", "rail"}:
+        manifest = "tools/tools.yaml" if action.action_group == "tool" else "rails/rails.yaml"
         return (
             f"Keep `{target_path}` loadable and keep `{manifest}` valid YAML "
             "if the manifest is one of the declared write paths."
@@ -1212,6 +1221,28 @@ class MemberActionExecutor:
                             else:
                                 subwave_results.append(r)
 
+                        failed_bundle_keys: set[str] = set()
+                        for result in subwave_results:
+                            if result.status == "succeeded":
+                                continue
+                            bundle_key = action_bundle_key(action_by_id.get(result.action_id))
+                            if bundle_key is not None:
+                                failed_bundle_keys.add(bundle_key)
+                        atomic_results: list[MemberActionExecutionResult] = []
+                        for result in subwave_results:
+                            bundle_key = action_bundle_key(action_by_id.get(result.action_id))
+                            if result.status == "succeeded" and bundle_key in failed_bundle_keys:
+                                result = replace(
+                                    result,
+                                    status="failed",
+                                    merge_status="not_merged",
+                                    error=(
+                                        "atomic action bundle peer failed; successful partial result was not merged"
+                                    ),
+                                )
+                            atomic_results.append(result)
+                        subwave_results = atomic_results
+
                         successful_results = [r for r in subwave_results if r.status == "succeeded"]
                         if successful_results:
                             merge_result = self._merge_subwave(
@@ -1287,6 +1318,15 @@ class MemberActionExecutor:
                 run_dir=run_dir,
                 error="; ".join(policy_check.errors),
             )
+        if action.action_group == "skill" and action.operation == "search":
+            return self._write_failed_action_result(
+                action=action,
+                run_dir=run_dir,
+                error=(
+                    "external skill search is unavailable in the current RSI runtime; "
+                    "run the dependency_failed package-local skill/add fallback"
+                ),
+            )
 
         worktrees_root = (
             Path(context.worktrees_dir).expanduser().resolve()
@@ -1344,6 +1384,15 @@ class MemberActionExecutor:
                 "declared_write_paths": declared_paths,
                 "error": str(e),
             }
+
+        if exec_result.get("status", "failed") == "succeeded":
+            manifest_fix = _normalize_rail_manifest_refs(
+                worktree_dir,
+                action,
+                declared_paths,
+            )
+            if manifest_fix:
+                exec_result["rail_manifest_normalization"] = manifest_fix
 
         after_declared = _snapshot_files(worktree_dir, declared_paths)
         changed_files = _changed_files(before_declared, after_declared)
@@ -1606,6 +1655,15 @@ def _execute_deterministic_remove(
             target_paths={target_rel},
         ):
             manifest_updates.append("tools/tools.yaml")
+    elif action.action_group == "rail":
+        removed_paths.extend(_remove_path(worktree_dir, target_rel))
+        manifest = worktree_dir / "rails" / "rails.yaml"
+        if manifest.is_file() and _remove_manifest_entries(
+            manifest,
+            list_key="rails",
+            target_paths={target_rel},
+        ):
+            manifest_updates.append("rails/rails.yaml")
     else:
         return {
             "status": "failed",
@@ -1656,7 +1714,7 @@ def _validate_generated_action_resources(
                 errors.append(f"skill_frontmatter:{normalized}: description is required")
         return errors
 
-    if action.action_group != "tool":
+    if action.action_group not in {"tool", "rail"}:
         return errors
 
     for rel_path in changed_files:
@@ -1673,7 +1731,7 @@ def _validate_generated_action_resources(
                 continue
             safety_errors = _validate_package_python_source(source, path=normalized)
             errors.extend(safety_errors)
-        elif normalized == "tools/tools.yaml":
+        elif normalized in {"tools/tools.yaml", "rails/rails.yaml"}:
             try:
                 yaml.safe_load(path.read_text(encoding="utf-8"))
             except Exception as exc:
@@ -1803,11 +1861,18 @@ def _execute_deterministic_add_scaffold(
             "error": "add scaffold requires constraints.class_name",
         }
 
-    if action.action_group != "tool" or not target_rel.startswith("tools/") or not target_rel.endswith(".py"):
-        return {"status": "failed", "scaffold": {}, "error": "tool/add scaffold target must be tools/*.py"}
-    manifest_rel = "tools/tools.yaml"
-    list_key = "tools"
-    content = _tool_scaffold(class_name, action.description)
+    if action.action_group == "tool":
+        if not target_rel.startswith("tools/") or not target_rel.endswith(".py"):
+            return {"status": "failed", "scaffold": {}, "error": "tool/add scaffold target must be tools/*.py"}
+        manifest_rel = "tools/tools.yaml"
+        list_key = "tools"
+        content = _tool_scaffold(class_name, action.description)
+    else:
+        if not target_rel.startswith("rails/") or not target_rel.endswith(".py"):
+            return {"status": "failed", "scaffold": {}, "error": "rail/add scaffold target must be rails/*.py"}
+        manifest_rel = "rails/rails.yaml"
+        list_key = "rails"
+        content = _rail_scaffold(class_name)
 
     if manifest_rel not in {_normalize_rel_path(path) for path in declared_paths}:
         return {
@@ -1838,11 +1903,77 @@ def _execute_deterministic_add_scaffold(
     }
 
 
+def _normalize_rail_manifest_refs(
+    worktree_dir: Path,
+    action: MemberOptimizationAction,
+    declared_paths: list[str],
+) -> dict[str, object] | None:
+    """Canonicalize generated rail manifest refs to package-local rails/*.py."""
+    if action.action_group != "rail":
+        return None
+    normalized_declared = {_normalize_rel_path(path) for path in declared_paths}
+    if "rails/rails.yaml" not in normalized_declared:
+        return None
+    manifest = worktree_dir / "rails" / "rails.yaml"
+    if not manifest.is_file():
+        return None
+
+    data = _load_yaml_manifest(manifest)
+    if isinstance(data, dict):
+        entries = data.get("rails") or []
+        key = "rails"
+    elif isinstance(data, list):
+        entries = data
+        data = {"rails": entries}
+        key = "rails"
+    else:
+        return None
+    if not isinstance(entries, list):
+        entries = [entries]
+
+    changed = False
+    normalized_entries: list[object] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            normalized_entries.append(entry)
+            continue
+        file_value = entry.get("file") or entry.get("file_path") or entry.get("path")
+        if not file_value:
+            normalized_entries.append(entry)
+            continue
+        normalized_file = _canonical_rail_file_ref(str(file_value))
+        if normalized_file != str(file_value):
+            entry = dict(entry)
+            entry["file"] = normalized_file
+            for alias_key in ("file_path", "path"):
+                entry.pop(alias_key, None)
+            changed = True
+        normalized_entries.append(entry)
+
+    if not changed:
+        return None
+    data[key] = normalized_entries
+    _write_yaml_manifest(manifest, data)
+    return {
+        "manifest_path": "rails/rails.yaml",
+        "normalized_file_refs": [
+            entry.get("file") for entry in normalized_entries if isinstance(entry, dict) and entry.get("file")
+        ],
+    }
+
+
+def _canonical_rail_file_ref(raw_path: str) -> str:
+    normalized = _normalize_rel_path(raw_path)
+    if normalized.startswith("rails/"):
+        return normalized
+    return f"rails/{Path(normalized).name}"
+
+
 def _is_add_like_scaffold_action(
     worktree_dir: Path,
     action: MemberOptimizationAction,
 ) -> bool:
-    if action.action_group not in {"prompt", "skill", "tool"}:
+    if action.action_group not in {"prompt", "skill", "tool", "rail"}:
         return False
     if action.operation == "add":
         return True
@@ -1887,6 +2018,22 @@ def _tool_scaffold(class_name: str, description: str) -> str:
             "    async def stream(self, inputs, **kwargs):",
             "        if False:",
             "            yield inputs",
+            "",
+        ]
+    )
+
+
+def _rail_scaffold(class_name: str) -> str:
+    return "\n".join(
+        [
+            "from openjiuwen.core.single_agent.rail.base import AgentRail",
+            "",
+            "",
+            f"class {class_name}(AgentRail):",
+            "    priority = 90",
+            "",
+            "    async def before_model_call(self, ctx):",
+            "        return None",
             "",
         ]
     )
@@ -2184,7 +2331,7 @@ def _manifest_path_matches(raw_path: str, target_rel: str, *, exact_only: bool =
         return True
     if exact_only:
         return False
-    if not normalized.startswith(("skills/", "tools/", "prompt_sections/")):
+    if not normalized.startswith(("skills/", "tools/", "rails/", "prompt_sections/")):
         prefixed = f"prompt_sections/files/{normalized}"
         if prefixed == target:
             return True

@@ -8,9 +8,11 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 from openjiuwen.symphony.evaluation import EvaluationContext, EvaluationSuite, EvaluationWindow, Evaluator
+from openjiuwen.symphony.graph_engine import SymphonyGraphEngine
 from openjiuwen.symphony.interfaces import (
     AtomicCapabilityProvider,
     CapabilityProvider,
+    SkillGraphUpdater,
     SymphonyLLM,
 )
 from openjiuwen.symphony.models import (
@@ -36,6 +38,8 @@ from openjiuwen.symphony.orchestration import (
     CapabilityGraph,
     GraphArtifactStatus,
     GraphBuildResult,
+    GraphMutationDelta,
+    GraphMutationResult,
     OrchestrationConfig,
     OrchestrationPlan,
     OrchestrationProgress,
@@ -58,12 +62,13 @@ from openjiuwen.symphony.shared.fingerprint import (
 
 if TYPE_CHECKING:
     from openjiuwen.symphony import agent as agent
+    from openjiuwen.symphony import discovery as discovery
     from openjiuwen.symphony import retrieval as retrieval
     from openjiuwen.symphony import shared as shared
 
 CapabilityInput = ParameterSpec
 CapabilityOutput = ArtifactSpec
-_LAZY_MODULES = frozenset({"agent", "retrieval", "shared"})
+_LAZY_MODULES = frozenset({"agent", "discovery", "retrieval", "shared"})
 
 __all__ = [
     "FINGERPRINT_ARTIFACT_FILENAME",
@@ -92,6 +97,8 @@ __all__ = [
     "FingerprintSettings",
     "GraphArtifactStatus",
     "GraphBuildResult",
+    "GraphMutationDelta",
+    "GraphMutationResult",
     "IONameVocabulary",
     "ImprovementSuggestion",
     "MetricResult",
@@ -108,12 +115,15 @@ __all__ = [
     "ScanResult",
     "SemanticProfile",
     "SkillFolderScanner",
+    "SkillGraphUpdater",
     "SkillManifestParser",
     "SourceSnapshot",
     "SuggestionPriority",
     "SymphonyLLM",
+    "SymphonyGraphEngine",
     "SymphonyRuntime",
     "agent",
+    "discovery",
     "retrieval",
     "shared",
 ]

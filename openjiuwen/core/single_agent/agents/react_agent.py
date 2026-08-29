@@ -21,7 +21,8 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Un
 
 from pydantic import Field, BaseModel
 
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error, raise_error
 from openjiuwen.core.common.logging import logger
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
@@ -641,6 +642,9 @@ class ReActAgent(BaseAgent):
     @classmethod
     def _with_context_engine_model_name(cls, config: ReActAgentConfig) -> ReActAgentConfig:
         context_config = config.context_engine_config
+        configured_model_name = getattr(context_config, "model_name", None)
+        if isinstance(configured_model_name, str) and configured_model_name.strip():
+            return config
         context_updates = {}
 
         if not getattr(context_config, "model_name", None):
@@ -662,6 +666,33 @@ class ReActAgent(BaseAgent):
             }
         )
 
+    @classmethod
+    def _with_context_engine_model_window(cls, config: ReActAgentConfig) -> ReActAgentConfig:
+        """Attach the selected model's window without overriding a global value."""
+        model_config = getattr(config, "model_config_obj", None)
+        model_context_window = getattr(model_config, "context_window", None)
+        context_config = config.context_engine_config
+        if not (
+            isinstance(model_context_window, int)
+            and model_context_window > 0
+        ):
+            # No model metadata is available. Preserve an explicit context
+            # engine override instead of clearing it during configure().
+            return config
+
+        if getattr(context_config, "model_context_window_tokens_override", None) == model_context_window:
+            return config
+
+        return config.model_copy(
+            update={
+                "context_engine_config": context_config.model_copy(
+                    update={
+                        "model_context_window_tokens_override": model_context_window,
+                    }
+                )
+            }
+        )
+
     def configure(self, config: ReActAgentConfig) -> 'BaseAgent':
         """Set configuration
 
@@ -676,6 +707,7 @@ class ReActAgent(BaseAgent):
             will be updated accordingly
         """
         config = self._with_context_engine_model_name(config)
+        config = self._with_context_engine_model_window(config)
         old_config = self._config
         self._config = config
         kv_config_changed = old_config.kv_cache_affinity_config != config.kv_cache_affinity_config
@@ -729,6 +761,28 @@ class ReActAgent(BaseAgent):
         )
 
         return self
+
+    def update_model_context(
+        self,
+        *,
+        model_name: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+    ) -> None:
+        """Refresh selected-model context metadata without rebuilding contexts."""
+        self._config.context_engine_config = self._config.context_engine_config.model_copy(
+            update={
+                "model_name": model_name or None,
+                "model_context_window_tokens_override": (
+                    context_window_tokens
+                    if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                    else None
+                ),
+            }
+        )
+        self.context_engine.update_model_context(
+            model_name=model_name,
+            context_window_tokens=context_window_tokens,
+        )
 
     def set_llm(self, llm: Model) -> None:
         """Set LLM model instance directly.
@@ -1033,23 +1087,18 @@ class ReActAgent(BaseAgent):
             ctx: AgentCallbackContext,
             final_system: List[SystemMessage],
     ) -> dict:
-        """Build the final ContextWindow inputs after model-call rails run."""
-        context_window_kwargs = {
+        """Build the final ContextWindow inputs after model-call rails run.
+
+        Prompt attachments are persisted in conversation order: the first
+        snapshot is synchronized before the first user message, and later
+        changes are synchronized immediately before the model call.  They are
+        intentionally left in ``context_messages``; no final-window mutator
+        moves them into ``system_messages``.
+        """
+        return {
             "system_messages": final_system,
             "tools": ctx.inputs.tools if ctx.inputs.tools else None,
         }
-        manager = getattr(self, "prompt_attachment_manager", None)
-        make_window_mutator = getattr(manager, "make_window_mutator", None)
-        if callable(make_window_mutator):
-            session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
-            )
-            context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id)
-            ]
-        return context_window_kwargs
 
     async def _sync_prompt_attachments(
             self,
@@ -1573,6 +1622,7 @@ class ReActAgent(BaseAgent):
                 phase="post_call",
                 usage_metadata=getattr(ai_message, "usage_metadata", None),
             )
+            self._raise_for_model_response_error(ai_message)
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
@@ -1670,6 +1720,7 @@ class ReActAgent(BaseAgent):
             phase="post_call",
             usage_metadata=ai_message.usage_metadata,
         )
+        self._raise_for_model_response_error(ai_message)
         if ai_message.usage_metadata:
 
             perf_metrics = {}
@@ -1693,6 +1744,30 @@ class ReActAgent(BaseAgent):
                 },
             ))
         return ai_message
+
+    @staticmethod
+    def _raise_for_model_response_error(message: AssistantMessage) -> None:
+        """Turn provider error responses into rail-visible exceptions."""
+        finish_reason = str(getattr(message, "finish_reason", "") or "").strip().lower()
+        usage = getattr(message, "usage_metadata", None)
+        code = int(getattr(usage, "code", 0) or 0)
+        if finish_reason not in {"error", "failed"} and code == 0:
+            return
+        error_message = str(getattr(usage, "err_msg", "") or getattr(message, "content", "") or "")
+        provider_detail = (
+            f"provider response error: code={code}, "
+            f"finish_reason={finish_reason or 'unknown'}, "
+            f"message={error_message[:500] or 'provider returned no error detail'}"
+        )
+        raise_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg=provider_detail,
+            details={
+                "provider_code": code,
+                "finish_reason": finish_reason or "unknown",
+                "provider_message": error_message[:500],
+            },
+        )
 
     @staticmethod
     def _messages_contain_image_input(messages: Optional[List[Any]]) -> bool:
@@ -2351,9 +2426,6 @@ class ReActAgent(BaseAgent):
 
         if has_read_file:
             return
-
-        from openjiuwen.core.common.exception.codes import StatusCode
-        from openjiuwen.core.common.exception.errors import build_error
 
         err = build_error(
             StatusCode.AGENT_TOOL_NOT_FOUND,

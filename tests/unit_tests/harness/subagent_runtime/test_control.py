@@ -425,13 +425,25 @@ async def test_cancel_all_closes_running_subagents() -> None:
 async def test_duplicate_sticky_spawn_rejected() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
     async with _patched_control(parent=parent) as control:
-        first = await control.spawn("browser_agent", "first")
+        first = await control.spawn("verification_agent", "first")
         await _wait_for_turn(parent.mock_agent)
 
         with pytest.raises(Exception, match="subagent already live"):
-            await control.spawn("browser_agent", "second")
+            await control.spawn("verification_agent", "second")
 
         assert control._manager.find(first.subagent_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_browser_spawn_uses_fresh_subagent_session() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        first = await control.spawn("browser_agent", "first")
+        second = await control.spawn("browser_agent", "second")
+
+        assert first.subagent_id != second.subagent_id
+        assert control._manager.find(first.subagent_id) is not None
+        assert control._manager.find(second.subagent_id) is not None
 
 
 @pytest.mark.asyncio

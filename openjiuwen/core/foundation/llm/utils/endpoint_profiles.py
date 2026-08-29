@@ -116,6 +116,28 @@ def deep_merge_defaults(target: dict[str, Any], defaults: dict[str, Any]) -> dic
     return merged
 
 
+def _alias_field_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+# After dump()+rebuild, ModelClientConfig defaults land in model_fields_set and
+# look like user intent. For OpenAIAccount those printed defaults are never a
+# real choice: keep applying oauth / responses unless the user set something else.
+_IMPLICIT_OPENAI_ACCOUNT_DEFAULTS: dict[str, frozenset[Any]] = {
+    "auth_mode": frozenset({LLMAuthMode.ApiKey, LLMAuthMode.ApiKey.value}),
+    "api_mode": frozenset({None}),
+}
+
+
+def _is_implicit_openai_account_default(provider: str, key: str, current: Any) -> bool:
+    if provider != ProviderType.OpenAIAccount.value:
+        return False
+    allowed = _IMPLICIT_OPENAI_ACCOUNT_DEFAULTS.get(key)
+    if allowed is None:
+        return False
+    return current in allowed or _alias_field_value(current) in allowed
+
+
 def normalize_model_client_config(config: ModelClientConfig) -> ModelClientConfig:
     """Return a normalized config carrying protocol/profile/auth/api-mode metadata."""
     provider = (
@@ -135,7 +157,11 @@ def normalize_model_client_config(config: ModelClientConfig) -> ModelClientConfi
     for key, value in alias.items():
         if key == "extensions":
             continue
-        if key == "client_provider" or key not in explicit_fields:
+        if (
+            key == "client_provider"
+            or key not in explicit_fields
+            or _is_implicit_openai_account_default(provider, key, data.get(key))
+        ):
             data[key] = value
 
     if alias.get("extensions"):

@@ -12,7 +12,15 @@ import time
 import uuid
 from typing import Any, Optional
 
-from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import build_direct_supervisor_sft_samples
+from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
+    assistant_text,
+    build_direct_supervisor_sft_samples,
+    json_safe,
+    normalize_assistant_message,
+    normalize_message,
+    normalize_messages,
+    normalize_tool_definitions,
+)
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (
     SESSION_ID,
@@ -27,7 +35,6 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution import PreparedEvolutionInput
 
-from ...core.interaction import TokenInTokenOutForwarder
 from ...core.rail import BaseOnlineTrainingRail
 from ...core.uploader import TrajectoryUploader
 from .collector import SFTTrajectoryCollector
@@ -84,7 +91,7 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         sft_scenario: str = "multi_turn_supervisor",
         collector: Optional[SFTTrajectoryCollector] = None,
         sft_raw_converter: Optional[SFTRawTrajectoryConverter] = None,
-        forwarder: Optional[TokenInTokenOutForwarder] = None,
+        forwarder: Any = None,
         session_done_on_invoke_end: bool = False,
         session_flush_token_threshold_k: int = 0,
         upload_mode: str = "raw",
@@ -104,7 +111,10 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
                 scenario=sft_scenario,
             ),
         )
-        self._forwarder = forwarder or TokenInTokenOutForwarder()
+        # Kept as a compatibility-only constructor argument for older callers.
+        # SFT stores structured messages/tools directly from ModelCallInputs;
+        # TokenInTokenOutRecord belongs to the RL token-capture path.
+        del forwarder
         self._flush_policy = SFTSessionFlushPolicy(
             done_on_invoke_end=session_done_on_invoke_end,
             token_threshold_k=session_flush_token_threshold_k,
@@ -117,13 +127,6 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         self._llm_step_count = 0
         self._started_at = 0.0
 
-    def _enable_token_capture(self, ctx: AgentCallbackContext) -> None:
-        config = self._react_config(ctx)
-        if config is None:
-            return
-        config.llm_return_token_ids = True
-        self._enable_user_header(ctx)
-
     # Lifecycle phase 1: initialize a session-level builder before the agent
     # starts work. SFT keeps a whole session as one raw trajectory unless the
     # flush policy decides the session is complete.
@@ -132,7 +135,7 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         self._status = "ok"
         self._exception = None
         self._ensure_tenant_from_ctx(ctx)
-        self._enable_token_capture(ctx)
+        self._enable_user_header(ctx)
         self._llm_step_count = len(self._fallback_turns)
         logger.info(
             "[SFTOnlineRail] before_invoke tenant=%s fallback_turns=%d inputs=%s",
@@ -213,40 +216,42 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
             self._session_metadata["original_task"] = self._task_prompt_from_env()
 
     def _collect_fallback_llm_interaction(self, ctx: AgentCallbackContext) -> None:
-        """Keep a text fallback for tests and host runtimes without span capture."""
+        """Keep structured ChatML fields when OTel spans are unavailable."""
 
         inputs = getattr(ctx, "inputs", None)
-        messages = list(getattr(inputs, "messages", None) or [])
-        response = getattr(inputs, "response", None)
-        if response is None and not messages:
+        messages = normalize_messages(getattr(inputs, "messages", None) or [])
+        response_value = getattr(inputs, "response", None)
+        if response_value is None and not messages:
             logger.info("[SFTOnlineRail] fallback model call skipped: empty inputs")
             return
 
-        record = self._forwarder.from_model_call_context(ctx)
+        response = normalize_assistant_message(response_value or {})
+        tools = normalize_tool_definitions(getattr(inputs, "tools", None))
+        llm_str = assistant_text(response)
         turn = {
             "turn_id": self._llm_step_count - 1,
-            "model_id": record.model_id or self._model_id_from_ctx(ctx),
+            "model_id": self._model_id_from_ctx(ctx),
             "messages": messages,
             "response": response,
-            "prompt_ids": record.prompt_ids,
-            "completion_token_ids": record.llm_ids,
-            "prompt_str": record.prompt_str,
-            "llm_str": record.llm_str,
+            "tools": tools,
+            "prompt_ids": None,
+            "completion_token_ids": None,
+            "prompt_str": "",
+            "llm_str": llm_str,
             "meta": {
                 "turn_id": self._llm_step_count - 1,
                 "source": "sft_online",
                 "tenant_id": self._tenant_id,
-                "prompt_str": record.prompt_str,
-                "llm_str": record.llm_str,
+                "llm_str": llm_str,
                 **self._lora_step_meta(ctx),
             },
         }
         self._fallback_turns.append(turn)
         logger.info(
-            "[SFTOnlineRail] captured llm step=%d prompt_ids=%s response_tokens=%s",
+            "[SFTOnlineRail] captured llm step=%d messages=%d tools=%d",
             self._llm_step_count,
-            len(record.prompt_ids or []),
-            len(record.llm_ids or []),
+            len(messages),
+            len(tools),
         )
 
     async def _on_after_evolution_triggered(
@@ -575,29 +580,51 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
     @staticmethod
     def _fallback_turn_to_span(index: int, turn: dict[str, Any]) -> dict[str, Any]:
         messages = turn.get("messages") or []
-        response = turn.get("response") or {}
-        if hasattr(response, "model_dump"):
-            try:
-                response = response.model_dump()
-            except Exception:
-                response = {"role": "assistant", "content": str(response)}
-        if not isinstance(response, dict):
-            response = {"role": "assistant", "content": str(response)}
+        response = normalize_assistant_message(turn.get("response") or {})
 
         attrs: dict[str, Any] = {
             semconv.GEN_AI_OPERATION_NAME: "chat",
             semconv.GEN_AI_REQUEST_MODEL: str(turn.get("model_id") or "unknown"),
             "openjiuwen.legacy.step.meta": turn.get("meta") or {},
         }
+        tools = normalize_tool_definitions(turn.get("tools"))
+        if tools:
+            attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = tools
+
         for message_index, message in enumerate(messages):
-            if isinstance(message, dict):
-                attrs[f"{semconv.GEN_AI_PROMPT}.{message_index}.role"] = message.get("role")
-                attrs[f"{semconv.GEN_AI_PROMPT}.{message_index}.content"] = message.get("content")
-            else:
-                attrs[f"{semconv.GEN_AI_PROMPT}.{message_index}.role"] = getattr(message, "role", "user")
-                attrs[f"{semconv.GEN_AI_PROMPT}.{message_index}.content"] = getattr(message, "content", str(message))
+            normalized = normalize_message(message)
+            base = f"{semconv.GEN_AI_PROMPT}.{message_index}"
+            for key in (
+                "role",
+                "content",
+                "name",
+                "tool_call_id",
+                "reasoning_content",
+                "reasoning",
+                "refusal",
+            ):
+                if key in normalized:
+                    attrs[f"{base}.{key}"] = normalized[key]
+            if normalized.get("tool_calls"):
+                attrs[f"{base}.tool_calls"] = normalized["tool_calls"]
+
         attrs[f"{semconv.GEN_AI_COMPLETION}.0.role"] = response.get("role") or "assistant"
-        attrs[f"{semconv.GEN_AI_COMPLETION}.0.content"] = response.get("content") or turn.get("llm_str") or ""
+        response_content = response.get("content")
+        if response_content is not None:
+            attrs[f"{semconv.GEN_AI_COMPLETION}.0.content"] = response_content
+        elif not response.get("tool_calls"):
+            attrs[f"{semconv.GEN_AI_COMPLETION}.0.content"] = turn.get("llm_str") or ""
+        for key in (
+            "name",
+            "reasoning_content",
+            "reasoning",
+            "refusal",
+        ):
+            if key in response:
+                attrs[f"{semconv.GEN_AI_COMPLETION}.0.{key}"] = response[key]
+        if response.get("tool_calls"):
+            attrs[f"{semconv.GEN_AI_COMPLETION}.0.tool_calls"] = response["tool_calls"]
+            attrs[semconv.GEN_AI_TOOL_CALLS] = response["tool_calls"]
         if turn.get("prompt_ids") is not None:
             attrs["prompt_ids"] = turn.get("prompt_ids")
         if turn.get("completion_token_ids") is not None:

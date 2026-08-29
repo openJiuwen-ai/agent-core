@@ -14,16 +14,26 @@ from openjiuwen.harness.personal_context.personal_context import PersonalContext
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 
+_ALL_FEISHU_READ_SCOPES = {
+    "calendar:calendar.event:read",
+    "docs:document.content:read",
+    "drive:file:download",
+    "search:docs:read",
+    "task:task:read",
+    "wiki:node:retrieve",
+}
+
+
 def _config(
     *,
-    enabled: bool = True,
-    fetching_enabled: bool = True,
+    collection_enabled: bool = True,
+    agent_use_enabled: bool = False,
     service_enabled: bool = True,
 ) -> PersonalContextConfig:
     return PersonalContextConfig.from_dict(
         {
-            "enabled": enabled,
-            "fetching_enabled": fetching_enabled,
+            "collection_enabled": collection_enabled,
+            "agent_use_enabled": agent_use_enabled,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -33,6 +43,7 @@ def _config(
                     "provider": "local_files",
                     "enabled": service_enabled,
                     "interval_seconds": 60,
+                    "time_range": {"mode": "all"},
                     "source": {"root_dir": str(Path.cwd())},
                     "credentials": {},
                 }
@@ -44,8 +55,8 @@ def _config(
 def _feishu_config(*resources_by_service: tuple[str, ...]) -> PersonalContextConfig:
     return PersonalContextConfig.from_dict(
         {
-            "enabled": False,
-            "fetching_enabled": False,
+            "collection_enabled": False,
+            "agent_use_enabled": False,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -55,6 +66,7 @@ def _feishu_config(*resources_by_service: tuple[str, ...]) -> PersonalContextCon
                     "provider": "feishu",
                     "enabled": True,
                     "interval_seconds": 60,
+                    "time_range": {"mode": "all"},
                     "source": {
                         "mode": "account",
                         "resources": list(resources),
@@ -271,8 +283,8 @@ async def test_authorize_feishu_returns_authorized_when_lark_cli_scope_is_ready(
     await personal_context.set_configuration(
         PersonalContextConfig.from_dict(
             {
-                "enabled": True,
-                "fetching_enabled": True,
+                "collection_enabled": True,
+                "agent_use_enabled": False,
                 "strategy_profile": "rules",
                 "fetch_services": [
                     {
@@ -280,6 +292,7 @@ async def test_authorize_feishu_returns_authorized_when_lark_cli_scope_is_ready(
                         "provider": "feishu",
                         "enabled": True,
                         "interval_seconds": 60,
+                        "time_range": {"mode": "all"},
                         "source": {"mode": "wiki_space", "wiki_space_id": "space-1"},
                         "credentials": {},
                     }
@@ -306,13 +319,13 @@ async def test_authorize_feishu_returns_authorized_when_lark_cli_scope_is_ready(
         (set(), None, "not_authorized", None),
         ({"docs:document.content:read"}, None, "authorization_required", None),
         (
-            {"docs:document.content:read", "calendar:calendar.event:read"},
+            set(_ALL_FEISHU_READ_SCOPES),
             None,
             "authorized",
             None,
         ),
         (
-            {"docs:document.content:read", "calendar:calendar.event:read"},
+            set(_ALL_FEISHU_READ_SCOPES),
             "Feishu authorization failed",
             "authorization_failed",
             "Feishu authorization failed",
@@ -420,7 +433,7 @@ async def test_get_authorization_status_returns_stable_failure_when_read_only_st
 
 
 @pytest.mark.asyncio
-async def test_get_authorization_status_rejects_unknown_or_unconfigured_provider_without_cli_calls(
+async def test_get_authorization_status_requires_core_config_but_not_a_feishu_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -429,13 +442,13 @@ async def test_get_authorization_status_rejects_unknown_or_unconfigured_provider
 
     with pytest.raises(BaseError):
         await personal_context.get_authorization_status("feishu")
-    await personal_context.set_configuration(_config(enabled=False))
+    await personal_context.set_configuration(_config(collection_enabled=False))
     with pytest.raises(BaseError):
         await personal_context.get_authorization_status("github")
-    with pytest.raises(BaseError):
-        await personal_context.get_authorization_status("feishu")
+    result = await personal_context.get_authorization_status("feishu")
+    assert result["state"] == "not_authorized"
 
-    status.assert_not_awaited()
+    status.assert_awaited_once_with(tuple(sorted(_ALL_FEISHU_READ_SCOPES)))
     begin.assert_not_awaited()
     finish.assert_not_awaited()
 
@@ -521,7 +534,7 @@ async def test_successful_authorization_task_releases_challenge_and_rechecks_rea
     status.reset_mock()
     begin.reset_mock()
     finish.reset_mock()
-    status.return_value = (True, {"docs:document.content:read"})
+    status.return_value = (True, set(_ALL_FEISHU_READ_SCOPES))
 
     result = await personal_context.get_authorization_status("feishu")
 
@@ -597,13 +610,12 @@ async def test_cancelled_authorization_task_releases_challenge_and_propagates_ca
 
 
 @pytest.mark.asyncio
-async def test_shared_feishu_scopes_require_explicit_supplemental_authorization(
+async def test_feishu_scope_set_is_fixed_across_service_configuration_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     personal_context = PersonalContext(home=tmp_path)
     documents_scope = "docs:document.content:read"
-    calendar_scope = "calendar:calendar.event:read"
     status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes={documents_scope})
     started = asyncio.Event()
     release = asyncio.Event()
@@ -621,7 +633,7 @@ async def test_shared_feishu_scopes_require_explicit_supplemental_authorization(
     finish.side_effect = wait_for_authorization
 
     await personal_context.set_configuration(_feishu_config(("docs",)))
-    assert (await personal_context.get_authorization_status("feishu"))["state"] == "authorized"
+    assert (await personal_context.get_authorization_status("feishu"))["state"] == "authorization_required"
     begin.assert_not_awaited()
     finish.assert_not_awaited()
 
@@ -629,7 +641,7 @@ async def test_shared_feishu_scopes_require_explicit_supplemental_authorization(
     supplemental = await personal_context.get_authorization_status("feishu")
     assert supplemental["state"] == "authorization_required"
     required_scopes = status.await_args.args[0]
-    assert set(required_scopes) == {documents_scope, calendar_scope}
+    assert set(required_scopes) == _ALL_FEISHU_READ_SCOPES
     assert [service.service_id for service in personal_context._config.fetch_services] == ["feishu-1", "feishu-2"]
     begin.assert_not_awaited()
     finish.assert_not_awaited()
@@ -646,7 +658,7 @@ async def test_shared_feishu_scopes_require_explicit_supplemental_authorization(
             "expires_at": "2026-08-18T12:00:00Z",
             "error": None,
         }
-        begin.assert_awaited_once_with(tuple(sorted({documents_scope, calendar_scope})))
+        begin.assert_awaited_once_with(tuple(sorted(_ALL_FEISHU_READ_SCOPES)))
         finish.assert_awaited_once()
     finally:
         task.cancel()
@@ -705,9 +717,9 @@ async def test_authorization_and_configuration_change_are_linearized_without_reg
         assert personal_context._authorization_task is None
         assert personal_context._authorization_challenge is None
         assert personal_context._authorization_error is None
-        begin.assert_awaited_once_with(("docs:document.content:read",))
+        begin.assert_awaited_once_with(tuple(sorted(_ALL_FEISHU_READ_SCOPES)))
         finish.assert_awaited_once()
-        status.assert_awaited_once_with(("docs:document.content:read",))
+        status.assert_awaited_once_with(tuple(sorted(_ALL_FEISHU_READ_SCOPES)))
     finally:
         release_scopes.set()
         finish_release.set()
@@ -728,7 +740,7 @@ async def test_changed_configuration_clears_old_authorization_failure_before_rec
     personal_context = PersonalContext(home=tmp_path)
     await personal_context.set_configuration(_feishu_config(("docs",)))
     personal_context._authorization_error = "Feishu authorization failed"
-    full_scopes = {"docs:document.content:read", "calendar:calendar.event:read"}
+    full_scopes = set(_ALL_FEISHU_READ_SCOPES)
     status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=full_scopes)
 
     await personal_context.set_configuration(_feishu_config(("docs",), ("calendar",)))
@@ -788,13 +800,13 @@ async def test_identical_configuration_keeps_active_authorization_task_and_chall
 
 
 def _ready_auth_status() -> tuple[bool, set[str]]:
-    return True, {"wiki:node:retrieve", "docs:document.content:read", "drive:file:download"}
+    return True, set(_ALL_FEISHU_READ_SCOPES)
 
 
 @pytest.mark.asyncio
 async def test_disabled_configuration_does_not_create_runtime_tasks(tmp_path: Path) -> None:
     personal_context = PersonalContext(home=tmp_path)
-    await personal_context.set_configuration(_config(enabled=False))
+    await personal_context.set_configuration(_config(collection_enabled=False))
     await personal_context.activate_runtime()
     status = await personal_context.snapshot()
     assert status.state == "CONFIGURED"
@@ -803,7 +815,7 @@ async def test_disabled_configuration_does_not_create_runtime_tasks(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_fetching_disabled_starts_pipeline_without_provider_tasks(
+async def test_agent_use_switch_does_not_start_or_stop_collection_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -826,19 +838,90 @@ async def test_fetching_disabled_starts_pipeline_without_provider_tasks(
         RunningPipeline,
     )
     personal_context = PersonalContext(home=tmp_path)
-    await personal_context.set_configuration(_config(fetching_enabled=False))
-    await personal_context.activate_runtime()
+    await personal_context.set_configuration(_config(collection_enabled=False, agent_use_enabled=False))
+
+    await personal_context.start_agent_use()
 
     status = await personal_context.snapshot()
-    assert status.state == "RUNNING"
-    assert status.pipeline_running is True
-    assert status.fetching_enabled is False
+    assert status.state == "CONFIGURED"
+    assert status.collection_enabled is False
+    assert status.agent_use_enabled is True
+    assert status.pipeline_running is False
     assert status.fetch_service_states == {"notes": "STOPPED"}
     assert personal_context._fetch_tasks == {}
 
-    with pytest.raises(BaseError):
-        await personal_context.start_fetch_service("notes")
-    await personal_context.deactivate_runtime(timeout_seconds=1)
+    await personal_context.stop_agent_use()
+    status = await personal_context.snapshot()
+    assert status.collection_enabled is False
+    assert status.agent_use_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_collection_switch_does_not_change_agent_use_switch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RunningPipeline:
+        def __init__(self, **_kwargs: object) -> None:
+            self.running = False
+
+        async def start(self) -> None:
+            self.running = True
+
+        async def stop(self, *, timeout_seconds: float) -> None:
+            del timeout_seconds
+            self.running = False
+
+        def is_running(self) -> bool:
+            return self.running
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.personal_context.personal_context.ContextPipelineService",
+        RunningPipeline,
+    )
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(
+        _config(
+            collection_enabled=False,
+            agent_use_enabled=True,
+            service_enabled=False,
+        )
+    )
+
+    await personal_context.start_collection()
+    running = await personal_context.snapshot()
+    assert running.collection_enabled is True
+    assert running.agent_use_enabled is True
+    assert running.pipeline_running is True
+
+    await personal_context.stop_collection(timeout_seconds=1)
+    stopped = await personal_context.snapshot()
+    assert stopped.collection_enabled is False
+    assert stopped.agent_use_enabled is True
+    assert stopped.pipeline_running is False
+
+
+@pytest.mark.asyncio
+async def test_feishu_authorization_without_service_uses_all_supported_read_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config())
+    status, begin, finish = _mock_authorization_io(
+        monkeypatch,
+        granted_scopes=set(_ALL_FEISHU_READ_SCOPES),
+    )
+
+    read_result = await personal_context.get_authorization_status("feishu")
+    authorize_result = await personal_context.authorize_provider("feishu")
+
+    assert read_result["state"] == "authorized"
+    assert authorize_result["state"] == "authorized"
+    assert status.await_count == 2
+    assert all(set(call.args[0]) == _ALL_FEISHU_READ_SCOPES for call in status.await_args_list)
+    begin.assert_not_awaited()
+    finish.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1082,8 +1165,8 @@ async def test_deactivate_retains_activation_task_when_cancel_does_not_finish(
     personal_context = PersonalContext(home=tmp_path)
     empty_config = PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": True,
+            "collection_enabled": True,
+            "agent_use_enabled": False,
             "strategy_profile": "rules",
             "fetch_services": [],
         }
@@ -1126,8 +1209,8 @@ async def test_reactivation_replaces_pipeline_queue(tmp_path: Path, monkeypatch:
     await personal_context.set_configuration(
         PersonalContextConfig.from_dict(
             {
-                "enabled": True,
-                "fetching_enabled": True,
+                "collection_enabled": True,
+                "agent_use_enabled": False,
                 "strategy_profile": "rules",
                 "fetch_services": [],
             }

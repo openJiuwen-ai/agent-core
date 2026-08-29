@@ -155,10 +155,10 @@ class ForkContext:
         messages = ctx_state.get("messages")
         if not isinstance(messages, list):
             return None
-        return cls._normalize_messages(messages)
+        return cls.normalize_messages(messages)
 
     @classmethod
-    def _normalize_messages(cls, messages: list) -> list | None:
+    def normalize_messages(cls, messages: list) -> list | None:
         """Return messages as ``BaseMessage`` objects, or ``None`` on malformed input.
 
         The checkpoint round-trip currently preserves ``BaseMessage`` objects

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
@@ -85,12 +86,71 @@ class TaskTool(Tool):
         self.language = language
 
     @staticmethod
-    def _build_sub_session_id(parent_session_id: str, subagent_type: str) -> str:
+    def _build_sub_session_id(
+        parent_session_id: str,
+        subagent_type: str,
+        resume_task_id: str = "",
+    ) -> str:
         normalized_type = str(subagent_type or "").strip()
+        normalized_resume_id = str(resume_task_id or "").strip()
+        if normalized_resume_id:
+            expected_prefix = f"{parent_session_id}_sub_{normalized_type}_"
+            if normalized_type != "browser_agent" or not normalized_resume_id.startswith(expected_prefix):
+                raise ValueError("resume_task_id is not valid for this parent browser task")
+            return normalized_resume_id
         if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def _extract_browser_result(result: Any, output: Any) -> dict[str, Any]:
+        if isinstance(result, dict) and isinstance(result.get("authoritative_browser_result"), dict):
+            return dict(result["authoritative_browser_result"])
+        try:
+            parsed = json.loads(str(output or ""))
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        browser_result = parsed.get("browser_result")
+        return dict(browser_result) if isinstance(browser_result, dict) else {}
+
+    @classmethod
+    def _build_result_data(
+        cls,
+        result: Any,
+        output: Any,
+        *,
+        agent_id: str,
+        subagent_type: str,
+        sub_session_id: str,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {"output": output, "agent_id": agent_id}
+        if str(subagent_type) != "browser_agent":
+            return data
+        browser_result = cls._extract_browser_result(result, output)
+        data["resume_task_id"] = sub_session_id
+        if not browser_result:
+            return data
+        data["browser_result"] = browser_result
+        data["retryable"] = bool(browser_result.get("retryable"))
+        resume_context: dict[str, Any] = {}
+        resume_keys = (
+            "status",
+            "missing_fields",
+            "missing_slots",
+            "requested_slots",
+            "blockers",
+            "evidence",
+            "current_page",
+            "recommended_recovery",
+            "resume_count",
+        )
+        for key in resume_keys:
+            resume_context[key] = browser_result.get(key)
+        data["resume_context"] = resume_context
+        return data
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         """Execute task by delegating to a subagent.
@@ -116,6 +176,7 @@ class TaskTool(Tool):
         if isinstance(inputs, dict):
             subagent_type = inputs.get("subagent_type")
             task_description = inputs.get("task_description")
+            resume_task_id = inputs.get("resume_task_id")
         else:
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
@@ -142,9 +203,24 @@ class TaskTool(Tool):
                     StatusCode.TOOL_TASK_TOOL_INVOKED,
                     reason="'browser_capabilities' must be a list of strings",
                 )
+        elif resume_task_id:
+            raise build_error(
+                StatusCode.TOOL_TASK_TOOL_INVOKED,
+                reason="'resume_task_id' is supported only for browser_agent",
+            )
 
         parent_session_id = parent_session.get_session_id()
-        sub_session_id = self._build_sub_session_id(parent_session_id, str(subagent_type))
+        try:
+            sub_session_id = self._build_sub_session_id(
+                parent_session_id,
+                str(subagent_type),
+                str(resume_task_id or ""),
+            )
+        except ValueError as exc:
+            raise build_error(
+                StatusCode.TOOL_TASK_TOOL_INVOKED,
+                reason=str(exc),
+            ) from exc
         logger.info(
             f"[TaskTool] Creating subagent: {subagent_type}, "
             f"parent_session={parent_session_id}, sub_session={sub_session_id}"
@@ -194,6 +270,11 @@ class TaskTool(Tool):
                 "query": task_description,
                 "conversation_id": sub_session_id,
             }
+            if str(subagent_type) == "browser_agent" and resume_task_id:
+                subagent_inputs["run_context"] = {
+                    "browser_resume": True,
+                    "resume_task_id": sub_session_id,
+                }
             if affinity_enabled:
                 subagent_inputs["parent_session_id"] = parent_session_id
                 # The child owns a new request-local report.  Keep the
@@ -217,7 +298,14 @@ class TaskTool(Tool):
                 reset_usage_delegation(delegation_token)
             succeeded = True
             output = result.get("output", "")
-            return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
+            data = self._build_result_data(
+                result,
+                output,
+                agent_id=subagent.card.id,
+                subagent_type=str(subagent_type),
+                sub_session_id=sub_session_id,
+            )
+            return ToolOutput(success=True, data=data, error=None)
         except Exception as e:
             logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
             raise build_error(

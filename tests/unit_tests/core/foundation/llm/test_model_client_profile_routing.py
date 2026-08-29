@@ -112,6 +112,37 @@ def test_openai_account_oauth_shape_routes_to_account_client():
     assert isinstance(client, OpenAIAccountModelClient)
 
 
+def test_openai_account_alias_applies_when_auth_mode_unset():
+    config = ModelClientConfig(
+        client_provider="OpenAIAccount",
+        api_base=DEFAULT_OPENAI_ACCOUNT_BASE_URL,
+    )
+
+    normalized = normalize_model_client_config(config)
+
+    assert normalized.client_provider == ProviderType.OpenAI.value
+    assert normalized.auth_mode == LLMAuthMode.OpenAIAccountOAuth.value
+    assert normalized.api_mode == LLMApiMode.Responses.value
+    assert normalized.legacy_client_provider == ProviderType.OpenAIAccount.value
+
+
+def test_openai_account_alias_applies_when_default_auth_mode_was_materialized():
+    original = ModelClientConfig(
+        client_provider="OpenAIAccount",
+        api_base=DEFAULT_OPENAI_ACCOUNT_BASE_URL,
+    )
+    polluted = ModelClientConfig(**original.model_dump())
+    assert "auth_mode" in polluted.model_fields_set
+    assert polluted.auth_mode in (LLMAuthMode.ApiKey, LLMAuthMode.ApiKey.value)
+
+    normalized = normalize_model_client_config(polluted)
+    client = create_model_client(polluted, _request_config())
+
+    assert normalized.auth_mode == LLMAuthMode.OpenAIAccountOAuth.value
+    assert normalized.api_mode == LLMApiMode.Responses.value
+    assert isinstance(client, OpenAIAccountModelClient)
+
+
 def test_openai_responses_api_key_shape_stays_on_openai_client():
     config = ModelClientConfig(
         client_provider="OpenAI",

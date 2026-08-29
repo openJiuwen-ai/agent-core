@@ -94,22 +94,23 @@ _RUNTIME_HEALTH_PARAMS: Dict[str, Any] = {
 _PROBE_INTERACTIVES_DESC = (
     "Return a compact list of visible, high-value interactive elements on the current page. "
     "Use this for page-level controls such as buttons, links, inputs, forms, navigation, login, "
-    "pagination, menus, and visible actions. The optional query filter is alias-aware for common "
+    "pagination, menus, calendar dates, sort tabs, rating filters, and visible actions. "
+    "Dynamic controls are returned as generation-scoped targets with region/kind semantics. "
+    "The optional query filter is alias-aware for common "
     "search/input terms, including placeholders, aria labels, input type/name/id/class, and Chinese "
     "search text such as 搜索/关键词. Prefer max_items around 20-30 unless a larger inventory "
     "is needed. For product/search/listing card data, prefer browser_probe_cards first. "
     "The result includes compact PageState and generation-scoped target_id values that can be "
     "passed directly to browser_batch_interact without rebuilding CSS. It also includes "
-    "role/action_likelihood/text/aria-label/testid/bbox/selector_hint plus "
-    "match_count/visible/enabled/clickable/generation_id. Click only validated hints with "
-    "clickable=true."
+    "role/text/region/kind plus match_count/visible/enabled/actionable. The model-facing "
+    "result does not expose Probe-local ids or internal selectors."
 )
 _PROBE_INTERACTIVES_PARAMS: Dict[str, Any] = {
     "type": "object",
     "properties": {
         "max_items": {
             "type": "integer",
-            "description": "Maximum number of elements to return. Default 50, hard-capped at 100.",
+            "description": "Maximum number of elements to return. Default 30, hard-capped at 40.",
         },
         "viewport_only": {
             "type": "boolean",
@@ -129,7 +130,9 @@ _PROBE_CARDS_DESC = (
     "article-list pages, table/list-row result pages, or any page with repeated visible cards/listings. "
     "The result includes compact PageState with generation-scoped card/control target_id values, "
     "candidate card title, author/source, summary/snippet, price, rating, "
-    "review count, availability, primary link, visible buttons, bbox, selector_hint, "
+    "review count, availability, primary link, and visible controls, "
+    "region/kind/result_index/is_ad semantics that distinguish main results, accounts, sidebars, "
+    "hot searches, shops, chats, and product links, "
     "match_count/visible/enabled/clickable/generation_id, recurring structure signatures, and "
     "cache diagnostics. Navigate primary_link/href directly instead of clicking a card hint. "
     "If this returns the fields needed "
@@ -142,7 +145,7 @@ _PROBE_CARDS_PARAMS: Dict[str, Any] = {
     "properties": {
         "max_cards": {
             "type": "integer",
-            "description": "Maximum number of cards to return. Default 20, hard-capped at 50.",
+            "description": "Maximum number of cards to return. Default 12, hard-capped at 20.",
         },
         "viewport_only": {
             "type": "boolean",
@@ -166,8 +169,9 @@ _BATCH_INTERACT_DESC = (
     "known targets, such as three or more form fields, click+type+choose autocomplete, dropdown or "
     "date-picker selection, filter panels, search submit plus result wait, or compact extraction. "
     "This is a first-class helper like the probe tools; do not route this through browser_custom_action. "
-    "Pass the current PageState generation_id and use target_id from probes or ref from an AX "
-    "snapshot instead of constructing CSS. Locator strategies are mutually exclusive. "
+    "Pass the current PageState generation_id and use target_id from probes for actions. "
+    "Only read-only extraction and explicit wait operations accept a validated selector. "
+    "Locator strategies are mutually exclusive. "
     "A one-step call is rewritten by the runtime to an equivalent official browser primitive when "
     "one exists, so it does not fail and require another model turn. Multi-step calls are preflighted "
     "before side effects. Results use status=completed/partial/failed and contain only compact step "
@@ -183,7 +187,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                 "autocomplete, select_visible_text, press, select_option, set_checked, "
                 "wait_for_selector, wait_for_text, wait_for_load_state, wait_for_url, "
                 "wait_for_first_card_title, wait_for_sort_state, wait_for_result_count, "
-                "wait_for_dom_text_change, wait_for_stable, sleep, extract_text, "
+                "wait_for_dom_text_change, wait_for_stable, wait_for_tab, extract_text, "
                 "extract_value, screenshot."
             ),
             "minItems": 1,
@@ -212,7 +216,7 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                             "wait_for_result_count",
                             "wait_for_dom_text_change",
                             "wait_for_stable",
-                            "sleep",
+                            "wait_for_tab",
                             "extract_text",
                             "extract_value",
                             "screenshot",
@@ -364,6 +368,23 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                         "type": "string",
                         "description": "Regular expression expected to match the current URL.",
                     },
+                    "title_contains": {
+                        "type": "string",
+                        "description": "Title substring expected on a newly opened tab.",
+                    },
+                    "min_tabs": {
+                        "type": "integer",
+                        "description": (
+                            "Minimum context tab count for wait_for_tab. By default the runtime waits "
+                            "for one more tab than existed when the batch started."
+                        ),
+                    },
+                    "activate": {
+                        "type": "boolean",
+                        "description": (
+                            "For wait_for_tab, activate the matched new tab for subsequent steps. Default true."
+                        ),
+                    },
                     "expected_text": {
                         "type": "string",
                         "description": "Expected first-card title text.",
@@ -423,18 +444,6 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                         "type": "integer",
                         "description": "Optional typing delay in milliseconds.",
                     },
-                    "wait_after_type_ms": {
-                        "type": "integer",
-                        "description": ("Optional wait after autocomplete typing before choosing an option."),
-                    },
-                    "wait_after_ms": {
-                        "type": "integer",
-                        "description": "Optional wait after this step succeeds.",
-                    },
-                    "ms": {
-                        "type": "integer",
-                        "description": "Sleep duration for op=sleep.",
-                    },
                     "max_chars": {
                         "type": "integer",
                         "description": "Maximum characters for extract_text.",
@@ -473,10 +482,6 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                 "Default timeout for condition waits in milliseconds. "
                 "Default 10000, clamped to the action timeout..30000."
             ),
-        },
-        "wait_after_each_ms": {
-            "type": "integer",
-            "description": "Optional short wait after each successful step, clamped to 0..5000.",
         },
         "continue_on_error": {
             "type": "boolean",
@@ -659,10 +664,10 @@ class BrowserProbeInteractivesTool(Tool):
         del kwargs
 
         try:
-            max_items = int(inputs.get("max_items", 50))
+            max_items = int(inputs.get("max_items", 30))
         except (TypeError, ValueError):
-            max_items = 50
-        max_items = max(1, min(100, max_items))
+            max_items = 30
+        max_items = max(1, min(40, max_items))
 
         viewport_only_raw = inputs.get("viewport_only", True)
         if isinstance(viewport_only_raw, str):
@@ -710,10 +715,10 @@ class BrowserProbeCardsTool(Tool):
         del kwargs
 
         try:
-            max_cards = int(inputs.get("max_cards", 20))
+            max_cards = int(inputs.get("max_cards", 12))
         except (TypeError, ValueError):
-            max_cards = 20
-        max_cards = max(1, min(50, max_cards))
+            max_cards = 12
+        max_cards = max(1, min(20, max_cards))
 
         viewport_only_raw = inputs.get("viewport_only", True)
         if isinstance(viewport_only_raw, str):

@@ -8,6 +8,7 @@ hands it a fully-rendered prompt, the call's ``opts``, and (when the call
 requested structured output) the JSON-Schema dict; it returns an
 :class:`AgentResult`.
 """
+
 from __future__ import annotations
 
 import abc
@@ -87,13 +88,57 @@ class AgentBackend(abc.ABC):
         """
         raise NotImplementedError
 
+    async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
+        """Eagerly snapshot a session's context per ``fork_mode`` / ``keep_rounds``.
+
+        Called at ``AgentSession.fork()`` time so the parent's context is frozen
+        at the fork point (a later lazy capture would pick up the parent's own
+        evolution). Returns a serializable ``fork_data`` dict (``messages`` + the
+        compact split/direction when a compact mode was requested) for injection
+        into a fresh child session, or ``None`` when the session has no
+        captureable context — the caller then falls back to the engine's history
+        mirror (degraded, no ToolMessage).
+
+        The default rejects forking so a session-less / single-shot-only backend
+        fails clearly rather than silently producing an empty fork.
+        """
+        raise NotImplementedError("backend does not support forking sessions")
+
+    async def ensure_member_name(self, *, kind: str, opts: dict) -> str:
+        """Reserve this session's member identity without building its avatar.
+
+        Called on a session's **first turn regardless of cache hit** so the
+        engine knows the session's stable member name even when every turn is a
+        journal replay (no avatar is ever built). This name is what ``fork()``
+        needs to locate the parent's persisted context after a fully-hit resume
+        — without it, a parent that never re-ran could not be restored.
+
+        Unlike :meth:`open_session` this must NOT build a harness, call an LLM,
+        or hold a spawn/budget slot — it is pure in-process bookkeeping (a
+        counter increment + name mint). The default rejects so a single-shot-only
+        backend fails clearly; a session-capable backend implements it.
+        """
+        raise NotImplementedError("backend does not support stateful sessions")
+
     async def open_session(
-        self, *, kind: str, instructions: str | None, opts: dict
+        self,
+        *,
+        kind: str,
+        instructions: str | None,
+        opts: dict,
+        fork_data: dict | None = None,
+        member_name: str | None = None,
     ) -> str:
         """Open a stateful session; return its backend-scoped session id.
 
         ``kind`` is ``"agent"`` (LLM-driven) or ``"human"`` (each turn's input
-        comes from a real person); the engine forwards it opaquely. The default
+        comes from a real person); the engine forwards it opaquely.
+        ``fork_data`` is an optional context snapshot captured by
+        :meth:`capture_fork`; a backend that supports forking seeds the new
+        session's context from it (and compacts when requested). ``member_name``
+        is the identity already reserved by :meth:`ensure_member_name` on the
+        first turn — a backend that tracks names reuses it (rather than minting a
+        fresh one, which would drift the counter across a resume). The default
         rejects sessions so a single-shot-only backend fails clearly.
         """
         raise NotImplementedError("backend does not support stateful sessions")

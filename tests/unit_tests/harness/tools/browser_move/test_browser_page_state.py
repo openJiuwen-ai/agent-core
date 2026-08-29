@@ -83,6 +83,10 @@ def test_probe_targets_and_compact_page_state_share_one_contract() -> None:
                 "generation_id": "g0",
                 "role": "button",
                 "text": "Search",
+                "match_count": 1,
+                "visible": True,
+                "enabled": True,
+                "actionable": True,
                 "clickable": True,
             }
         ],
@@ -126,6 +130,80 @@ def test_cards_add_primary_link_and_field_coverage_to_page_state() -> None:
     assert exported["cards"][0]["target_id"] == card["target_id"]
     assert exported["cards"][0]["href"] == "https://shop.example.test/item/1"
     assert exported["field_coverage"] == ["price", "primary_link", "source", "summary", "title"]
+
+
+def test_card_detail_fields_register_generation_scoped_read_only_targets() -> None:
+    state = BrowserPageState(page_id="page-detail", generation=2)
+    payload = {
+        "cards": [
+            {
+                "title": "Article",
+                "author": "Alice",
+                "likes": None,
+                "field_status": {"author": "present", "likes": "missing"},
+                "field_provenance": {
+                    "author": {
+                        "selector": ".article-author",
+                        "raw_text": "Alice",
+                        "generation_id": "g2",
+                        "source": "browser_probe_cards",
+                    }
+                },
+                "selector_metadata": {
+                    "author": {
+                        "selector_hint": ".article-author",
+                        "match_count": 1,
+                        "visible": True,
+                        "enabled": True,
+                        "generation_id": "g2",
+                    }
+                },
+            }
+        ]
+    }
+
+    state.register_cards(payload)
+
+    exported_card = state.export()["cards"][0]
+    author_target = exported_card["field_targets"]["author"]
+    assert author_target["generation_id"] == "g2"
+    assert author_target["field"] == "author"
+    assert author_target["extractable"] is True
+    assert author_target["read_only"] is True
+    assert author_target["actionable"] is False
+    resolved = state.resolve_target(generation_id="g2", target_id=author_target["target_id"])
+    assert resolved is not None
+    assert resolved.locator == {"selector": ".article-author"}
+    assert exported_card["field_status"]["likes"] == "missing"
+
+
+def test_page_state_preserves_probe_region_kind_and_dynamic_target_semantics() -> None:
+    state = BrowserPageState(page_id="page-semantic")
+    dynamic = _interactive("[data-date='2026-08-09']", "9")
+    dynamic.update({"region": "main", "kind": "calendar_date"})
+    state.register_interactives({"elements": [dynamic]})
+    state.register_cards(
+        {
+            "cards": [
+                {
+                    "region": "main_result",
+                    "kind": "product",
+                    "result_index": 1,
+                    "is_ad": False,
+                    "title": "Bluetooth Headphones",
+                    "primary_link": "https://item.taobao.com/item.htm?id=1",
+                }
+            ]
+        }
+    )
+
+    exported = state.export()
+    assert exported["interactives"][0]["kind"] == "calendar_date"
+    assert exported["interactives"][0]["region"] == "main"
+    assert exported["cards"][0]["region"] == "main_result"
+    assert exported["cards"][0]["kind"] == "product"
+    assert exported["cards"][0]["result_index"] == 1
+    assert exported["cards"][0]["is_ad"] is False
 
 
 def test_page_state_blockers_do_not_treat_a_login_link_as_login_required() -> None:
@@ -179,6 +257,162 @@ def test_ax_ref_reused_after_navigation_gets_a_new_current_target() -> None:
     assert new_target is not None
     assert new_target.generation_id == "g1"
     assert new_target.target_id != old_target_id
+
+
+def test_stale_probe_target_refreshes_only_to_unique_current_equivalent() -> None:
+    state = BrowserPageState(page_id="page-refresh")
+    first = _interactive("[data-date='2026-08-26']", "26")
+    first.update({"kind": "calendar_date", "region": "hotel_search"})
+    state.register_interactives({"elements": [first]})
+    stale_target_id = first["target_id"]
+
+    state.advance(url="https://hotels.ctrip.com/list")
+    current = _interactive("[data-date='2026-08-26']", "26")
+    current.update({"kind": "calendar_date", "region": "hotel_search"})
+    state.register_interactives({"elements": [current]})
+
+    assert state.refresh_target_id(stale_target_id) == current["target_id"]
+
+
+def test_stale_ax_target_and_ambiguous_probe_target_cannot_refresh() -> None:
+    state = BrowserPageState(page_id="page-refresh-reject")
+    state.register_ax_snapshot('- button "Continue" [ref=e1]')
+    stale_ax_target = state.export()["interactives"][0]["target_id"]
+    old = _interactive(".rating", "5 stars")
+    old.update({"kind": "rating_filter", "region": "main"})
+    state.register_interactives({"elements": [old]})
+    stale_probe_target = old["target_id"]
+
+    state.advance(url="https://example.test/results")
+    first = _interactive("#rating-a", "5 stars")
+    second = _interactive("#rating-b", "5 stars")
+    for target in (first, second):
+        target.update({"kind": "rating_filter", "region": "main"})
+    state.register_interactives({"elements": [first, second]})
+
+    with pytest.raises(ValueError, match="Stale AX target_id"):
+        state.refresh_target_id(stale_ax_target)
+    with pytest.raises(ValueError, match="ambiguous"):
+        state.refresh_target_id(stale_probe_target)
+
+
+def test_runtime_refreshes_stale_batch_target_id_without_accepting_stale_ref() -> None:
+    runtime = _make_bare_runtime()
+    old = _interactive("#sort-price", "Price")
+    old.update({"kind": "sort_tab", "region": "main"})
+    runtime._ensure_page_state().register_interactives({"elements": [old]})
+
+    runtime._ensure_page_state().advance(url="https://example.test/results?sort=price")
+    current = _interactive("#sort-price", "Price")
+    current.update({"kind": "sort_tab", "region": "main"})
+    runtime._ensure_page_state().register_interactives({"elements": [current]})
+
+    refreshed, recovered_from = _run(
+        runtime._refresh_stale_batch_targets(
+            [{"op": "click", "target_id": old["target_id"]}],
+            generation_id="g0",
+        )
+    )
+    assert refreshed[0]["target_id"] == current["target_id"]
+    assert recovered_from == "g0"
+
+    with pytest.raises(ValueError, match="AX refs cannot be refreshed"):
+        _run(
+            runtime._refresh_stale_batch_targets(
+                [{"op": "click", "ref": "e1"}],
+                generation_id="g0",
+            )
+        )
+
+
+def test_stale_generation_condition_waits_refresh_without_reusing_action_selector() -> None:
+    runtime = _make_bare_runtime()
+    runtime._ensure_page_state().advance(url="https://example.test/results")
+
+    refreshed, recovered_from = _run(
+        runtime._refresh_stale_batch_targets(
+            [
+                {"op": "wait_for_url", "url_contains": "/results"},
+                {"op": "wait_for_selector", "selector": ".result-card"},
+            ],
+            generation_id="g0",
+        )
+    )
+    assert len(refreshed) == 2
+    assert recovered_from == "g0"
+
+    with pytest.raises(ValueError, match="Model-authored selectors cannot refresh"):
+        _run(
+            runtime._refresh_stale_batch_targets(
+                [{"op": "extract_text", "selector": ".result-card", "field": "title"}],
+                generation_id="g0",
+            )
+        )
+
+
+def test_runtime_rebinds_stale_probe_target_when_dom_identity_is_still_unique() -> None:
+    runtime = _make_bare_runtime()
+    old = _interactive("#sort-price", "Price")
+    runtime._ensure_page_state().register_interactives({"elements": [old]})
+    runtime._ensure_page_state().advance(url="https://example.test/results")
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._call_playwright_run_code_unsafe = AsyncMock(
+        return_value=('{"ok":true,"match_count":1,"visible":true,"enabled":true,"actionable":true}')
+    )
+
+    refreshed, recovered_from = _run(
+        runtime._refresh_stale_batch_targets(
+            [{"op": "click", "target_id": old["target_id"]}],
+            generation_id="g0",
+        )
+    )
+
+    refreshed_id = refreshed[0]["target_id"]
+    assert recovered_from == "g0"
+    assert refreshed_id != old["target_id"]
+    rebound = runtime._ensure_page_state().resolve_target(
+        generation_id="g1",
+        target_id=refreshed_id,
+    )
+    assert rebound is not None
+    assert rebound.selector == "#sort-price"
+
+
+def test_compact_page_state_never_exposes_probe_local_id_or_ax_ref() -> None:
+    state = BrowserPageState(page_id="page-compact")
+    payload = {"elements": [_interactive("#query", "Search")]}
+    payload["elements"][0]["id"] = "local-probe-id"
+    state.register_interactives(payload)
+    state.register_ax_snapshot('textbox "Search" [ref=f1e2]')
+
+    serialized = str(state.export())
+
+    assert "local-probe-id" not in serialized
+    assert "f1e2" not in serialized
+    assert "target_id" in serialized
+
+
+def test_failed_stale_target_refresh_returns_current_generation_and_candidates() -> None:
+    runtime = _make_bare_runtime()
+    old = _interactive("#sort-price", "Price")
+    runtime._ensure_page_state().register_interactives({"elements": [old]})
+    runtime._ensure_page_state().advance(url="https://example.test/results")
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._call_playwright_run_code_unsafe = AsyncMock(
+        return_value=('{"ok":true,"match_count":2,"visible":true,"enabled":true,"actionable":true}')
+    )
+
+    result = _run(
+        runtime.batch_interact(
+            steps=[{"op": "click", "target_id": old["target_id"]}],
+            generation_id="g0",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["current_generation"] == "g1"
+    assert result["generation_id"] == "g1"
+    assert result["candidate_fresh_targets"] == []
 
 
 def test_replacing_ax_snapshot_preserves_present_refs_and_removes_missing_refs() -> None:
@@ -335,9 +569,7 @@ def test_runtime_rewrites_single_card_click_to_direct_navigation() -> None:
         ]
     }
     runtime._ensure_page_state().register_cards(payload)
-    navigate_tool = SimpleNamespace(
-        invoke=AsyncMock(return_value=SimpleNamespace(success=True, error=None, data={}))
-    )
+    navigate_tool = SimpleNamespace(invoke=AsyncMock(return_value=SimpleNamespace(success=True, error=None, data={})))
     runtime._get_playwright_mcp_tool = AsyncMock(return_value=navigate_tool)
 
     result = _run(

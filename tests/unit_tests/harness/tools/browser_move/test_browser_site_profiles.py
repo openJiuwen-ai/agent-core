@@ -6,9 +6,16 @@ from pathlib import Path
 
 from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
     BrowserSelectorCache,
+    apply_site_card_semantics,
     builtin_site_profiles,
+    deduplicate_site_cards,
     domain_from_url,
+    infer_profile_evidence_entity,
+    normalize_site_card_fields,
     normalize_route_signature,
+    profile_detail_link_key,
+    site_profile_for_host,
+    site_profiles_for_url,
 )
 
 
@@ -23,6 +30,64 @@ def test_builtin_site_profiles_include_books_to_scrape() -> None:
     assert "article.product_pod" in profile["card_container_selectors"]
     assert "h3 a[title]" in profile["title_selectors"]
     assert ".price_color" in profile["price_selectors"]
+
+
+def test_site_profiles_own_marketplace_and_hotel_semantics() -> None:
+    taobao = site_profile_for_host("list.taobao.com")
+    ctrip = site_profile_for_host("hotels.ctrip.com")
+
+    assert taobao is not None and taobao["id"] == "taobao_marketplace"
+    assert ctrip is not None and ctrip["id"] == "ctrip_hotels"
+    assert profile_detail_link_key(
+        taobao,
+        "https://item.taobao.com/item.htm?id=42",
+    ) == "product:42"
+    assert profile_detail_link_key(
+        ctrip,
+        "https://hotels.ctrip.com/hotels/detail/?hotelId=99",
+    ) == "hotel:99"
+    assert [
+        profile["id"]
+        for profile in site_profiles_for_url("https://hotels.ctrip.com/list")
+    ] == ["ctrip_hotels"]
+
+
+def test_site_profiles_normalize_semantics_and_fields() -> None:
+    region, kind, is_ad = apply_site_card_semantics(
+        {
+            "title": "付费内容",
+            "primary_link": "https://www.zhihu.com/market/paid_column/123",
+        },
+        host="www.zhihu.com",
+        region="main_result",
+        kind="result",
+        is_ad=False,
+    )
+    assert (region, kind, is_ad) == ("sponsored_result", "paid_column", True)
+
+    card = {
+        "rating": "4.9",
+        "rating_raw_text": "店铺评分 4.9",
+        "rating_kind": "rating",
+    }
+    normalize_site_card_fields(card, host="item.taobao.com")
+    assert card["rating"] is None
+    assert card["shop_rating"] == "4.9"
+    assert card["rating_kind"] == "shop_rating"
+
+
+def test_site_profiles_deduplicate_detail_entities_and_infer_task_entity() -> None:
+    cards = [
+        {"title": "Hotel A", "primary_link": "https://hotels.ctrip.com/hotels/123.html"},
+        {"title": "Hotel A duplicate", "primary_link": "https://hotels.ctrip.com/hotels/123.html"},
+        {"title": "Hotel B", "primary_link": "https://hotels.ctrip.com/hotels/456.html"},
+    ]
+
+    deduplicated = deduplicate_site_cards(cards, host="hotels.ctrip.com")
+
+    assert [card["title"] for card in deduplicated] == ["Hotel A", "Hotel B"]
+    assert infer_profile_evidence_entity("比较携程的两家酒店") == "hotel"
+    assert infer_profile_evidence_entity("查看 B站 最新视频") == "bilibili_search_result"
 
 
 def test_normalize_route_signature_generalizes_numeric_paths() -> None:

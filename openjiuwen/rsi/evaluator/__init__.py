@@ -17,6 +17,16 @@ from openjiuwen.rsi.evaluator.judger import (
     build_judger,
 )
 from openjiuwen.rsi.evaluator.metrics_collector import MetricsCollector
+from openjiuwen.rsi.evaluator.optimization_signals import (
+    evaluation_optimization_signals,
+    optimization_signals_contract,
+)
+from openjiuwen.rsi.evaluator.requirement_results import (
+    evaluation_requirement_results,
+    normalize_requirement_results,
+    requirement_results_contract,
+    requirement_results_from_judge_criteria,
+)
 from openjiuwen.rsi.evaluator.team_evaluator import TeamEvaluator
 
 __all__ = [
@@ -28,6 +38,12 @@ __all__ = [
     "ExactMatchJudger",
     "JudgeResult",
     "MetricsCollector",
+    "evaluation_optimization_signals",
+    "evaluation_requirement_results",
+    "normalize_requirement_results",
+    "optimization_signals_contract",
+    "requirement_results_contract",
+    "requirement_results_from_judge_criteria",
     "ScriptBasedJudger",
     "SingleHarnessExecutionBackend",
     "TeamEvaluator",

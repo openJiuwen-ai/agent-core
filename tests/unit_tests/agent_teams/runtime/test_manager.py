@@ -11,6 +11,7 @@ from unittest.mock import (
 
 import pytest
 
+from openjiuwen.agent_teams import paths as apaths
 from openjiuwen.agent_teams.agent.member import TeamMember
 from openjiuwen.agent_teams.interaction import ExternalTeamEvent
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup_inprocess_bus
@@ -18,6 +19,13 @@ from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.team_workspace import (
+    MEMBER_MODE_DYNAMIC,
+    MEMBER_MODE_PREDEFINED,
+    MemberWorkspaceBinder,
+    TeamMemberBinding,
+)
+from openjiuwen.agent_teams.team_workspace.paths import member_real_dir
 
 
 class FakeTeamAgent:
@@ -304,3 +312,41 @@ class TestExternalEventIngress:
 
         assert result.ok is False
         assert result.reason == "external_event_team_mismatch"
+
+
+class TestDeleteTeamFilesystemCleanup:
+    """manager.delete_team runs block-C member cleanup before the rmtree."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_delete_team_releases_dynamic_real_dir(self, monkeypatch, tmp_path):
+        apaths.configure_openjiuwen_home(tmp_path / "oj-home")
+        try:
+            binder = MemberWorkspaceBinder()
+            binder.setup(TeamMemberBinding(team_name="teamA", member_name="worker", mode=MEMBER_MODE_DYNAMIC))
+            binder.setup(TeamMemberBinding(team_name="teamA", member_name="shared", mode=MEMBER_MODE_PREDEFINED))
+            worker_real = member_real_dir("teamA", "worker", MEMBER_MODE_DYNAMIC)
+            shared_real = apaths.get_agent_teams_home() / "shared"
+            assert worker_real.is_dir()
+
+            fake_db = SimpleNamespace(
+                initialize=AsyncMock(return_value=None),
+                team=SimpleNamespace(delete_team=AsyncMock(return_value=True)),
+            )
+            monkeypatch.setattr(
+                "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+                lambda _config: fake_db,
+            )
+            monkeypatch.setattr(
+                "openjiuwen.agent_teams.runtime.manager.CheckpointerFactory.get_checkpointer",
+                lambda: MagicMock(),
+            )
+
+            deleted = await TeamRuntimeManager().delete_team("teamA", [])
+
+            assert deleted is True
+            assert not worker_real.exists(), "dynamic real dir must be released"
+            assert shared_real.is_dir(), "predefined shared dir must be preserved"
+            assert not apaths.team_home("teamA").is_dir(), "team home must be removed"
+        finally:
+            apaths.reset_openjiuwen_home()

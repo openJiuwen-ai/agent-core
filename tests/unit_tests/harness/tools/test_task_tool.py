@@ -212,7 +212,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "required"):
             await tool.invoke({"subagent_type": "code"}, session=session)
 
-    async def test_task_tool_reuses_sticky_browser_subsession_id(self) -> None:
+    async def test_task_tool_creates_fresh_browser_model_session(self) -> None:
         called_inputs: dict[str, str] = {}
 
         class FakeSubAgent:
@@ -254,12 +254,100 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(called_inputs["conversation_id"], "parent_session_sub_browser_agent")
+        browser_session_id = called_inputs["conversation_id"]
+        self.assertRegex(browser_session_id, r"^parent_session_sub_browser_agent_[0-9a-f]{8}$")
+        self.assertEqual(result.data["resume_task_id"], browser_session_id)
         mock_create_subagent.assert_called_once_with(
             "browser_agent",
-            "parent_session_sub_browser_agent",
+            browser_session_id,
             browser_capabilities=["pdf", "vision"],
         )
+
+    def test_browser_session_can_resume_only_with_returned_parent_scoped_id(self) -> None:
+        resume_id = "parent_session_sub_browser_agent_1234abcd"
+        self.assertEqual(
+            TaskTool._build_sub_session_id(
+                "parent_session",
+                "browser_agent",
+                resume_id,
+            ),
+            resume_id,
+        )
+        with self.assertRaisesRegex(ValueError, "not valid"):
+            TaskTool._build_sub_session_id(
+                "another_parent",
+                "browser_agent",
+                resume_id,
+            )
+
+    async def test_browser_resume_passes_structured_context_and_result_metadata(self) -> None:
+        called_inputs: dict[str, object] = {}
+        browser_result = {
+            "status": "partial",
+            "retryable": True,
+            "missing_fields": ["product_rating"],
+            "missing_slots": [
+                {"entity": "product", "variant": "default", "field": "product_rating"}
+            ],
+            "blockers": [],
+            "evidence": [{"field": "title", "value": "Keyboard"}],
+            "current_page": {"url": "https://example.test/item/1"},
+            "recommended_recovery": "collect_missing_evidence_from_current_page",
+            "resume_count": 0,
+        }
+
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, object]) -> dict[str, object]:
+                called_inputs.update(inputs)
+                return {
+                    "output": '{"browser_result":{"status":"partial"}}',
+                    "authoritative_browser_result": browser_result,
+                }
+
+        browser_spec = SubAgentConfig(
+            agent_card=AgentCard(name="browser_agent", description="browser subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[browser_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+        resume_id = "parent_session_sub_browser_agent_1234abcd"
+
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+            result = await tool.invoke(
+                {
+                    "subagent_type": "browser_agent",
+                    "task_description": "Only collect the missing product rating",
+                    "browser_capabilities": [],
+                    "resume_task_id": resume_id,
+                },
+                session=Session(session_id="parent_session"),
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(called_inputs["conversation_id"], resume_id)
+        self.assertEqual(
+            called_inputs["run_context"],
+            {"browser_resume": True, "resume_task_id": resume_id},
+        )
+        self.assertTrue(result.data["retryable"])
+        self.assertEqual(result.data["browser_result"], browser_result)
+        self.assertEqual(result.data["resume_context"]["missing_fields"], ["product_rating"])
 
 
 class TestTaskToolSync(unittest.TestCase):

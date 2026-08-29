@@ -35,6 +35,10 @@ from openjiuwen.rsi.member_optimizer.agents.factory import (
 from openjiuwen.rsi.member_optimizer.agents.output import (
     extract_agent_text,
 )
+from openjiuwen.rsi.member_optimizer.execution_contract import (
+    evaluate_role_execution,
+    role_execution_errors,
+)
 from openjiuwen.rsi.member_optimizer.schema import (
     MemberFixResult,
     MemberOptimizationPlan,
@@ -94,6 +98,7 @@ _UNREPAIRABLE_CHECK_PREFIXES = (
     "execution_action_policy:",
     "action_result:",
     "action_merge:",
+    "role_action_bundle:",
     "verification_exception:",
 )
 _REPAIR_CONTEXT_FILE_LIMIT = 80
@@ -784,7 +789,7 @@ def _validate_action_results_by_role(
             checks_by_role[role].extend(checks)
         return checks_by_role
 
-    by_action_id = {str(row.get("action_id", "")): row for row in result_rows if row.get("action_id")}
+    outcomes_by_role = {role: evaluate_role_execution(plan, result_rows, role) for role in checks_by_role}
 
     for action in plan.actions:
         role_checks = checks_by_role.setdefault(action.role, [])
@@ -798,13 +803,16 @@ def _validate_action_results_by_role(
                 )
             )
 
-        result = by_action_id.get(action.action_id)
-        if result is None:
+        matching_results = [row for row in result_rows if str(row.get("action_id", "")) == action.action_id]
+        result = matching_results[0] if len(matching_results) == 1 else None
+        outcome = outcomes_by_role.get(action.role, {}).get(action.action_id)
+        if result is None or outcome is None:
+            error = outcome.reason if outcome is not None else "missing execution result"
             role_checks.append(
                 VerificationCheck(
                     name=f"action_result:{action.action_id}",
                     status="failed",
-                    error="missing execution result",
+                    error=error,
                 )
             )
             continue
@@ -838,23 +846,12 @@ def _validate_action_results_by_role(
             )
             continue
 
-        status = str(result.get("status", ""))
-        merge_status = str(result.get("merge_status", ""))
-        if status != "succeeded":
+        if not outcome.satisfied:
             role_checks.append(
                 VerificationCheck(
                     name=f"action_result:{action.action_id}",
                     status="failed",
-                    error=f"execution status is {status!r}: {result.get('error', '')}",
-                )
-            )
-            continue
-        if status == "succeeded" and merge_status != "merged":
-            role_checks.append(
-                VerificationCheck(
-                    name=f"action_merge:{action.action_id}",
-                    status="failed",
-                    error=f"succeeded action has merge_status={merge_status!r}",
+                    error=outcome.reason,
                 )
             )
             continue
@@ -863,6 +860,16 @@ def _validate_action_results_by_role(
             VerificationCheck(
                 name=f"action_result:{action.action_id}",
                 status="passed",
+            )
+        )
+
+    for role, role_checks in checks_by_role.items():
+        execution_errors = role_execution_errors(plan, result_rows, role)
+        role_checks.append(
+            VerificationCheck(
+                name=f"role_action_bundle:{role}",
+                status="failed" if execution_errors else "passed",
+                error="; ".join(execution_errors),
             )
         )
 

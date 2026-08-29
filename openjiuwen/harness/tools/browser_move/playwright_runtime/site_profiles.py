@@ -10,8 +10,8 @@ import re
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Mapping
+from urllib.parse import parse_qsl, urlparse
 
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,323 @@ BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
             "[role='button']",
             "input[type='submit']",
         ],
-    }
+    },
+    {
+        "id": "bilibili",
+        "domains": ["bilibili.com"],
+        "task_aliases": ["bilibili", "b站", "哔哩哔哩"],
+        "evidence_entity": "bilibili_search_result",
+    },
+    {
+        "id": "taobao_marketplace",
+        "domains": ["taobao.com", "tmall.com"],
+        "task_aliases": ["taobao", "tmall", "淘宝", "天猫"],
+        "evidence_entity": "product",
+        "shop_selectors": [
+            "a[href*='shop.taobao.com']",
+            "a[href*='shop.tmall.com']",
+        ],
+        "semantic_rules": {
+            "detail_link": {
+                "domains": ["taobao.com", "tmall.com"],
+                "path_patterns": [r"/item\.htm$"],
+                "query_id_params": ["id"],
+                "key_prefix": "product",
+                "kind": "product",
+            },
+            "primary_link": {
+                "preferred_patterns": [
+                    r"item\.taobao\.com/item\.htm",
+                    r"detail\.tmall\.com/item\.htm",
+                ],
+                "required_query_params": ["id"],
+                "excluded_patterns": [
+                    r"^wangwang:",
+                    r"^aliim:",
+                    r"amos\.alicdn\.com",
+                    r"wangwang",
+                    r"/shop/",
+                    r"shop\.(?:taobao|tmall)\.com",
+                    r"store\.taobao\.com",
+                    r"seller\.taobao\.com",
+                    r"contact-seller",
+                ],
+            },
+            "rating": {
+                "shop_patterns": [
+                    r"shop[-_ ]?rating",
+                    r"seller[-_ ]?(?:rating|score)",
+                    r"store[-_ ]?(?:rating|score)",
+                    r"店铺评分|店铺动态评分|描述相符|服务态度|物流服务",
+                ],
+                "product_patterns": [
+                    r"product[-_ ]?rating",
+                    r"item[-_ ]?(?:rating|score)",
+                    r"review[-_ ]?(?:rating|score)",
+                    r"商品评分|宝贝评分|商品评价|累计评价",
+                ],
+                "unknown_without_match": True,
+            },
+        },
+    },
+    {
+        "id": "zhihu",
+        "domains": ["zhihu.com"],
+        "task_aliases": ["zhihu", "知乎"],
+        "evidence_entity": "article_or_answer",
+        "semantic_rules": {
+            "paid_link_patterns": [r"/market/paid_column/", r"/paid_column/"],
+            "activity_text_patterns": [r"精选活动"],
+            "promotion_text_patterns": [r"(?:^|\s)(?:推广|广告)(?:\s|$)"],
+            "natural_result_kind": "result",
+        },
+    },
+    {
+        "id": "csdn",
+        "domains": ["csdn.net"],
+        "task_aliases": ["csdn"],
+        "evidence_entity": "article",
+    },
+    {
+        "id": "douban",
+        "domains": ["douban.com"],
+        "task_aliases": ["douban", "豆瓣"],
+        "evidence_entity": "movie",
+    },
+    {
+        "id": "ctrip_hotels",
+        "domains": ["ctrip.com", "trip.com"],
+        "task_aliases": ["ctrip", "trip.com", "携程"],
+        "evidence_entity": "hotel",
+        "semantic_rules": {
+            "detail_link": {
+                "domains": ["ctrip.com", "trip.com"],
+                "path_patterns": [
+                    r"/(?:hotels?|hotel)/(?:detail/)?(?:\d+|[^/?#]+\.html)(?:/|$)",
+                    r"/hotels?/detail/?$",
+                ],
+                "query_id_params": ["hotelId", "hotelid"],
+                "key_prefix": "hotel",
+                "kind": "hotel",
+            },
+            "deduplicate_detail_links": True,
+            "control_semantics": {
+                "region": "hotel_search",
+                "context_patterns": [
+                    r"hotel|hotels|hotel-search|hotelsearch",
+                    r"酒店|目的地|入住|退房",
+                ],
+                "global_search_patterns": [r"search|query|keyword|搜索"],
+                "kinds": [
+                    {
+                        "kind": "hotel_destination",
+                        "patterns": [r"目的地|城市|酒店|关键词|destination|city|hotelname"],
+                        "tags": ["input", "textarea"],
+                    },
+                    {
+                        "kind": "hotel_checkin",
+                        "patterns": [r"入住|check[-_ ]?in|start[-_ ]?date"],
+                    },
+                    {
+                        "kind": "hotel_checkout",
+                        "patterns": [r"退房|离店|check[-_ ]?out|end[-_ ]?date"],
+                    },
+                    {
+                        "kind": "hotel_search_submit",
+                        "patterns": [r"搜索|查询|search|submit"],
+                        "tags": ["button"],
+                        "roles": ["button"],
+                        "types": ["submit"],
+                    },
+                    {
+                        "kind": "hotel_filter",
+                        "patterns": [r"筛选|价格|星级|评分|filter|price|star|rating"],
+                    },
+                ],
+            },
+        },
+    },
 ]
+
+
+def _domain_matches(host: str, domains: Any) -> bool:
+    normalized_host = str(host or "").strip().lower()
+    return any(
+        normalized_host == domain or normalized_host.endswith(f".{domain}")
+        for domain in (str(item or "").strip().lower() for item in (domains or []))
+        if domain
+    )
+
+
+def site_profile_for_host(host: str) -> Dict[str, Any] | None:
+    """Return the built-in profile responsible for a host, if any."""
+    for profile in BUILTIN_SITE_PROFILES:
+        if _domain_matches(host, profile.get("domains")):
+            return profile
+    return None
+
+
+def infer_profile_evidence_entity(task: str) -> str:
+    """Resolve site-named task entities without coupling runtime code to sites."""
+    normalized_task = str(task or "").lower()
+    for profile in BUILTIN_SITE_PROFILES:
+        aliases = profile.get("task_aliases") or []
+        if any(str(alias or "").lower() in normalized_task for alias in aliases):
+            return str(profile.get("evidence_entity") or "").strip()
+    return ""
+
+
+def _semantic_rules(profile: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    if not isinstance(profile, Mapping):
+        return {}
+    rules = profile.get("semantic_rules")
+    return rules if isinstance(rules, Mapping) else {}
+
+
+def _matches_any(value: Any, patterns: Any) -> bool:
+    text = str(value or "")
+    for pattern in patterns or []:
+        try:
+            if re.search(str(pattern), text, re.IGNORECASE):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+def profile_detail_link_key(profile: Mapping[str, Any] | None, value: Any) -> str:
+    """Return a stable entity key for a profile-defined detail link."""
+    detail = _semantic_rules(profile).get("detail_link")
+    if not isinstance(detail, Mapping):
+        return ""
+    try:
+        parsed = urlparse(str(value or ""))
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if not _domain_matches(host, detail.get("domains") or profile.get("domains")):
+        return ""
+    query = {
+        str(key).lower(): str(item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+    }
+    identifier = next(
+        (
+            query.get(str(parameter or "").lower(), "").strip()
+            for parameter in detail.get("query_id_params") or []
+            if query.get(str(parameter or "").lower(), "").strip()
+        ),
+        "",
+    )
+    path_matches = _matches_any(parsed.path, detail.get("path_patterns"))
+    if not identifier and not path_matches:
+        return ""
+    prefix = str(detail.get("key_prefix") or "detail").strip().lower()
+    return f"{prefix}:{identifier}" if identifier else f"{host}{parsed.path}".lower()
+
+
+def apply_site_card_semantics(
+    card: Mapping[str, Any],
+    *,
+    host: str,
+    region: str,
+    kind: str,
+    is_ad: bool,
+) -> tuple[str, str, bool]:
+    """Apply data-driven site semantics after generic card classification."""
+    profile = site_profile_for_host(host)
+    rules = _semantic_rules(profile)
+    if not rules:
+        return region, kind, is_ad
+    href = str(card.get("primary_link") or card.get("href") or "")[:500]
+    title = " ".join(str(card.get("title") or "").split())[:240]
+    preview = " ".join(str(card.get("text_preview") or "").split())[:500]
+    badges = " ".join(
+        " ".join(str(item or "").split())[:100]
+        for item in (card.get("semantic_badges") or [])
+    )
+
+    if _matches_any(href, rules.get("paid_link_patterns")):
+        return "sponsored_result", "paid_column", True
+    if _matches_any(f"{title} {badges}", rules.get("activity_text_patterns")):
+        return "activity", "activity", True
+    if _matches_any(f"{badges} {preview}", rules.get("promotion_text_patterns")):
+        return "sponsored_result", "promotion", True
+
+    detail_key = profile_detail_link_key(profile, href)
+    detail = rules.get("detail_link")
+    if detail_key and isinstance(detail, Mapping):
+        return "main_result", str(detail.get("kind") or kind), is_ad
+
+    natural_kind = str(rules.get("natural_result_kind") or "").strip()
+    is_natural_result = (
+        region == "main_result" and kind not in {"account", "hot_search", "sidebar"} and not is_ad
+    )
+    if natural_kind and is_natural_result:
+        return "main_result", natural_kind, False
+    return region, kind, is_ad
+
+
+def normalize_site_card_fields(card: Dict[str, Any], *, host: str) -> None:
+    """Normalize profile-owned fields without adding site branches to Probe."""
+    profile = site_profile_for_host(host)
+    rating_rules = _semantic_rules(profile).get("rating")
+    if not isinstance(rating_rules, Mapping):
+        return
+    rating = card.get("rating")
+    rating_kind = " ".join(str(card.get("rating_kind") or "").split()).lower()[:80]
+    if rating_kind == "unknown":
+        statuses = card.get("field_status")
+        field_status = dict(statuses) if isinstance(statuses, Mapping) else {}
+        field_status["rating"] = "unknown"
+        field_status["product_rating"] = "unknown"
+        card["field_status"] = field_status
+        card["rating"] = None
+        card["product_rating"] = None
+        return
+    evidence = " ".join(
+        (
+            rating_kind,
+            str(card.get("rating_selector_hint") or "")[:400],
+            str(card.get("rating_raw_text") or "")[:400],
+            str(card.get("text_preview") or "")[:600],
+        )
+    )
+    shop_match = _matches_any(evidence, rating_rules.get("shop_patterns"))
+    product_match = _matches_any(evidence, rating_rules.get("product_patterns"))
+    if rating not in (None, "") and shop_match and not product_match:
+        card["shop_rating"] = rating
+        card["rating"] = None
+        card["product_rating"] = None
+        card["rating_kind"] = "shop_rating"
+        return
+    if rating not in (None, ""):
+        card["product_rating"] = rating
+        card["rating_kind"] = "product_rating"
+
+
+def deduplicate_site_cards(cards: List[Any], *, host: str) -> List[Any]:
+    """Apply profile-defined entity deduplication while preserving card order."""
+    profile = site_profile_for_host(host)
+    rules = _semantic_rules(profile)
+    if not rules.get("deduplicate_detail_links"):
+        return cards
+    deduplicated: List[Any] = []
+    seen_keys: set[str] = set()
+    for card in cards:
+        if not isinstance(card, Mapping):
+            deduplicated.append(card)
+            continue
+        detail_key = profile_detail_link_key(
+            profile,
+            card.get("primary_link") or card.get("href"),
+        )
+        if detail_key and detail_key in seen_keys:
+            continue
+        if detail_key:
+            seen_keys.add(detail_key)
+        deduplicated.append(card)
+    return deduplicated
 
 
 _CHROME_SELECTOR_FRAGMENTS = [
@@ -108,6 +423,18 @@ _CHROME_TITLES = {
 def builtin_site_profiles() -> List[Dict[str, Any]]:
     """Return a copy of built-in browser site profiles."""
     return deepcopy(BUILTIN_SITE_PROFILES)
+
+
+def site_profiles_for_url(url: str) -> List[Dict[str, Any]]:
+    """Return only profiles relevant to the current URL when it is known."""
+    host = domain_from_url(url)
+    if not host:
+        return builtin_site_profiles()
+    return [
+        deepcopy(profile)
+        for profile in BUILTIN_SITE_PROFILES
+        if _domain_matches(host, profile.get("domains"))
+    ]
 
 
 def normalize_route_signature(url: str) -> str:

@@ -134,7 +134,7 @@ class SpawnTeammateTool(_SpawnToolBase):
     #: and prose are gated together — the model must never read about an
     #: argument it has no way to pass.
     _FORK_PARAMS = ("fork", "fork_source", "fork_mode")
-    _FORK_SLOT = "fork_usage"
+    _FORK_SLOTS = frozenset({"fork_usage", "fork_param_rows"})
 
     def __init__(
         self,
@@ -159,7 +159,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             team,
             t,
             "spawn_teammate",
-            omit_slots=None if fork_enabled else frozenset({self._FORK_SLOT}),
+            omit_slots=None if fork_enabled else frozenset(self._FORK_SLOTS),
         )
         self._allocate_model_config = model_config_allocator
         self._fork_enabled = fork_enabled

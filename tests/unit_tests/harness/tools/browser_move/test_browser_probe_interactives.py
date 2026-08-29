@@ -17,6 +17,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_interactive_probe_js,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
+    builtin_site_profiles,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
 )
@@ -54,7 +57,11 @@ def _make_runtime() -> BrowserAgentRuntime:
 
 
 def test_build_interactive_probe_js_contains_high_value_selectors() -> None:
-    js = build_interactive_probe_js(max_items=25, viewport_only=True)
+    js = build_interactive_probe_js(
+        max_items=25,
+        viewport_only=True,
+        site_profiles=builtin_site_profiles(),
+    )
 
     assert "button" in js
     assert "a[href]" in js
@@ -74,6 +81,20 @@ def test_build_interactive_probe_js_contains_high_value_selectors() -> None:
     assert "generation_id" in js
     assert "matchCount === 1" in js
     assert "document.elementFromPoint" in js
+    assert "calendar_date" in js
+    assert "sort_tab" in js
+    assert "rating_filter" in js
+    assert "hotel_destination" in js
+    assert "hotel_checkin" in js
+    assert "hotel_checkout" in js
+    assert "hotel_search_submit" in js
+    assert "hotel_filter" in js
+    assert "hotel_search" in js
+    assert "global_search" in js
+    assert "region: classifyRegion" in js
+    assert "kind: kind || actionLikelihood" in js
+    assert "'[role=\"gridcell\"]'" in js
+    assert "'[role=\"tab\"]'" in js
 
 
 def test_build_interactive_probe_js_embeds_generation_id() -> None:
@@ -134,7 +155,7 @@ def test_browser_probe_interactives_tool_invokes_runtime_api() -> None:
     )
 
     runtime.probe_interactives.assert_called_once_with(
-        max_items=100,
+        max_items=40,
         viewport_only=False,
         query="cart",
     )
@@ -201,6 +222,8 @@ def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None
     assert result["elements"][0]["text"] == "Search"
     assert result["elements"][0]["target_id"].startswith("t_g")
     assert result["elements"][0]["generation_id"] == result["page_state"]["generation_id"]
+    assert "id" not in result["elements"][0]
+    assert "selector_hint" not in result["elements"][0]
     assert result["page_state"]["interactives"][0]["target_id"] == result["elements"][0]["target_id"]
 
 
@@ -242,6 +265,15 @@ def test_runtime_unwrap_mcp_text_result() -> None:
     }
 
     assert runtime._unwrap_mcp_text_result(raw) == '{"ok": true, "elements": []}'
+
+
+def test_probe_query_uses_exact_match_before_bounded_alias_widening() -> None:
+    script = build_interactive_probe_js(query="搜索清华大学")
+
+    assert "exactQueryMatches" in script
+    assert "widenedCandidates" in script
+    assert "query_widened" in script
+    assert "raw.includes(term)" in script
 
 
 def test_runtime_call_playwright_run_code_unsafe_uses_runner_mcp_tool(monkeypatch) -> None:

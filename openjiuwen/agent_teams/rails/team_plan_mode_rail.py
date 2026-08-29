@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.prompts.team_plan_agent import apply_team_plan_agent_prompt
 from openjiuwen.agent_teams.prompts.team_plan_mode import build_team_plan_mode_section
 from openjiuwen.core.common.logging import team_logger
@@ -31,9 +32,19 @@ class TeamPlanModeRail(DeepAgentRail):
 
     priority = 84
 
-    def __init__(self, *, language: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        language: str | None = None,
+        loader: TemplateLoader = load_template,
+    ) -> None:
         super().__init__()
         self._language_override = resolve_language(language) if language else None
+        # The loader is bound at construction by the rail factory
+        # (elements.py) from the backend's cache; the default is the
+        # framework read-only loader. No second
+        # fallback here — the factory owns the cache wiring.
+        self._loader = loader
         self._agent: Any | None = None
         self.system_prompt_builder: Any | None = None
         self.attachment_manager: Any | None = None
@@ -82,6 +93,7 @@ class TeamPlanModeRail(DeepAgentRail):
             language=language,
             agent=self._agent,
             session=ctx.session,
+            loader=self._loader,
         )
         self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
         if self.attachment_manager is None:
@@ -113,6 +125,7 @@ class TeamPlanModeRail(DeepAgentRail):
         applied = apply_team_plan_agent_prompt(
             getattr(deep_config, "subagents", None),
             language=self._resolve_language(),
+            loader=self._loader,
         )
         if applied:
             team_logger.info("[team.plan] specialized built-in plan_agent prompt")

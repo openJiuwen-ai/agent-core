@@ -96,6 +96,11 @@ class ContextEngineConfig(BaseModel):
         Best-effort fallback mapping from model name to total context window
         tokens. Explicit runtime values and context_window_tokens take priority.
 
+    model_context_window_tokens_override : int, optional
+        Context window supplied by the currently selected model configuration.
+        It is lower priority than the global ``context_window_tokens`` value and
+        higher priority than the model-name mapping and automatic lookups.
+
     enable_openrouter_model_context_window_tokens : bool, default False
         Whether to fetch model context windows from OpenRouter when creating a
         context. Results are cached process-wide and explicit
@@ -137,6 +142,7 @@ class ContextEngineConfig(BaseModel):
     tokenizer_cache_dir: Optional[str] = Field(default=None)
     enable_tokenizer_download: bool = Field(default=False)
     tokenizer_offline: bool = Field(default=False)
+    model_context_window_tokens_override: Optional[int] = Field(default=None)
     enable_openrouter_model_context_window_tokens: bool = Field(default=False)
     openrouter_request_timeout: float = Field(default=3.0, gt=0)
     compression_recall_config: CompressionRecallConfig = Field(

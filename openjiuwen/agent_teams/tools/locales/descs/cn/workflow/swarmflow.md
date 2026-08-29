@@ -80,7 +80,10 @@ async def run(args):
     - `timeout` 本次 worker 调用的超时秒数。
     - `isolation='worktree'`：在全新 git worktree 里跑 worker，**昂贵**（每 worker 约 200-500ms 设置 + 磁盘开销），**仅当** worker 并行改文件且会互相冲突时才用；worktree 若无更改则自动回收。
     - `agent_type`：用具名专家 subagent（如团队里某类 teammate）替代默认 worker，从与团队相同的注册表解析；与 `schema` 组合使用（专家系统提示词会被追加结构化输出指令）。（接口就位、执行推进中。）
+- `await verify(reviewers, *, threshold=0.85, label=None, phase=None, options=None)` —— 对一份产物跑一轮**多 reviewer 验收判定**并返回结构化 `VerifyResult`（`{verdict: "pass"|"fail"|None, votes, feedback, passed}`）。每个 reviewer 是并行的一次结构化 `agent()`：`verdict` 类投 pass/fail（一票否决），`score` 类投 0~1 分（平均分 ≥ `threshold` 才通过）。任一 reviewer 未投票 → `verdict=None`（undecided），脚本自行决定重试或放弃。**单次判定、不驱动返工**——返回 `feedback` 供脚本组织执行者重做后再 `verify()`。**推荐用业务辅助 `build_reviewers(deliverable, specs, ...)` 从 `type`（`verifier` / `inspector` / `challenger`）+ 产物（文本或文件路径）构建 reviewer**（省 token、提示词一致、自动映射 kind）；仅在需要完全定制提示词时才直接构造 `Reviewer{kind, prompt, label, options}`（见「验证（verify）」一节）。
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` —— **有状态**多轮 agent，跨轮记忆，第二轮无需重述第一轮上下文。`notify=True` 单向推送、返回 `None`。
+- `await s.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` —— 从 `agent_session` 派生一个**独立分支**（`fork_mode` 五种）：`full` 全量继承；`before`/`after` 以第 N 轮为界保留前/后；`keep_before_compact_after`/`keep_after_compact_before` 保留一侧、另一侧压成摘要。`keep_rounds` 是**轮数**（每次 `send()` 计一轮）：**`full` 之外的模式必填**（缺省会直接报错，没有截断点就没法截断）；传入的轮数超过父会话实际轮数时**降级为全量**并告警，不报错。fork 在调用时刻冻结父上下文，此后两条线互不影响；子会话可继续 `send`、也可再 `fork`（链式）。`human_session` 不支持 fork。
+  - **链式 fork 约束**：**不要 `fork` 一个尚未发送过任何消息的 fork 子会话**——它会降级为镜像兜底（丢失 ToolMessage）。链式派生时，每个被 `fork` 的会话都必须先 `send` 过；若想基于父会话的早期状态派生，直接用父会话的 `fork_mode` + `keep_rounds`（如 `before`/`after`）表达，而不是先 fork 出一个未发送的子再 fork 它。
 - `await human(prompt, *, schema=)` / `human_session()` + `.send()` —— 一次性 / 有状态的**人类参与**（HITL），等真人不占并发 permit、不计 spawn 预算，可被 journal 重放。
 - `await parallel([thunk, ...])` —— fork-join **栅栏**：并发跑、等齐才返回；分支抛错落 `None`，调用**永不抛**（用前 `compact` 过滤）。thunk 是 `lambda: agent(...)` 这样的零参可调用。
 - `await pipeline(items, stage1, stage2, ...)` —— **无栅栏**流式：每个 item 独立穿过所有 stage（A 可在 stage3 而 B 还在 stage1）；每个 stage 回调收 `(prev, item, index)`——后续 stage 可用 `item`/`index` 标注工作，无需把上下文穿过 `prev`；某 stage 抛错只把该 item 落为 `None`、跳过它剩余 stage。
@@ -137,9 +140,28 @@ c = await parallel([... for x in b])
 - `resume_id` = 上次运行的 **run_id**（即本工具调用返回的句柄）。续跑时**内容寻址**：未变的 `agent()` 调用瞬时复用缓存结果；**上游 prompt 改 → 下游签名变 → 自动重跑**（无需手动标记）。**同脚本 + 同 args → 100% 缓存命中**。
 - 由异步工具执行框架维护内容寻址 journal（与参考工具的 runId 机制一致）。（执行推进中。）
 
+## 验证（verify）：多 reviewer 把关产物
+
+需要给自己的产物做质量把关时，用 `verify()` 替代"手写 N 个 agent 收投票再自己判"的样板，并收集每票 feedback 供返工。
+
+**什么时候该用 `verify()`（而不是裸 `agent`）：** 任何"对产物做验收判定"的活——包括**编译、运行、逐项核对验收标准**——都是 reviewer（尤其 `verifier`）该做的，用 `verify()` 而不是手写一个 `agent(schema=...)` 去收一份非结构化结果。每个 reviewer 都是一个普通 worker（继承 worker 的 `bash` / `read_file` / `write_file` 等工具），所以任一 reviewer 都能编译、运行、跑测试——把"验收判定"交给 reviewer，`verify()` 替你收票并给出结构化 `verdict`（判定语义见上文 `verify` 原语）。**构建 reviewer 用 `build_reviewers(deliverable, specs, ...)`（推荐）**——省 token、提示词来自 `swarmflow_reviewer_*` 模板保持一致、自动映射 type→kind；仅需完全定制提示词时才直接构造 `Reviewer`。**裸 `agent` 适合"产出内容"（写代码、检索、总结），不适合"判定产物是否达标"——达标判定一律走 `verify()`。** 完整可运行示例见下文「代码骨架」。
+
+**reviewer 类型与适用场景（组成建议）**：`verify()` 不替你决定配几个 reviewer——那由脚本按产物重要性与开放性定。基调如下：
+
+| type | 适用场景 | 数量基调 |
+|---|---|---|
+| `verifier` | 几乎所有要把关的产物都配，是基本质量保障；逐项对照验收标准确认"做到了没有" | ≥1，主力；**验证 / 测试类产物只需 1 个** |
+| `inspector` | 需要多维度综合评分的关键交付物 / 被下游消费、规范与一致性要求高的产物 | 按关键度；轻量产物可不配 |
+| `challenger` | 无确定性验收标准、开放性 / 设计 / 规划 / 调研类，对下游有决定性 / 方针性影响的产物 | 此类必配；验证 / 测试类产物不配 |
+
+组合基调：**轻量把关** = 1 个 `verifier`；**重要交付物** = `verifier` + `inspector`（可多个 inspector 分维度）；**开放性 / 高风险设计** = `verifier` + `challenger`（视需要再加 `inspector`）。同一脚本对不同阶段产物可用不同组成多次调用。
+
+**两道门槛**：`verifier` 是**最低门槛**——只问"验收标准满足了吗"（过了/没过）；`inspector` 是**质量门槛**——按维度打分、平均 ≥ 0.85 才过，会**拦下"功能全满足但质量平庸"的交付物**（如代码能编译但不可维护）。对**关键最终交付物 / 被下游消费的产物**，光 `verifier` 不够——加 `inspector` 强制质量；对一次性、轻量、用完即弃的中间产物，只 `verifier` 即可。
+
+**默认组合**：**设计文档 / 架构方案 / 最终交付物** → `verifier` + `inspector`（保底功能 + 强制质量，这是默认，不要只用 verifier）；**实现代码** → `verifier`（编译运行验收）+ 若被下游消费再加 `inspector`；**开放性设计 / 无确定验收标准** → 上面组合再加 `challenger`。拿不准时，优先 `verifier` + `inspector`。
+
 ## 编排模式库（按任务规模组合）
-- **对抗验证**：每个发现派 N 个独立怀疑者去**反驳**，多数反驳则淘汰——防"看似合理实则错"。
-- **多视角验证**：给每个验证者不同视角（正确性 / 安全 / 性能 / 能否复现），优于 N 个相同反驳者。
+- **验证（verify）**：对产物做多 reviewer 判定——`verifier` 核对"做到没有"（一票否决）、`inspector` 评"好不好"（平均分 ≥ 0.85）、`challenger` 找"没想到的盲点"（对抗式）；按产物性质选组合。
 - **评审团**：从不同角度生成 N 个独立方案 → 并行打分 → 从胜者综合、嫁接亚军好点子。
 - **loop-until-count**：累积到目标数量——`while len(bugs) < 10: ...`，每轮 push 新发现。
 - **loop-until-dry**：未知规模的发现，持续派 finder 直到连续 K 轮无新增（简单计数会漏长尾）。
@@ -151,34 +173,38 @@ c = await parallel([... for x in b])
 这些模式**并非穷举**——任务需要时自造新编排（锦标赛两两对裁、自修复循环、分级升级，等等）。
 
 ## 代码骨架（真实 swarmflow API）
-多维评审 —— 默认 pipeline，每个维度评审一完成就立刻对抗验证（'bugs' 在验证时 'perf' 还在评审，不浪费墙钟）：
+
+**对抗验证（默认 pipeline）** —— 从多个维度并行评审（'bugs' / 'perf'），每个维度一完成就立刻对其发现跑一轮 `verify()` 一票否决（'bugs' 在验证时 'perf' 还在评审，不浪费墙钟）。**用 `build_reviewers` 构建 reviewer（推荐路径）**：单 `challenger` 即对抗式（任一 reviewer 投 fail 即裁掉）；要多视角，就在 specs 里放多个不同 `instruction` 的 `challenger`（见下方「多视角评审 + loop-until-dry」一例）：
 
 ```python
+# from swarmflow import agent, parallel, compact, verify
+# from openjiuwen.agent_teams.workflow.review import build_reviewers
+
 async def run(args):
     dims = [{"key": "bugs", "prompt": "找 bug"}, {"key": "perf", "prompt": "找性能问题"}]
 
     async def review(_prev, d, _i):
         return await agent(d["prompt"], label=f"review:{d['key']}", phase="Review", schema=FINDINGS)
 
-    async def verify(rev, _d, _i):
+    async def adjudicate(rev, _d, _i):              # 用 verify() + build_reviewers 判定每个发现（一票否决）
         findings = rev["findings"] if rev else []
-        return await parallel([
-            (lambda f=f: agent(f"对抗验证：{f['title']}", phase="Verify", schema=VERDICT))
-            for f in findings
-        ])
+        if not findings:
+            return []
 
-    results = await pipeline(dims, review, verify)
-    return {"confirmed": [f for rev in compact(results) for f in compact(rev) if f.get("is_real")]}
+        async def judge(f):
+            r = await verify(build_reviewers(
+                f["title"],                          # 该发现作为待判定产物
+                [{"type": "challenger", "instruction": "对抗性判定该发现是否真实、可复现"}],
+            ))
+            return f if r.passed else None          # 对抗判定 pass 才确认
+
+        return compact(await parallel([(lambda f=f: judge(f)) for f in findings]))
+
+    results = await pipeline(dims, review, adjudicate)
+    return {"confirmed": [f for rev in compact(results) for f in rev]}
 ```
 
-栅栏正确的场景 —— 昂贵验证前对全量发现去重（确需一次性拿到全部）：
-
-```python
-async def run(args):
-    raw = await parallel([(lambda d=d: agent(d, schema=FINDINGS)) for d in DIMENSIONS])
-    deduped = dedupe_by_file_and_line([f for r in compact(raw) for f in r["findings"]])  # 纯代码，不用 agent
-    return await parallel([(lambda f=f: agent(verify_prompt(f), schema=VERDICT)) for f in deduped])
-```
+> **何时需要栅栏（parallel）而非 pipeline**：若要在昂贵验证前对**全量**发现去重合并，须一次性拿到全部——这才需要 `parallel` 收集 → 纯代码去重 → 再逐条 `verify()`。除此之外别为"代码更干净"上栅栏（见「pipeline 还是 parallel」一节）。
 
 loop-until-count —— 累积到目标数量：
 
@@ -204,9 +230,12 @@ async def run(args):
     return {"bugs": bugs}
 ```
 
-组合范例 —— 详尽审查（发现 → 对 `seen` 去重 → 多视角评审团 → loop-until-dry）。持续派 finder 直到连续 2 轮无新增；每个新发现并发判定、各用 3 个不同视角，多数通过才确认。**对 `seen` 去重而非 `confirmed`**，否则被裁掉的发现每轮重现、永不收敛。注意 `parallel` 可嵌套 `parallel`：
+**多视角评审 + loop-until-dry（组合范例）** —— 详尽审查（发现 → 对 `seen` 去重 → 多视角评审 → loop-until-dry）。持续派 finder 直到连续 2 轮无新增；每个新发现用 `verify()` + `build_reviewers` 并行**多视角**判定——`correctness`/`security`/`repro` 三个 `challenger`，**一票否决**（任一视角投 fail 即不成立；上一例的单 reviewer 是它的退化形式）。**对 `seen` 去重而非 `confirmed`**，否则被裁掉的发现每轮重现、永不收敛。注意 `parallel` 可嵌套 `parallel`：
 
 ```python
+from swarmflow import agent, parallel, compact, verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
+
 async def run(args):
     seen, confirmed, dry = set(), [], 0
     while dry < 2:                                  # 连续 2 轮无新增才停
@@ -219,15 +248,65 @@ async def run(args):
         for b in fresh:
             seen.add(b["id"])
 
-        async def judge(bug):                       # 每个发现：3 个视角并发投票，≥2 票为真
-            votes = compact(await parallel([
-                (lambda lens=lens: agent(f'用「{lens}」视角判定 "{bug["desc"]}" 是否真问题', phase="Verify", schema=VERDICT))
-                for lens in ("correctness", "security", "repro")
-            ]))
-            return bug if sum(1 for v in votes if v.get("real")) >= 2 else None
+        async def judge(bug):                       # verify() + build_reviewers 多视角判定（一票否决）
+            r = await verify(build_reviewers(
+                bug["desc"],                         # 该发现作为待判定产物
+                [
+                    {"type": "challenger", "instruction": "用 correctness 视角判定该发现是否真问题"},
+                    {"type": "challenger", "instruction": "用 security 视角判定该发现是否真问题"},
+                    {"type": "challenger", "instruction": "用 repro 视角判定该发现是否真问题"},
+                ],
+            ))
+            return bug if r.passed else None        # 3 个视角全 pass 才确认
 
         confirmed.extend(compact(await parallel([(lambda b=b: judge(b)) for b in fresh])))
     return {"confirmed": confirmed}
+```
+
+编码 → 编译运行验收（verifier 现场构建）→ 打包 —— 产物是代码时，让 `verifier` 编译运行并逐项核对验收标准，而不是另写一个编译 agent：
+
+```python
+from swarmflow import agent, verify
+from openjiuwen.agent_teams.workflow.review import build_reviewers
+
+async def run(args):
+    code = await agent("…写代码…", label="code")
+    r = await verify(build_reviewers(
+        [f"{PROJ}/src/main.cpp", f"{PROJ}/include/shape.h"],  # 文件路径，verifier 会 read_file
+        [{"type": "verifier", "instruction": "编译并运行：g++ 能通过编译、程序输出数值符合验收标准"}],
+        acceptance="…验收标准…",
+        language="cn",
+    ))
+    if not r.passed:
+        code = await agent(f"按反馈修复代码：\n{r.feedback}\n原代码：{code}")
+        # 重新 verify()（可放入循环直至通过或轮数上限）
+    pkg = await agent("…打包 zip…", label="package")
+    return {"code": code, "verify": r, "package": pkg}
+```
+
+质量门槛（inspector）—— 对**关键最终交付物 / 被下游消费**的产物，光 verifier（最低门槛）不够，加 `inspector` 打分、平均 ≥ 0.85 才过；各维度分在 `r.votes[i].score`、评分理由在 `r.votes[i].feedback`：
+
+```python
+# from swarmflow import verify
+# from openjiuwen.agent_teams.workflow.review import build_reviewers
+
+async def run(args):
+    r = await verify(build_reviewers(
+        f"{PROJ}/src/main.cpp",                    # 或文件路径清单
+        [{"type": "inspector", "instruction": (
+            "| 维度 | 权重 | 考察点 |\n"
+            "| --- | --- | --- |\n"
+            "| 可维护性 | 0.4 | 分层清晰、命名一致、避免重复 |\n"
+            "| 可扩展性 | 0.3 | 新增类型/逻辑是否无需改核心 |\n"
+            "| 健壮性 | 0.2 | 边界与错误处理 |\n"
+            "| 文档 | 0.1 | 关键逻辑注释、构建说明 |"
+        )}],
+        acceptance="…验收标准…",
+    ))
+    if r.passed:
+        avg = sum(v.score for v in r.votes if v.score is not None) / len(r.votes)
+        log(f"质量分 {avg:.2f}（各维度：{[(v.score, v.feedback[:40]) for v in r.votes]}）")
+    # 平均 < 0.85 → r.passed=False，按 r.feedback 返工后再 verify()
 ```
 
 本工具用于**控制流应当确定性**（循环、条件、扇出）而非由模型即兴决定的多步编排。

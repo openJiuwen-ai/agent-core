@@ -99,6 +99,12 @@ def load_tree_root(path: str | Path, *, catalog_records: Sequence[CatalogRecord]
     payload = _load_yaml_like(Path(path).read_text(encoding="utf-8"))
     raw_nodes = payload.get("nodes")
     nodes = raw_nodes if isinstance(raw_nodes, list) else []
+    return build_tree_root(nodes, catalog_records=catalog_records)
+
+
+def build_tree_root(nodes: Sequence[object], *, catalog_records: Sequence[CatalogRecord]) -> RetrieverNode:
+    """Build the standard Symphony retriever tree from an in-memory taxonomy."""
+
     record_by_payload = {record.payload: record for record in catalog_records}
     return _build_tree_from_nodes(nodes, record_by_payload=record_by_payload)
 
@@ -261,6 +267,7 @@ def _parse_simple_nodes_yaml(text: str) -> Dict[str, object]:
 __all__ = [
     "CatalogRecord",
     "LoadedRetrieverIndex",
+    "build_tree_root",
     "load_catalog_records",
     "load_retriever_index",
     "load_tree_root",

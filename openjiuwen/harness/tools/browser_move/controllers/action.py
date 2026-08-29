@@ -58,6 +58,7 @@ _BATCH_SUPPORTED_OPS = frozenset(
         "wait_for_result_count",
         "wait_for_dom_text_change",
         "wait_for_stable",
+        "wait_for_tab",
         "sleep",
         "extract_text",
         "extract_value",
@@ -84,6 +85,7 @@ _BATCH_CONDITION_OPS = frozenset(
         "wait_for_result_count",
         "wait_for_dom_text_change",
         "wait_for_stable",
+        "wait_for_tab",
     }
 )
 _BATCH_PRIMARY_TARGET_OPS = frozenset(
@@ -170,14 +172,10 @@ def _validate_batch_locator_contract(
     if op in _BATCH_SELECTOR_CONDITION_OPS:
         invalid_locators = [key for key in locator_strategies if key != "selector"]
         if invalid_locators:
-            errors.append(
-                f"steps[{index}] op={op} accepts only selector; "
-                f"received {', '.join(invalid_locators)}"
-            )
+            errors.append(f"steps[{index}] op={op} accepts only selector; received {', '.join(invalid_locators)}")
     elif op not in _BATCH_PRIMARY_TARGET_OPS and op != "press" and locator_strategies:
         errors.append(
-            f"steps[{index}] op={op} does not accept a primary locator; "
-            f"received {', '.join(locator_strategies)}"
+            f"steps[{index}] op={op} does not accept a primary locator; received {', '.join(locator_strategies)}"
         )
     if op in _BATCH_OPTION_TARGET_OPS and not option_strategies:
         errors.append(f"steps[{index}] {op} requires an option target")
@@ -334,6 +332,27 @@ def _compact_batch_conditions(parsed: Mapping[str, Any], steps: list[dict[str, A
             compact["observed"] = observed
         conditions.append(compact)
     return conditions
+
+
+def _compact_extraction_provenance(
+    steps: list[dict[str, Any]],
+    generation_id: str,
+) -> dict[str, dict[str, Any]]:
+    provenance: dict[str, dict[str, Any]] = {}
+    for item in steps:
+        if not isinstance(item, Mapping) or not item.get("ok"):
+            continue
+        if str(item.get("op") or "") not in {"extract_text", "extract_value"}:
+            continue
+        field_name = str(item.get("field") or "").strip()
+        if not field_name:
+            continue
+        provenance[field_name] = {
+            "selector": str(item.get("selector") or "")[:600],
+            "raw_text": str(item.get("raw_text") or "")[:1000],
+            "generation_id": generation_id,
+        }
+    return provenance
 
 
 class RuntimeRunner(Protocol):
@@ -529,8 +548,7 @@ class ActionController(BaseController):
             _err = response.get("error") if not _ok else None
             logger.info(
                 f"CONTROLLER_ACTION end action={action_name} session_id={sid or '-'} "
-                f"request_id={rid or '-'} ok={_ok}"
-                + (f" error={_err!r}" if _err else "")
+                f"request_id={rid or '-'} ok={_ok}" + (f" error={_err!r}" if _err else "")
             )
             return response
         except Exception as exc:
@@ -690,7 +708,7 @@ def _build_coordinate_resolution_body() -> str:
         "      source = await getPoint(params.element_source, params.element_source_offset, 'source');\n"
         "      if (!source) {\n"
         "        return { ok: false, error: 'Failed to determine source coordinates from selector."
-        " Use the exact visible text (e.g. \"Learn more\" not \"More information\")"
+        ' Use the exact visible text (e.g. "Learn more" not "More information")'
         " or a valid CSS/Playwright selector.', source: null, target: null };\n"
         "      }\n"
         "    }\n"
@@ -822,6 +840,10 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         f"  const payload = {payload_json};\n"
         "  const startedAt = Date.now();\n"
         "  const steps = Array.isArray(payload.steps) ? payload.steps : [];\n"
+        "  const initialBrowserContext = page && typeof page.context === 'function' ? page.context() : null;\n"
+        "  const initialTabCount = initialBrowserContext && typeof initialBrowserContext.pages === 'function'\n"
+        "    ? initialBrowserContext.pages().length\n"
+        "    : 1;\n"
         "  const defaultTimeout = Math.max(250, Number(payload.timeout_ms || 2500));\n"
         "  const defaultConditionTimeout = Math.max(\n"
         "    defaultTimeout,\n"
@@ -830,7 +852,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "  const conditionOps = new Set([\n"
         "    'wait_for_selector', 'wait_for_text', 'wait_for_load_state', 'wait_for_url',\n"
         "    'wait_for_first_card_title', 'wait_for_sort_state', 'wait_for_result_count',\n"
-        "    'wait_for_dom_text_change', 'wait_for_stable'\n"
+        "    'wait_for_dom_text_change', 'wait_for_stable', 'wait_for_tab'\n"
         "  ]);\n"
         "  const defaultAfter = Math.max(0, Number(payload.wait_after_each_ms || 0));\n"
         "  const generationId = String(payload.generation_id || 'g0');\n"
@@ -961,6 +983,29 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    }\n"
         "    throw new Error(`condition timed out after ${timeout}ms`);\n"
         "  };\n"
+        "  const clickWithTransientRetry = async (step, timeout, option = false, initialChecked = null) => {\n"
+        "    const started = Date.now();\n"
+        "    let lastError = null;\n"
+        "    for (let attempt = 0; attempt < 2; attempt += 1) {\n"
+        "      const remaining = Math.max(250, timeout - (Date.now() - started));\n"
+        "      try {\n"
+        "        const locator = option ? optionLocatorFromStep(step) : locatorFromStep(step);\n"
+        "        const checked = attempt === 0 && initialChecked\n"
+        "          ? initialChecked\n"
+        "          : await validateTarget(locator, remaining, true);\n"
+        "        await checked.locator.click({ timeout: remaining });\n"
+        "        return checked;\n"
+        "      } catch (error) {\n"
+        "        lastError = error;\n"
+        "        const message = String(error && error.message ? error.message : error).toLowerCase();\n"
+        "        const transient = /(detached|not attached|intercept|not stable|"
+        "outside of the viewport)/.test(message);\n"
+        "        if (!transient || attempt > 0 || Date.now() - started >= timeout) throw error;\n"
+        "        await sleep(Math.min(100, Math.max(0, timeout - (Date.now() - started))));\n"
+        "      }\n"
+        "    }\n"
+        "    throw lastError || new Error('click failed');\n"
+        "  };\n"
         "  const summarizeVisible = async () => {\n"
         "    return await page.evaluate(() => {\n"
         "      const text = (document.body && document.body.innerText) ? document.body.innerText : '';\n"
@@ -1041,9 +1086,9 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    try {\n"
         "      if (!op) throw new Error('missing op');\n"
         "      if (op === 'click') {\n"
-        "        const target = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
+        "        const prechecked = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
+        "        const target = await clickWithTransientRetry(step, timeout, false, prechecked);\n"
         "        item.target_validation = target.metadata;\n"
-        "        await target.locator.click({ timeout });\n"
         "      } else if (op === 'fill' || op === 'type') {\n"
         "        const checked = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
         "        item.target_validation = checked.metadata;\n"
@@ -1089,11 +1134,11 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        }\n"
         "        const checkedOption = await getCheckedTarget(i, 'option', optionLocatorFromStep(step), timeout);\n"
         "        item.option_validation = checkedOption.metadata;\n"
-        "        await checkedOption.locator.click({ timeout });\n"
+        "        await clickWithTransientRetry(step, timeout, true, checkedOption);\n"
         "      } else if (op === 'select_visible_text') {\n"
         "        const checkedOption = await getCheckedTarget(i, 'option', optionLocatorFromStep(step), timeout);\n"
         "        item.target_validation = checkedOption.metadata;\n"
-        "        await checkedOption.locator.click({ timeout });\n"
+        "        await clickWithTransientRetry(step, timeout, true, checkedOption);\n"
         "      } else if (op === 'press') {\n"
         "        const key = String(step.key || 'Enter');\n"
         "        if (hasTarget(step)) {\n"
@@ -1224,20 +1269,69 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "          return { ok: true, value };\n"
         "        }, timeout, step.poll_interval_ms, Number(step.stable_ms || 500));\n"
         "        item.stable = true;\n"
+        "      } else if (op === 'wait_for_tab') {\n"
+        "        if (!page || typeof page.context !== 'function') {\n"
+        "          throw new Error('wait_for_tab requires a Playwright browser context');\n"
+        "        }\n"
+        "        const minTabs = Math.max(1, Number(step.min_tabs || (initialTabCount + 1)));\n"
+        "        const expectedUrl = String(step.url || step.expected_url || '');\n"
+        "        const urlContains = String(step.url_contains || '');\n"
+        "        const urlPattern = String(step.url_pattern || '');\n"
+        "        const titleContains = String(step.title_contains || '');\n"
+        "        const observation = await pollUntil(async () => {\n"
+        "          const pages = page.context().pages();\n"
+        "          const tabs = [];\n"
+        "          for (let tabIndex = 0; tabIndex < pages.length; tabIndex += 1) {\n"
+        "            const candidate = pages[tabIndex];\n"
+        "            tabs.push({\n"
+        "              index: tabIndex,\n"
+        "              url: candidate.url(),\n"
+        "              title: await candidate.title().catch(() => '')\n"
+        "            });\n"
+        "          }\n"
+        "          const matches = tabs.filter((tab) => {\n"
+        "            if (expectedUrl && tab.url !== expectedUrl) return false;\n"
+        "            if (urlContains && !tab.url.includes(urlContains)) return false;\n"
+        "            if (urlPattern) {\n"
+        "              try { if (!(new RegExp(urlPattern)).test(tab.url)) return false; } catch (_) { return false; }\n"
+        "            }\n"
+        "            if (titleContains && !tab.title.includes(titleContains)) return false;\n"
+        "            return true;\n"
+        "          });\n"
+        "          const matched = pages.length >= minTabs && matches.length > 0;\n"
+        "          const matchedIndex = matched ? matches[matches.length - 1].index : -1;\n"
+        "          return { ok: matched, value: { tabs, matched_index: matchedIndex } };\n"
+        "        }, timeout, step.poll_interval_ms, Number(step.stable_ms || 0));\n"
+        "        item.tabs = observation.value.tabs;\n"
+        "        item.count = observation.value.tabs.length;\n"
+        "        const matchedIndex = Number(observation.value.matched_index);\n"
+        "        if (step.activate !== false && matchedIndex >= 0) {\n"
+        "          const matchedPage = page.context().pages()[matchedIndex];\n"
+        "          if (matchedPage) {\n"
+        "            await matchedPage.bringToFront();\n"
+        "            page = matchedPage;\n"
+        "            item.url = page.url();\n"
+        "          }\n"
+        "        }\n"
         "      } else if (op === 'sleep') {\n"
         "        await sleep(Math.max(0, Number(step.ms || step.time_ms || 0)));\n"
         "      } else if (op === 'extract_text') {\n"
         "        const checkedTarget = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout, false);\n"
         "        item.target_validation = checkedTarget.metadata;\n"
+        "        const rawText = await checkedTarget.locator.innerText({ timeout });\n"
         "        item.text = compactText(\n"
-        "          await checkedTarget.locator.innerText({ timeout }),\n"
+        "          rawText,\n"
         "          Number(step.max_chars || 500)\n"
         "        );\n"
+        "        item.raw_text = String(rawText || '').slice(0, 1000);\n"
+        "        item.selector = String(step.selector || '');\n"
         "        item.field = String(step.field || step.name || step.description || `field_${i + 1}`);\n"
         "      } else if (op === 'extract_value') {\n"
         "        const checkedTarget = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout, false);\n"
         "        item.target_validation = checkedTarget.metadata;\n"
         "        item.value = await checkedTarget.locator.inputValue({ timeout });\n"
+        "        item.raw_text = String(item.value || '').slice(0, 1000);\n"
+        "        item.selector = String(step.selector || '');\n"
         "        item.field = String(step.field || step.name || step.description || `field_${i + 1}`);\n"
         "      } else if (op === 'screenshot') {\n"
         "        const path = String(step.path || 'screenshots/batch_interact.png');\n"
@@ -1291,7 +1385,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    .filter((result) => result && conditionOps.has(result.op))\n"
         "    .map((result) => {\n"
         "      const observed = {};\n"
-        "      for (const key of ['url', 'text', 'value', 'count', 'stable']) {\n"
+        "      for (const key of ['url', 'text', 'value', 'count', 'stable', 'tabs']) {\n"
         "        if (result[key] !== undefined) observed[key] = result[key];\n"
         "      }\n"
         "      return {\n"
@@ -1383,8 +1477,7 @@ def _has_source_selector(payload: dict[str, Any]) -> bool:
 
 def _has_coordinate_inputs(payload: dict[str, Any]) -> bool:
     return all(
-        payload.get(k) is not None
-        for k in ("coord_source_x", "coord_source_y", "coord_target_x", "coord_target_y")
+        payload.get(k) is not None for k in ("coord_source_x", "coord_source_y", "coord_target_x", "coord_target_y")
     )
 
 
@@ -1497,11 +1590,7 @@ async def run_action(
 
 
 def _normalize_batch_interact_payload(kwargs: Mapping[str, Any]) -> dict[str, Any]:
-    payload = {
-        key: value
-        for key, value in kwargs.items()
-        if value is not None
-    }
+    payload = {key: value for key, value in kwargs.items() if value is not None}
 
     payload["session_id"] = str(payload.get("session_id") or "")
     payload["request_id"] = str(payload.get("request_id") or "")
@@ -1936,9 +2025,7 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
         }
         build_started_at = time.perf_counter()
         js_code = _build_batch_interact_script(payload)
-        build_elapsed_ms = int(
-            max(0.0, (time.perf_counter() - build_started_at) * 1000)
-        )
+        build_elapsed_ms = int(max(0.0, (time.perf_counter() - build_started_at) * 1000))
         script_size_bytes = len(js_code.encode("utf-8", "ignore"))
         code_executor = ctl.code_executor
 
@@ -2036,17 +2123,13 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
                 },
             }
 
-        executor_elapsed_ms = int(
-            max(0.0, (time.perf_counter() - executor_started_at) * 1000)
-        )
+        executor_elapsed_ms = int(max(0.0, (time.perf_counter() - executor_started_at) * 1000))
         response_size_bytes = len(str(raw).encode("utf-8", "ignore"))
         rpc_metrics = _browser_rpc_metrics(raw)
         parse_started_at = time.perf_counter()
         unwrapped = _unwrap_browser_code_result(raw)
         parsed = extract_json_object(unwrapped)
-        parse_elapsed_ms = int(
-            max(0.0, (time.perf_counter() - parse_started_at) * 1000)
-        )
+        parse_elapsed_ms = int(max(0.0, (time.perf_counter() - parse_started_at) * 1000))
         if not parsed:
             error = "Could not parse browser_batch_interact result JSON from browser_run_code output"
             raw_text = str(unwrapped)
@@ -2106,9 +2189,7 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             "result_parse_elapsed_ms": parse_elapsed_ms,
             "script_size_bytes": script_size_bytes,
             "response_size_bytes": response_size_bytes,
-            "internal_steps_elapsed_ms": int(
-                parsed.get("internal_steps_elapsed_ms") or 0
-            ),
+            "internal_steps_elapsed_ms": int(parsed.get("internal_steps_elapsed_ms") or 0),
             "preflight_elapsed_ms": int(parsed.get("preflight_elapsed_ms") or 0),
             "preflight_target_count": int(parsed.get("preflight_target_count") or 0),
             **rpc_metrics,
@@ -2134,8 +2215,7 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
         for item in completed_steps:
             if isinstance(item, dict):
                 browser_agent_log_info(
-                    "[BROWSER_BATCH] step index=%s op=%s ok=%s elapsed_ms=%s "
-                    "error=%s",
+                    "[BROWSER_BATCH] step index=%s op=%s ok=%s elapsed_ms=%s error=%s",
                     item.get("index"),
                     item.get("op"),
                     bool(item.get("ok", False)),
@@ -2149,6 +2229,10 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             if compact is not None:
                 compact_steps.append(compact)
         extracted = parsed.get("extracted")
+        field_provenance = _compact_extraction_provenance(
+            completed_steps,
+            generation_id,
+        )
         compact_result = {
             "ok": bool(parsed.get("ok", False)),
             "status": str(parsed.get("status") or "failed"),
@@ -2160,6 +2244,7 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             "generation_id": generation_id,
             "steps": compact_steps,
             "extracted": dict(extracted) if isinstance(extracted, Mapping) else {},
+            "field_provenance": field_provenance,
             "conditions": _compact_batch_conditions(parsed, completed_steps),
             "metrics": parsed["metrics"],
             "_runtime_page": {
@@ -2314,9 +2399,7 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
     ctl.register_action_spec(
         "browser_drag_and_drop",
         summary="Performs drag-and-drop using selectors or explicit coordinates.",
-        when_to_use=(
-            "Use for drag-and-drop tasks instead of generic browser_run_task text-only instructions."
-        ),
+        when_to_use=("Use for drag-and-drop tasks instead of generic browser_run_task text-only instructions."),
         params={
             "url": "string: optional URL to open before drag-and-drop",
             "element_source": "string: source selector/text alias",
@@ -2346,29 +2429,25 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
         when_to_use=(
             "Use for multi-field forms with several known controls, search boxes with autocomplete, "
             "dropdown/date-picker flows, filter panels, and short click/type/wait/extract sequences. "
-            "Prefer this over many separate browser_click, browser_type, browser_wait_for, and "
+            "Prefer this over many separate browser_click, browser_type, condition-wait, and "
             "browser_evaluate turns when the next actions are already known. Do not use it for a single "
             "uncertain click or when the page state must be inspected first."
         ),
         params={
             "steps": (
-                "list[object]: required, 2-25 items. Each step has op plus target fields. Supported op values: "
+                "list[object]: required, 1-25 items. Each step has op plus target fields. Supported op values: "
                 "click, fill, type, autocomplete, select_visible_text, press, select_option, set_checked, "
                 "wait_for_selector, wait_for_text, wait_for_load_state, wait_for_url, "
                 "wait_for_first_card_title, wait_for_sort_state, wait_for_result_count, "
-                "wait_for_dom_text_change, wait_for_stable, sleep, extract_text, extract_value, "
+                "wait_for_dom_text_change, wait_for_stable, wait_for_tab, extract_text, extract_value, "
                 "screenshot. Targets may use selector, role+name, label, placeholder, testid, or text. "
                 "For fill/type/autocomplete use value. For autocomplete also use choose_text/option_text "
                 "or option_selector/choose_selector. For native select_option, use value/option_value, "
                 "option_text/option_label/label_value, index, or values for MCP-style multi/single selection."
             ),
             "timeout_ms": "int: default timeout per step, default 2500, max 30000",
-            "condition_timeout_ms": (
-                "int: default timeout for condition waits, default 10000, max 30000"
-            ),
-            "wait_after_each_ms": (
-                "int: optional pause after successful steps, max 5000; prefer condition wait ops"
-            ),
+            "condition_timeout_ms": ("int: default timeout for condition waits, default 10000, max 30000"),
+            "wait_after_each_ms": ("int: optional pause after successful steps, max 5000; prefer condition wait ops"),
             "continue_on_error": "bool: when true, continue after failed optional/non-critical steps",
             "global_timeout_ms": (
                 "int: hard ceiling for the full batch, default derived from step count "

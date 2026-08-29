@@ -321,20 +321,22 @@ fingerprint_artifact_root/
 
 Symphony 直接使用上例中 agent-core 的 `Model`，复用统一的 provider、连接池和回调，不增加额外 LLM 包装层。Symphony 内部统一将编排请求转换为 `Model.invoke()`，并处理 timeout、请求覆盖、错误上下文和 JSON 修复；模型账号及默认模型的选择仍由使用方显式注入。
 
-### OrchestrationService
+### SymphonyGraphEngine
 
-当前服务接口为：
+`SymphonyGraphEngine` 是统一的公开图谱入口。当前静态图生命周期由其内部的 `OrchestrationService`
+实现，使用 `SymphonyRuntime` 时通过 `runtime.graph_engine` 访问：
 
 ```python
-status = service.status(expected_snapshot=None)
-build_result = await service.build(
+engine = runtime.graph_engine
+status = engine.status(expected_snapshot=None)
+build_result = await engine.build(
     force=False,
     progress=on_progress,
     prepare_artifact=None,
 )
-cancel_status = await service.cancel_build()
-graph = service.read(version=None)
-plan = await service.plan(
+cancel_status = await engine.cancel_build()
+graph = engine.read(version=None)
+plan = await engine.plan(
     query,
     candidate_ids,
     language="cn",
@@ -354,6 +356,36 @@ plan = await service.plan(
 - `graph.resolve.progress` 保留当前匹配窗口的 `current/total`，并通过 `completed_candidate_count`、`total_candidate_count` 和 `reused_candidate_count` 提供跨窗口的全局候选关系进度；缓存复用的候选关系计入已完成数量。
 - `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
 
+Skill 安装、卸载或审核通过的自演进提交可以使用三个批量接口同步静态图谱。调用方先持久化整批 Skill
+变更，然后只提交变更 ID、幂等请求 ID 和持久化结果的 revision：
+
+```python
+result = await engine.add_skills(
+    ["ocr_invoice", "verify_invoice"],
+    request_id="install-batch-42",
+    source_revision="skill-inventory-v18",
+)
+```
+
+| 接口 | 适用场景 | 图谱处理 |
+|---|---|---|
+| `add_skills()` | 一批新 Skill 已持久化 | 新增节点，计算存量与新增、新增与新增之间的关系 |
+| `update_skills()` | 一批现有 Skill 内容已变化 | 替换节点，失效旧入边和出边，按新 fingerprint 重算受影响关系 |
+| `delete_skills()` | 一批 Skill 已从目标 inventory 删除 | 删除节点、关联边以及 neighbor、I/O 和文本 lookup 引用 |
+
+`add_skills()`、`update_skills()` 和 `delete_skills()` 均以整批为事务，只发布一个不可变图版本。
+一次调用只能包含一种操作；Skill 身份变化应显式执行 delete 后再 add，不使用 update 隐式改 ID。
+`source_revision` 必须标识持久化后的不可变 Skill inventory。服务内部通过 `FingerprintService` 或
+`AtomicCapabilityProvider` 读取目标 `SourceSnapshot` 和完整 fingerprint，并自行读取当前图版本与旧
+content hash；`request_id` 支持响应丢失后的幂等重试。服务会核对 provider 的真实变更集，复用未变化
+关系的 matcher 缓存，并以与全量构建相同的 registry、候选生成、图物化和 lookup 流程生成目标版本；
+任一校验、matcher 或发布步骤失败时，`current.json` 仍指向完整旧版本。自演进模块只依赖
+`SkillGraphUpdater` 协议，无需读取图谱目录、预先生成 fingerprint 或了解 matcher 实现。运行时的具体
+对象是 `SymphonyGraphEngine`；它作为统一图谱入口把当前静态图操作委托给内部
+`OrchestrationService`。`runtime.orchestration` 仅兼容 PR 之前已有的 `status()`、`read()`、
+`build()`、`cancel_build()` 和 `plan()` 调用；新增的三个批量 mutation 接口只从
+`runtime.graph_engine` 暴露，不形成第二套公共入口。
+
 ### 图产物生命周期
 
 图产物目录结构为：
@@ -363,6 +395,8 @@ graph_artifact_root/
 ├── cache/
 │   └── relation_matches.json
 ├── current.json
+├── mutation_requests.json
+├── .publish.lock
 ├── versions/
 │   └── <version>/
 │       └── graph.json
@@ -376,6 +410,8 @@ graph_artifact_root/
 - `force=False` 且 source snapshot 未变化时复用当前产物；能力清单变化后状态会标记为不新鲜。
 - `force=False` 时可复用 `cache/relation_matches.json` 中身份匹配的关系判断；`force=True` 完全绕过该缓存。缓存不属于已发布的版本化图产物。
 - 同一服务实例的构建互斥，避免并发发布互相覆盖。
+- 全量构建和批量变更在发布时共享进程锁与版本 CAS；批量请求的幂等结果保存在
+  `mutation_requests.json`，每个已发布 `graph.json` 也保留对应 mutation 摘要以支持中断恢复。
 
 ### 图构建配置
 

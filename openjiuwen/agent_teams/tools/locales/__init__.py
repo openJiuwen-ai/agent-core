@@ -50,14 +50,18 @@ caller's ``**kwargs`` (only runtime error messages do this — parameter
 descriptions are plain literals).  Text that varies belongs in a Markdown
 slot or a variant-specific key, never in an interpolated ``STRINGS`` value.
 """
+
 from __future__ import annotations
 
 import re
 from functools import cache
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from openjiuwen.core.foundation.prompt import PromptTemplate
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 Translator = Callable[..., str]
 """``(desc_key, key="_desc", *, omit=None, **kwargs) -> str`` — resolves a locale string."""
@@ -101,10 +105,7 @@ def _desc_index(lang: str) -> dict[str, Path]:
             continue
         clash = index.get(path.stem)
         if clash is not None:
-            raise ValueError(
-                f"Duplicate description key '{path.stem}' for language '{lang}': "
-                f"{clash} and {path}"
-            )
+            raise ValueError(f"Duplicate description key '{path.stem}' for language '{lang}': {clash} and {path}")
         index[path.stem] = path
     return index
 
@@ -142,9 +143,7 @@ def _load_fragment(slot: str, lang: str) -> str:
     """
     path = _DESCS_DIR / lang / _FRAGMENTS_DIRNAME / f"{slot}.md"
     if not path.is_file():
-        raise FileNotFoundError(
-            f"Missing description fragment '{slot}' for language '{lang}': expected {path}"
-        )
+        raise FileNotFoundError(f"Missing description fragment '{slot}' for language '{lang}': expected {path}")
     return path.read_text(encoding="utf-8").strip()
 
 
@@ -178,13 +177,11 @@ def _render_desc(tmpl: PromptTemplate, desc_key: str, lang: str, omit: frozenset
     # assembler's silent "reinstate the {{literal}}" behaviour ever reaching a
     # model-facing string.
     if "{{" in rendered:
-        raise ValueError(
-            f"Unresolved placeholder left in description '{desc_key}' (language '{lang}')"
-        )
+        raise ValueError(f"Unresolved placeholder left in description '{desc_key}' (language '{lang}')")
     return rendered
 
 
-def make_translator(lang: str = "cn") -> Translator:
+def make_translator(lang: str = "cn", ws_cache: "WorkspaceCache | None" = None) -> Translator:
     """Create a language-bound translator closure.
 
     Each call returns an independent closure — safe for concurrent use
@@ -192,6 +189,13 @@ def make_translator(lang: str = "cn") -> Translator:
 
     Args:
         lang: Language code; anything other than ``"en"`` resolves to ``cn``.
+        ws_cache: The team's resident ``WorkspaceCache``. When set, tool
+            descriptions consult the team's evolved ``prompts/tool/`` files
+            first: tool-level md via
+            ``ws_cache.get_tool_md`` (rendered ``{{slot}}`` fragments),
+            param-level via ``ws_cache.get_tool_param``. ``None`` (unit tests /
+            ``evolution_enabled=false`` / single agent) resolves straight from
+            the framework defaults — exactly the pre-evolvable behaviour.
 
     Returns:
         ``t(desc_key, key="_desc", *, omit=None, **kwargs) -> str``. ``kwargs``
@@ -199,6 +203,9 @@ def make_translator(lang: str = "cn") -> Translator:
         messages use this); Markdown ``_desc`` slots are filled from shared
         fragments and take no ``kwargs``. ``omit`` names capability slots to
         collapse to empty (``_desc`` only) — see the module docstring.
+
+    Read order (ws_cache set): tool-level ``ws_cache.get_tool_md`` → descs/ md →
+    STRINGS ``_desc``; param-level ``ws_cache.get_tool_param`` → STRINGS.
     """
     if lang == "en":
         from openjiuwen.agent_teams.tools.locales import en as mod
@@ -207,6 +214,22 @@ def make_translator(lang: str = "cn") -> Translator:
     strings: dict[str, str] = mod.STRINGS
 
     def t(desc_key: str, key: str = "_desc", *, omit: frozenset[str] | None = None, **kwargs: str) -> str:
+        # Consult the team workspace first when a cache is bound.
+        if ws_cache is not None:
+            if key == "_desc":
+                evolved = ws_cache.get_tool_md(desc_key)
+                if evolved is not None:
+                    return _render_desc(
+                        PromptTemplate(name=f"{desc_key}._desc", content=evolved),
+                        desc_key,
+                        lang,
+                        omit or frozenset(),
+                    )
+            else:
+                evolved = ws_cache.get_tool_param(desc_key, key)
+                if evolved is not None:
+                    return evolved.format_map(kwargs) if kwargs else evolved
+        # Framework fallback — the original resolution path.
         if key == "_desc":
             tmpl = _load_desc(desc_key, lang)
             if tmpl is not None:
@@ -218,7 +241,11 @@ def make_translator(lang: str = "cn") -> Translator:
                     f"expected Markdown at {_DESCS_DIR / lang}/<domain>/{desc_key}.md "
                     f"or STRINGS['{dict_key}']"
                 )
+            return strings[dict_key]
         raw = strings[f"{desc_key}.{key}"]
         return raw.format_map(kwargs) if kwargs else raw
 
     return t
+
+
+__all__ = ["Translator", "make_translator"]

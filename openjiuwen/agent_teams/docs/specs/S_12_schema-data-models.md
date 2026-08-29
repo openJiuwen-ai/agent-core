@@ -765,14 +765,18 @@ CANCELLED    -> (terminal)
 ### 评审投票数据面（F_62）
 
 - **动态票表 `team_review_vote_{session}`**（`TeamTaskReviewVoteBase`，
-  `models._get_review_vote_model`；表名刻意避开 `team_task_` 前缀以免被任务表迁移扫描误判）：
+  `models._get_review_vote_model`；表名避开 `team_task_` 前缀：早期迁移函数靠前缀全扫判型，
+  `review_vote` 不进 task 分支；2026-08-24 后迁移只扫当前 session 的
+  `task`/`dependency`/`message` 3 张候选表（见 F_83 § 后续修复），`review_vote` 不在
+  候选集，表名约定保留为历史一致）：
   `id`（自增 PK）、`team_name`（FK）、`task_id`、`review_round`、`reviewer`、`decision`
   （pass/fail）、`feedback`（可空）、`created_at`。复合索引 `(task_id, review_round)`。
   **追加写**：改票 = 再插一行，tally 取每 reviewer 最新一票（`get_review_votes` 按 `id` 升序）；
   旧轮票由 `review_round` 分区自然作废，全量留痕可审计。
 - **任务行新列**：`review_round INT NOT NULL DEFAULT 0`（`submit_for_review` CAS 原子自增）、
   `max_review_rounds INT NULL`（per-task 轮数上限）。迁移在
-  `engine._ensure_dynamic_table_indexes`（ALTER ADD COLUMN，幂等）。
+  `engine._ensure_dynamic_table_indexes`（ALTER ADD COLUMN，幂等；仅对当前 session 已
+  存在的老表跑，新建表跳过——见 F_83 § 后续修复）。
 - **`team_info` 新列**：`dispatch_mode TEXT NOT NULL DEFAULT 'autonomous'` 与
   `enable_task_verification BOOLEAN NOT NULL DEFAULT 0`——build_team 选定的**实例级生效值**，
   冷恢复回填 `TeamBackend`。静态表迁移 `engine._ensure_team_info_capability_columns`。
