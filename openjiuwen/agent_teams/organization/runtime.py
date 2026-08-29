@@ -334,6 +334,7 @@ class OrganizationRuntimeManager:
                             ))
                         self._subscribed_topics.discard(subscribed)
                 backend.org_task_manager = None
+                backend.org_message_service = None
                 transport = getattr(backend, "org_transport", None)
                 if transport is not None:
                     await transport.shutdown()
@@ -348,7 +349,7 @@ class OrganizationRuntimeManager:
                         remove_tool(tool_name)
                 self._team_organizations.pop(key, None)
 
-            deleted = await manager.task_pool.dissolve_organization()
+            deleted = await manager.dissolve_organization()
             remove_process_org_manager(
                 organization_id=organization_id,
                 db=owner_backend.db,
@@ -479,6 +480,7 @@ class OrganizationRuntimeManager:
         from openjiuwen.agent_teams.organization.transport_api import TransportAPI
 
         backend.org_task_manager = manager.task_pool
+        backend.org_message_service = manager.message_service
         if backend.messager is None:
             raise ValueError(f"team has no messager for organization transport: {backend.team_name}")
         backend.org_transport = TransportAPI(
@@ -510,6 +512,7 @@ class OrganizationRuntimeManager:
 
             for tool in create_org_leader_tools(
                 manager=manager.task_pool,
+                message_service=manager.message_service,
                 team_id=backend.team_name,
                 leader_id=leader_id,
                 transport=backend.org_transport,

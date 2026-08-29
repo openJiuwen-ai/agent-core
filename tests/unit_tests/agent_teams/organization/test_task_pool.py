@@ -77,6 +77,7 @@ class FakeBackend:
         self.db = db
         self.messager = messager
         self.org_task_manager = None
+        self.org_message_service = None
         self.org_transport = None
 
 
@@ -425,30 +426,17 @@ async def test_completed_event_points_to_db_result(org_manager):
 
 
 @pytest.mark.asyncio
-async def test_leader_message_persists_content_without_publishing(org_manager):
-    manager, messager = org_manager
-    result = await manager.send_leader_message(
-        from_team_id="team-a",
-        from_leader_id="leader-a",
-        to_team_id="team-b",
-        content="Please take the API compatibility slice.",
-    )
-    assert result.ok
-
-    message_events = [m for _, m in messager.published if m.event_type == OrgEvent.LEADER_MESSAGE]
-    assert not message_events
-
-    messages = await manager.list_leader_messages(team_id="team-b")
-    assert messages[0]["content"] == "Please take the API compatibility slice."
-    assert messages[0]["message_id"] == result.data["message_id"]
-
-
-@pytest.mark.asyncio
 async def test_org_send_leader_message_tool_delivers_via_transport(org_manager):
+    from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.tools import OrgSendLeaderMessageTool
     from openjiuwen.agent_teams.organization.transport_api import TransportAPI
 
     manager, messager = org_manager
+    message_service = OrgMessageService(
+        db=manager.db,
+        organization_id=manager.organization_id,
+        session_id=manager.session_id,
+    )
     await manager.register_leader(team_id="team-a", leader_id="leader-a")
     await manager.register_leader(team_id="team-b", leader_id="leader-b")
     transport = TransportAPI(
@@ -457,7 +445,9 @@ async def test_org_send_leader_message_tool_delivers_via_transport(org_manager):
         from_team_id="team-a",
         messager=messager,
     )
-    tool = OrgSendLeaderMessageTool(manager, "team-a", "leader-a", transport=transport)
+    tool = OrgSendLeaderMessageTool(
+        manager, "team-a", "leader-a", message_service=message_service, transport=transport
+    )
     output = await tool.invoke(
         {
             "content": "Please take the API compatibility slice.",
@@ -473,7 +463,7 @@ async def test_org_send_leader_message_tool_delivers_via_transport(org_manager):
     assert payload["message_id"] == output.data["message_id"]
     assert "content" not in payload
 
-    messages = await manager.list_leader_messages(team_id="team-b")
+    messages = await message_service.list_leader_messages(team_id="team-b")
     assert messages[0]["content"] == "Please take the API compatibility slice."
 
 

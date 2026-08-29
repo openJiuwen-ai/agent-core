@@ -8,6 +8,10 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
     LaunchedExpertTeam,
 )
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
+from openjiuwen.agent_teams.organization.message_service import (
+    OrgMessageOpResult,
+    OrgMessageService,
+)
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.schema import (
     OrgAssignment,
@@ -39,6 +43,8 @@ __all__ = [
     "OrgLeaderHandle",
     "OrganizationSpec",
     "OrganizationRuntimeManager",
+    "OrgMessageOpResult",
+    "OrgMessageService",
     "OrgTask",
     "OrgTaskCreator",
     "OrgTaskManager",

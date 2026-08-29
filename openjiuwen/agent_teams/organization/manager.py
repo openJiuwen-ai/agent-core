@@ -9,13 +9,14 @@ from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.organization.events import BaseOrgEvent, OrgTopic
+from openjiuwen.agent_teams.organization.message_service import OrgMessageService
 from openjiuwen.agent_teams.organization.schema import OrgLeaderHandle, OrganizationSpec
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 
 
 class TeamOrganizationManager:
-    """Owns one organization's DB-backed task pool in the current process."""
+    """Owns one organization's DB-backed task pool and message service."""
 
     def __init__(
         self,
@@ -32,6 +33,11 @@ class TeamOrganizationManager:
             db=db,
             organization_id=organization_id,
             messager=messager,
+            session_id=session_id,
+        )
+        self.message_service = OrgMessageService(
+            db=db,
+            organization_id=organization_id,
             session_id=session_id,
         )
 
@@ -67,6 +73,15 @@ class TeamOrganizationManager:
         """Return organization metadata together with its current leaders."""
 
         return await self.task_pool.get_organization()
+
+    async def dissolve_organization(self) -> dict[str, int]:
+        """Purge inbox rows then erase task-pool / membership state."""
+
+        deleted: dict[str, int] = {
+            "leader_messages": await self.message_service.purge_organization(),
+        }
+        deleted.update(await self.task_pool.dissolve_organization())
+        return deleted
 
     async def publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:
         """Publish a small organization event after durable state is updated."""

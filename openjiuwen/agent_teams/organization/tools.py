@@ -19,6 +19,7 @@ from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.organization.transport_api import TransportAPI
 
@@ -32,9 +33,11 @@ class _OrgLeaderTool(TeamTool):
         manager: OrgTaskManager,
         team_id: str,
         leader_id: str,
+        message_service: "OrgMessageService | None" = None,
     ) -> None:
         super().__init__(ToolCard(id=f"team_org.{name}", name=name, description=description))
         self.manager = manager
+        self.message_service = message_service
         self.team_id = team_id
         self.leader_id = leader_id
 
@@ -352,13 +355,20 @@ class OrgViewOrganizationTool(_OrgControlTool):
 class OrgViewTasksTool(_OrgLeaderTool):
     """View organization-level tasks for LLM claim/delegate decisions."""
 
-    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService | None" = None,
+    ) -> None:
         super().__init__(
             name="org_view_tasks",
             description="View organization-level tasks and leader messages.",
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
+            message_service=message_service,
         )
         self.card.input_params = {
             "type": "object",
@@ -394,7 +404,9 @@ class OrgViewTasksTool(_OrgLeaderTool):
             tasks = await self.manager.list_tasks_for_team(self.team_id, include_open=False, limit=limit)
             return ToolOutput(success=True, data={"tasks": [task.brief() for task in tasks]})
         if action == "messages":
-            messages = await self.manager.list_leader_messages(team_id=self.team_id, limit=limit)
+            if self.message_service is None:
+                return ToolOutput(success=False, error="organization message service is not bound")
+            messages = await self.message_service.list_leader_messages(team_id=self.team_id, limit=limit)
             return ToolOutput(success=True, data={"messages": messages})
         if action == "list":
             tasks = await self.manager.list_tasks(status=inputs.get("status"), limit=limit)
@@ -584,6 +596,7 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
         manager: OrgTaskManager,
         team_id: str,
         leader_id: str,
+        message_service: "OrgMessageService",
         transport: "TransportAPI | None" = None,
     ) -> None:
         super().__init__(
@@ -592,6 +605,7 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
+            message_service=message_service,
         )
         self.transport = transport
         self.card.input_params = {
@@ -610,11 +624,13 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
         content = inputs.get("content")
         if not content:
             return ToolOutput(success=False, error="'content' is required")
+        if self.message_service is None:
+            return ToolOutput(success=False, error="organization message service is not bound")
         if self.transport is None:
             return ToolOutput(success=False, error="organization transport is not bound")
 
         to_team_id = inputs.get("to_team_id")
-        result = await self.manager.send_leader_message(
+        result = await self.message_service.send_leader_message(
             from_team_id=self.team_id,
             from_leader_id=self.leader_id,
             content=content,
@@ -877,15 +893,18 @@ def create_org_leader_tools(
     manager: OrgTaskManager,
     team_id: str,
     leader_id: str,
+    message_service: "OrgMessageService",
     transport: "TransportAPI | None" = None,
 ) -> list[TeamTool]:
     return [
-        OrgViewTasksTool(manager, team_id, leader_id),
+        OrgViewTasksTool(manager, team_id, leader_id, message_service=message_service),
         OrgCreateTaskTool(manager, team_id, leader_id),
         OrgClaimTaskTool(manager, team_id, leader_id),
         OrgDelegateTaskTool(manager, team_id, leader_id),
         OrgUpdateTaskTool(manager, team_id, leader_id),
-        OrgSendLeaderMessageTool(manager, team_id, leader_id, transport=transport),
+        OrgSendLeaderMessageTool(
+            manager, team_id, leader_id, message_service=message_service, transport=transport
+        ),
         OrgViewChildTasksTool(manager, team_id, leader_id),
         OrgViewPendingReviewsTool(manager, team_id, leader_id),
         OrgReviewTaskTool(manager, team_id, leader_id),

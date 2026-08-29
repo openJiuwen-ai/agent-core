@@ -246,11 +246,20 @@ def create_team_tools(
 
     org_task_manager = getattr(agent_team, "org_task_manager", None)
     if org_task_manager is not None:
+        from openjiuwen.agent_teams.organization.message_service import OrgMessageService
         from openjiuwen.agent_teams.organization.tools import create_org_leader_tools
 
         leader_id = agent_team.leader_member_name or agent_team.member_name
+        org_message_service = getattr(agent_team, "org_message_service", None)
+        if org_message_service is None:
+            org_message_service = OrgMessageService(
+                db=org_task_manager.db,
+                organization_id=org_task_manager.organization_id,
+                session_id=org_task_manager.session_id,
+            )
         org_tools = create_org_leader_tools(
             manager=org_task_manager,
+            message_service=org_message_service,
             team_id=agent_team.team_name,
             leader_id=leader_id,
             transport=getattr(agent_team, "org_transport", None),
