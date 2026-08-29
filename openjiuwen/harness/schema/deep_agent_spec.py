@@ -200,6 +200,7 @@ class ProgressiveToolSpec(BaseModel):
     """
 
     enabled: bool = True
+    search_limit: int = 5
 
 
 class SysOperationSpec(BaseModel):
@@ -636,6 +637,7 @@ class DeepAgentSpec(BaseModel):
         pt = self.progressive_tool
         return {
             "progressive_tool_enabled": pt.enabled,
+            "tool_search_limit": pt.search_limit,
         }
 
 

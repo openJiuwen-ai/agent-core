@@ -83,6 +83,7 @@ _IDENTITY_SECTION = "identity"
 _SKILLS_SECTION = "legacy_skills"
 _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
+_PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY = "_openjiuwen_prompt_attachment_commit_callbacks"
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
 # Above this, the per-stage breakdown of invoke preparation is reported at INFO
 # so a slow start shows up without having to enable debug logging. Preparation
@@ -768,6 +769,7 @@ class ReActAgent(BaseAgent):
             ctx.inputs = previous_inputs
         if not parts:
             return
+        await self._sync_prompt_attachments(ctx, context)
         body = "\n".join(parts)
         await context.add_messages(UserMessage(content=f"{prefix}{body}"))
 
@@ -936,25 +938,60 @@ class ReActAgent(BaseAgent):
             ctx: AgentCallbackContext,
             final_system: List[SystemMessage],
     ) -> dict:
-        """Build the final ContextWindow inputs after model-call rails run."""
-        context_window_kwargs = {
+        """Build the final ContextWindow inputs after model-call rails run.
+
+        Prompt attachments are persisted in conversation order: the first
+        snapshot is synchronized before the first user message, and later
+        changes are synchronized immediately before the model call.  They are
+        intentionally left in ``context_messages``; no final-window mutator
+        moves them into ``system_messages``.
+        """
+        return {
             "system_messages": final_system,
             "tools": ctx.inputs.tools if ctx.inputs.tools else None,
         }
 
-        prompt_attachment_manager = getattr(self, "prompt_attachment_manager", None)
-        make_window_mutator = getattr(prompt_attachment_manager, "make_window_mutator", None)
-        if callable(make_window_mutator):
-            session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
+    async def _sync_prompt_attachments(
+            self,
+            ctx: AgentCallbackContext,
+            context: ModelContext,
+    ) -> None:
+        """Append changed prompt attachments to conversation history."""
+        manager = getattr(self, "prompt_attachment_manager", None)
+        sync_to_context = getattr(manager, "sync_to_context", None)
+        if not callable(sync_to_context):
+            return
+        session_id = (
+            ctx.session.get_session_id()
+            if ctx.session is not None
+            else context.session_id()
+        )
+        try:
+            await sync_to_context(context, session_id)
+        except Exception as exc:  # noqa: BLE001 - attachment updates must not block the model
+            logger.warning(
+                "[ReActAgent] prompt attachment history sync failed: %s",
+                exc,
+                exc_info=True,
             )
-            context_window_kwargs["window_mutators"] = [
-                make_window_mutator(session_id)
-            ]
+            return
 
-        return context_window_kwargs
+        callbacks = ctx.extra.pop(_PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY, [])
+        if not isinstance(callbacks, list):
+            return
+        for callback in callbacks:
+            if not callable(callback):
+                continue
+            try:
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - callback failures must not block the model
+                logger.warning(
+                    "[ReActAgent] prompt attachment delivery callback failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
@@ -978,6 +1015,7 @@ class ReActAgent(BaseAgent):
         """
         # --- Finalize system message and context window (post-rails) ---
         final_system = [SystemMessage(content=self.prompt_builder.build())]
+        await self._sync_prompt_attachments(ctx, ctx.context)
         llm = self._get_llm()
         kv_runtime = self._kv_cache_model_call_hook.resolve_runtime(
             llm,

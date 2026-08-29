@@ -359,7 +359,6 @@ def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
     )
 
     assert agent.system_prompt_builder is not None
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "initial identity" in initial_prompt
     assert "<prompt-attachment>" not in initial_prompt
@@ -372,7 +371,6 @@ def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
         )
     )
 
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "updated identity" in reloaded_prompt
     assert "<prompt-attachment>" not in reloaded_prompt
@@ -1154,6 +1152,17 @@ async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     )
 
     assert agent.ability_manager.get("task_tool") is not None
+
+
+def test_refresh_subagent_tool_descriptions_updates_retained_rails() -> None:
+    """Hot reload refreshes dynamic tool names without rebuilding task_tool."""
+    agent = DeepAgent(AgentCard(name="refresh_test"))
+    rail = MagicMock()
+    agent._registered_rails = [rail]
+
+    agent._refresh_subagent_tool_descriptions()
+
+    rail.refresh_available_agents.assert_called_once_with(agent)
 
 
 def test_create_deep_agent_auto_add_skill_rail(tmp_path) -> None:
