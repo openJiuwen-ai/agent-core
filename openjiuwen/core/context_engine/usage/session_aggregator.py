@@ -67,15 +67,15 @@ class SessionKVCacheAggregator:
             return self.snapshot(scope_key)
 
         if usage.input_tokens is None or usage.cache_read_tokens is None:
-            if any(
-                value is not None
-                for value in (
-                    usage.input_tokens,
-                    usage.cache_read_tokens,
-                    usage.cache_miss_tokens,
-                    usage.cache_write_tokens,
+            has_reported_usage = any(
+                (
+                    usage.input_tokens is not None,
+                    usage.cache_read_tokens is not None,
+                    usage.cache_miss_tokens is not None,
+                    usage.cache_write_tokens is not None,
                 )
-            ):
+            )
+            if has_reported_usage:
                 accumulator.calls_partial += 1
                 self._merge_quality(accumulator, "partial")
             else:
