@@ -216,12 +216,14 @@ class OrganizationRuntimeManager:
             inviter_agent, inviter_backend = await self._resolve_leader(inviter_team_id, session_id)
             try:
                 target_agent, target_backend = await self._resolve_leader(target_team_id, session_id)
-            except ValueError:
+            except ValueError as exc:
                 if self._team_activator is None:
                     raise
                 activated_team_id = await self._team_activator(target_team_id, session_id)
                 if not activated_team_id:
-                    raise ValueError(f"configured team could not be activated: {target_team_id}")
+                    raise ValueError(
+                        f"configured team could not be activated: {target_team_id}"
+                    ) from exc
                 target_team_id = activated_team_id
                 target_agent, target_backend = await self._resolve_leader(target_team_id, session_id)
             manager = get_process_org_manager(

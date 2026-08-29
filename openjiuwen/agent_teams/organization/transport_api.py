@@ -134,7 +134,8 @@ class TransportAPI:
 
         return None
 
-    def _is_same_process(self, from_team_id: str, to_team_id: str) -> bool:
+    @staticmethod
+    def _is_same_process(from_team_id: str, to_team_id: str) -> bool:
         """当前 Organization 仅支持同进程成员，一律视为 inprocess。
 
         后续可改为查询 Team Runtime 注册信息 / 配置中的进程归属。

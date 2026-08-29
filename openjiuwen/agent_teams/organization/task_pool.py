@@ -50,12 +50,25 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskSource,
     OrgTaskSourceRecord,
     OrgTaskStatus,
+    org_static_tables,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
 
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_org_static_tables(sync_conn) -> None:
+    SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
+
+
+async def _ensure_org_schema(db: TeamDatabase) -> None:
+    await db.initialize()
+    if db.engine is None:
+        return
+    async with db.engine.begin() as conn:
+        await conn.run_sync(_ensure_org_static_tables)
 
 
 @dataclass
@@ -105,7 +118,7 @@ class OrgTaskManager:
         if self._sessions is None:
             self._sessions = DbSessions(self.db.session_local)
         async with self.db.engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+            await conn.run_sync(_ensure_org_static_tables)
 
     async def ensure_organization(
         self,
@@ -183,7 +196,7 @@ class OrgTaskManager:
         organization binding before its leader tool set is assembled.
         """
 
-        await db.initialize()
+        await _ensure_org_schema(db)
         if db.session_local is None:
             raise RuntimeError("TeamDatabase is not initialized")
         sessions = DbSessions(db.session_local)
@@ -281,7 +294,8 @@ class OrgTaskManager:
                 )
                 session.add(row)
             else:
-                row.leader_member_name = leader_member_name if leader_member_name is not None else row.leader_member_name
+                if leader_member_name is not None:
+                    row.leader_member_name = leader_member_name
                 if capabilities is not None:
                     row.capabilities_json = _json_dumps(capabilities)
                 row.updated_at = now
@@ -312,7 +326,10 @@ class OrgTaskManager:
     ) -> OrgTaskOpResult:
         await self.initialize()
         capabilities = required_capabilities or []
-        if not capabilities or any(not isinstance(capability, str) or not capability.strip() for capability in capabilities):
+        if not capabilities or any(
+            not isinstance(capability, str) or not capability.strip()
+            for capability in capabilities
+        ):
             return OrgTaskOpResult(
                 ok=False,
                 reason="required_capabilities must contain at least one non-empty capability",
@@ -355,7 +372,12 @@ class OrgTaskManager:
         task = self._to_task(row)
         await self._publish_task_created(task)
         if delegated_to_team_id:
-            await self._publish_task_delegated(task, created_by.team_id or "", delegated_to_team_id, delegated_to_leader_id)
+            await self._publish_task_delegated(
+                task,
+                created_by.team_id or "",
+                delegated_to_team_id,
+                delegated_to_leader_id,
+            )
         return OrgTaskOpResult(ok=True, task=task)
 
     async def get_task(self, task_id: str) -> OrgTask | None:
@@ -391,7 +413,10 @@ class OrgTaskManager:
         await self.initialize()
         stmt = select(OrgTaskRecord).where(OrgTaskRecord.organization_id == self.organization_id)
         if include_open:
-            stmt = stmt.where((OrgTaskRecord.assigned_team_id == team_id) | (OrgTaskRecord.status == OrgTaskStatus.OPEN.value))
+            stmt = stmt.where(
+                (OrgTaskRecord.assigned_team_id == team_id)
+                | (OrgTaskRecord.status == OrgTaskStatus.OPEN.value)
+            )
         else:
             stmt = stmt.where(OrgTaskRecord.assigned_team_id == team_id)
         stmt = stmt.order_by(OrgTaskRecord.updated_at.desc()).limit(limit)
@@ -443,7 +468,11 @@ class OrgTaskManager:
             row = await session.get(OrgTaskRecord, task_id)
             if row is None or row.organization_id != self.organization_id:
                 return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
-            if row.status in {OrgTaskStatus.COMPLETED.value, OrgTaskStatus.CANCELLED.value, OrgTaskStatus.EXPIRED.value}:
+            if row.status in {
+                OrgTaskStatus.COMPLETED.value,
+                OrgTaskStatus.CANCELLED.value,
+                OrgTaskStatus.EXPIRED.value,
+            }:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
             if row.assigned_team_id and row.assigned_team_id != from_team_id:
                 return OrgTaskOpResult(ok=False, reason=f"task is assigned to another team: {row.assigned_team_id}")
@@ -479,7 +508,11 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
             if row.assigned_team_id != team_id:
                 return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
-            if row.status in {OrgTaskStatus.COMPLETED.value, OrgTaskStatus.CANCELLED.value, OrgTaskStatus.EXPIRED.value}:
+            if row.status in {
+                OrgTaskStatus.COMPLETED.value,
+                OrgTaskStatus.CANCELLED.value,
+                OrgTaskStatus.EXPIRED.value,
+            }:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
             child_stmt = select(OrgTaskRecord).where(
                 OrgTaskRecord.organization_id == self.organization_id,
@@ -740,7 +773,11 @@ class OrgTaskManager:
                 summary_task_id=summary_task_id,
             )
         )
-        return OrgTaskOpResult(ok=True, task=await self.get_task(summary_task_id), data={"source_task_ids": source_task_ids})
+        return OrgTaskOpResult(
+            ok=True,
+            task=await self.get_task(summary_task_id),
+            data={"source_task_ids": source_task_ids},
+        )
 
     async def list_summary_sources(self, *, summary_task_id: str) -> list[OrgTaskSource]:
         await self.initialize()
@@ -921,14 +958,18 @@ class OrgTaskManager:
             await self.messager.publish(OrgTopic.LEADER.build(session_id, self.organization_id), message)
         # Leader inbox delivery is owned by TransportAPI.deliver; skip duplicate TEAM_INBOX publish.
         if team_inbox_id and not isinstance(event, OrgLeaderMessageEvent):
-            await self.messager.publish(OrgTopic.TEAM_INBOX.build(session_id, self.organization_id, team_inbox_id), message)
+            await self.messager.publish(
+                OrgTopic.TEAM_INBOX.build(session_id, self.organization_id, team_inbox_id),
+                message,
+            )
 
     async def publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:
         """Publish an organization lifecycle event through the configured transport."""
 
         await self._publish_event(event, team_inbox_id=team_inbox_id)
 
-    def _to_task(self, row: OrgTaskRecord) -> OrgTask:
+    @staticmethod
+    def _to_task(row: OrgTaskRecord) -> OrgTask:
         output_spec = _json_loads(row.output_spec_json, None)
         output_context = _json_loads(row.output_context_json, None)
         return OrgTask(

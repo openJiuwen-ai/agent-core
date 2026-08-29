@@ -108,10 +108,17 @@ class OrgCreateOrganizationTool(_OrgControlTool):
 class OrgInviteTeamTool(_OrgControlTool):
     """Invite another active team; invitation acceptance is automatic in v1."""
 
+    _tool_name = "org_invite_team"
+    _tool_description = (
+        "Invite an active team in this session to the organization. "
+        "The invitation is accepted automatically."
+    )
+    _target_team_param_description = "Active team to add."
+
     def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
         super().__init__(
-            name="org_invite_team",
-            description="Invite an active team in this session to the organization. The invitation is accepted automatically.",
+            name=self._tool_name,
+            description=self._tool_description,
             runtime_manager=runtime_manager,
             team_id=team_id,
             session_id=session_id,
@@ -120,7 +127,10 @@ class OrgInviteTeamTool(_OrgControlTool):
             "type": "object",
             "properties": {
                 "organization_id": {"type": "string"},
-                "team_id": {"type": "string", "description": "Active team to add."},
+                "team_id": {
+                    "type": "string",
+                    "description": self._target_team_param_description,
+                },
             },
             "required": ["organization_id", "team_id"],
         }
@@ -150,7 +160,10 @@ class OrgDissolveOrganizationTool(_OrgControlTool):
     def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
         super().__init__(
             name="org_dissolve_organization",
-            description="Dissolve an organization owned by this team, remove its members, and delete its task-pool data.",
+            description=(
+                "Dissolve an organization owned by this team, remove its members, "
+                "and delete its task-pool data."
+            ),
             runtime_manager=runtime_manager,
             team_id=team_id,
             session_id=session_id,
@@ -212,23 +225,11 @@ class OrgListConfiguredTeamsTool(_OrgControlTool):
 class OrgActivateAndInviteTeamTool(OrgInviteTeamTool):
     """Activate a configured team when necessary, then invite it into the organization."""
 
-    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
-        _OrgControlTool.__init__(
-            self,
-            name="org_activate_and_invite_team",
-            description="Activate a configured team if dormant, then invite it into the organization.",
-            runtime_manager=runtime_manager,
-            team_id=team_id,
-            session_id=session_id,
-        )
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "organization_id": {"type": "string"},
-                "team_id": {"type": "string", "description": "Configured profile or active team to add."},
-            },
-            "required": ["organization_id", "team_id"],
-        }
+    _tool_name = "org_activate_and_invite_team"
+    _tool_description = (
+        "Activate a configured team if dormant, then invite it into the organization."
+    )
+    _target_team_param_description = "Configured profile or active team to add."
 
 
 class OrgListExpertGroupsTool(_OrgControlTool):

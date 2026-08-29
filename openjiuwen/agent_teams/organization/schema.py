@@ -9,8 +9,19 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
+from sqlalchemy import Table
 from sqlmodel import Field as SQLField
 from sqlmodel import SQLModel
+
+ORG_STATIC_TABLE_NAMES = (
+    "org_info",
+    "org_leader",
+    "org_task",
+    "org_leader_message",
+    "org_task_event",
+    "org_task_review",
+    "org_task_source",
+)
 
 
 class OrgTaskStatus(StrEnum):
@@ -242,7 +253,17 @@ class OrgTaskSourceRecord(SQLModel, table=True):
     created_at: int
 
 
+def org_static_tables() -> list[Table]:
+    """Return organization static tables from the global SQLModel registry."""
+    return [
+        table
+        for name, table in SQLModel.metadata.tables.items()
+        if name in ORG_STATIC_TABLE_NAMES
+    ]
+
+
 __all__ = [
+    "ORG_STATIC_TABLE_NAMES",
     "OrgAssignment",
     "OrgAssignmentType",
     "OrgCreatorType",
@@ -263,4 +284,5 @@ __all__ = [
     "OrgTaskSource",
     "OrgTaskSourceRecord",
     "OrgTaskStatus",
+    "org_static_tables",
 ]
