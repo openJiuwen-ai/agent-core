@@ -33,7 +33,6 @@ from openjiuwen.agent_evolving.agent_rl.online.backends.sft.rollouter import (
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sft_data_formatter import write_sft_parquet
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.supervisor_client import SupervisorClient
 from openjiuwen.agent_evolving.agent_rl.online.core.training_process import ManagedTrainingProcess
-from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
 from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRAPublishRequest
 
 logger = logging.getLogger("online_rl.scheduler")
@@ -47,7 +46,7 @@ class SFTTrainingExecutor:
         *,
         base_model_path: str,
         lora_repo: LoRARepositoryProtocol | None,
-        notifier: InferenceNotifier | None,
+        notifier: Any | None,
         training_gpu_ids: str,
         rollouter_name: str = "multi_turn_supervisor",
         supervisor_url: str = "",

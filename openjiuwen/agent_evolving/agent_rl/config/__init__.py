@@ -26,6 +26,7 @@ from openjiuwen.agent_evolving.agent_rl.config.offline_config import (
     VerlTrainerHydraOverlay,
     VerlVllmEngineHydraKwargs,
 )
+from openjiuwen.agent_evolving.agent_rl.config.service_config import RLServiceConfig
 
 __all__ = [
     "AdaConfig",
@@ -34,6 +35,7 @@ __all__ = [
     "JiuwenRLHydraOverlay",
     "PersistenceConfig",
     "RLConfig",
+    "RLServiceConfig",
     "RolloutConfig",
     "TrainingConfig",
     "VerlActorFsdpHydraOverlay",

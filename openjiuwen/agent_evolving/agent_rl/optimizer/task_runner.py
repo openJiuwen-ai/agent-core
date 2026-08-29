@@ -411,6 +411,7 @@ class OnlineTaskRunner(BaseTaskRunner):
             "train_sampler": bundle.train_sampler,
         }
         self.verl_trainer = VerlTrainingExecutor(**trainer_kwargs)
+        self.verl_trainer.preserve_provided_old_log_probs = True
 
         if bundle.cleanup_fn:
             bundle.cleanup_fn()
@@ -429,9 +430,6 @@ class OnlineTaskRunner(BaseTaskRunner):
             "OnlineTaskRunner train_on_batch step=%d batch_size=%d",
             self.verl_trainer.global_steps, len(data_proto),
         )
-
-        if "old_log_probs" in data_proto.batch.keys():
-            data_proto.batch.pop("old_log_probs")
 
         metrics = self.verl_trainer.train_step(data_proto, data_proto)
         logger.info("train_step completed: %s", {k: v for k, v in metrics.items() if isinstance(v, (int, float))})

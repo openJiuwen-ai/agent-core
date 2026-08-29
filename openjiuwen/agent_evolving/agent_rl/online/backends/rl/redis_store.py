@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from redis.asyncio import Redis
+from redis.exceptions import WatchError
 
-_DEFAULT_KEY_PREFIX = "rl:traj"
-_DEFAULT_IDX_PREFIX = "rl:traj_idx"
-_DEFAULT_USERS_SET_KEY = "rl:traj_users"
+_DEFAULT_KEY_PREFIX = "rl:v1:traj"
+_DEFAULT_IDX_PREFIX = "rl:v1:traj_idx"
+_DEFAULT_USERS_SET_KEY = "rl:v1:traj_users"
 
 logger = logging.getLogger(__name__)
 
@@ -126,32 +127,37 @@ class RedisTrajectoryStore:
             score = _epoch(datetime.fromisoformat(created_at.replace("Z", "+00:00")))
             prepared.append((sample_id, normalized_user_id, session_id, created_at, payload, score))
 
-        lookup = self._r.pipeline()
-        for sample_id, *_ in prepared:
-            lookup.hget(self._traj_key(sample_id), "status")
-        statuses = await lookup.execute()
-
-        new_samples = [item for item, status in zip(prepared, statuses) if status is None]
-        if not new_samples:
+        if not prepared:
             return set()
 
-        pipe = self._r.pipeline()
-        for sample_id, normalized_user_id, session_id, created_at, payload, score in new_samples:
-            pipe.hset(
-                self._traj_key(sample_id),
-                mapping={
-                    "sample_id": sample_id,
-                    "user_id": normalized_user_id,
-                    "session_id": session_id,
-                    "created_at": created_at,
-                    "status": "pending",
-                    "sample_json": payload,
-                },
-            )
-            pipe.zadd(self._idx_key(normalized_user_id, "pending"), {sample_id: score})
-            pipe.sadd(self._users_set_key, normalized_user_id)
-        await pipe.execute()
-        return {sample_id for sample_id, *_ in new_samples}
+        sample_keys = [self._traj_key(sample_id) for sample_id, *_ in prepared]
+        while True:
+            async with self._r.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(*sample_keys)
+                    statuses = [await pipe.hget(key, "status") for key in sample_keys]
+                    new_samples = [item for item, status in zip(prepared, statuses) if status is None]
+                    if not new_samples:
+                        return set()
+                    pipe.multi()
+                    for sample_id, normalized_user_id, session_id, created_at, payload, score in new_samples:
+                        pipe.hset(
+                            self._traj_key(sample_id),
+                            mapping={
+                                "sample_id": sample_id,
+                                "user_id": normalized_user_id,
+                                "session_id": session_id,
+                                "created_at": created_at,
+                                "status": "pending",
+                                "sample_json": payload,
+                            },
+                        )
+                        pipe.zadd(self._idx_key(normalized_user_id, "pending"), {sample_id: score})
+                        pipe.sadd(self._users_set_key, normalized_user_id)
+                    await pipe.execute()
+                    return {sample_id for sample_id, *_ in new_samples}
+                except WatchError:
+                    continue
 
     async def get_pending_count(self, user_id: str) -> int:
         return int(await self._r.zcard(self._idx_key(user_id, "pending")) or 0)

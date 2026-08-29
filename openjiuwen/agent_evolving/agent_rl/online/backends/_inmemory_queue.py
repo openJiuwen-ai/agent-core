@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -35,6 +36,34 @@ class InMemoryStatusQueue:
                 self._remove(item_id, str(old.get("user_id") or "online"), str(old.get("_store_status") or "pending"))
             self._items[item_id] = normalized
             self._add(item_id, normalized["user_id"], initial_status)
+
+    async def save_once(
+        self,
+        payloads: Sequence[dict[str, Any]],
+        *,
+        user_id: str = "online",
+        initial_status: str = "pending",
+    ) -> set[str]:
+        prepared: list[tuple[str, dict[str, Any]]] = []
+        for payload in payloads:
+            item_id = str(payload.get(self._id_field) or payload.get("id") or "").strip()
+            if not item_id:
+                raise ValueError(f"{self._id_field} is required")
+            normalized = copy.deepcopy(payload)
+            normalized[self._id_field] = item_id
+            normalized["user_id"] = str(normalized.get("user_id") or user_id or "online")
+            normalized["_store_status"] = initial_status
+            prepared.append((item_id, normalized))
+
+        async with self._lock:
+            saved_ids: set[str] = set()
+            for item_id, normalized in prepared:
+                if item_id in self._items:
+                    continue
+                self._items[item_id] = normalized
+                self._add(item_id, normalized["user_id"], initial_status)
+                saved_ids.add(item_id)
+            return saved_ids
 
     async def pending_count(self, user_id: str, *, status: str = "pending") -> int:
         async with self._lock:
