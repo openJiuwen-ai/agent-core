@@ -188,16 +188,25 @@ class SessionModelContext(ModelContext):
             enable_openrouter_model_context_window_tokens=config.enable_openrouter_model_context_window_tokens,
             openrouter_request_timeout=config.openrouter_request_timeout,
         )
-        if (
-            self._default_window_size == config.default_window_message_num
-            and self._context_window_tokens == config.context_window_tokens
-            and self._model_name == config.model_name
-            and self._model_context_window_tokens == next_model_context_window_tokens
-            and self._default_dialogue_round == config.default_window_round_num
-            and self._compression_recall_config == config.compression_recall_config
-            and self._token_counter_binding(self._token_counter)
-            == self._token_counter_binding(token_counter)
-        ):
+        current_model_state = (
+            self._default_window_size,
+            self._context_window_tokens,
+            self._model_name,
+            self._model_context_window_tokens,
+            self._default_dialogue_round,
+            self._compression_recall_config,
+            self._token_counter_binding(self._token_counter),
+        )
+        next_model_state = (
+            config.default_window_message_num,
+            config.context_window_tokens,
+            config.model_name,
+            next_model_context_window_tokens,
+            config.default_window_round_num,
+            config.compression_recall_config,
+            self._token_counter_binding(token_counter),
+        )
+        if current_model_state == next_model_state:
             return False
 
         self._default_window_size = config.default_window_message_num
@@ -1028,7 +1037,11 @@ class SessionModelContext(ModelContext):
                 {"messages": context_window.system_messages, "sections": system_prompt_sections}
             ),
             "skills": self._usage_signature(
-                [section for section in system_prompt_sections if str(getattr(section[0], "value", section[0])) == "skills"]
+                [
+                    section
+                    for section in system_prompt_sections
+                    if str(getattr(section[0], "value", section[0])) == "skills"
+                ]
             ),
             "attachments": self._usage_signature(attachment_messages),
             "tools": self._usage_signature(context_window.tools),

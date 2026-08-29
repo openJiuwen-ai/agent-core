@@ -69,7 +69,12 @@ class SessionKVCacheAggregator:
         if usage.input_tokens is None or usage.cache_read_tokens is None:
             if any(
                 value is not None
-                for value in (usage.input_tokens, usage.cache_read_tokens, usage.cache_miss_tokens, usage.cache_write_tokens)
+                for value in (
+                    usage.input_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_miss_tokens,
+                    usage.cache_write_tokens,
+                )
             ):
                 accumulator.calls_partial += 1
                 self._merge_quality(accumulator, "partial")

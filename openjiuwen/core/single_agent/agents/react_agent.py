@@ -1141,6 +1141,7 @@ class ReActAgent(BaseAgent):
                     exc,
                     exc_info=True,
                 )
+
     def _context_usage_prompt_sections(self) -> list[tuple[ContextCategory, str, str]]:
         """Return builder sections using the four-category product taxonomy."""
         sections: list[tuple[ContextCategory, str, str]] = []
@@ -2559,24 +2560,26 @@ class ReActAgent(BaseAgent):
         stream_lifecycle_owner = bool(kwargs.get("_stream_lifecycle_owner"))
         commit_on_abort = self._session_supports_agent_lifecycle(session)
         invocation_token = bind_usage_invocation_id(invocation_id)
-        ctx.context_usage_attribution = {
-            **{
-                key: delegation_attribution[key]
-                for key in (
-                    "product_session_id",
-                    "parent_cache_identity",
-                    "cache_mode",
-                    "cache_scope",
-                )
-                if key in delegation_attribution
-            },
-            "parent_session_id": parent_session_id,
-            "invocation_id": invocation_id,
-            "parent_invocation_id": parent_invocation_id,
-            "delegation_id": delegation_id,
-            "agent_path": agent_path,
-            "depth": depth,
-        }
+        context_usage_attribution = {}
+        for key in (
+            "product_session_id",
+            "parent_cache_identity",
+            "cache_mode",
+            "cache_scope",
+        ):
+            if key in delegation_attribution:
+                context_usage_attribution[key] = delegation_attribution[key]
+        context_usage_attribution.update(
+            {
+                "parent_session_id": parent_session_id,
+                "invocation_id": invocation_id,
+                "parent_invocation_id": parent_invocation_id,
+                "delegation_id": delegation_id,
+                "agent_path": agent_path,
+                "depth": depth,
+            }
+        )
+        ctx.context_usage_attribution = context_usage_attribution
         attribution_token = bind_usage_attribution(ctx.context_usage_attribution)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
@@ -2660,7 +2663,7 @@ class ReActAgent(BaseAgent):
                 start_iteration = 0
                 if interruption_state is not None:
                     is_tool_interruption = isinstance(interruption_state, ToolInterruptionState)
-                    
+
                     if is_tool_interruption:
                         # Tool Interrupt: not write UserMessage, recovery input is passed to Rail via ctx.extra
                         await self._handle_resume(

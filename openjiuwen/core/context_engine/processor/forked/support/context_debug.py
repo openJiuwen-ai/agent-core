@@ -142,8 +142,12 @@ def _json_safe_debug_value(value: Any) -> Any:
         except Exception:
             try:
                 return _json_safe_debug_value(model_dump())
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "context debug model_dump() failed for %s: %s",
+                    type(value).__name__,
+                    exc,
+                )
     return str(value)
 
 

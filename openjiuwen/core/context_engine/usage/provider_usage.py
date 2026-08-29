@@ -56,7 +56,12 @@ def request_usage_from_metadata(usage: Any) -> RequestKVCacheUsage:
 
     authoritative = bool(getattr(usage, "cache_authoritative", False))
     source = getattr(usage, "cache_source", None) or (
-        "provider_usage" if any(value is not None for value in (read_tokens, miss_tokens, write_tokens)) else "not_reported"
+        "provider_usage"
+        if any(
+            value is not None
+            for value in (read_tokens, miss_tokens, write_tokens)
+        )
+        else "not_reported"
     )
     status = _cache_status(
         getattr(usage, "cache_status", None),
@@ -71,7 +76,11 @@ def request_usage_from_metadata(usage: Any) -> RequestKVCacheUsage:
         cache_read_tokens=read_tokens,
         cache_miss_tokens=miss_tokens,
         cache_write_tokens=write_tokens,
-        hit_rate=(read_tokens / input_tokens) if read_tokens is not None and input_tokens and invalid_reason is None else None,
+        hit_rate=(
+            read_tokens / input_tokens
+            if read_tokens is not None and input_tokens and invalid_reason is None
+            else None
+        ),
         status=status,
         source=source,
         authoritative=authoritative,
@@ -94,7 +103,10 @@ def _parse_nonnegative(value: Any, field_name: str) -> tuple[int | None, str | N
         return (integer, None) if integer >= 0 else (None, f"{field_name}_is_negative")
     if isinstance(value, str):
         text = value.strip()
-        if not text or (text.startswith("+") and not text[1:].isdigit()) or not text.lstrip("+").isdigit():
+        if not text:
+            return None, f"{field_name}_is_not_an_integer"
+        digits = text[1:] if text.startswith("+") else text
+        if not digits.isdigit():
             return None, f"{field_name}_is_not_an_integer"
         integer = int(text)
         return (integer, None) if integer >= 0 else (None, f"{field_name}_is_negative")

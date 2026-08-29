@@ -474,7 +474,11 @@ class ContextUsageAnalyzer:
         if hasattr(value, "model_dump"):
             return cls._canonicalize(value.model_dump(mode="json"))
         if isinstance(value, dict):
-            return {str(key): cls._canonicalize(item) for key, item in sorted(value.items(), key=lambda item: str(item[0]))}
+            sorted_items = sorted(value.items(), key=lambda item: str(item[0]))
+            return {
+                str(key): cls._canonicalize(item)
+                for key, item in sorted_items
+            }
         if isinstance(value, (list, tuple)):
             return [cls._canonicalize(item) for item in value]
         if isinstance(value, set):

@@ -52,7 +52,7 @@ class NativeTokenizerCounter(TokenCounter):
             return 0
         total = 0
         for message in messages:
-            content = self._content_text(message.content)
+            content = self.content_text(message.content)
             piece = f"<|start|>{message.role}\n{content}<|end|>"
             total += self.count(piece, model=model, **kwargs)
             if isinstance(message, AssistantMessage) and message.tool_calls:
@@ -80,7 +80,8 @@ class NativeTokenizerCounter(TokenCounter):
         return total + 3
 
     @staticmethod
-    def _content_text(content: object) -> str:
+    def content_text(content: object) -> str:
+        """Convert message content into text for token counting."""
         if isinstance(content, str):
             return sanitize_content_for_text(content)
         if not isinstance(content, list):

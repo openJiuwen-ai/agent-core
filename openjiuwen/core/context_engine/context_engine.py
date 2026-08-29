@@ -99,7 +99,8 @@ class ContextEngine:
         """Clear instance-level final-window mutators."""
         self._window_mutators.clear()
 
-    def _select_token_counter(self, config: ContextEngineConfig) -> TokenCounter:
+    @staticmethod
+    def _select_token_counter(config: ContextEngineConfig) -> TokenCounter:
         """Select a local-only counter for a context-engine configuration."""
         has_model_tokenizer_target = bool(
             config.model_name

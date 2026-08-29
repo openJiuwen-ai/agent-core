@@ -49,10 +49,11 @@ class TokenizerSelector:
 
     def select(self) -> TokenCounter:
         exact_spec = self.spec
-        if self.allow_tiktoken_fallback and exact_spec is None and not self.provider and not self.model:
-            # Preserve the historical default for contexts that have no model
-            # configuration at all.
-            return TiktokenCounter()
+        if self.allow_tiktoken_fallback and exact_spec is None:
+            if not self.provider and not self.model:
+                # Preserve the historical default for contexts that have no model
+                # configuration at all.
+                return TiktokenCounter()
 
         if exact_spec is not None:
             is_family_match = self._registry_match_kind == "family"
