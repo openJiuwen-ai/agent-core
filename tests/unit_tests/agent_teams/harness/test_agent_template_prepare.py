@@ -14,6 +14,7 @@ from openjiuwen.agent_teams.harness.native_harness import NativeHarness
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.harness import deep_agent as deep_agent_module
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.resources import LoadRecord
 from openjiuwen.harness.schema.build_context import BuildContext
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 from tests.unit_tests.agent_teams.harness.fixtures import make_spec
@@ -74,8 +75,10 @@ async def test_load_agent_template_spec_uses_in_memory_resolver(
             parts: object,
             *,
             source_uri: str | None,
-        ) -> tuple[object, str | None]:
-            return parts, source_uri
+        ) -> LoadRecord:
+            captured["parts"] = parts
+            captured["source_uri"] = source_uri
+            return LoadRecord(source_uri=source_uri)
 
     monkeypatch.setattr(
         deep_agent_module,
@@ -85,7 +88,10 @@ async def test_load_agent_template_spec_uses_in_memory_resolver(
 
     result = await DeepAgent.load_agent_template_spec(_Host(), template)  # type: ignore[arg-type]
 
-    assert result == (resolved_parts, None)
+    assert isinstance(result, LoadRecord)
+    assert result.source_uri is None
+    assert captured["parts"] is resolved_parts
+    assert captured["source_uri"] is None
     assert captured["template"] is template
     context = captured["context"]
     assert isinstance(context, BuildContext)

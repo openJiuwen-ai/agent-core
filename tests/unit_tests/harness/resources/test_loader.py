@@ -228,3 +228,38 @@ def test_build_mcp_specs_rejects_invalid_connector_value(
 
     with pytest.raises(ValueError, match="connector"):
         load_plugin_package(manifest)
+
+
+def test_plugin_manifest_loads_prompt_sections_from_routed_files(tmp_path: Path) -> None:
+    """Plugin prompt_sections are md files under prompt_sections/, routed by file."""
+    from openjiuwen.harness.resources.extension_loader import load_plugin_package
+
+    package_dir = tmp_path / "prompt_plugin"
+    sections_dir = package_dir / "prompt_sections"
+    sections_dir.mkdir(parents=True)
+    (sections_dir / "wellness_guidance.md").write_text("drink water", encoding="utf-8")
+    (sections_dir / "safety_rules.md").write_text("do not harm", encoding="utf-8")
+    (sections_dir / "draft.md").write_text("ignored until routed", encoding="utf-8")
+    manifest = package_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "package_type": "plugin",
+                "id": "prompt_plugin",
+                "prompt_sections": [
+                    {"file": "prompt_sections/wellness_guidance.md", "priority": 30},
+                    {"file": "prompt_sections/safety_rules.md"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_plugin_package(manifest)
+
+    assert [(section.name, section.priority) for section in spec.prompt_sections] == [
+        ("wellness_guidance", 30),
+        ("safety_rules", 100),
+    ]
+    assert spec.prompt_sections[0].content == {"cn": "drink water", "en": "drink water"}
+    assert spec.prompt_sections[1].content == {"cn": "do not harm", "en": "do not harm"}

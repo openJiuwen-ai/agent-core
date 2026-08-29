@@ -261,7 +261,9 @@ def _load_plugin_manifest_json(manifest: Path) -> PluginSpec:
         id=str(plugin_id),
         name=payload.get("name"),
         description=payload.get("description"),
-        prompt_sections=[PromptSectionSpec.model_validate(item) for item in _as_list(payload.get("prompt_sections"))],
+        prompt_sections=_build_prompt_section_specs(
+            payload.get("prompt_sections"), base_dir=base_dir, package_root=package_root
+        ),
         tools=_build_tool_specs(payload.get("tools"), base_dir=base_dir, package_root=package_root),
         mcps=_build_mcp_specs(payload.get("mcps"), base_dir=base_dir, package_root=package_root),
         rails=_build_rail_specs(payload.get("rails"), base_dir=base_dir, package_root=package_root),
@@ -411,6 +413,38 @@ def _build_model_spec(model_ref: Any, *, base_dir: Path, package_root: Path) -> 
     if model_payload is None:
         raise ValueError(f"model file {model_path} is missing the outer 'model' key")
     return ModelSpec.model_validate(model_payload)
+
+
+def _build_prompt_section_specs(
+    items: Any, *, base_dir: Path, package_root: Path
+) -> list[PromptSectionSpec]:
+    """Load Plugin prompt sections from ``prompt_sections/*.md`` routed by ``file``.
+
+    ``name`` is the markdown stem. Inline ``name`` + ``content`` entries stay valid.
+    """
+    specs: list[PromptSectionSpec] = []
+    sections_root = (package_root / "prompt_sections").resolve()
+    for item in _as_list(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"prompt_sections entry must be a mapping: {item!r}")
+        if "file" not in item:
+            specs.append(PromptSectionSpec.model_validate(item))
+            continue
+        file_path = _resolve_new_manifest_path(
+            str(item["file"]), base_dir=base_dir, package_root=package_root, must_be_dir=False
+        )
+        if not file_path.is_relative_to(sections_root) or file_path.suffix.lower() != ".md":
+            raise ValueError(f"prompt_sections file must be a .md under prompt_sections/: {item['file']!r}")
+        payload: dict[str, Any] = {
+            "name": file_path.stem,
+            "content": _section_content(file_path.read_text(encoding="utf-8")),
+        }
+        if "priority" in item:
+            payload["priority"] = item["priority"]
+        if "render_params" in item:
+            payload["render_params"] = item["render_params"]
+        specs.append(PromptSectionSpec.model_validate(payload))
+    return specs
 
 
 def _build_tool_specs(items: Any, *, base_dir: Path, package_root: Path) -> list[BuiltinToolSpec]:

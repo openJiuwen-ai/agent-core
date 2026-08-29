@@ -141,7 +141,7 @@ def test_load_runtime_resources_from_manifest(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_extension_skills_are_refreshed_and_preferred(
+async def test_runtime_extension_skill_overrides_same_named_host_skill(
     tmp_path: Path,
 ):
     old_root = tmp_path / "old_skills"
@@ -176,9 +176,9 @@ async def test_runtime_extension_skills_are_refreshed_and_preferred(
     assert any(ref.kind.value == "skill" for ref in record.refs)
     skill_rail = next(rail for rail in agent._registered_rails if isinstance(rail, SkillUseRail))
     skill_dirs = list(skill_rail.skills_dir)
-    assert Path(skill_dirs[-1]).as_posix().endswith("demo_ext/skills")
+    assert Path(skill_dirs[0]).as_posix().endswith("demo_ext/skills")
     assert skill_rail.skills[0].name == "shared_skill"
-    assert Path(skill_rail.skills[0].directory).as_posix().endswith("old_skills/shared_skill")
+    assert Path(skill_rail.skills[0].directory).as_posix().endswith("demo_ext/skills/shared_skill")
 
 
 @pytest.mark.asyncio

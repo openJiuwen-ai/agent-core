@@ -518,7 +518,9 @@ async def test_stream_single_round_branch() -> None:
     chunks = [chunk async for chunk in agent.stream("stream_input")]
 
     assert [chunk["chunk"] for chunk in chunks] == [1, 2]
-    assert fake_react.stream_calls[0]["inputs"] == {"query": "stream_input"}
+    assert fake_react.stream_calls[0]["inputs"] == {
+        "query": "stream_input",
+    }
 
 
 @pytest.mark.asyncio

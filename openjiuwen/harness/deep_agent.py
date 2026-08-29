@@ -122,6 +122,7 @@ from openjiuwen.harness.prompts import (
     resolve_mode,
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PromptAttachmentKind,
     PromptAttachmentManager,
 )
 from openjiuwen.harness.prompts.sections import SectionName
@@ -182,6 +183,8 @@ _DEEP_EVENTS = frozenset(
 )
 
 _SUB_AGENTS_DIR = "sub_agents"
+_EXPERT_ROLE_SECTION = "expert_role"
+_EXPERT_ROLE_SOURCE = "deep_agent.agent_template"
 
 # Tools that remain visible to the model when progressive tool loading is
 # enabled.  The registration switch still decides whether a tool exists at
@@ -254,6 +257,33 @@ def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) 
     return identity_section.render(language)
 
 
+def _expert_role_load_content(role_name: str, language: str = "cn") -> str:
+    """Build the model-visible load notice for one expert role."""
+    if language == "en":
+        return (
+            f"The user selected the {role_name} expert. You are {role_name}. "
+            "Previous expert roles are cancelled; do not use their persona or related capabilities."
+        )
+    return (
+        f"用户选择了{role_name}专家，你是{role_name}。"
+        "此前专家角色已取消，不再使用其角色设定和相关能力。"
+    )
+
+
+def _expert_role_unload_content(role_name: str, language: str = "cn") -> str:
+    """Build the model-visible unload notice for one expert role."""
+    if language == "en":
+        return (
+            f"The user cancelled the {role_name} expert selection. Immediately stop using that "
+            "expert's role, workflows, and exclusive capabilities, and fall back to your default "
+            "role and capabilities."
+        )
+    return (
+        f"用户取消了{role_name}专家选择，立即停止使用之前该专家的角色、工作流和独有能力，"
+        "回退到你的默认角色和能力。"
+    )
+
+
 class DeepAgent(BaseAgent):
     """High-level agent that delegates to an internal ReActAgent."""
 
@@ -274,6 +304,7 @@ class DeepAgent(BaseAgent):
         self._auto_invoke_scheduled: bool = False
         self._bound_session_id: Optional[str] = None
         self._load_records: dict[str, LoadRecord] = {}
+        self._active_agent_template: tuple[str, str] | None = None
         self._session_toolkit: SessionToolkit | None = None
         self._pending_harness_configs: List[str] = []
         self.prompt_attachment_manager: PromptAttachmentManager = PromptAttachmentManager()
@@ -1943,7 +1974,9 @@ class DeepAgent(BaseAgent):
             ctx.extras["source_root"] = str(manifest_path.parent)
             ctx.extras["_parent_model"] = self.deep_config.model
             parts = resolve_agent_template_parts(spec, ctx)
-            return await self._apply_extension_parts(parts, source_uri=str(manifest_path))
+            record = await self._apply_extension_parts(parts, source_uri=str(manifest_path))
+            self._active_agent_template = (record.load_id, spec.agent_card.name)
+            return record
         except Exception as exc:
             raise build_error(
                 StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
@@ -1968,7 +2001,9 @@ class DeepAgent(BaseAgent):
             ctx = self._new_extension_context(context)
             ctx.extras["_parent_model"] = self.deep_config.model
             parts = resolve_agent_template_parts(spec, ctx)
-            return await self._apply_extension_parts(parts, source_uri=None)
+            record = await self._apply_extension_parts(parts, source_uri=None)
+            self._active_agent_template = (record.load_id, spec.agent_card.name)
+            return record
         except Exception as exc:
             raise build_error(
                 StatusCode.DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR,
@@ -2021,6 +2056,11 @@ class DeepAgent(BaseAgent):
                 return []
             labels = await unapply_extension_hot(self, owned.refs)
             self._load_records.pop(record.load_id, None)
+            if (
+                self._active_agent_template is not None
+                and self._active_agent_template[0] == record.load_id
+            ):
+                self._active_agent_template = None
             return labels
         except Exception as exc:
             raise build_error(
@@ -2762,6 +2802,63 @@ class DeepAgent(BaseAgent):
         ):
             yield chunk
 
+    async def _sync_expert_role_attachment(
+        self,
+        invoke_inputs: InvokeInputs,
+        session: Session | None,
+    ) -> None:
+        """Materialize the current AgentTemplate role onto this round's session.
+        """
+        try:
+            session_id = (
+                session.get_session_id()
+                if session is not None
+                else invoke_inputs.conversation_id
+            )
+            if not session_id:
+                return
+
+            manager = self.prompt_attachment_manager
+            language = resolve_language(
+                self._deep_config.language if self._deep_config is not None else None
+            )
+            if self._active_agent_template is not None:
+                role_name = self._active_agent_template[1]
+                await manager.add_section(
+                    session_id=session_id,
+                    section=_EXPERT_ROLE_SECTION,
+                    content=_expert_role_load_content(role_name, language),
+                    kind=PromptAttachmentKind.RUNTIME,
+                    source=_EXPERT_ROLE_SOURCE,
+                    metadata={"role_name": role_name},
+                )
+                return
+
+            attachments = await manager.collect_for_session(session_id)
+            current = next(
+                (item for item in attachments if item.section == _EXPERT_ROLE_SECTION),
+                None,
+            )
+            if current is None:
+                return
+            role_name = current.metadata.get("role_name")
+            if not role_name:
+                return
+            await manager.add_section(
+                session_id=session_id,
+                section=_EXPERT_ROLE_SECTION,
+                content=_expert_role_unload_content(role_name, language),
+                kind=PromptAttachmentKind.RUNTIME,
+                source=_EXPERT_ROLE_SOURCE,
+                metadata={"role_name": role_name},
+            )
+        except Exception as exc:  # noqa: BLE001 - role notices must not block the model
+            logger.warning(
+                "[DeepAgent] failed to sync expert_role attachment: %s",
+                exc,
+                exc_info=True,
+            )
+
     async def invoke(
         self,
         inputs: Any,
@@ -2786,6 +2883,7 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
+                await self._sync_expert_role_attachment(invoke_inputs, session)
                 if (
                     self._deep_config is not None
                     and self._deep_config.enable_task_loop
@@ -2830,6 +2928,7 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
+                await self._sync_expert_role_attachment(invoke_inputs, session)
                 if (
                     self._deep_config is not None
                     and self._deep_config.enable_task_loop
@@ -3090,6 +3189,7 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
+                await self._sync_expert_role_attachment(invoke_inputs, session)
                 if is_resume_input:
                     result = await self._run_single_round_invoke(ctx, session)
                 else:

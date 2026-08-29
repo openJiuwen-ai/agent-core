@@ -235,10 +235,28 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
 
     previous_enabled = None if target.enabled_skills is None else set(target.enabled_skills)
 
-    # Append after host roots. SkillUseRail keeps the first loaded name, so
-    # workspace/skills wins over a same-named package skill. Do not write leaf
+    # Insert after already-bound package roots, before host roots. SkillUseRail
+    # keeps the first loaded name, so earlier packages win over later ones and
+    # all packages win over a same-named workspace skill. Do not write leaf
     # names into enabled_skills: that global allow-list would hide host skills.
-    target.skills_dir = [*previous_dirs, *(root for root in roots if root not in current_dirs)]
+    package_roots: set[str] = set()
+    for record in (getattr(agent, "_load_records", None) or {}).values():
+        for ref in record.refs:
+            if ref.kind != ResourceKind.SKILL:
+                continue
+            path = Path(str(ref.extra.get("directory") or ref.identity)).expanduser().resolve()
+            package_roots.add(str(path.parent if _is_skill_leaf_dir(path) else path))
+    package_dirs = [
+        item for item in previous_dirs if str(Path(item).expanduser().resolve()) in package_roots
+    ]
+    host_dirs = [
+        item for item in previous_dirs if str(Path(item).expanduser().resolve()) not in package_roots
+    ]
+    target.skills_dir = [
+        *package_dirs,
+        *(root for root in roots if root not in current_dirs),
+        *host_dirs,
+    ]
     target.enable_cache = False
     target.clear_skills()
     try:
