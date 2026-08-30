@@ -14,7 +14,7 @@ import asyncio
 import pytest
 
 from openjiuwen.agent_teams.workflow.engine import MockBackend, Reviewer, run_workflow
-from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+from openjiuwen.agent_teams.workflow.engine.errors import EngineError
 from openjiuwen.agent_teams.workflow.engine.verify import settle_verify_tally
 from openjiuwen.agent_teams.workflow.engine.backends.mock import SKIP
 from openjiuwen.agent_teams.workflow.review import build_reviewers
@@ -136,7 +136,7 @@ def test_verify_undecided_when_reviewer_did_not_vote(tmp_path):
 def test_verify_empty_reviewers_raises(tmp_path):
     """An empty reviewer list is rejected rather than silently passing."""
     script = _write(tmp_path, "empty.py", _VERIFY_SCRIPT)
-    with pytest.raises(WorkflowError):
+    with pytest.raises(EngineError):
         asyncio.run(run_workflow(str(script), args={"reviewers": []}, backend=MockBackend()))
 
 

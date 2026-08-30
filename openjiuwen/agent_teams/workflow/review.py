@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from openjiuwen.agent_teams.prompts.loader import load_template
-from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+from openjiuwen.agent_teams.workflow.engine.errors import EngineError
 from openjiuwen.agent_teams.workflow.engine.verify import Reviewer, ReviewerKind
 
 #: reviewer ``type`` -> prompt template basename.
@@ -91,7 +91,7 @@ def build_reviewers(
         label = spec.get("label") or f"{rtype}-{i}"
         body = load_template(template, language).content
         if not isinstance(body, str):
-            raise WorkflowError(f"swarmflow reviewer template {template!r} resolved to non-str content")
+            raise EngineError(f"swarmflow reviewer template {template!r} resolved to non-str content")
         prompt = body.format(
             reviewer=label,
             instruction=instruction or "",

@@ -612,14 +612,14 @@ async def run(args):
 """,
     )
     backend = _RecordingBackend()
-    with pytest.raises(WorkflowError, match="keep_rounds"):
+    with pytest.raises(EngineError, match="keep_rounds"):
         asyncio.run(run_workflow(script, backend=backend))
     # Nothing reached the backend: the error fires before any capture.
     assert backend.forks == []
 
 
 def test_fork_of_human_session_rejected(tmp_path):
-    """fork() on a human_session raises a clear WorkflowError."""
+    """fork() on a human_session raises a clear EngineError."""
     script = _write(
         tmp_path,
         "fork_human.py",
@@ -636,7 +636,7 @@ async def run(args):
 """,
     )
     backend = _RecordingBackend()
-    with pytest.raises(WorkflowError, match="fork"):
+    with pytest.raises(EngineError, match="fork"):
         asyncio.run(run_workflow(script, backend=backend))
     # No capture ever reached the backend for the rejected human fork.
     assert backend.forks == []

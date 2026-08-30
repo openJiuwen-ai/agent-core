@@ -862,12 +862,12 @@ async def verify(
         aggregated review feedback.
 
     Raises:
-        WorkflowError: If ``reviewers`` is empty.
+        EngineError: If ``reviewers`` is empty.
     """
     rt = _rt.get()
     reviewers = list(reviewers)
     if not reviewers:
-        raise WorkflowError("verify() requires at least one reviewer")
+        raise EngineError("verify() requires at least one reviewer")
     base = label or "verify"
 
     _emit_log(rt, f"verify: dispatching {len(reviewers)} reviewer(s)")
@@ -1145,9 +1145,9 @@ class AgentSession:
         inherit).
         """
         if self._human:
-            raise WorkflowError("fork() is only supported on agent_session")
+            raise EngineError("fork() is only supported on agent_session")
         if fork_mode != "full" and keep_rounds is None:
-            raise WorkflowError(
+            raise EngineError(
                 "fork() requires keep_rounds unless fork_mode='full'"
                 f" (fork_mode={fork_mode!r} has no split point without it)"
             )
