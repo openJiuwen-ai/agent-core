@@ -264,18 +264,20 @@ async def test_team_card_stamp_does_not_emit_empty_roster_change():
 
 
 # ─── evolution off (cache=None) degrades to no-op ────────────────────────
-# Without a cache the backend's ``get_team_updated_at_state`` returns
-# ``(0, True)`` (present=True — no "must update" signal), so the wall-clock
-# comparison runs against a 0 that equals the initial baseline → return None,
-# no stamp, no re-announce. Degrades the same as before the fix.
+# When the probe reports ``(0, True)`` — a stable mtime with present=True (no
+# "must update" signal) — the wall-clock comparison runs against a 0 that
+# equals the initial baseline → return None, no stamp, no re-announce. The
+# real ``TeamBackend`` surfaces this pair when ``team_card.md`` is missing on
+# a cache-on team (a cache-off team probes the DB column instead, which moves
+# on a team mutation and re-delivers — the pre-evolution behaviour).
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_cache_off_degrades_to_no_re_announce():
-    """Evolution off (cache=None → (0, True)) must not stamp or re-announce."""
+    """A stable ``(0, True)`` probe (md missing / present, mtime 0) must not stamp or re-announce."""
     backend = _FakeBackend(team_info=_team_info(_EVOLVED_DESC))
     tracker = _tracker(backend=backend)
-    # present=True, mtime=0 — the cache-off default. Baseline carries 0 too.
+    # present=True, mtime=0 — a stable probe. Baseline carries 0 too.
     baseline = _baseline_with_info_emitted(info_mtime=0)
     updated: dict[str, Any] = dict(baseline)
     backend._card_mtime = 0

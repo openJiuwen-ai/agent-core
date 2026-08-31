@@ -2211,6 +2211,12 @@ def _external_backend() -> MagicMock:
     backend = MagicMock()
     backend.team_name = "test-team"
     backend.get_team_updated_at = AsyncMock(return_value=1)
+    # Team-info re-announce probe (present-aware). ``(1, True)`` mirrors a
+    # stable timestamp: present=True takes the wall-clock branch, so the first
+    # probe (baseline empty) advances to ``get_team_info`` and later probes
+    # against baseline=1 stay quiet. Symmetric with the member pair below.
+    backend.get_team_updated_at_state = AsyncMock(return_value=(1, True))
+    backend.stamp_team_card_updated_at = AsyncMock(return_value=None)
     backend.get_members_max_updated_at = AsyncMock(return_value=1)
     # External backend serves no real member_prompt.md, so the probe reports 0
     # (missing file / evolution off) -- matching real WorkspaceCache behaviour.
@@ -2380,7 +2386,7 @@ async def test_external_member_context_refresh_survives_build_failure():
     backend = _external_backend()
     runtime = _external_runtime(backend)
     _, host, handler = _make_external_member_context_handler(harness=runtime, backend=backend)
-    backend.get_team_updated_at.side_effect = RuntimeError("db unavailable")
+    backend.get_team_updated_at_state.side_effect = RuntimeError("db unavailable")
     event = EventMessage.from_event(
         MemberShutdownEvent(
             team_name="test-team",

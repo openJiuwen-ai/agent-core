@@ -1446,14 +1446,23 @@ class TeamBackend:
         ``team_card.md`` body without stamping it) as an explicit "must
         update" signal, symmetric with :meth:`get_member_updated_at_state`.
 
+        When the cache is absent (evolution off / single-agent) the md probe
+        has nothing to read, so the DB column is probed instead and surfaced
+        with ``present=True``: the team-info re-announce path then compares
+        the DB timestamp wall-clock (a ``build_team`` / team mutation moves
+        it and re-delivers), preserving the pre-evolution behaviour. Evolution
+        on stays md-only (the DB column is shadowed by ``get_team_info``'s md
+        overlay, so a DB-only change shows nothing new to announce).
+
         Returns:
-            ``(updated_at_ms, present)`` — ``(0, True)`` when the cache is
-            absent (evolution off) or the ``team_card.md`` file is missing
-            (no "must update" signal; the DB column floors the probe).
+            ``(updated_at_ms, present)`` — ``(db_ts, True)`` when the cache is
+            absent (evolution off; DB column drives the probe), the md pair
+            otherwise.
         """
         cache = self.workspace_cache
         if cache is None:
-            return (0, True)
+            db_ts = await self.db.team.get_team_updated_at(self.team_name)
+            return (db_ts, True)
         return cache.get_team_updated_at_state("desc")
 
     async def stamp_team_card_updated_at(self, ts: int) -> None:
