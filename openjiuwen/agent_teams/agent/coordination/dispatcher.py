@@ -252,6 +252,13 @@ class EventDispatcher:
                 pingpong=build_pingpong_detector(reliability_cfg),
             )
 
+        # External runtime retrying handler (leader-only). Always registered —
+        # no feature flag. Final failures reuse the mailbox + MessageHandler
+        # path, so this handler only consumes retrying events.
+        from openjiuwen.agent_teams.reliability.external_handler import ExternalRuntimeHandler
+
+        self.external_runtime = ExternalRuntimeHandler(host, blueprint, infra, poll_ctrl)
+
         self._framework = AsyncCallbackFramework(
             enable_metrics=False,
             enable_logging=True,
@@ -278,6 +285,7 @@ class EventDispatcher:
         ]
         if self.reliability is not None:
             handlers.append(self.reliability)
+        handlers.append(self.external_runtime)
 
         for handler in handlers:
             for event_key, callback in handler.get_callbacks().items():

@@ -18,6 +18,12 @@ from typing import (
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+    ExternalRuntimeAgentKind,
+    ExternalRuntimeFailureCategory,
+    ExternalRuntimeFailureReason,
+    ExternalRuntimePhase,
+)
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 
 
@@ -120,6 +126,9 @@ class TeamEvent:
 
     # Reliability events
     ANOMALY_DETECTED = "anomaly_detected"
+    # A Claude/Codex SDK runtime is auto-retrying (e.g. Codex will_retry=True).
+    # Non-persistent progress signal; final failure reuses MESSAGE + mailbox.
+    EXTERNAL_RUNTIME_RETRYING = "external_runtime_retrying"
 
     # Messaging events
     MESSAGE = "message"
@@ -556,6 +565,31 @@ class AnomalyDetectedEvent(BaseEventMessage):
     peer_member: Optional[str] = Field(default=None, description="Peer member for team-level anomalies")
 
 
+class ExternalRuntimeRetryingEvent(BaseEventMessage):
+    """Published when a Claude/Codex SDK runtime is auto-retrying.
+
+    Member-scoped: ``member_name`` (from BaseEventMessage) is the retrying
+    member. Non-persistent progress signal — it does not end the current
+    round and does not change the member's final status. Carried across
+    processes so the leader's :class:`ExternalRuntimeHandler` can surface the
+    retry progress. ``agent_kind`` / ``phase`` / ``category`` are the string
+    values from ``external_runtime`` so this schema stays independent of the
+    external runtime package.
+    """
+
+    agent_kind: ExternalRuntimeAgentKind = Field(..., description="Which SDK produced the retry")
+    phase: ExternalRuntimePhase = Field(..., description="Startup or turn")
+    category: ExternalRuntimeFailureCategory = Field(..., description="Failure category of the retrying error")
+    summary: str = Field(..., description="One-line description for human/LLM")
+    reason: ExternalRuntimeFailureReason = Field(
+        default_factory=ExternalRuntimeFailureReason,
+        description="Structured reason snapshot",
+    )
+    attempt: Optional[int] = Field(default=None, description="Retry attempt number, if known")
+    max_attempts: Optional[int] = Field(default=None, description="Max retry attempts, if known")
+    round_id: Optional[int] = Field(default=None, description="Member round id, None for startup")
+
+
 _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model class
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
@@ -596,6 +630,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.WORKSPACE_LOCK_REQUEST: WorkspaceLockRequestEvent,
     TeamEvent.WORKSPACE_LOCK_RESPONSE: WorkspaceLockResponseEvent,
     TeamEvent.ANOMALY_DETECTED: AnomalyDetectedEvent,
+    TeamEvent.EXTERNAL_RUNTIME_RETRYING: ExternalRuntimeRetryingEvent,
 }
 
 _EVENT_CLASS_MAP: Dict[Type[BaseEventMessage], str] = {  # model class -> event_type

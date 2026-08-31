@@ -78,6 +78,24 @@ STRINGS: dict[str, dict[str, str]] = {
         "reliability.escalate_user": (
             "[可靠性·严重] {summary}。已超出自动处理范围，建议立即上报控制者 / 用户决策。"
         ),
+        # reliability/external_handler.py + message.py — external runtime
+        "reliability.external_runtime_retrying": (
+            "[三方运行时] 成员 {member_name}（{agent_kind}）正在自动重试：{category}。"
+            "本轮不结束，成员状态不变，等待 SDK 后续结果。{summary}"
+        ),
+        "reliability.external_runtime_failed": (
+            "[三方运行时·失败] 成员 {member_name}（{agent_kind}，阶段 {phase}）最终失败："
+            "{category}。{summary} 原始错误：{reason_message} 建议处理：{suggested_action}。"
+            "是否需要用户介入：{user_action_required}。请评估成员状态并决定是否继续调度。"
+        ),
+        "reliability.suggested_action.auth_required": "请登录 CLI 或配置有效的 API key",
+        "reliability.suggested_action.quota_exceeded": "请检查账户额度或更换 API key",
+        "reliability.suggested_action.rate_limited": "请稍后重试",
+        "reliability.suggested_action.server_unavailable": "服务端暂时不可用，请稍后重试",
+        "reliability.suggested_action.network_timeout": "请检查网络连接和 API 地址是否可达",
+        "reliability.suggested_action.process_start_failed": "成员运行时启动失败，请检查配置或重试",
+        "reliability.suggested_action.sdk_error": "运行时异常，请重试或检查日志",
+        "reliability.suggested_action.unknown": "运行时异常，请重试或检查日志",
         # agent/dispatcher.py — member lifecycle events
         "dispatcher.member_online": "[成员事件] 成员 {target_id} 已上线",
         "dispatcher.member_restarted": "[成员事件] 成员 {target_id} 已重启 (第{restart_count}次)",
@@ -395,6 +413,27 @@ STRINGS: dict[str, dict[str, str]] = {
             "[reliability critical] {summary}. Beyond automated handling; escalate to the "
             "controller/user for a decision now."
         ),
+        # reliability/external_handler.py + message.py — external runtime
+        "reliability.external_runtime_retrying": (
+            "[external runtime] Member {member_name} ({agent_kind}) is auto-retrying: {category}. "
+            "The round stays open and member status is unchanged; awaiting the next SDK result. {summary}"
+        ),
+        "reliability.external_runtime_failed": (
+            "[external runtime failed] Member {member_name} ({agent_kind}, phase {phase}) finally "
+            "failed: {category}. {summary} Reason: {reason_message} Suggested action: {suggested_action}. "
+            "User action required: {user_action_required}. Assess the member state and decide whether "
+            "to keep scheduling it."
+        ),
+        "reliability.suggested_action.auth_required": "Log in to the CLI or configure a valid API key",
+        "reliability.suggested_action.quota_exceeded": "Check account quota or switch to a different API key",
+        "reliability.suggested_action.rate_limited": "Please retry later",
+        "reliability.suggested_action.server_unavailable": "Server temporarily unavailable; please retry later",
+        "reliability.suggested_action.network_timeout": "Check network connectivity and API endpoint reachability",
+        "reliability.suggested_action.process_start_failed": (
+            "Member runtime failed to start; check configuration or retry"
+        ),
+        "reliability.suggested_action.sdk_error": "Runtime error; retry or check logs",
+        "reliability.suggested_action.unknown": "Runtime error; retry or check logs",
         # agent/dispatcher.py — member lifecycle events
         "dispatcher.member_online": "[Member Event] Member {target_id} is online",
         "dispatcher.member_restarted": "[Member Event] Member {target_id} restarted (attempt {restart_count})",

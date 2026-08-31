@@ -320,6 +320,7 @@ async def external_cli_spawn(
         ),
     )
     from openjiuwen.agent_teams.external.cli_agent.claude import ClaudeSdkRuntime
+    from openjiuwen.agent_teams.external.cli_agent.codex import CodexSdkRuntime
 
     if isinstance(runtime, ClaudeSdkRuntime) and teammate_backend is not None:
         runtime.bind_team_tools(
@@ -333,6 +334,18 @@ async def external_cli_spawn(
             messager=teammate.infra.messager,
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
+        )
+
+    # Inject the reliability delivery surface (failed message to the
+    # leader mailbox + member ERROR status) for Claude/Codex SDK runtimes only.
+    if isinstance(runtime, (ClaudeSdkRuntime, CodexSdkRuntime)) and teammate_backend is not None:
+        leader_name = await teammate_backend.resolve_leader_member_name()
+        runtime.bind_reliability_context(
+            session_id=session_id or "",
+            team_backend=teammate_backend,
+            leader_name=leader_name,
+            update_status_cb=teammate.update_status,
+            messager=teammate.infra.messager,
         )
 
     base_query = initial_message or ""
