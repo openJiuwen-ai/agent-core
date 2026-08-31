@@ -31,7 +31,7 @@ from typing import Any, Callable, Sequence
 from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import (
     cancellation_safe_release_then_dispose,
 )
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
@@ -525,7 +525,7 @@ class AvatarSessionManager:
                 owner_id=session_id,
             )
         finally:
-            kv_cache_hooks.clear_harness_session_hooks(state.harness)
+            kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(state.harness)
 
     async def aclose(self) -> None:
         """Cancel pending human waits, unsubscribe, and dispose every session."""
@@ -642,7 +642,7 @@ class AvatarSessionManager:
             # turns *and* across a same-process resume (pre_run recovery needs a
             # deterministic session_id to locate the prior run's state).
             team_session = self._team_session_for(state)
-            kv_cache_hooks.configure_harness_session_hooks(
+            kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=False,
@@ -656,7 +656,7 @@ class AvatarSessionManager:
             )
         except Exception as e:
             if harness is not None:
-                kv_cache_hooks.clear_harness_session_hooks(harness)
+                kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(harness)
             team_logger.exception("[swarmflow] session avatar build/start failed for %s", state.member_name)
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness

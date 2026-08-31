@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import run_workflow
@@ -79,7 +79,7 @@ class _TerminalHarness:
             agent_id="stateful-terminal",
             share_stream_writer=False,
         )
-        kv_cache_hooks.on_harness_session_created(self, self._session)
+        kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, self._session)
         self.events.append("start")
 
     def current_session(self) -> Session | None:

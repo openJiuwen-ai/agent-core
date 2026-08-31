@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
 from openjiuwen.core.context_engine.base import ContextWindow
@@ -162,7 +162,7 @@ class _PayloadHarness:
             agent_id="stateful-payload",
             share_stream_writer=False,
         )
-        kv_cache_hooks.on_harness_session_created(self, self._session)
+        kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, self._session)
         runtime = self._session.get_kv_cache_runtime()
         if (
             runtime is not None

@@ -24,7 +24,7 @@ from openjiuwen.core.single_agent.rail.base import (
     current_usage_invocation_id,
     reset_usage_delegation,
 )
-from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
@@ -155,7 +155,7 @@ class TaskTool(Tool):
             if normalized_type != "browser_agent" or not normalized_resume_id.startswith(expected_prefix):
                 raise ValueError("resume_task_id is not valid for this parent browser task")
             return normalized_resume_id
-        if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
+        if kv_cache_subagent_lifecycle.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
@@ -267,10 +267,10 @@ class TaskTool(Tool):
             )
 
         runtime_parent_session_id = parent_session.get_session_id()
-        affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+        affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self.parent_agent)
         parent_cache_id = runtime_parent_session_id
         if affinity_enabled:
-            parent_cache_id = kv_cache_hooks.resolve_subagent_parent_cache_id(
+            parent_cache_id = kv_cache_subagent_lifecycle.resolve_subagent_parent_cache_id(
                 parent_session
             )
         try:
@@ -285,7 +285,7 @@ class TaskTool(Tool):
                 reason=str(exc),
             ) from exc
         if affinity_enabled and not resume_task_id:
-            sub_session_id = kv_cache_hooks.scope_sub_session_id(
+            sub_session_id = kv_cache_subagent_lifecycle.scope_sub_session_id(
                 sub_session_id,
                 runtime_parent_session_id=runtime_parent_session_id,
                 parent_cache_id=parent_cache_id,
@@ -364,7 +364,7 @@ class TaskTool(Tool):
                 await prepare_subagent_task_resources(subagent)
                 parent_invocation_id = current_usage_invocation_id()
                 if affinity_enabled:
-                    child_session = kv_cache_hooks.create_subagent_session(
+                    child_session = kv_cache_subagent_lifecycle.create_subagent_session(
                         parent_session,
                         sub_session_id=sub_session_id,
                         parent_cache_id=parent_cache_id,
@@ -390,7 +390,7 @@ class TaskTool(Tool):
                     if parent_invocation_id:
                         subagent_inputs["parent_invocation_id"] = parent_invocation_id
                     await child_session.pre_run(inputs=subagent_inputs)
-                    await kv_cache_hooks.prepare_subagent(
+                    await kv_cache_subagent_lifecycle.prepare_subagent(
                         child_session,
                         subagent_type=str(subagent_type),
                     )
@@ -434,7 +434,7 @@ class TaskTool(Tool):
                     )
                 await cleanup_subagent_task_resources(subagent)
                 if child_session is not None:
-                    await kv_cache_hooks.finish_subagent(
+                    await kv_cache_subagent_lifecycle.finish_subagent(
                         child_session,
                         subagent_type=str(subagent_type),
                         succeeded=succeeded,

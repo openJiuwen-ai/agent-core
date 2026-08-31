@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Thin KVC policy hooks for DeepAgent subagent lifecycles."""
+"""KVC lifecycle policy for DeepAgent subagents."""
 
 import hashlib
 from typing import Any

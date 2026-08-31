@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Minimal Session hooks for standalone Team workers."""
+"""Lifecycle hooks for standalone Team Harness Sessions using KVC."""
 
 from __future__ import annotations
 

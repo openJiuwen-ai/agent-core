@@ -14,7 +14,7 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
 
@@ -49,16 +49,16 @@ def test_team_member_subagent_scope_is_stable_and_distinct() -> None:
         "sub_session_id": "product-session_sub_browser_agent",
         "runtime_parent_session_id": "product-session",
     }
-    member_a = kv_cache_hooks.scope_sub_session_id(
+    member_a = kv_cache_subagent_lifecycle.scope_sub_session_id(
         **kwargs,
         parent_cache_id="team:product-session:team:team-a:member:member-a",
     )
-    member_b = kv_cache_hooks.scope_sub_session_id(
+    member_b = kv_cache_subagent_lifecycle.scope_sub_session_id(
         **kwargs,
         parent_cache_id="team:product-session:team:team-a:member:member-b",
     )
 
-    assert member_a == kv_cache_hooks.scope_sub_session_id(
+    assert member_a == kv_cache_subagent_lifecycle.scope_sub_session_id(
         **kwargs,
         parent_cache_id="team:product-session:team:team-a:member:member-a",
     )

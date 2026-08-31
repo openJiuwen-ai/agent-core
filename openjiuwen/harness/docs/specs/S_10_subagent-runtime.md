@@ -38,7 +38,7 @@ persistence。`subagent_runtime/` 18 文件承载 `enable_subagent_runtime=True`
 - 子代理工具（`SubagentSpawnTool` 等）—— `S_05`。
 - 预设子代理（browser/code/research/verification）—— `S_18`。
 - `SubagentRail` / `SessionRail` —— `S_04`。
-- KVC 亲和（`kv_cache_hooks.py`）—— `S_16`。
+- KVC 亲和（`kv_cache_subagent_lifecycle.py`）—— `S_16`。
 
 ## 不变量
 

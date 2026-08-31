@@ -31,7 +31,7 @@ from typing import (
     Optional,
 )
 
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
@@ -133,7 +133,7 @@ class TeamHarness:
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
         child = self._make_child_session(team_session)
-        kv_cache_hooks.on_harness_session_created(self, child)
+        kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
         await self._native.start(session=child)
         self._native_session_id = self._session_id_of(team_session)
@@ -180,7 +180,7 @@ class TeamHarness:
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
         child = self._make_child_session(team_session)
-        kv_cache_hooks.on_harness_session_created(self, child)
+        kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
         self._active_agent_session = child
         try:
@@ -192,7 +192,7 @@ class TeamHarness:
                 logger.debug("[TeamHarness] post_run raised during teardown, ignoring", exc_info=True)
             finally:
                 try:
-                    await kv_cache_hooks.after_harness_session_finished(self, child)
+                    await kv_cache_harness_session_lifecycle_hook.after_harness_session_finished(self, child)
                 except Exception:
                     logger.debug(
                         "[TeamHarness] session-finished hook raised during teardown, ignoring",

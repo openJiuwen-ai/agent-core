@@ -349,7 +349,7 @@ async def test_session_factory_creates_new_session_per_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_kv_cache_hooks_called_when_affinity_enabled() -> None:
+async def test_kv_cache_lifecycle_called_when_affinity_enabled() -> None:
     from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 
     parent = MockParentAgent()
@@ -359,10 +359,10 @@ async def test_kv_cache_hooks_called_when_affinity_enabled() -> None:
     manager = _manager(parent=parent)
 
     with _patch_create_session(), patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_hooks.prepare_subagent",
+        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_subagent_lifecycle.prepare_subagent",
         new=AsyncMock(),
     ) as prepare_mock, patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_hooks.finish_subagent",
+        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_subagent_lifecycle.finish_subagent",
         new=AsyncMock(),
     ) as finish_mock:
         instance = await manager.create(

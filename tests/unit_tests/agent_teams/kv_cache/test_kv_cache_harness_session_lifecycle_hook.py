@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 
 
 class Session:
@@ -32,13 +32,13 @@ async def test_one_shot_hook_binds_parent_and_releases_session() -> None:
     harness = Harness()
     session = Session()
 
-    assert kv_cache_hooks.configure_harness_session_hooks(
+    assert kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
         harness,
         product_session_id="product",
         evict_on_finish=True,
     ) is True
-    kv_cache_hooks.on_harness_session_created(harness, session)
-    await kv_cache_hooks.after_harness_session_finished(harness, session)
+    kv_cache_harness_session_lifecycle_hook.on_harness_session_created(harness, session)
+    await kv_cache_harness_session_lifecycle_hook.after_harness_session_finished(harness, session)
 
     assert session.parent == "product"
     assert session.released is True

@@ -20,8 +20,8 @@ from openjiuwen.core.single_agent.rail.base import (
     current_usage_attribution,
     current_usage_invocation_id,
 )
-from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -312,9 +312,10 @@ class SessionsSpawnTool(Tool):
                 reason="SessionSpawnTool requires a valid session in kwargs",
             )
         runtime_parent_session_id = parent_session.get_session_id()
+        affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self._parent_agent)
         parent_cache_id = runtime_parent_session_id
-        if kv_cache_hooks.affinity_enabled(self._parent_agent):
-            parent_cache_id = kv_cache_hooks.resolve_subagent_parent_cache_id(
+        if affinity_enabled:
+            parent_cache_id = kv_cache_subagent_lifecycle.resolve_subagent_parent_cache_id(
                 parent_session
             )
         sub_session_id = f"{runtime_parent_session_id}_sub_{secrets.token_hex(4)}"

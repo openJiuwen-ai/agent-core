@@ -17,7 +17,7 @@ KVC 的亲和判定、sticky 白名单与子会话键解析都收敛在这一个
 
 具体覆盖：
 
-- `kv_cache/kv_cache_hooks.py`：`affinity_enabled` / `is_sticky_subagent_type` /
+- `kv_cache/kv_cache_subagent_lifecycle.py`：`affinity_enabled` / `is_sticky_subagent_type` /
   `resolve_sub_session_id` / `get_model`（DeepAgent 子代理生命周期的 KVC 策略钩子）。
 
 不在本规约范围内：
@@ -27,7 +27,7 @@ KVC 的亲和判定、sticky 白名单与子会话键解析都收敛在这一个
 
 ## 不变量
 
-1. **`kv_cache_hooks.py` 是 DeepAgent ↔ KVC 的唯一桥**：`affinity_enabled(deep_agent)`
+1. **`kv_cache_subagent_lifecycle.py` 是 DeepAgent ↔ KVC 的唯一生命周期桥**：`affinity_enabled(deep_agent)`
    从 `deep_config.kv_cache_affinity_config.enable_kv_cache_affinity` 判定亲和是否开启
    （不检查 model/绑定状态）；`is_sticky_subagent_type(subagent_type)` 只在
    `{"browser_agent", "verification_agent"}` 返回 True——sticky 类型是 KVC 亲和的
@@ -39,7 +39,7 @@ KVC 的亲和判定、sticky 白名单与子会话键解析都收敛在这一个
 ## 接口契约
 
 ```python
-# kv_cache/kv_cache_hooks.py
+# kv_cache/kv_cache_subagent_lifecycle.py
 def affinity_enabled(deep_agent: Any) -> bool
 def is_sticky_subagent_type(subagent_type: str) -> bool
 def resolve_sub_session_id(*, task_id: str, parent_session_id: str,

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.kv_cache import kv_cache_cleanup as cleanup_module
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
@@ -68,7 +68,7 @@ class _FullWorkerHarness:
             card=AgentCard(id=self.member_name, name=self.member_name),
             share_stream_writer=False,
         )
-        kv_cache_hooks.on_harness_session_created(self, session)
+        kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, session)
         self.identities.append(session.get_cache_identity())
         try:
             manageable = (
@@ -89,7 +89,7 @@ class _FullWorkerHarness:
                 await self.block_cancel.wait()
             return {"output": "ok"}
         finally:
-            await kv_cache_hooks.after_harness_session_finished(self, session)
+            await kv_cache_harness_session_lifecycle_hook.after_harness_session_finished(self, session)
 
     async def dispose(self) -> None:
         self.events.append("dispose")

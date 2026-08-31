@@ -62,7 +62,7 @@ from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
 )
-from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.kv_cache import kv_cache_react_model_call_hook
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
@@ -607,7 +607,7 @@ class ReActAgent(BaseAgent):
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
-        self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
+        self._kv_cache_model_call_hook = kv_cache_react_model_call_hook.KVCacheModelCallHook()
         self._context_usage_aggregator = SessionKVCacheAggregator()
         self._context_usage_sequences: dict[str, int] = {}
 

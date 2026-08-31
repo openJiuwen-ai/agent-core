@@ -12,9 +12,9 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
-from openjiuwen.harness.kv_cache import kv_cache_hooks
-from openjiuwen.harness.kv_cache.kv_cache_hooks import affinity_enabled
 from openjiuwen.harness.execution_subject import current_execution_subject
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
+from openjiuwen.harness.kv_cache.kv_cache_subagent_lifecycle import affinity_enabled
 from openjiuwen.harness.subagent_runtime.activity import ActivityProjector
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.errors import (
@@ -85,13 +85,13 @@ class SubagentSessionManager:
             return None, None
 
         async def on_turn_start(session: Any) -> None:
-            await kv_cache_hooks.prepare_subagent(
+            await kv_cache_subagent_lifecycle.prepare_subagent(
                 session,
                 subagent_type=subagent_type,
             )
 
         async def on_turn_finished(session: Any, succeeded: bool) -> None:
-            await kv_cache_hooks.finish_subagent(
+            await kv_cache_subagent_lifecycle.finish_subagent(
                 session,
                 subagent_type=subagent_type,
                 succeeded=succeeded,

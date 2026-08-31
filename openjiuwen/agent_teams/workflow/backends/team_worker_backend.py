@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Sequence
 
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
@@ -410,7 +410,7 @@ class TeamWorkerBackend(AgentBackend):
             )
             if budget_rail is not None:
                 harness.add_rail(budget_rail)
-            kv_cache_hooks.configure_harness_session_hooks(
+            kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=True,
@@ -451,7 +451,7 @@ class TeamWorkerBackend(AgentBackend):
             except Exception:
                 team_logger.debug("worker harness dispose failed for %s", member_name)
             finally:
-                kv_cache_hooks.clear_harness_session_hooks(harness)
+                kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(harness)
         return _text_from_invoke_result(result, member_name=member_name)
 
     # ------------------------------------------------------------------
