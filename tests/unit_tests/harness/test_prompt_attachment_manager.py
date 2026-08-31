@@ -7,7 +7,15 @@ import pytest
 
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    LLMApiMode,
+    ModelClientConfig,
+    ProviderType,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_HISTORY_METADATA_KEY,
@@ -293,6 +301,82 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
     assert window.context_messages[-1].content == delta.content
     assert window.get_messages()[1].content == snapshot.content
     assert window.get_messages()[-1].content == delta.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "endpoint_profile", "api_mode", "use_system_role"),
+    [
+        (ProviderType.DeepSeek, None, LLMApiMode.ChatCompletions, False),
+        (ProviderType.DeepSeek, None, LLMApiMode.AnthropicMessages, False),
+        (ProviderType.DashScope, None, LLMApiMode.ChatCompletions, True),
+        (ProviderType.DashScope, None, LLMApiMode.AnthropicMessages, False),
+        (ProviderType.OpenAI, "dashscope", LLMApiMode.ChatCompletions, True),
+        (ProviderType.OpenAI, "dashscope", LLMApiMode.AnthropicMessages, False),
+        (ProviderType.OpenAI, "bailian", LLMApiMode.ChatCompletions, True),
+        (ProviderType.OpenAI, "openai", LLMApiMode.ChatCompletions, False),
+        (ProviderType.Anthropic, None, None, False),
+    ],
+)
+async def test_prompt_attachment_model_window_role_is_route_specific(
+    provider: ProviderType,
+    endpoint_profile: str | None,
+    api_mode: LLMApiMode | None,
+    use_system_role: bool,
+) -> None:
+    manager = PromptAttachmentManager(language="en")
+    await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="runtime context",
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+    snapshot = await manager.sync_to_context(context, "sess1")
+    query = UserMessage(content="<system-reminder>user-authored text</system-reminder>")
+    assistant = AssistantMessage(content="previous answer")
+    await context.add_messages([query, assistant])
+
+    config = ModelClientConfig(
+        client_provider=provider,
+        api_key="test-key",
+        api_base="https://example.test/v1",
+        endpoint_profile=endpoint_profile,
+        api_mode=api_mode,
+    )
+    mutator = manager.build_model_window_mutator(
+        session_id="sess1",
+        model_client_config=config,
+    )
+    window = await context.get_context_window(
+        system_messages=[SystemMessage(content="base system")],
+        window_mutators=[mutator],
+    )
+
+    assert snapshot is not None
+    assert isinstance(snapshot, UserMessage)
+    assert isinstance(context.get_messages()[0], UserMessage)
+    assert context.get_messages()[0] is snapshot
+
+    if use_system_role:
+        assert window.system_messages == [SystemMessage(content="base system")]
+        assert isinstance(window.context_messages[0], SystemMessage)
+        assert window.context_messages[0].content == snapshot.content
+        assert window.context_messages[1:] == [query, assistant]
+    else:
+        assert window.system_messages == [SystemMessage(content="base system")]
+        assert window.context_messages == [snapshot, query, assistant]
+
+    assert window.get_messages()[0] == SystemMessage(content="base system")
+    assert query in window.context_messages
+    assert query not in window.system_messages
 
 
 def test_prompt_attachment_manager_render_truncates_large_content():
