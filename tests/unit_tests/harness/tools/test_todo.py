@@ -228,14 +228,27 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
             await self.tool.invoke({"tasks": "not a valid json array"}, session=self.mock_session)
 
-    async def test_invoke_create_missing_required_field(self):
-        """Raises error when required field (content, activeForm, or description) is missing."""
+    async def test_invoke_create_missing_content_field(self):
+        """Raises error when required field 'content' is missing."""
         with self.assertRaises(Exception):
             await self.tool.invoke({"tasks": [{"activeForm": "Doing"}]}, session=self.mock_session)
-        with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
-        with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": [{"content": "Task 1", "activeForm": "Doing"}]}, session=self.mock_session)
+
+    async def test_invoke_create_optional_fields_default_empty(self):
+        """activeForm and description are optional; missing fields default to empty strings."""
+        result = await self.tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+        self.assertIn("Successfully created 1 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(saved[0].activeForm, "")
+        self.assertEqual(saved[0].description, "")
+
+        result = await self.tool.invoke(
+            {"tasks": [{"content": "Task 1", "activeForm": "Doing"}]},
+            session=self.mock_session,
+        )
+        self.assertIn("Successfully created 1 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(saved[0].activeForm, "Doing")
+        self.assertEqual(saved[0].description, "")
 
 
 class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
