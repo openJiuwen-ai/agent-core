@@ -24,6 +24,13 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.organization.transport_api import TransportAPI
 
 
+_ORG_TASK_POOL_NEXT_ACTION = (
+    "Organization task-pool tools are now available to this leader on the next model call. "
+    "Use org_create_task, org_view_tasks, org_view_child_tasks, and org_review_task; "
+    "do not replace member teams with local teammates."
+)
+
+
 class _OrgLeaderTool(TeamTool):
     def __init__(
         self,
@@ -100,11 +107,7 @@ class OrgCreateOrganizationTool(_OrgControlTool):
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
         data = organization.model_dump()
-        data["next_action"] = (
-            "Organization task-pool tools are now available to this leader. "
-            "Use org_create_task, org_view_tasks, org_view_child_tasks, and org_review_task; "
-            "do not replace member teams with local teammates."
-        )
+        data["next_action"] = _ORG_TASK_POOL_NEXT_ACTION
         return ToolOutput(success=True, data=data)
 
 
@@ -149,11 +152,7 @@ class OrgInviteTeamTool(_OrgControlTool):
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
         data = organization.model_dump()
-        data["next_action"] = (
-            "Organization task-pool tools are now available to this leader. "
-            "Use org_create_task, org_view_tasks, org_view_child_tasks, and org_review_task; "
-            "do not replace member teams with local teammates."
-        )
+        data["next_action"] = _ORG_TASK_POOL_NEXT_ACTION
         return ToolOutput(success=True, data=data)
 
 

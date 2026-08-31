@@ -1998,6 +1998,7 @@ class ReActAgent(BaseAgent):
                 skills_ready_at = time.monotonic()
 
                 tools = await self.ability_manager.list_tool_info()
+                tools_revision = self.ability_manager.registry_revision
                 tools_ready_at = time.monotonic()
 
                 prep_elapsed = tools_ready_at - prep_started_at
@@ -2072,6 +2073,10 @@ class ReActAgent(BaseAgent):
                                 source="steering",
                                 prefix="[STEERING] ",
                             )
+
+                        if self.ability_manager.registry_revision != tools_revision:
+                            tools = await self.ability_manager.list_tool_info()
+                            tools_revision = self.ability_manager.registry_revision
 
                         ai_message = await self._call_model(
                             ctx,

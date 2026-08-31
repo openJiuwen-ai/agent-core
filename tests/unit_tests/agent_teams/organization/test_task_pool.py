@@ -743,6 +743,7 @@ async def test_active_teams_can_create_and_join_organization(active_organization
         {"organization_id": "org-active", "display_name": "Active Organization"}
     )
     assert created.success
+    assert "next model call" in created.data["next_action"]
     assert created.data["owner_team_id"] == "team-a"
     assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-active"
     owner_prompt = agents["team-a"].harness.system_prompt_builder.sections["organization_owner_lifecycle"]
