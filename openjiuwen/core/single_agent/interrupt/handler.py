@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
@@ -35,6 +35,10 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 
 _RESUME_USER_INPUT_KEY_METADATA = "resume_user_input_key"
+_INTERRUPT_PENDING_TOOL_MESSAGE = (
+    "[Awaiting user approval. Tool execution is paused; "
+    "do not retry this tool or ask the user until approval completes.]"
+)
 
 
 @dataclass
@@ -347,6 +351,7 @@ class ToolInterruptHandler:
         resume_user_input_keys = self._resume_user_input_keys_for_state(state)
         ctx.extra.update({key: user_input for key in resume_user_input_keys})
 
+        resolved_outer_ids = set(state.interrupted_tools.keys())
         tools_to_execute = []
         for outer_id, entry in state.interrupted_tools.items():
             tc = copy.deepcopy(entry.tool_call)
@@ -377,8 +382,96 @@ class ToolInterruptHandler:
         if new_interrupted_tools:
             return await self.commit_interrupt(state, context, session, invoke_inputs, sub_agent_outputs)
 
+        if context is not None and resolved_outer_ids:
+            self._cleanup_resolved_interrupt_tool_messages(
+                context,
+                resolved_outer_ids,
+                results,
+            )
+
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
+
+    @staticmethod
+    def _is_interrupt_tool_message_content(content: str) -> bool:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        if text == _INTERRUPT_PENDING_TOOL_MESSAGE:
+            return True
+        if text.startswith("[INTERRUPTED"):
+            return True
+        if "'result_type': 'interrupt'" in text or '"result_type": "interrupt"' in text:
+            return True
+        if "ConfirmPayload" in text and "interrupt_ids" in text:
+            return True
+        return False
+
+    @staticmethod
+    def _cleanup_resolved_interrupt_tool_messages(
+        context: ModelContext,
+        resolved_outer_ids: set[str],
+        results: list,
+    ) -> None:
+        """Remove stale interrupt tool messages after a successful resume."""
+        if not resolved_outer_ids:
+            return
+
+        success_content_by_id: dict[str, str] = {}
+        for _tool_result, tool_message in results:
+            if tool_message is None:
+                continue
+            call_id = str(getattr(tool_message, "tool_call_id", "") or "")
+            if call_id not in resolved_outer_ids:
+                continue
+            content = str(getattr(tool_message, "content", "") or "")
+            if content and not ToolInterruptHandler._is_interrupt_tool_message_content(content):
+                success_content_by_id[call_id] = content
+
+        messages = list(context.get_messages())
+        if not messages:
+            return
+
+        changed = False
+        drop_indices: set[int] = set()
+        indices_by_id: dict[str, list[int]] = {}
+        for idx, msg in enumerate(messages):
+            if getattr(msg, "role", None) != "tool":
+                continue
+            call_id = str(getattr(msg, "tool_call_id", "") or "")
+            if call_id in resolved_outer_ids:
+                indices_by_id.setdefault(call_id, []).append(idx)
+
+        for call_id, indices in indices_by_id.items():
+            if len(indices) == 1:
+                idx = indices[0]
+                content = str(getattr(messages[idx], "content", "") or "")
+                if ToolInterruptHandler._is_interrupt_tool_message_content(content):
+                    replacement = success_content_by_id.get(call_id)
+                    if replacement:
+                        messages[idx] = ToolMessage(content=replacement, tool_call_id=call_id)
+                        changed = True
+                continue
+
+            for idx in indices[:-1]:
+                content = str(getattr(messages[idx], "content", "") or "")
+                if ToolInterruptHandler._is_interrupt_tool_message_content(content):
+                    drop_indices.add(idx)
+                    changed = True
+
+            keep_idx = indices[-1]
+            keep_content = str(getattr(messages[keep_idx], "content", "") or "")
+            if ToolInterruptHandler._is_interrupt_tool_message_content(keep_content):
+                replacement = success_content_by_id.get(call_id)
+                if replacement:
+                    messages[keep_idx] = ToolMessage(content=replacement, tool_call_id=call_id)
+                    changed = True
+
+        if drop_indices:
+            messages = [msg for idx, msg in enumerate(messages) if idx not in drop_indices]
+
+        if changed:
+            context.set_messages(messages)
 
     @staticmethod
     def _resume_user_input_keys_for_state(state: ToolInterruptionState) -> set[str]:

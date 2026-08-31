@@ -17,6 +17,9 @@ from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.tools import TaskTool, create_task_tool
+from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.subagent.task_tool import _build_success_tool_content
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
 
 
 def _create_dummy_model() -> Model:
@@ -77,7 +80,10 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(result.data, {"output": "done", 'agent_id': 'test_id'})
+        self.assertEqual(result.data["output"], "done")
+        self.assertEqual(result.data["agent_id"], "test_id")
+        self.assertIn("content", result.data)
+        self.assertIn("已完成任务", result.data["content"])
         self.assertIsNone(result.error)
         self.assertEqual(called_inputs["query"], "run task")
         # task_tool: f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
@@ -206,6 +212,277 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.success)
         mock_create.assert_called_once()
         self.assertIs(mock_create.call_args.kwargs.get("model"), override)
+
+    async def test_task_tool_returns_interrupt_dict(self) -> None:
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, str]) -> dict:
+                return {
+                    "result_type": "interrupt",
+                    "interrupt_ids": ["inner_perm_1"],
+                    "state": [],
+                }
+
+        code_spec = SubAgentConfig(
+            agent_card=AgentCard(name="code", description="code subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[code_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(card=ToolCard(id="task_tool_test", name="task_tool", description="test"), parent_agent=parent_agent)
+        session = Session(session_id="parent_session")
+
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()) as mock_create:
+            result = await tool.invoke(
+                {"subagent_type": "code", "task_description": "read external file"},
+                session=session,
+                tool_call_id="call_interrupt_001",
+            )
+
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("result_type"), "interrupt")
+        self.assertIn("interrupt_ids", result)
+        mock_create.assert_called_once()
+
+    async def test_task_tool_resume_reuses_pending_subagent(self) -> None:
+        create_count = 0
+
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict) -> dict:
+                if isinstance(inputs.get("query"), dict):
+                    return {"output": "file is empty"}
+                return {
+                    "result_type": "interrupt",
+                    "interrupt_ids": ["inner_perm_1"],
+                    "state": [],
+                }
+
+        def _create_subagent(*_args, **_kwargs):
+            nonlocal create_count
+            create_count += 1
+            return FakeSubAgent()
+
+        code_spec = SubAgentConfig(
+            agent_card=AgentCard(name="code", description="code subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[code_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(card=ToolCard(id="task_tool_test", name="task_tool", description="test"), parent_agent=parent_agent)
+        session = Session(session_id="parent_session")
+        tool_call_id = "call_resume_001"
+
+        with patch.object(parent_agent, "create_subagent", side_effect=_create_subagent):
+            interrupt_result = await tool.invoke(
+                {"subagent_type": "code", "task_description": "read external file"},
+                session=session,
+                tool_call_id=tool_call_id,
+            )
+            self.assertIsInstance(interrupt_result, dict)
+            self.assertEqual(interrupt_result.get("result_type"), "interrupt")
+            self.assertEqual(create_count, 1)
+
+            resume_result = await tool.invoke(
+                {
+                    "subagent_type": "code",
+                    "task_description": "read external file",
+                    "query": {"action": "allow_once"},
+                },
+                session=session,
+                tool_call_id=tool_call_id,
+            )
+
+        self.assertIsInstance(resume_result, ToolOutput)
+        self.assertTrue(resume_result.success)
+        self.assertEqual(resume_result.data["output"], "file is empty")
+        self.assertIn("已完成任务", resume_result.data["content"])
+        self.assertEqual(create_count, 1)
+
+    async def test_task_tool_sub_session_id_uses_tool_call_id(self) -> None:
+        called_inputs: dict[str, str] = {}
+
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                called_inputs.update(inputs)
+                return {"output": "done"}
+
+        code_spec = SubAgentConfig(
+            agent_card=AgentCard(name="code", description="code subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[code_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(card=ToolCard(id="task_tool_test", name="task_tool", description="test"), parent_agent=parent_agent)
+        session = Session(session_id="parent_session")
+        tool_call_id = "call_stable_session"
+
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+            await tool.invoke(
+                {"subagent_type": "code", "task_description": "run task"},
+                session=session,
+                tool_call_id=tool_call_id,
+            )
+
+        self.assertEqual(
+            called_inputs["conversation_id"],
+            f"parent_session_sub_code_{tool_call_id}",
+        )
+
+    async def test_task_tool_english_success_content(self) -> None:
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                return {"output": "hello"}
+
+        code_spec = SubAgentConfig(
+            agent_card=AgentCard(name="code", description="code subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[code_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+            language="en",
+        )
+        session = Session(session_id="parent_session")
+
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+            result = await tool.invoke(
+                {"subagent_type": "code", "task_description": "run task"},
+                session=session,
+            )
+
+        self.assertTrue(result.success)
+        self.assertIn("completed successfully", result.data["content"])
+        self.assertIn("hello", result.data["content"])
+
+    async def test_task_tool_empty_output_success_content(self) -> None:
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                return {"output": ""}
+
+        code_spec = SubAgentConfig(
+            agent_card=AgentCard(name="code", description="code subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[code_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(card=ToolCard(id="task_tool_test", name="task_tool", description="test"), parent_agent=parent_agent)
+        session = Session(session_id="parent_session")
+
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+            result = await tool.invoke(
+                {"subagent_type": "code", "task_description": "read empty file"},
+                session=session,
+            )
+
+        self.assertTrue(result.success)
+        self.assertIn("已完成任务", result.data["content"])
+        self.assertNotIn("\n\n", result.data["content"])
+
+
+class TestTaskToolSuccessContent(unittest.TestCase):
+    def test_build_success_tool_content_cn(self) -> None:
+        content = _build_success_tool_content(
+            "file is empty",
+            subagent_type="general-purpose",
+            language="cn",
+        )
+        self.assertIn("已完成任务", content)
+        self.assertIn("file is empty", content)
+        self.assertIn("task_tool", content)
+
+    def test_build_success_tool_content_en(self) -> None:
+        content = _build_success_tool_content(
+            "",
+            subagent_type="code",
+            language="en",
+        )
+        self.assertIn("completed successfully", content)
+        self.assertIn("Do NOT call task_tool", content)
+
+    def test_build_success_tool_content_whitespace_only_output(self) -> None:
+        content = _build_success_tool_content(
+            "   ",
+            subagent_type="general-purpose",
+            language="cn",
+        )
+        self.assertIn("已完成任务", content)
+        self.assertNotIn("\n\n", content)
+
+    def test_ability_manager_uses_task_tool_content_field(self) -> None:
+        tool_output = ToolOutput(
+            success=True,
+            data={
+                "content": _build_success_tool_content("payload", subagent_type="code", language="cn"),
+                "output": "payload",
+                "agent_id": "agent-1",
+            },
+            error=None,
+        )
+        rendered = AbilityManager._build_tool_message_content(tool_output)
+        self.assertIn("已完成任务", rendered)
+        self.assertIn("payload", rendered)
+        self.assertNotIn("ToolOutput", rendered)
 
 
 class TestTaskToolSync(unittest.TestCase):

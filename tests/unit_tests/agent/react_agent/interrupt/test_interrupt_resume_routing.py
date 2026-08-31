@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
@@ -150,3 +150,67 @@ async def test_mixed_resume_input_exposes_generic_and_dedicated_keys():
     assert seen_extra[EVOLUTION_RESUME_USER_INPUT_KEY] == user_input
     assert RESUME_USER_INPUT_KEY not in final_extra
     assert EVOLUTION_RESUME_USER_INPUT_KEY not in final_extra
+
+
+class _FakeModelContext:
+    def __init__(self, messages: list):
+        self._messages = list(messages)
+
+    def get_messages(self, size=None, with_history=True):
+        if size is None:
+            return list(self._messages)
+        return list(self._messages[-size:])
+
+    def set_messages(self, messages, with_history=True):
+        self._messages = list(messages)
+
+
+@pytest.mark.asyncio
+async def test_resume_cleans_stale_interrupt_tool_messages():
+    call_id = "call_task_001"
+    interrupt_content = (
+        "{'result_type': 'interrupt', 'interrupt_ids': ['inner_1'], "
+        "'state': [ConfirmPayload(...)]}"
+    )
+    success_content = "子智能体「general-purpose」已完成任务。文件内容为空。"
+    context = _FakeModelContext(
+        [
+            ToolMessage(content=interrupt_content, tool_call_id=call_id),
+            ToolMessage(content=success_content, tool_call_id=call_id),
+        ]
+    )
+
+    handler = ToolInterruptHandler(agent=object())
+    state = ToolInterruptionState(
+        ai_message=AssistantMessage(content="", tool_calls=[_tool_call(call_id, "task_tool")]),
+        iteration=0,
+        interrupted_tools={
+            call_id: ToolInterruptEntry(
+                tool_call=_tool_call(call_id, "task_tool"),
+                interrupt_requests={},
+                is_sub_agent=True,
+            )
+        },
+    )
+    ctx = AgentCallbackContext(agent=object(), inputs=ToolCallInputs())
+    success_msg = ToolMessage(content=success_content, tool_call_id=call_id)
+
+    async def _execute_tool_call(ctx_arg, tools_to_execute, session, context_arg):
+        return [(None, success_msg)]
+
+    result = await handler.handle_resume(
+        ResumeContext(
+            state=state,
+            user_input={"action": "allow_once"},
+            ctx=ctx,
+            context=context,
+            session=None,
+            invoke_inputs=InvokeInputs(query="resume"),
+            execute_tool_call=_execute_tool_call,
+        )
+    )
+
+    assert result is None
+    messages = context.get_messages()
+    assert len(messages) == 1
+    assert messages[0].content == success_content

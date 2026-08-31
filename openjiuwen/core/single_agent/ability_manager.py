@@ -1187,10 +1187,23 @@ class AbilityManager:
                 ff = tool_ctx.consume_force_finish()
                 force_finish_result = ff.result if ff is not None else result
                 force_finish_requests[i] = force_finish_result
-                tool_msg = ToolMessage(
-                    content=str(force_finish_result),
-                    tool_call_id=tool_calls[i].id,
-                )
+                if (
+                    isinstance(force_finish_result, dict)
+                    and force_finish_result.get("result_type") == "interrupt"
+                    and force_finish_result.get("interrupt_ids")
+                ):
+                    tool_msg = ToolMessage(
+                        content=(
+                            "[Awaiting user approval. Tool execution is paused; "
+                            "do not retry this tool or ask the user until approval completes.]"
+                        ),
+                        tool_call_id=tool_calls[i].id,
+                    )
+                else:
+                    tool_msg = ToolMessage(
+                        content=str(force_finish_result),
+                        tool_call_id=tool_calls[i].id,
+                    )
                 tool_result = force_finish_result
                 if isinstance(tool_ctx.inputs, ToolCallInputs):
                     if tool_ctx.inputs.tool_result is not None:

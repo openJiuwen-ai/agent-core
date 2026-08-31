@@ -43,6 +43,31 @@ def _summarize_task_description(task_description: Any) -> dict[str, Any]:
     }
 
 
+def _build_success_tool_content(
+    output: Any,
+    *,
+    subagent_type: str,
+    language: str = "cn",
+) -> str:
+    """Build a parent-facing tool message after a subagent completes."""
+    output_text = str(output or "").strip()
+    if language == "en":
+        summary = (
+            f"Subagent '{subagent_type}' completed successfully. "
+            "Any permissions required inside the subagent were already handled. "
+            "Do NOT call task_tool again or read the file directly — use this result."
+        )
+    else:
+        summary = (
+            f"子智能体「{subagent_type}」已完成任务。"
+            "子任务内的权限审批已处理完毕，无需再次向用户确认或重复调用 task_tool / read_file。"
+            "请直接根据下方结果回复用户。"
+        )
+    if output_text:
+        return f"{summary}\n\n{output_text}"
+    return summary
+
+
 def resolve_task_tool_model(
     parent_agent: Any,
     *,
@@ -278,7 +303,20 @@ class TaskTool(Tool):
                 self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
                 return result
             output = result.get("output", "")
-            return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
+            content = _build_success_tool_content(
+                output,
+                subagent_type=str(subagent_type),
+                language=self.language,
+            )
+            return ToolOutput(
+                success=True,
+                data={
+                    "content": content,
+                    "output": output,
+                    "agent_id": subagent.card.id,
+                },
+                error=None,
+            )
         except Exception as e:
             logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
             raise build_error(
@@ -331,4 +369,5 @@ __all__ = [
     "TaskTool",
     "create_task_tool",
     "resolve_task_tool_model",
+    "_build_success_tool_content",
 ]
