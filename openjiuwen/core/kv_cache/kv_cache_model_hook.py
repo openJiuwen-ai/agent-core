@@ -7,13 +7,23 @@ import asyncio
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.kv_cache.kv_cache_types import (
+    InferenceLease,
+    KVCacheRuntimeProtocol,
+)
+
+_RuntimeLease = tuple[KVCacheRuntimeProtocol, InferenceLease | None]
 
 
 class KVCacheModelHook:
     """Keep Runtime inference accounting around affinity-enabled model calls."""
 
     @staticmethod
-    async def begin(model: Any, request_kwargs: dict, model_name: str | None):
+    async def begin(
+        model: Any,
+        request_kwargs: dict,
+        model_name: str | None,
+    ) -> _RuntimeLease | None:
         if not request_kwargs.get("session_id"):
             return None
         try:
@@ -53,7 +63,11 @@ class KVCacheModelHook:
             return None
 
     @staticmethod
-    async def end(runtime_lease, *, succeeded: bool) -> None:
+    async def end(
+        runtime_lease: _RuntimeLease | None,
+        *,
+        succeeded: bool,
+    ) -> None:
         if runtime_lease is None:
             return
         runtime, lease = runtime_lease

@@ -12,7 +12,6 @@ T = TypeVar("T")
 
 KV_CACHE_AFFINITY_SESSION_ID_ENV = "kv_cache_affinity_session_id"
 KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV = "kv_cache_affinity_parent_session_id"
-KV_CACHE_EPHEMERAL_TAIL_METADATA = "_openjiuwen_kv_cache_ephemeral_tail"
 
 _CONTEXT_COMPRESSOR_CACHE_SUFFIXES = {
     "RoundLevelCompressor": "round-level",

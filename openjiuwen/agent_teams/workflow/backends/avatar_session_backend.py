@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import (
     cancellation_safe_release_then_dispose,
 )
 from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
@@ -167,7 +168,7 @@ class AvatarSessionManager:
         human_timeout: float | None = None,
         budget: BudgetLedger | None = None,
         workflow_budget: BudgetLedger | None = None,
-        kv_cache_runtime: Any = None,
+        kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
         self._workflow_budget = workflow_budget

@@ -13,6 +13,7 @@ from openjiuwen.core.session.stream import (
 from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KVCacheIdentity,
 )
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.core.single_agent import (
     create_agent_session,
     Session as AgentSession,
@@ -30,7 +31,7 @@ class Session:
             envs: dict[str, Any] = None,
             team_id: str = "agent_team",
             source_metadata_enabled: bool = True,
-            kv_cache_runtime: Any = None,
+            kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
     ):
         if session_id is None:
             session_id = str(uuid.uuid4())
@@ -43,7 +44,7 @@ class Session:
         self._inner = AgentTeamSession(session_id=session_id, team_id=team_id, config=config)
         self._pre_run_done = False
         self._post_run_done = False
-        self._kv_cache_runtime = kv_cache_runtime
+        self._kv_cache_runtime: KVCacheRuntimeProtocol | None = kv_cache_runtime
         self._kvc_released = False
 
     def get_session_id(self) -> str:
@@ -62,7 +63,7 @@ class Session:
             parent_cache_id=self._session_id,
         )
 
-    def get_kv_cache_runtime(self):
+    def get_kv_cache_runtime(self) -> KVCacheRuntimeProtocol | None:
         """Return the process-local KVC runtime while this Team Session is live."""
         return None if self._kvc_released else self._kv_cache_runtime
 
@@ -214,7 +215,7 @@ def create_agent_team_session(
         envs: dict[str, Any] = None,
         team_id: str = "agent_team",
         source_metadata_enabled: bool = True,
-        kv_cache_runtime: Any = None,
+        kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
 ) -> Session:
     """Create AgentTeam Session"""
     return Session(

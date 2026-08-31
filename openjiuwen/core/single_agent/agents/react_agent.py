@@ -1614,7 +1614,6 @@ class ReActAgent(BaseAgent):
             session=session,
             session_id=session_id,
             parent_session_id=parent_session_id,
-            context_window=context_window,
         )
 
         if self._config.llm_return_token_ids:
@@ -2518,7 +2517,7 @@ class ReActAgent(BaseAgent):
             ) or getattr(self, "_usage_parent_session_id", None) or current_usage_delegation().get(
                 "parent_session_id"
             )
-            session_kwargs = {}
+            session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
@@ -2939,7 +2938,7 @@ class ReActAgent(BaseAgent):
                 if isinstance(inputs, dict)
                 else None
             )
-            session_kwargs = {}
+            session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,

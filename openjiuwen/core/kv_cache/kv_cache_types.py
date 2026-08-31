@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +105,31 @@ class InferenceLease:
     released: bool = False
 
 
+class KVCacheRuntimeProtocol(Protocol):
+    """Narrow runtime contract used by Session and model-call integration."""
+
+    async def prepare(self, identity: KVCacheIdentity) -> bool: ...
+
+    async def suspend(self, identity: KVCacheIdentity) -> bool: ...
+
+    async def release(self, identity: KVCacheIdentity) -> bool: ...
+
+    async def begin_inference(
+        self,
+        identity: KVCacheIdentity,
+        model: Any,
+        *,
+        model_name: str | None = None,
+    ) -> InferenceLease | None: ...
+
+    async def end_inference(
+        self,
+        lease: InferenceLease | None,
+        *,
+        succeeded: bool,
+    ) -> None: ...
+
+
 __all__ = [
     "ActionKey",
     "ActionKind",
@@ -117,6 +142,7 @@ __all__ = [
     "KVCacheBinding",
     "KVCacheControlDomain",
     "KVCacheIdentity",
+    "KVCacheRuntimeProtocol",
     "PendingAction",
     "Residency",
     "RootKey",

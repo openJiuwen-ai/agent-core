@@ -13,7 +13,6 @@ from openjiuwen.core.kv_cache.kv_cache_config import (
 from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KV_CACHE_AFFINITY_SESSION_ID_ENV,
-    KV_CACHE_EPHEMERAL_TAIL_METADATA,
     context_compressor_cache_identity,
     first_changed_index,
     message_range_kwargs,
@@ -22,7 +21,10 @@ from openjiuwen.core.kv_cache.kv_cache_metadata import (
     team_member_cache_identity,
     tools_range_kwargs,
 )
-from openjiuwen.core.kv_cache.kv_cache_types import KVCacheIdentity
+from openjiuwen.core.kv_cache.kv_cache_types import (
+    KVCacheIdentity,
+    KVCacheRuntimeProtocol,
+)
 
 __all__ = [
     "KVC_MANAGEMENT_MAX_ATTEMPTS",
@@ -32,9 +34,9 @@ __all__ = [
     "KVC_TERMINAL_CLEANUP_TIMEOUT_SECONDS",
     "KVCacheAffinityConfig",
     "KVCacheIdentity",
+    "KVCacheRuntimeProtocol",
     "KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV",
     "KV_CACHE_AFFINITY_SESSION_ID_ENV",
-    "KV_CACHE_EPHEMERAL_TAIL_METADATA",
     "context_compressor_cache_identity",
     "first_changed_index",
     "message_range_kwargs",

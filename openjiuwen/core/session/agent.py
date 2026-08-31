@@ -17,6 +17,7 @@ from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KVCacheIdentity,
     team_member_cache_identity,
 )
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
 from openjiuwen.core.session.internal.agent import AgentSession
@@ -39,7 +40,7 @@ class Session:
                  close_stream_on_post_run: bool = True,
                  source_metadata: dict[str, Any] | None = None,
                  parent_session_id: str | None = None,
-                 kv_cache_runtime: Any = None):
+                 kv_cache_runtime: KVCacheRuntimeProtocol | None = None):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
@@ -64,7 +65,7 @@ class Session:
             else None
         )
         self._team_cache_scope: tuple[str, str] | None = None
-        self._kv_cache_runtime = kv_cache_runtime
+        self._kv_cache_runtime: KVCacheRuntimeProtocol | None = kv_cache_runtime
         self._kvc_released = False
 
     def get_session_id(self) -> str:
@@ -170,7 +171,7 @@ class Session:
             parent_cache_id=self._session_id,
         )
 
-    def get_kv_cache_runtime(self):
+    def get_kv_cache_runtime(self) -> KVCacheRuntimeProtocol | None:
         """Return the process-local KVC runtime while this Session is live."""
         return None if self._kvc_released else self._kv_cache_runtime
 
@@ -328,7 +329,7 @@ def create_agent_session(session_id: str = None,
                          stream_writer_manager: StreamWriterManager | None = None,
                          source_metadata: dict[str, Any] | None = None,
                          parent_session_id: str | None = None,
-                         kv_cache_runtime: Any = None,
+                         kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
                          **kwargs) -> Session:
     close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
     session = Session(
