@@ -17,6 +17,7 @@ address one specific run; ``pause`` / ``resume`` / ``stop`` operate per-run, wit
 ``pause(None)`` / ``resume(None)`` preserving the full-collection behaviour, and
 ``stop`` being terminal (the run is dropped, not parked for resume).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,7 +49,7 @@ class BackgroundTaskController:
     """
 
     def __init__(self) -> None:
-        self._active: dict[str, SwarmflowRunHandle] = {}   # keyed by run_id
+        self._active: dict[str, SwarmflowRunHandle] = {}  # keyed by run_id
         self._paused: dict[str, SwarmflowRunHandle] = {}  # keyed by run_id
         self._lock = asyncio.Lock()
 
@@ -132,7 +133,7 @@ class BackgroundTaskController:
             h = self._active.get(run_id)
             if h is not None:
                 await self._abort_one(h, "stop")
-                self._active.pop(run_id, None)   # terminal: NOT into _paused
+                self._active.pop(run_id, None)  # terminal: NOT into _paused
                 return True
             if run_id in self._paused:
                 # Already aborted at pause time; just drop the relaunch
@@ -146,6 +147,12 @@ class BackgroundTaskController:
         if run_id is None:
             return bool(self._paused)
         return run_id in self._paused
+
+    def is_active(self, run_id: str | None = None) -> bool:
+        """Whether ``run_id`` (any run when None) is currently active (running)."""
+        if run_id is None:
+            return bool(self._active)
+        return run_id in self._active
 
 
 __all__ = ["BackgroundTaskController", "SwarmflowRunHandle"]
