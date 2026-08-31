@@ -19,7 +19,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
-from openjiuwen.harness.subagent_runtime.models import SubagentRecord, SubagentStatusKind, UserInputOp
+from openjiuwen.harness.subagent_runtime.models import SubagentRecord, SubagentStatus, SubagentStatusKind, UserInputOp
 from openjiuwen.harness.subagent_runtime.persistence import merge_subagent_bucket, read_subagent_bucket
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
 from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockParentAgent, MockSession as ManagerSession
@@ -425,25 +425,13 @@ async def test_cancel_all_closes_running_subagents() -> None:
 async def test_duplicate_sticky_spawn_rejected() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
     async with _patched_control(parent=parent) as control:
-        first = await control.spawn("verification_agent", "first")
+        first = await control.spawn("browser_agent", "first")
         await _wait_for_turn(parent.mock_agent)
 
         with pytest.raises(Exception, match="subagent already live"):
-            await control.spawn("verification_agent", "second")
+            await control.spawn("browser_agent", "second")
 
         assert control._manager.find(first.subagent_id) is not None
-
-
-@pytest.mark.asyncio
-async def test_browser_spawn_uses_fresh_subagent_session() -> None:
-    parent = ControlParentAgent(mock_agent=MockAgent())
-    async with _patched_control(parent=parent) as control:
-        first = await control.spawn("browser_agent", "first")
-        second = await control.spawn("browser_agent", "second")
-
-        assert first.subagent_id != second.subagent_id
-        assert control._manager.find(first.subagent_id) is not None
-        assert control._manager.find(second.subagent_id) is not None
 
 
 @pytest.mark.asyncio
@@ -633,10 +621,47 @@ async def test_resume_restores_closed_instance() -> None:
             result = await control.resume(spawned.subagent_id)
 
         assert result.restored is True
-        assert result.status.kind is SubagentStatusKind.PENDING_INIT
+        assert result.status.kind is SubagentStatusKind.COMPLETED
         assert control._manager.find(spawned.subagent_id) is not None
         assert spawned.subagent_id not in control._closed_records
         assert control._registry.find_metadata(spawned.subagent_id) is not None
+        payload = control.describe_one(spawned.subagent_id)
+        assert payload is not None
+        assert payload["status"] == "idle"
+        assert payload["can_send_input"] is True
+
+
+@pytest.mark.asyncio
+async def test_resume_normalizes_quiescent_pending_init_on_live_instance() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+        await control.close(spawned.subagent_id)
+
+        with patch(
+            "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+        ) as get_checkpointer:
+            checkpointer = AsyncMock()
+            checkpointer.session_exists = AsyncMock(return_value=True)
+            get_checkpointer.return_value = checkpointer
+
+            restored = await control.resume(spawned.subagent_id)
+            assert restored.restored is True
+            assert restored.status.kind is SubagentStatusKind.COMPLETED
+
+            instance = control._manager.get(spawned.subagent_id)
+            await instance.status.set(SubagentStatus.pending_init())
+
+            result = await control.resume(spawned.subagent_id)
+            assert result.restored is False
+            assert result.status.kind is SubagentStatusKind.COMPLETED
+
+        payload = control.describe_one(spawned.subagent_id)
+        assert payload is not None
+        assert payload["status"] == "idle"
+        assert payload["can_send_input"] is True
 
 
 @pytest.mark.asyncio

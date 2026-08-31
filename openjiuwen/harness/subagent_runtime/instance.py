@@ -160,6 +160,13 @@ class SubagentInstance:
         kind = self.status.current().kind
         return kind in {SubagentStatusKind.PENDING_INIT, SubagentStatusKind.RUNNING}
 
+    def has_active_turn(self) -> bool:
+        """Return True when a user-input turn is queued or currently executing."""
+        if not self._ops.empty():
+            return True
+        run = self._current_run
+        return run is not None and not run.done()
+
     async def _set_status(self, status: SubagentStatus) -> None:
         await self.status.set(status)
         if self._on_status_changed is not None:
