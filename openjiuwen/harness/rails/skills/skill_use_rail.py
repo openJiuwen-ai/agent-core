@@ -820,13 +820,16 @@ class SkillUseRail(DeepAgentRail):
 
         The persisted baseline is included even if the directory was changed after
         the session started. Newly discovered skills remain available as runtime
-        additions for the current session.
+        additions for the current session. Skills explicitly disabled/removed from
+        the current enabled set are excluded so a ``skill_tool`` lookup fails with
+        ``Skill not found``, consistent with the runtime removal notice.
         """
         baseline = self._load_session_baseline(session)
         if self._load_session_state(session) is None:
             return list(self.skills)
 
-        merged = list(baseline)
+        current_names = {skill.name for skill in self.skills}
+        merged = [skill for skill in baseline if skill.name in current_names]
         known_names = {skill.name for skill in merged}
         merged.extend(skill for skill in self.skills if skill.name not in known_names)
         return merged
