@@ -165,11 +165,14 @@ async def test_six_tool_lifecycle_chain_uses_real_control() -> None:
             )
             assert close_result.data["previous_status"] == SubagentStatusKind.COMPLETED.value
 
+            # resume restores the instance to idle (no turn is enqueued); the
+            # model must call subagent_send_input to actually run it again.
             resume_result = await resume_tool.invoke(
                 {"subagent_id": subagent_id},
                 session=session,
             )
-            assert resume_result.data["status"] == "running"
+            assert resume_result.data["status"] == "idle"
+            assert resume_result.data["turn_outcome"] == "completed"
             assert resume_result.data["restored"] is True
 
             parent.mock_agent.output = "turn-3"
