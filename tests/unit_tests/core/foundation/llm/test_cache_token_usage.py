@@ -100,3 +100,18 @@ def test_cache_usage_metadata_does_not_clamp_negative_provider_values():
     metadata = BaseModelClient._cache_usage_metadata({"cache_read_tokens": -1})
 
     assert metadata["cache_read_tokens"] == -1
+
+
+def test_cache_usage_metadata_downgrades_legacy_cache_tokens_authority():
+    metadata = BaseModelClient._cache_usage_metadata({"cache_tokens": 40})
+
+    assert metadata["cache_read_tokens"] == 40
+    assert metadata["cache_status"] == "observed"
+    assert metadata["cache_authoritative"] is False
+
+
+def test_cache_usage_metadata_prefers_explicit_read_tokens_over_legacy_field():
+    metadata = BaseModelClient._cache_usage_metadata({"cache_read_tokens": 10, "cache_tokens": 40})
+
+    assert metadata["cache_read_tokens"] == 10
+    assert metadata["cache_authoritative"] is True

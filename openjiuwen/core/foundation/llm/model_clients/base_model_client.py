@@ -150,9 +150,9 @@ class BaseModelClient(ABC):
     def _cache_usage_metadata(obj: Any) -> dict[str, Any]:
         """Normalize cache read/miss/write fields while preserving zero values.
 
-        The legacy ``cache_tokens`` field cannot distinguish an authoritative
-        zero hit from an omitted field. This helper keeps that distinction for
-        the context-usage aggregator without changing the legacy field.
+        The legacy ``cache_tokens`` field is retained as a compatibility read
+        value, but it is not authoritative because providers disagree on
+        whether it represents cache hits or cache writes.
         """
 
         def _get_value(source: Any, key: str) -> Any:
@@ -209,7 +209,6 @@ class BaseModelClient(ABC):
                 ("cachedContentTokenCount",),
                 ("cached_content_token_count",),
                 ("cache_read_tokens",),
-                ("cache_tokens",),
                 ("cached_tokens",),
                 ("cache_hit_tokens",),
                 ("cached_input_tokens",),
@@ -217,6 +216,10 @@ class BaseModelClient(ABC):
                 ("prompt_cached_tokens",),
             )
         )
+        legacy_read_tokens = _first((("cache_tokens",),))
+        legacy_read = read_tokens is None and legacy_read_tokens is not None
+        if read_tokens is None:
+            read_tokens = legacy_read_tokens
         miss_tokens = _first(
             (
                 ("prompt_cache_miss_tokens",),
@@ -239,7 +242,9 @@ class BaseModelClient(ABC):
             "cache_write_tokens": write_tokens,
             "cache_status": "observed" if has_cache_usage else None,
             "cache_source": "provider_usage" if has_cache_usage else None,
-            "cache_authoritative": has_cache_usage,
+            # ``cache_tokens`` is retained as a compatibility read value, but
+            # providers disagree on whether it means cache hits or writes.
+            "cache_authoritative": has_cache_usage and not legacy_read,
         }
 
     @staticmethod

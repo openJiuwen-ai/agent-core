@@ -17,6 +17,7 @@ from openjiuwen.core.context_engine.token.tokenizer_spec import (
 
 
 _HUGGINGFACE_ENDPOINT = "https://hf-mirror.com"
+_HUGGINGFACE_TIMEOUT = 10.0
 
 
 class TokenizerArtifactManager:
@@ -34,6 +35,8 @@ class TokenizerArtifactManager:
         cache_dir: str | Path | None = None,
         enable_download: bool = False,
         offline: bool = False,
+        endpoint: str | None = None,
+        request_timeout: float = _HUGGINGFACE_TIMEOUT,
     ) -> None:
         configured_cache_dir = cache_dir or os.getenv(
             "OPENJIUWEN_TOKENIZER_CACHE_DIR",
@@ -42,6 +45,11 @@ class TokenizerArtifactManager:
         self.cache_dir = Path(configured_cache_dir).expanduser()
         self.enable_download = enable_download
         self.offline = offline
+        configured_endpoint = endpoint if endpoint is not None else os.getenv("HF_ENDPOINT")
+        self.endpoint = str(configured_endpoint or _HUGGINGFACE_ENDPOINT).strip().rstrip("/")
+        if request_timeout <= 0:
+            raise ValueError("request_timeout must be greater than zero")
+        self.request_timeout = request_timeout
         self.last_error: str | None = None
 
     def resolve(self, spec: TokenizerSpec | CompatibleTokenizerSpec) -> Path | None:
@@ -157,16 +165,15 @@ class TokenizerArtifactManager:
         snapshot_download: Any,
         spec: TokenizerSpec | CompatibleTokenizerSpec,
     ) -> str:
-        """Download from the fixed Hugging Face mirror."""
-        if self.enable_download and not self.offline:
-            _configure_huggingface_direct_client()
+        """Download from the configured Hugging Face endpoint."""
         return snapshot_download(
             repo_id=str(spec.tokenizer_id),
             revision=getattr(spec, "revision", None),
             cache_dir=str(self.cache_dir),
             allow_patterns=self._allow_patterns(spec),
             local_files_only=self.offline or not self.enable_download,
-            endpoint=_HUGGINGFACE_ENDPOINT,
+            endpoint=self.endpoint,
+            etag_timeout=self.request_timeout,
         )
 
     def _resolve_modelscope(self, spec: TokenizerSpec | CompatibleTokenizerSpec) -> Path | None:
@@ -307,31 +314,6 @@ class TokenizerArtifactManager:
         if "revision" in message:
             return "tokenizer_revision_unavailable"
         return "tokenizer_download_failed"
-
-
-def _configure_huggingface_direct_client() -> None:
-    """Use a direct HTTP client so mirror requests ignore inherited settings."""
-    try:
-        import httpx
-        import huggingface_hub
-    except ImportError:
-        return
-
-    set_client_factory = getattr(huggingface_hub, "set_client_factory", None)
-    if not callable(set_client_factory):
-        try:
-            from huggingface_hub.utils._http import set_client_factory
-        except ImportError:
-            return
-
-    def client_factory() -> httpx.Client:
-        return httpx.Client(
-            follow_redirects=True,
-            timeout=None,
-            trust_env=False,
-        )
-
-    set_client_factory(client_factory)
 
 
 __all__ = ["TokenizerArtifactManager"]

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UserMessage
@@ -287,52 +286,6 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
     assert window.context_messages[-1].content == delta.content
     assert window.get_messages()[1].content == snapshot.content
     assert window.get_messages()[-1].content == delta.content
-
-
-@pytest.mark.asyncio
-async def test_prompt_attachment_window_mutator_marks_homogeneous_usage_category():
-    manager = PromptAttachmentManager()
-    await manager.add_section(
-        session_id="sess1",
-        section="skill",
-        kind=PromptAttachmentKind.SKILL,
-        source="rail.skill",
-        content="skill instructions",
-    )
-
-    mutator = manager.make_window_mutator("sess1")
-    result = await mutator(None, ContextWindow())
-
-    assert result.context_messages[-1].metadata["_context_usage_category"] == "skills"
-
-
-@pytest.mark.asyncio
-async def test_prompt_attachment_window_mutator_splits_mixed_usage_categories():
-    manager = PromptAttachmentManager()
-    await manager.add_section(
-        session_id="sess1",
-        section="memory",
-        kind=PromptAttachmentKind.MEMORY,
-        source="rail.memory",
-        content="memory content",
-    )
-    await manager.add_section(
-        session_id="sess1",
-        section="skill",
-        kind=PromptAttachmentKind.SKILL,
-        source="rail.skill",
-        content="skill instructions",
-    )
-
-    result = await manager.make_window_mutator("sess1")(None, ContextWindow())
-
-    assert len(result.context_messages) == 1
-    attachment_message = result.context_messages[0]
-    assert "_context_usage_category" not in attachment_message.metadata
-    assert [
-        fragment["category"]
-        for fragment in attachment_message.metadata["_context_usage_fragments"]
-    ] == ["system_prompt", "skills"]
 
 
 def test_prompt_attachment_manager_render_truncates_large_content():

@@ -9,13 +9,13 @@ import json
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Awaitable, Callable, Iterable
+from typing import Any, Iterable
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
-from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
+from openjiuwen.core.context_engine.base import ModelContext
+from openjiuwen.core.foundation.llm import SystemMessage
 
 
 class PromptAttachmentKind(str, Enum):
@@ -88,12 +88,6 @@ def _canonical_json(value: Any) -> str:
 
 def _kind_value(kind: PromptAttachmentKind | str) -> str:
     return kind.value if isinstance(kind, PromptAttachmentKind) else str(kind)
-
-
-def _context_usage_category(kind: PromptAttachmentKind | str) -> str:
-    """Map dynamic prompt content to the token usage protocol categories."""
-
-    return "skills" if _kind_value(kind).lower() == PromptAttachmentKind.SKILL.value else "system_prompt"
 
 
 def _content_sha256(content: str | None) -> str:
@@ -559,133 +553,6 @@ class PromptAttachmentManager:
                 sorted(current_state),
             )
             return message
-
-    def make_window_mutator(
-        self,
-        session_id: str,
-    ) -> Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]:
-        """Build the final-window mutator for prompt attachment history.
-
-        ``sync_to_context`` persists attachment messages in append-only
-        context history.  The first full snapshot is the baseline for all
-        later deltas, so it must be placed immediately after the fixed system
-        prompt in the final model window.  Later delta messages stay in their
-        historical position, which keeps changes at the end of the
-        conversation (and after browser state/tool messages when applicable).
-        """
-
-        async def mutator(context: ModelContext, window: ContextWindow) -> ContextWindow:
-            context_history_messages = []
-            if context is not None:
-                get_messages = getattr(context, "get_messages", None)
-                if callable(get_messages):
-                    for message in get_messages(with_history=True):
-                        if self._is_history_message(message):
-                            context_history_messages.append(message)
-
-            snapshot_message = None
-            candidate_message_groups = (
-                window.system_messages,
-                window.context_messages,
-                context_history_messages,
-            )
-            for messages in candidate_message_groups:
-                for message in messages:
-                    if self._is_snapshot_history_message(message):
-                        snapshot_message = message
-                        break
-                if snapshot_message is not None:
-                    break
-
-            if snapshot_message is not None:
-                context_messages = []
-                for message in window.context_messages:
-                    if not self._is_snapshot_history_message(message):
-                        context_messages.append(message)
-
-                system_messages = []
-                for message in window.system_messages:
-                    if not self._is_snapshot_history_message(message):
-                        system_messages.append(message)
-
-                logger.info(
-                    "[PromptAttachmentManager] promoted prompt attachment snapshot "
-                    "after fixed system: session_id=%s",
-                    session_id,
-                )
-                return window.model_copy(
-                    update={
-                        "system_messages": [*system_messages, snapshot_message],
-                        "context_messages": context_messages,
-                    }
-                )
-
-            if context_history_messages:
-                logger.info(
-                    "[PromptAttachmentManager] retained prompt attachment history order: "
-                    "session_id=%s, messages=%s",
-                    session_id,
-                    len(context_history_messages),
-                )
-
-            # Keep compatibility with callers that build a window before
-            # persisting attachment history.  The normal ReAct path calls
-            # ``sync_to_context`` first and therefore uses the append-only
-            # snapshot/delta path above.
-            prompt_attachments = await self.collect_for_session(session_id)
-            rendered = self.render(prompt_attachments)
-            if rendered:
-                categories = [_context_usage_category(item.kind) for item in prompt_attachments]
-                fragments = [
-                    {
-                        "category": category,
-                        "carrier": "context_message",
-                        "order": index,
-                        "stable_id": item.id,
-                        "source": item.source,
-                        "text": item.content or "",
-                    }
-                    for index, (item, category) in enumerate(zip(prompt_attachments, categories))
-                ]
-                homogeneous_category = categories[0] if categories and len(set(categories)) == 1 else None
-                messages = self.inject_messages(
-                    list(window.context_messages),
-                    rendered,
-                    context_usage_category=homogeneous_category,
-                    context_usage_fragments=fragments,
-                )
-                logger.info(
-                    "[PromptAttachmentManager] injected unsaved prompt attachments: "
-                    "session_id=%s, prompt_attachment_ids=%s, rendered_prompt_attachment_hash=%s",
-                    session_id,
-                    [item.id for item in prompt_attachments],
-                    hash_rendered(rendered),
-                )
-                return window.model_copy(update={"context_messages": messages})
-            return window
-
-        return mutator
-
-    @staticmethod
-    def inject_messages(
-        messages: list[BaseMessage],
-        rendered_prompt_attachments: str,
-        *,
-        context_usage_category: str | None = None,
-        context_usage_fragments: list[dict[str, Any]] | None = None,
-    ) -> list[BaseMessage]:
-        """Append rendered prompt attachments as a classified context message."""
-
-        if not rendered_prompt_attachments:
-            return list(messages)
-
-        metadata: dict[str, Any] = {}
-        if context_usage_category is not None:
-            metadata["_context_usage_category"] = context_usage_category
-            metadata["_context_usage_carrier"] = "context_message"
-        if context_usage_fragments:
-            metadata["_context_usage_fragments"] = [dict(fragment) for fragment in context_usage_fragments]
-        return [*messages, UserMessage(content=rendered_prompt_attachments, metadata=metadata)]
 
     @staticmethod
     def _state_by_section(prompt_attachments: Iterable[PromptAttachment]) -> dict[str, str]:

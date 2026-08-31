@@ -290,6 +290,41 @@ def test_modelscope_cached_artifact_is_available_offline(tmp_path: Path) -> None
     assert manager.resolve(spec) == artifact
 
 
+def test_huggingface_endpoint_accepts_env_and_explicit_timeout(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HF_ENDPOINT", "https://company-hf.example/")
+    manager = TokenizerArtifactManager(
+        cache_dir=tmp_path,
+        enable_download=True,
+        endpoint="https://configured-hf.example/",
+        request_timeout=7.5,
+    )
+    spec = TokenizerSpec(
+        provider="qwen",
+        model="qwen-chat",
+        source="huggingface",
+        tokenizer_id="org/model",
+    )
+    calls = {}
+
+    def fake_snapshot_download(**kwargs):
+        calls.update(kwargs)
+        return str(tmp_path)
+
+    manager._snapshot_download_huggingface(fake_snapshot_download, spec)
+
+    assert manager.endpoint == "https://configured-hf.example"
+    assert calls["endpoint"] == "https://configured-hf.example"
+    assert calls["etag_timeout"] == 7.5
+
+
+def test_huggingface_endpoint_defaults_to_environment(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HF_ENDPOINT", "https://company-hf.example/")
+
+    manager = TokenizerArtifactManager(cache_dir=tmp_path)
+
+    assert manager.endpoint == "https://company-hf.example"
+
+
 def test_network_download_error_is_not_misclassified_as_revision_failure() -> None:
     error = RuntimeError(
         "LocalEntryNotFoundError: Got: ConnectError: [Errno 54] "
