@@ -411,7 +411,7 @@ class SubagentControl:
         """Restore a closed or evicted subagent from checkpointer without enqueueing work."""
         existing = self._manager.find(subagent_id)
         if existing is not None and not existing.is_closed():
-            status = existing.agent_status()
+            status = await self._finalize_resume_idle(subagent_id, existing)
             return ResumeResult(
                 status=status,
                 restored=False,
@@ -444,7 +444,9 @@ class SubagentControl:
 
         self._closed_records.pop(subagent_id, None)
         restored = self._manager.find(subagent_id)
-        status = restored.agent_status() if restored is not None else SubagentStatus.pending_init()
+        if restored is None:
+            return ResumeResult(status=SubagentStatus.pending_init(), restored=True)
+        status = await self._finalize_resume_idle(subagent_id, restored)
         return ResumeResult(status=status, restored=True)
 
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus:
@@ -957,6 +959,29 @@ class SubagentControl:
             metadata.closed_at_ms = None
         elif is_instance_closed(status) and metadata.closed_at_ms is None:
             metadata.closed_at_ms = metadata.updated_at_ms
+
+    async def _finalize_resume_idle(
+        self,
+        subagent_id: str,
+        instance: Any,
+    ) -> SubagentStatus:
+        """After resume, expose quiescent instances as idle so list/send_input stay usable."""
+        status = instance.agent_status()
+        if instance.has_active_turn():
+            return status
+        if status.kind not in {
+            SubagentStatusKind.PENDING_INIT,
+            SubagentStatusKind.RUNNING,
+        }:
+            return status
+        idle_status = SubagentStatus.completed()
+        await instance.status.set(idle_status)
+        metadata = self._registry.find_metadata(subagent_id)
+        if metadata is not None:
+            self._touch_metadata_timestamps(metadata, status=idle_status)
+        await self.emit_status_update(subagent_id)
+        self.flush()
+        return idle_status
 
     async def _handle_instance_status_changed(
         self,
