@@ -1184,6 +1184,49 @@ class CodexSpanBridge:
                 },
             )
 
+    def record_external_runtime_failure(
+        self,
+        *,
+        failure_id: str,
+        round_id: int | None,
+        phase: str,
+        category: str,
+        summary: str,
+    ) -> None:
+        """Stamp the finalized external runtime failure on a trace span.
+
+        Prefers the current turn span; falls back to the long-lived team span
+        so a startup-phase failure (no turn span yet) is still correlated in
+        trace. Correlates the failed mailbox message, round result and logs
+        with the member round via ``failure_id`` / ``round_id``. No-op when no
+        recording span is available (observability is best-effort).
+        """
+        span = self._turn_span
+        if span is None or not span.is_recording():
+            # Startup failures happen before any turn span exists; fall back to
+            # the team span so the event is not lost from trace.
+            runtime = self._observability_runtime()
+            if runtime is None:
+                return
+            _tracer, _config, team_span = runtime
+            span = team_span
+            if not span.is_recording():
+                return
+        span.add_event(
+            "external_runtime.failed",
+            {
+                "external_runtime.failure_id": failure_id,
+                "external_runtime.round_id": round_id if round_id is not None else "",
+                "external_runtime.phase": phase,
+                "external_runtime.category": category,
+                "external_runtime.summary": summary,
+                "external_runtime.member_name": self._member_name,
+                "external_runtime.member_agent_id": self._member_agent_id,
+                "external_runtime.team_name": self._team_name,
+                "external_runtime.agent_kind": "codex",
+            },
+        )
+
     async def wait_for_native_observations(self, *, timeout_s: float = 1.0) -> None:
         """Allow rollout and fallback OTel exporters to flush after the stream."""
         if not (self._rollout_trace_enabled or self._native_trace_enabled) or self._turn_span is None:
