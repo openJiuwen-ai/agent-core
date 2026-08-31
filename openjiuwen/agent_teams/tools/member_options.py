@@ -37,6 +37,7 @@ class TeamMemberOptions(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model_ref: MemberModelRef | None = None
+    fallback_model_ref: MemberModelRef | None = None
     cli_agent: str | None = None
     worktree: MemberWorktreeOptions | None = None
     permissions_override: dict[str, str] | None = Field(
@@ -110,6 +111,7 @@ def merge_legacy_member_options(
 def build_member_options(
     *,
     model_ref: Mapping[str, Any] | None = None,
+    fallback_model_ref: Mapping[str, Any] | None = None,
     cli_agent: str | None = None,
     worktree: MemberWorktreeOptions | None = None,
     worktree_isolation: str | None = None,
@@ -119,6 +121,7 @@ def build_member_options(
     """Build a TeamMember.options JSON string for new writes."""
     parsed = TeamMemberOptions()
     parsed.model_ref = _model_ref_from_mapping(model_ref)
+    parsed.fallback_model_ref = _model_ref_from_mapping(fallback_model_ref)
     parsed.cli_agent = cli_agent
     if worktree is not None:
         parsed.worktree = worktree
@@ -169,6 +172,20 @@ def get_member_options(record: object) -> TeamMemberOptions:
 def get_member_model_ref(record: object) -> MemberModelRef | None:
     """Return the member's model reference from options."""
     return get_member_options(record).model_ref
+
+
+def get_member_fallback_model_ref(record: object) -> MemberModelRef | None:
+    """Return the member's authentication fallback model reference."""
+    return get_member_options(record).fallback_model_ref
+
+
+def promote_member_fallback_model(raw_options: str | None) -> str | None:
+    """Promote a member's fallback model to its active model reference."""
+    parsed = load_member_options(raw_options)
+    if parsed.fallback_model_ref is None:
+        return raw_options
+    parsed.model_ref = parsed.fallback_model_ref.model_copy()
+    return dump_member_options(parsed)
 
 
 def get_member_cli_agent(record: object) -> str | None:

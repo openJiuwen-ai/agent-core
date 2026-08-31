@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from contextlib import nullcontext
+from contextlib import aclosing, nullcontext
 from dataclasses import dataclass
 import json
-from typing import Any, AsyncIterator, ContextManager, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, ContextManager, Optional
 
 from openjiuwen.agent_teams.external.cli_agent.claude.failure_classifier import (
     classify_assistant_error,
@@ -63,6 +63,10 @@ class _ClaudeStderrTail:
         return "\n".join(self._lines)
 
 
+class _ClaudeAuthFallbackRequested(RuntimeError):
+    """Signal that the outer driver should retry once with fallback options."""
+
+
 class ClaudeSdkRuntime(CliRuntimeBase):
     """Drive a Claude Code member through Claude Agent SDK."""
 
@@ -71,6 +75,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         *,
         member_name: str,
         options: Any,
+        fallback_options: Any | None = None,
+        promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
         transport: Any | None = None,
         inject_mcp: bool = True,
         mcp_server_name: str = "openjiuwen-team",
@@ -85,6 +91,9 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             team_context_tracker=team_context_tracker,
         )
         self._options = options
+        self._fallback_options = fallback_options
+        self._promote_fallback_model = promote_fallback_model
+        self._fallback_activated = False
         self._transport = transport
         self._inject_mcp = inject_mcp
         self._mcp_server_name = mcp_server_name
@@ -198,6 +207,64 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         )
         self._sdk_mcp_tool_set = tool_set
         self._options.mcp_servers = {self._mcp_server_name: tool_set.server}
+        if self._fallback_options is not None:
+            self._fallback_options.mcp_servers = {self._mcp_server_name: tool_set.server}
+
+    async def _activate_auth_fallback(self) -> bool:
+        """Switch an unauthenticated native client to its persisted fallback model."""
+        if self._fallback_activated or self._fallback_options is None or self._promote_fallback_model is None:
+            return False
+        fallback_client = None
+        original_options = self._options
+        fallback_session_id = self._fallback_options.resume or self._fallback_options.session_id
+        session_mode = "resume" if self._fallback_options.resume else "new"
+        team_logger.info(
+            "[external-cli] member {} activating Claude authentication fallback session_mode={} session_id={}",
+            self._member_name,
+            session_mode,
+            fallback_session_id,
+        )
+        try:
+            old_client = self._client
+            if old_client is not None:
+                await old_client.disconnect()
+                team_logger.info(
+                    "[external-cli] member {} disconnected native Claude client before authentication fallback",
+                    self._member_name,
+                )
+            self._client = None
+            self._options = self._fallback_options
+            self._install_stderr_callback()
+            sdk = load_claude_sdk()
+            fallback_client = sdk.ClaudeSDKClient(options=self._options, transport=self._transport)
+            await self._connect_client(fallback_client)
+            team_logger.info(
+                "[external-cli] member {} connected Claude authentication fallback client",
+                self._member_name,
+            )
+            promoted = await self._promote_fallback_model()
+        except Exception:
+            self._options = original_options
+            self._client = None
+            self._install_stderr_callback()
+            team_logger.exception(
+                "[external-cli] member {} failed to activate Claude authentication fallback",
+                self._member_name,
+            )
+            return False
+        if not promoted:
+            team_logger.warning(
+                "[external-cli] member {} connected Claude authentication fallback but failed to persist it",
+                self._member_name,
+            )
+            await fallback_client.disconnect()
+            self._options = original_options
+            self._install_stderr_callback()
+            return False
+        self._client = fallback_client
+        self._fallback_activated = True
+        team_logger.info("[external-cli] member {} activated Claude authentication fallback", self._member_name)
+        return True
 
     async def start(self, *, team_session: Any | None = None) -> None:
         """Start the SDK client and initialize Claude's streaming protocol."""
@@ -215,22 +282,35 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             raise
 
     async def _drive(self, inputs: dict[str, Any]) -> AsyncIterator[Any]:
+        query = inputs.get("query")
+        text = query if isinstance(query, str) else str(query)
+        self._abort_requested = False
+        self._tool_metadata_by_id.clear()
+        for _ in range(2):
+            try:
+                async with aclosing(self._drive_once(text)) as attempt_stream:
+                    async for chunk in attempt_stream:
+                        yield chunk
+            except _ClaudeAuthFallbackRequested:
+                continue
+            return
+
+    async def _drive_once(self, text: str) -> AsyncIterator[Any]:
+        """Run one Claude SDK turn attempt and request at most one outer retry."""
         client = self._client
         if client is None:
             sdk = load_claude_sdk()
             client = sdk.ClaudeSDKClient(options=self._options, transport=self._transport)
             self._client = client
             await self._connect_client(client)
-        query = inputs.get("query")
-        text = query if isinstance(query, str) else str(query)
-        self._abort_requested = False
-        self._tool_metadata_by_id.clear()
         self._span_bridge.start_turn(prompt=text)
         # One reliability attempt per turn.
         if self._reliability_ctx is not None:
             self._reliability_ctx.begin_attempt(phase="turn", round_id=self._current_round_id)
         status = "ok"
         error: BaseException | None = None
+        retry_with_fallback = False
+        deferred_auth_chunks: list[OutputSchema] = []
         try:
             await client.query(text)
             chunk_index = 0
@@ -242,9 +322,20 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                 # Classify structured failure signals before chunk conversion.
                 # AssistantMessage.error records a pending candidate;
                 # ResultMessage.is_error finalizes it.
+                auth_diagnostic = self._reliability_ctx is not None and self._is_auth_diagnostic_message(message)
                 finalize_payload = self._classify_sdk_message(message)
                 if finalize_payload is not None:
                     category, reason, summary = finalize_payload
+                    if category == "auth_required" and chunk_index == 0 and await self._activate_auth_fallback():
+                        retry_with_fallback = True
+                        status = "cancelled"
+                        break
+                    for chunk in deferred_auth_chunks:
+                        team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
+                        self._span_bridge.record_chunk(chunk)
+                        yield chunk
+                        chunk_index = chunk.index + 1
+                    deferred_auth_chunks.clear()
                     await self._reliability_ctx.finalize_failure(
                         category=category,
                         reason=reason,
@@ -253,13 +344,24 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     # Turn terminal failure delivered; end the generator cleanly
                     # so _drive_turn maps it onto a failed round.
                     return
-                for chunk in _iter_sdk_chunks(
+                if deferred_auth_chunks:
+                    for chunk in deferred_auth_chunks:
+                        team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
+                        self._span_bridge.record_chunk(chunk)
+                        yield chunk
+                        chunk_index = chunk.index + 1
+                    deferred_auth_chunks.clear()
+                chunks = _iter_sdk_chunks(
                     message,
                     chunk_index,
                     self._tool_metadata_by_id,
                     mcp_server_name=self._mcp_server_name,
                     team_tool_names=set(self._sdk_mcp_tool_set.tools) if self._sdk_mcp_tool_set is not None else set(),
-                ):
+                )
+                if auth_diagnostic:
+                    deferred_auth_chunks.extend(chunks)
+                    continue
+                for chunk in chunks:
                     team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                     self._span_bridge.record_chunk(chunk)
                     yield chunk
@@ -274,11 +376,34 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             if self._abort_requested or isinstance(exc, asyncio.CancelledError):
                 status = "cancelled"
             else:
-                status = "failed"
-                await self._finalize_turn_failure(exc)
-            raise
+                ctx = self._reliability_ctx
+                pending_auth = ctx is not None and ctx.has_pending and ctx.pending_category == "auth_required"
+                if pending_auth and chunk_index == 0 and await self._activate_auth_fallback():
+                    retry_with_fallback = True
+                    status = "cancelled"
+                else:
+                    for chunk in deferred_auth_chunks:
+                        team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
+                        self._span_bridge.record_chunk(chunk)
+                        yield chunk
+                        chunk_index = chunk.index + 1
+                    deferred_auth_chunks.clear()
+                    status = "failed"
+                    await self._finalize_turn_failure(exc)
+                    raise exc
         finally:
             self._span_bridge.finish_turn(status=status, error=error)
+        if retry_with_fallback:
+            raise _ClaudeAuthFallbackRequested()
+
+    @staticmethod
+    def _is_auth_diagnostic_message(message: Any) -> bool:
+        """Return whether an assistant message carries a structured authentication error."""
+        sdk = load_claude_sdk()
+        if not isinstance(message, sdk.AssistantMessage) or not message.error:
+            return False
+        category, _ = classify_assistant_error(message.error)
+        return category == "auth_required"
 
     def _classify_sdk_message(
         self,
@@ -391,6 +516,8 @@ def build_claude_runtime(
     env: dict[str, str],
     cli_path: str | None = None,
     external_model_config: ExternalCliModelConfig | None = None,
+    fallback_external_model_config: ExternalCliModelConfig | None = None,
+    promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
     inject_mcp: bool,
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
@@ -416,6 +543,19 @@ def build_claude_runtime(
         member_name=member_name,
         resume_external_backend=resume_external_backend,
     )
+    fallback_options = None
+    if external_model_config is None and fallback_external_model_config is not None:
+        fallback_options = build_claude_options(
+            cwd=cwd,
+            add_dirs=add_dirs,
+            env=env,
+            cli_path=cli_path,
+            external_model_config=fallback_external_model_config,
+            system_prompt=system_prompt,
+            team_session_id=team_session_id,
+            member_name=member_name,
+            resume_external_backend=True,
+        )
     transport = None
     if ssh_transport is not None:
         team_logger.info("[external-cli] using claude sdk ssh transport for member {}", member_name)
@@ -430,6 +570,8 @@ def build_claude_runtime(
     return ClaudeSdkRuntime(
         member_name=member_name,
         options=options,
+        fallback_options=fallback_options,
+        promote_fallback_model=promote_fallback_model,
         transport=transport,
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,

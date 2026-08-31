@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.tools.database.engine import (
 )
 from openjiuwen.agent_teams.tools.member_options import (
     MemberWorktreeOptions,
+    promote_member_fallback_model,
     set_member_worktree_options,
 )
 from openjiuwen.agent_teams.tools.models import TeamMember
@@ -80,7 +81,8 @@ class MemberDao:
                 path. HITT callers must pass
                 ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
             options: JSON object for extensible member configuration.
-                Current shape: ``{"model_ref": {...}, "cli_agent": "...",
+                Current shape: ``{"model_ref": {...},
+                "fallback_model_ref": {...}, "cli_agent": "...",
                 "worktree": {...}, "permissions_override": {...}}``.
         """
         async with self._sessions.write() as session:
@@ -499,5 +501,29 @@ class MemberDao:
                 isolation=isolation,
                 worktree_path=worktree_path,
             )
+            await session.commit()
+            return True
+
+    async def promote_member_fallback_model(
+        self,
+        member_name: str,
+        team_name: str,
+    ) -> bool:
+        """Promote the persisted fallback model to the active model reference."""
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                select(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if member is None:
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
+                return False
+            promoted = promote_member_fallback_model(member.options)
+            if promoted == member.options:
+                return False
+            member.options = promoted
             await session.commit()
             return True

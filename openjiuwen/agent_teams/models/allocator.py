@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Optional, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Callable, Optional, Protocol, TYPE_CHECKING, runtime_checkable
 
 from openjiuwen.agent_teams.models.pool import (
     INTELLI_ROUTER_PROVIDER,
@@ -103,7 +103,12 @@ class ModelAllocator(Protocol):
     indexes into the new layout.
     """
 
-    def allocate(self, model_name: Optional[str] = None) -> Optional[Allocation]:
+    def allocate(
+        self,
+        model_name: Optional[str] = None,
+        *,
+        provider_filter: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[Allocation]:
         """Return the next allocation, or None when unavailable.
 
         Args:
@@ -112,6 +117,11 @@ class ModelAllocator(Protocol):
                 and return ``None`` when missing or unknown. Allocators
                 that ignore name (``RoundRobinModelAllocator``) accept
                 it for signature compatibility and discard it.
+            provider_filter: Optional predicate on ``api_provider``; when
+                set, entries whose provider does not satisfy the predicate
+                are skipped. Used by external-CLI members to match the
+                pool entry's protocol to the CLI kind (e.g. Claude needs
+                Anthropic, Codex needs OpenAI-compatible).
         """
         ...
 
@@ -182,18 +192,33 @@ class RoundRobinModelAllocator:
         for entry in self._pool:
             self._groups.setdefault(entry.model_name, []).append(entry)
 
-    def allocate(self, model_name: Optional[str] = None) -> Optional[Allocation]:
+    def allocate(
+        self,
+        model_name: Optional[str] = None,
+        *,
+        provider_filter: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[Allocation]:
         """Return the next pool entry as an Allocation.
 
         ``model_name`` is accepted for protocol compatibility but
         ignored — round-robin is name-agnostic and rotates across
         every entry in pool order.
         """
-        del model_name  # round-robin is name-agnostic
         if not self._pool:
             return None
-        entry = self._pool[self._index % len(self._pool)]
-        self._index += 1
+        if provider_filter is None:
+            entry = self._pool[self._index % len(self._pool)]
+            self._index += 1
+        else:
+            filtered = [
+                entry
+                for entry in self._pool
+                if provider_filter(entry.api_provider) and (not model_name or entry.model_name == model_name)
+            ]
+            if not filtered:
+                return None
+            entry = filtered[self._index % len(filtered)]
+            self._index += 1
         group = self._groups.get(entry.model_name) or [entry]
         return Allocation(entry=entry, group_index=_group_index_of(entry, group))
 
@@ -236,20 +261,38 @@ class ByModelNameAllocator:
         self._pool_digest = _pool_digest(list(pool))
         self._inner_indexes: dict[str, int] = {name: 0 for name in self._groups}
 
-    def allocate(self, model_name: Optional[str] = None) -> Optional[Allocation]:
+    def allocate(
+        self,
+        model_name: Optional[str] = None,
+        *,
+        provider_filter: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[Allocation]:
         """Return the next entry in the requested name's group.
 
         Args:
             model_name: Group key to look up. Required — a missing or
                 unknown name yields ``None`` so callers can fall back
                 to their per-agent model.
+            provider_filter: Optional predicate on ``api_provider``; when
+                set, entries whose provider does not satisfy the predicate
+                are skipped within the group.
         """
         if not model_name or model_name not in self._groups:
             return None
         group = self._groups[model_name]
+        if provider_filter is not None:
+            group = [e for e in group if provider_filter(e.api_provider)]
+            if not group:
+                return None
         idx = self._inner_indexes[model_name] % len(group)
         self._inner_indexes[model_name] += 1
-        return Allocation(entry=group[idx], group_index=idx)
+        picked = group[idx]
+        # group_index must map back to the original group position so
+        # resolve_member_model (which does not re-apply the filter) can
+        # find the same entry on rehydration.
+        original_group = self._groups[model_name]
+        original_idx = original_group.index(picked)
+        return Allocation(entry=picked, group_index=original_idx)
 
     def state_dict(self) -> dict:
         """Snapshot per-group counters + pool digest for session persistence.
@@ -359,7 +402,12 @@ class RouterAllocator:
         self._by_name: dict[str, ModelPoolEntry] = {entry.model_name: entry for entry in self._pool}
         self._pool_digest = _pool_digest(self._pool)
 
-    def allocate(self, model_name: Optional[str] = None) -> Optional[Allocation]:
+    def allocate(
+        self,
+        model_name: Optional[str] = None,
+        *,
+        provider_filter: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[Allocation]:
         """Return the entry for the requested name, or the default.
 
         Args:
@@ -374,9 +422,13 @@ class RouterAllocator:
             given but absent from the pool.
         """
         if model_name is None:
-            return Allocation(entry=self._pool[0], group_index=0)
+            entry = next(
+                (entry for entry in self._pool if provider_filter is None or provider_filter(entry.api_provider)),
+                None,
+            )
+            return Allocation(entry=entry, group_index=0) if entry is not None else None
         entry = self._by_name.get(model_name)
-        if entry is None:
+        if entry is None or (provider_filter is not None and not provider_filter(entry.api_provider)):
             return None
         return Allocation(entry=entry, group_index=0)
 

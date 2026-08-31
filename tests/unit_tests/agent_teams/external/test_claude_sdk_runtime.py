@@ -490,6 +490,34 @@ async def test_build_cli_runtime_maps_claude_model_config(fake_claude_sdk):
     assert flag_settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-test"
 
 
+@pytest.mark.level0
+def test_build_claude_runtime_resumes_session_for_fallback(fake_claude_sdk):
+    runtime = claude_runtime_mod.build_claude_runtime(
+        member_name="claude-1",
+        cwd="/project",
+        add_dirs=(),
+        env={},
+        fallback_external_model_config=ExternalCliModelConfig(
+            provider="anthropic",
+            model="fallback-model",
+            api_base="https://gateway.example",
+            api_key="sk-test",
+        ),
+        inject_mcp=False,
+        mcp_server_name="openjiuwen-team",
+        mcp_server_command=("openjiuwen-team-mcp",),
+        system_prompt=None,
+        ssh_transport=None,
+        team_session_id="sess-1",
+        resume_external_backend=False,
+    )
+
+    expected_session_id = build_claude_session_id(team_session_id="sess-1", member_name="claude-1")
+    assert runtime._fallback_options is not None
+    assert runtime._fallback_options.resume == expected_session_id
+    assert runtime._fallback_options.session_id is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_build_cli_runtime_claude_rejects_full_command_override(fake_claude_sdk):

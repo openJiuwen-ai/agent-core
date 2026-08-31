@@ -15,6 +15,8 @@ import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+from openjiuwen.agent_teams.schema.status import MemberStatus
+
 import pytest
 
 from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime
@@ -126,7 +128,7 @@ def _install_fake_sdk(monkeypatch, *, messages_factory, connect_error=None) -> M
 
 class _FakeOptions(SimpleNamespace):
     def __init__(self, **kwargs: Any) -> None:
-        super().__init__()
+        super().__init__(**kwargs)
         self.tools = None
         self.system_prompt = None
         self.allowed_tools = []
@@ -134,6 +136,8 @@ class _FakeOptions(SimpleNamespace):
         self.cwd = None
         self.cli_path = None
         self.env = {}
+        self.resume = None
+        self.session_id = None
         self.stderr = None
 
 
@@ -284,5 +288,93 @@ async def test_startup_connect_failure_marks_member_error(monkeypatch):
     failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
     assert failure.category == "process_start_failed"
     assert failure.phase == "startup"
-    assert sink.statuses == ["ERROR"]
+    assert sink.statuses == [MemberStatus.ERROR]
     logger.info("startup failure -> ERROR, category=%s", failure.category)
+
+
+@pytest.mark.asyncio
+async def test_pending_auth_failure_activates_and_promotes_fallback(monkeypatch):
+    """A structured auth signal followed by stream failure activates fallback."""
+    attempts = 0
+
+    def messages():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            yield sdk.AssistantMessage(content=[], error="authentication_failed")
+            raise RuntimeError("stream closed")
+        yield sdk.ResultMessage(subtype="success")
+
+    sdk = _install_fake_sdk(monkeypatch, messages_factory=messages)
+    promotions = 0
+
+    async def promote() -> bool:
+        nonlocal promotions
+        promotions += 1
+        return True
+
+    runtime = ClaudeSdkRuntime(
+        member_name="worker1",
+        options=_FakeOptions(),
+        fallback_options=_FakeOptions(),
+        promote_fallback_model=promote,
+        inject_mcp=False,
+    )
+    runtime._reliability_ctx = _build_ctx(
+        _FakeMessageManager(),
+        _FakeMessager(),
+        _StatusSink(),
+    )
+    async for _chunk in runtime._drive({"query": "hi"}):
+        pass
+    assert runtime._fallback_activated is True
+    assert promotions == 1
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_auth_diagnostic_text_is_discarded_after_fallback(monkeypatch):
+    """A structured login diagnostic does not block or leak into a successful fallback."""
+    attempts = 0
+
+    def messages():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            yield sdk.AssistantMessage(
+                content=[sdk.TextBlock("Not logged in · Please run /login")],
+                error="authentication_failed",
+            )
+            yield sdk.ResultMessage(is_error=True, errors=["authentication_failed"])
+            return
+        yield sdk.AssistantMessage(content=[sdk.TextBlock("fallback answer")])
+        yield sdk.ResultMessage(subtype="success")
+
+    sdk = _install_fake_sdk(monkeypatch, messages_factory=messages)
+    promotions = 0
+
+    async def promote() -> bool:
+        nonlocal promotions
+        promotions += 1
+        return True
+
+    runtime = ClaudeSdkRuntime(
+        member_name="worker1",
+        options=_FakeOptions(),
+        fallback_options=_FakeOptions(),
+        promote_fallback_model=promote,
+        inject_mcp=False,
+    )
+    runtime._reliability_ctx = _build_ctx(
+        _FakeMessageManager(),
+        _FakeMessager(),
+        _StatusSink(),
+    )
+    chunks = []
+    async for chunk in runtime._drive({"query": "hi"}):
+        chunks.append(chunk)
+
+    assert runtime._fallback_activated is True
+    assert promotions == 1
+    assert attempts == 2
+    assert [chunk.payload["content"] for chunk in chunks] == ["fallback answer"]

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
@@ -30,7 +30,7 @@ from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTrans
 from openjiuwen.agent_teams.external.descriptor import OPENJIUWEN_HOME_ENV, TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
-from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_home, team_workspace_dir
+from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_workspace_dir
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRuntimeContext
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
@@ -191,6 +191,8 @@ async def build_cli_runtime(
     codex_turn_idle_timeout_s: float | None = None,
     codex_turn_idle_retries: int | None = None,
     external_model_config: ExternalCliModelConfig | None = None,
+    fallback_external_model_config: ExternalCliModelConfig | None = None,
+    promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
@@ -235,6 +237,9 @@ async def build_cli_runtime(
             stalled turn emitted no SDK notifications and was interrupted.
         external_model_config: Optional model endpoint config translated into
             backend-specific SDK options.
+        fallback_external_model_config: Optional endpoint used only after an
+            explicit native authentication failure.
+        promote_fallback_model: Callback persisting the fallback as active.
         system_prompt: The member's team-rail system prompt. Claude receives it
             through SDK options, Codex through SDK thread options, and other CLIs
             may receive it as a launch arg.
@@ -299,6 +304,8 @@ async def build_cli_runtime(
             env=env,
             cli_path=cli_path,
             external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,
             mcp_server_command=mcp_server_command,
@@ -361,6 +368,8 @@ async def build_cli_runtime(
             system_prompt=system_prompt,
             codex_bin=cli_path or codex_bin,
             external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             resume_external_backend=resume_external_backend,
             turn_idle_timeout_s=codex_turn_idle_timeout_s,
             turn_idle_retries=codex_turn_idle_retries,

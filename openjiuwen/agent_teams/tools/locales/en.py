@@ -226,6 +226,19 @@ STRINGS: dict[str, str] = {
         "and MCP injection all live in that entry; this field only references "
         "it by name"
     ),
+    "spawn_external_cli.model_name": (
+        "Optional. Set only when the user explicitly specifies the model for this third-party agent. "
+        "You must not choose, infer, or auto-fill it. Omit it when the user has not explicitly specified "
+        "a model so the agent uses its own default model"
+    ),
+    "spawn_external_cli.fallback_model_name": (
+        "Required. Select this model from the team model pool, choosing one whose model API protocol is "
+        "compatible with the protocol supported by this third-party agent. It is used for automatic fallback "
+        "when the agent uses its own default model but authentication is unavailable. It applies only to "
+        "authentication failures explicitly reported by the runtime. If the model is unavailable, incompatible, "
+        "or the agent does not support authentication fallback, its own default model can still be used without "
+        "automatic fallback"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/member/shutdown_member.md
     "shutdown_member.member_name": (

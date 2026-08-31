@@ -215,7 +215,11 @@ def create_team_tools(
         "list_checkpoints": ListCheckpointsTool(agent_team, t),
         "spawn_human_agent": SpawnHumanAgentTool(agent_team, t),
         "spawn_bridge_agent": SpawnBridgeAgentTool(agent_team, t),
-        "spawn_external_cli": SpawnExternalCliTool(agent_team, t),
+        "spawn_external_cli": SpawnExternalCliTool(
+            agent_team,
+            t,
+            model_config_allocator=model_config_allocator,
+        ),
         "shutdown_member": ShutdownMemberTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),

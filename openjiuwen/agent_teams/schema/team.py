@@ -519,6 +519,8 @@ class TeamRuntimeContext(BaseModel):
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
+    fallback_member_model: Optional[TeamModelConfig] = None
+    """TeamModelConfig reserved for native external-CLI authentication fallback."""
     worktree_path: Optional[str] = None
     """Absolute cwd override for a teammate running in an isolated worktree."""
     fork_source: Optional[str] = None
