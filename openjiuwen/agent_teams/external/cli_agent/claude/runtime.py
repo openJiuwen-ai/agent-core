@@ -10,8 +10,13 @@ from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
 import json
-from typing import Any, AsyncIterator, ContextManager
+from typing import Any, AsyncIterator, ContextManager, Optional
 
+from openjiuwen.agent_teams.external.cli_agent.claude.failure_classifier import (
+    classify_assistant_error,
+    classify_claude_exception,
+    classify_result_message,
+)
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
 from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
     ClaudeSdkMcpToolSet,
@@ -90,6 +95,32 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         self._span_bridge = span_bridge or _NoopClaudeSpanBridge()
         self._stderr_tail = _ClaudeStderrTail()
         self._install_stderr_callback()
+        # Reliability context; injected via bind_reliability_context.
+        self._reliability_ctx: Any = None
+
+    def bind_reliability_context(
+        self,
+        *,
+        session_id: str,
+        team_backend: Any,
+        leader_name: str,
+        update_status_cb: Any,
+        messager: Any,
+    ) -> None:
+        """Bind the reliability failure/retry delivery surface."""
+        from openjiuwen.agent_teams.external.reliability import RuntimeReliabilityContext
+
+        self._reliability_ctx = RuntimeReliabilityContext(
+            member_name=self._member_name,
+            team_name=team_backend.team_name if team_backend is not None else "",
+            session_id=session_id,
+            agent_kind="claude",
+            message_manager=team_backend.message_manager if team_backend is not None else None,
+            messager=messager,
+            leader_name=leader_name,
+            update_status_cb=update_status_cb,
+            span_bridge=self._span_bridge,
+        )
 
     def _install_stderr_callback(self) -> None:
         """Attach a Claude SDK stderr callback without dropping a caller callback."""
@@ -173,9 +204,15 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         await super().start(team_session=team_session)
         if self._inject_mcp and self._sdk_mcp_tool_set is None:
             team_logger.warning("[{}] Claude SDK MCP is enabled but no team tools were bound", self._member_name)
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.begin_attempt(phase="startup", round_id=None)
         sdk = load_claude_sdk()
         self._client = sdk.ClaudeSDKClient(options=self._options, transport=self._transport)
-        await self._connect_client(self._client)
+        try:
+            await self._connect_client(self._client)
+        except BaseException as exc:
+            await self._finalize_startup_failure(exc)
+            raise
 
     async def _drive(self, inputs: dict[str, Any]) -> AsyncIterator[Any]:
         client = self._client
@@ -189,6 +226,9 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         self._abort_requested = False
         self._tool_metadata_by_id.clear()
         self._span_bridge.start_turn(prompt=text)
+        # One reliability attempt per turn.
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.begin_attempt(phase="turn", round_id=self._current_round_id)
         status = "ok"
         error: BaseException | None = None
         try:
@@ -198,6 +238,20 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                 if self._abort_requested:
                     team_logger.debug("[{}] claude sdk turn aborted", self._member_name)
                     status = "cancelled"
+                    return
+                # Classify structured failure signals before chunk conversion.
+                # AssistantMessage.error records a pending candidate;
+                # ResultMessage.is_error finalizes it.
+                finalize_payload = self._classify_sdk_message(message)
+                if finalize_payload is not None:
+                    category, reason, summary = finalize_payload
+                    await self._reliability_ctx.finalize_failure(
+                        category=category,
+                        reason=reason,
+                        summary=summary,
+                    )
+                    # Turn terminal failure delivered; end the generator cleanly
+                    # so _drive_turn maps it onto a failed round.
                     return
                 for chunk in _iter_sdk_chunks(
                     message,
@@ -221,9 +275,84 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                 status = "cancelled"
             else:
                 status = "failed"
+                await self._finalize_turn_failure(exc)
             raise
         finally:
             self._span_bridge.finish_turn(status=status, error=error)
+
+    def _classify_sdk_message(
+        self,
+        message: Any,
+    ) -> Optional[tuple[str, Any, str]]:
+        """Record a candidate or describe the Claude SDK terminal failure.
+
+        ``AssistantMessage.error`` is a candidate: recorded as pending, returns
+        ``None`` (no finalize yet). ``ResultMessage`` with ``is_error=True`` is
+        the turn terminal state: returns a ``(category, reason, summary)``
+        tuple for the caller to finalize.
+        """
+        ctx = self._reliability_ctx
+        if ctx is None:
+            return None
+        sdk = load_claude_sdk()
+        if isinstance(message, sdk.AssistantMessage):
+            if message.error:
+                category, reason = classify_assistant_error(message.error)
+                ctx.record_pending(category=category, reason=reason)
+            return None
+        if isinstance(message, sdk.ResultMessage) and message.is_error:
+            category, reason = classify_result_message(message)
+            # Merge the terminal state's structured fields with the pending
+            # candidate; keep the candidate category when the terminal state
+            # carries no mappable api_error_status.
+            if ctx.has_pending and (reason.http_status is None or category == "sdk_error"):
+                if ctx.pending_category is not None and ctx.pending_category != "sdk_error":
+                    category = ctx.pending_category
+            ctx.record_pending(category=category, reason=reason)
+            summary = _claude_failure_summary(message, ctx.pending_reason)
+            return category, ctx.pending_reason or reason, summary
+        return None
+
+    async def _finalize_turn_failure(self, exc: BaseException) -> None:
+        """Finalize a Claude SDK/CLI exception, merging any pending candidate."""
+        ctx = self._reliability_ctx
+        if ctx is None or ctx.has_finalized:
+            return
+        category, reason = classify_claude_exception(exc, phase="turn")
+        if ctx.has_pending:
+            # Keep the pending structured signal; enrich reason with exc text.
+            category = ctx.pending_category if ctx.pending_category is not None else category
+            reason = ctx.pending_reason or reason
+        await ctx.finalize_failure(
+            category=category,
+            reason=reason,
+            summary=f"{self._member_name} Claude SDK turn failed: {type(exc).__name__}",
+        )
+
+    async def _finalize_startup_failure(self, exc: BaseException) -> None:
+        """Finalize and surface a Claude startup failure (member → ERROR)."""
+        from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+            ExternalRuntimeFailureReason,
+        )
+
+        ctx = self._reliability_ctx
+        if ctx is None or ctx.has_finalized:
+            return
+        category, reason = classify_claude_exception(exc, phase="startup")
+        stderr_tail = self._stderr_tail.render()
+        if stderr_tail:
+            reason = ExternalRuntimeFailureReason(
+                message=f"{reason.message}\n{stderr_tail}" if reason.message else stderr_tail,
+                sdk_error_type=reason.sdk_error_type,
+                sdk_error_code=reason.sdk_error_code,
+                http_status=reason.http_status,
+            )
+        await ctx.finalize_failure(
+            category=category,
+            reason=reason,
+            summary=f"{self._member_name} Claude SDK startup failed: {type(exc).__name__}",
+        )
+        await ctx.mark_member_error()
 
     async def steer(self, content: str) -> None:
         """Send content into the active Claude SDK conversation."""
@@ -364,6 +493,23 @@ def _build_claude_span_bridge(
         session_id=session_id,
         role=role,
     )
+
+
+def _claude_failure_summary(result: Any, reason: Any) -> str:
+    """Build a one-line failure summary from a Claude ResultMessage terminal state.
+
+    Prefers the structured ``errors`` text; falls back to the pending reason
+    message; finally to a generic placeholder so the leader always sees a
+    non-empty handling cue.
+    """
+    errors = getattr(result, "errors", None) or []
+    if errors:
+        return f"Claude SDK turn failed: {' '.join(str(e) for e in errors)}"
+    if reason is not None:
+        message = getattr(reason, "message", "") or ""
+        if message:
+            return f"Claude SDK turn failed: {message}"
+    return "Claude SDK turn failed"
 
 
 def _iter_sdk_chunks(
