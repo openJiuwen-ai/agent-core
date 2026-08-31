@@ -162,6 +162,28 @@ async def test_stream_timeout_exception_retries_twice_then_resets():
 
 
 @pytest.mark.asyncio
+async def test_model_call_failed_async_invoke_error_retries_twice_then_resets():
+    rail = LLMRetryRail(max_retries=2, backoff_seconds=[0.5, 1.0, 2.0])
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    ctx.exception = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg=(
+            "[181001] model call failed, reason: openAI API async invoke error: "
+            "Error code: 408 - {'message': 'Request Timeout.'}"
+        ),
+    )
+
+    await rail.on_model_exception(ctx)
+    await rail.on_model_exception(ctx)
+    await rail.on_model_exception(ctx)
+
+    assert ctx.request_retry.call_count == 2
+    assert [call.kwargs["delay_seconds"] for call in ctx.request_retry.call_args_list] == [0.5, 1.0]
+    assert rail.model_call_failed_retry_count == 0
+
+
+@pytest.mark.asyncio
 async def test_before_invoke_resets_retry_counters():
     rail = LLMRetryRail()
     rail.repeat_retry_count = 1

@@ -20,11 +20,15 @@ _STREAM_TIMEOUT_MARKERS = (
     "LLM stream timeout",
     "stream frame timeout",
 )
-# Model-call stream errors raised by the model clients as MODEL_CALL_FAILED
-# (code 181001), e.g. "openAI API async stream error: ...". These are
-# transient upstream failures; retrying re-reads the same context window, so
-# the conversation history is preserved.
-_MODEL_CALL_FAILED_MARKER = "async stream error"
+# Model-call errors raised by the model clients as MODEL_CALL_FAILED
+# (code 181001). Both streaming ("async stream error") and non-streaming
+# ("async invoke error", e.g. HTTP 408) calls are transient upstream failures;
+# retrying re-reads the same context window, so the conversation history is
+# preserved.
+_MODEL_CALL_FAILED_MARKERS = (
+    "async stream error",
+    "async invoke error",
+)
 # Whole-call retry backoff (seconds) before the 1st/2nd/... retry attempt.
 # The last value is reused if there are more retries than entries.
 _DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
@@ -270,8 +274,8 @@ class LLMRetryRail(DeepAgentRail):
                 index=0,
                 payload={
                     "error": (
-                        f"⚠️ 模型调用异常 [{reason}]，将在 {delay:.1f} 秒后进行"
-                        f"第 {retry_count}/{self.max_retries} 次重试..."
+                        f"模型调用异常，将在 {delay:.1f} 秒后进行"
+                        f"第 {retry_count} 次重试（共 {self.max_retries} 次）"
                     ),
                 },
             ))
@@ -293,7 +297,8 @@ class LLMRetryRail(DeepAgentRail):
     def _is_model_call_failed_exception(exc: Optional[BaseException]) -> bool:
         if exc is None:
             return False
-        return _MODEL_CALL_FAILED_MARKER in str(exc)
+        message = str(exc)
+        return any(marker in message for marker in _MODEL_CALL_FAILED_MARKERS)
 
 
 __all__ = [
