@@ -102,16 +102,26 @@ class TaskTool(Tool):
         super().__init__(card)
         self.parent_agent = parent_agent
         self.language = language
+        self._pending_subagents: dict[str, tuple[Any, bool]] = {}
 
     @staticmethod
-    def _build_sub_session_id(parent_session_id: str, subagent_type: str) -> str:
+    def _build_sub_session_id(
+        parent_session_id: str,
+        subagent_type: str,
+        tool_call_id: Optional[str] = None,
+    ) -> str:
         normalized_type = str(subagent_type or "").strip()
         if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
+        normalized_tool_call_id = str(tool_call_id or "").strip()
+        if normalized_tool_call_id:
+            # The interrupt handler retries the same outer tool call on resume.
+            # Reusing its ID keeps the retry attached to the interrupted child session.
+            return f"{parent_session_id}_sub_{normalized_type}_{normalized_tool_call_id}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
 
-    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput | dict[str, Any]:
         """Execute task by delegating to a subagent.
 
         Args:
@@ -166,54 +176,65 @@ class TaskTool(Tool):
                 )
 
         parent_session_id = parent_session.get_session_id()
-        sub_session_id = self._build_sub_session_id(parent_session_id, str(subagent_type))
-        logger.info(
-            f"[TaskTool] Creating subagent: {subagent_type}, "
-            f"parent_session={parent_session_id}, sub_session={sub_session_id}"
+        sub_session_id = self._build_sub_session_id(
+            parent_session_id,
+            str(subagent_type),
+            tool_call_id=kwargs.get("tool_call_id"),
         )
-
-        task_model = resolve_task_tool_model(
-            self.parent_agent,
-            model_name=model_name,
-            model_tier=model_tier,
-        )
-        # Omit model= when unset so create_subagent keeps its default path.
-        create_kwargs = {}
-        if task_model is not None:
-            create_kwargs["model"] = task_model
-
-        try:
-            if browser_capabilities is None:
-                subagent = self.parent_agent.create_subagent(
-                    subagent_type,
-                    sub_session_id,
-                    **create_kwargs,
-                )
-            else:
-                subagent = self.parent_agent.create_subagent(
-                    subagent_type,
-                    sub_session_id,
-                    browser_capabilities=browser_capabilities,
-                    **create_kwargs,
-                )
-        except Exception as exc:
-            logger.error(f"[TaskTool] Subagent creation failed: type={subagent_type}, error={exc}")
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=f"Subagent {subagent_type} creation failed: {exc}",
-            ) from exc
-
-        # Optional semantic thinking control (default|off|on). No-op unless a
-        # host registers a hook that attaches a BEFORE_MODEL_CALL rail.
-        try:
-            from openjiuwen.harness.tools.subagent.thinking_hook import (
-                apply_subagent_thinking,
+        pending_subagent = self._pending_subagents.pop(sub_session_id, None)
+        if pending_subagent is None:
+            logger.info(
+                f"[TaskTool] Creating subagent: {subagent_type}, "
+                f"parent_session={parent_session_id}, sub_session={sub_session_id}"
             )
 
-            model = getattr(getattr(subagent, "deep_config", None), "model", None)
-            apply_subagent_thinking(subagent, thinking=thinking, model=model)
-        except Exception as exc:  # noqa: BLE001 — never break spawn
-            logger.warning("[TaskTool] subagent thinking hook skipped: %s", exc)
+            task_model = resolve_task_tool_model(
+                self.parent_agent,
+                model_name=model_name,
+                model_tier=model_tier,
+            )
+            create_kwargs = {}
+            if task_model is not None:
+                create_kwargs["model"] = task_model
+
+            try:
+                if browser_capabilities is None:
+                    subagent = self.parent_agent.create_subagent(
+                        subagent_type,
+                        sub_session_id,
+                        **create_kwargs,
+                    )
+                else:
+                    subagent = self.parent_agent.create_subagent(
+                        subagent_type,
+                        sub_session_id,
+                        browser_capabilities=browser_capabilities,
+                        **create_kwargs,
+                    )
+            except Exception as exc:
+                logger.error(f"[TaskTool] Subagent creation failed: type={subagent_type}, error={exc}")
+                raise build_error(
+                    StatusCode.TOOL_TASK_TOOL_INVOKED,
+                    reason=f"Subagent {subagent_type} creation failed: {exc}",
+                ) from exc
+
+            try:
+                from openjiuwen.harness.tools.subagent.thinking_hook import (
+                    apply_subagent_thinking,
+                )
+
+                model = getattr(getattr(subagent, "deep_config", None), "model", None)
+                apply_subagent_thinking(subagent, thinking=thinking, model=model)
+            except Exception as exc:  # noqa: BLE001 — never break spawn
+                logger.warning("[TaskTool] subagent thinking hook skipped: %s", exc)
+
+            affinity_enabled = False
+        else:
+            subagent, affinity_enabled = pending_subagent
+            logger.info(
+                f"[TaskTool] Resuming interrupted subagent: {subagent_type}, "
+                f"parent_session={parent_session_id}, sub_session={sub_session_id}"
+            )
 
         query_summary = _summarize_task_description(task_description)
         invoke_log = (
@@ -226,8 +247,10 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
+        interrupted = False
         try:
-            affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+            if pending_subagent is None:
+                affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
             if affinity_enabled:
                 kv_cache_hooks.prefetch_sticky_subagent(
                     self.parent_agent,
@@ -235,15 +258,25 @@ class TaskTool(Tool):
                     sub_session_id=sub_session_id,
                     parent_session_id=parent_session_id,
                 )
-            # Invoke subagent with isolated session_id
+            query = inputs.get("query")
+            if query is None:
+                query = task_description
             subagent_inputs = {
-                "query": task_description,
+                "query": query,
                 "conversation_id": sub_session_id,
             }
             if affinity_enabled:
                 subagent_inputs["parent_session_id"] = parent_session_id
             result = await subagent.invoke(subagent_inputs)
             succeeded = True
+            if (
+                isinstance(result, dict)
+                and result.get("result_type") == "interrupt"
+                and "interrupt_ids" in result
+            ):
+                interrupted = True
+                self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
+                return result
             output = result.get("output", "")
             return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
         except Exception as e:
@@ -297,4 +330,5 @@ def create_task_tool(
 __all__ = [
     "TaskTool",
     "create_task_tool",
+    "resolve_task_tool_model",
 ]

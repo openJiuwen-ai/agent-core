@@ -222,9 +222,10 @@ class TaskLoopEventExecutor(TaskExecutor):
             result = await agent.react_agent.invoke(
                 effective, session, _streaming=True
             )
+            is_interrupt = result.get("result_type") == "interrupt"
 
             # Mark completed in TaskPlan (skip for interrupt)
-            if result.get("result_type") != "interrupt":
+            if not is_interrupt:
                 if self._get_plan_task(state, task_id):
                     summary = str(result.get("output", ""))[:200]
                     state.task_plan.mark_completed(task_id, summary)
@@ -240,24 +241,36 @@ class TaskLoopEventExecutor(TaskExecutor):
                 .AFTER_TASK_ITERATION
             )
 
+            if is_interrupt and tasks:
+                core_task = tasks[0]
+                core_task.input_required_fields = {
+                    "interrupt_ids": result.get("interrupt_ids", []),
+                }
+                await self._task_manager.update_task(core_task)
+
             # increment_iteration is called in
             # DeepAgent._run_task_loop after yield.
 
+            outcome = "interrupted" if is_interrupt else "completed"
             if UserConfig.is_sensitive():
                 logger.info(
                     f"[OuterLoop] iteration={iteration} "
-                    f"task_id={task_id} completed"
+                    f"task_id={task_id} {outcome}"
                 )
             else:
                 logger.info(
                     f"[OuterLoop] iteration={iteration} "
-                    f"task_id={task_id} completed, "
+                    f"task_id={task_id} {outcome}, "
                     f"output="
                     f"{str(result.get('output', ''))[:200]}"
                 )
 
             payload = ControllerOutputPayload(
-                type=EventType.TASK_COMPLETION,
+                type=(
+                    EventType.TASK_INTERACTION
+                    if is_interrupt
+                    else EventType.TASK_COMPLETION
+                ),
                 data=[JsonDataFrame(data=result)],
                 metadata={"task_id": task_id},
             )

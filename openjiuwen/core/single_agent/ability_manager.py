@@ -1400,7 +1400,11 @@ class AbilityManager:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
                 with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(tool_args, session=session)
+                    result = await tool.invoke(
+                        tool_args,
+                        session=session,
+                        tool_call_id=tool_call.id,
+                    )
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
                 logger.warning(error_msg)
@@ -1505,7 +1509,11 @@ class AbilityManager:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
                 with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(tool_args, session=session)
+                    result = await tool.invoke(
+                        tool_args,
+                        session=session,
+                        tool_call_id=tool_call.id,
+                    )
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
                 logger.warning(error_msg)
