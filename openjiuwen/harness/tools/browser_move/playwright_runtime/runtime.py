@@ -26,6 +26,9 @@ from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
+from openjiuwen.harness.rails._multimodal import (
+    should_enable_read_image_multimodal,
+)
 from ..controllers import ActionController, BaseController, validate_batch_steps
 from ..utils.parsing import extract_json_object
 from .browser_capabilities import (
@@ -4781,8 +4784,7 @@ class BrowserRuntimeRail(AgentRail):
 
     @staticmethod
     def _image_input_supported(agent: Any) -> bool:
-        deep_config = getattr(agent, "deep_config", None) or getattr(agent, "_deep_config", None)
-        return getattr(deep_config, "enable_read_image_multimodal", None) is True
+        return should_enable_read_image_multimodal(agent)
 
     async def _effective_browser_tool_allowlist(
         self,

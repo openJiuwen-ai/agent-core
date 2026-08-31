@@ -122,6 +122,28 @@ async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
     assert "native image multimodal input is disabled" in read_res.data["content"]
 
 
+@pytest.mark.asyncio
+async def test_read_file_image_resolves_multimodal_policy_per_call(sys_op, temp_dir):
+    policy = {"enabled": False}
+    read_tool = ReadFileTool(
+        sys_op,
+        enable_image_multimodal=lambda: policy["enabled"],
+    )
+    file_path = os.path.join(temp_dir, "dynamic_one_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    disabled_result = await read_tool.invoke({"file_path": file_path})
+    assert disabled_result.data["multimodal"] == []
+
+    policy["enabled"] = True
+    enabled_result = await read_tool.invoke({"file_path": file_path})
+    assert enabled_result.data["multimodal"][0]["type"] == "image"
+
+
 def test_estimate_base64_tokens_matches_actual_encoding():
     for length in (0, 1, 2, 3, 4, 5, 100, 1000, 123457):
         data = b"a" * length

@@ -20,7 +20,7 @@ _IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS = 5.0
 # with a few words would otherwise be cut off before saying it and get cached
 # as image-blind forever. Truncated answers are treated as inconclusive on top
 # of that -- see ``_interpret_probe_response``.
-_IMAGE_MODALITY_PROBE_MAX_TOKENS = 32
+_IMAGE_MODALITY_PROBE_MAX_TOKENS = 64
 # ``finish_reason`` value meaning the answer hit the token budget.
 _LENGTH_FINISH_REASON = "length"
 # Vendor-specific switches for turning reasoning off, merged into one body.
@@ -273,10 +273,10 @@ async def _run_probe(llm) -> Optional[bool]:
     except asyncio.TimeoutError:
         logger.warning(
             "[ImageModalityProbe] image modality probe timed out after %.0fs; "
-            "treating read_file image multimodal as unsupported",
+            "leaving image support undetermined",
             _IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
         )
-        return False
+        return None
     except Exception as exc:
         if is_image_modality_rejection(exc):
             logger.info(
@@ -299,10 +299,10 @@ async def _run_probe(llm) -> Optional[bool]:
         except asyncio.TimeoutError:
             logger.warning(
                 "[ImageModalityProbe] image modality probe timed out after %.0fs; "
-                "treating read_file image multimodal as unsupported",
+                "leaving image support undetermined",
                 _IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
             )
-            return False
+            return None
         except Exception as retry_exc:
             if is_image_modality_rejection(retry_exc):
                 logger.info(
@@ -331,15 +331,19 @@ def _interpret_probe_response(response) -> Optional[bool]:
         response: The assistant message the probe request returned.
 
     Returns:
-        True when the model named the color it was shown, False when it
-        answered without naming it, and None when the reply carries no verdict
-        either way.
+        True when the model named the color it was shown in either its answer
+        or reasoning, False when it answered without naming it, and None when
+        the reply carries no verdict either way.
     """
-    content = response.content if isinstance(response.content, str) else str(response.content)
-    if "red" in content.lower():
+    raw_content = getattr(response, "content", None)
+    content = raw_content if isinstance(raw_content, str) else ""
+    raw_reasoning = getattr(response, "reasoning_content", None)
+    reasoning_content = raw_reasoning if isinstance(raw_reasoning, str) else ""
+    response_text = "\n".join(part for part in (content, reasoning_content) if part)
+    if "red" in response_text.lower():
         return True
 
-    if not content.strip():
+    if not response_text.strip():
         # A reasoning model that spent the whole (tiny) budget thinking says
         # nothing about image support.
         logger.warning(
@@ -365,11 +369,10 @@ async def probe_image_support(llm) -> Optional[bool]:
 
     Returns:
         True if the model named the color it was shown, False if it responded
-        without naming it, deterministically rejected the image (e.g. a 404
-        "no endpoints found that support image input"), or the probe timed out,
-        and None if the result is inconclusive (call failed for some other
-        reason such as auth / rate limit / 5xx, or the model answered nothing)
-        and should therefore not be cached.
+        without naming it or deterministically rejected the image (e.g. a 404
+        "no endpoints found that support image input"), and None if the result
+        is inconclusive (timeout, another call failure such as auth / rate
+        limit / 5xx, or the model answered nothing) and should not be cached.
     """
     key = probe_cache_key(llm)
     if key is not None and key in _probe_results:
