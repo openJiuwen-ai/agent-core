@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony import (
     ArtifactSpec,
     CapabilityFingerprint,
@@ -570,6 +572,32 @@ async def test_public_service_contracts_accept_planned_call_shapes(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_early_build_failure_is_delivered_without_started_progress_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    error = build_error(StatusCode.MODEL_CALL_FAILED, error_msg="model unavailable during fingerprint extraction")
+    events: list[OrchestrationProgress] = []
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+    )
+
+    async def fail_inventory(*, require_atomic: bool = False, force_fingerprint: bool = False):
+        del require_atomic, force_fingerprint
+        raise error
+
+    monkeypatch.setattr(service, "_load_inventory", fail_inventory)
+
+    with pytest.raises(BaseError) as exc_info:
+        await service.build(progress=events.append)
+
+    assert exc_info.value is error
+    assert events == [OrchestrationProgress("build_failed", error=str(error))]
+
+
+@pytest.mark.asyncio
 async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_path: Path) -> None:
     llm = _CompactMatcherLLM()
     inventory = [
@@ -643,7 +671,7 @@ async def test_planned_graph_is_minimal_and_never_falls_back_to_static_edges(tmp
                     "steps": [{"skill_id": "extract"}, {"skill_id": "summarize"}],
                     "can_feed_edges": [],
                 }
-            ]
+            ],
         },
         artifacts,
     )
@@ -738,9 +766,7 @@ async def test_planned_graph_rejects_edge_endpoints_outside_selected_nodes(tmp_p
                 "recommended_plans": [
                     {
                         "steps": [{"skill_id": "extract"}],
-                        "can_feed_edges": [
-                            {"source_id": "capability:extract", "target_id": "skill:summarize"}
-                        ],
+                        "can_feed_edges": [{"source_id": "capability:extract", "target_id": "skill:summarize"}],
                     }
                 ],
             },

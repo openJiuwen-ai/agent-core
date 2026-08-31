@@ -628,6 +628,7 @@ class _BuildProgressDispatcher:
 
     async def emit(self, event: str, **details: Any) -> None:
         if self._worker is None:
+            await self.deliver(event, **details)
             return
         completion = asyncio.get_running_loop().create_future()
         self._queue.put_nowait(
