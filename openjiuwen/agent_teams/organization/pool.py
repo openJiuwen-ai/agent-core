@@ -9,7 +9,12 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 
-_MANAGERS: dict[tuple[int, str, str | None], TeamOrganizationManager] = {}
+_MANAGERS: dict[tuple[str, str, str | None], TeamOrganizationManager] = {}
+
+
+def _db_registry_key(db: TeamDatabase) -> str:
+    config = db.config
+    return f"{config.db_type}::{config.connection_string}"
 
 
 def get_process_org_manager(
@@ -21,7 +26,7 @@ def get_process_org_manager(
 ) -> TeamOrganizationManager:
     """Return the process-local manager for ``organization_id`` and DB handle."""
 
-    key = (id(db), organization_id, session_id)
+    key = (_db_registry_key(db), organization_id, session_id)
     manager = _MANAGERS.get(key)
     if manager is None:
         manager = TeamOrganizationManager(
@@ -46,7 +51,21 @@ def remove_process_org_manager(
 ) -> None:
     """Forget one dissolved organization manager from the process registry."""
 
-    _MANAGERS.pop((id(db), organization_id, session_id), None)
+    _MANAGERS.pop((_db_registry_key(db), organization_id, session_id), None)
 
 
-__all__ = ["clear_process_org_managers", "get_process_org_manager", "remove_process_org_manager"]
+def remove_process_org_managers_for_db(db: TeamDatabase) -> None:
+    """Forget all organization managers bound to ``db``'s stable registry key."""
+
+    db_key = _db_registry_key(db)
+    for key in list(_MANAGERS):
+        if key[0] == db_key:
+            _MANAGERS.pop(key, None)
+
+
+__all__ = [
+    "clear_process_org_managers",
+    "get_process_org_manager",
+    "remove_process_org_manager",
+    "remove_process_org_managers_for_db",
+]

@@ -283,10 +283,12 @@ class TeamRuntimeManager:
             return False
 
         activation: TeamRuntimeActivation | None = None
+        ran_turn = False
         try:
             activation = await self.activate(spec, session_id, inputs)
             if activation.action.kind in _REJECT_KINDS or activation.agent is None:
                 return False
+            ran_turn = True
             await activation.agent.invoke(inputs, session=activation.session)
             return True
         except Exception as exc:
@@ -298,7 +300,7 @@ class TeamRuntimeManager:
             )
             return False
         finally:
-            if activation is not None:
+            if ran_turn and activation is not None:
                 await self.finalize(team_name=team_name, session_id=session_id)
                 current = await self._resolve_entry(team_name=team_name, session_id=session_id)
                 if current is not None:

@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.context import get_session_id
@@ -336,12 +336,19 @@ class OrgTaskManager:
             )
         capabilities = list(dict.fromkeys(capability.strip() for capability in capabilities))
         task_id = task_id or f"org-task-{uuid.uuid4().hex[:12]}"
-        root_task_id = root_task_id or parent_task_id or task_id
         now = get_current_time()
         assignment_type = OrgAssignmentType.DELEGATED if delegated_to_team_id else OrgAssignmentType.UNASSIGNED
         status = OrgTaskStatus.DELEGATED if delegated_to_team_id else OrgTaskStatus.OPEN
         spec_model = self._coerce_output_spec(output_spec)
         async with self._write() as session:
+            if parent_task_id:
+                parent = await session.get(OrgTaskRecord, parent_task_id)
+                if parent is None or parent.organization_id != self.organization_id:
+                    return OrgTaskOpResult(ok=False, reason=f"parent task not found: {parent_task_id}")
+                if root_task_id is None:
+                    root_task_id = parent.root_task_id
+            else:
+                root_task_id = root_task_id or task_id
             if await session.get(OrgTaskRecord, task_id) is not None:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
             row = OrgTaskRecord(
@@ -428,19 +435,28 @@ class OrgTaskManager:
         await self.initialize()
         now = get_current_time()
         async with self._write() as session:
-            row = await session.get(OrgTaskRecord, task_id)
-            if row is None or row.organization_id != self.organization_id:
-                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
-            if row.status != OrgTaskStatus.OPEN.value or row.assignment_type != OrgAssignmentType.UNASSIGNED.value:
-                return OrgTaskOpResult(ok=False, reason=f"task is not open/unassigned: {task_id}")
-            row.status = OrgTaskStatus.CLAIMED.value
-            row.assignment_type = OrgAssignmentType.CLAIMED.value
-            row.assigned_team_id = team_id
-            row.assigned_leader_id = leader_id
-            row.assigned_by_team_id = None
-            row.assigned_at = now
-            row.updated_at = now
+            result = await session.execute(
+                update(OrgTaskRecord)
+                .where(
+                    OrgTaskRecord.task_id == task_id,
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.status == OrgTaskStatus.OPEN.value,
+                    OrgTaskRecord.assignment_type == OrgAssignmentType.UNASSIGNED.value,
+                )
+                .values(
+                    status=OrgTaskStatus.CLAIMED.value,
+                    assignment_type=OrgAssignmentType.CLAIMED.value,
+                    assigned_team_id=team_id,
+                    assigned_leader_id=leader_id,
+                    assigned_by_team_id=None,
+                    assigned_at=now,
+                    updated_at=now,
+                )
+            )
             await session.commit()
+            if result.rowcount != 1:
+                return OrgTaskOpResult(ok=False, reason=f"task is not open/unassigned: {task_id}")
+            row = await session.get(OrgTaskRecord, task_id)
         task = self._to_task(row)
         await self._publish_event(
             OrgTaskClaimedEvent(
@@ -465,31 +481,79 @@ class OrgTaskManager:
         await self.initialize()
         now = get_current_time()
         async with self._write() as session:
+            result = await session.execute(
+                update(OrgTaskRecord)
+                .where(
+                    OrgTaskRecord.task_id == task_id,
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.status.not_in({
+                        OrgTaskStatus.COMPLETED.value,
+                        OrgTaskStatus.CANCELLED.value,
+                        OrgTaskStatus.EXPIRED.value,
+                    }),
+                    or_(
+                        OrgTaskRecord.assigned_team_id.is_(None),
+                        OrgTaskRecord.assigned_team_id == from_team_id,
+                    ),
+                )
+                .values(
+                    status=OrgTaskStatus.DELEGATED.value,
+                    assignment_type=OrgAssignmentType.DELEGATED.value,
+                    assigned_team_id=to_team_id,
+                    assigned_leader_id=to_leader_id,
+                    assigned_by_team_id=from_team_id,
+                    assigned_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+            if result.rowcount != 1:
+                row = await session.get(OrgTaskRecord, task_id)
+                if row is None or row.organization_id != self.organization_id:
+                    return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+                if row.status in {
+                    OrgTaskStatus.COMPLETED.value,
+                    OrgTaskStatus.CANCELLED.value,
+                    OrgTaskStatus.EXPIRED.value,
+                }:
+                    return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
+                if row.assigned_team_id and row.assigned_team_id != from_team_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=f"task is assigned to another team: {row.assigned_team_id}",
+                    )
+                return OrgTaskOpResult(ok=False, reason=f"task delegate failed: {task_id}")
+            row = await session.get(OrgTaskRecord, task_id)
+        task = self._to_task(row)
+        await self._publish_task_delegated(task, from_team_id, to_team_id, to_leader_id)
+        return OrgTaskOpResult(ok=True, task=task)
+
+    async def start_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
             row = await session.get(OrgTaskRecord, task_id)
             if row is None or row.organization_id != self.organization_id:
                 return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+            if row.assigned_team_id != team_id:
+                return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
             if row.status in {
                 OrgTaskStatus.COMPLETED.value,
                 OrgTaskStatus.CANCELLED.value,
                 OrgTaskStatus.EXPIRED.value,
             }:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
-            if row.assigned_team_id and row.assigned_team_id != from_team_id:
-                return OrgTaskOpResult(ok=False, reason=f"task is assigned to another team: {row.assigned_team_id}")
-            row.status = OrgTaskStatus.DELEGATED.value
-            row.assignment_type = OrgAssignmentType.DELEGATED.value
-            row.assigned_team_id = to_team_id
-            row.assigned_leader_id = to_leader_id
-            row.assigned_by_team_id = from_team_id
-            row.assigned_at = now
+            if row.status == OrgTaskStatus.IN_PROGRESS.value:
+                return OrgTaskOpResult(ok=True, task=self._to_task(row))
+            if row.status not in {
+                OrgTaskStatus.CLAIMED.value,
+                OrgTaskStatus.DELEGATED.value,
+            }:
+                return OrgTaskOpResult(ok=False, reason=f"task cannot be started from status {row.status}: {task_id}")
+            row.status = OrgTaskStatus.IN_PROGRESS.value
             row.updated_at = now
             await session.commit()
-        task = self._to_task(row)
-        await self._publish_task_delegated(task, from_team_id, to_team_id, to_leader_id)
-        return OrgTaskOpResult(ok=True, task=task)
-
-    async def start_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
-        return await self._set_assigned_task_status(task_id, team_id, OrgTaskStatus.IN_PROGRESS)
+        return OrgTaskOpResult(ok=True, task=self._to_task(row))
 
     async def complete_task(
         self,
@@ -939,28 +1003,37 @@ class OrgTaskManager:
         session_id = self.session_id or get_session_id()
         if not session_id:
             return
-        await self.messager.publish(OrgTopic.ORG.build(session_id, self.organization_id), message)
-        if isinstance(
-            event,
-            (
-                OrgTaskCreatedEvent,
-                OrgTaskClaimedEvent,
-                OrgTaskDelegatedEvent,
-                OrgTaskCompletedEvent,
-                OrgTaskReviewRequestedEvent,
-                OrgTaskReviewedEvent,
-                OrgSummaryTaskCreatedEvent,
-                OrgSummarySourcesUpdatedEvent,
-            ),
-        ):
-            await self.messager.publish(OrgTopic.TASK.build(session_id, self.organization_id), message)
-        if isinstance(event, OrgLeaderMessageEvent):
-            await self.messager.publish(OrgTopic.LEADER.build(session_id, self.organization_id), message)
-        # Leader inbox delivery is owned by TransportAPI.deliver; skip duplicate TEAM_INBOX publish.
-        if team_inbox_id and not isinstance(event, OrgLeaderMessageEvent):
-            await self.messager.publish(
-                OrgTopic.TEAM_INBOX.build(session_id, self.organization_id, team_inbox_id),
-                message,
+        try:
+            await self.messager.publish(OrgTopic.ORG.build(session_id, self.organization_id), message)
+            if isinstance(
+                event,
+                (
+                    OrgTaskCreatedEvent,
+                    OrgTaskClaimedEvent,
+                    OrgTaskDelegatedEvent,
+                    OrgTaskCompletedEvent,
+                    OrgTaskReviewRequestedEvent,
+                    OrgTaskReviewedEvent,
+                    OrgSummaryTaskCreatedEvent,
+                    OrgSummarySourcesUpdatedEvent,
+                ),
+            ):
+                await self.messager.publish(OrgTopic.TASK.build(session_id, self.organization_id), message)
+            if isinstance(event, OrgLeaderMessageEvent):
+                await self.messager.publish(OrgTopic.LEADER.build(session_id, self.organization_id), message)
+            # Leader inbox delivery is owned by TransportAPI.deliver; skip duplicate TEAM_INBOX publish.
+            if team_inbox_id and not isinstance(event, OrgLeaderMessageEvent):
+                await self.messager.publish(
+                    OrgTopic.TEAM_INBOX.build(session_id, self.organization_id, team_inbox_id),
+                    message,
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to publish organization event event_type=%s task_id=%s organization_id=%s",
+                message.event_type,
+                message.payload.get("task_id"),
+                self.organization_id,
+                exc_info=True,
             )
 
     async def publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:

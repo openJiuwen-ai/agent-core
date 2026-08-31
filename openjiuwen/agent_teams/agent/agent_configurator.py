@@ -901,7 +901,7 @@ class AgentConfigurator:
         db = get_shared_db(ctx.db_config)
         organization_id = None
         if spec.metadata:
-            organization_id = spec.metadata.get("organization_id") or spec.metadata.get("org_id")
+            organization_id = spec.metadata.get("organization_id")
         org_task_manager = None
         if organization_id:
             from openjiuwen.agent_teams.context import get_session_id

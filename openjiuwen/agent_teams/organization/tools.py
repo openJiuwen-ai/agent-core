@@ -743,10 +743,17 @@ class OrgReviewTaskTool(_OrgLeaderTool):
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         await self._ensure_registered()
+        try:
+            review_status = OrgTaskReviewStatus(inputs.get("review_status", ""))
+        except ValueError:
+            return ToolOutput(
+                success=False,
+                error=f"invalid review_status: {inputs.get('review_status')!r}",
+            )
         result = await self.manager.review_task(
             task_id=inputs.get("task_id", ""),
             reviewer_team_id=self.team_id,
-            review_status=OrgTaskReviewStatus(inputs.get("review_status", "")),
+            review_status=review_status,
             verdict=inputs.get("verdict"),
             required_changes=inputs.get("required_changes") or [],
         )

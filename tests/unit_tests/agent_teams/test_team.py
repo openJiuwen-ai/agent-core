@@ -628,6 +628,20 @@ class TestCleanTeam:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_clean_team_blocks_when_organization_check_fails(self, agent_team, db):
+        from unittest.mock import AsyncMock, MagicMock
+
+        manager = MagicMock()
+        manager.get_organization = AsyncMock(side_effect=RuntimeError("db down"))
+        agent_team.org_task_manager = manager
+
+        result = await agent_team.clean_team()
+
+        assert result is False
+        assert await db.team.team_exists(agent_team.team_name)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_clean_team_fails_when_members_not_shutdown(self, agent_team, sample_agent_card, db):
         """Test that clean_team fails when members are not shutdown"""
         await agent_team.spawn_member(

@@ -1,6 +1,7 @@
 # coding: utf-8
 
 import asyncio
+from collections import deque
 
 import pytest
 import pytest_asyncio
@@ -26,7 +27,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
-from openjiuwen.agent_teams.organization.tools import OrgCreateTaskTool
+from openjiuwen.agent_teams.organization.tools import OrgCreateTaskTool, OrgReviewTaskTool
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
@@ -131,6 +132,40 @@ async def active_organization_runtime():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_org_claim_same_task_single_winner(org_manager):
+    manager, _ = org_manager
+    assert (
+        await manager.create_task(
+            task_id="race-task",
+            title="Race",
+            description="Only one team should claim this.",
+            required_capabilities=["analysis"],
+            created_by=OrgTaskCreator(
+                creator_type="client",
+                creator_id="client-1",
+                organization_id="org-1",
+            ),
+        )
+    ).ok
+
+    results = await asyncio.gather(
+        *[
+            manager.claim_task(
+                task_id="race-task",
+                team_id=f"team-{index}",
+                leader_id=f"leader-{index}",
+            )
+            for index in range(10)
+        ]
+    )
+    assert sum(result.ok for result in results) == 1
+
+    task = await manager.get_task("race-task")
+    assert task.status == OrgTaskStatus.CLAIMED
+    assert task.assignment.team_id is not None
+
+
+@pytest.mark.asyncio
 async def test_claim_and_delegate_use_single_assignment(org_manager):
     manager, _ = org_manager
     result = await manager.create_task(
@@ -165,6 +200,163 @@ async def test_claim_and_delegate_use_single_assignment(org_manager):
     assert delegated.task.assignment.team_id == "team-b"
     assert delegated.task.assignment.leader_id == "leader-b"
     assert delegated.task.assignment.assigned_by_team_id == "team-a"
+
+
+@pytest.mark.asyncio
+async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="client",
+        creator_id="client-1",
+        organization_id="org-1",
+    )
+    assert (
+        await manager.create_task(
+            task_id="root-1",
+            title="Root",
+            description="Root task.",
+            required_capabilities=["analysis"],
+            created_by=creator,
+        )
+    ).ok
+    assert (
+        await manager.create_task(
+            task_id="child-1",
+            parent_task_id="root-1",
+            title="Child",
+            description="Child task.",
+            required_capabilities=["analysis"],
+            created_by=creator,
+        )
+    ).ok
+
+    grandchild = await manager.create_task(
+        task_id="grandchild-1",
+        parent_task_id="child-1",
+        title="Grandchild",
+        description="Grandchild task.",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert grandchild.ok
+    assert grandchild.task.root_task_id == "root-1"
+
+
+@pytest.mark.asyncio
+async def test_create_task_rejects_invalid_parent(org_manager):
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="client",
+        creator_id="client-1",
+        organization_id="org-1",
+    )
+    missing_parent = await manager.create_task(
+        task_id="orphan-1",
+        parent_task_id="missing-parent",
+        title="Orphan",
+        description="Parent does not exist.",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert not missing_parent.ok
+    assert missing_parent.reason == "parent task not found: missing-parent"
+
+    other_org = OrgTaskManager(
+        db=manager.db,
+        organization_id="org-2",
+        messager=manager.messager,
+        session_id=manager.session_id,
+    )
+    assert (
+        await other_org.create_task(
+            task_id="other-org-parent",
+            title="Other org parent",
+            description="Belongs to another organization.",
+            required_capabilities=["analysis"],
+            created_by=OrgTaskCreator(
+                creator_type="client",
+                creator_id="client-2",
+                organization_id="org-2",
+            ),
+        )
+    ).ok
+
+    cross_org = await manager.create_task(
+        task_id="cross-org-child",
+        parent_task_id="other-org-parent",
+        title="Cross org child",
+        description="Parent belongs to another organization.",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert not cross_org.ok
+    assert cross_org.reason == "parent task not found: other-org-parent"
+
+
+@pytest.mark.asyncio
+async def test_start_task_status_guards(org_manager):
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="start-guard-task",
+        title="Start guard",
+        description="Validate start transitions.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client-1",
+            organization_id="org-1",
+        ),
+    )
+    assert created.ok
+
+    open_start = await manager.start_task(task_id="start-guard-task", team_id="team-a")
+    assert not open_start.ok
+
+    claimed = await manager.claim_task(
+        task_id="start-guard-task",
+        team_id="team-a",
+        leader_id="leader-a",
+    )
+    assert claimed.ok
+
+    started = await manager.start_task(task_id="start-guard-task", team_id="team-a")
+    assert started.ok
+    assert started.task.status == OrgTaskStatus.IN_PROGRESS
+
+    again = await manager.start_task(task_id="start-guard-task", team_id="team-a")
+    assert again.ok
+    assert again.task.status == OrgTaskStatus.IN_PROGRESS
+
+    completed = await manager.complete_task(task_id="start-guard-task", team_id="team-a")
+    assert completed.ok
+
+    restarted = await manager.start_task(task_id="start-guard-task", team_id="team-a")
+    assert not restarted.ok
+    assert restarted.reason == "task is terminal: start-guard-task"
+    assert (await manager.get_task("start-guard-task")).status == OrgTaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_start_task_allows_delegated_task(org_manager):
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="delegated-start-task",
+        title="Delegated start",
+        description="Delegated tasks can be started.",
+        required_capabilities=["analysis"],
+        delegated_to_team_id="team-b",
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client-1",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    assert created.ok
+
+    started = await manager.start_task(task_id="delegated-start-task", team_id="team-b")
+    assert started.ok
+    assert started.task.status == OrgTaskStatus.IN_PROGRESS
 
 
 @pytest.mark.asyncio
@@ -408,6 +600,15 @@ async def test_organization_events_are_persisted_for_activity_views(org_manager)
         )).all()
     assert (OrgEvent.TASK_CREATED, "activity-task") in rows
     assert (OrgEvent.TASK_CLAIMED, "activity-task") in rows
+
+
+@pytest.mark.asyncio
+async def test_org_review_task_rejects_invalid_review_status(org_manager):
+    manager, _ = org_manager
+    tool = OrgReviewTaskTool(manager=manager, team_id="team-a", leader_id="leader-a")
+    result = await tool.invoke({"task_id": "child-1", "review_status": "accepted"})
+    assert not result.success
+    assert result.error == "invalid review_status: 'accepted'"
 
 
 @pytest.mark.asyncio
@@ -1116,3 +1317,57 @@ async def test_owner_can_dissolve_organization_and_recreate_it(active_organizati
         session_id=session_id,
     )
     assert recreated.organization_id == "org-dissolve"
+
+
+@pytest.mark.asyncio
+async def test_non_owner_cannot_dissolve_organization_even_without_bindings(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-dissolve-guard",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-dissolve-guard",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    runtime._team_organizations.clear()
+
+    with pytest.raises(ValueError, match="only the organization owner team can dissolve an organization"):
+        await runtime.dissolve_organization(
+            organization_id="org-dissolve-guard",
+            owner_team_id="team-b",
+            session_id=session_id,
+        )
+
+    manager = agents["team-a"].team_backend.org_task_manager
+    assert manager is not None
+    assert (await manager.get_organization()) is not None
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_times_out_when_team_stays_running(active_organization_runtime, monkeypatch):
+    org_runtime, _agents, session_id = active_organization_runtime
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.organization.runtime._LEADER_TURN_PAUSE_MAX_RETRIES",
+        3,
+    )
+    sleep_calls: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.RUNNING
+
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque([{"query": "queued turn"}])
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert key not in org_runtime._leader_turn_queues
+    assert key not in org_runtime._leader_turn_workers
+    assert len(sleep_calls) == 2

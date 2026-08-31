@@ -64,6 +64,9 @@ _ORG_COLLABORATION_PROMPT = {
     ),
 }
 
+_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS = 0.1
+_LEADER_TURN_PAUSE_MAX_RETRIES = 600
+
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
@@ -298,13 +301,8 @@ class OrganizationRuntimeManager:
             organization = await manager.get_organization()
             if organization is None:
                 raise ValueError(f"organization not found: {organization_id}")
-            active_member_bindings = {
-                team_id
-                for (bound_session_id, team_id), bound_organization_id in self._team_organizations.items()
-                if bound_session_id == session_id and bound_organization_id == organization_id
-            }
-            if organization.owner_team_id != owner_team_id and active_member_bindings:
-                raise ValueError("only the organization owner team can dissolve an active organization")
+            if organization.owner_team_id != owner_team_id:
+                raise ValueError("only the organization owner team can dissolve an organization")
 
             member_team_ids = {leader.team_id for leader in organization.leaders}
             member_team_ids.add(owner_team_id)
@@ -913,14 +911,20 @@ class OrganizationRuntimeManager:
         key = (session_id, team_id)
         try:
             queue = self._leader_turn_queues.setdefault(key, deque())
+            pause_wait_retries = 0
             while queue:
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
                     queue.clear()
                     return
                 if entry.state is not RuntimeState.PAUSED:
-                    await asyncio.sleep(0.1)
+                    pause_wait_retries += 1
+                    if pause_wait_retries >= _LEADER_TURN_PAUSE_MAX_RETRIES:
+                        queue.clear()
+                        return
+                    await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
                     continue
+                pause_wait_retries = 0
                 inputs = queue.popleft()
                 await self._run_leader_turn(team_id, session_id, inputs)
         finally:

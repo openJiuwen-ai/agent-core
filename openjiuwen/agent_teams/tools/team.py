@@ -1029,10 +1029,18 @@ class TeamBackend:
         Example:
             success = team.clean_team()
         """
-        if await self.owns_active_organization():
-            team_logger.error(
-                "Cannot clean organization owner team {} before org_dissolve_organization succeeds",
+        try:
+            if await self.owns_active_organization():
+                team_logger.error(
+                    "Cannot clean organization owner team {} before org_dissolve_organization succeeds",
+                    self.team_name,
+                )
+                return False
+        except Exception as exc:
+            team_logger.warning(
+                "Could not check organization ownership for {}: {}",
                 self.team_name,
+                exc,
             )
             return False
 
@@ -1100,11 +1108,7 @@ class TeamBackend:
         manager = self.org_task_manager
         if manager is None:
             return False
-        try:
-            organization = await manager.get_organization()
-        except Exception as exc:
-            team_logger.warning("Could not check organization ownership for {}: {}", self.team_name, exc)
-            return False
+        organization = await manager.get_organization()
         return organization is not None and organization.owner_team_id == self.team_name
 
     async def force_clean_team(self, shutdown_members: bool = True) -> bool:
