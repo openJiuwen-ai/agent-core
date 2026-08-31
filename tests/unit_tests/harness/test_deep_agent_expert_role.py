@@ -12,7 +12,7 @@ import pytest
 
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.deep_agent import (
@@ -98,7 +98,7 @@ async def test_load_a_invoke_writes_snapshot_before_user_message(
     user_message = UserMessage(content="hello")
     await context.add_messages(user_message)
 
-    assert isinstance(snapshot, SystemMessage)
+    assert isinstance(snapshot, UserMessage)
     assert context.get_messages() == [snapshot, user_message]
     assert "用户选择了A专家" in snapshot.content
 

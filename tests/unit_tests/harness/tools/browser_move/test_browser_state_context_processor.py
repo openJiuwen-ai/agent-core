@@ -10,7 +10,6 @@ import pytest
 from openjiuwen.core.context_engine import ContextEngine, ContextWindow
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
-    SystemMessage,
     ToolCall,
     ToolMessage,
     UserMessage,
@@ -431,7 +430,7 @@ async def test_persisted_prompt_attachments_remain_with_browser_state_tail() -> 
     window = await context.get_context_window()
 
     attachment = window.context_messages[0]
-    assert isinstance(attachment, SystemMessage)
+    assert isinstance(attachment, UserMessage)
     assert "The following dynamic context" in attachment.content
     assert "runtime attachment" in attachment.content
     assert window.context_messages[-1].name == "current_browser_state"

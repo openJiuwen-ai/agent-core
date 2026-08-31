@@ -48,7 +48,9 @@ async def test_prompt_attachment_manager_collect_render_and_update():
     assert [item.id for item in collected] == ["session.sess1.runtime", "session.sess1.memory"]
 
     rendered = manager.render(collected)
-    assert rendered.startswith("The following dynamic context is currently active.")
+    assert rendered.startswith("<system-reminder>\n")
+    assert "The following content does not represent the user's intent" in rendered
+    assert rendered.endswith("\n</system-reminder>")
     assert "<prompt-attachment" not in rendered
     assert "runtime rules" in rendered
     assert "memory content" in rendered
@@ -89,9 +91,12 @@ async def test_prompt_attachment_manager_persists_snapshot_then_only_deltas():
 
     snapshot = await manager.sync_to_context(context, "sess1")
 
-    assert isinstance(snapshot, SystemMessage)
+    assert isinstance(snapshot, UserMessage)
     assert snapshot.metadata[PROMPT_ATTACHMENT_HISTORY_METADATA_KEY] is True
-    assert snapshot.content.startswith("The following dynamic context is currently active.")
+    assert snapshot.content.startswith("<system-reminder>\n")
+    assert "The following dynamic context is currently active." in snapshot.content
+    assert "The following content does not represent the user's intent" in snapshot.content
+    assert snapshot.content.endswith("\n</system-reminder>")
     assert "<prompt-attachment" not in snapshot.content
     assert "runtime v1" in snapshot.content
     assert "unchanged payload" in snapshot.content
@@ -121,11 +126,12 @@ async def test_prompt_attachment_manager_persists_snapshot_then_only_deltas():
     await manager.update_content_by_id(runtime.id, content="runtime v2", session_id="sess1")
     delta = await manager.sync_to_context(context, "sess1")
 
-    assert isinstance(delta, SystemMessage)
-    assert delta.content.startswith("The following dynamic context has changed.")
+    assert isinstance(delta, UserMessage)
+    assert delta.content.startswith("<system-reminder>\n")
+    assert "The following dynamic context has changed." in delta.content
+    assert delta.content.endswith("\n</system-reminder>")
     assert "<prompt-attachment" not in delta.content
     assert "runtime v2" in delta.content
-    assert "<system-reminder>" not in delta.content
     assert "unchanged payload" not in delta.content
     assert len(context.get_messages()) == 3
     assert context.get_messages()[0].content == "query"
@@ -135,10 +141,11 @@ async def test_prompt_attachment_manager_persists_snapshot_then_only_deltas():
     await manager.clear_section(session_id="sess1", section="stable")
     removal = await manager.sync_to_context(context, "sess1")
 
-    assert isinstance(removal, SystemMessage)
+    assert isinstance(removal, UserMessage)
     assert "no longer active" in removal.content
     assert "- `stable`" in removal.content
     assert "<prompt-attachment" not in removal.content
+    assert removal.content.endswith("\n</system-reminder>")
     assert len(context.get_messages()) == 4
     assert context.get_messages()[-1].content == removal.content
 
@@ -166,7 +173,7 @@ async def test_prompt_attachment_snapshot_precedes_the_first_user_message():
     await context.add_messages(user_message)
 
     assert context.get_messages() == [snapshot, user_message]
-    assert isinstance(context.get_messages()[0], SystemMessage)
+    assert isinstance(context.get_messages()[0], UserMessage)
 
 
 @pytest.mark.asyncio
@@ -275,7 +282,7 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
 
     await manager.update_content_by_id(runtime.id, content="updated runtime", session_id="sess1")
     delta = await manager.sync_to_context(context, "sess1")
-    assert isinstance(delta, SystemMessage)
+    assert isinstance(delta, UserMessage)
 
     window = await context.get_context_window(
         system_messages=[SystemMessage(content="base system")],
@@ -508,6 +515,8 @@ def test_prompt_attachment_plain_text_intro_is_rendered_only_with_attachments():
         ]
     )
 
+    assert rendered.startswith("<system-reminder>\n")
+    assert rendered.endswith("\n</system-reminder>")
     intro_index = rendered.index("The following dynamic context")
     content_index = rendered.index("runtime context")
     assert intro_index < content_index
