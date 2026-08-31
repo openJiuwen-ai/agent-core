@@ -532,6 +532,12 @@ async def test_close_writes_closed_record_and_describe_one_returns_closed() -> N
         assert payload["closed_reason"] == "manual"
         assert payload["display_name"] == "Explorer"
 
+        listed = control.describe_list()
+        assert listed["summary"] == {"live_count": 0, "closed_count": 1}
+        assert listed["subagents"] == []
+        assert listed["closed_subagents"][0]["subagent_id"] == spawned.subagent_id
+        assert listed["closed_subagents"][0]["status"] == "closed"
+
 
 @pytest.mark.asyncio
 async def test_send_input_on_completed_instance() -> None:

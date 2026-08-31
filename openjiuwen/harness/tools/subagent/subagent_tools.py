@@ -228,10 +228,7 @@ class SubagentListTool(Tool):
         control = get_subagent_control(self._parent_agent, kwargs.get("session"))
         return ToolOutput(
             success=True,
-            data={
-                "capacity": control.capacity(),
-                "subagents": control.describe_live(),
-            },
+            data=control.describe_list(),
         )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:

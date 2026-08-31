@@ -353,10 +353,14 @@ async def test_subagent_list_returns_capacity_and_rows() -> None:
         ToolCard(id="subagent_list", name="subagent_list", description="list"),
         parent,
     )
-    control = SimpleNamespace(
-        capacity=lambda: {"used": 1, "max": 10},
-        describe_live=lambda: [{"subagent_id": "sub1", "status": "closed"}],
-    )
+    list_data = {
+        "capacity": {"used": 1, "max": 10},
+        "subagents": [{"subagent_id": "sub1", "status": "idle"}],
+        "live_subagents": [{"subagent_id": "sub1", "status": "idle"}],
+        "closed_subagents": [],
+        "summary": {"live_count": 1, "closed_count": 0},
+    }
+    control = SimpleNamespace(describe_list=lambda: list_data)
     session = Session(session_id="parent_sess")
 
     with patch(
@@ -365,8 +369,7 @@ async def test_subagent_list_returns_capacity_and_rows() -> None:
     ):
         result = await tool.invoke({}, session=session)
 
-    assert result.data["capacity"] == {"used": 1, "max": 10}
-    assert result.data["subagents"][0]["subagent_id"] == "sub1"
+    assert result.data == list_data
 
 
 @pytest.mark.asyncio
