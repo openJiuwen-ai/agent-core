@@ -14,25 +14,25 @@ from typing import Any
 import pytest
 import yaml
 
-from openjiuwen.rsi.config import (
+from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
     EvaluatorConfig,
     MemberOptimizerConfig,
 )
-from openjiuwen.rsi.evaluator.runtime_adapters import RSISkillUseRail
-from openjiuwen.rsi.improver_evolution.policy import (
+from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import RSISkillUseRail
+from openjiuwen.rsi.harness_rsi.improver_evolution.policy import (
     VersionedImproverPolicy,
     write_improver_policy,
 )
-from openjiuwen.rsi.single_harness import (
+from openjiuwen.rsi.harness_rsi.single_harness import (
     IterativeSingleHarnessRequest,
     SingleHarnessIterativeOptimizationOrchestrator,
 )
-from openjiuwen.rsi.single_harness import (
+from openjiuwen.rsi.harness_rsi.single_harness import (
     iterative as iterative_module,
 )
-from openjiuwen.rsi.single_harness.iterative import (
+from openjiuwen.rsi.harness_rsi.single_harness.iterative import (
     _bind_task_acceptance_contracts,
     _candidate_capabilities,
     _causal_candidate_failure_classification,
@@ -3305,7 +3305,7 @@ def test_invoked_skill_names_reads_skill_tool_arguments(tmp_path: Path) -> None:
 
 
 def test_jiuwenswarm_type_steps_count_successful_skill_before_code_edit() -> None:
-    from openjiuwen.rsi.evaluator.trajectory_usage import (
+    from openjiuwen.rsi.harness_rsi.evaluator.trajectory_usage import (
         collect_pre_edit_successful_usage,
         collect_successful_skill_names,
     )
@@ -3348,7 +3348,7 @@ def test_jiuwenswarm_type_steps_count_successful_skill_before_code_edit() -> Non
 
 
 def test_normalized_message_trace_counts_successful_skill_before_edit(tmp_path: Path) -> None:
-    from openjiuwen.rsi.single_harness.iterative import (
+    from openjiuwen.rsi.harness_rsi.single_harness.iterative import (
         _invoked_skill_names,
         _pre_edit_invoked_names_by_case,
     )
@@ -4312,7 +4312,7 @@ def test_candidate_gate_requires_each_failing_target_case_to_improve(
 
 
 def test_failure_class_distinguishes_no_edit_from_wrong_semantic_edit() -> None:
-    from openjiuwen.rsi.single_harness.iterative import (
+    from openjiuwen.rsi.harness_rsi.single_harness.iterative import (
         _classify_gate_failure,
     )
 

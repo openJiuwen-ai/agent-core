@@ -4,15 +4,15 @@
 
 from __future__ import annotations
 
-from openjiuwen.rsi.auto_harness.infra.pipeline_selector import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.pipeline_selector import (
     choose_session_pipeline,
     detect_pipeline_signal,
 )
-from openjiuwen.rsi.auto_harness.pipelines import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
     EXTENDED_EVOLVE_PIPELINE,
     META_EVOLVE_PIPELINE,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     OptimizationTask,
 )

@@ -12,20 +12,20 @@ import pytest
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.rsi.auto_harness.contexts import (
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import (
     TaskContext,
     TaskRuntime,
 )
-from openjiuwen.rsi.auto_harness.orchestrator import (
+from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     ExtensionDesign,
     OptimizationTask,
     StageResult,
 )
-from openjiuwen.rsi.auto_harness.stages.implement import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.implement import (
     ExtendImplementStage,
     _build_implement_ext_prompt,
 )

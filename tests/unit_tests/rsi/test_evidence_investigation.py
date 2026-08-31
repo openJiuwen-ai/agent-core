@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from openjiuwen.rsi.evaluation_result_analyzer.case_reader import CaseAnalysisInput, DeterministicSignals
-from openjiuwen.rsi.evaluation_result_analyzer.evidence_investigation import (
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseAnalysisInput, DeterministicSignals
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_investigation import (
     execute_causal_investigation,
     normalize_causal_investigation,
 )
@@ -480,7 +480,7 @@ def test_structured_artifact_inspection_filters_file_types_and_reuses_parse_cach
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import evidence_investigation
 
     case = _case(tmp_path)
     artifacts = Path(case.result_path).parent / "artifacts"
@@ -520,7 +520,7 @@ def test_artifact_search_uses_logical_source_name_before_structured_parse_limit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import evidence_investigation
 
     logical_name = "Authorization Documents/Controlling Contract.xlsx"
     stored_name = "hashed_target.xlsx"
@@ -565,7 +565,7 @@ def test_artifact_inspection_uses_requested_source_as_selection_hint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import evidence_investigation
 
     logical_name = "nested/Controlling Contract.docx"
     stored_name = "__longpath__/target.docx"
@@ -618,7 +618,7 @@ def test_artifact_inspection_uses_named_source_from_request_purpose(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer import evidence_investigation
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import evidence_investigation
 
     target_logical = "deliverables/Target Decision Record.docx"
     reference_logical = "references/Decision Guidance.docx"
@@ -1130,7 +1130,7 @@ def test_controller_compares_candidate_delta_against_baseline(tmp_path: Path) ->
 
 
 def test_unresolved_material_hypothesis_cannot_assign_optimization_target() -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
 
     conflicts = _causal_investigation_conflicts(
         [
@@ -1169,7 +1169,7 @@ def test_unresolved_material_hypothesis_cannot_assign_optimization_target() -> N
 
 
 def test_supported_local_issue_survives_when_unresolved_hypothesis_is_split() -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
         _causal_investigation_conflicts,
         _normalize_case_diagnoses,
     )
@@ -1254,7 +1254,7 @@ def test_supported_local_issue_survives_when_unresolved_hypothesis_is_split() ->
 
 
 def test_falsified_prior_causal_hypothesis_cannot_be_reused_by_semantic_identity() -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
 
     conflicts = _causal_investigation_conflicts(
         [
@@ -1315,7 +1315,7 @@ def test_falsified_prior_causal_hypothesis_cannot_be_reused_by_semantic_identity
 
 
 def test_local_hypothesis_label_can_be_reused_for_a_different_causal_claim() -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _causal_investigation_conflicts
 
     conflicts = _causal_investigation_conflicts(
         [
@@ -1374,7 +1374,7 @@ def test_local_hypothesis_label_can_be_reused_for_a_different_causal_claim() -> 
 
 
 def test_reconciliation_keeps_same_mechanism_falsifier_unresolved() -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
         _hypothesis_assessment_entailment_audit,
         _reconcile_causal_assessments,
     )
@@ -1444,7 +1444,7 @@ def test_reconciliation_keeps_same_mechanism_falsifier_unresolved() -> None:
 
 
 def test_unverified_decision_ground_requires_structured_incomplete_chain() -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _decision_ground_audit_conflicts
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _decision_ground_audit_conflicts
 
     diagnosis = {
         "failure_mode": "unverified_decision_ground_used",
@@ -1470,7 +1470,7 @@ def test_unverified_decision_ground_requires_structured_incomplete_chain() -> No
 
 
 def test_decision_ground_audit_adds_exact_released_answer_probe(tmp_path: Path) -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     case = _case(tmp_path)
     diagnoses = [
@@ -1532,7 +1532,7 @@ def test_decision_ground_audit_adds_exact_released_answer_probe(tmp_path: Path) 
 
 
 def test_decision_ground_audit_expands_exact_children_and_rejects_discovery_only() -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     evidence_rows = [
         {
@@ -1596,8 +1596,8 @@ async def test_broad_decision_claim_narrows_to_verified_material_ground(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     case = _case(tmp_path)
     strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
@@ -1885,7 +1885,7 @@ async def test_broad_decision_claim_narrows_to_verified_material_ground(
 async def test_independent_ground_audit_injects_label_free_process_hypothesis(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     diagnoses = [
         {
@@ -2009,8 +2009,8 @@ async def test_ground_audit_canonical_survives_unresolved_sibling_and_enters_han
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     case = _case(tmp_path)
     strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
@@ -2304,8 +2304,8 @@ async def test_diagnosis_runs_plan_then_controller_evidence_then_final(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     case = _case(tmp_path)
     strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
@@ -2510,8 +2510,8 @@ async def test_independent_entailment_rejection_reenters_evidence_closure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     case = _case(tmp_path)
     strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
@@ -2755,8 +2755,8 @@ async def test_legacy_diagnosis_cannot_bypass_mandatory_investigation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     case = _case(tmp_path)
     strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
@@ -2882,8 +2882,8 @@ async def test_handoff_audit_reenters_evidence_and_reaudits_assigned_diagnosis(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-    from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+    from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
     case = _case(tmp_path)
     strategy = analyzer_module.DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))

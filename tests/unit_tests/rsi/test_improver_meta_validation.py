@@ -8,7 +8,7 @@ from copy import deepcopy
 
 import pytest
 
-from openjiuwen.rsi.improver_evolution.meta_validation import (
+from openjiuwen.rsi.harness_rsi.improver_evolution.meta_validation import (
     MetaValidationThresholds,
     paired_meta_validate,
 )

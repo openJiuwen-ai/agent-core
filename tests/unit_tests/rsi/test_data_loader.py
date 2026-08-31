@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from openjiuwen.rsi.config import DataLoaderConfig
-from openjiuwen.rsi.data_loader import DataLoader
+from openjiuwen.rsi.harness_rsi.config import DataLoaderConfig
+from openjiuwen.rsi.harness_rsi.data_loader import DataLoader
 
 
 def _write_json(path: Path, data: object) -> None:

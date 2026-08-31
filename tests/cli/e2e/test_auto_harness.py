@@ -19,10 +19,10 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.infra.worktree_manager import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager import (
     WorktreeManager,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     load_auto_harness_config,
 )
@@ -150,7 +150,7 @@ class TestAutoHarnessWorktreeWithLocalRepo:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare(
@@ -199,7 +199,7 @@ class TestAutoHarnessWorktreeWithoutLocalRepo:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare("test-clone")
@@ -308,7 +308,7 @@ class TestAutoHarnessDataDirIsolation:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_git,
         ):
             wt_path = await mgr.prepare("test-iso")
@@ -336,7 +336,7 @@ class TestSubcmdRunIntegration:
         from openjiuwen.core.session.stream.base import (
             OutputSchema,
         )
-        from openjiuwen.rsi.auto_harness.schema import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
             CycleResult,
         )
 
@@ -358,7 +358,7 @@ class TestSubcmdRunIntegration:
         ]
 
         with patch(
-            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+            "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             return_value=mock_orch,
         ):
             from rich.console import Console
@@ -412,7 +412,7 @@ class TestSubcmdRunIntegration:
         mock_orch.results = []
 
         with patch(
-            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+            "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             return_value=mock_orch,
         ):
             from rich.console import Console
@@ -459,7 +459,7 @@ class TestSubcmdRunIntegration:
         data_dir.mkdir(parents=True)
 
         with patch(
-            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+            "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
         ) as mock_create:
             await _subcmd_run(
                 console,
@@ -503,7 +503,7 @@ class TestSubcmdRunIntegration:
             return mock_orch
 
         with patch(
-            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+            "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
             from rich.console import Console
@@ -608,7 +608,7 @@ class TestAutoHarnessOptimizationScenarios:
                 "auto-harness",
                 "run",
                 "--task",
-                "为 openjiuwen/rsi/auto_harness/controller/session_budget.py 补充所有公共方法的返回值类型注解",
+                "为 openjiuwen/rsi/harness_rsi/auto_harness/controller/session_budget.py 补充所有公共方法的返回值类型注解",
                 "--budget",
                 "240",
             ],
@@ -644,7 +644,7 @@ class TestAutoHarnessOptimizationScenarios:
                 "auto-harness",
                 "run",
                 "--task",
-                "为 openjiuwen/rsi/auto_harness/memory/store.py 中缺少 docstring 的公共方法补充 Google 风格文档字符串",
+                "为 openjiuwen/rsi/harness_rsi/auto_harness/memory/store.py 中缺少 docstring 的公共方法补充 Google 风格文档字符串",
                 "--budget",
                 "240",
             ],
@@ -682,7 +682,7 @@ class TestAutoHarnessOptimizationScenarios:
                         "trailing whitespace 等）"
                     ),
                     "files": [
-                        "openjiuwen/rsi/auto_harness/",
+                        "openjiuwen/rsi/harness_rsi/auto_harness/",
                     ],
                 }
             ],
@@ -738,7 +738,7 @@ class TestAutoHarnessOptimizationScenarios:
                 "auto-harness",
                 "run",
                 "--task",
-                "为 openjiuwen/rsi/auto_harness/tools/"
+                "为 openjiuwen/rsi/harness_rsi/auto_harness/tools/"
                 "git_tool.py 的 _create_pr_sync 方法"
                 "增加更详细的错误日志，包括 HTTP "
                 "状态码和响应体摘要",

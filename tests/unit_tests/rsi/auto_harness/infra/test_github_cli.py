@@ -7,7 +7,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from openjiuwen.rsi.auto_harness.infra.github_cli import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli import (
     ensure_github_cli_ready,
 )
 
@@ -17,11 +17,11 @@ def test_github_cli_present_and_authenticated():
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli.shutil.which",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli.shutil.which",
             return_value="/usr/bin/gh",
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli.subprocess.run",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli.subprocess.run",
             return_value=SimpleNamespace(
                 returncode=0,
                 stderr="",
@@ -61,15 +61,15 @@ def test_github_cli_missing_installs_and_prompts_login():
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli.shutil.which",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli.shutil.which",
             side_effect=_fake_which,
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli._install_commands",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli._install_commands",
             return_value=[(["brew", "install", "gh"], "brew install gh")],
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli.subprocess.run",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli.subprocess.run",
             side_effect=_fake_run,
         ),
     ):
@@ -88,15 +88,15 @@ def test_github_cli_missing_and_install_fails():
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli.shutil.which",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli.shutil.which",
             return_value="",
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli._install_commands",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli._install_commands",
             return_value=[(["apt-get", "install", "-y", "gh"], "apt-get install -y gh")],
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.infra.github_cli.subprocess.run",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli.subprocess.run",
             return_value=SimpleNamespace(
                 returncode=1,
                 stderr="permission denied",

@@ -92,7 +92,7 @@ def _trial(trace_id: str, *, total: float, transactions: list[str], final_text: 
 
 class TestPublicTaskContract:
     def test_snapshot_keeps_public_schema_and_excludes_scorer(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             public_task_contract_snapshot,
         )
 
@@ -109,7 +109,7 @@ class TestPublicTaskContract:
         assert "must_not_leak" not in json.dumps(snapshot)
 
     def test_older_run_loads_public_contract_from_materialized_suite(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             load_public_task_contract,
         )
 
@@ -141,7 +141,7 @@ class TestPublicTaskContract:
 
 class TestCausalEvidenceDigest:
     def test_preserves_trial_outcomes_terminal_variants_and_request_contract(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             build_causal_evidence_digest,
             public_task_contract_snapshot,
         )
@@ -179,7 +179,7 @@ class TestCausalEvidenceDigest:
         assert digest["compression_policy"]["trial_boundaries_preserved"] is True
 
     def test_preserves_per_trial_score_reason_judge_detail_and_dimension_availability(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             build_causal_evidence_digest,
         )
 
@@ -253,7 +253,7 @@ class TestCausalEvidenceDigest:
         }
 
     def test_success_failure_output_contrast_keeps_delivery_evidence(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             build_causal_evidence_digest,
         )
 
@@ -286,7 +286,7 @@ class TestCausalEvidenceDigest:
         assert failed_trial["final_output"]["excerpt"] == "Saved to outputs/blog.md"
 
     def test_keeps_aggregate_judge_criteria_when_trial_score_file_has_no_detail(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             build_causal_evidence_digest,
         )
 
@@ -331,7 +331,7 @@ class TestCausalEvidenceDigest:
         )
 
     def test_dynamic_selection_keeps_successful_document_reads_and_response_failure(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             build_causal_evidence_digest,
         )
 
@@ -425,7 +425,7 @@ class TestCausalEvidenceDigest:
         assert coverage["selected_count"] > 8
 
     def test_compaction_marker_cannot_hide_failed_requirement_linked_source_text(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             build_causal_evidence_digest,
         )
 
@@ -494,7 +494,7 @@ class TestCausalEvidenceDigest:
 
 class TestCandidateFeedbackCompression:
     def test_preserves_prediction_activation_and_observed_score_delta(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             compact_candidate_feedback,
         )
 
@@ -547,7 +547,7 @@ class TestCandidateFeedbackCompression:
         )
 
     def test_normalizes_candidate_gate_feedback_without_losing_continuous_progress(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.evidence_compactor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.evidence_compactor import (
             compact_candidate_feedback,
         )
 
@@ -621,10 +621,10 @@ class TestCandidateFeedbackCompression:
 
 class TestAnalyzerIntegration:
     def test_diagnosis_input_uses_causal_digest_as_primary_evidence(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -694,12 +694,12 @@ class TestAnalyzerIntegration:
         self,
         tmp_path: Path,
     ) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
             _load_effective_harness_snapshot,
             _summarize_evaluation_metadata,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )

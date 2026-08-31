@@ -19,11 +19,11 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import SkillUseRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.rsi.auto_harness.infra.runtime_extension_loader import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_loader import (
     load_runtime_rails,
     load_runtime_tools,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     RuntimeExtensionArtifact,
 )
 

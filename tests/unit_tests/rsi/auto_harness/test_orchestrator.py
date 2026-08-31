@@ -12,21 +12,21 @@ from unittest.mock import AsyncMock, Mock, patch
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.rsi.auto_harness.orchestrator import (
+from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
 )
-from openjiuwen.rsi.auto_harness.pipelines import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
     EXTENDED_EVOLVE_PIPELINE,
     META_EVOLVE_PIPELINE,
 )
-from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
     ExtensionTaskPipeline,
 )
-from openjiuwen.rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline import (
     PRTaskPipeline,
     prepare_task_runtime,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     CycleResult,
     ExtensionDesign,
@@ -39,11 +39,11 @@ from openjiuwen.rsi.auto_harness.schema import (
     TaskStatus,
 )
 
-_ASSESS_STAGE_MOD = "openjiuwen.rsi.auto_harness.stages.assess"
-_PLAN_STAGE_MOD = "openjiuwen.rsi.auto_harness.stages.plan"
-_LEARNINGS_STAGE_MOD = "openjiuwen.rsi.auto_harness.stages.learnings"
-_TASK_PIPELINE_MOD = "openjiuwen.rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline"
-_SKILL_SOURCE_MANAGER_MOD = "openjiuwen.rsi.auto_harness.infra.skill_source_manager"
+_ASSESS_STAGE_MOD = "openjiuwen.rsi.harness_rsi.auto_harness.stages.assess"
+_PLAN_STAGE_MOD = "openjiuwen.rsi.harness_rsi.auto_harness.stages.plan"
+_LEARNINGS_STAGE_MOD = "openjiuwen.rsi.harness_rsi.auto_harness.stages.learnings"
+_TASK_PIPELINE_MOD = "openjiuwen.rsi.harness_rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline"
+_SKILL_SOURCE_MANAGER_MOD = "openjiuwen.rsi.harness_rsi.auto_harness.infra.skill_source_manager"
 
 
 async def _collect(agen):
@@ -251,7 +251,7 @@ class TestOrchestratorRunSession(
 
             async def _fake_plan_stream(_stage, _ctx):
                 called["plan"] += 1
-                from openjiuwen.rsi.auto_harness.schema import (
+                from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
                     TaskPlanArtifact,
                 )
 
@@ -830,11 +830,11 @@ class TestTaskPipeline(IsolatedAsyncioTestCase):
 
             with (
                 patch(
-                    "openjiuwen.rsi.auto_harness.agents.create_auto_harness_agent",
+                    "openjiuwen.rsi.harness_rsi.auto_harness.agents.create_auto_harness_agent",
                     side_effect=[task_agent, fix_agent],
                 ) as create_task_agent,
                 patch(
-                    "openjiuwen.rsi.auto_harness.agents.create_commit_agent",
+                    "openjiuwen.rsi.harness_rsi.auto_harness.agents.create_commit_agent",
                     return_value=commit_agent,
                 ) as create_commit_agent,
                 patch(

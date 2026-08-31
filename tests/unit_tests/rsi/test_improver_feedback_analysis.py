@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from openjiuwen.rsi.improver_evolution.feedback_analysis import analyze_candidate_feedback_ledgers
-from openjiuwen.rsi.improver_evolution.policy import (
+from openjiuwen.rsi.harness_rsi.improver_evolution.feedback_analysis import analyze_candidate_feedback_ledgers
+from openjiuwen.rsi.harness_rsi.improver_evolution.policy import (
     default_improver_policy,
     propose_policy_candidates,
 )
-from openjiuwen.rsi.single_harness.candidate_feedback import build_candidate_feedback_cohort
+from openjiuwen.rsi.harness_rsi.single_harness.candidate_feedback import build_candidate_feedback_cohort
 
 
 def _raw_candidate(

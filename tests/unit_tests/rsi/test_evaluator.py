@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from openjiuwen.rsi.config import EvaluatorConfig
-from openjiuwen.rsi.evaluator.case_backend import (
+from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     CaseExecutionResult,
     SingleHarnessExecutionBackend,
     _artifact_files_from_case,
@@ -20,16 +20,16 @@ from openjiuwen.rsi.evaluator.case_backend import (
     _single_harness_team_skill_metadata,
     build_backend,
 )
-from openjiuwen.rsi.evaluator.case_runner import CaseRunner
-from openjiuwen.rsi.evaluator.errors import EvaluationInfrastructureError
-from openjiuwen.rsi.evaluator.judger import (
+from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.judger import (
     ExactMatchJudger,
     ScriptBasedJudger,
     build_judger,
 )
-from openjiuwen.rsi.evaluator.metrics_collector import MetricsCollector
-from openjiuwen.rsi.evaluator.team_evaluator import TeamEvaluator
-from openjiuwen.rsi.schema import EvaluationCaseTraceRef
+from openjiuwen.rsi.harness_rsi.evaluator.metrics_collector import MetricsCollector
+from openjiuwen.rsi.harness_rsi.evaluator.team_evaluator import TeamEvaluator
+from openjiuwen.rsi.harness_rsi.schema import EvaluationCaseTraceRef
 
 
 class _Backend:
@@ -167,7 +167,7 @@ async def test_team_evaluator_retries_transient_infrastructure_error(
     async def _skip_sleep(_: float) -> None:
         return None
 
-    monkeypatch.setattr("openjiuwen.rsi.evaluator.team_evaluator.asyncio.sleep", _skip_sleep)
+    monkeypatch.setattr("openjiuwen.rsi.harness_rsi.evaluator.team_evaluator.asyncio.sleep", _skip_sleep)
     evaluator = TeamEvaluator(EvaluatorConfig(transient_case_retry_limit=1))
     case_runner = _InfrastructureRetryCaseRunner(
         ["RemoteProtocolError: peer closed connection (incomplete chunked read)"]

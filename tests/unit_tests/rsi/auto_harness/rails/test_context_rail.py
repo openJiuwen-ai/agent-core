@@ -16,7 +16,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.harness.prompts.builder import (
     SystemPromptBuilder,
 )
-from openjiuwen.rsi.auto_harness.rails.context_rail import (
+from openjiuwen.rsi.harness_rsi.auto_harness.rails.context_rail import (
     AutoHarnessContextRail,
 )
 

@@ -7,7 +7,7 @@ import textwrap
 from pathlib import Path
 from unittest import TestCase
 
-from openjiuwen.rsi.auto_harness.infra.skill_source_manager import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.skill_source_manager import (
     _load_skill_description,
     _patch_skill_frontmatter,
     _repo_name_from_url,
@@ -16,7 +16,7 @@ from openjiuwen.rsi.auto_harness.infra.skill_source_manager import (
     format_community_skill_list,
     scan_skills,
 )
-from openjiuwen.rsi.auto_harness.schema import AutoHarnessConfig, ExtensionDesign
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import AutoHarnessConfig, ExtensionDesign
 
 
 class TestRepoNameFromUrl(TestCase):
@@ -330,7 +330,7 @@ class TestExtensionDesignSkillSource(TestCase):
         assert design.skill_source == "community:pptx"
 
     def test_from_dict(self):
-        from openjiuwen.rsi.auto_harness.schema import AutoHarnessConfig
+        from openjiuwen.rsi.harness_rsi.auto_harness.schema import AutoHarnessConfig
 
         config = AutoHarnessConfig.load_from_dict(
             {
@@ -354,7 +354,7 @@ class TestSkillFrontmatterValidation(TestCase):
     """Test SKILL.md frontmatter validation."""
 
     def test_validate_valid_frontmatter(self):
-        from openjiuwen.rsi.auto_harness.infra.runtime_extension_static_checks import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_static_checks import (
             _validate_skill_frontmatter,
         )
 
@@ -374,7 +374,7 @@ class TestSkillFrontmatterValidation(TestCase):
         assert errors == []
 
     def test_validate_missing_name(self):
-        from openjiuwen.rsi.auto_harness.infra.runtime_extension_static_checks import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_static_checks import (
             _validate_skill_frontmatter,
         )
 
@@ -394,7 +394,7 @@ class TestSkillFrontmatterValidation(TestCase):
         assert "name" in errors[0]
 
     def test_validate_missing_description(self):
-        from openjiuwen.rsi.auto_harness.infra.runtime_extension_static_checks import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_static_checks import (
             _validate_skill_frontmatter,
         )
 
@@ -414,7 +414,7 @@ class TestSkillFrontmatterValidation(TestCase):
         assert "description" in errors[0]
 
     def test_validate_no_frontmatter(self):
-        from openjiuwen.rsi.auto_harness.infra.runtime_extension_static_checks import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_static_checks import (
             _validate_skill_frontmatter,
         )
 

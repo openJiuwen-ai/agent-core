@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from openjiuwen.rsi.member_optimizer.path_layout import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.path_layout import (
     MemberOptimizerPathLayout,
 )
 

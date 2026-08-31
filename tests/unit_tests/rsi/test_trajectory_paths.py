@@ -7,15 +7,15 @@ from __future__ import annotations
 import json
 
 from openjiuwen.agent_evolving.trajectory.legacy import upgrade_legacy_record
-from openjiuwen.rsi.evaluator.case_backend import (
+from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     _is_runtime_workspace_metadata,
     _skip_trace_snapshot_path,
 )
-from openjiuwen.rsi.evaluator.case_runner import (
+from openjiuwen.rsi.harness_rsi.evaluator.case_runner import (
     _messages_from_role_trajectory,
     _skip_harvest_path,
 )
-from openjiuwen.rsi.evaluator.trajectory_paths import (
+from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
     RoleFileTrajectoryStore,
 )
 

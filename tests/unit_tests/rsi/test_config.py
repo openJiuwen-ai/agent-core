@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.rsi.config import (
+from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     ModelConfigs,
     load_auto_coordinating_harness_config,

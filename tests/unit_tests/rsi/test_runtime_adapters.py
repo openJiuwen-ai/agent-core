@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.rsi.evaluator import runtime_adapters
-from openjiuwen.rsi.evaluator.runtime_adapters import (
+from openjiuwen.rsi.harness_rsi.evaluator import runtime_adapters
+from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
     RSIBashTool,
     run_agent_with_empty_response_recovery,
 )

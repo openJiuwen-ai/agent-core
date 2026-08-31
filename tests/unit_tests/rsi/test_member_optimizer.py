@@ -18,9 +18,9 @@ import pytest
 import yaml
 
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseModelClient
-from openjiuwen.rsi.config import MemberOptimizerConfig
-from openjiuwen.rsi.member_optimizer import action_planner as action_planner_module
-from openjiuwen.rsi.member_optimizer.action_executor import (
+from openjiuwen.rsi.harness_rsi.config import MemberOptimizerConfig
+from openjiuwen.rsi.harness_rsi.member_optimizer import action_planner as action_planner_module
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
     MemberActionExecutor,
     _normalize_skill_frontmatter_name,
     _runtime_contract_projection,
@@ -28,14 +28,14 @@ from openjiuwen.rsi.member_optimizer.action_executor import (
     _validate_generated_action_resources,
     _validate_generated_skill_contract,
 )
-from openjiuwen.rsi.member_optimizer.action_groups import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     build_action_waves,
     build_role_subwaves,
     filter_action_definitions,
     load_action_definitions,
     validate_action_policy,
 )
-from openjiuwen.rsi.member_optimizer.action_planner import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
     MemberActionPlanner,
     MemberActionPlannerAgent,
     _adapt_surface_for_activation_phase,
@@ -44,37 +44,37 @@ from openjiuwen.rsi.member_optimizer.action_planner import (
     _validate_action_issue_attribution,
     _validate_new_skill_qualification,
 )
-from openjiuwen.rsi.member_optimizer.agents.factory import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     _failure_signature_values,
     _mechanism_type_values,
     _optimization_surface_values,
     load_member_optimizer_model,
 )
-from openjiuwen.rsi.member_optimizer.agents.output import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
     extract_agent_text,
     invoke_member_optimizer_agent_structured,
     parse_json_object_response,
     parse_yaml_or_json_object_response,
 )
-from openjiuwen.rsi.member_optimizer.hypothesis import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import (
     compile_optimization_hypotheses,
     load_optimization_hypotheses,
 )
-from openjiuwen.rsi.member_optimizer.lever import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.lever import (
     available_surfaces_for_lever,
     target_ref_lever,
 )
-from openjiuwen.rsi.member_optimizer.loader import EvalRef
-from openjiuwen.rsi.member_optimizer.member_selector import MemberSelector
-from openjiuwen.rsi.member_optimizer.optimizer import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.loader import EvalRef
+from openjiuwen.rsi.harness_rsi.member_optimizer.member_selector import MemberSelector
+from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import (
     MemberOptimizer,
     _find_reusable_pending_optimization,
 )
-from openjiuwen.rsi.member_optimizer.path_layout import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.path_layout import (
     MemberOptimizerPathLayout,
 )
-from openjiuwen.rsi.member_optimizer.role_attributor import RoleAttributor
-from openjiuwen.rsi.member_optimizer.schema import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.role_attributor import RoleAttributor
+from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
     MechanismAttributionReport,
     MemberActionExecutionResult,
     MemberOptimizationAction,
@@ -85,17 +85,17 @@ from openjiuwen.rsi.member_optimizer.schema import (
     RoleIssueAttribution,
     RoleMechanismAttribution,
 )
-from openjiuwen.rsi.member_optimizer.verification import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
     HarnessChangeVerifier,
     _validate_package_python_source,
     scan_skill_directory,
 )
-from openjiuwen.rsi.member_optimizer.worktree_coordinator import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.worktree_coordinator import (
     MemberWorktreeCoordinator,
     integration_worktree_path,
     role_worktree_path,
 )
-from openjiuwen.rsi.schema import ActionDefinition, TeamIssue
+from openjiuwen.rsi.harness_rsi.schema import ActionDefinition, TeamIssue
 
 
 def test_lever_policy_does_not_recast_configuration_as_instruction() -> None:
@@ -250,7 +250,7 @@ async def test_sibling_candidates_use_isolated_planner_sessions(
 
 
 def test_member_optimizer_package_exports_only_facade_and_schema() -> None:
-    from openjiuwen.rsi import member_optimizer
+    from openjiuwen.rsi.harness_rsi import member_optimizer
 
     assert "MemberOptimizer" in member_optimizer.__all__
     assert "MemberOptimizationArtifact" in member_optimizer.__all__
@@ -349,7 +349,7 @@ def test_action_issue_attribution_rejects_combining_independent_issues() -> None
 
 
 def test_action_bundle_accepts_three_connected_actions_for_one_issue() -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
 
     plan_data = {
         "actions": [
@@ -378,7 +378,7 @@ def test_action_bundle_accepts_three_connected_actions_for_one_issue() -> None:
 
 
 def test_action_bundle_rejects_more_than_three_actions_for_one_issue() -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
 
     plan_data = {
         "actions": [
@@ -398,7 +398,7 @@ def test_action_bundle_rejects_more_than_three_actions_for_one_issue() -> None:
 
 
 def test_action_bundle_rejects_cross_issue_dependency() -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
 
     plan_data = {
         "actions": [
@@ -423,7 +423,7 @@ def test_action_bundle_rejects_cross_issue_dependency() -> None:
 
 
 def test_action_bundle_rejects_disconnected_changes_for_one_issue() -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
 
     plan_data = {
         "actions": [
@@ -522,7 +522,7 @@ def test_find_reusable_pending_optimization_matches_identical_inputs(tmp_path: P
 
 def test_member_optimizer_attribution_taxonomy_excludes_rail() -> None:
     """Member optimization may use existing rails, but cannot attribute to rail."""
-    from openjiuwen.rsi.member_optimizer.mechanism_attributor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.mechanism_attributor import (
         FAILURE_SIGNATURE_VALUES,
         MECHANISM_TYPE_VALUES,
         OPTIMIZATION_SURFACE_VALUES,
@@ -537,7 +537,7 @@ def test_member_optimizer_attribution_taxonomy_excludes_rail() -> None:
 
 
 def test_member_optimizer_agent_profiles_are_declared() -> None:
-    from openjiuwen.rsi.member_optimizer.agents.profiles import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import (
         ACTION_EXECUTION,
         ACTION_PLANNING,
         MECHANISM_ATTRIBUTION,
@@ -559,7 +559,7 @@ def test_member_optimizer_agent_profiles_are_declared() -> None:
 
 
 def test_member_optimizer_agent_factory_renders_planner_prompt(monkeypatch, tmp_path: Path) -> None:
-    from openjiuwen.rsi.member_optimizer.agents import factory
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents import factory
 
     model_path = _write_model_config(tmp_path / "model.yaml")
     captured: dict[str, object] = {}
@@ -604,8 +604,8 @@ def test_member_optimizer_agent_factory_uses_external_skill_roots(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.agents import factory
-    from openjiuwen.rsi.member_optimizer.agents.profiles import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents import factory
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import (
         MemberOptimizerAgentProfile,
     )
 
@@ -650,7 +650,7 @@ def test_action_execution_agent_does_not_mount_filesystem_write_tools(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.agents import factory
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents import factory
 
     model_path = _write_model_config(tmp_path / "model.yaml")
     captured: dict[str, object] = {}
@@ -862,7 +862,7 @@ def test_role_attributor_does_not_map_team_alias_to_business_member(tmp_path: Pa
 
 def test_resolve_team_issues_only_returns_member_harness_targets() -> None:
     """MemberOptimizer only consumes analyzer issues targeted at member_harness."""
-    from openjiuwen.rsi.member_optimizer.loader import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.loader import (
         AnalysisRef,
         resolve_team_issues,
     )
@@ -1376,7 +1376,7 @@ def test_member_selector_no_targets_low_confidence() -> None:
 
 def test_member_action_planner_returns_empty_plan_for_insufficient_role_evidence_only() -> None:
     """Planner must not turn insufficient evidence into a direct file modification."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1480,7 +1480,7 @@ def test_member_selector_records_insufficient_evidence_as_deferred_contract_issu
 
 def test_member_action_planner_rejects_specific_workflow_in_soul_md() -> None:
     """Concrete workflow/checklist repairs must use prompt sections, not soul.md."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1564,7 +1564,7 @@ def test_member_action_planner_rejects_specific_workflow_in_soul_md() -> None:
 
 def test_member_action_planner_accepts_specific_workflow_prompt_section() -> None:
     """Specific workflow repairs can be planned as mounted prompt sections."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1667,7 +1667,7 @@ def test_member_action_planner_accepts_specific_workflow_prompt_section() -> Non
 
 def test_member_action_planner_rejects_prompt_when_surface_is_skill() -> None:
     """A workflow failure can still require a skill optimization surface."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1759,7 +1759,7 @@ def test_member_action_planner_rejects_prompt_when_surface_is_skill() -> None:
 
 def test_member_action_planner_replans_when_action_surface_mismatches_diagnosis() -> None:
     """Planner should repair semantic surface mismatches instead of aborting immediately."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1909,7 +1909,7 @@ def test_member_optimizer_allocates_next_version(tmp_path: Path) -> None:
     output_dir.mkdir(parents=True)
     (output_dir / "member_optimization_001").mkdir()
 
-    from openjiuwen.rsi.member_optimizer.optimizer import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import (
         _allocate_optimization_dir,
     )
 
@@ -1927,7 +1927,7 @@ def test_member_optimizer_allocates_starts_at_001(tmp_path: Path) -> None:
     output_dir = tmp_path / "member_optimizations"
     output_dir.mkdir(parents=True)
 
-    from openjiuwen.rsi.member_optimizer.optimizer import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import (
         _allocate_optimization_dir,
     )
 
@@ -2123,7 +2123,7 @@ def test_member_optimizer_worktree_forbidden_paths(tmp_path: Path) -> None:
 
 def test_schema_dataclasses_are_frozen() -> None:
     """All schema dataclasses must be immutable (frozen=True)."""
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         MemberOptimizationArtifact,
     )
 
@@ -2544,10 +2544,10 @@ def test_member_optimizer_model_config_rejects_invalid_refs(tmp_path: Path) -> N
 
 
 def test_member_verifier_repairability_accepts_only_worktree_failures() -> None:
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         VerificationCheck,
     )
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         _role_is_repairable,
     )
 
@@ -2572,10 +2572,10 @@ def test_member_verifier_repairability_accepts_only_worktree_failures() -> None:
 def test_member_verifier_repairability_rejects_unrepairable_or_unknown_failures(
     failed_check_name: str,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         VerificationCheck,
     )
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         _role_is_repairable,
     )
 
@@ -2590,10 +2590,10 @@ def test_member_verifier_repairability_rejects_unrepairable_or_unknown_failures(
 
 
 def test_member_verifier_repairability_rejects_mixed_failures() -> None:
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         VerificationCheck,
     )
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         _role_is_repairable,
     )
 
@@ -2920,8 +2920,8 @@ def test_member_optimizer_publish_rejects_partially_executed_role(
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.optimizer import _PublishRequest
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import _PublishRequest
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         MemberSelectionReport,
         MemberVerificationResult,
         RoleVerificationResult,
@@ -3576,7 +3576,7 @@ def test_member_executor_default_agent_fails_success_without_real_declared_chang
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer import action_executor as action_executor_module
+    from openjiuwen.rsi.harness_rsi.member_optimizer import action_executor as action_executor_module
 
     class NoopDeepAgent:
         async def invoke(self, inputs, session=None):  # type: ignore[no-untyped-def]
@@ -3803,7 +3803,7 @@ and checked assertions as evidence.
 
 
 def test_action_executor_accepts_complete_skill_as_structured_file_write() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3839,7 +3839,7 @@ def test_action_executor_writes_complete_skill_from_one_model_call(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3899,7 +3899,7 @@ def test_action_executor_retries_malformed_complete_skill_response(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3954,7 +3954,7 @@ def test_action_executor_does_not_publish_invalid_assembled_skill(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -4007,7 +4007,7 @@ def test_action_executor_does_not_publish_invalid_assembled_skill(
 
 
 def test_action_execution_prompt_requires_native_complete_skill_artifact() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -4053,7 +4053,7 @@ def test_action_execution_prompt_requires_native_complete_skill_artifact() -> No
 
 
 def test_action_execution_projects_only_public_runtime_contract() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -5080,7 +5080,7 @@ description: A structurally valid but empty skill.
 
 
 def test_action_execution_prompt_requires_safe_mountable_tool_contract() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -5181,7 +5181,7 @@ def _safe_payload_tool_source() -> str:
 def test_action_executor_retries_tool_generation_after_safety_validation_error(
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -5612,7 +5612,7 @@ def test_member_executor_executes_package_local_rail_action(
 
 def test_member_repair_prompt_includes_failed_file_contents(tmp_path: Path) -> None:
     """Repair agent receives bounded file content for directly failed files."""
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         HarnessRepairAgent,
     )
 
@@ -5643,7 +5643,7 @@ def test_member_repair_prompt_includes_failed_file_contents(tmp_path: Path) -> N
 
 def test_member_executor_agent_includes_declared_file_contents_in_prompt(tmp_path: Path) -> None:
     """Executor must give the model current file contents before asking for replacement content."""
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -5807,7 +5807,7 @@ def test_member_executor_does_not_merge_partial_same_issue_bundle(
 
 
 def test_role_execution_contract_accepts_successful_fallback_branch() -> None:
-    from openjiuwen.rsi.member_optimizer.execution_contract import role_execution_errors
+    from openjiuwen.rsi.harness_rsi.member_optimizer.execution_contract import role_execution_errors
 
     target = MemberOptimizationTarget(
         role="solver",
@@ -6817,7 +6817,7 @@ def test_member_action_planner_reports_the_latest_action_budget_error() -> None:
 def test_planner_turns_unapplied_skill_into_execution_checkpoint(
     failure_class: str,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _adapt_recovery_surface_from_history,
     )
 
@@ -6875,7 +6875,7 @@ def test_planner_turns_unapplied_skill_into_execution_checkpoint(
 
 
 def test_planner_keeps_skill_surface_after_semantic_replay_failure() -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _adapt_recovery_surface_from_history,
     )
 
@@ -6932,7 +6932,7 @@ def test_planner_keeps_skill_surface_after_semantic_replay_failure() -> None:
 
 def test_member_action_planner_rejects_action_removed_from_run_contract() -> None:
     """A model cannot reintroduce skill/search after one-action filtering removes it."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 
@@ -6975,7 +6975,7 @@ def test_member_action_planner_rejects_action_removed_from_run_contract() -> Non
 
 def test_member_action_planner_rejects_action_when_run_contract_is_empty() -> None:
     """An explicitly empty run contract must fail closed for model actions."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 
@@ -7009,7 +7009,7 @@ def test_member_action_planner_rejects_action_when_run_contract_is_empty() -> No
 
 def test_member_action_planner_rejects_empty_plan_for_actionable_surface() -> None:
     """Selected roles with a supported diagnosed surface need executable actions."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 
@@ -7225,7 +7225,7 @@ def test_member_action_planner_hard_limits_prompt_surface() -> None:
 
 def test_role_attribution_matches_stable_member_alias() -> None:
     """Analyzer display names should resolve through persisted member identity aliases."""
-    from openjiuwen.rsi.member_optimizer.role_attributor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.role_attributor import (
         _match_target_member,
     )
 
@@ -7255,7 +7255,7 @@ def test_role_attribution_matches_stable_member_alias() -> None:
 
 def test_member_action_planner_rejects_duplicate_add_target(tmp_path: Path) -> None:
     """An existing Prompt/Skill/Tool must be modified rather than added again."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 

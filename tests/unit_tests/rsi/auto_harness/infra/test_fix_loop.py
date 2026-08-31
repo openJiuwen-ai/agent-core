@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from unittest import IsolatedAsyncioTestCase
 
-from openjiuwen.rsi.auto_harness.infra.fix_loop import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.fix_loop import (
     FixLoopController,
     FixLoopResult,
 )

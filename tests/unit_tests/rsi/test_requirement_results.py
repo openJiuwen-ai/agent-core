@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from openjiuwen.rsi.evaluator.requirement_results import (
+from openjiuwen.rsi.harness_rsi.evaluator.requirement_results import (
     evaluation_requirement_results,
     requirement_results_from_judge_criteria,
 )

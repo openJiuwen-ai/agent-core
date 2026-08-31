@@ -19,7 +19,7 @@ import yaml
 
 class _FakeIssueStrategy:
     async def analyze(self, invocation):  # type: ignore[no-untyped-def]
-        from openjiuwen.rsi.schema import (
+        from openjiuwen.rsi.harness_rsi.schema import (
             EvaluationResultAnalysisArtifact,
             TeamIssue,
         )
@@ -53,7 +53,7 @@ class TestAnalyzerConfiguration:
     """Analyzer configuration and public protocol contracts."""
 
     def test_config_parses_diagnosis_agent_fields(self) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
 
         config = EvaluationResultAnalyzerConfig.from_dict(
             {
@@ -83,7 +83,7 @@ class TestAnalyzerConfiguration:
         assert config.output_filename == "issues.yaml"
 
     def test_interfaces_expose_strategy_and_signal_extractor_protocols(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.interfaces import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.interfaces import (
             EvaluationResultAnalysisStrategy,
             SignalExtractor,
         )
@@ -99,7 +99,7 @@ class TestTeamIssueMapping:
     """Contracts for mapping raw diagnosis output to optimization targets."""
 
     def test_member_issue_uses_affected_components_as_target_members(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -131,7 +131,7 @@ class TestTeamIssueMapping:
         assert mapped.metadata["affected_components"] == ["math_teacher"]
 
     def test_member_issue_without_member_evidence_does_not_default_to_team_leader(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -155,7 +155,7 @@ class TestTeamIssueMapping:
         assert mapped.target_members == []
 
     def test_member_issue_extracts_target_member_from_roleful_target_ref(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -186,7 +186,7 @@ class TestTeamIssueMapping:
         assert mapped.target_members == ["builder"]
 
     def test_member_harness_team_target_ref_routes_to_team_skill(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -221,7 +221,7 @@ class TestTeamIssueMapping:
         assert mapped.metadata["attribution"]["target_ref"] == "team_skill.team_leader.constraint_violation"
 
     def test_team_leader_member_target_ref_routes_to_team_skill(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -255,7 +255,7 @@ class TestTeamIssueMapping:
         assert mapped.metadata["attribution"]["target_ref"] == "team_skill.team_leader.constraint_violation"
 
     def test_member_scope_wins_over_team_coordination_category(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -285,7 +285,7 @@ class TestTeamIssueMapping:
         assert mapped.target_members == ["executor"]
 
     def test_target_ref_scope_wins_over_conflicting_member_scope(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -316,7 +316,7 @@ class TestTeamIssueMapping:
         assert mapped.target_members == []
 
     def test_target_ref_scope_wins_over_conflicting_team_scope(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -347,7 +347,7 @@ class TestTeamIssueMapping:
         assert mapped.target_members == ["builder"]
 
     def test_unassigned_attribution_does_not_open_optimizer_gate(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -375,7 +375,7 @@ class TestTeamIssueMapping:
         assert mapped.target_members == []
 
     def test_evidence_pipeline_failure_does_not_open_member_optimizer_gate(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _apply_g5_mapping,
             _dict_to_team_issue,
         )
@@ -409,7 +409,7 @@ class TestCaseReader:
     """Filesystem reader contracts for evaluation artifacts."""
 
     def test_reads_eval_ref_summary_and_case_inputs(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseReader,
             EvaluationSummaryInput,
         )
@@ -440,11 +440,11 @@ class TestCaseReader:
         self,
         tmp_path: Path,
     ) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
             _build_evidence_summary,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseReader,
             DeterministicSignals,
         )
@@ -510,14 +510,14 @@ class TestCaseReader:
         assert "SECRET_GOLD_PATCH" not in json.dumps(diagnosis_input)
 
     def test_missing_case_results_dir_returns_empty_inputs(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import CaseReader
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseReader
 
         reader = CaseReader()
 
         assert reader.read_case_inputs(str(tmp_path / "missing_case_results")) == []
 
     def test_missing_eval_ref_raises_value_error(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import CaseReader
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseReader
 
         reader = CaseReader()
 
@@ -529,7 +529,7 @@ class TestSignalExtractors:
     """Method-aware deterministic signal extraction contracts."""
 
     def test_build_signal_extractor_dispatches_by_method(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             GenericSignalExtractor,
             LlmJudgeSignalExtractor,
             PytestSignalExtractor,
@@ -543,7 +543,7 @@ class TestSignalExtractors:
         assert isinstance(build_signal_extractor("unknown_method"), GenericSignalExtractor)
 
     def test_generic_extractor_reports_common_failures_and_expected_mismatch(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             GenericSignalExtractor,
         )
 
@@ -575,7 +575,7 @@ class TestSignalExtractors:
         assert signals.error_clusters
 
     def test_pytest_extractor_falls_back_when_pytest_evidence_is_missing(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             PytestSignalExtractor,
         )
 
@@ -597,7 +597,7 @@ class TestSignalExtractors:
         assert signals.method_specific["fallback_reason"] == "pytest_evidence_missing"
 
     def test_reward_trace_seed_uses_real_role_without_solver_fallback(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             RewardSignalExtractor,
         )
 
@@ -643,7 +643,7 @@ class TestSignalExtractors:
         assert attribution["evidence_refs"][0]["role"] == "content_writer"
 
     def test_reward_trace_seed_does_not_invent_solver_role(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             RewardSignalExtractor,
         )
 
@@ -690,7 +690,7 @@ class TestSignalExtractors:
         assert attribution["evidence_refs"][0]["role"] == ""
 
     def test_llm_judge_extractor_reads_parsed_dimensions_without_llm(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             LlmJudgeSignalExtractor,
         )
 
@@ -743,7 +743,7 @@ class TestSignalExtractors:
         assert signals.method_specific["behavior_pass_fail_counts"] == {"case_001": {"pass_count": 1, "fail_count": 1}}
 
     def test_llm_judge_extractor_falls_back_when_dimensions_are_missing(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.signal_extractor import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             LlmJudgeSignalExtractor,
         )
 
@@ -768,7 +768,7 @@ class TestDiagnosisAgentStrategy:
     """DeepAgent strategy factory and normalization contracts."""
 
     def test_json_extraction_ignores_braces_inside_strings(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         parsed = analyzer_module._extract_json_object(
             'Reasoning first. {"diagnoses":[{"root_cause":"literal } in source"}]}'
@@ -777,8 +777,8 @@ class TestDiagnosisAgentStrategy:
         assert parsed == {"diagnoses": [{"root_cause": "literal } in source"}]}
 
     def test_truncated_diagnosis_json_is_retryable(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.model_call import RetryableModelOutputError
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError
 
         error = analyzer_module._unusable_diagnosis_output_error(
             "case_001",
@@ -792,7 +792,7 @@ class TestDiagnosisAgentStrategy:
         assert "incomplete JSON after repair" in str(error)
 
     def test_non_json_service_error_remains_non_retryable(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         error = analyzer_module._unusable_diagnosis_output_error(
             "case_001",
@@ -804,7 +804,7 @@ class TestDiagnosisAgentStrategy:
         assert "contained a model-service error" in str(error)
 
     def test_non_json_diagnosis_prose_is_a_format_error(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         error = analyzer_module._unusable_diagnosis_output_error(
             "case_001",
@@ -815,15 +815,15 @@ class TestDiagnosisAgentStrategy:
         assert "did not contain JSON" in str(error)
 
     def test_build_analysis_strategy_returns_diagnosis_agent_strategy(self) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import build_analysis_strategy
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import build_analysis_strategy
 
         strategy = build_analysis_strategy(EvaluationResultAnalyzerConfig())
 
         assert strategy.name == "diagnosis_agent"
 
     def test_strategy_protocol_accepts_single_invocation(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.interfaces import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.interfaces import (
             EvaluationResultAnalysisStrategy,
         )
 
@@ -837,8 +837,8 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         model_config = tmp_path / "model.yaml"
         model_config.write_text(
@@ -892,9 +892,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.schema import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.schema import (
             EvaluationResultAnalysisInvocation,
         )
 
@@ -977,9 +977,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1078,9 +1078,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1181,9 +1181,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1237,9 +1237,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1327,9 +1327,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1422,9 +1422,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1550,7 +1550,7 @@ class TestDiagnosisAgentStrategy:
         assert results[1]["evidence_supplement"]["status"] == "not_needed"
 
     def test_compactor_omission_claim_forces_raw_evidence_supplement(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnoses_need_evidence_supplement,
         )
 
@@ -1572,13 +1572,13 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
-        from openjiuwen.rsi.model_call import RetryableModelOutputError
+        from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError
 
         case_dir = tmp_path / "case_results" / "case_001"
         result_path = case_dir / "result.json"
@@ -1636,9 +1636,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1725,9 +1725,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1840,9 +1840,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -1942,9 +1942,9 @@ class TestDiagnosisAgentStrategy:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.schema import EvaluationResultAnalysisInvocation
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.schema import EvaluationResultAnalysisInvocation
 
         summary_path = tmp_path / "summary.json"
         summary_path.write_text(
@@ -1997,7 +1997,7 @@ class TestDiagnosisAgentStrategy:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from openjiuwen.core.runner import Runner
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         attempts = 0
 
@@ -2021,7 +2021,7 @@ class TestDiagnosisAgentStrategy:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from openjiuwen.core.runner import Runner
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         attempts = 0
 
@@ -2045,7 +2045,7 @@ class TestDiagnosisAgentStrategy:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from openjiuwen.core.runner import Runner
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         prompts: list[str] = []
 
@@ -2071,7 +2071,7 @@ class TestDiagnosisAgentStrategy:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from openjiuwen.core.runner import Runner
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         prompts: list[str] = []
 
@@ -2089,7 +2089,7 @@ class TestDiagnosisAgentStrategy:
         assert "FORMAT-ONLY TASK" in prompts[1]
 
     def test_json_repair_prompt_is_format_only_and_keeps_completed_analysis(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         original = "ORIGINAL-EVIDENCE " * 10_000
         conclusion = "The first wrong decision was submitting before checking all receipts."
@@ -2104,7 +2104,7 @@ class TestDiagnosisAgentStrategy:
         assert '"evidence_independence"' in prompt
 
     def test_handoff_repair_preserves_entailment_fields(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         prompt = analyzer_module._build_causal_handoff_repair_prompt(
             public_task_contract="Use the declared public mode.",
@@ -2119,7 +2119,7 @@ class TestDiagnosisAgentStrategy:
         assert 'evidence_relation="direct_falsifier"' in prompt
 
     def test_entailment_audit_json_repair_is_format_only(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         prompt = analyzer_module._build_hypothesis_entailment_audit_json_repair_prompt(
             "large frozen audit input",
@@ -2137,7 +2137,7 @@ class TestDiagnosisPromptEvidenceSummary:
     """Verify per-case diagnosis prompt consumes bounded evidence, not raw case dirs."""
 
     def _make_case_input(self, result_path: str) -> Any:
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
         )
 
@@ -2158,14 +2158,14 @@ class TestDiagnosisPromptEvidenceSummary:
         )
 
     def _make_signals(self) -> Any:
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             DeterministicSignals,
         )
 
         return DeterministicSignals(method="llm_as_judge")
 
     def test_inline_payload_uses_compact_json(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         payload = analyzer_module._build_diagnosis_input_json(
             case=self._make_case_input(str(tmp_path / "result.json")),
@@ -2178,7 +2178,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert payload.startswith('{"analysis_protocol":')
 
     def test_prompt_contains_evidence_summary_when_available(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_prompt,
         )
 
@@ -2208,7 +2208,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "artifacts" not in prompt
 
     def test_prompt_uses_inline_json_when_summary_is_missing(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_prompt,
         )
 
@@ -2229,7 +2229,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "Analyze team organization" in prompt
 
     def test_prompt_does_not_contain_absolute_case_dir_path(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_prompt,
         )
 
@@ -2250,7 +2250,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert str(result_path) not in prompt
 
     def test_diagnosis_input_json_evidence_block_uses_relative_paths(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
 
@@ -2278,7 +2278,7 @@ class TestDiagnosisPromptEvidenceSummary:
         self,
         tmp_path: Path,
     ) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
             _case_prior_candidate_feedback,
         )
@@ -2342,7 +2342,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "Preserve newly passing operations" in payload["prior_candidate_feedback_policy"]
 
     def test_diagnosis_input_preserves_complete_authoritative_task(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
 
@@ -2366,7 +2366,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "[truncated" not in payload["authoritative_task_contract"]["input_excerpt"]
 
     def test_diagnosis_prompt_includes_experience_usage_policy(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
 
@@ -2399,7 +2399,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "Do not copy a historical target_ref" in payload["experience_usage_policy"]["rules"][0]
 
     def test_system_prompt_uses_generic_evidence_grounded_protocol(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             DIAGNOSIS_SYSTEM_PROMPT,
         )
 
@@ -2430,7 +2430,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "do not claim it is unavailable" in DIAGNOSIS_SYSTEM_PROMPT
 
     def test_causal_prompt_preserves_late_controller_results_under_independent_budgets(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _causal_prompt_json
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _causal_prompt_json
 
         rendered = _causal_prompt_json(
             {
@@ -2469,7 +2469,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "current_support" not in payload["investigation"]["hypotheses"][0]
 
     def test_input_builds_complete_failed_requirement_inventory(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
 
@@ -2512,7 +2512,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "does not identify their causes" in inventory["policy"]
 
     def test_failed_requirement_inventory_does_not_drop_criteria_after_twenty_four(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _build_failed_requirement_inventory
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _build_failed_requirement_inventory
 
         result_path = tmp_path / "case_many_requirements" / "result.json"
         result_path.parent.mkdir(parents=True)
@@ -2540,7 +2540,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert inventory["items"][-1]["requirement_id"] == "criterion:requirement_29"
 
     def test_causal_coverage_rejects_local_cause_claimed_as_complete(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -2591,7 +2591,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
 
     def test_causal_coverage_accepts_explicit_local_contributor(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -2640,7 +2640,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
 
     def test_causal_coverage_rejects_explaining_checks_outside_own_cluster(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _diagnosis_validation_conflicts
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _diagnosis_validation_conflicts
 
         diagnosis = {
             "evidence_status": "supported_hypothesis",
@@ -2680,7 +2680,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert any("must exactly match this diagnosis's failure_cluster" in item for item in conflicts)
 
     def test_diagnosis_set_cannot_drop_an_independent_failed_requirement(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _case_diagnoses_validation_conflicts,
         )
 
@@ -2720,7 +2720,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert conflicts == ["diagnosis set omitted failed requirement IDs: criterion:format"]
 
     def test_generic_protocol_rejects_assigned_target_with_insufficient_evidence(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -2741,7 +2741,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "insufficient evidence must use confidence=low" in conflicts
 
     def test_system_prompt_preserves_role_aware_target_refs(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             DIAGNOSIS_SYSTEM_PROMPT,
         )
 
@@ -2750,7 +2750,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "Never output role-less target_ref" in DIAGNOSIS_SYSTEM_PROMPT
 
     def test_system_prompt_no_longer_allows_rail_attribution(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             AGGREGATION_SYSTEM_PROMPT,
             DIAGNOSIS_SYSTEM_PROMPT,
         )
@@ -2760,7 +2760,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "Valid member_harness variables: prompt, skill, tool, rail, config." not in (AGGREGATION_SYSTEM_PROMPT)
 
     def test_prepare_evidence_summary_does_not_require_artifacts_dir(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _prepare_diagnosis_evidence,
         )
 
@@ -2818,7 +2818,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert not (runtime_dir / "artifacts").exists()
 
     def test_evidence_summary_includes_role_content_events(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _prepare_diagnosis_evidence,
         )
 
@@ -2878,11 +2878,11 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "Declared index.html" in summary
 
     def test_evidence_summary_preserves_project_suite_pass_verifier_fail(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
             _prepare_diagnosis_evidence,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             DeterministicSignals,
         )
 
@@ -2965,7 +2965,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert inventory["authoritative_verifier_result"] == "failed"
 
     def test_diagnosis_gate_rejects_skipped_suite_claim_after_suite_pass(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -2991,7 +2991,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert conflicts == ["recommendation contradicts observed successful project-suite execution"]
 
     def test_diagnosis_gate_accepts_semantic_contract_explanation(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3015,7 +3015,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert _diagnosis_validation_conflicts(diagnosis, inventory) == []
 
     def test_diagnosis_gate_does_not_guess_semantics_from_keywords(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3029,7 +3029,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert _diagnosis_validation_conflicts(diagnosis, {}) == []
 
     def test_diagnosis_gate_rejects_patch_apply_claim_when_patch_applied(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3057,7 +3057,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert conflicts == ["diagnosis contradicts authoritative successful patch application"]
 
     def test_diagnosis_gate_accepts_failed_authoritative_test_attribution(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3090,7 +3090,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
 
     def test_diagnosis_gate_rejects_generic_iterable_attribution_for_test_next(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3121,7 +3121,7 @@ class TestDiagnosisPromptEvidenceSummary:
         ]
 
     def test_diagnosis_gate_rejects_instruction_for_known_edit_after_empty_patch(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3146,7 +3146,7 @@ class TestDiagnosisPromptEvidenceSummary:
         ]
 
     def test_diagnosis_gate_keeps_earlier_investigation_error_actionable(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3175,7 +3175,7 @@ class TestDiagnosisPromptEvidenceSummary:
     def test_diagnosis_gate_rejects_late_empty_patch_instruction_without_phrase_match(
         self,
     ) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3198,7 +3198,7 @@ class TestDiagnosisPromptEvidenceSummary:
         ]
 
     def test_diagnosis_gate_rejects_encoding_only_safe_replace_attribution(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3228,7 +3228,7 @@ class TestDiagnosisPromptEvidenceSummary:
         ]
 
     def test_diagnosis_gate_accepts_transactional_safe_replace_attribution(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
@@ -3258,7 +3258,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
 
     def test_verifier_inventory_preserves_authoritative_failure_output(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_evidence_summary,
             _build_verifier_inventory,
         )
@@ -3292,7 +3292,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "iterator state is not initialized" in summary
 
     def test_empty_patch_inventory_is_preserved_without_instance_report(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_evidence_summary,
             _build_verifier_inventory,
         )
@@ -3309,10 +3309,10 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "empty_patch: true" in _build_evidence_summary(case)
 
     def test_aggregation_prompt_includes_retrieved_experience(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_aggregation_prompt,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             DeterministicSignals,
             EvaluationSummaryInput,
         )
@@ -3354,7 +3354,7 @@ class TestJudgeBreakdown:
     """Contracts for _summarize_evaluation_metadata and judge_breakdown in diagnosis input."""
 
     def test_summarize_evaluation_metadata_extracts_behaviors(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _summarize_evaluation_metadata,
         )
 
@@ -3380,7 +3380,7 @@ class TestJudgeBreakdown:
         assert result["forbidden_hits"] == []
 
     def test_summarize_evaluation_metadata_extracts_behavior_diagnostics(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _summarize_evaluation_metadata,
         )
 
@@ -3409,7 +3409,7 @@ class TestJudgeBreakdown:
         assert behavior["suggested_surface_hint"] == "tool"
 
     def test_summarize_evaluation_metadata_extracts_quality_gaps(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _summarize_evaluation_metadata,
         )
 
@@ -3465,7 +3465,7 @@ class TestJudgeBreakdown:
         assert result["dataset_budget"]["case_groups"][0]["source_gap"] == "missing_interaction_binding"
 
     def test_summarize_evaluation_metadata_excludes_verification_gaps_from_optimizer(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _summarize_evaluation_metadata,
         )
 
@@ -3498,7 +3498,7 @@ class TestJudgeBreakdown:
         assert result["behaviors"][0]["id"] == "runtime_behavior"
 
     def test_summarize_evaluation_metadata_returns_empty_when_no_behaviors(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _summarize_evaluation_metadata,
         )
 
@@ -3509,7 +3509,7 @@ class TestJudgeBreakdown:
         assert result == {}
 
     def test_summarize_evaluation_metadata_returns_empty_for_non_judge_cases(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _summarize_evaluation_metadata,
         )
 
@@ -3517,10 +3517,10 @@ class TestJudgeBreakdown:
         assert _summarize_evaluation_metadata({"attempt": 1}) == {}
 
     def test_build_diagnosis_input_json_contains_judge_breakdown_for_llm_judge(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -3578,10 +3578,10 @@ class TestJudgeBreakdown:
         assert breakdown["forbidden_hits"] == ["forbidden_phrase"]
 
     def test_build_diagnosis_input_json_contains_quality_gaps_for_llm_judge(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -3643,10 +3643,10 @@ class TestJudgeBreakdown:
         assert gaps[0]["likely_surfaces"] == ["tool"]
 
     def test_build_evidence_summary_contains_quality_gaps(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_evidence_summary,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import CaseAnalysisInput
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseAnalysisInput
 
         case_dir = tmp_path / "case_summary"
         case_dir.mkdir(parents=True)
@@ -3691,10 +3691,10 @@ class TestJudgeBreakdown:
         assert "tool" in summary
 
     def test_build_diagnosis_input_json_judge_breakdown_empty_for_non_judge(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -3734,7 +3734,7 @@ class TestAttributionMetadata:
     """Contracts for attribution flat→nested conversion and TeamIssue.metadata preservation."""
 
     def test_dict_to_team_issue_writes_attribution_from_nested_metadata(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _dict_to_team_issue,
         )
 
@@ -3770,7 +3770,7 @@ class TestAttributionMetadata:
         assert attribution["evidence_refs"][0]["role"] == "executor"
 
     def test_dict_to_team_issue_builds_attribution_from_flat_top_level_fields(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _dict_to_team_issue,
         )
 
@@ -3799,7 +3799,7 @@ class TestAttributionMetadata:
         assert attribution["confidence"] == "medium"
 
     def test_compact_per_case_diagnoses_builds_attribution_sub_dict(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _compact_per_case_diagnoses,
         )
 
@@ -3878,7 +3878,7 @@ class TestBoundedMultiDiagnosis:
         }
 
     def test_normalize_case_diagnoses_bounds_deduplicates_and_prioritizes_residuals(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _normalize_case_diagnoses,
         )
 
@@ -3945,7 +3945,7 @@ class TestBoundedMultiDiagnosis:
         assert legacy == [remaining]
 
     def test_normalize_case_diagnoses_rejects_empty_json_placeholders(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _normalize_case_diagnoses,
         )
 
@@ -3968,7 +3968,7 @@ class TestBoundedMultiDiagnosis:
         ]
 
     def test_normalize_preserves_supported_issue_and_splits_unresolved_residual(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
 
         diagnosis = self._diagnosis(
             failure_mode="incomplete_extraction",
@@ -4029,7 +4029,7 @@ class TestBoundedMultiDiagnosis:
         assert [item["hypothesis_id"] for item in residual["hypothesis_assessment"]] == ["h_format"]
 
     def test_normalize_keeps_supported_local_issue_when_only_an_alternative_is_unresolved(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
 
         diagnosis = self._diagnosis(
             failure_mode="wrong_decision",
@@ -4068,7 +4068,7 @@ class TestBoundedMultiDiagnosis:
         assert normalized[0]["causal_coverage"]["sufficiency_status"] == "local_contributor"
 
     def test_causal_reconciliation_downgrades_only_the_unsupported_hypothesis(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="wrong_decision",
@@ -4124,7 +4124,7 @@ class TestBoundedMultiDiagnosis:
         assert any("downgraded h_bad" in warning for warning in warnings)
 
     def test_causal_reconciliation_preserves_paired_experiment_when_model_omits_assessment(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _normalize_prior_experiment_assessment,
             _reconcile_causal_assessments,
         )
@@ -4186,7 +4186,7 @@ class TestBoundedMultiDiagnosis:
         assert "did not activate" in correction
 
     def test_causal_reconciliation_rejects_form_only_activation_when_failure_persists(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="unverified_decision_ground_used",
@@ -4244,7 +4244,7 @@ class TestBoundedMultiDiagnosis:
         assert any("pre-registered failure mechanism remained supported" in warning for warning in warnings)
 
     def test_causal_reconciliation_preserves_valid_cluster_when_sibling_uses_unknown_id(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         supported = self._diagnosis(
             failure_mode="wrong_decision",
@@ -4337,7 +4337,7 @@ class TestBoundedMultiDiagnosis:
         assert any("dropped a redundant cluster" in warning for warning in warnings)
 
     def test_causal_refinement_admits_only_independently_tested_new_hypothesis(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _merge_causal_investigation,
             _normalize_causal_refinement,
         )
@@ -4400,7 +4400,7 @@ class TestBoundedMultiDiagnosis:
         assert additions[0]["hypothesis_ids"] == ["h_persist"]
 
     def test_causal_refinement_rejects_discovered_story_without_new_test(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _merge_causal_investigation,
             _normalize_causal_refinement,
         )
@@ -4448,7 +4448,7 @@ class TestBoundedMultiDiagnosis:
         assert additions == []
 
     def test_investigation_diagnosis_prompt_requires_cluster_wide_falsifier_matrix(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_investigation_diagnosis_prompt,
         )
 
@@ -4465,7 +4465,7 @@ class TestBoundedMultiDiagnosis:
         assert "`current_support`" in prompt
 
     def test_compatible_evidence_requests_share_facts_only_inside_requirement_cluster(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _compatible_evidence_requests,
         )
 
@@ -4488,7 +4488,7 @@ class TestBoundedMultiDiagnosis:
         assert compatible["h3"] == {"q3"}
 
     def test_causal_reconciliation_does_not_borrow_unrelated_hypothesis_evidence(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="wrong_decision",
@@ -4539,7 +4539,7 @@ class TestBoundedMultiDiagnosis:
         assert any("stripped evidence outside h_read" in warning for warning in warnings)
 
     def test_causal_reconciliation_shares_discriminator_with_competing_hypothesis(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="wrong_state",
@@ -4598,7 +4598,7 @@ class TestBoundedMultiDiagnosis:
         assert not any("stripped evidence outside h_stale" in warning for warning in warnings)
 
     def test_causal_reconciliation_keeps_valid_scoped_evidence_when_extra_citation_is_stripped(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="proven_method_not_reused",
@@ -4665,7 +4665,7 @@ class TestBoundedMultiDiagnosis:
         assert any("stripped evidence outside h_reuse" in warning for warning in warnings)
 
     def test_causal_reconciliation_repairs_residual_coverage_for_already_unassigned_diagnosis(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="unresolved_mechanism",
@@ -4722,7 +4722,7 @@ class TestBoundedMultiDiagnosis:
         assert reconciled[0]["causal_coverage"]["residual_requirement_ids"] == ["criterion:value"]
 
     def test_causal_reconciliation_drops_redundant_unresolved_alternative(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _case_diagnoses_validation_conflicts,
             _reconcile_causal_assessments,
         )
@@ -4824,7 +4824,7 @@ class TestBoundedMultiDiagnosis:
     def test_causal_reconciliation_isolates_outcome_dependent_handoff_and_preserves_ledger(
         self,
     ) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _causal_investigation_conflicts,
             _reconcile_causal_assessments,
         )
@@ -4932,7 +4932,7 @@ class TestBoundedMultiDiagnosis:
         )
 
     def test_causal_reconciliation_keeps_structural_support_with_numeric_context(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="artifact_update_not_persisted",
@@ -4989,7 +4989,7 @@ class TestBoundedMultiDiagnosis:
         assert reconciled[0]["hypothesis_assessment"][0]["status"] == "supported"
 
     def test_causal_reconciliation_rejects_expected_label_as_root_cause(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="expected_verdict_mismatch",
@@ -5035,7 +5035,7 @@ class TestBoundedMultiDiagnosis:
         assert any("outcome_reverse_engineering_is_not_causal_evidence" in warning for warning in warnings)
 
     def test_causal_reconciliation_rejects_handoff_not_bound_to_one_supported_hypothesis(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
 
         diagnosis = self._diagnosis(
             failure_mode="post_hoc_mechanism",
@@ -5108,7 +5108,7 @@ class TestBoundedMultiDiagnosis:
         )
 
     def test_causal_handoff_audit_requires_exact_selected_hypothesis_and_fails_closed(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _causal_handoff_audit_approved,
             _downgrade_rejected_causal_handoffs,
             _normalize_causal_handoff_audit,
@@ -5154,7 +5154,7 @@ class TestBoundedMultiDiagnosis:
         assert downgraded[0]["causal_coverage"]["residual_requirement_ids"] == ["criterion:value"]
 
     def test_causal_handoff_audit_marks_only_omitted_diagnosis_rejected(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _causal_handoff_audit_approved,
             _normalize_causal_handoff_audit,
             _replace_rejected_causal_handoffs,
@@ -5215,7 +5215,7 @@ class TestBoundedMultiDiagnosis:
         assert merged[1]["failure_mode"] == "repaired_second_failure"
 
     def test_causal_handoff_audit_rejects_rule_that_is_only_contract_compatible(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_causal_handoff_audit_prompt,
             _causal_handoff_audit_approved,
             _normalize_causal_handoff_audit,
@@ -5260,7 +5260,7 @@ class TestBoundedMultiDiagnosis:
         assert '"May mean", "could mean", "perhaps intended"' in prompt
 
     def test_rejected_handoff_with_missing_authority_returns_to_evidence_acquisition(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_causal_handoff_evidence_prompt,
             _causal_handoff_audit_needs_evidence,
         )
@@ -5297,7 +5297,7 @@ class TestBoundedMultiDiagnosis:
         assert "expected answer" in prompt
 
     def test_rejected_handoff_without_source_gap_does_not_request_more_evidence(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _causal_handoff_audit_needs_evidence,
         )
 
@@ -5317,7 +5317,7 @@ class TestBoundedMultiDiagnosis:
         assert not _causal_handoff_audit_needs_evidence(audit)
 
     def test_evaluator_owned_outcome_cannot_define_causal_hypothesis(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_causal_plan_correction_prompt,
             _causal_plan_outcome_dependency_conflicts,
         )
@@ -5352,7 +5352,7 @@ class TestBoundedMultiDiagnosis:
         assert "independently observable prediction" in correction
 
     def test_causal_plan_salvages_outcome_independent_siblings(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _normalize_outcome_independent_causal_plan,
         )
 
@@ -5417,7 +5417,7 @@ class TestBoundedMultiDiagnosis:
         assert {item["request_id"] for item in plan["evidence_requests"]} == {"q_trace", "q_scope"}
 
     def test_structurally_invalid_plan_still_reports_outcome_leakage(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _normalize_outcome_independent_causal_plan,
         )
 
@@ -5442,7 +5442,7 @@ class TestBoundedMultiDiagnosis:
         assert "hypothesis h_leak uses evaluator-owned outcomes in claim" in conflicts
 
     def test_outcome_independent_plan_rejects_hidden_evaluation_requests(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _normalize_outcome_independent_causal_plan,
         )
 
@@ -5475,7 +5475,7 @@ class TestBoundedMultiDiagnosis:
         assert any("inspect_evaluation" in item for item in conflicts)
 
     def test_outcome_independent_recovery_input_keeps_behavior_but_removes_labels(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_outcome_independent_causal_plan_recovery_prompt,
         )
 
@@ -5521,7 +5521,7 @@ class TestBoundedMultiDiagnosis:
         assert '"requirement_id":"criterion:opaque"' in task_visible
 
     def test_supported_sibling_hypothesis_cannot_disappear_from_handoff(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _causal_investigation_conflicts,
         )
 
@@ -5582,7 +5582,7 @@ class TestBoundedMultiDiagnosis:
         assert not any("supported causal hypothesis was not handed off" in item for item in conflicts)
 
     def test_normalize_keeps_independent_surfaces_for_the_same_failed_check(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
 
         extraction = self._diagnosis(
             failure_mode="incomplete_extraction",
@@ -5608,7 +5608,7 @@ class TestBoundedMultiDiagnosis:
         }
 
     def test_causal_refinement_runs_when_a_failed_requirement_is_only_residual(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import _diagnoses_need_causal_refinement
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _diagnoses_need_causal_refinement
 
         diagnoses = [
             {
@@ -5633,9 +5633,9 @@ class TestBoundedMultiDiagnosis:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
@@ -5706,7 +5706,7 @@ class TestBoundedMultiDiagnosis:
         assert all(item["diagnosis_count"] == 2 for item in results)
 
     def test_aggregation_keeps_distinct_clusters_from_same_case_independent(self) -> None:
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _aggregate_structured_diagnoses,
         )
 
@@ -5756,11 +5756,11 @@ class TestDeterministicAggregation:
         self,
         tmp_path: Path,
     ) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             DiagnosisAgentStrategy,
         )
-        from openjiuwen.rsi.evaluation_result_analyzer.case_reader import (
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             DeterministicSignals,
             EvaluationSummaryInput,
         )
@@ -5849,11 +5849,11 @@ class TestAnalyzerFacadeArtifacts:
 
     @pytest.mark.asyncio
     async def test_empty_case_results_writes_empty_analysis_artifact(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             EvaluationResultAnalyzer,
         )
-        from openjiuwen.rsi.schema import EvaluationResultAnalysisInvocation
+        from openjiuwen.rsi.harness_rsi.schema import EvaluationResultAnalysisInvocation
 
         analyzer = EvaluationResultAnalyzer(
             EvaluationResultAnalyzerConfig(output_filename="issues.yaml"),
@@ -5882,11 +5882,11 @@ class TestAnalyzerFacadeArtifacts:
 
     @pytest.mark.asyncio
     async def test_analysis_ref_backfills_case_evidence_refs(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             EvaluationResultAnalyzer,
         )
-        from openjiuwen.rsi.schema import EvaluationResultAnalysisInvocation
+        from openjiuwen.rsi.harness_rsi.schema import EvaluationResultAnalysisInvocation
 
         case_dir = tmp_path / "case_results" / "case_001_abc"
         (case_dir / "judge").mkdir(parents=True)
@@ -5936,11 +5936,11 @@ class TestAnalyzerRealModelIntegration:
         if not model_config_path.is_file():
             pytest.skip("AUTO_COORDINATING_ANALYZER_MODEL_CONFIG_REF must point to an existing model YAML")
 
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             EvaluationResultAnalyzer,
         )
-        from openjiuwen.rsi.schema import EvaluationResultAnalysisInvocation
+        from openjiuwen.rsi.harness_rsi.schema import EvaluationResultAnalysisInvocation
 
         artifacts = _write_evaluation_artifacts(tmp_path, method="llm_as_judge")
         output_dir = tmp_path / "analysis"
@@ -6020,11 +6020,11 @@ class TestAnalyzerRealModelIntegration:
         _write_yaml(harness_refs_path, {"name": "test_harness", "version": "1.0"})
         output_dir = tmp_path / "analysis"
 
-        from openjiuwen.rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.evaluation_result_analyzer.analyzer import (
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             EvaluationResultAnalyzer,
         )
-        from openjiuwen.rsi.schema import EvaluationResultAnalysisInvocation
+        from openjiuwen.rsi.harness_rsi.schema import EvaluationResultAnalysisInvocation
 
         analyzer = EvaluationResultAnalyzer(
             EvaluationResultAnalyzerConfig(
@@ -6251,7 +6251,7 @@ def _write_empty_eval_ref(tmp_path: Path) -> Path:
 
 
 def _summary_input(*, method: str) -> Any:
-    from openjiuwen.rsi.evaluation_result_analyzer.case_reader import EvaluationSummaryInput
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import EvaluationSummaryInput
 
     return EvaluationSummaryInput(
         total_cases=2,
@@ -6274,7 +6274,7 @@ def _case_input(
     metadata: dict[str, Any] | None = None,
     normalized_trace_summary: dict[str, Any] | None = None,
 ) -> Any:
-    from openjiuwen.rsi.evaluation_result_analyzer.case_reader import CaseAnalysisInput
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseAnalysisInput
 
     return CaseAnalysisInput(
         case_id=case_id,

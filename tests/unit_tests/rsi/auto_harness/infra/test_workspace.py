@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.infra.worktree_manager import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager import (
     WorktreeManager,
     _slugify,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
 )
 
@@ -92,7 +92,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             result = await mgr.prepare("fix timeout")
@@ -156,7 +156,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             await mgr.prepare("fix timeout")
@@ -226,7 +226,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             await mgr.prepare("fix timeout")
@@ -285,7 +285,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             with pytest.raises(
@@ -330,7 +330,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             await mgr.prepare("add feature")
@@ -355,7 +355,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             await mgr.cleanup(str(wt_dir))
@@ -403,7 +403,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             await mgr.prepare("test remote")
@@ -447,7 +447,7 @@ class TestWorktreeManager:
             return 0, "ok"
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.worktree_manager._run_git",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.worktree_manager._run_git",
             side_effect=fake_run_git,
         ):
             await mgr.prepare("auth test")

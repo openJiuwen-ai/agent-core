@@ -409,35 +409,35 @@ async def _run_auto_harness(
     from openjiuwen.harness.cli.agent.config import (
         load_config as load_cli_config,
     )
-    from openjiuwen.rsi.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
-    from openjiuwen.rsi.auto_harness.infra.ci_gate_runner import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.infra.ci_gate_runner import (
         CIGateRunner,
     )
-    from openjiuwen.rsi.auto_harness.infra.github_cli import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli import (
         ensure_github_cli_ready,
     )
-    from openjiuwen.rsi.auto_harness.orchestrator import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
         create_auto_harness_orchestrator,
     )
-    from openjiuwen.rsi.auto_harness.pipelines import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
         META_EVOLVE_PIPELINE,
     )
-    from openjiuwen.rsi.auto_harness.schema import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
         OptimizationTask,
         is_placeholder_local_repo,
         load_auto_harness_config,
         normalize_pipeline_preference,
     )
-    from openjiuwen.rsi.auto_harness.stages.assess import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.stages.assess import (
         run_assess_stream,
     )
 
     if opts.verbose:
         for name in (
             "auto_harness",
-            "openjiuwen.rsi.auto_harness",
+            "openjiuwen.rsi.harness_rsi.auto_harness",
         ):
             logging.getLogger(name).setLevel(
                 logging.DEBUG,
@@ -689,7 +689,7 @@ async def _run_experience_search(
     import os
     from pathlib import Path
 
-    from openjiuwen.rsi.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 
@@ -714,7 +714,7 @@ async def _run_experience_list(
     import os
     from pathlib import Path
 
-    from openjiuwen.rsi.auto_harness.experience.experience_store import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.experience.experience_store import (
         ExperienceStore,
     )
 
@@ -738,10 +738,10 @@ async def _run_gap_analyze(
     """Run competitive gap analysis."""
     import os
 
-    from openjiuwen.rsi.auto_harness.schema import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
         AutoHarnessConfig,
     )
-    from openjiuwen.rsi.auto_harness.stages.assess import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.stages.assess import (
         run_gap_analysis,
     )
 
@@ -987,15 +987,15 @@ async def _run_verify_ext(
     import uuid
     from pathlib import Path as _Path
 
-    from openjiuwen.rsi.auto_harness.infra.runtime_extension_loader import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_loader import (
         load_runtime_rails,
         load_runtime_skill_dirs,
         load_runtime_tools,
     )
-    from openjiuwen.rsi.auto_harness.schema import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
         RuntimeExtensionArtifact,
     )
-    from openjiuwen.rsi.auto_harness.stages.verify import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.stages.verify import (
         _check_ruff,
     )
 

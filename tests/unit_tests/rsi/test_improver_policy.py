@@ -9,7 +9,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 import yaml
 
-from openjiuwen.rsi.improver_evolution.policy import (
+from openjiuwen.rsi.harness_rsi.improver_evolution.policy import (
     VersionedImproverPolicy,
     canonical_policy_digest,
     default_improver_policy,

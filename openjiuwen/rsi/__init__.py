@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Recursive self-improvement for standalone Expert Harnesses."""
 
-from openjiuwen.rsi.config import (
+from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
     EvaluationResultAnalyzerConfig,
@@ -11,14 +11,14 @@ from openjiuwen.rsi.config import (
     ModelConfigs,
     OrchestratorSchedulingConfig,
 )
-from openjiuwen.rsi.data_loader import DataLoader
-from openjiuwen.rsi.evaluation_result_analyzer import (
+from openjiuwen.rsi.harness_rsi.data_loader import DataLoader
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
     EvaluationResultAnalysisStrategy,
     EvaluationResultAnalyzer,
 )
-from openjiuwen.rsi.evaluator import TeamEvaluator
-from openjiuwen.rsi.member_optimizer import MemberOptimizer
-from openjiuwen.rsi.schema import (
+from openjiuwen.rsi.harness_rsi.evaluator import TeamEvaluator
+from openjiuwen.rsi.harness_rsi.member_optimizer import MemberOptimizer
+from openjiuwen.rsi.harness_rsi.schema import (
     ActionDefinition,
     CaseMapping,
     DatasetArtifact,
@@ -27,7 +27,7 @@ from openjiuwen.rsi.schema import (
     EvaluationResultAnalysisInvocation,
     TeamIssue,
 )
-from openjiuwen.rsi.single_harness import (
+from openjiuwen.rsi.harness_rsi.single_harness import (
     IterativeSingleHarnessRequest,
     IterativeSingleHarnessResult,
     SingleHarnessIterativeOptimizationOrchestrator,

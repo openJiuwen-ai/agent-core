@@ -8,13 +8,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.infra.runtime_extension_merger import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_merger import (
     MergedExtensionError,
 )
-from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
     VerifiedExtensionTask,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     CycleResult,
     ExtensionDesign,
 )
@@ -51,7 +51,7 @@ class TestMergePipelineDispatch:
     @pytest.mark.asyncio
     async def test_multi_design_uses_merge_block(self):
         """N>1 → MergeActivationBlock.stream is called."""
-        from openjiuwen.rsi.auto_harness.stages import merge as merge_mod
+        from openjiuwen.rsi.harness_rsi.auto_harness.stages import merge as merge_mod
 
         verified = [
             _verified_task("ext_a"),
@@ -91,7 +91,7 @@ class TestMergePipelineDispatch:
                 mock_block,
             ),
             patch(
-                "openjiuwen.rsi.auto_harness.pipelines."
+                "openjiuwen.rsi.harness_rsi.auto_harness.pipelines."
                 "extended_evolve_pipeline."
                 "extended_evolve_pipeline."
                 "ExtensionTaskPipeline.run_activate_stream",

@@ -12,17 +12,17 @@ import pytest
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.rsi.auto_harness.infra.runtime_extension_merger import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_merger import (
     MergedExtensionError,
     MergeRuntimeExtensionsResult,
 )
-from openjiuwen.rsi.auto_harness.infra.runtime_extension_static_checks import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_static_checks import (
     ExtStaticCheckResult,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     RuntimeExtensionArtifact,
 )
-from openjiuwen.rsi.auto_harness.stages.merge import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.merge import (
     MergeActivationBlock,
     _build_merge_fix_prompt,
     _merge_event,
@@ -151,11 +151,11 @@ class TestMergeActivationBlock:
 
         with (
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge.merge_runtime_extensions",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge.merge_runtime_extensions",
                 return_value=_make_merge_result(),
             ),
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge.run_static_checks_against_runtime",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge.run_static_checks_against_runtime",
                 return_value=ExtStaticCheckResult(errors=[], rails_count=1, tools_count=1),
             ),
         ):
@@ -168,7 +168,7 @@ class TestMergeActivationBlock:
         assert "running" in statuses
         assert "success" in statuses
         # MergeSuccessResult was yielded
-        from openjiuwen.rsi.auto_harness.stages.merge import MergeSuccessResult
+        from openjiuwen.rsi.harness_rsi.auto_harness.stages.merge import MergeSuccessResult
 
         assert any(isinstance(e, MergeSuccessResult) for e in events)
 
@@ -198,19 +198,19 @@ class TestMergeActivationBlock:
 
         with (
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge.merge_runtime_extensions",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge.merge_runtime_extensions",
                 return_value=_make_merge_result(),
             ),
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge.run_static_checks_against_runtime",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge.run_static_checks_against_runtime",
                 side_effect=fake_static,
             ),
             mock.patch(
-                "openjiuwen.rsi.auto_harness.agents.factory.create_merge_ext_agent",
+                "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_merge_ext_agent",
                 return_value=mock_agent,
             ),
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge._stream_merge_agent_turn",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge._stream_merge_agent_turn",
                 side_effect=fake_stream,
             ),
         ):
@@ -250,19 +250,19 @@ class TestMergeActivationBlock:
 
         with (
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge.merge_runtime_extensions",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge.merge_runtime_extensions",
                 return_value=_make_merge_result(),
             ),
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge.run_static_checks_against_runtime",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge.run_static_checks_against_runtime",
                 side_effect=fake_static,
             ),
             mock.patch(
-                "openjiuwen.rsi.auto_harness.agents.factory.create_merge_ext_agent",
+                "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_merge_ext_agent",
                 side_effect=create_agent_mock,
             ),
             mock.patch(
-                "openjiuwen.rsi.auto_harness.stages.merge._stream_merge_agent_turn",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge._stream_merge_agent_turn",
                 side_effect=fake_stream,
             ),
         ):
@@ -284,7 +284,7 @@ class TestMergeActivationBlock:
         block = MergeActivationBlock()
 
         with mock.patch(
-            "openjiuwen.rsi.auto_harness.stages.merge.merge_runtime_extensions",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.merge.merge_runtime_extensions",
             side_effect=MergedExtensionError("bad manifest"),
         ):
             events = []
