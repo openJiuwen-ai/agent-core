@@ -487,6 +487,10 @@ class SwarmflowTool(AsyncTool):
                 try:
                     meta = json.loads(resume_file.read_text(encoding="utf-8"))
                 except Exception:
+                    team_logger.debug(
+                        "[swarmflow] resume sidecar read failed, skipping: %s",
+                        resume_file, exc_info=True,
+                    )
                     continue
                 if meta.get("run_id") == resume_id:
                     sp = str(meta.get("script_path") or (sub / "script.py"))
@@ -523,6 +527,10 @@ class SwarmflowTool(AsyncTool):
                 return None
             return meta.get("args")
         except Exception:
+            team_logger.debug(
+                "[swarmflow] resume args restore failed: script_path=%s run_id=%s",
+                script_path, resume_id, exc_info=True,
+            )
             return None
 
     def _check_rerun(self, script_path: str, script: str) -> None:
