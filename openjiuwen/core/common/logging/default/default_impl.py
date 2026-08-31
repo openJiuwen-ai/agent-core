@@ -347,7 +347,16 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
 
         # Add console handler
         if "console" in output:
-            stream_handler = logging.StreamHandler(stream=sys.stdout)
+            # Windows 中文环境 stdout 默认 GBK：遇到 ⚠️ 等非 GBK 字符会直接
+            # 崩日志（UnicodeEncodeError），且前端按 UTF-8 捕获时会乱码。
+            # 统一重配为 UTF-8 + errors='replace'，任何字符都可安全落盘。
+            _console = sys.stdout
+            if _console is not None and hasattr(_console, "reconfigure"):
+                try:
+                    _console.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:  # noqa: BLE001
+                    pass
+            stream_handler = logging.StreamHandler(stream=_console)
             stream_handler.addFilter(ContextFilter(self.log_type))
             stream_handler.setFormatter(self._get_formatter())
             self._logger.addHandler(stream_handler)
