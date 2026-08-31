@@ -363,6 +363,28 @@ class SubagentControl:
             )
         return rows
 
+    def describe_closed(self) -> list[dict[str, Any]]:
+        """Return external status payloads for closed subagents resumable via resume."""
+        return [
+            self._closed_record_to_payload(record, self._parent_session_id)
+            for record in self._closed_records.values()
+        ]
+
+    def describe_list(self) -> dict[str, Any]:
+        """Return a unified list view separating live and closed subagents."""
+        live = self.describe_live()
+        closed = self.describe_closed()
+        return {
+            "capacity": self.capacity(),
+            "subagents": live,
+            "live_subagents": live,
+            "closed_subagents": closed,
+            "summary": {
+                "live_count": len(live),
+                "closed_count": len(closed),
+            },
+        }
+
     async def emit_status_update(
         self,
         subagent_id: str,
