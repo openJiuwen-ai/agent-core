@@ -21,6 +21,7 @@ from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
 from openjiuwen.harness.subagent_runtime.models import SubagentRecord, SubagentStatus, SubagentStatusKind, UserInputOp
 from openjiuwen.harness.subagent_runtime.persistence import merge_subagent_bucket, read_subagent_bucket
+from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control, release_subagent_control
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
 from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockParentAgent, MockSession as ManagerSession
 
@@ -425,13 +426,25 @@ async def test_cancel_all_closes_running_subagents() -> None:
 async def test_duplicate_sticky_spawn_rejected() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
     async with _patched_control(parent=parent) as control:
-        first = await control.spawn("browser_agent", "first")
+        first = await control.spawn("verification_agent", "first")
         await _wait_for_turn(parent.mock_agent)
 
         with pytest.raises(Exception, match="subagent already live"):
-            await control.spawn("browser_agent", "second")
+            await control.spawn("verification_agent", "second")
 
         assert control._manager.find(first.subagent_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_browser_spawn_uses_fresh_subagent_session() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        first = await control.spawn("browser_agent", "first")
+        second = await control.spawn("browser_agent", "second")
+
+        assert first.subagent_id != second.subagent_id
+        assert control._manager.find(first.subagent_id) is not None
+        assert control._manager.find(second.subagent_id) is not None
 
 
 @pytest.mark.asyncio
@@ -535,6 +548,7 @@ async def test_close_writes_closed_record_and_describe_one_returns_closed() -> N
         listed = control.describe_list()
         assert listed["summary"] == {"live_count": 0, "closed_count": 1}
         assert listed["subagents"] == []
+        assert listed["subagents"] == listed["live_subagents"]
         assert listed["closed_subagents"][0]["subagent_id"] == spawned.subagent_id
         assert listed["closed_subagents"][0]["status"] == "closed"
 
@@ -606,6 +620,29 @@ async def test_resume_live_instance_returns_not_restored() -> None:
         assert result.restored is False
         assert result.status.kind is SubagentStatusKind.COMPLETED
         assert "send_input" in (result.message or "")
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_normalize_turn_waiting_for_concurrency_slot() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
+    config = SubagentRuntimeConfig(max_concurrent_running=1)
+    async with _patched_control(parent=parent, config=config) as control:
+        await control.spawn("explore", "occupy slot")
+        await asyncio.sleep(0.02)
+        waiting = await control.spawn("explore", "wait for slot")
+        instance = control._manager.get(waiting.subagent_id)
+
+        async def wait_until_worker_claims_turn() -> None:
+            while instance.current_task_id is None:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_until_worker_claims_turn(), timeout=1.0)
+        assert instance.agent_status().kind is SubagentStatusKind.PENDING_INIT
+
+        result = await control.resume(waiting.subagent_id)
+
+        assert result.restored is False
+        assert result.status.kind is SubagentStatusKind.PENDING_INIT
 
 
 @pytest.mark.asyncio
@@ -717,7 +754,7 @@ async def test_close_flushes_record_to_parent_session() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
     session = Session(session_id="parent")
     async with _patched_control(parent=parent) as control:
-        control._parent_session = session
+        control.set_parent_session(session)
         spawned = await control.spawn("explore", "hello")
         await _wait_for_turn(parent.mock_agent)
         await control.wait([spawned.subagent_id], timeout_ms=500)
@@ -730,11 +767,37 @@ async def test_close_flushes_record_to_parent_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_shows_closed_subagent_after_adapter_release() -> None:
+    """Simulate idle adapter eviction: list must still return the subagent."""
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    session = Session(session_id="parent")
+    session.commit = AsyncMock()
+    control = get_subagent_control(parent, session)
+    spawned = await control.spawn("explore", "hello")
+    await _wait_for_turn(parent.mock_agent)
+    await control.wait([spawned.subagent_id], timeout_ms=500)
+
+    live_list = control.describe_list()
+    assert live_list["summary"]["live_count"] == 1
+    assert live_list["summary"]["closed_count"] == 0
+
+    await release_subagent_control(parent, "parent", reason="adapter_cleanup")
+
+    control_after = get_subagent_control(parent, session)
+    listed = control_after.describe_list()
+    assert listed["summary"]["live_count"] == 0
+    assert listed["summary"]["closed_count"] == 1
+    assert listed["closed_subagents"][0]["subagent_id"] == spawned.subagent_id
+    assert listed["closed_subagents"][0]["status"] == "closed"
+    session.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hydrate_restores_closed_records_and_turns() -> None:
     parent = ControlParentAgent(mock_agent=MockAgent())
     session = Session(session_id="parent")
     async with _patched_control(parent=parent) as control:
-        control._parent_session = session
+        control.set_parent_session(session)
         spawned = await control.spawn("explore", "hello")
         await _wait_for_turn(parent.mock_agent)
         await control.wait([spawned.subagent_id], timeout_ms=500)
@@ -816,6 +879,76 @@ async def test_hydrate_live_record_becomes_parent_ended() -> None:
     payload = control.describe_one("sid-live")
     assert payload is not None
     assert payload["closed_reason"] == "parent_ended"
+
+
+@pytest.mark.asyncio
+async def test_merge_persisted_records_skips_unchanged_bucket_revision() -> None:
+    session = Session(session_id="parent")
+    initial = SubagentRecord(
+        subagent_id="sid-closed",
+        subagent_type="explore",
+        display_name="Explorer",
+        role="r",
+        task_description="initial",
+        created_at_ms=1.0,
+        updated_at_ms=2.0,
+        closed_at_ms=2.0,
+        closed_reason="manual",
+    )
+    merge_subagent_bucket(
+        session,
+        {"records": {initial.subagent_id: initial.to_dict()}, "revision": 1},
+    )
+    control = SubagentControl(ControlParentAgent(), "parent", parent_session=session)
+    control.hydrate()
+    first_object = control._closed_records[initial.subagent_id]
+
+    control.merge_persisted_records()
+
+    assert control._closed_records[initial.subagent_id] is first_object
+
+    updated = SubagentRecord(
+        subagent_id=initial.subagent_id,
+        subagent_type="explore",
+        display_name="Explorer",
+        role="r",
+        task_description="updated",
+        created_at_ms=1.0,
+        updated_at_ms=3.0,
+        closed_at_ms=3.0,
+        closed_reason="manual",
+    )
+    merge_subagent_bucket(
+        session,
+        {"records": {updated.subagent_id: updated.to_dict()}, "revision": 2},
+    )
+
+    control.merge_persisted_records()
+
+    assert control._closed_records[updated.subagent_id].task_description == "updated"
+    assert control._closed_records[updated.subagent_id] is not first_object
+
+    replacement_session = Session(session_id="parent")
+    replacement = SubagentRecord(
+        subagent_id="sid-replacement",
+        subagent_type="explore",
+        display_name="Replacement",
+        role="r",
+        task_description="same revision, new session object",
+        created_at_ms=4.0,
+        updated_at_ms=5.0,
+        closed_at_ms=5.0,
+        closed_reason="manual",
+    )
+    merge_subagent_bucket(
+        replacement_session,
+        {"records": {replacement.subagent_id: replacement.to_dict()}, "revision": 2},
+    )
+
+    control.set_parent_session(replacement_session)
+    control.merge_persisted_records()
+
+    assert replacement.subagent_id in control._closed_records
 
 
 @pytest.mark.asyncio
