@@ -1,6 +1,5 @@
 # coding: utf-8
 from __future__ import annotations
-import asyncio
 import pytest
 from unittest.mock import AsyncMock
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
@@ -9,14 +8,44 @@ from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 class _FakeController:
     def __init__(self):
         self.calls = []
-    async def pause(self, run_id): self.calls.append(("pause", run_id)); return True
-    async def resume(self, run_id): self.calls.append(("resume", run_id)); return True
-    async def stop(self, run_id): self.calls.append(("stop", run_id)); return True
+
+    async def pause(self, run_id):
+        self.calls.append(("pause", run_id))
+        return True
+
+    async def resume(self, run_id):
+        self.calls.append(("resume", run_id))
+        return True
+
+    async def stop(self, run_id):
+        self.calls.append(("stop", run_id))
+        return True
+
+
+class _FakeGovernor:
+    """Minimal governor: admit always succeeds (returns a ticket + gate)."""
+
+    def __init__(self):
+        self.admitted = []
+
+    async def admit_workflow(self):
+        self.admitted.append(True)
+        return type("A", (), {"ticket": object(), "agent_gate": object()})()
+
+    def release_workflow(self, ticket):
+        pass
+
+    def new_agent_gate(self):
+        return object()
+
+    def snapshot(self):
+        return type("S", (), {"active_workflows": 1, "max_workflows": 1})()
 
 
 def _make_tool(controller):
     tool = object.__new__(SwarmflowTool)
     tool._parent_agent = type("P", (), {"background_task_controller": controller})()
+    tool._governor = _FakeGovernor()
     return tool
 
 
@@ -46,11 +75,16 @@ async def test_stop_action_calls_controller():
 
 @pytest.mark.asyncio
 async def test_resume_id_without_action_requires_a_script_source():
-    """resume_id without action is a re-launch — it still needs script_path/script."""
+    """resume_id alone (no action) resolves script_path from the sidecar.
+
+    When the sidecar is absent, the launch path must reject it with a script
+    source error (not fall through to a raw governor admission).
+    """
     ctl = _FakeController()
     tool = _make_tool(ctl)
+    # No resume.json sidecar on disk — sidecar resolve returns None.
+    tool._resolve_resume_sidecar = AsyncMock(return_value=None)
+    tool._restore_resume_args = AsyncMock(return_value=None)
     out = await tool.invoke({"resume_id": "wf_1"})
     assert not out.success
-    # Falls through to the launch path, which requires a script source (not
-    # "action is required" — that gate is gone).
     assert "script" in out.error.lower()
