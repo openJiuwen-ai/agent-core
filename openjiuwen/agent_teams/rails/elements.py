@@ -154,8 +154,13 @@ class TeamPolicyInput(ConstructionInput):
     team_mode: str = param_field(default="default", description="Team operating mode.")
     dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     base_prompt: Optional[str] = param_field(default=None, description="User-supplied base system prompt.")
-    team_workspace_mount: Optional[str] = param_field(default=None, description="Team workspace mount path.")
     team_workspace_path: Optional[str] = param_field(default=None, description="Team workspace root path.")
+    team_outputs_dir: Optional[str] = param_field(
+        default=None,
+        description="Shared final-deliverables directory (under team-workspace/artifacts). "
+        "Surfaced in the team info body for projectless members only; None for "
+        "members bound to a project.",
+    )
     expose_human_agents_to_teammates: bool = param_field(
         default=False,
         description="Whether teammates see the concrete human-agent roster.",
@@ -196,8 +201,8 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         team_mode=inp.team_mode,
         dispatch_mode=inp.dispatch_mode,
         base_prompt=inp.base_prompt,
-        team_workspace_mount=inp.team_workspace_mount,
         team_workspace_path=inp.team_workspace_path,
+        team_outputs_dir=inp.team_outputs_dir,
         team_backend=backend,
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
         steer_batch_size=inp.steer_batch_size,

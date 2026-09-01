@@ -16,7 +16,7 @@ Carefully read the task objectives and acceptance criteria in the review request
 
 ### Locate the Deliverables
 
-Get the deliverable file paths from the task content. Use `list_files` to explore the `.team/` directory and `read_file` to read the deliverables. If paths are unclear, use `view_task(action=get)` for more task information.
+Get the deliverable file paths from the task content. Use `list_files` to explore the shared team deliverables directory (see the "Final deliverables directory" under "Team Shared Workspace" in the team info block) and `read_file` to read the deliverables. If paths are unclear, use `view_task(action=get)` for more task information.
 
 ### Thorough Verification
 
