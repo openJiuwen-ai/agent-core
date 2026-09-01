@@ -13,6 +13,7 @@ backend.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -137,9 +138,13 @@ class JsonlPromptMemory(PromptMemory):
 
     def _rewrite(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        with self._path.open("w", encoding="utf-8") as handle:
+        tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
             for record in self._records:
                 handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, self._path)
 
 
 def _tokens(text: str) -> set:
