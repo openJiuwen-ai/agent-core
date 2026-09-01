@@ -285,7 +285,10 @@ def test_provider_protocol_is_structurally_implementable() -> None:
     provider = _ProgramProvider()
 
     assert isinstance(provider, ArtifactProvider)
-    assert isinstance(provider, ProgramArtifactProvider)
+    # `ProgramArtifactProvider` is the program implementation, not a protocol —
+    # a stub is checked against `ArtifactProvider`, which is the structural
+    # contract AgentServer routes on. `PaperArtifactProvider` is still a
+    # protocol, because no paper optimizer has been written yet.
     assert get_type_hints(ProgramArtifactProvider)["artifact_type"] == Literal["program"]
     assert get_type_hints(PaperArtifactProvider)["artifact_type"] == Literal["paper"]
 

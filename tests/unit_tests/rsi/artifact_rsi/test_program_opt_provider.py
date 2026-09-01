@@ -16,15 +16,13 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from typing import Literal, get_type_hints
 
 import pytest
 
 from openjiuwen.rsi.artifact_rsi.program_opt import events
 from openjiuwen.rsi.artifact_rsi.program_opt import state as state_module
 from openjiuwen.rsi.artifact_rsi.program_opt.provider import ProgramArtifactProvider
-from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import (
-    PuctProgramProvider,
-)
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     DEFAULT_MAX_TOKENS_PER_CALL,
     ModelConfigError,
@@ -91,12 +89,15 @@ def _scorecard(run_dir: Path, **extra: object) -> None:
 # -- the protocol ---------------------------------------------------------------
 
 
-def test_the_provider_satisfies_both_protocols() -> None:
-    provider = PuctProgramProvider()
+def test_the_provider_satisfies_the_structural_contract() -> None:
+    """`ArtifactProvider` is the protocol AgentServer routes against, and it is
+    the only one: this class is the program contract rather than a second
+    implementation of a protocol restating it."""
+    provider = ProgramArtifactProvider()
 
-    assert isinstance(provider, ProgramArtifactProvider)
     assert isinstance(provider, ArtifactProvider)
     assert provider.artifact_type == "program"
+    assert get_type_hints(ProgramArtifactProvider)["artifact_type"] == Literal["program"]
 
 
 # -- the model reference --------------------------------------------------------
@@ -191,7 +192,7 @@ def test_a_program_the_gate_would_reject_is_refused_at_the_form(tmp_path: Path) 
     path = tmp_path / "seed.py"
     path.write_text("def something_else():\n    return 1\n", encoding="utf-8")
 
-    result = PuctProgramProvider().validate_input(str(path))
+    result = ProgramArtifactProvider().validate_input(str(path))
 
     assert result.valid is False
     assert [error["code"] for error in result.errors] == ["ARTIFACT_REJECTED_BY_GATE"]
@@ -201,7 +202,7 @@ def test_a_usable_seed_validates(tmp_path: Path) -> None:
     path = tmp_path / "seed.py"
     path.write_text(SEED, encoding="utf-8")
 
-    assert PuctProgramProvider().validate_input(str(path)).valid is True
+    assert ProgramArtifactProvider().validate_input(str(path)).valid is True
 
 
 @pytest.mark.parametrize(
@@ -209,13 +210,13 @@ def test_a_usable_seed_validates(tmp_path: Path) -> None:
     [(None, "ARTIFACT_PATH_REQUIRED"), ("", "ARTIFACT_PATH_REQUIRED")],
 )
 def test_no_program_at_all_is_named_as_such(artifact_path: str | None, code: str) -> None:
-    result = PuctProgramProvider().validate_input(artifact_path)
+    result = ProgramArtifactProvider().validate_input(artifact_path)
 
     assert [error["code"] for error in result.errors] == [code]
 
 
 def test_a_path_that_is_not_there_is_named_as_such(tmp_path: Path) -> None:
-    result = PuctProgramProvider().validate_input(str(tmp_path / "absent.py"))
+    result = ProgramArtifactProvider().validate_input(str(tmp_path / "absent.py"))
 
     assert [error["code"] for error in result.errors] == ["ARTIFACT_NOT_FOUND"]
 
@@ -226,7 +227,7 @@ def test_a_path_that_is_not_there_is_named_as_such(tmp_path: Path) -> None:
 def test_a_run_without_a_scorecard_is_refused_rather_than_scored_by_a_guess(
     tmp_path: Path,
 ) -> None:
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     request = _request(tmp_path)
     Path(request.run_dir).mkdir(parents=True)
 
@@ -241,7 +242,7 @@ def test_the_token_ceiling_comes_from_the_model_config_not_the_engine_default(
     """`RunSpec` defaults to 16k, and a reasoning model at 16k spends the whole
     allowance on hidden thinking and returns an empty reply -- which then reads
     as a model that cannot write code. The deployment's number has to win."""
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -253,7 +254,7 @@ def test_the_token_ceiling_comes_from_the_model_config_not_the_engine_default(
 
 
 def test_the_starting_program_reaches_the_spec(tmp_path: Path) -> None:
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -282,7 +283,7 @@ def test_packages_takes_names_a_reviewer_can_recognise_and_nothing_else(
     """`packages` is written by a model, so readability is the whole security
     boundary: a name is checkable by eye, a path or a URL or a pip option is
     not, however plausible the surrounding text makes it look."""
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir), packages=[package])
 
@@ -292,7 +293,7 @@ def test_packages_takes_names_a_reviewer_can_recognise_and_nothing_else(
 
 
 def test_an_ordinary_pinned_dependency_still_gets_through(tmp_path: Path) -> None:
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir), packages=["xgboost", "scikit-learn==1.5.0"])
 
@@ -307,7 +308,7 @@ def test_resuming_continues_the_numbering_the_first_attempt_stopped_at(
 ) -> None:
     """Without the previous tree a resumed run would append node 0 on top of a
     graph that already has one, leaving a single index holding two candidates."""
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     request = _request(tmp_path)
     run_dir = Path(request.run_dir)
     _scorecard(run_dir)
@@ -502,13 +503,13 @@ def test_the_queries_answer_after_a_restart(
     monkeypatch.setattr(state_module, "_DIRECTORIES", {})
     monkeypatch.setenv("SCIENCE_AGENT_RSI_RUNS", str(runs))
 
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     assert provider.read_state("task-001").status == "created"
     assert provider.get_tree("task-001").nodes != []
 
 
 def test_an_unknown_task_says_so_rather_than_pretending(tmp_path: Path) -> None:
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
 
     state = provider.read_state("task-nowhere")
 
@@ -525,7 +526,7 @@ def test_the_final_artifact_is_the_best_nodes(tmp_path: Path) -> None:
     _absorb(run, events.evaluated(1, 0.42, {"rmse": 1.9}))
     _absorb(run, events.merged(1, True, "it scored better"))
 
-    provider = PuctProgramProvider()
+    provider = ProgramArtifactProvider()
     final = provider.locate_artifact("task-001")
 
     assert final.node_id == state_module.node_id_for("task-001", 1)
@@ -537,7 +538,7 @@ def test_an_artifact_from_another_task_is_not_served(tmp_path: Path) -> None:
     _absorb(run, events.seeded(0, 0.25, code_hash="sha256:" + "a" * 64))
 
     with pytest.raises(FileNotFoundError):
-        PuctProgramProvider().locate_artifact("task-001", "A-program:other:dead")
+        ProgramArtifactProvider().locate_artifact("task-001", "A-program:other:dead")
 
 
 # -- execution control ----------------------------------------------------------
@@ -548,7 +549,7 @@ def test_an_unusable_model_config_fails_the_task_rather_than_the_server(
 ) -> None:
     """A bad reference is a task-level failure with a status the caller can see,
     not an exception AgentServer has to interpret."""
-    provider = PuctProgramProvider(sandbox_backend="bwrap")
+    provider = ProgramArtifactProvider(sandbox_backend="bwrap")
     request = _request(tmp_path, model_config=str(tmp_path / "absent.yaml"))
     seen: list[object] = []
 
@@ -565,7 +566,7 @@ def test_an_unusable_model_config_fails_the_task_rather_than_the_server(
 
 
 def test_a_run_without_isolation_never_starts(tmp_path: Path) -> None:
-    provider = PuctProgramProvider(sandbox_backend="none")
+    provider = ProgramArtifactProvider(sandbox_backend="none")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -576,7 +577,7 @@ def test_a_run_without_isolation_never_starts(tmp_path: Path) -> None:
 
 
 def test_pause_is_declined_in_words_rather_than_faked(tmp_path: Path) -> None:
-    result = asyncio.run(PuctProgramProvider().pause("task-001"))
+    result = asyncio.run(ProgramArtifactProvider().pause("task-001"))
 
     assert result.error_code == "NOT_IMPLEMENTED"
 
@@ -589,7 +590,7 @@ def test_terminate_reports_terminated_and_says_which_node_won(tmp_path: Path) ->
     async def sink(event: object) -> None:
         seen.append(event)
 
-    result = asyncio.run(PuctProgramProvider().terminate("task-001", sink))
+    result = asyncio.run(ProgramArtifactProvider().terminate("task-001", sink))
 
     assert result.status == "terminated"
     assert result.final_node_id == state_module.node_id_for("task-001", 0)
@@ -625,7 +626,7 @@ def _no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     refuse the fixture scorecard before any of that is reached.
     """
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.run_probe",
+        "openjiuwen.rsi.artifact_rsi.program_opt.provider.run_probe",
         lambda spec: {"baseline": 0.25, "worsened": 0.05, "flat": False, "label": "test"},
     )
 
@@ -633,7 +634,7 @@ def _no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 def _canned(monkeypatch: pytest.MonkeyPatch, script: list[dict[str, object]]) -> None:
     _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
         lambda **kwargs: _CannedEngine(script, **kwargs),
     )
 
@@ -652,7 +653,7 @@ def test_a_search_running_on_a_thread_delivers_its_events_to_the_callers_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _canned(monkeypatch, _SCRIPT)
-    provider = PuctProgramProvider(sandbox_backend="bwrap")
+    provider = ProgramArtifactProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
     seen: list[object] = []
@@ -683,7 +684,7 @@ def test_the_search_waits_for_a_slow_consumer(
     events go to a bounded queue, and a search that fired and forgot would drop
     the node it just told everyone about."""
     _canned(monkeypatch, _SCRIPT)
-    provider = PuctProgramProvider(sandbox_backend="bwrap")
+    provider = ProgramArtifactProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
     order: list[str] = []
@@ -728,10 +729,10 @@ def test_terminate_reaches_a_search_that_is_already_running(
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
         _HaltingEngine,
     )
-    provider = PuctProgramProvider(sandbox_backend="bwrap")
+    provider = ProgramArtifactProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -770,10 +771,10 @@ def test_a_crashing_search_becomes_a_failed_task(
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
         lambda **kwargs: _Exploding(**kwargs),
     )
-    provider = PuctProgramProvider(sandbox_backend="bwrap")
+    provider = ProgramArtifactProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -795,10 +796,10 @@ def test_a_scorecard_that_cannot_rank_is_refused_before_the_budget_is_spent(
     after it has spent the model calls."""
     built: list[object] = []
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
         lambda **kwargs: built.append(kwargs) or _CannedEngine(_SCRIPT, **kwargs),
     )
-    provider = PuctProgramProvider(sandbox_backend="bwrap")
+    provider = ProgramArtifactProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     # The fixture scorecard has no criteria, so nothing can be ranked with it.
     _scorecard(Path(request.run_dir))
@@ -862,3 +863,28 @@ def test_a_candidate_is_not_handed_the_hosts_environment(tmp_path: Path) -> None
     # writable home inside the scratch directory.
     assert seen["threads"] == "1"
     assert seen["home"] == str(tmp_path.resolve())
+
+
+def test_importing_the_provider_does_not_require_the_search_engines_wheel() -> None:
+    """`artifact_rsi/__init__` imports this provider eagerly, and it is
+    re-exported from `openjiuwen.rsi`. So a module-level `agentdescent` import
+    anywhere on the chain would make the whole RSI package unimportable wherever
+    that wheel is absent -- and agent-core does not declare it. That is why
+    `PuctEngine` is imported inside `_drive` rather than at the top.
+
+    Checked in a fresh interpreter: within this session `agentdescent` is
+    already in `sys.modules` from the tests above.
+    """
+    import subprocess
+    import sys
+
+    completed = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; import openjiuwen.rsi;"
+         " from openjiuwen.rsi import ProgramArtifactProvider;"
+         " print('agentdescent' in sys.modules)"],
+        capture_output=True, text=True, timeout=180,
+    )
+
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    assert completed.stdout.strip().splitlines()[-1] == "False"

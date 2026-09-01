@@ -1,16 +1,18 @@
 # `program_opt` — program artifact optimization
 
-`PuctProgramProvider` implements `ProgramArtifactProvider` on top of a PUCT
-search over programs, ported from ScienceDiscovery's evolve service.
+`ProgramArtifactProvider` optimizes a program with a PUCT search, ported from
+ScienceDiscovery's evolve service. It is the implementation, not a protocol
+restating one — the structural contract is `artifact_rsi.provider.
+ArtifactProvider`, and `isinstance` still checks against it.
 
 ```python
-from openjiuwen.rsi.artifact_rsi.program_opt import PuctProgramProvider
+from openjiuwen.rsi.artifact_rsi.program_opt import ProgramArtifactProvider
 
-provider = PuctProgramProvider()
+provider = ProgramArtifactProvider()
 result = await provider.run(request, on_event)
 ```
 
-Everything lives flat in this package. `puct_provider` is the contract surface,
+Everything lives flat in this package. `provider` is the contract surface,
 `runtime` answers model and sandbox, `state` does the event projection, and
 `puct_engine` plus what it imports is the search itself. `domain`, `program`,
 `sandbox`, `search` and `tree` are vendored from AgentDescent's ERA example
@@ -70,7 +72,7 @@ neither is.
 Deployments that know better than the probe can name one:
 
 ```python
-PuctProgramProvider(sandbox_backend="bwrap")
+ProgramArtifactProvider(sandbox_backend="bwrap")
 ```
 
 This is deliberately *not* routed through `openjiuwen/extensions/sys_operation/
