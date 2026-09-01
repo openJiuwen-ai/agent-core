@@ -16,6 +16,17 @@ DESCRIPTION: Dict[str, str] = {
         "除非用户明确要求，否则不要改写成 Z 或 UTC。"
         "给当前聊天创建提醒时，优先使用 payload.kind=systemEvent 和 sessionTarget=current。"
         "向用户确认创建结果时，优先按 schedule.at 里的原始时区/偏移表述，不要自行改写成 UTC。"
+        "\n\n【强制：任务内容不得包含时间/频率】payload.text 和 description 是到点提醒用户的内容，"
+        "**禁止**把用户原话里的时间/频率表述（如'每五分钟'、'每隔40分钟'、'每天9点'、'2分钟后'）复制进去。"
+        "时间规则已由 schedule 表达，内容里重复属于冗余且到点播报时毫无意义。"
+        "必须只保留动作与对象：用户说'每五分钟提醒我滴眼药水'，内容应为'该滴眼药水了'，而不是'每五分钟提醒我滴眼药水'；"
+        "用户说'每天9点提醒我喝水'，内容应为'该喝水了'。"
+        "\n\n【重要：充实简单提醒的内容】用户只给一句简单提醒（如'提醒我喝水'、'提醒我站起来'）时，"
+        "内容不能照抄原文，要适当充实为可直接播报的提醒文案：说明做什么、为什么/有什么好处、给一句简短行动建议。"
+        "保持 1-3 句、简洁友好，禁止长篇大论。"
+        "例：'提醒我喝水' -> '该喝水啦～起身接一杯温水，小口慢饮。规律补水能让头脑保持清醒。'"
+        "例：'提醒我滴眼药水' -> '滴眼药水时间到。摘掉隐形眼镜后仰头轻拉下眼睑，滴入一滴后闭眼休息1分钟，缓解眼睛疲劳。'"
+        "用户已给出具体/丰富的内容时，尊重原文意图，只做轻度润色，不要过度改写。"
         "\n\n【投递频道】delivery.channel / targets：用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**"
         "\n\n【强制：wake_offset_seconds】这是提前唤醒秒数，不是任务执行时间。"
         "除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds 字段；"
@@ -60,6 +71,19 @@ DESCRIPTION: Dict[str, str] = {
         "For reminders targeting the current chat, prefer payload.kind=systemEvent with sessionTarget=current. "
         "When confirming a created reminder to the user, prefer the original timezone/offset from schedule.at "
         "instead of rewriting it into UTC."
+        "\n\n[MANDATORY: No time/frequency in task content] payload.text and description are what the user "
+        "reads when the reminder fires. **NEVER** copy time/frequency wording from the user's request "
+        "(e.g. 'every 5 minutes', 'every 40 minutes', 'daily at 9am', 'in 2 minutes') into the content. "
+        "The schedule already encodes the timing; repeating it is redundant and meaningless at delivery time. "
+        "Keep only the action and object: 'remind me to use eye drops every 5 minutes' -> content 'Time to use your eye drops' "
+        "(NOT 'every 5 minutes remind me to use eye drops'); 'remind me to drink water daily at 9am' -> content 'Time to drink water'."
+        "\n\n[IMPORTANT: Enrich bare reminders] When the user gives only a bare reminder "
+        "(e.g. 'remind me to drink water', 'remind me to stand up'), do NOT copy the request verbatim. "
+        "Enrich it into ready-to-deliver reminder copy: state what to do, why it helps, plus one short actionable tip. "
+        "Keep it 1-3 sentences, concise and friendly; never write an essay. "
+        "Example: 'remind me to drink water' -> 'Time to hydrate! Get up, pour a glass of water, and sip slowly. "
+        "Regular hydration keeps your mind sharp.' "
+        "When the user already provided specific/rich content, respect their wording and only lightly polish it."
         "\n\n[Delivery Channel] delivery.channel / targets: leave empty unless user explicitly specifies; "
         "system uses current channel. **Never infer from history.**"
         "\n\n[MANDATORY: wake_offset_seconds] This is a compatibility wake-ahead offset, not the task execution time. "
@@ -199,8 +223,17 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Payload type: systemEvent or agentTurn",
     },
     "payload.text": {
-        "cn": "systemEvent提醒文本。不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）",
-        "en": "Reminder text for systemEvent. Do NOT include time/frequency info",
+        "cn": (
+            "systemEvent提醒文本，即到点提醒用户时播报的内容。"
+            "禁止包含时间/频率信息（如'每五分钟'、'每隔40分钟'、'每天9点'），时间已由 schedule 表达；"
+            "用户给的是简单提醒（如'提醒我喝水'）时，充实为1-3句可播报文案：做什么+好处+一句行动建议，不要照抄原文。"
+        ),
+        "en": (
+            "Reminder text for systemEvent, i.e. what the user reads at delivery time. "
+            "Do NOT include time/frequency info (e.g. 'every 5 minutes', 'daily at 9am'); the schedule already covers timing. "
+            "For bare reminders (e.g. 'remind me to drink water'), enrich into 1-3 sentences of deliverable copy: "
+            "what to do + why it helps + one actionable tip; do not copy the request verbatim."
+        ),
     },
     "payload.message": {
         "cn": "agentTurn 发送给代理的消息",
@@ -327,8 +360,15 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         ),
     },
     "description": {
-        "cn": "具体任务内容，到点执行时发给助手。不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）",
-        "en": "Task content sent to assistant at scheduled time. Do NOT include time/frequency info",
+        "cn": (
+            "具体任务内容，到点执行时发给助手。禁止包含时间/频率信息（如'每五分钟'、'每隔40分钟'、'每天9点'），"
+            "时间已由 schedule/cron 表达；用户给的是简单提醒时，充实为1-3句可播报文案：做什么+好处+一句行动建议。"
+        ),
+        "en": (
+            "Task content sent to assistant at scheduled time. Do NOT include time/frequency info "
+            "(e.g. 'every 5 minutes', 'daily at 9am'); the schedule already covers timing. "
+            "For bare reminders, enrich into 1-3 sentences of deliverable copy: what to do + why it helps + one actionable tip."
+        ),
     },
     "targets": {
         "cn": "目标频道。用户未明确指定时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**",
@@ -604,6 +644,15 @@ CRON_CREATE_JOB_DESCRIPTION_CN = """
 
 【targets】用户未明确指定投递渠道时不填，系统自动使用当前对话渠道；**禁止从历史记录推断。**
 
+【强制：description 不得包含时间/频率】description 是到点提醒用户的内容，**禁止**把用户原话里的
+时间/频率表述（如'每五分钟'、'每隔40分钟'、'每天9点'）复制进去。时间规则已由 cron_expr 表达。
+必须只保留动作与对象：用户说'每五分钟提醒我滴眼药水'，description 应为'该滴眼药水了'。
+
+【重要：充实简单提醒】用户只给一句简单提醒（如'提醒我喝水'）时，description 不能照抄原文，
+要充实为 1-3 句可播报的提醒文案：做什么+为什么/好处+一句行动建议，简洁友好，禁止长篇大论。
+例：'提醒我喝水' -> '该喝水啦～起身接一杯温水，小口慢饮。规律补水能让头脑保持清醒。'
+用户已给出具体/丰富的内容时，尊重原文意图，只做轻度润色。
+
 【强制：wake_offset_seconds】除非用户明确说“提前 X 秒/分钟唤醒/准备/执行”，否则**禁止**传 wake_offset_seconds。
 用户未明确指定时必须省略该字段，后端会默认使用 0 秒（到点执行，不提前唤醒）。
 不要因为是查询/准备类任务而传 60 或其他正值；禁止从任务类型、距离触发时间或历史记录推断。
@@ -634,6 +683,16 @@ CRON_CREATE_JOB_DESCRIPTION_EN = """
 Create a new cron job using flat fields (name, cron_expr, timezone, targets, description, wake_offset_seconds).
 
 [targets] Leave empty unless user explicitly specifies a channel; system uses current channel. **Never infer from history.**
+
+[MANDATORY: No time/frequency in description] description is what the user reads when the reminder fires.
+**NEVER** copy time/frequency wording from the user's request (e.g. 'every 5 minutes', 'daily at 9am') into it;
+the cron_expr already encodes the timing. Keep only the action and object:
+'remind me to use eye drops every 5 minutes' -> description 'Time to use your eye drops'.
+
+[IMPORTANT: Enrich bare reminders] When the user gives only a bare reminder (e.g. 'remind me to drink water'),
+do NOT copy it verbatim. Enrich into 1-3 sentences of deliverable copy: what to do + why it helps + one actionable tip.
+Example: 'remind me to drink water' -> 'Time to hydrate! Get up, pour a glass of water, and sip slowly. Regular hydration keeps your mind sharp.'
+When the user already provided specific/rich content, respect their wording and only lightly polish it.
 
 [MANDATORY: wake_offset_seconds] Unless the user explicitly says to wake/prepare/run X seconds/minutes early,
 DO NOT pass wake_offset_seconds. If the user does not specify it, omit the field; the backend defaults to 0 seconds
@@ -763,8 +822,15 @@ LEGACY_FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "en": "Whether to enable the job",
     },
     "legacy_description": {
-        "cn": "具体任务内容，到点执行时发给助手。不要包含时间/频率信息（如'每隔40分钟'、'每天9点'）",
-        "en": "Task content sent to assistant at scheduled time. Do NOT include time/frequency info",
+        "cn": (
+            "具体任务内容，到点执行时发给助手。禁止包含时间/频率信息（如'每五分钟'、'每隔40分钟'、'每天9点'），"
+            "时间已由 cron_expr 表达；用户给的是简单提醒时，充实为1-3句可播报文案：做什么+好处+一句行动建议。"
+        ),
+        "en": (
+            "Task content sent to assistant at scheduled time. Do NOT include time/frequency info "
+            "(e.g. 'every 5 minutes', 'daily at 9am'); the cron_expr already covers timing. "
+            "For bare reminders, enrich into 1-3 sentences of deliverable copy: what to do + why it helps + one actionable tip."
+        ),
     },
     "wake_offset_seconds": {
         "cn": (
