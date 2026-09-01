@@ -295,27 +295,20 @@ class SwarmflowTool(AsyncTool):
         #   - WITH script_path/script = script-edit relaunch (same run_id),
         #     the frontend resets the phase/agent tree (relaunch_kind="relaunch").
         #   - WITHOUT script_path/script = cross-session cold resume: resolve
-        #     script_path + args from the resume.json sidecar the original
-        #     launch wrote, so the journal prefix cache replays completed
+        #     script_path + args from the launch record in the existing
+        #     journal/WAL, so the journal prefix cache replays completed
         #     agent() calls under the same run_id.
         if resume_id and not script_path and not script:
-            resolved = await self._resolve_resume_sidecar(resume_id)
+            resolved = await self._resolve_resume_record(resume_id)
             if resolved is not None:
-                script_path, sidecar_args = resolved
+                script_path, launch_args = resolved
                 if args is None:
-                    args = sidecar_args
-        # Leader passed script_path (relaunch) but no args — restore from sidecar.
+                    args = launch_args
+        # Leader passed script_path (relaunch) but no args — restore from journal.
         if resume_id and args is None and script_path:
-            restored = await self._restore_resume_args(script_path, resume_id)
+            restored = await self._restore_resume_args_from_journal(script_path, resume_id)
             if restored is not None:
                 args = restored
-        # resume_id alone that failed to resolve a script from the sidecar is an
-        # error — do NOT fall through to a launch with an empty script_path.
-        if resume_id and not script_path and not script:
-            return ToolOutput(
-                success=False,
-                error="resume_id 未找到对应 resume.json sidecar；请提供 'script_path' 或 inline 'script'",
-            )
         error = self._launch_input_error(script_path, script, name, resume_id)
         if error is not None:
             return ToolOutput(success=False, error=error)
@@ -404,16 +397,16 @@ class SwarmflowTool(AsyncTool):
     def _launch_input_error(script_path: str, script: str, name: str, resume_id: str) -> str | None:
         """Source validation: one of the four keys required, only scripts wired.
 
-        ``resume_id`` alone (no script_path/script) is allowed — it signals a
-        cross-session cold resume: ``invoke`` resolves script_path + args from
-        the resume.json sidecar written at the original launch. ``name`` alone
+        ``resume_id`` alone (no script_path/script) is allowed when the journal
+        launch record resolves it; otherwise this returns the same source error
+        as any incomplete launch input. ``name`` alone
         remains unsupported (no registry to resolve a script by name yet).
         """
         if not any((script_path, script, name, resume_id)):
             return "one of 'script_path' / 'script' / 'name' / 'resume_id' is required"
         if not script_path and not script:
             if resume_id:
-                return None  # resume_id alone: sidecar restore in invoke
+                return "resume_id 未找到对应 journal launch 记录；请提供 'script_path' 或 inline 'script'"
             return (
                 f"{name!r} is not supported yet; provide 'script_path' or inline 'script'"
                 if name
@@ -428,105 +421,67 @@ class SwarmflowTool(AsyncTool):
 
         return await materialize_swarmflow_script(script, team_name=self._team_name, session_id=get_session_id())
 
-    async def _persist_resume_metadata(self, script_path: str, args: Any, run_id: str) -> None:
-        """Write resume.json next to the journal so a cold resume can rebuild.
-
-        Carries run_id, args, workflow_name, team_name, script_path — everything
-        ``invoke`` needs to re-enter run_swarmflow under the same run_id after the
-        in-process relaunch closure was lost to a process restart (/exit). Best-effort:
-        failures only debug-log, never block the launch.
-        """
-        if not script_path:
-            return
+    async def _resolve_resume_record(self, resume_id: str) -> tuple[str, Any] | None:
+        """Scan workflow journals for a launch record matching ``resume_id``."""
         try:
-            import json
-
-            import aiofiles
-
-            from openjiuwen.agent_teams.context import get_session_id
-            from openjiuwen.agent_teams.paths import workflow_run_dir
-            from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
-
-            name = (load_workflow_meta(script_path) or {}).get("name")
-            if not name:
-                return
-            run_dir = workflow_run_dir(self._team_name, get_session_id(), name)
-            payload = {
-                "run_id": run_id,
-                "args": args,
-                "workflow_name": name,
-                "team_name": self._team_name,
-                "script_path": script_path,
-            }
-            async with aiofiles.open(run_dir / f"{run_id}.resume.json", "w", encoding="utf-8") as f:
-                await f.write(json.dumps(payload, ensure_ascii=False))
-        except Exception:
-            team_logger.debug("[swarmflow] resume metadata write failed", exc_info=True)
-
-    async def _resolve_resume_sidecar(self, resume_id: str) -> tuple[str, Any] | None:
-        """Scan workflow run dirs for a resume.json whose run_id matches.
-
-        Returns ``(script_path, args)`` or ``None``. Used when the leader calls
-        ``swarmflow(resume_id=...)`` without a script_path — the cold-resume path
-        where script_path + args must be recovered from the original launch.
-        """
-        try:
-            import json
-
             from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.paths import team_session_dir
+            from openjiuwen.agent_teams.workflow.engine.journal import Journal
 
             sid = get_session_id()
             workflows_root = team_session_dir(self._team_name, sid) / "workflows"
             if not workflows_root.exists():
                 return None
             for sub in workflows_root.iterdir():
-                resume_file = sub / f"{resume_id}.resume.json"
-                if not resume_file.exists():
+                journal_path = sub / "journal.jsonl"
+                if not journal_path.exists() and not Path(f"{journal_path}.wal").exists():
                     continue
-                try:
-                    meta = json.loads(resume_file.read_text(encoding="utf-8"))
-                except Exception:
-                    team_logger.debug(
-                        "[swarmflow] resume sidecar read failed, skipping: %s",
-                        resume_file, exc_info=True,
-                    )
+                journal = await Journal.load(
+                    str(journal_path) if journal_path.exists() else None,
+                    wal_path=f"{journal_path}.wal",
+                )
+                meta = journal.find_run_record(resume_id, "launch")
+                if not meta:
                     continue
                 sp = str(meta.get("script_path") or (sub / "script.py"))
                 return (sp, meta.get("args"))
             return None
         except Exception:
-            team_logger.debug("[swarmflow] resume sidecar resolve failed", exc_info=True)
+            team_logger.debug("[swarmflow] resume journal resolve failed", exc_info=True)
             return None
 
-    async def _restore_resume_args(self, script_path: str, resume_id: str) -> Any:
-        """Restore args from resume.json for a script-path relaunch under run_id.
-
-        The leader may pass script_path (a relaunch) without args — recover the
-        original launch's args from the sidecar so the rerun uses the same inputs.
-        """
+    async def _restore_resume_args_from_journal(self, script_path: str, resume_id: str) -> Any:
+        """Restore args from the journal launch record for a path relaunch."""
         if not script_path:
             return None
         try:
-            import json
-
             from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.paths import workflow_run_dir
+            from openjiuwen.agent_teams.workflow.engine.journal import Journal
             from openjiuwen.agent_teams.workflow.engine.loader import load_workflow_meta
 
             name = (load_workflow_meta(script_path) or {}).get("name")
             if not name:
                 return None
             run_dir = workflow_run_dir(self._team_name, get_session_id(), name)
-            resume_file = run_dir / f"{resume_id}.resume.json"
-            if not resume_file.exists():
+            journal_path = run_dir / "journal.jsonl"
+            wal_path = f"{journal_path}.wal"
+            if not journal_path.exists() and not Path(wal_path).exists():
                 return None
-            meta = json.loads(resume_file.read_text(encoding="utf-8"))
+            journal = await Journal.load(
+                str(journal_path) if journal_path.exists() else None,
+                wal_path=wal_path,
+            )
+            meta = journal.find_run_record(resume_id, "launch")
+            if not meta:
+                return None
             return meta.get("args")
         except Exception:
             team_logger.debug(
                 "[swarmflow] resume args restore failed: script_path=%s run_id=%s",
-                script_path, resume_id, exc_info=True,
+                script_path,
+                resume_id,
+                exc_info=True,
             )
             return None
 
@@ -626,10 +581,6 @@ class SwarmflowTool(AsyncTool):
         # `invoke` already resolved this (inline `script` materialised to disk).
         script_path = (inputs.get("script_path") or "").strip()
         args = inputs.get("args")
-        # Persist the launch inputs as a resume.json sidecar so a cross-session
-        # cold resume (workflow.resume) can rebuild run_swarmflow under the
-        # same run_id after /exit tore down the in-process relaunch closure.
-        await self._persist_resume_metadata(script_path, args, run_id)
         model = self._parent_agent.model
         messager = self._messager
         team_name = self._team_name

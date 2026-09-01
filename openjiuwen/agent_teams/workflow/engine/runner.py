@@ -12,6 +12,7 @@ Unlike the dw reference, there is no CLI ``main()`` here — the team integratio
 drives runs through ``workflow/runner.py:run_swarmflow`` (real worker backend)
 or directly with ``MockBackend`` from tests; library code must not ``print``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -82,7 +83,8 @@ async def _write_seal_record(rt, *, terminal_status: str) -> None:
     if rt.journal is None or rt.journal.wal_path is None:
         return
     await rt.journal.write_run_record(
-        rt.run_id or "", "seal",
+        rt.run_id or "",
+        "seal",
         {"terminal_status": terminal_status, "final_spent": rt.workflow_budget.spent},
     )
 
@@ -107,7 +109,8 @@ async def _write_pause_record(rt, *, pause_reason: str) -> None:
             "tokens": rt.workflow_budget.spent - (cur.get("started_spent") or 0),
         }
     await rt.journal.write_run_record(
-        rt.run_id or "", "pause",
+        rt.run_id or "",
+        "pause",
         {
             "pause_reason": pause_reason,
             "paused_at": datetime.now(timezone.utc).isoformat(),
@@ -181,18 +184,20 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
     phases = _normalize_meta_phases(raw_phases)
     try:
         args_text = _preview(rt.args) or ""
-        rt.progress_sink(WorkflowProgressEvent(
-            kind=ProgressKind.WORKFLOW_STARTED,
-            name=name,
-            description=description,
-            message=f"Workflow started, args: {args_text}",
-            phases=phases,
-            # Ledgers exist (possibly unbounded) before the run starts, so the
-            # budget badges can render from the first event instead of waiting
-            # for the first agent to complete.
-            budget=_budget_snapshot(rt.budget),
-            workflow_budget=_wf_budget_snapshot(rt),
-        ))
+        rt.progress_sink(
+            WorkflowProgressEvent(
+                kind=ProgressKind.WORKFLOW_STARTED,
+                name=name,
+                description=description,
+                message=f"Workflow started, args: {args_text}",
+                phases=phases,
+                # Ledgers exist (possibly unbounded) before the run starts, so the
+                # budget badges can render from the first event instead of waiting
+                # for the first agent to complete.
+                budget=_budget_snapshot(rt.budget),
+                workflow_budget=_wf_budget_snapshot(rt),
+            )
+        )
         result = await _invoke_loaded(loaded, rt.args)
         # The rail force-finishes in-flight agents instead of raising, so a
         # drained ledger can end a run with the script simply returning — no
@@ -205,7 +210,9 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
         if rt.budget.exhausted:
             raise BudgetExhausted(
                 f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
-                scope="session", spent=rt.budget.spent, total=rt.budget.total,
+                scope="session",
+                spent=rt.budget.spent,
+                total=rt.budget.total,
                 workflow_spent=rt.workflow_budget.spent,
                 workflow_total=rt.workflow_budget.total,
                 top_phases=_top_phases(rt),
@@ -213,7 +220,8 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
         if rt.workflow_budget.exhausted:
             raise BudgetExhausted(
                 f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
-                scope="workflow", spent=rt.workflow_budget.spent,
+                scope="workflow",
+                spent=rt.workflow_budget.spent,
                 total=rt.workflow_budget.total,
                 workflow_spent=rt.workflow_budget.spent,
                 workflow_total=rt.workflow_budget.total,
@@ -221,12 +229,14 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             )
         result_text = _preview(result) or ""
         await _write_seal_record(rt, terminal_status="completed")
-        rt.progress_sink(WorkflowProgressEvent(
-            kind=ProgressKind.WORKFLOW_COMPLETED,
-            name=name,
-            description=description,
-            message=f"Workflow completed, result: {result_text}",
-        ))
+        rt.progress_sink(
+            WorkflowProgressEvent(
+                kind=ProgressKind.WORKFLOW_COMPLETED,
+                name=name,
+                description=description,
+                message=f"Workflow completed, result: {result_text}",
+            )
+        )
         return result
     except BudgetExhausted as exc:
         # Scope decides the terminal event: a workflow (per-run) ceiling hit is
@@ -235,26 +245,30 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
         # not recoverable by any script edit, so it is sealed terminal.
         if exc.scope == "workflow":
             await _write_pause_record(rt, pause_reason="workflow_budget_exhausted")
-            rt.progress_sink(WorkflowProgressEvent(
-                kind=ProgressKind.WORKFLOW_FAILED,
-                name=name,
-                description=description,
-                message=f"Workflow failed, exception: {exc}",
-                budget=_budget_snapshot(rt.budget),
-                workflow_budget=_wf_budget_snapshot(rt),
-                budget_exhausted_scope=exc.scope,
-            ))
+            rt.progress_sink(
+                WorkflowProgressEvent(
+                    kind=ProgressKind.WORKFLOW_FAILED,
+                    name=name,
+                    description=description,
+                    message=f"Workflow failed, exception: {exc}",
+                    budget=_budget_snapshot(rt.budget),
+                    workflow_budget=_wf_budget_snapshot(rt),
+                    budget_exhausted_scope=exc.scope,
+                )
+            )
         else:
             await _write_seal_record(rt, terminal_status="stopped")
-            rt.progress_sink(WorkflowProgressEvent(
-                kind=ProgressKind.WORKFLOW_STOPPED,
-                name=name,
-                description=description,
-                message=f"Workflow stopped, exception: {exc}",
-                budget=_budget_snapshot(rt.budget),
-                workflow_budget=_wf_budget_snapshot(rt),
-                budget_exhausted_scope=exc.scope,
-            ))
+            rt.progress_sink(
+                WorkflowProgressEvent(
+                    kind=ProgressKind.WORKFLOW_STOPPED,
+                    name=name,
+                    description=description,
+                    message=f"Workflow stopped, exception: {exc}",
+                    budget=_budget_snapshot(rt.budget),
+                    workflow_budget=_wf_budget_snapshot(rt),
+                    budget_exhausted_scope=exc.scope,
+                )
+            )
         raise
     except WorkflowAborted as exc:
         # Cooperative control signal: pause / early_return (edit & rerun) are
@@ -265,11 +279,14 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             await _write_seal_record(rt, terminal_status="stopped")
         raise
     except Exception as exc:
-        rt.progress_sink(WorkflowProgressEvent(
-            kind=ProgressKind.WORKFLOW_FAILED,
-            name=name,
-            description=description,
-            message=f"Workflow failed, exception: {exc}"))
+        rt.progress_sink(
+            WorkflowProgressEvent(
+                kind=ProgressKind.WORKFLOW_FAILED,
+                name=name,
+                description=description,
+                message=f"Workflow failed, exception: {exc}",
+            )
+        )
         raise
     except asyncio.CancelledError:
         # controller.stop/pause cancels the task mid-LLM-call (no abort checkpoint
@@ -328,6 +345,18 @@ async def run_workflow(
     wal_path = f"{journal_path}.wal" if journal_path else None
     journal = await Journal.load(resume, wal_path=wal_path)
     log(f"[wf] journal loaded: prior_records={len(journal.prior)} path={resume} wal={wal_path}")
+    # Persist launch inputs in the existing journal/WAL. Cold resume can then
+    # reconstruct the same invocation without creating a resume.json sidecar.
+    if journal_path and run_id:
+        await journal.write_run_record(
+            run_id,
+            "launch",
+            {
+                "script_path": path,
+                "args": args,
+                "workflow_name": loaded.meta.get("name") if isinstance(loaded.meta, dict) else None,
+            },
+        )
     # Per-run budget on resume is NOT restored from a snapshot — the ledger
     # starts at spent=0 and the emit hooks re-bill it by replaying cache hits:
     # every cache-hit agent adds its record's stored ``tokens`` back, so the
@@ -344,7 +373,9 @@ async def run_workflow(
         strict=strict,
         cap_override=cap,
         budget=budget if budget is not None else BudgetLedger(),
-        workflow_budget=workflow_budget if workflow_budget is not None else _resolve_workflow_budget(
+        workflow_budget=workflow_budget
+        if workflow_budget is not None
+        else _resolve_workflow_budget(
             loaded,
             session_budget=budget,
         ),

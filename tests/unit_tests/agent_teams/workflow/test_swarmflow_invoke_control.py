@@ -1,7 +1,10 @@
 # coding: utf-8
 from __future__ import annotations
-import pytest
+
 from unittest.mock import AsyncMock
+
+import pytest
+
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 
 
@@ -75,16 +78,16 @@ async def test_stop_action_calls_controller():
 
 @pytest.mark.asyncio
 async def test_resume_id_without_action_requires_a_script_source():
-    """resume_id alone (no action) resolves script_path from the sidecar.
+    """resume_id alone (no action) resolves script_path from the journal.
 
-    When the sidecar is absent, the launch path must reject it with a script
+    When the journal launch record is absent, the launch path must reject it with a script
     source error (not fall through to a raw governor admission).
     """
     ctl = _FakeController()
     tool = _make_tool(ctl)
-    # No resume.json sidecar on disk — sidecar resolve returns None.
-    tool._resolve_resume_sidecar = AsyncMock(return_value=None)
-    tool._restore_resume_args = AsyncMock(return_value=None)
+    # No journal launch record — journal resolve returns None.
+    tool._resolve_resume_record = AsyncMock(return_value=None)
+    tool._restore_resume_args_from_journal = AsyncMock(return_value=None)
     out = await tool.invoke({"resume_id": "wf_1"})
     assert not out.success
     assert "script" in out.error.lower()

@@ -16,6 +16,7 @@ cascade is automatic, because a downstream prompt that embeds an upstream
 result changes its own signature once the upstream re-runs. This is both
 simpler and deterministic under concurrency.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -133,7 +134,7 @@ class Journal:
         A crash mid WAL-append can leave a partial final record; that line fails to
         parse and is skipped — its call simply re-executes on the next run.
         Accepts both call records (keyed by structural path) and run-level
-        records (``pause`` / ``seal``), which carry a synthetic key of the form
+        records (``launch`` / ``pause`` / ``seal``), which carry a synthetic key of the form
         ``__run__:{type}:{run_id}`` so they round-trip through ``load``.
         """
         records: list[dict] = []
@@ -190,10 +191,11 @@ class Journal:
         return rec
 
     def find_run_record(self, run_id: str, record_type: str) -> dict | None:
-        """Find the latest record of ``record_type`` (``"pause"`` / ``"seal"``) for ``run_id``.
+        """Find the latest run-level record of ``record_type`` for ``run_id``.
 
-        Used to recover budget state on resume (pause record) or detect a
-        terminal prior run (seal record → force a fresh run_id on relaunch).
+        Used to recover launch inputs, budget state on resume (pause record),
+        or detect a terminal prior run (seal record → force a fresh run_id on
+        relaunch).
         Returns the last match in insertion order (WAL overlay semantics: a
         later record of the same type supersedes an earlier one). ``None`` when
         no such record exists (first run, or a different run_id).
@@ -217,7 +219,7 @@ class Journal:
         self.used[ks] = record
 
     async def write_run_record(self, run_id: str, record_type: str, payload: dict) -> None:
-        """Write a run-level record (``pause`` / ``seal``) to the journal + WAL.
+        """Write a run-level record (``launch`` / ``pause`` / ``seal``) to journal + WAL.
 
         Unlike call records, these carry no structural call path — they are a
         run-wide snapshot keyed by a synthetic path ``[["__run__", ord,
@@ -227,6 +229,7 @@ class Journal:
         ``type`` / ``run_id`` envelope before persistence.
         """
         import sys
+
         ks = key_str([["__run__", sys.maxsize, record_type, run_id]])
         rec = {"key": ks, "type": record_type, "run_id": run_id, **payload}
         await self._append_wal(rec)
