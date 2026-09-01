@@ -225,6 +225,14 @@ class TeamWorkspaceInput(ConstructionInput):
     """Construction inputs for the team workspace rail."""
 
     member_name: str = context_field(attr="member_name", default="", description="Member name.")
+    team_outputs_dir: str = context_field(
+        attr="team_outputs_dir",
+        default=None,
+        description="Shared final-deliverables directory the rail locks and "
+        "auto-commits (team-workspace/artifacts/<date>/chat-<n>/outputs/). "
+        "None for members bound to a project, in which case the rail never "
+        "intercepts.",
+    )
 
 
 @harness_element(
@@ -241,7 +249,11 @@ def build_team_workspace_rail(params: dict[str, Any], context: Any) -> Any:
     from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
 
     inp = TeamWorkspaceInput.resolve(params, context)
-    return TeamWorkspaceRail(workspace_manager, inp.member_name)
+    return TeamWorkspaceRail(
+        workspace_manager,
+        inp.member_name,
+        outputs_dir=inp.team_outputs_dir,
+    )
 
 
 # ---------------------------------------------------------------------------

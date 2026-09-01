@@ -833,8 +833,8 @@ class TestTeamPolicyRailTeamContext:
         rail = _leader_rail(
             backend,
             member_prompt="",
-            team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
+            team_outputs_dir="/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs",
         )
         rail.init(agent)
 
@@ -849,7 +849,7 @@ class TestTeamPolicyRailTeamContext:
         assert second.count("<team-context>") == 1 if isinstance(second, str) else True
         assert second.content.count("<team-context>") == 1
         assert "# 团队信息" in second.content
-        assert "`.team/beta/`" in second.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in second.content
         assert _team_texts(ctx).count("# 团队信息") == 1
 
     @pytest.mark.asyncio
@@ -1014,21 +1014,21 @@ class TestTeamPolicyRailTeamContext:
         )
         rail = _leader_rail(
             backend,
-            team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
+            team_outputs_dir="/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs",
         )
         rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
 
         ctx = _StubContext()
         first = await _admit(rail, ctx, "go")
-        assert "`.team/beta/`" in first.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in first.content
         assert "/abs/team-workspace" in first.content
 
         # A renamed team is announced again rather than rewritten in place.
         backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
         second = await _admit(rail, ctx, "next")
         assert "Beta-renamed" in second.content
-        assert "`.team/beta/`" in second.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in second.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1

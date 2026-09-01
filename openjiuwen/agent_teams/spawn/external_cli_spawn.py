@@ -142,8 +142,8 @@ def _build_team_context_tracker(
         role=ctx.role,
         display_name=ctx.display_name or "",
         member_prompt=ctx.prompt or "",
-        team_workspace_mount=None,
         team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
+        team_outputs_dir=_path_value(ctx.team_outputs_dir),
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
     )
