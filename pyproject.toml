@@ -114,6 +114,15 @@ online-rl = [
     "omegaconf>=2.3.0",
 ]
 
+# RSI program artifact optimization (`openjiuwen.rsi.artifact_rsi.program_opt`).
+# Pinned exactly, not floored: the provider vendors the PUCT port out of
+# agentdescent's `examples/`, which the wheel does not package, and imports
+# internals around it (`FlatPuct`, `Candidate.prior`, `AggregatorConfig`,
+# `vv_staleness`, `Ledger`, `get_policy`). None of those promise stability
+# across releases, so a floor would let a minor bump move the algorithm the
+# vendored code is written against.
+program-opt = ["agentdescent==0.4.6"]
+
 all-mq = ["openjiuwen[pulsar]"]
 all-storage = ["openjiuwen[sqlite,postgres,mysql,gaussdb,redis,elasticsearch,obs]"]
 all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]

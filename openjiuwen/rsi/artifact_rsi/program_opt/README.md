@@ -5,6 +5,19 @@ ScienceDiscovery's evolve service. It is the implementation, not a protocol
 restating one — the structural contract is `artifact_rsi.provider.
 ArtifactProvider`, and `isinstance` still checks against it.
 
+The search engine ships as an optional extra:
+
+```bash
+pip install 'openjiuwen[program-opt]'
+```
+
+It is pinned exactly (`agentdescent==0.4.6`) rather than floored: the vendored
+files below are copied out of that release's `examples/` and are written against
+internals — `FlatPuct`, `Candidate.prior`, `AggregatorConfig`, `vv_staleness`,
+`Ledger`, `get_policy` — that promise no stability across releases. Without the
+extra, `run` fails with `SEARCHENGINEUNAVAILABLE` and the install line; nothing
+else in `openjiuwen.rsi` is affected.
+
 ```python
 from openjiuwen.rsi.artifact_rsi.program_opt import ProgramArtifactProvider
 

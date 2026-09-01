@@ -118,6 +118,10 @@ def _expand_env(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class SearchEngineUnavailable(RuntimeError):
+    """The optional `program-opt` extra is not installed."""
+
+
 class SandboxUnavailable(RuntimeError):
     """No isolation backend, so no candidate may be executed."""
 
@@ -185,6 +189,7 @@ __all__ = [
     "DEFAULT_MAX_TOKENS_PER_CALL",
     "ModelConfigError",
     "SandboxUnavailable",
+    "SearchEngineUnavailable",
     "completion_factory_for",
     "load_model_endpoint",
     "require_sandbox",

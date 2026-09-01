@@ -38,6 +38,7 @@ from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     ModelConfigError,
     SandboxUnavailable,
+    SearchEngineUnavailable,
     completion_factory_for,
     load_model_endpoint,
     require_sandbox,
@@ -291,10 +292,12 @@ class ProgramArtifactProvider:
         )
 
         try:
+            engine_type = _load_engine()
             endpoint = load_model_endpoint(request.model_config)
             capability = require_sandbox(self._sandbox_backend)
             spec = self._spec_for(request, capability, endpoint, resumed=resumed)
-        except (ModelConfigError, SandboxUnavailable, FileNotFoundError, ValueError) as error:
+        except (ModelConfigError, SandboxUnavailable, SearchEngineUnavailable,
+                FileNotFoundError, ValueError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
             state.fail(code, str(error))
             await emit(on_event, EventStatus(status="failed"))
@@ -339,13 +342,7 @@ class ProgramArtifactProvider:
                 error_code="PROBE_REFUSED", error_message=str(refusal),
             )
 
-        # Imported here, not at module scope: this is the one module on the
-        # chain that hard-imports `agentdescent`, and `artifact_rsi/__init__`
-        # imports this file eagerly. At module scope it would make the whole
-        # `openjiuwen.rsi` package unimportable wherever that wheel is absent.
-        from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
-
-        engine = PuctEngine(completion_factory=_counting(completion_factory_for(endpoint), state))
+        engine = engine_type(completion_factory=_counting(completion_factory_for(endpoint), state))
         try:
             await asyncio.to_thread(engine.run, spec, sink, stop.is_set)
         except Exception as error:  # noqa: BLE001 - a crash is a failed task, not a crashed server
@@ -444,6 +441,29 @@ class ProgramArtifactProvider:
             resume_tokens=tokens,
             resume_from_sequence=sequence,
         )
+
+
+def _load_engine() -> Any:
+    """`PuctEngine`, imported at call time rather than at module scope.
+
+    `puct_engine` is the one module on the chain that hard-imports
+    `agentdescent`, and `artifact_rsi/__init__` imports this file eagerly --
+    at module scope a missing wheel would make the whole `openjiuwen.rsi`
+    package unimportable rather than making one provider unusable.
+
+    The extra is optional, so "not installed" is an ordinary configuration
+    fault and deserves the sentence that fixes it, not a `ModuleNotFoundError`
+    raised three files deep in the vendored search.
+    """
+    try:
+        from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+    except ImportError as error:
+        raise SearchEngineUnavailable(
+            "program optimization needs the search engine: "
+            "pip install 'openjiuwen[program-opt]' "
+            f"({error})"
+        ) from error
+    return PuctEngine
 
 
 def _counting(factory: Any, state: ProgramRunState) -> Any:

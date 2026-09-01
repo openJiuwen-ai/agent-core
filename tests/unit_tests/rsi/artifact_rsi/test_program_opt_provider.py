@@ -888,3 +888,37 @@ def test_importing_the_provider_does_not_require_the_search_engines_wheel() -> N
 
     assert completed.returncode == 0, completed.stderr[-2000:]
     assert completed.stdout.strip().splitlines()[-1] == "False"
+
+
+def test_a_missing_search_engine_names_the_extra_that_installs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`agentdescent` is an optional extra, so "not installed" is an ordinary
+    configuration fault. It deserves the sentence that fixes it, not a
+    `ModuleNotFoundError` raised three files deep in the vendored search."""
+    import sys
+
+    # Drop the cached modules that carry the import, then make the wheel
+    # unreachable -- `None` in `sys.modules` is what an absent package looks
+    # like to `import`.
+    for name in ("openjiuwen.rsi.artifact_rsi.program_opt.puct_engine",
+                 "openjiuwen.rsi.artifact_rsi.program_opt.search",
+                 "openjiuwen.rsi.artifact_rsi.program_opt.tree"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    # Every submodule, not just the package: `from agentdescent.aggregator
+    # import X` is served straight out of `sys.modules` when that entry is
+    # cached, and never looks at the parent. Blocking only the parent passes
+    # this test alone and does nothing once an earlier test has imported one.
+    for name in [name for name in sys.modules if name.split(".")[0] == "agentdescent"]:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "agentdescent", None)
+
+    provider = ProgramArtifactProvider(sandbox_backend="bwrap")
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+
+    result = asyncio.run(provider.run(request))
+
+    assert result.status == "failed"
+    assert result.error_code == "SEARCHENGINEUNAVAILABLE"
+    assert "openjiuwen[program-opt]" in (result.error_message or "")
