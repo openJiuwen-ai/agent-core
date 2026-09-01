@@ -90,6 +90,21 @@ class BuildContext:
             setattr(clone, key, value)
         return clone
 
+    def resolve_member_work_dir(self) -> Optional[str]:
+        """Return this member's isolated temporary working directory, if any.
+
+        Base implementation returns ``None`` (no platform work-directory
+        convention). Platforms that allocate a per-member work directory for
+        projectless team members override this; the agent configurator reads
+        it as the shell cwd for members without a project or worktree.
+
+        Returns:
+            The absolute per-member work directory path, or ``None`` when the
+            platform does not allocate one (members bound to a project, or a
+            base ``BuildContext`` with no platform convention).
+        """
+        return None
+
 
 # Process-wide factory that rebuilds a ``BuildContext`` from a serializable
 # seed. ``build_context`` is non-serializable and excluded from JSON, so a
