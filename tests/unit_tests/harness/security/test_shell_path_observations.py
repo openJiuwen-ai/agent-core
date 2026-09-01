@@ -409,3 +409,315 @@ def test_quoted_or_escaped_dynamic_characters_remain_static_paths(
     assert extract_shell_path_accesses(command, tmp_path) == [
         (tmp_path / relative_path, "exec")
     ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash ./$SCRIPT",
+        "bash ./*.sh",
+        "bash ./file?.sh",
+        "bash ./file[0].sh",
+        "bash ./{one,two}.sh",
+        'bash "./$SCRIPT/test.sh"',
+    ],
+)
+@pytest.mark.parametrize("force_fallback", [False, True])
+def test_unquoted_expansion_and_glob_operands_remain_unobserved(
+    command: str,
+    force_fallback: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if force_fallback:
+        monkeypatch.setattr(shell_ast, "_get_tree_sitter_bash_parser", lambda: None)
+
+    assert extract_shell_path_accesses(command, tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("command", "relative_path"),
+    [
+        ("bash './$literal/test.sh'", "$literal/test.sh"),
+        (r'''bash "./\$literal/test.sh"''', "$literal/test.sh"),
+        ("bash '~/test.sh'", "~/test.sh"),
+        (r"bash \~/test.sh", "~/test.sh"),
+        ("VAR=x bash ./test.sh", "test.sh"),
+        ("VAR=x timeout 5 bash ./test.sh && echo done", "test.sh"),
+    ],
+)
+@pytest.mark.parametrize("force_fallback", [False, True])
+@pytest.mark.asyncio
+async def test_static_shell_path_cannot_bypass_fileguard_exec_deny(
+    command: str,
+    relative_path: str,
+    force_fallback: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if force_fallback:
+        monkeypatch.setattr(shell_ast, "_get_tree_sitter_bash_parser", lambda: None)
+    denied = tmp_path / relative_path
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "defaults": {"*": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+                "paths": [
+                    {
+                        "path": str(denied),
+                        "read": "allow",
+                        "write": "allow",
+                        "exec": "deny",
+                    }
+                ],
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    result = await engine.check_permission(
+        "bash",
+        {"command": command},
+    )
+
+    assert result.permission == PermissionLevel.DENY
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("bash ~/test.sh", lambda cwd: Path.home() / "test.sh"),
+        ("bash ~+/test.sh", lambda cwd: cwd / "test.sh"),
+    ],
+)
+@pytest.mark.parametrize("force_fallback", [False, True])
+def test_unquoted_tilde_uses_shell_expansion_semantics(
+    command: str,
+    expected: Callable[[Path], Path],
+    force_fallback: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if force_fallback:
+        monkeypatch.setattr(shell_ast, "_get_tree_sitter_bash_parser", lambda: None)
+
+    assert extract_shell_path_accesses(command, tmp_path) == [
+        (expected(tmp_path), "exec")
+    ]
+
+
+@pytest.mark.parametrize("force_fallback", [False, True])
+def test_runtime_dependent_tilde_forms_remain_unobserved(
+    force_fallback: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if force_fallback:
+        monkeypatch.setattr(shell_ast, "_get_tree_sitter_bash_parser", lambda: None)
+
+    assert extract_shell_path_accesses("bash ~-/test.sh", tmp_path) == []
+    assert extract_shell_path_accesses("bash ~+1/test.sh", tmp_path) == []
+
+
+def test_symlinked_workdir_preserves_lexical_and_resolved_identities(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    real_directory = tmp_path / "real"
+    workspace.mkdir()
+    real_directory.mkdir()
+    (workspace / "linked").symlink_to(real_directory, target_is_directory=True)
+
+    accesses = extract_accesses_native(
+        "bash",
+        {"command": "bash test.sh", "workdir": "linked"},
+        workspace,
+    )
+
+    paths = {path.as_posix() for path, action, source in accesses if action == "exec" and source == "shlex"}
+    assert paths == {
+        (workspace / "linked" / "test.sh").as_posix(),
+        (real_directory / "test.sh").as_posix(),
+    }
+
+    read_paths = {
+        path.as_posix()
+        for path, action, source in extract_accesses_native(
+            "bash",
+            {"command": "cat report.csv", "workdir": "linked"},
+            workspace,
+        )
+        if action == "read" and source == "shlex"
+    }
+    assert read_paths == {
+        (workspace / "linked" / "report.csv").as_posix(),
+        (real_directory / "report.csv").as_posix(),
+    }
+
+
+def test_registered_tool_keeps_tool_arg_source(tmp_path: Path) -> None:
+    accesses = extract_accesses_native(
+        "read_file",
+        {"file_path": "notes.txt"},
+        tmp_path,
+    )
+
+    assert [(path.name, action, source) for path, action, source in accesses] == [
+        ("notes.txt", "read", "tool_arg")
+    ]
+
+
+def test_existing_path_outputs_are_not_globally_truncated(tmp_path: Path) -> None:
+    command = "cat " + " ".join(f"./file-{index}.txt" for index in range(80))
+
+    accesses = _accesses(command, tmp_path)
+
+    assert len(accesses) == 80
+    assert accesses[-1][0].name == "file-79.txt"
+
+
+@pytest.mark.asyncio
+async def test_sed_write_is_denied_by_existing_fileguard_contract(tmp_path: Path) -> None:
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "defaults": {"*": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+                "paths": [
+                    {
+                        "path": str(tmp_path / "test.sh"),
+                        "read": "allow",
+                        "write": "deny",
+                        "exec": "allow",
+                    }
+                ],
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("sys.platform", "linux")
+        result = await engine.check_permission(
+            "bash",
+            {"command": "sed -ni 's/x/y/' ./test.sh"},
+        )
+
+    assert result.permission == PermissionLevel.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true && printf ok > ./secret.txt",
+        "echo ok | cat > ./secret.txt",
+    ],
+)
+@pytest.mark.asyncio
+async def test_scoped_redirect_is_denied_by_fileguard(
+    command: str,
+    tmp_path: Path,
+) -> None:
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "defaults": {"*": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+                "paths": [
+                    {
+                        "path": str(tmp_path / "secret.txt"),
+                        "read": "allow",
+                        "write": "deny",
+                        "exec": "allow",
+                    }
+                ],
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    result = await engine.check_permission("bash", {"command": command})
+
+    assert result.permission == PermissionLevel.DENY
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "true && printf ok > ./secret.txt",
+        "echo ok | cat > ./secret.txt",
+    ],
+)
+@pytest.mark.asyncio
+async def test_fallback_scoped_redirect_is_denied_by_fileguard(
+    command: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shell_ast, "_get_tree_sitter_bash_parser", lambda: None)
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "defaults": {"*": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+                "paths": [
+                    {
+                        "path": str(tmp_path / "secret.txt"),
+                        "read": "allow",
+                        "write": "deny",
+                        "exec": "allow",
+                    }
+                ],
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    result = await engine.check_permission("bash", {"command": command})
+
+    assert result.permission == PermissionLevel.DENY
+
+
+@pytest.mark.asyncio
+async def test_unrelated_pipeline_does_not_suppress_sequential_cd(
+    tmp_path: Path,
+) -> None:
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "defaults": {"*": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+                "paths": [
+                    {
+                        "path": str(subdir / "secret.txt"),
+                        "read": "allow",
+                        "write": "deny",
+                        "exec": "allow",
+                    }
+                ],
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    result = await engine.check_permission(
+        "bash",
+        {
+            "command": (
+                "cd ./sub; echo ok | cat; printf ok > ./secret.txt"
+            )
+        },
+    )
+
+    assert result.permission == PermissionLevel.DENY
