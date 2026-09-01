@@ -10,11 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.harness.security.files import (
+from openjiuwen.harness.security.permission_engine.fileguard import (
     FileToolSpec,
     extract_accesses_native,
-    extract_path_aware_command_accesses,
-    extract_shell_path_accesses,
     lookup_file_tool_specs,
     register_file_tool,
 )
@@ -23,6 +21,8 @@ from openjiuwen.harness.security.permission_engine.fileguard.file_guard import F
 from openjiuwen.harness.security.permission_engine.fileguard import path_extract
 from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
     extract_accesses_native as canonical_extract_accesses_native,
+    extract_path_aware_command_accesses,
+    extract_shell_path_accesses,
 )
 from openjiuwen.harness.security.permission_engine.models import (
     PermissionLevel,
@@ -53,7 +53,7 @@ def test_public_permission_contracts_are_unchanged() -> None:
     ]
 
 
-def test_compatibility_exports_share_implementation_and_registry() -> None:
+def test_fileguard_exports_share_implementation_and_registry() -> None:
     assert extract_accesses_native is canonical_extract_accesses_native
     assert extract_accesses_native.__module__.endswith("fileguard.path_extract")
     assert tuple(inspect.signature(extract_accesses_native).parameters) == (
