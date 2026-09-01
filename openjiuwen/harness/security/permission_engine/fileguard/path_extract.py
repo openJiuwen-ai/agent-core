@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,12 @@ _PATH_AWARE_COMMANDS = frozenset({
     "remove-item", "ri", "new-item", "ni",
 })
 
+_INTERPRETER_BASENAMES = frozenset({
+    "python", "python3", "pythonw", "py",
+    "node", "nodejs", "bash", "sh", "dash", "zsh", "fish",
+    "pwsh", "powershell",
+})
+
 _WRITE_PATH_TOOLS = frozenset({
     "write_file", "edit_file", "write_text_file", "write", "search_replace",
 })
@@ -62,6 +69,7 @@ _FD_ALIAS_RE = re.compile(r"^&\d+$")
 _TRANSFER_CMDS = frozenset({"cp", "copy", "mv", "move"})
 _PLAIN_POSITIONAL_PATH_COMMANDS = frozenset({"cat", "type"})
 _CONTROL_CHARS = frozenset("();&|<>")
+_MAX_WRAPPER_DEPTH = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,12 +294,208 @@ def _path_aware_argv_accesses(
     return results, new_cwd
 
 
+def _timeout_inner(argv: tuple[str, ...]) -> tuple[str, ...] | None:
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            index += 1
+            break
+        if not token.startswith("-") or token == "-":
+            break
+        if token in {"-k", "--kill-after", "-s", "--signal"}:
+            if index + 1 >= len(argv):
+                return None
+            index += 2
+            continue
+        if token.startswith(("--kill-after=", "--signal=")) or token in {
+            "--foreground",
+            "--preserve-status",
+            "--verbose",
+        }:
+            index += 1
+            continue
+        return None
+    if index + 1 >= len(argv):
+        return None
+    return argv[index + 1 :]
+
+
+def _interpreter_script(argv: tuple[str, ...]) -> tuple[str, int] | None:
+    if len(argv) < 2:
+        return None
+    command = _basename_lower(argv[0])
+    index = 1
+    if argv[index] == "--":
+        index += 1
+    elif command in {"pwsh", "powershell"} and argv[index].lower() == "-file":
+        index += 1
+    elif argv[index].startswith("-"):
+        return None
+    if index >= len(argv) or not _is_static_operand(argv[index]):
+        return None
+    return argv[index], index
+
+
+def _sed_accesses(
+    argv: tuple[str, ...],
+    argv_syntax: tuple[_ShellArgSyntax, ...],
+    cwd: Path,
+    *,
+    command: str,
+) -> list[tuple[Path, FileAction]]:
+    dialect = _sed_dialect(command)
+    index = 1
+    in_place = False
+    expression_seen = False
+    program_files: list[tuple[str, _ShellArgSyntax]] = []
+    operands: list[tuple[str, _ShellArgSyntax]] = []
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            operands.extend(zip(argv[index + 1 :], argv_syntax[index + 1 :], strict=True))
+            break
+        if token in {"-e", "--expression"}:
+            if index + 1 >= len(argv):
+                return []
+            expression_seen = True
+            index += 2
+            continue
+        if token in {"-f", "--file"}:
+            if index + 1 >= len(argv):
+                return []
+            program_files.append((argv[index + 1], argv_syntax[index + 1]))
+            expression_seen = True
+            index += 2
+            continue
+        if token == "-i":
+            if dialect == "bsd":
+                if index + 1 >= len(argv):
+                    return []
+                index += 2
+            elif dialect == "gnu":
+                index += 1
+            else:
+                return []
+            in_place = True
+            continue
+        if token.startswith("-i"):
+            in_place = True
+            index += 1
+            continue
+        if token == "--in-place" or token.startswith("--in-place="):
+            if dialect != "gnu":
+                return []
+            in_place = True
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            option_body = token[1:]
+            if "i" in option_body and all(char in "Enrisuz" for char in option_body):
+                if dialect == "bsd" and option_body.endswith("i"):
+                    if index + 1 >= len(argv):
+                        return []
+                    index += 2
+                elif dialect == "gnu":
+                    index += 1
+                else:
+                    return []
+                in_place = True
+                continue
+            if all(char in "Enrsuz" for char in option_body):
+                index += 1
+                continue
+            return []
+        operands.append((token, argv_syntax[index]))
+        index += 1
+    if not expression_seen:
+        if not operands:
+            return []
+        operands = operands[1:]
+    accesses: list[tuple[Path, FileAction]] = []
+    for token, syntax in program_files:
+        accesses.extend(_observed_accesses(token, cwd, "read", syntax=syntax))
+    for token, syntax in operands:
+        accesses.extend(_observed_accesses(token, cwd, "read", syntax=syntax))
+        if in_place:
+            accesses.extend(_observed_accesses(token, cwd, "write", syntax=syntax))
+    return accesses
+
+
+def _sed_dialect(command: str) -> str:
+    if command == "gsed" or sys.platform.startswith("linux"):
+        return "gnu"
+    if sys.platform == "darwin" or "bsd" in sys.platform:
+        return "bsd"
+    return "unknown"
+
+
+def _observe_timeout(
+    argv: tuple[str, ...],
+    argv_syntax: tuple[_ShellArgSyntax, ...],
+    cwd: Path,
+    depth: int,
+) -> list[tuple[Path, FileAction]]:
+    if os.name == "nt" or depth >= _MAX_WRAPPER_DEPTH:
+        return []
+    inner = _timeout_inner(argv)
+    if inner is None:
+        return []
+    start = len(argv) - len(inner)
+    return _observe_command_argv(
+        inner,
+        argv_syntax[start:],
+        cwd,
+        depth=depth + 1,
+    )
+
+
+def _observe_interpreter(
+    argv: tuple[str, ...],
+    argv_syntax: tuple[_ShellArgSyntax, ...],
+    cwd: Path,
+    _depth: int,
+) -> list[tuple[Path, FileAction]]:
+    script = _interpreter_script(argv)
+    if script is None:
+        return []
+    token, index = script
+    return _observed_accesses(
+        token,
+        cwd,
+        "exec",
+        syntax=argv_syntax[index],
+    )
+
+
+def _observe_sed(
+    argv: tuple[str, ...],
+    argv_syntax: tuple[_ShellArgSyntax, ...],
+    cwd: Path,
+    _depth: int,
+) -> list[tuple[Path, FileAction]]:
+    if os.name == "nt":
+        return []
+    return _sed_accesses(
+        argv,
+        argv_syntax,
+        cwd,
+        command=_basename_lower(argv[0]),
+    )
+
+
 _CommandObserver = Callable[
     [tuple[str, ...], tuple[_ShellArgSyntax, ...], Path, int],
     list[tuple[Path, FileAction]],
 ]
 
-_COMMAND_OBSERVERS: dict[str, _CommandObserver] = {}
+_COMMAND_OBSERVERS: dict[str, _CommandObserver] = {
+    "timeout": _observe_timeout,
+    "gtimeout": _observe_timeout,
+    "sed": _observe_sed,
+    "gsed": _observe_sed,
+    **{name: _observe_interpreter for name in _INTERPRETER_BASENAMES},
+}
 
 
 def _observe_command_argv(
@@ -530,19 +734,17 @@ def extract_accesses_native(
 
     if tool_name in ("mcp_exec_command", "bash", "powershell", "core.powershell", "create_terminal"):
         workdir = tool_args.get("workdir", "")
+        if not workdir and tool_name == "bash":
+            workdir = tool_args.get("cwd", "")
         try:
-            workdir_resolved = (workspace / str(workdir)).resolve() if workdir else workspace
-        except (OSError, RuntimeError):
+            workspace_lexical = _lexical_absolute(workspace, Path.cwd())
+            workdir_resolved = (
+                _lexical_absolute(str(workdir), workspace_lexical)
+                if workdir
+                else workspace_lexical
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
             workdir_resolved = workspace
-        # workdir 若已是绝对路径
-        raw_wd = tool_args.get("workdir")
-        if isinstance(raw_wd, str) and raw_wd.strip():
-            try:
-                wd_p = Path(raw_wd)
-                if wd_p.is_absolute():
-                    workdir_resolved = wd_p.resolve()
-            except (OSError, RuntimeError):
-                pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         for p, act in extract_shell_path_accesses(cmd, workdir_resolved):
             out.append((p, act, "shlex"))
