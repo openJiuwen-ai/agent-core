@@ -721,3 +721,136 @@ async def test_unrelated_pipeline_does_not_suppress_sequential_cd(
     )
 
     assert result.permission == PermissionLevel.DENY
+
+
+def test_failed_sequential_cd_preserves_original_redirect_identity(
+    tmp_path: Path,
+) -> None:
+    accesses = _accesses(
+        "cd ./missing; printf ok > ./secret.txt",
+        tmp_path,
+    )
+
+    write_paths = {
+        path.as_posix()
+        for path, action, source in accesses
+        if action == "write" and source == "shlex"
+    }
+    assert (tmp_path / "secret.txt").as_posix() in write_paths
+    assert (tmp_path / "missing" / "secret.txt").as_posix() in write_paths
+
+
+@pytest.mark.parametrize("operator", [";", "&&", "||"])
+def test_sequential_cd_keeps_old_and_new_interpreter_identities(
+    operator: str,
+    tmp_path: Path,
+) -> None:
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+
+    accesses = _accesses(f"cd ./sub {operator} bash ./test.sh", tmp_path)
+
+    exec_paths = {
+        path.as_posix()
+        for path, action, source in accesses
+        if action == "exec" and source == "shlex"
+    }
+    assert exec_paths == {
+        (tmp_path / "test.sh").as_posix(),
+        (subdir / "test.sh").as_posix(),
+    }
+
+
+def test_pipeline_cd_does_not_change_parent_shell_identity(tmp_path: Path) -> None:
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+
+    accesses = _accesses("cd ./sub | cat; bash ./test.sh", tmp_path)
+
+    exec_paths = {
+        path.as_posix()
+        for path, action, source in accesses
+        if action == "exec" and source == "shlex"
+    }
+    assert exec_paths == {(tmp_path / "test.sh").as_posix()}
+
+
+def test_cd_preserves_lexical_and_resolved_cwd_identities(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    real_directory = tmp_path / "real"
+    workspace.mkdir()
+    real_directory.mkdir()
+    (workspace / "linked").symlink_to(real_directory, target_is_directory=True)
+
+    accesses = extract_accesses_native(
+        "bash",
+        {"command": "cd .; cat report.csv", "workdir": "linked"},
+        workspace,
+    )
+
+    read_paths = {
+        path.as_posix()
+        for path, action, source in accesses
+        if path.name == "report.csv" and action == "read" and source == "shlex"
+    }
+    assert read_paths == {
+        (workspace / "linked" / "report.csv").as_posix(),
+        (real_directory / "report.csv").as_posix(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_cd_cannot_bypass_original_cwd_fileguard(tmp_path: Path) -> None:
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "defaults": {"*": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+                "paths": [
+                    {
+                        "path": str(tmp_path / "secret.txt"),
+                        "read": "allow",
+                        "write": "deny",
+                        "exec": "allow",
+                    }
+                ],
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    result = await engine.check_permission(
+        "bash",
+        {"command": "cd ./missing; printf ok > ./secret.txt"},
+    )
+
+    assert result.permission == PermissionLevel.DENY
+
+
+@pytest.mark.asyncio
+async def test_interpreter_script_is_denied_by_existing_fileguard_contract(tmp_path: Path) -> None:
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "defaults": {"*": "allow"},
+            "file_guard": {
+                "enabled": True,
+                "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+                "paths": [
+                    {
+                        "path": str(tmp_path / "test.sh"),
+                        "read": "allow",
+                        "write": "allow",
+                        "exec": "deny",
+                    }
+                ],
+            },
+        },
+        workspace_root=tmp_path,
+    )
+
+    result = await engine.check_permission("bash", {"command": "bash ./test.sh"})
+
+    assert result.permission == PermissionLevel.DENY
