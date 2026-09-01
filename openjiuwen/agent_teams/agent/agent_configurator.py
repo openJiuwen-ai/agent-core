@@ -486,9 +486,26 @@ class AgentConfigurator:
         # declaration); cwd is where shell runs and relative paths resolve. Team
         # isolation moves cwd into the worktree without dragging the workspace
         # along -- otherwise the member's artifacts and its Skill grants would
-        # live inside an ephemeral checkout and vanish with it.
-        member_cwd = ctx.worktree_path or agent_spec.cwd or None
-        member_project_root = agent_spec.project_root or agent_spec.cwd or None
+        # live inside an ephemeral checkout and vanish with it. A projectless
+        # team member (no project, no worktree) instead runs in its own
+        # isolated ``work/<member>/`` under the shared artifact root, so its
+        # intermediate files stay per-member instead of piling up together.
+        worktree_path = ctx.worktree_path
+        project_root_or_cwd = agent_spec.project_root or agent_spec.cwd or None
+        if worktree_path:
+            member_cwd = worktree_path
+        elif project_root_or_cwd:
+            member_cwd = project_root_or_cwd
+        elif spec.build_context is not None:
+            # No project and no worktree: the platform may allocate a per-member
+            # work directory. Derive a member view (so the per-team root and the
+            # member name combine) and ask the platform for the work dir.
+            member_cwd = spec.build_context.derive(
+                member_name=ctx.member_name,
+            ).resolve_member_work_dir()
+        else:
+            member_cwd = None
+        member_project_root = project_root_or_cwd
 
         workspace_root_path = ws_spec.root_path if ws_spec is not None else None
         # The workspace is now always the member's own directory (never the
@@ -542,7 +559,11 @@ class AgentConfigurator:
         # context (platform-filled for projectless members, None for members
         # bound to a project). Surfaced to the team info body by the policy
         # rail only when set, so members with a project keep the bullet off.
-        team_outputs_dir: str | None = ctx.team_outputs_dir
+        team_outputs_dir: str | None = (
+            spec.build_context.team_outputs_dir
+            if spec.build_context is not None
+            else None
+        )
 
         # Decide which team rails this member gets, as declarative RailSpecs.
         # Live handles ride on the build context's extras (injected below); only

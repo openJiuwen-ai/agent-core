@@ -18,6 +18,7 @@
 ### 管什么
 
 - 无 project_dir 的团队成员共享一个最终产物目录 `team-workspace/artifacts/<YYYY-MM-DD>/chat-<n>/outputs/`。
+- 无 project_dir 的成员各自的临时工作目录 `.../chat-<n>/work/<member_slug>/`（cwd，临时文件 per-member 隔离）。
 - 该目录的版本（git auto-commit、history 查询）：outputs 在 team-workspace git 仓库范围内，auto_commit 生效。
 - 该目录下文件的写锁（in-memory，按文件路径粒度，带 timeout）。
 - 团队信息块告知模型该目录的绝对路径（仅无 project_dir 时注入）。
@@ -45,26 +46,32 @@
         └── chat-<n>/                      # 全 team 共享一个 chat-n（按 session 复用）
             ├── metadata.json              # chat_id/session_id/title（原 query）
             ├── .session_id                # 分配碰撞探针
-            └── outputs/                  # 最终产物（成员靠文件名区分）
+            ├── work/                      # per-member 临时工作目录
+            │   └── <member_slug>/         # 每个成员的 cwd（临时文件隔离）
+            └── outputs/                  # 共享最终产物（成员靠文件名区分）
 ```
 
 - **chat-n 复用**：同一 team session_id 的所有成员共享同一 chat-n 目录（registry 在
   `artifacts/.team_artifacts/<safe_session>.json`，记录 `root_dir`）。
-- **只建 outputs，不建 work**：cwd 留 member workspace；prompt 的「临时工作目录」= member workspace。
+- **outputs 共享、work per-member**：outputs 全 team 共享一个、靠文件名区分；work 按成员 slug 隔离，
+  临时文件不散落在一起。member 的 cwd = `work/<member_slug>/`（无 project_dir 时）。
 - **按天布局**：复用单 agent projectless 的 `_allocate_task_root` 思路（`<date>/chat-<n>/`），
-  根植于 team-workspace（平台侧 `jiuwenswarm/common/team_artifacts.py`）。
+  根植于 team-workspace（平台侧 `jiuwenswarm/common/team_artifacts.py`，`resolve_member_work_dir`）。
 
 ## 注入路径（BuildContext → 提示词 → rail）
 
 - `BuildContext.team_outputs_dir`（基类字段，平台填充）：无 project_dir 时 =
   `team-workspace/artifacts/<date>/chat-<n>/outputs`；有 project_dir = None。
+- `BuildContext.resolve_member_work_dir()`（基类方法，平台覆盖）：无 project_dir 时 =
+  `team-workspace/artifacts/<date>/chat-<n>/work/<member_slug>/`；基类返回 None。per-member，不入 seed。
 - `SwarmBuildContext.task_workspace_root`（per-team，seed 序列化）：产物根（chat-n 目录）。
-  `task_work_dir`（per-member = member workspace）不入 seed，在 rail 从 `member_workspace_root` 解析。
-- `agent_configurator`：`team_outputs_dir = ctx.team_outputs_dir` → 传 `TEAM_POLICY` RailSpec.params。
+- `agent_configurator`：`team_outputs_dir = spec.build_context.team_outputs_dir` → 传 `TEAM_POLICY`
+  RailSpec.params；`member_cwd = worktree > project > resolve_member_work_dir()`（无 project_dir 无 worktree
+  时 cwd 移到 `work/<member>/`，临时文件 per-member 隔离）。
 - `TeamPolicyRail` → `TeamContextTracker(team_outputs_dir=...)` → `build_team_info_text(team_outputs_dir=...)`。
-- `member_rails._build_runtime_prompt_rail`：无 project_dir 时 `set_runtime_paths(task_workspace_root=...,
-  task_work_dir=member_workspace_root, task_outputs_dir=...)` → `RuntimePromptRail` 走
-  `has_projectless_task=True` 分支（PR 5702 已有，team 适配只负责传参）。
+- `member_rails._build_runtime_prompt_rail`：无 project_dir 时 `resolve_member_work_dir()` 得 work_dir，
+  `set_runtime_paths(cwd=work_dir, task_workspace_root=..., task_work_dir=work_dir, task_outputs_dir=...)`
+  → `RuntimePromptRail` 走 `has_projectless_task=True` 分支（PR 5702 已有，team 适配只负责传参）。
 - `TeamWorkspaceRail(outputs_dir=...)`：拦 outputs 绝对路径 write，lock + auto_commit + publish。
 
 ## 锁与版本控制

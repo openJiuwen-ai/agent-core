@@ -30,10 +30,12 @@ outputs 在 team-workspace git 仓库范围内 → auto_commit / history 工作�
 ## 决策（用户裁决）
 
 1. **产物不进 Documents/outputs**：那是单会话的。移到 `team-workspace/artifacts/<date>/chat-<n>/outputs/`。
-2. **不要 work/ 子目录**：cwd 留 member workspace（做法 A），不引入 work；prompt 的「临时工作目录」
-   指向 member workspace（per-member，在 rail 解析），最终产物指向共享 outputs。
-3. **member_name 不加**：全 team 共享一个 chat-n，靠文件名区分。
-4. **有 project_dir** → 不建 outputs，产物写项目内，走 else 分支（对齐单 agent）。
+2. **引入 per-member work/ 子目录**：无 project_dir 的 member 的 cwd 移到
+   `team-workspace/artifacts/<date>/chat-<n>/work/<member_slug>/`，临时文件 per-member 隔离、不散落在一起；
+   prompt 的「临时工作目录」指向该 work 目录，最终产物指向共享 outputs。（最初方案 A 不建 work，
+   后改为带 work 以隔离临时文件。）
+3. **outputs 共享、work 隔离**：outputs 全 team 共享一个 chat-n、靠文件名区分；work per-member。
+4. **有 project_dir** → 不建 outputs/work，产物写项目内，走 else 分支（对齐单 agent）。
 5. **`.team` 路由全去掉**：symlink mount、相对路径提示词、TeamWorkspaceRail 的 `.team/` 前缀拦截。
 6. **TeamWorkspaceRail 锁改拦 outputs** 绝对前缀；auto_commit/publish 走 outputs。
 7. team-workspace 保持纯配置/内部数据目录（prompts/team.yaml/trajectories/skills-visibility/artifacts）。
@@ -44,21 +46,23 @@ outputs 在 team-workspace git 仓库范围内 → auto_commit / history 工作�
 assembly.enrich_team_spec_for_swarm
   └─ 无 project_dir → get_team_artifact_workspace(team_ws_root, session_id)
         → task_workspace_root / team_outputs_dir  ← per-team，塞进 SwarmBuildContext
-              (task_work_dir = member workspace，per-member，在 rail 解析，不入 seed)
 SwarmBuildContext.to_seed → 跨序列化边界（spawned teammate / distributed remote）
   └─ from_seed 重建 context（team_outputs_dir 走基类 BuildContext 字段）
 agent_configurator
-  └─ team_outputs_dir = ctx.team_outputs_dir → 传给 TEAM_POLICY RailSpec.params
+  └─ team_outputs_dir = spec.build_context.team_outputs_dir → 传给 TEAM_POLICY RailSpec.params
+  └─ member_cwd：worktree > project > resolve_member_work_dir()（无 project_dir 无 worktree 时
+     cwd 移到 work/<member>/，临时文件 per-member 隔离）
 elements.build_team_policy_rail
   └─ TeamPolicyInput.team_outputs_dir → TeamPolicyRail(team_outputs_dir=...)
         └─ TeamContextTracker(team_outputs_dir=...)
               └─ build_team_info_text(team_outputs_dir=...) → 团队信息块「最终产物目录」bullet（仅无 project_dir）
 member_rails._build_runtime_prompt_rail
-  └─ RuntimePromptInput.team_outputs_dir → rail.set_runtime_paths(task_outputs_dir=...)
-        → RuntimePromptRail has_projectless_task=True 分支：三段路径 + 产物放 outputs
+  └─ RuntimePromptInput.team_outputs_dir → resolve_member_work_dir(task_workspace_root, member_name)
+        → set_runtime_paths(cwd=work_dir, task_work_dir=work_dir, task_outputs_dir=...)
+        → RuntimePromptRail has_projectless_task=True 分支：三段路径（root/work<member>/outputs）+ 产物放 outputs
 member_rails._build_team_workspace_report_path_rail
   └─ TeamWorkspaceReportPathInput.team_outputs_dir → rail(outputs_dir=...)
-        → 提示：team-workspace 标配置目录、无 project_dir 产物指 outputs、有 project_dir 产物留项目
+        → 提示：team-workspace 标配置目录、无 project_dir 产物指 outputs、中间文件留 cwd（work/<member>/）
 elements.build_team_workspace_rail
   └─ TeamWorkspaceInput.team_outputs_dir → TeamWorkspaceRail(outputs_dir=...)
         → 拦 outputs 绝对路径 write：lock + auto_commit + publish
@@ -70,8 +74,8 @@ elements.build_team_workspace_rail
 |---|---|---|
 | member 内部数据 | memory/skills/todo/IDENTITY | `~/.jiuwenswarm/.agent_teams/<t>/workspaces/<member>_workspace`（不动） |
 | team 配置/内部数据 | prompts/team.yaml/trajectories/skills-visibility | `~/.jiuwenswarm/.agent_teams/<t>/team-workspace`（不动，绝对路径访问） |
-| member cwd | bash 执行、临时文件 | 无 project_dir：member workspace（不动）；有 project_dir：worktree 副本 |
-| member 产物 | 最终交付物 | **无 project_dir：`team-workspace/artifacts/<date>/chat-<n>/outputs/`（新）**；有 project_dir：project 内（不建 outputs） |
+| member cwd | bash 执行、临时文件 | 无 project_dir：`team-workspace/artifacts/<date>/chat-<n>/work/<member>/`（per-member 隔离，新）；有 project_dir：worktree 副本 |
+| member 产物 | 最终交付物 | **无 project_dir：`team-workspace/artifacts/<date>/chat-<n>/outputs/`（全 team 共享，新）**；有 project_dir：project 内（不建 outputs） |
 
 ## 提示词变更（22 处）
 
