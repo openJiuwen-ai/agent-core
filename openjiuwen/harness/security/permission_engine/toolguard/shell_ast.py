@@ -281,7 +281,9 @@ def _lex_shell_words(text: str) -> tuple[_ShellLexeme, ...] | None:
         raw_word.append(char)
         word_started = True
         index += 1
-    if escaped or single_quoted or double_quoted or not flush_word():
+    if escaped or single_quoted or double_quoted:
+        return None
+    if not flush_word():
         return None
     return tuple(lexemes)
 
@@ -592,13 +594,11 @@ def _normalized_argv_for_command(
     node: Any,
     source: bytes,
 ) -> tuple[tuple[str, _ShellArgSyntax], ...] | None:
-    raw_argv = tuple(
-        _node_text(child, source)
-        for index, child in enumerate(getattr(node, "children", []))
-        if child is not None
-        and getattr(node, "field_name_for_child", lambda _index: None)(index)
-        in {"name", "argument"}
-    )
+    raw_argv: list[str] = []
+    field_name_for_child = getattr(node, "field_name_for_child", lambda _index: None)
+    for index, child in enumerate(getattr(node, "children", [])):
+        if child is not None and field_name_for_child(index) in {"name", "argument"}:
+            raw_argv.append(_node_text(child, source))
     normalized: list[tuple[str, _ShellArgSyntax]] = []
     for raw in raw_argv:
         word = _normalize_shell_word(raw)

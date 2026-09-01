@@ -318,7 +318,8 @@ def _timeout_inner(argv: tuple[str, ...]) -> tuple[str, ...] | None:
         return None
     if index + 1 >= len(argv):
         return None
-    return argv[index + 1 :]
+    inner_command_start = index + 1
+    return argv[inner_command_start:]
 
 
 def _interpreter_script(argv: tuple[str, ...]) -> tuple[str, int] | None:
@@ -353,7 +354,8 @@ def _sed_accesses(
     while index < len(argv):
         token = argv[index]
         if token == "--":
-            operands.extend(zip(argv[index + 1 :], argv_syntax[index + 1 :], strict=True))
+            operand_start = index + 1
+            operands.extend(zip(argv[operand_start:], argv_syntax[operand_start:], strict=True))
             break
         if token in {"-e", "--expression"}:
             if index + 1 >= len(argv):
@@ -588,11 +590,11 @@ def _normalize_shell_subcommands(command: str) -> tuple[_NormalizedShellSubcomma
     if parsed.kind == "simple" and parsed.subcommands:
         normalized: list[_NormalizedShellSubcommand] = []
         for index, subcommand in enumerate(parsed.subcommands):
-            redirects = tuple(
-                redirect
-                for raw_redirect in subcommand.redirects
-                if (redirect := _normalize_redirect_text(raw_redirect)) is not None
-            )
+            normalized_redirects: list[tuple[str, FileAction, _ShellArgSyntax]] = []
+            for raw_redirect in subcommand.redirects:
+                redirect = _normalize_redirect_text(raw_redirect)
+                if redirect is not None:
+                    normalized_redirects.append(redirect)
             normalized.append(
                 _NormalizedShellSubcommand(
                     argv=subcommand.argv,
@@ -606,7 +608,7 @@ def _normalize_shell_subcommands(command: str) -> tuple[_NormalizedShellSubcomma
                             for _ in subcommand.argv
                         )
                     ),
-                    redirects=redirects,
+                    redirects=tuple(normalized_redirects),
                     parent_operators=subcommand.parent_operators,
                 )
             )
