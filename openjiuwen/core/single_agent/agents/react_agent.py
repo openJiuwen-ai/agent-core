@@ -1089,11 +1089,12 @@ class ReActAgent(BaseAgent):
     ) -> dict:
         """Build the final ContextWindow inputs after model-call rails run.
 
-        Prompt attachments are persisted in conversation order: the first
-        snapshot is synchronized before the first user message, and later
-        changes are synchronized immediately before the model call.  They are
-        intentionally left in ``context_messages``; no final-window mutator
-        moves them into ``system_messages``.
+        Prompt attachments are persisted as marked ``UserMessage`` entries in
+        conversation order: the first snapshot is synchronized before the
+        first user message, and later changes are synchronized immediately
+        before the model call.  The active model provider may replace those
+        marked entries in place with ``SystemMessage`` through a call-level
+        mutator; ordinary user messages remain in ``context_messages``.
         """
         return {
             "system_messages": final_system,
@@ -1499,11 +1500,27 @@ class ReActAgent(BaseAgent):
             self._config.kv_cache_affinity_config,
         )
 
-        context_window = await ctx.context.get_context_window(
-            **self._build_context_window_kwargs(
-                ctx,
-                final_system,
+        context_window_kwargs = self._build_context_window_kwargs(
+            ctx,
+            final_system,
+        )
+        attachment_manager = getattr(self, "prompt_attachment_manager", None)
+        build_window_mutator = getattr(attachment_manager, "build_model_window_mutator", None)
+        if callable(build_window_mutator):
+            attachment_session_id = (
+                ctx.session.get_session_id()
+                if ctx.session is not None
+                else ctx.context.session_id()
             )
+            context_window_kwargs["window_mutators"] = [
+                build_window_mutator(
+                    session_id=attachment_session_id,
+                    model_client_config=getattr(llm, "model_client_config", None),
+                )
+            ]
+
+        context_window = await ctx.context.get_context_window(
+            **context_window_kwargs
         )
         # Update ctx.inputs: after_model_call hooks inspect these to see
         # what was actually sent. (LLM call uses them too, but could

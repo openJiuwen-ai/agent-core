@@ -1,40 +1,31 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Recursive self-improvement for standalone Expert Harnesses."""
 
-from openjiuwen.rsi.artifact_rsi import (
-    ArtifactEngineRequest,
-    ArtifactProvider,
-    PaperArtifactProvider,
-    ProgramArtifactProvider,
-    build_request,
-    validate_artifact_task_request,
+from openjiuwen.rsi.harness_rsi.auto_harness import (
+    AutoHarnessConfig,
+    AutoHarnessOrchestrator,
+    create_auto_harness_orchestrator,
 )
-from openjiuwen.rsi.events import (
-    EngineEvent,
-    EngineEventSink,
-    EventNode,
-    EventProgress,
-    EventStatus,
-    OnEvent,
-    emit,
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import (
+    TaskContext,
+    TaskRuntime,
 )
-from openjiuwen.rsi.schema import (
-    ArtifactRef,
-    ArtifactType,
-    ArtifactValidationResult,
-    EngineReport,
-    EngineResult,
-    EngineState,
-    RsiChange,
-    RsiScenario,
-    RsiStatus,
-    RsiTaskCreateRequest,
-    RsiTaskEnvelope,
-    RsiTreeNode,
-    RsiUsage,
-    RsiUsageTokens,
-    TreeResponse,
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.git_auth import build_git_auth_env
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
+    EXTENDED_EVOLVE_PIPELINE,
+    META_EVOLVE_PIPELINE,
 )
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline import (
+    ExtensionTaskPipeline,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
+    ExtensionDesign,
+    OptimizationTask,
+    RuntimeExtensionArtifact,
+    StageResult,
+    load_auto_harness_config,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.activate import ExtendActivateStage
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
@@ -67,22 +58,17 @@ from openjiuwen.rsi.harness_rsi.single_harness import (
 )
 
 __all__ = [
+    "EXTENDED_EVOLVE_PIPELINE",
+    "META_EVOLVE_PIPELINE",
     "ActionDefinition",
-    "ArtifactEngineRequest",
-    "ArtifactProvider",
-    "ArtifactRef",
-    "ArtifactType",
-    "ArtifactValidationResult",
     "AutoCoordinatingHarnessConfig",
+    # Downstream-facing AutoHarness exports (JiuwenSwarm and other integrators).
+    "AutoHarnessConfig",
+    "AutoHarnessOrchestrator",
     "CaseMapping",
     "DataLoader",
     "DataLoaderConfig",
     "DatasetArtifact",
-    "EngineEvent",
-    "EngineEventSink",
-    "EngineReport",
-    "EngineResult",
-    "EngineState",
     "EvaluationCaseTraceRef",
     "EvaluationResultAnalysisArtifact",
     "EvaluationResultAnalysisInvocation",
@@ -90,31 +76,24 @@ __all__ = [
     "EvaluationResultAnalyzer",
     "EvaluationResultAnalyzerConfig",
     "EvaluatorConfig",
-    "EventNode",
-    "EventProgress",
-    "EventStatus",
+    "ExtendActivateStage",
+    "ExtensionDesign",
+    "ExtensionTaskPipeline",
     "IterativeSingleHarnessRequest",
     "IterativeSingleHarnessResult",
     "MemberOptimizer",
     "MemberOptimizerConfig",
     "ModelConfigs",
-    "OnEvent",
+    "OptimizationTask",
     "OrchestratorSchedulingConfig",
-    "PaperArtifactProvider",
-    "ProgramArtifactProvider",
-    "RsiChange",
-    "RsiScenario",
-    "RsiStatus",
-    "RsiTaskCreateRequest",
-    "RsiTaskEnvelope",
-    "RsiTreeNode",
-    "RsiUsage",
-    "RsiUsageTokens",
+    "RuntimeExtensionArtifact",
     "SingleHarnessIterativeOptimizationOrchestrator",
+    "StageResult",
+    "TaskContext",
+    "TaskRuntime",
     "TeamEvaluator",
     "TeamIssue",
-    "TreeResponse",
-    "build_request",
-    "emit",
-    "validate_artifact_task_request",
+    "build_git_auth_env",
+    "create_auto_harness_orchestrator",
+    "load_auto_harness_config",
 ]

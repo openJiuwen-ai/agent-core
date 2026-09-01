@@ -327,7 +327,7 @@ class SkillTool(Tool):
         language: str = "cn",
         agent_id: Optional[str] = None,
         multimodal_skill_mode: str = "hint",
-        enable_read_image_multimodal: bool = True,
+        enable_read_image_multimodal: bool | Callable[[], bool] = True,
     ):
         """Initialize SkillTool.
 
@@ -345,7 +345,21 @@ class SkillTool(Tool):
         self.get_skills = get_skills
         self.language = language
         self.multimodal_skill_mode = multimodal_skill_mode
-        self.enable_read_image_multimodal = enable_read_image_multimodal
+        self._enable_read_image_multimodal = enable_read_image_multimodal
+
+    @property
+    def enable_read_image_multimodal(self) -> bool:
+        """Return the current native-image policy used by skill hints."""
+        if callable(self._enable_read_image_multimodal):
+            return bool(self._enable_read_image_multimodal())
+        return self._enable_read_image_multimodal
+
+    @enable_read_image_multimodal.setter
+    def enable_read_image_multimodal(
+        self,
+        value: bool | Callable[[], bool],
+    ) -> None:
+        self._enable_read_image_multimodal = value
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         """Invoke skill_tool tool."""

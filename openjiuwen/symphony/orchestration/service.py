@@ -30,7 +30,7 @@ from openjiuwen.symphony.orchestration.contracts import (
     OrchestrationPlan,
     OrchestrationProgress,
 )
-from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
+from openjiuwen.symphony.orchestration.planned_graph import build_planned_graph
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.candidates import CandidateGenerator
 from openjiuwen.symphony.orchestration.graph.matcher.cache import (
@@ -259,7 +259,7 @@ class OrchestrationService:
         if planning_mode not in {"fast", "beam"}:
             raise ValueError(f"Unsupported orchestration mode: {planning_mode}")
         normalized_language = resolve_orchestration_language(language)
-        selected, summary = _input_candidate_summary(candidate_ids, artifacts.skills)
+        selected, _summary = _input_candidate_summary(candidate_ids, artifacts.skills)
         effective_overlay = dynamic_overlay if self.config.dynamic_graph_enabled and dynamic_overlay else {}
         planner: Any
         if planning_mode == "beam":
@@ -286,14 +286,12 @@ class OrchestrationService:
                 dynamic_overlay=effective_overlay,
             )
         result = await planner.plan(query)
-        result["language"] = normalized_language
+        if result.get("success") is False:
+            detail = str(result.get("detail") or "Symphony planner failed to produce a valid plan.").strip()
+            raise ValueError(f"Symphony planning failed: {detail}")
         result["plan_id"] = str(uuid4())
-        result["graph_artifact_root"] = str(self.graph_artifact_root)
-        result["dynamic_graph_enabled"] = self.config.dynamic_graph_enabled
-        result["capability_retrieval"] = summary
-        result["execution_graph"] = build_execution_graph(result, artifacts)
-        public_result = OrchestrationPlan(_generalize_public_fields(result))
-        await _emit(callback, "plan_completed", plan_id=public_result["plan_id"])
+        public_result = OrchestrationPlan({"planned_graph": build_planned_graph(result, artifacts)})
+        await _emit(callback, "plan_completed", plan_id=result["plan_id"])
         return public_result
 
     async def _construct_graph_payload(
@@ -528,42 +526,6 @@ def _input_candidate_summary(
         "candidate_count": len(selected),
         "fallback_reason": fallback_reason,
     }
-
-
-def _generalize_public_fields(value: Any) -> Any:
-    key_mapping = {
-        "skill_id": "capability_id",
-        "skill_ids": "capability_ids",
-        "candidate_skill_ids": "candidate_ids",
-        "candidate_skill_count": "candidate_count",
-    }
-    scalar_id_fields = {"id", "skill_id", "capability_id", "source", "target", "source_id", "target_id"}
-    sequence_id_fields = {"skill_ids", "capability_ids", "candidate_skill_ids", "candidate_ids"}
-    if isinstance(value, dict):
-        output: dict[str, Any] = {}
-        for key, item in value.items():
-            public_key = key_mapping.get(key, key)
-            if key in scalar_id_fields and isinstance(item, str):
-                output[public_key] = _normalize_capability_id(item)
-            elif key in sequence_id_fields and isinstance(item, (list, tuple)):
-                output[public_key] = [
-                    _normalize_capability_id(element)
-                    if isinstance(element, str)
-                    else _generalize_public_fields(element)
-                    for element in item
-                ]
-            else:
-                output[public_key] = _generalize_public_fields(item)
-        return output
-    if isinstance(value, list):
-        return [_generalize_public_fields(item) for item in value]
-    if isinstance(value, tuple):
-        return [_generalize_public_fields(item) for item in value]
-    return value
-
-
-def _normalize_capability_id(value: str) -> str:
-    return value.removeprefix("skill:").removeprefix("capability:")
 
 
 def _resolve_progress_callback(

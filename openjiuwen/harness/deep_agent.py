@@ -1179,12 +1179,12 @@ class DeepAgent(BaseAgent):
             self.ability_manager.add(mcp_config)
 
     async def _resolve_read_image_multimodal(self) -> None:
-        """Resolve read_file image modality when it is set to auto.
+        """Warm the native-image capability decision when it is set to auto.
 
         A probe costs a full LLM round-trip, so it never blocks startup: a
-        cached verdict is applied straight away, otherwise the probe runs in the
-        background and this run stays metadata-only (``None`` is falsy at every
-        read site). Later agents on the same endpoint and model reuse the cache.
+        cached verdict is consumed dynamically by image-input call sites;
+        otherwise the probe runs in the background. The config remains ``None``
+        so auto mode follows later probe completion and main-model changes.
         """
         config = self._deep_config
         if config is None or config.enable_read_image_multimodal is not None:
@@ -1192,14 +1192,12 @@ class DeepAgent(BaseAgent):
 
         if config.model is None:
             logger.debug(
-                "[DeepAgent] no model configured; disabling read_file image multimodal",
+                "[DeepAgent] no model configured; native image input remains unavailable",
             )
-            config.enable_read_image_multimodal = False
             return
 
         cached = get_cached_image_support(config.model)
         if cached is not None:
-            config.enable_read_image_multimodal = cached
             logger.info(
                 "[DeepAgent] read_file image multimodal from probe cache: %s",
                 cached,
@@ -1208,7 +1206,7 @@ class DeepAgent(BaseAgent):
 
         logger.info(
             "[DeepAgent] read_file image multimodal not probed yet; "
-            "probing in background and degrading to metadata-only for this run",
+            "probing in background and using metadata-only until resolved",
         )
         schedule_image_support_probe(config.model)
 
@@ -1542,7 +1540,7 @@ class DeepAgent(BaseAgent):
                     )
                     factory_kwargs.setdefault(
                         "enable_read_image_multimodal",
-                        parent_image_support is True,
+                        parent_image_support,
                     )
                 if browser_capabilities is not None:
                     factory_kwargs["browser_capabilities"] = list(browser_capabilities)

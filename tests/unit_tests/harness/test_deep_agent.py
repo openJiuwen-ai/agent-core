@@ -39,7 +39,6 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent, _DEFAULT_DIRECT_TOOL_NAMES
-from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import (
@@ -296,8 +295,9 @@ async def test_ensure_initialized_uses_cached_read_image_multimodal(
 
     await agent.ensure_initialized()
 
-    assert agent.deep_config.enable_read_image_multimodal is True
-    assert rail.enable_read_image_multimodal is True
+    assert agent.deep_config.enable_read_image_multimodal is None
+    assert rail.enable_read_image_multimodal is None
+    assert should_enable_read_image_multimodal(agent) is True
     _mock_image_modality_probe.assert_not_called()
 
 
@@ -800,7 +800,7 @@ def test_create_deep_agent_registers_tool_instances() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_deep_agent_auto_registers_complete_vision_tools(
+async def test_create_deep_agent_keeps_native_auto_with_complete_vision_tools(
     _mock_image_modality_probe,
 ) -> None:
     agent = create_deep_agent(
@@ -816,9 +816,9 @@ async def test_create_deep_agent_auto_registers_complete_vision_tools(
     try:
         assert agent.ability_manager.get("image_ocr") is not None
         assert agent.ability_manager.get("visual_question_answering") is not None
-        assert agent.deep_config.enable_read_image_multimodal is False
+        assert agent.deep_config.enable_read_image_multimodal is None
         await agent.ensure_initialized()
-        _mock_image_modality_probe.assert_not_called()
+        _mock_image_modality_probe.assert_called_once_with(agent.deep_config.model)
     finally:
         agent.ability_manager.teardown_tools()
 

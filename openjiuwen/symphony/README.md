@@ -75,7 +75,7 @@ shared/fingerprint
         ↓
       orchestration planner
         ↓
-      execution_graph
+      planned_graph
 ```
 
 - `shared/fingerprint` 扫描或消费能力清单，抽取语义画像，归一化 IO，并原子发布带 schema 版本的能力指纹。
@@ -351,7 +351,28 @@ plan = await engine.plan(
 - `build()` 返回 `GraphBuildResult`，完成暂存后才原子切换 `current.json`。
 - `cancel_build()` 请求取消当前构建，并返回取消请求后的图产物状态。
 - `read()` 返回映射兼容的 `CapabilityGraph`；传入 `version` 可读取指定的不可变版本。
-- `plan()` 返回映射兼容的 `OrchestrationPlan`。
+- `plan()` 返回映射兼容的 `OrchestrationPlan`，且仅包含 `planned_graph`。该字段是最小 JGF v2
+  单图：`graph.id` 为本次计划 ID，`graph.type` 为 `planned_graph`，节点使用 capability ID Map，边只保留
+  选中方案明确给出的 `can_feed` 关系。例如：
+
+  ```json
+  {
+    "planned_graph": {
+      "graph": {
+        "id": "plan-id",
+        "type": "planned_graph",
+        "directed": true,
+        "metadata": {"status": "ready"},
+        "nodes": {
+          "extract-text": {"label": "Extract text", "metadata": {"type": "skill"}}
+        },
+        "edges": []
+      }
+    }
+  }
+  ```
+
+  `metadata.reason` 和 `metadata.missing_inputs` 仅在非空时出现；`needs_input` 与 `no_plan` 也会返回这个合法图结构，节点和边可为空。
 - `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
 - `graph.resolve.progress` 保留当前匹配窗口的 `current/total`，并通过 `completed_candidate_count`、`total_candidate_count` 和 `reused_candidate_count` 提供跨窗口的全局候选关系进度；缓存复用的候选关系计入已完成数量。
 - `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
@@ -442,7 +463,7 @@ service = OrchestrationService(
 - 通过 `candidate_ids` 限定候选能力；
 - 通过 `disabled_capability_ids` 过滤禁用能力；
 - 选择中英文摘要；
-- 分析缺失输入并生成稳定的执行图；
+- 分析缺失输入并生成稳定的计划图；
 - 通过进度回调报告构建、关系匹配和规划阶段事件。
 
 动态 overlay 默认关闭。只有 `OrchestrationConfig(dynamic_graph_enabled=True)` 时，传给 `plan(dynamic_overlay=...)` 的运行时边权覆盖才会参与 Fast 规划；overlay 不改写离线图产物。

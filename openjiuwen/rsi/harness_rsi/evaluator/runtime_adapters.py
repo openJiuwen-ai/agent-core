@@ -16,7 +16,9 @@ from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.skills import build_skill_line, build_skill_lines
-from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
+from openjiuwen.harness.rails._multimodal import (
+    build_read_image_multimodal_resolver,
+)
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.tools import BashTool, PowerShellTool
@@ -82,7 +84,7 @@ class RSISysOperationRail(SysOperationRail):
         if self._shell_only:
             self.tools = [bash_tool]
         else:
-            enable_image = should_enable_read_image_multimodal(
+            enable_image = build_read_image_multimodal_resolver(
                 agent,
                 self._enable_read_image_multimodal,
             )
@@ -140,7 +142,9 @@ class RSISkillUseRail(SkillUseRail):
             language=lang,
             agent_id=agent_id,
             multimodal_skill_mode=self.multimodal_skill_mode,
-            enable_read_image_multimodal=should_enable_read_image_multimodal(agent),
+            enable_read_image_multimodal=build_read_image_multimodal_resolver(
+                agent,
+            ),
         )
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:

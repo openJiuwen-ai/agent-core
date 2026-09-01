@@ -259,10 +259,6 @@ def resolve_deep_agent_parts(
             normalized_tools.append(tool.card)
             existing_tool_names.add(tool.card.name)
 
-    effective_enable_read_image_multimodal = (
-        False if vision_tools_enabled else enable_read_image_multimodal
-    )
-
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
     elif isinstance(workspace, (str, PathLike)):
@@ -334,7 +330,7 @@ def resolve_deep_agent_parts(
         prompt_mode=prompt_mode,
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
-        enable_read_image_multimodal=effective_enable_read_image_multimodal,
+        enable_read_image_multimodal=enable_read_image_multimodal,
         enable_async_subagent=enable_async_subagent,
         enable_subagent_runtime=enable_subagent_runtime,
         add_general_purpose_agent=add_general_purpose_agent,
