@@ -9,31 +9,27 @@ from typing import Literal, get_type_hints
 import pytest
 
 from openjiuwen.rsi.artifact_rsi import (
-    ArtifactEngineRequest,
     ArtifactProvider,
+    PaperArtifactProvider,
+    ProgramArtifactProvider,
+    build_request,
+    validate_artifact_task_request,
+)
+from openjiuwen.rsi.artifact_rsi.request import ArtifactEngineRequest
+from openjiuwen.rsi.events import EngineEventSink, EventNode, EventProgress, EventStatus, emit
+from openjiuwen.rsi.schema import (
     ArtifactRef,
     ArtifactValidationResult,
     EngineReport,
     EngineResult,
     EngineState,
-    EventNode,
-    EventProgress,
-    EventStatus,
-    PaperArtifactProvider,
-    ProgramArtifactProvider,
     RsiTaskCreateRequest,
     RsiTaskEnvelope,
     RsiTreeNode,
     RsiUsage,
     RsiUsageTokens,
     TreeResponse,
-    build_request,
-    emit,
-    validate_artifact_task_request,
 )
-from openjiuwen.rsi.events import EngineEventSink
-from openjiuwen.rsi.events import EventStatus as SharedEventStatus
-from openjiuwen.rsi.schema import RsiTaskCreateRequest as SharedTaskCreateRequest
 
 
 def _request(**overrides: object) -> RsiTaskCreateRequest:
@@ -298,6 +294,14 @@ def test_public_dataclasses_are_frozen() -> None:
 
 
 def test_shared_contracts_are_defined_at_rsi_root() -> None:
-    assert SharedEventStatus.__module__ == "openjiuwen.rsi.events"
-    assert SharedTaskCreateRequest.__module__ == "openjiuwen.rsi.schema"
+    assert EventStatus.__module__ == "openjiuwen.rsi.events"
+    assert RsiTaskCreateRequest.__module__ == "openjiuwen.rsi.schema"
     assert EngineEventSink is not None
+
+
+def test_artifact_package_does_not_reexport_internal_structures() -> None:
+    from openjiuwen.rsi import artifact_rsi
+
+    assert not hasattr(artifact_rsi, "ArtifactEngineRequest")
+    assert not hasattr(artifact_rsi, "RsiTreeNode")
+    assert not hasattr(artifact_rsi, "EventNode")
