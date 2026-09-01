@@ -39,6 +39,7 @@ class TeamOrganizationManager:
             db=db,
             organization_id=organization_id,
             session_id=session_id,
+            messager=messager,
         )
 
     async def initialize(

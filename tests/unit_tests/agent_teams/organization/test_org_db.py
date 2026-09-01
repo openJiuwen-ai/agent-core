@@ -15,7 +15,14 @@ async def test_ensure_org_schema_creates_static_tables():
     assert db.engine is not None
     async with db.engine.connect() as conn:
         table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
+        message_columns = await conn.run_sync(
+            lambda sync_conn: {
+                column["name"]
+                for column in inspect(sync_conn).get_columns("org_leader_message")
+            }
+        )
     assert set(ORG_STATIC_TABLE_NAMES).issubset(table_names)
+    assert "read_at" not in message_columns
     await db.close()
 
 

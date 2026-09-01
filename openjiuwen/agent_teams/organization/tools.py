@@ -21,7 +21,6 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
-    from openjiuwen.agent_teams.organization.transport_api import TransportAPI
 
 
 _ORG_TASK_POOL_NEXT_ACTION = (
@@ -588,7 +587,7 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
 
 
 class OrgSendLeaderMessageTool(_OrgLeaderTool):
-    """Persist and announce a leader-to-leader message via TransportAPI."""
+    """Persist and announce a leader-to-leader message."""
 
     def __init__(
         self,
@@ -596,7 +595,6 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
         team_id: str,
         leader_id: str,
         message_service: "OrgMessageService",
-        transport: "TransportAPI | None" = None,
     ) -> None:
         super().__init__(
             name="org_send_leader_message",
@@ -606,7 +604,6 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
             leader_id=leader_id,
             message_service=message_service,
         )
-        self.transport = transport
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -625,56 +622,137 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
             return ToolOutput(success=False, error="'content' is required")
         if self.message_service is None:
             return ToolOutput(success=False, error="organization message service is not bound")
-        if self.transport is None:
-            return ToolOutput(success=False, error="organization transport is not bound")
 
-        to_team_id = inputs.get("to_team_id")
         result = await self.message_service.send_leader_message(
             from_team_id=self.team_id,
             from_leader_id=self.leader_id,
             content=content,
-            to_team_id=to_team_id,
+            to_team_id=inputs.get("to_team_id"),
             to_leader_id=inputs.get("to_leader_id"),
             metadata=inputs.get("metadata") or {},
         )
         if not result.ok or not result.data:
-            return ToolOutput(success=False, error=result.reason or "failed to persist leader message")
+            return ToolOutput(success=False, error=result.reason or "failed to send leader message")
+        return ToolOutput(success=True, data=result.data)
 
-        message_id = result.data["message_id"]
-        targets = await self._resolve_delivery_targets(to_team_id)
-        if not targets:
-            return ToolOutput(success=False, error="no delivery targets for leader message")
 
-        delivered: list[str] = []
-        for target in targets:
-            transport_result = await self.transport.deliver(
-                content,
-                target,
-                message_id=message_id,
-            )
-            if not transport_result.success:
-                return ToolOutput(
-                    success=False,
-                    error=transport_result.reason or f"failed to deliver to {target}",
-                    data={**result.data, "delivered_to": delivered},
-                )
-            delivered.append(target)
+class OrgGetLeaderMessageTool(_OrgLeaderTool):
+    """Get one persisted leader message for this team."""
 
-        return ToolOutput(success=True, data={**result.data, "delivered_to": delivered})
-
-    async def _resolve_delivery_targets(self, to_team_id: str | None) -> list[str]:
-        if to_team_id:
-            return [to_team_id]
-        organization = await self.manager.get_organization()
-        if organization is None:
-            return []
-        return sorted(
-            {
-                leader.team_id
-                for leader in organization.leaders
-                if leader.team_id and leader.team_id != self.team_id
-            }
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService",
+    ) -> None:
+        super().__init__(
+            name="org_get_leader_message",
+            description="Get one leader inbox message by message_id without acknowledging it.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
         )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"message_id": {"type": "string"}},
+            "required": ["message_id"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        await self._ensure_registered()
+        message_id = inputs.get("message_id")
+        if not message_id:
+            return ToolOutput(success=False, error="'message_id' is required")
+        message = await self.message_service.get_leader_message(
+            message_id=message_id,
+            team_id=self.team_id,
+        )
+        if message is None:
+            return ToolOutput(success=False, error=f"leader message not found: {message_id}")
+        return ToolOutput(success=True, data=message)
+
+
+class OrgListLeaderMessagesTool(_OrgLeaderTool):
+    """List persisted leader messages for this team."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService",
+    ) -> None:
+        super().__init__(
+            name="org_list_leader_messages",
+            description="List this team's leader inbox messages without acknowledging them.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "unread_only": {"type": "boolean"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"},
+            },
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        await self._ensure_registered()
+        messages = await self.message_service.list_leader_messages(
+            team_id=self.team_id,
+            unread_only=bool(inputs.get("unread_only", False)),
+            limit=int(inputs.get("limit") or 50),
+            offset=int(inputs.get("offset") or 0),
+        )
+        return ToolOutput(success=True, data={"messages": messages})
+
+
+class OrgAckLeaderMessageTool(_OrgLeaderTool):
+    """Acknowledge one leader message after this team handles it."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService",
+    ) -> None:
+        super().__init__(
+            name="org_ack_leader_message",
+            description="Mark one leader inbox message handled after completing the required action.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string"},
+                "handling_result": {"type": "string"},
+            },
+            "required": ["message_id"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        await self._ensure_registered()
+        message_id = inputs.get("message_id")
+        if not message_id:
+            return ToolOutput(success=False, error="'message_id' is required")
+        result = await self.message_service.ack_leader_message(
+            message_id=message_id,
+            team_id=self.team_id,
+            leader_id=self.leader_id,
+            handling_result=inputs.get("handling_result"),
+        )
+        if not result.ok:
+            return ToolOutput(success=False, error=result.reason)
+        return ToolOutput(success=True, data=result.data)
 
 
 class OrgViewChildTasksTool(_OrgLeaderTool):
@@ -893,7 +971,6 @@ def create_org_leader_tools(
     team_id: str,
     leader_id: str,
     message_service: "OrgMessageService",
-    transport: "TransportAPI | None" = None,
 ) -> list[TeamTool]:
     return [
         OrgViewTasksTool(manager, team_id, leader_id, message_service=message_service),
@@ -901,9 +978,10 @@ def create_org_leader_tools(
         OrgClaimTaskTool(manager, team_id, leader_id),
         OrgDelegateTaskTool(manager, team_id, leader_id),
         OrgUpdateTaskTool(manager, team_id, leader_id),
-        OrgSendLeaderMessageTool(
-            manager, team_id, leader_id, message_service=message_service, transport=transport
-        ),
+        OrgSendLeaderMessageTool(manager, team_id, leader_id, message_service=message_service),
+        OrgGetLeaderMessageTool(manager, team_id, leader_id, message_service),
+        OrgListLeaderMessagesTool(manager, team_id, leader_id, message_service),
+        OrgAckLeaderMessageTool(manager, team_id, leader_id, message_service),
         OrgViewChildTasksTool(manager, team_id, leader_id),
         OrgViewPendingReviewsTool(manager, team_id, leader_id),
         OrgReviewTaskTool(manager, team_id, leader_id),
@@ -939,6 +1017,9 @@ ORG_LEADER_TOOL_NAMES = {
     "org_delegate_task",
     "org_update_task",
     "org_send_leader_message",
+    "org_get_leader_message",
+    "org_list_leader_messages",
+    "org_ack_leader_message",
     "org_view_child_tasks",
     "org_view_pending_reviews",
     "org_review_task",
@@ -965,6 +1046,9 @@ __all__ = [
     "OrgAttachSummarySourcesTool",
     "OrgCreateSummaryTaskTool",
     "OrgReviewTaskTool",
+    "OrgAckLeaderMessageTool",
+    "OrgGetLeaderMessageTool",
+    "OrgListLeaderMessagesTool",
     "OrgSendLeaderMessageTool",
     "OrgUpdateTaskTool",
     "OrgViewChildTasksTool",

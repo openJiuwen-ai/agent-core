@@ -256,13 +256,13 @@ def create_team_tools(
                 db=org_task_manager.db,
                 organization_id=org_task_manager.organization_id,
                 session_id=org_task_manager.session_id,
+                messager=getattr(agent_team, "messager", None),
             )
         org_tools = create_org_leader_tools(
             manager=org_task_manager,
             message_service=org_message_service,
             team_id=agent_team.team_name,
             leader_id=leader_id,
-            transport=getattr(agent_team, "org_transport", None),
         )
         all_tools.update({tool.card.name: tool for tool in org_tools})
 

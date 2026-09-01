@@ -65,7 +65,6 @@ _ORG_COLLABORATION_PROMPT = {
 }
 
 _LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS = 0.1
-_LEADER_TURN_PAUSE_MAX_RETRIES = 600
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -82,6 +81,7 @@ class OrganizationRuntimeManager:
         self._team_organizations: dict[tuple[str, str], str] = {}
         self._leader_turn_queues: dict[tuple[str, str], deque[object]] = {}
         self._leader_turn_workers: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        self._scheduled_leader_messages: set[tuple[str, str, str]] = set()
         self._leader_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._configured_team_provider: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None
         self._team_activator: Callable[[str, str], Awaitable[str | None]] | None = None
@@ -312,6 +312,11 @@ class OrganizationRuntimeManager:
                 if worker is not None and not worker.done():
                     worker.cancel()
                 self._leader_turn_queues.pop(key, None)
+                self._scheduled_leader_messages = {
+                    message_key
+                    for message_key in self._scheduled_leader_messages
+                    if message_key[:2] != key
+                }
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
                     continue
@@ -515,7 +520,6 @@ class OrganizationRuntimeManager:
                 message_service=manager.message_service,
                 team_id=backend.team_name,
                 leader_id=leader_id,
-                transport=backend.org_transport,
             ):
                 add_tool(tool)
         await self._subscribe_team_events(
@@ -630,6 +634,17 @@ class OrganizationRuntimeManager:
         """
 
         await self._resume_claimed_tasks(manager=manager, team_id=team_id, session_id=session_id)
+        for message in await manager.message_service.list_leader_messages(
+            team_id=team_id,
+            unread_only=True,
+        ):
+            self._schedule_leader_message_turn(
+                team_id=team_id,
+                session_id=session_id,
+                message_id=message["message_id"],
+                from_team_id=message["from_team_id"],
+                organization_id=manager.organization_id,
+            )
         await self._schedule_matching_open_claims(
             manager=manager,
             team_id=team_id,
@@ -731,6 +746,14 @@ class OrganizationRuntimeManager:
                 payload = getattr(message, "payload", None) or {}
                 message_id = payload.get("message_id")
                 if not message_id:
+                    return
+                if (session_id, backend.team_name, message_id) in self._scheduled_leader_messages:
+                    return
+                persisted = await manager.message_service.get_leader_message(
+                    message_id=message_id,
+                    team_id=backend.team_name,
+                )
+                if persisted is None or persisted["handled_at"] is not None:
                     return
                 self._schedule_leader_message_turn(
                     team_id=backend.team_name,
@@ -843,13 +866,22 @@ class OrganizationRuntimeManager:
         from_team_id: str,
         organization_id: str,
     ) -> None:
+        message_key = (session_id, team_id, message_id)
+        if message_key in self._scheduled_leader_messages:
+            return
+        self._scheduled_leader_messages.add(message_key)
         prompt = (
             f"Leader message {message_id} arrived in organization {organization_id} "
-            f"from team {from_team_id}. Inspect it with org_view_tasks(action='messages'), "
-            "read the persisted content, and respond with any required cross-team coordination "
-            "or task-pool updates."
+            f"from team {from_team_id}. Read it with org_get_leader_message, perform any required "
+            "cross-team coordination or task-pool updates, then call org_ack_leader_message only "
+            "after the message has been handled."
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            message_key=message_key,
+        )
 
     def _schedule_claimed_task_execution_turn(
         self,
@@ -899,10 +931,17 @@ class OrganizationRuntimeManager:
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
-    def _schedule_leader_turn(self, *, team_id: str, session_id: str, prompt: str) -> None:
+    def _schedule_leader_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        prompt: str,
+        message_key: tuple[str, str, str] | None = None,
+    ) -> None:
         key = (session_id, team_id)
         queue = self._leader_turn_queues.setdefault(key, deque())
-        queue.append({"query": prompt})
+        queue.append({"query": prompt, "_org_message_key": message_key})
         worker = self._leader_turn_workers.get(key)
         if worker is None or worker.done():
             worker = asyncio.create_task(self._drain_leader_turns(team_id, session_id))
@@ -914,25 +953,36 @@ class OrganizationRuntimeManager:
         key = (session_id, team_id)
         try:
             queue = self._leader_turn_queues.setdefault(key, deque())
-            pause_wait_retries = 0
             while queue:
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
-                    queue.clear()
+                    self._clear_leader_turn_queue(queue)
                     return
                 if entry.state is not RuntimeState.PAUSED:
-                    pause_wait_retries += 1
-                    if pause_wait_retries >= _LEADER_TURN_PAUSE_MAX_RETRIES:
-                        queue.clear()
-                        return
                     await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
                     continue
-                pause_wait_retries = 0
                 inputs = queue.popleft()
-                await self._run_leader_turn(team_id, session_id, inputs)
+                message_key = (
+                    inputs.pop("_org_message_key", None)
+                    if isinstance(inputs, dict)
+                    else None
+                )
+                try:
+                    await self._run_leader_turn(team_id, session_id, inputs)
+                finally:
+                    if message_key is not None:
+                        self._scheduled_leader_messages.discard(message_key)
         finally:
             self._leader_turn_workers.pop(key, None)
             self._leader_turn_queues.pop(key, None)
+
+    def _clear_leader_turn_queue(self, queue: deque[object]) -> None:
+        for inputs in queue:
+            if isinstance(inputs, dict):
+                message_key = inputs.get("_org_message_key")
+                if message_key is not None:
+                    self._scheduled_leader_messages.discard(message_key)
+        queue.clear()
 
     async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
         entry = await self._team_runtime_manager.pool.get(team_id)

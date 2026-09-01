@@ -18,6 +18,7 @@ ORG_STATIC_TABLE_NAMES = (
     "org_leader",
     "org_task",
     "org_leader_message",
+    "org_leader_message_receipt",
     "org_task_event",
     "org_task_review",
     "org_task_source",
@@ -213,8 +214,20 @@ class OrgLeaderMessageRecord(SQLModel, table=True):
     to_leader_id: str | None = None
     content: str
     created_at: int
-    read_at: int | None = None
     metadata_json: str | None = None
+
+
+class OrgLeaderMessageReceiptRecord(SQLModel, table=True):
+    __tablename__ = "org_leader_message_receipt"
+
+    message_id: str = SQLField(primary_key=True)
+    recipient_team_id: str = SQLField(primary_key=True)
+    organization_id: str = SQLField(index=True)
+    recipient_leader_id: str | None = None
+    read_at: int | None = None
+    handled_at: int | None = SQLField(default=None, index=True)
+    handling_result_json: str | None = None
+    created_at: int
 
 
 class OrgTaskEventRecord(SQLModel, table=True):
@@ -270,6 +283,7 @@ __all__ = [
     "OrgInfoRecord",
     "OrgLeaderHandle",
     "OrgLeaderMessageRecord",
+    "OrgLeaderMessageReceiptRecord",
     "OrgLeaderRecord",
     "OrganizationSpec",
     "OrgTask",
