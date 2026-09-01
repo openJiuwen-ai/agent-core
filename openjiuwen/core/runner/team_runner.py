@@ -633,7 +633,7 @@ class _TeamRunnerMixin:
         try:
             release_info = await manager.resolve_team_session_release_info(session_id)
         except RuntimeError as exc:
-            team_logger.warning(
+            logger.warning(
                 "prune_agent_team_roster: cannot resolve release info for "
                 "session={} team={}: {} — skipping prune (fail-open)",
                 session_id,
