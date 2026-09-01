@@ -241,7 +241,7 @@ Skill 实体不在上面这棵树里，它在 `paths.global_skills_dir()`（默�
 ## 与其它 spec 的关系
 
 - **S_01 public-api-and-spec-flow**：`TeamWorkspaceConfig` 通过 `TeamAgentSpec.workspace` 进入装配蓝图，遵循 Spec → build → Runtime 单向流；workspace 不回写 spec。
-- **S_02 team-agent-architecture**：`TeamWorkspaceManager` 落在 `agent/infra.py` 的 `TeamInfra` 上（per-process 共享）；`TeamWorkspaceRail` 由 `agent/agent_configurator.py` 装到 DeepAgent；prompts/sections 通过 `team_workspace_mount` / `team_workspace_path` 把挂载点注入 system prompt——agent 侧不重复声明挂载格式。
+- **S_02 team-agent-architecture**：`TeamWorkspaceManager` 落在 `agent/infra.py` 的 `TeamInfra` 上（per-process 共享）；`TeamWorkspaceRail` 由 `agent/agent_configurator.py` 装到 DeepAgent；prompts/sections 通过 `team_workspace_path` / `team_outputs_dir` 把工作空间路径与最终产物目录注入 system prompt（`.team` 挂载点已废止，见 [[F_89]] / [[S_26]]）——agent 侧不重复声明路径格式。
 - **S_06 runtime-pool-dispatch**：workspace 的物理目录创建发生在 manager `activate` 路径（spec → blueprint → `create_workspace_manager`）；pool entry 复活时复用既有目录，不重新 init。
 - **S_08 team-tools-contract**：`WorkspaceMetaTool` 是团队工具的一员，ToolCard id `team.workspace_meta` 遵循 `team.{name}` 前缀约定；其描述文本走 `tools/locales/descs/<lang>/workspace/workspace_meta.md`，不在代码里写长文案。
 - **Worktree 子系统（`harness.tools.worktree`）**：路径不相交是不变量 1。`mount_into_worktree` 是 worktree → workspace 的单向挂载入口，不存在反向 mount；worktree 改动不通过 workspace 的 git 历史走，二者各自独立。
