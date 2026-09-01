@@ -26,7 +26,7 @@ prompt that rewrites one, and the name of the number being reported -- and
 
 Copied from `examples/era/_era_domain.py` (see `__init__.py` for the upstream
 commit). Upstream's own default is its Kaggle task; here the one implementation
-is :mod:`sciencediscovery_evolve.script_domain`, which is the user's scorecard —
+is :mod:`.script_domain`, which is the user's scorecard —
 which is exactly what this seam was cut for.
 """
 

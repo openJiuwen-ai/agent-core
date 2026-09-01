@@ -51,12 +51,12 @@ import re
 import statistics
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+from .domain import Domain
 from .logging_config import get_logger
+from .program import Program
 from .prompt import mutation_prompt
 from .scorecard import SCORE_KEY, evaluate_constraints, score_candidate
-from .vendor.puct.domain import Domain
-from .vendor.puct.program import Program
-from .vendor.puct.tree import finite as _finite
+from .tree import finite as _finite
 
 log = get_logger("judge")
 

@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from .events import Emit
-from .vendor.puct.sandbox import SandboxCapability
+from .sandbox import SandboxCapability
 
 
 @dataclass(frozen=True)

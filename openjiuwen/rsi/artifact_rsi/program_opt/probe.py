@@ -59,7 +59,7 @@ class ProbeError(RuntimeError):
 
 def run_probe(spec: RunSpec) -> Dict[str, Any]:
     """`{baseline, worsened, flat, label}` for one scorecard."""
-    from .puct_engine import _judge_spec, _mode_of, _scale_of, _default_completion
+    from .puct_engine import _default_completion, _judge_spec, _mode_of, _scale_of
 
     mode = _mode_of(spec)
 

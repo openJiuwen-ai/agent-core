@@ -1,9 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """`ProgramArtifactProvider` backed by the ScienceDiscovery PUCT search.
 
-The search itself is vendored under `sciencediscovery/`; this module is the
-translation layer between it and the RSI contract. Three things are being
-translated, and each is a shape change rather than a rename:
+The search lives alongside this module (`puct_engine` and what it imports);
+this module is the translation layer between it and the RSI contract. Three
+things are being translated, and each is a shape change rather than a rename:
 
 * **Nine search events into three task events.** The search speaks in
   selections, expansions, evaluations and merges; the contract speaks in status,
@@ -28,6 +28,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
+from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     ModelConfigError,
     SandboxUnavailable,
@@ -35,8 +38,6 @@ from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     load_model_endpoint,
     require_sandbox,
 )
-from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.engine import RunSpec
-from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.puct_engine import PuctEngine
 from openjiuwen.rsi.artifact_rsi.program_opt.state import (
     ProgramRunState,
     read_report_file,
@@ -63,7 +64,7 @@ from openjiuwen.rsi.schema import (
 DEFAULT_WORKERS = 1
 
 
-class ScienceDiscoveryProgramProvider:
+class PuctProgramProvider:
     """Program optimization by repeatedly rewriting a program and keeping what scores better.
 
     One instance serves many tasks; per-task state lives under each request's
@@ -124,7 +125,7 @@ class ScienceDiscoveryProgramProvider:
         # against it here means a seed that could never be rewritten is refused
         # while the user is still looking at the form, rather than after a run
         # has been created and every expansion has failed identically.
-        from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.vendor.puct.program import (
+        from openjiuwen.rsi.artifact_rsi.program_opt.program import (
             validate_source,
         )
 
@@ -305,6 +306,23 @@ class ScienceDiscoveryProgramProvider:
         await emit(on_event, EventStatus(status="running"))
         state.start()
 
+        # Before any budget is spent: score the starting point, then score a copy
+        # deliberately made worse. Two numbers that come back the same mean the
+        # scoring cannot separate a good candidate from a bad one, and a search
+        # on flat terrain is a random walk that looks completely normal from
+        # outside -- every event fires, every candidate is recorded, and the run
+        # simply reports that it found nothing. Worth a handful of evaluations to
+        # turn that into a sentence naming the evaluator.
+        try:
+            await asyncio.to_thread(run_probe, spec)
+        except ProbeError as refusal:
+            state.fail("PROBE_REFUSED", str(refusal))
+            await emit(on_event, EventStatus(status="failed"))
+            return EngineResult(
+                task_id=request.task_id, status="failed", final_node_id=None,
+                error_code="PROBE_REFUSED", error_message=str(refusal),
+            )
+
         engine = PuctEngine(completion_factory=_counting(completion_factory_for(endpoint), state))
         try:
             await asyncio.to_thread(engine.run, spec, sink, stop.is_set)
@@ -384,6 +402,14 @@ class ScienceDiscoveryProgramProvider:
             # needs to return anything at all.
             max_tokens_per_call=int(endpoint["max_tokens"]),
             thinking=str(endpoint["thinking"]),
+            # The engine takes its model as an injected callable and never reads
+            # these; the pre-flight probe builds its own judge and does. One
+            # endpoint for both, because a run graded by a different model from
+            # the one the probe cleared has not been cleared.
+            llm_url=endpoint["endpoint"],
+            llm_token=endpoint["token"],
+            judge_url=endpoint["endpoint"],
+            judge_token=endpoint["token"],
         )
         if not resumed:
             return spec
@@ -463,7 +489,7 @@ def _resume_from(run_dir: Path) -> tuple[tuple[dict[str, Any], ...], dict[str, f
     resume needs, which is why resuming needs nothing from AgentServer beyond
     the same `run_dir`.
     """
-    from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.candidates import TREE_FILE
+    from openjiuwen.rsi.artifact_rsi.program_opt.candidates import TREE_FILE
 
     path = run_dir / TREE_FILE
     if not path.is_file():
@@ -473,4 +499,4 @@ def _resume_from(run_dir: Path) -> tuple[tuple[dict[str, Any], ...], dict[str, f
     return nodes, dict(snapshot.get("baseline") or {}), int(snapshot.get("tokens") or 0), len(nodes)
 
 
-__all__ = ["DEFAULT_WORKERS", "ScienceDiscoveryProgramProvider"]
+__all__ = ["DEFAULT_WORKERS", "PuctProgramProvider"]

@@ -54,7 +54,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence
 
-from .vendor.puct.program import available_imports_text
+from .program import available_imports_text
 
 #: The closing instruction every code-shaped template ends on.
 #:

@@ -39,7 +39,6 @@ run single-threaded when a reproduction needs one, without the stub.
 from __future__ import annotations
 
 import math
-
 import os
 import tempfile
 import threading
@@ -51,22 +50,22 @@ from .candidates import TREE_FILE, TREE_SCHEMA_VERSION, CandidateStore, write_tr
 from .completion import CompletionUnavailable, CompletionUsage, completion_for
 from .engine import RunSpec
 from .events import Emit
-from .logging_config import get_logger
 from .judge_domain import grader, judge_domain
-from .provision import missing_candidate_runtime
-from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
-from .text_candidate import extract_text
-from .restore import RestoreError, restore_baseline, restore_tree
+from .logging_config import get_logger
+from .program import extract_program, read_promise
 from .prompt import repair_prompt, with_promise_request
-from .vendor.puct.program import extract_program, read_promise
-from .vendor.puct.search import (
+from .provision import missing_candidate_runtime
+from .restore import RestoreError, restore_baseline, restore_tree
+from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
+from .search import (
     PuctStrategy,
     PuctTreeAggregator,
     make_propose,
     make_reward,
     make_run,
 )
-from .vendor.puct.tree import PuctTree, Node
+from .text_candidate import extract_text
+from .tree import Node, PuctTree
 
 log = get_logger("puct")
 
@@ -234,8 +233,8 @@ class PuctEngine:
         emit: Emit,
         should_stop: Callable[[], bool],
     ) -> None:
-        from agentdescent.evolution import evolve
         from agentdescent.async_evolve import async_evolve
+        from agentdescent.evolution import evolve
         from agentdescent.staleness import get_policy
 
         baseline: Dict[str, float] = {}

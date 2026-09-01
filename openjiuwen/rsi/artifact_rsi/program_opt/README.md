@@ -1,14 +1,23 @@
 # `program_opt` — program artifact optimization
 
-`ScienceDiscoveryProgramProvider` implements `ProgramArtifactProvider` on top of
-the ScienceDiscovery PUCT search, vendored under `sciencediscovery/`.
+`PuctProgramProvider` implements `ProgramArtifactProvider` on top of a PUCT
+search over programs, ported from ScienceDiscovery's evolve service.
 
 ```python
-from openjiuwen.rsi.artifact_rsi.program_opt import ScienceDiscoveryProgramProvider
+from openjiuwen.rsi.artifact_rsi.program_opt import PuctProgramProvider
 
-provider = ScienceDiscoveryProgramProvider()
+provider = PuctProgramProvider()
 result = await provider.run(request, on_event)
 ```
+
+Everything lives flat in this package. `puct_provider` is the contract surface,
+`runtime` answers model and sandbox, `state` does the event projection, and
+`puct_engine` plus what it imports is the search itself. `domain`, `program`,
+`sandbox`, `search` and `tree` are vendored from AgentDescent's ERA example
+(https://github.com/Birfy/agentdescent @ b3d4240, `examples/era/*`) — the
+algorithm bodies live under `examples/`, which the wheel does not package, so
+they are copied while the engine (`evolve()`, `FlatPuct`, `Ledger`, the
+policies) stays a normal dependency.
 
 The search runs **in this process**, not behind HTTP. ScienceDiscovery deploys it
 as a sidecar because its control plane must not hold a provider key; here the
@@ -61,7 +70,7 @@ neither is.
 Deployments that know better than the probe can name one:
 
 ```python
-ScienceDiscoveryProgramProvider(sandbox_backend="bwrap")
+PuctProgramProvider(sandbox_backend="bwrap")
 ```
 
 This is deliberately *not* routed through `openjiuwen/extensions/sys_operation/
@@ -101,6 +110,24 @@ them. That is what lets `read_state` / `read_report` / `get_tree` answer after a
 restart, and what lets `resume` continue the original tree instead of starting a
 second root. Set `SCIENCE_AGENT_RSI_RUNS` to the parent of every task directory
 so the queries can still find a task the process no longer remembers.
+
+## The pre-flight
+
+`run` scores the starting program, then scores a copy deliberately made worse,
+before it draws a single candidate. Two numbers that come back the same mean the
+scoring cannot separate a good candidate from a bad one — and a search on flat
+terrain is a random walk that looks completely normal from outside: every event
+fires, every candidate is recorded, and the run reports that it found nothing.
+A refusal here costs a handful of evaluations and returns `PROBE_REFUSED` with a
+sentence naming what is wrong with the scorecard.
+
+## What a candidate can read
+
+Nothing from this process's environment. Both backends are given the same
+allowlist — thread caps, a scratch `TMPDIR` and `HOME`, and `PATH=/usr/bin:/bin`
+— and the network is denied. This is stricter than the sidecar the code came
+from, and it has to be: there the surrounding process held no provider key,
+here it holds every one of them.
 
 ## Not implemented
 

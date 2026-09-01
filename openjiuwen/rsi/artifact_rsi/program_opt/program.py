@@ -36,10 +36,10 @@ from __future__ import annotations
 import ast
 import hashlib
 import importlib.util
-from importlib.metadata import PackageNotFoundError, packages_distributions, version
 import math
 import re
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, packages_distributions, version
 from typing import Any, Dict, List, Optional, Tuple
 
 #: Wide enough for the benchmark, and no wider. Upstream ships no gate at all --

@@ -53,8 +53,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .candidates import CandidateStore
 from .logging_config import get_logger
-from .vendor.puct.program import Program, program_id
-from .vendor.puct.tree import Node, PuctTree
+from .program import Program, program_id
+from .tree import Node, PuctTree
 
 log = get_logger("restore")
 

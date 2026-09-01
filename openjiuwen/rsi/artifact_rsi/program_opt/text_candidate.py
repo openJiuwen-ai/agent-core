@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from .vendor.puct.program import FENCE
+from .program import FENCE
 
 #: A summary longer than this is not a summary; it is the model explaining
 #: itself into the node label.

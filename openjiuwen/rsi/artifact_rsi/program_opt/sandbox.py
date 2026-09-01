@@ -49,13 +49,12 @@ answers start to disagree.
 from __future__ import annotations
 
 import math
-import os
 import shutil
 import sys
 import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 _SEATBELT_PROFILE = """(version 1)
 (allow default)
@@ -161,6 +160,10 @@ def sandbox_command(
     env = dict(_THREAD_ENV)
     env["TMPDIR"] = str(scratch)
     env["PATH"] = "/usr/bin:/bin"
+    # Inside the scratch bind, because it is the one writable place: numpy,
+    # matplotlib and joblib all want a home to put a cache in, and the host's
+    # is neither writable here nor any of the candidate's business.
+    env["HOME"] = str(scratch)
     # Folded in *before* the per-backend plumbing, because the two backends
     # deliver the environment through different holes and only one of them
     # forgives the caller. Seatbelt inherits the subprocess env, so extras
@@ -215,7 +218,16 @@ def sandbox_command(
     # path.
     profile.write_text(_SEATBELT_PROFILE.format(scratch=str(scratch)), encoding="utf-8")
     command = ["/usr/bin/sandbox-exec", "-f", str(profile), sys.executable, "-I", *inner]
-    return command, {**os.environ, **env}
+    # `env` alone, never merged over `os.environ`. Seatbelt inherits whatever
+    # the subprocess is given, and bubblewrap's `--clearenv` gives it exactly
+    # this dict -- so merging the host environment in here is what made the two
+    # backends disagree about what a candidate can read. It mattered once this
+    # engine moved in-process: as a sidecar the surrounding environment held no
+    # provider key, and in a host that runs the model it holds every one of
+    # them. The profile denies the network, so the leak was a candidate reading
+    # a key and writing it into its own output -- which the search records as
+    # the node's reason and shows the user.
+    return command, env
 
 
 def _resolve_backend(path: str) -> str:

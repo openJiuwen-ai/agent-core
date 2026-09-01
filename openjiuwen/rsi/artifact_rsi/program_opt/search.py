@@ -58,7 +58,7 @@ from agentdescent.staleness import StaleAction, get_policy
 
 from .domain import Domain
 from .program import Program, program_id
-from .tree import PuctTree, Node
+from .tree import Node, PuctTree
 
 #: Merge outcomes upstream names for this port. `MergeOutcome` covers the
 #: framework's own; these two are the tree's.

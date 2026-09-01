@@ -19,8 +19,12 @@ from pathlib import Path
 
 import pytest
 
+from openjiuwen.rsi.artifact_rsi.program_opt import events
 from openjiuwen.rsi.artifact_rsi.program_opt import state as state_module
 from openjiuwen.rsi.artifact_rsi.program_opt.provider import ProgramArtifactProvider
+from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import (
+    PuctProgramProvider,
+)
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     DEFAULT_MAX_TOKENS_PER_CALL,
     ModelConfigError,
@@ -28,12 +32,8 @@ from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     load_model_endpoint,
     require_sandbox,
 )
-from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery import events
-from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.vendor.puct.sandbox import (
+from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import (
     SandboxCapability,
-)
-from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery_provider import (
-    ScienceDiscoveryProgramProvider,
 )
 from openjiuwen.rsi.artifact_rsi.program_opt.state import ProgramRunState
 from openjiuwen.rsi.artifact_rsi.provider import ArtifactProvider
@@ -92,7 +92,7 @@ def _scorecard(run_dir: Path, **extra: object) -> None:
 
 
 def test_the_provider_satisfies_both_protocols() -> None:
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
 
     assert isinstance(provider, ProgramArtifactProvider)
     assert isinstance(provider, ArtifactProvider)
@@ -191,7 +191,7 @@ def test_a_program_the_gate_would_reject_is_refused_at_the_form(tmp_path: Path) 
     path = tmp_path / "seed.py"
     path.write_text("def something_else():\n    return 1\n", encoding="utf-8")
 
-    result = ScienceDiscoveryProgramProvider().validate_input(str(path))
+    result = PuctProgramProvider().validate_input(str(path))
 
     assert result.valid is False
     assert [error["code"] for error in result.errors] == ["ARTIFACT_REJECTED_BY_GATE"]
@@ -201,7 +201,7 @@ def test_a_usable_seed_validates(tmp_path: Path) -> None:
     path = tmp_path / "seed.py"
     path.write_text(SEED, encoding="utf-8")
 
-    assert ScienceDiscoveryProgramProvider().validate_input(str(path)).valid is True
+    assert PuctProgramProvider().validate_input(str(path)).valid is True
 
 
 @pytest.mark.parametrize(
@@ -209,13 +209,13 @@ def test_a_usable_seed_validates(tmp_path: Path) -> None:
     [(None, "ARTIFACT_PATH_REQUIRED"), ("", "ARTIFACT_PATH_REQUIRED")],
 )
 def test_no_program_at_all_is_named_as_such(artifact_path: str | None, code: str) -> None:
-    result = ScienceDiscoveryProgramProvider().validate_input(artifact_path)
+    result = PuctProgramProvider().validate_input(artifact_path)
 
     assert [error["code"] for error in result.errors] == [code]
 
 
 def test_a_path_that_is_not_there_is_named_as_such(tmp_path: Path) -> None:
-    result = ScienceDiscoveryProgramProvider().validate_input(str(tmp_path / "absent.py"))
+    result = PuctProgramProvider().validate_input(str(tmp_path / "absent.py"))
 
     assert [error["code"] for error in result.errors] == ["ARTIFACT_NOT_FOUND"]
 
@@ -226,7 +226,7 @@ def test_a_path_that_is_not_there_is_named_as_such(tmp_path: Path) -> None:
 def test_a_run_without_a_scorecard_is_refused_rather_than_scored_by_a_guess(
     tmp_path: Path,
 ) -> None:
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     request = _request(tmp_path)
     Path(request.run_dir).mkdir(parents=True)
 
@@ -241,7 +241,7 @@ def test_the_token_ceiling_comes_from_the_model_config_not_the_engine_default(
     """`RunSpec` defaults to 16k, and a reasoning model at 16k spends the whole
     allowance on hidden thinking and returns an empty reply -- which then reads
     as a model that cannot write code. The deployment's number has to win."""
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -253,7 +253,7 @@ def test_the_token_ceiling_comes_from_the_model_config_not_the_engine_default(
 
 
 def test_the_starting_program_reaches_the_spec(tmp_path: Path) -> None:
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -282,7 +282,7 @@ def test_packages_takes_names_a_reviewer_can_recognise_and_nothing_else(
     """`packages` is written by a model, so readability is the whole security
     boundary: a name is checkable by eye, a path or a URL or a pip option is
     not, however plausible the surrounding text makes it look."""
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir), packages=[package])
 
@@ -292,7 +292,7 @@ def test_packages_takes_names_a_reviewer_can_recognise_and_nothing_else(
 
 
 def test_an_ordinary_pinned_dependency_still_gets_through(tmp_path: Path) -> None:
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir), packages=["xgboost", "scikit-learn==1.5.0"])
 
@@ -307,7 +307,7 @@ def test_resuming_continues_the_numbering_the_first_attempt_stopped_at(
 ) -> None:
     """Without the previous tree a resumed run would append node 0 on top of a
     graph that already has one, leaving a single index holding two candidates."""
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     request = _request(tmp_path)
     run_dir = Path(request.run_dir)
     _scorecard(run_dir)
@@ -502,13 +502,13 @@ def test_the_queries_answer_after_a_restart(
     monkeypatch.setattr(state_module, "_DIRECTORIES", {})
     monkeypatch.setenv("SCIENCE_AGENT_RSI_RUNS", str(runs))
 
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     assert provider.read_state("task-001").status == "created"
     assert provider.get_tree("task-001").nodes != []
 
 
 def test_an_unknown_task_says_so_rather_than_pretending(tmp_path: Path) -> None:
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
 
     state = provider.read_state("task-nowhere")
 
@@ -525,7 +525,7 @@ def test_the_final_artifact_is_the_best_nodes(tmp_path: Path) -> None:
     _absorb(run, events.evaluated(1, 0.42, {"rmse": 1.9}))
     _absorb(run, events.merged(1, True, "it scored better"))
 
-    provider = ScienceDiscoveryProgramProvider()
+    provider = PuctProgramProvider()
     final = provider.locate_artifact("task-001")
 
     assert final.node_id == state_module.node_id_for("task-001", 1)
@@ -537,7 +537,7 @@ def test_an_artifact_from_another_task_is_not_served(tmp_path: Path) -> None:
     _absorb(run, events.seeded(0, 0.25, code_hash="sha256:" + "a" * 64))
 
     with pytest.raises(FileNotFoundError):
-        ScienceDiscoveryProgramProvider().locate_artifact("task-001", "A-program:other:dead")
+        PuctProgramProvider().locate_artifact("task-001", "A-program:other:dead")
 
 
 # -- execution control ----------------------------------------------------------
@@ -548,7 +548,7 @@ def test_an_unusable_model_config_fails_the_task_rather_than_the_server(
 ) -> None:
     """A bad reference is a task-level failure with a status the caller can see,
     not an exception AgentServer has to interpret."""
-    provider = ScienceDiscoveryProgramProvider(sandbox_backend="bwrap")
+    provider = PuctProgramProvider(sandbox_backend="bwrap")
     request = _request(tmp_path, model_config=str(tmp_path / "absent.yaml"))
     seen: list[object] = []
 
@@ -565,7 +565,7 @@ def test_an_unusable_model_config_fails_the_task_rather_than_the_server(
 
 
 def test_a_run_without_isolation_never_starts(tmp_path: Path) -> None:
-    provider = ScienceDiscoveryProgramProvider(sandbox_backend="none")
+    provider = PuctProgramProvider(sandbox_backend="none")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -576,7 +576,7 @@ def test_a_run_without_isolation_never_starts(tmp_path: Path) -> None:
 
 
 def test_pause_is_declined_in_words_rather_than_faked(tmp_path: Path) -> None:
-    result = asyncio.run(ScienceDiscoveryProgramProvider().pause("task-001"))
+    result = asyncio.run(PuctProgramProvider().pause("task-001"))
 
     assert result.error_code == "NOT_IMPLEMENTED"
 
@@ -589,7 +589,7 @@ def test_terminate_reports_terminated_and_says_which_node_won(tmp_path: Path) ->
     async def sink(event: object) -> None:
         seen.append(event)
 
-    result = asyncio.run(ScienceDiscoveryProgramProvider().terminate("task-001", sink))
+    result = asyncio.run(PuctProgramProvider().terminate("task-001", sink))
 
     assert result.status == "terminated"
     assert result.final_node_id == state_module.node_id_for("task-001", 0)
@@ -617,9 +617,23 @@ class _CannedEngine:
         self.saw_stop = bool(should_stop())  # type: ignore[operator]
 
 
-def _canned(monkeypatch: pytest.MonkeyPatch, script: list[dict[str, object]]) -> None:
+def _no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a search past the pre-flight without a scorecard that can rank.
+
+    The probe is exercised on its own below; these tests are about the bridge
+    between the search thread and the caller's loop, and a real pre-flight would
+    refuse the fixture scorecard before any of that is reached.
+    """
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery_provider.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.run_probe",
+        lambda spec: {"baseline": 0.25, "worsened": 0.05, "flat": False, "label": "test"},
+    )
+
+
+def _canned(monkeypatch: pytest.MonkeyPatch, script: list[dict[str, object]]) -> None:
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: _CannedEngine(script, **kwargs),
     )
 
@@ -638,7 +652,7 @@ def test_a_search_running_on_a_thread_delivers_its_events_to_the_callers_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _canned(monkeypatch, _SCRIPT)
-    provider = ScienceDiscoveryProgramProvider(sandbox_backend="bwrap")
+    provider = PuctProgramProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
     seen: list[object] = []
@@ -669,7 +683,7 @@ def test_the_search_waits_for_a_slow_consumer(
     events go to a bounded queue, and a search that fired and forgot would drop
     the node it just told everyone about."""
     _canned(monkeypatch, _SCRIPT)
-    provider = ScienceDiscoveryProgramProvider(sandbox_backend="bwrap")
+    provider = PuctProgramProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
     order: list[str] = []
@@ -712,11 +726,12 @@ def test_terminate_reaches_a_search_that_is_already_running(
                 emit({"createdAt": "", "event": events.search_finished("stopped", 0, 1),
                       "sequence": 0})  # type: ignore[operator]
 
+    _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery_provider.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         _HaltingEngine,
     )
-    provider = ScienceDiscoveryProgramProvider(sandbox_backend="bwrap")
+    provider = PuctProgramProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -753,11 +768,12 @@ def test_a_crashing_search_becomes_a_failed_task(
         def run(self, spec: object, emit: object, should_stop: object) -> None:
             raise RuntimeError("the evaluator went away")
 
+    _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery_provider.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: _Exploding(**kwargs),
     )
-    provider = ScienceDiscoveryProgramProvider(sandbox_backend="bwrap")
+    provider = PuctProgramProvider(sandbox_backend="bwrap")
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -767,3 +783,82 @@ def test_a_crashing_search_becomes_a_failed_task(
     assert result.error_code == "ENGINE_ERROR"
     assert "the evaluator went away" in (result.error_message or "")
     assert provider.read_state(request.task_id).status == "failed"
+
+
+def test_a_scorecard_that_cannot_rank_is_refused_before_the_budget_is_spent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A search on flat terrain is a random walk that looks completely normal
+    from outside: every event fires, every candidate is recorded, and the run
+    reports that it found nothing. The pre-flight is what turns that into a
+    sentence naming the scorecard -- so it has to run before the search, not
+    after it has spent the model calls."""
+    built: list[object] = []
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        lambda **kwargs: built.append(kwargs) or _CannedEngine(_SCRIPT, **kwargs),
+    )
+    provider = PuctProgramProvider(sandbox_backend="bwrap")
+    request = _request(tmp_path)
+    # The fixture scorecard has no criteria, so nothing can be ranked with it.
+    _scorecard(Path(request.run_dir))
+
+    result = asyncio.run(provider.run(request))
+
+    assert result.status == "failed"
+    assert result.error_code == "PROBE_REFUSED"
+    assert "criteria" in (result.error_message or "")
+    # And no search was ever constructed, so no model call was paid for.
+    assert built == []
+
+
+# -- what a candidate can see ---------------------------------------------------
+
+
+def test_a_candidate_is_not_handed_the_hosts_environment(tmp_path: Path) -> None:
+    """The environment the sandbox builds is an allowlist, not the host's.
+
+    This mattered the moment the search moved in-process. As a sidecar the
+    surrounding environment held no provider key; in a host that runs the model
+    it holds every one of them -- and `runtime.load_model_endpoint` actively
+    tells operators to put the key there. Bubblewrap has always been clean
+    (`--clearenv`); seatbelt inherited whatever the subprocess was given, and
+    the host environment was being merged in.
+    """
+    import os
+    import subprocess
+
+    from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import (
+        detect_local_capability,
+        sandbox_command,
+    )
+
+    capability = detect_local_capability()
+    if not capability.available:
+        pytest.skip("no isolation backend on this host")
+
+    os.environ["PROGRAM_OPT_TEST_SECRET"] = "sk-must-not-be-visible"
+    try:
+        peek = tmp_path / "peek.py"
+        peek.write_text(
+            "import json, os\n"
+            "print(json.dumps({'secret': os.environ.get('PROGRAM_OPT_TEST_SECRET'),\n"
+            "                  'threads': os.environ.get('OMP_NUM_THREADS'),\n"
+            "                  'home': os.environ.get('HOME')}))\n",
+            encoding="utf-8",
+        )
+        command, env = sandbox_command(tmp_path, [str(peek)], capability=capability, timeout=30)
+        completed = subprocess.run(
+            command, capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=60
+        )
+    finally:
+        os.environ.pop("PROGRAM_OPT_TEST_SECRET", None)
+
+    assert completed.returncode == 0, completed.stderr
+    seen = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert seen["secret"] is None
+    # Still gets what the sandbox does mean to give it: the thread cap that
+    # keeps a candidate from burning its CPU budget eight ways at once, and a
+    # writable home inside the scratch directory.
+    assert seen["threads"] == "1"
+    assert seen["home"] == str(tmp_path.resolve())

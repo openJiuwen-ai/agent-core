@@ -17,10 +17,10 @@ from typing import Any, Callable, Optional
 
 import yaml
 
-from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.completion import (
+from openjiuwen.rsi.artifact_rsi.program_opt.completion import (
     CompletionUsage,
 )
-from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.vendor.puct.sandbox import (
+from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import (
     SandboxCapability,
     detect_local_capability,
 )
@@ -156,7 +156,7 @@ def completion_factory_for(endpoint: dict[str, Any]) -> Callable[..., Any]:
     builds the call itself so that a stop, a token count and an empty reply each
     mean something to it. All this does is put the endpoint in front of that.
     """
-    from openjiuwen.rsi.artifact_rsi.program_opt.sciencediscovery.completion import (
+    from openjiuwen.rsi.artifact_rsi.program_opt.completion import (
         completion_for,
     )
 

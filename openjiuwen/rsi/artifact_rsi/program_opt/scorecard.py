@@ -40,7 +40,6 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
-
 #: The key the tree ranks on -- upstream's contract, and the reason a
 #: scorecard's aggregate has to be oriented before it lands in `metrics`.
 SCORE_KEY = "score"
