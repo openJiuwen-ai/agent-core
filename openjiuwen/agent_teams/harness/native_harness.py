@@ -1164,13 +1164,14 @@ class NativeHarness(DeepAgent):
         # (prior round failed before consuming) is kept — that is a legitimate
         # retry, not a duplicate.
         if follow_ups is not None:
-            follow_ups = [
-                f for f in follow_ups
-                if not (
-                    isinstance(f, InteractiveInput)
-                    and not self._interrupt_resume_still_pending(f, session)
-                )
-            ] or None
+            kept = []
+            for f in follow_ups:
+                if isinstance(f, InteractiveInput) and not self._interrupt_resume_still_pending(
+                    f, session
+                ):
+                    continue
+                kept.append(f)
+            follow_ups = kept or None
         if follow_ups is not None:
             nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
