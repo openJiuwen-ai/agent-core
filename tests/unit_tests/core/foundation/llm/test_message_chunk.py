@@ -287,6 +287,22 @@ def test_assistant_add_merges_reasoning_content():
     assert result.reasoning_content == "Thinking step 1Thinking step 2"
 
 
+def test_assistant_add_preserves_and_merges_metadata():
+    chunk1 = AssistantMessageChunk(
+        content="hello",
+        metadata={"edge_cloud_router": {"target": "cloud"}, "first": True},
+    )
+    chunk2 = AssistantMessageChunk(content=" world", metadata={"second": True})
+
+    result = chunk1 + chunk2
+
+    assert result.metadata == {
+        "edge_cloud_router": {"target": "cloud"},
+        "first": True,
+        "second": True,
+    }
+
+
 def test_assistant_add_handles_none_reasoning_content():
     """Test that __add__ handles None reasoning_content."""
     chunk1 = AssistantMessageChunk(

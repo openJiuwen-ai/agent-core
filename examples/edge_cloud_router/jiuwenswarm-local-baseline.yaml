@@ -1,0 +1,17 @@
+# Replace only the `models` section in ~/.jiuwenswarm/config/config.yaml.
+# This baseline sends every request to the same local medium model used by the router.
+models:
+  defaults:
+    - alias: baseline-local
+      model_client_config:
+        api_base: ${LOCAL_MEDIUM_API_BASE:-http://127.0.0.1:8083/v1}
+        api_key: ${LOCAL_MEDIUM_API_KEY:-EMPTY}
+        model_name: ${LOCAL_MEDIUM_MODEL:-Qwen/Qwen3-8B}
+        client_provider: ${LOCAL_MEDIUM_PROVIDER:-OpenAI}
+        timeout: 360
+        stream_first_chunk_timeout: 300
+        stream_idle_timeout: 60
+        verify_ssl: false
+      model_config_obj:
+        temperature: 0
+      is_default: true

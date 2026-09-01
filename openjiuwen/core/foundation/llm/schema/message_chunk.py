@@ -212,6 +212,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             self.completion_token_ids, other.completion_token_ids
         )
         merged_logprobs = _merge_logprobs(self.logprobs, other.logprobs)
+        merged_metadata = {**self.metadata, **other.metadata}
 
         return AssistantMessageChunk(
             role=self.role,
@@ -225,6 +226,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             prompt_token_ids=merged_prompt_token_ids,
             completion_token_ids=merged_completion_token_ids,
             logprobs=merged_logprobs,
+            metadata=merged_metadata,
         )
 
 

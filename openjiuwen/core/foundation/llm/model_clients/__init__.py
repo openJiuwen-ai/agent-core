@@ -52,6 +52,11 @@ def _builtin_model_client(provider, client_config: ModelClientConfig, model_conf
         from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client import \
             IntelliRouterModelClient
         return IntelliRouterModelClient(model_config=model_config, model_client_config=client_config)
+
+    if provider == ProviderType.EdgeCloudRouter.value:
+        from openjiuwen.core.foundation.llm.model_clients.edge_cloud_router_model_client import \
+            EdgeCloudRouterModelClient
+        return EdgeCloudRouterModelClient(model_config=model_config, model_client_config=client_config)
     return None
 
 
