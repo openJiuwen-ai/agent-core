@@ -72,6 +72,10 @@ class TeamHarness:
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
         self._bg_controller: Optional[Any] = None
+        # Runtime features such as Team Organization mount tools after the
+        # harness has been built. Keep those instances so a later native
+        # rebuild does not silently lose their LLM-visible abilities.
+        self._dynamic_tools: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Construction
@@ -130,6 +134,7 @@ class TeamHarness:
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
+            self._remount_dynamic_tools()
         if self._bg_controller is not None:
             self._native.background_task_controller = self._bg_controller
         child = self._make_child_session(team_session)
@@ -179,6 +184,7 @@ class TeamHarness:
         """
         if self._native is None or self._native.state is HarnessState.TERMINATED:
             self._native = NativeHarness(self._agent_spec, self._build_context)
+            self._remount_dynamic_tools()
         child = self._make_child_session(team_session)
         kv_cache_hooks.on_harness_session_created(self, child)
         await child.pre_run()
@@ -445,13 +451,27 @@ class TeamHarness:
         schema is requested. The ability manager re-qualifies the id per owner, so
         concurrent sessions never collide; pair with :meth:`remove_tool` at turn end.
         """
-        if self._native is not None:
-            self._native.ability_manager.add_ability(tool.card, tool)
+        tool_name = getattr(getattr(tool, "card", None), "name", None)
+        if not tool_name:
+            raise ValueError("dynamically registered tools must define card.name")
+        self._dynamic_tools[tool_name] = tool
+        self._mount_dynamic_tool(tool)
 
     def remove_tool(self, name: str) -> None:
         """Drop a previously :meth:`add_tool`-ed tool by its (unqualified) name."""
+        self._dynamic_tools.pop(name, None)
         if self._native is not None:
             self._native.ability_manager.remove_ability(name)
+
+    def _remount_dynamic_tools(self) -> None:
+        """Restore tools mounted after construction onto a rebuilt native."""
+
+        for tool in self._dynamic_tools.values():
+            self._mount_dynamic_tool(tool)
+
+    def _mount_dynamic_tool(self, tool: Any) -> None:
+        if self._native is not None:
+            self._native.ability_manager.add_ability(tool.card, tool)
 
     def add_rail(self, rail: Any) -> None:
         """Queue an extra rail on the native brain (registered on next invoke/start).

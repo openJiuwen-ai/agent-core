@@ -1,0 +1,199 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Organization-level topics and event payloads."""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class OrgTopic(str, Enum):
+    """Topic categories for organization-level pub/sub."""
+
+    ORG = "org"
+    TASK = "task"
+    LEADER = "leader"
+    TEAM_INBOX = "team_inbox"
+
+    def build(self, session_id: str, organization_id: str, team_id: str | None = None) -> str:
+        base = f"session:{session_id}:org:{organization_id}:{self.value}"
+        if self is OrgTopic.TEAM_INBOX:
+            return f"{base}:{team_id or ''}"
+        return base
+
+
+class OrgEvent:
+    """Organization-level event type constants."""
+
+    BROADCAST = "org_broadcast"
+    TASK_CREATED = "org_task_created"
+    TASK_CLAIMED = "org_task_claimed"
+    TASK_DELEGATED = "org_task_delegated"
+    TASK_COMPLETED = "org_task_completed"
+    TASK_REVIEW_REQUESTED = "org_task_review_requested"
+    TASK_REVIEWED = "org_task_reviewed"
+    SUMMARY_TASK_CREATED = "org_summary_task_created"
+    SUMMARY_SOURCES_UPDATED = "org_summary_sources_updated"
+    LEADER_MESSAGE = "org_leader_message"
+    TEAM_INVITED = "org_team_invited"
+    TEAM_JOINED = "org_team_joined"
+
+
+class BaseOrgEvent(BaseModel):
+    """Base payload for organization-level events."""
+
+    organization_id: str
+    team_id: str | None = None
+    leader_id: str | None = None
+
+
+class OrgBroadcastEvent(BaseOrgEvent):
+    """Event used to wake all leaders without embedding large content."""
+
+    event_id: str
+
+
+class OrgTaskCreatedEvent(BaseOrgEvent):
+    """Published after an org task row is created."""
+
+    task_id: str
+    parent_task_id: str | None = None
+    root_task_id: str
+
+
+class OrgTaskClaimedEvent(BaseOrgEvent):
+    """Published after an open task is claimed by one leader."""
+
+    task_id: str
+    claimed_by_team_id: str
+    claimed_by_leader_id: str
+
+
+class OrgTaskDelegatedEvent(BaseOrgEvent):
+    """Published after a task is delegated to another team leader."""
+
+    task_id: str
+    delegated_by_team_id: str
+    delegated_to_team_id: str
+    delegated_to_leader_id: str | None = None
+
+
+class OrgTaskCompletedEvent(BaseOrgEvent):
+    """Published after a task reaches COMPLETED.
+
+    The result body stays in the DB. Consumers should fetch by ``task_id``.
+    """
+
+    task_id: str
+
+
+class OrgTaskReviewRequestedEvent(BaseOrgEvent):
+    """Published when a completed child task awaits parent-team review."""
+
+    task_id: str
+    parent_task_id: str
+    reviewer_team_id: str
+
+
+class OrgTaskReviewedEvent(BaseOrgEvent):
+    """Published after a parent team reviews a completed child task."""
+
+    task_id: str
+    review_id: str
+    review_status: str
+
+
+class OrgSummaryTaskCreatedEvent(BaseOrgEvent):
+    """Published after a summary task row is created."""
+
+    summary_task_id: str
+
+
+class OrgSummarySourcesUpdatedEvent(BaseOrgEvent):
+    """Published after source tasks are attached to a summary task."""
+
+    summary_task_id: str
+
+
+class OrgLeaderMessageEvent(BaseOrgEvent):
+    """Published after a leader-to-leader message row is persisted."""
+
+    message_id: str
+    from_team_id: str
+    to_team_id: str | None = None
+
+
+class OrgTeamInvitedEvent(BaseOrgEvent):
+    """Published after an active team is invited into an organization."""
+
+    inviter_team_id: str
+    invited_team_id: str
+
+
+class OrgTeamJoinedEvent(BaseOrgEvent):
+    """Published after an invited team is bound to the organization runtime."""
+
+    joined_team_id: str
+    joined_leader_id: str
+
+
+_EVENT_TYPE_MAP: dict[str, type[BaseOrgEvent]] = {
+    OrgEvent.BROADCAST: OrgBroadcastEvent,
+    OrgEvent.TASK_CREATED: OrgTaskCreatedEvent,
+    OrgEvent.TASK_CLAIMED: OrgTaskClaimedEvent,
+    OrgEvent.TASK_DELEGATED: OrgTaskDelegatedEvent,
+    OrgEvent.TASK_COMPLETED: OrgTaskCompletedEvent,
+    OrgEvent.TASK_REVIEW_REQUESTED: OrgTaskReviewRequestedEvent,
+    OrgEvent.TASK_REVIEWED: OrgTaskReviewedEvent,
+    OrgEvent.SUMMARY_TASK_CREATED: OrgSummaryTaskCreatedEvent,
+    OrgEvent.SUMMARY_SOURCES_UPDATED: OrgSummarySourcesUpdatedEvent,
+    OrgEvent.LEADER_MESSAGE: OrgLeaderMessageEvent,
+    OrgEvent.TEAM_INVITED: OrgTeamInvitedEvent,
+    OrgEvent.TEAM_JOINED: OrgTeamJoinedEvent,
+}
+_EVENT_CLASS_MAP: dict[type[BaseOrgEvent], str] = {v: k for k, v in _EVENT_TYPE_MAP.items()}
+
+
+class OrgEventMessage(BaseModel):
+    """Transport wrapper matching the team EventMessage shape."""
+
+    event_type: str = Field(..., description="Event type from OrgEvent constants")
+    payload: dict[str, Any] = Field(..., description="Raw event payload data")
+    sender_id: str = Field(default="", description="Node ID of the sender")
+
+    @classmethod
+    def from_event(cls, event: BaseOrgEvent) -> "OrgEventMessage":
+        event_type = _EVENT_CLASS_MAP.get(type(event))
+        if event_type is None:
+            raise ValueError(f"Unknown org event class: {type(event).__name__}")
+        return cls(event_type=event_type, payload=event.model_dump())
+
+    def get_payload(self) -> BaseOrgEvent:
+        event_cls = _EVENT_TYPE_MAP.get(self.event_type)
+        if event_cls is None:
+            raise ValueError(f"Unknown org event_type: {self.event_type}")
+        return event_cls.model_validate(self.payload)
+
+
+__all__ = [
+    "BaseOrgEvent",
+    "OrgBroadcastEvent",
+    "OrgEvent",
+    "OrgEventMessage",
+    "OrgLeaderMessageEvent",
+    "OrgTeamInvitedEvent",
+    "OrgTeamJoinedEvent",
+    "OrgTaskClaimedEvent",
+    "OrgTaskCompletedEvent",
+    "OrgTaskCreatedEvent",
+    "OrgTaskDelegatedEvent",
+    "OrgTaskReviewedEvent",
+    "OrgTaskReviewRequestedEvent",
+    "OrgSummarySourcesUpdatedEvent",
+    "OrgSummaryTaskCreatedEvent",
+    "OrgTopic",
+]

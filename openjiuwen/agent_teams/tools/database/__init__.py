@@ -302,6 +302,9 @@ class TeamDatabase:
             self.task = None
             self.message = None
             team_logger.info("Team database closed")
+        from openjiuwen.agent_teams.organization.pool import remove_process_org_managers_for_db
+
+        remove_process_org_managers_for_db(self)
 
     async def _ensure_initialized(self) -> None:
         """Initialize on first call; idempotent thereafter."""

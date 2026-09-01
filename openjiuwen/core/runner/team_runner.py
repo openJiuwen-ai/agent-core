@@ -124,7 +124,42 @@ class _TeamRunnerMixin:
             from openjiuwen.agent_teams.runtime import TeamRuntimeManager
 
             self._team_runtime_manager = TeamRuntimeManager()
+            self._team_runtime_manager.organization_runtime_manager.set_leader_turn_runner(
+                self._run_organization_leader_turn
+            )
         return self._team_runtime_manager
+
+    async def _run_organization_leader_turn(
+        self,
+        team_name: str,
+        session_id: str,
+        inputs: object,
+    ) -> bool:
+        """Run a background organization turn through the normal Runner path."""
+
+        spec = await self._resolve_team_agent_spec(team_name, session=session_id)
+        runtime_manager = self._get_team_runtime_manager()
+        activation = await runtime_manager.activate(spec, session_id, inputs)
+        ran_turn = False
+        try:
+            if _is_team_reject_kind(activation.action.kind) or activation.agent is None:
+                return False
+            await runtime_manager.organization_runtime_manager.ensure_team_binding(
+                team_id=team_name,
+                session_id=activation.session.get_session_id(),
+                agent=activation.agent,
+            )
+            self._maybe_attach_observability(activation.agent)
+            ran_turn = True
+            result = await activation.agent.invoke(inputs, session=activation.session)
+            return result is not None
+        finally:
+            if ran_turn:
+                await runtime_manager.finalize(
+                    team_name=spec.team_name,
+                    session_id=activation.session.get_session_id(),
+                )
+                await activation.session.post_run()
 
     @staticmethod
     @contextmanager

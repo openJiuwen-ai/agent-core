@@ -22,6 +22,9 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -120,6 +123,7 @@ class TeamBackend:
         plan_id: str | None = None,
         leader_member_name: str | None = None,
         leader_prompt: str = "",
+        org_task_manager: "OrgTaskManager | None" = None,
     ):
         """Initialize agent team manager.
 
@@ -258,6 +262,7 @@ class TeamBackend:
             leader_member_name=self.leader_member_name,
             dispatch_mode=dispatch_mode,
         )
+        self.org_task_manager = org_task_manager
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
         # ``register_human_agent_inbound`` for the registration surface.
@@ -1024,6 +1029,21 @@ class TeamBackend:
         Example:
             success = team.clean_team()
         """
+        try:
+            if await self.owns_active_organization():
+                team_logger.error(
+                    "Cannot clean organization owner team {} before org_dissolve_organization succeeds",
+                    self.team_name,
+                )
+                return False
+        except Exception as exc:
+            team_logger.warning(
+                "Could not check organization ownership for {}: {}",
+                self.team_name,
+                exc,
+            )
+            return False
+
         # Check if all members are shutdown
         all_shutdown = True
         members = await self.db.member.get_team_members(self.team_name)
@@ -1081,6 +1101,15 @@ class TeamBackend:
         team_logger.info(f"Team {self.team_name} cleaned successfully")
 
         return True
+
+    async def owns_active_organization(self) -> bool:
+        """Return whether this Team is the owner of a persisted organization."""
+
+        manager = self.org_task_manager
+        if manager is None:
+            return False
+        organization = await manager.get_organization()
+        return organization is not None and organization.owner_team_id == self.team_name
 
     async def force_clean_team(self, shutdown_members: bool = True) -> bool:
         """Force cleanup for the current session's team state.

@@ -3,7 +3,7 @@
 
 """Unit tests for team_tools module"""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -389,6 +389,18 @@ class TestCleanTeamTool:
 
         assert result.success is False
         assert "shutdown_member" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_blocks_when_organization_check_fails(self, agent_team, t):
+        manager = MagicMock()
+        manager.get_organization = AsyncMock(side_effect=RuntimeError("db down"))
+        agent_team.org_task_manager = manager
+
+        result = await CleanTeamTool(agent_team, t).invoke({})
+
+        assert result.success is False
+        assert "Could not verify organization ownership" in result.error
 
 
 class TestCleanTeamLifecycleGate:

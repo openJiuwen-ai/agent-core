@@ -81,6 +81,7 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
 
@@ -106,11 +107,22 @@ class TeamRuntimeManager:
 
     def __init__(self) -> None:
         self._pool: TeamRuntimePool = TeamRuntimePool()
+        self._organization_runtime_manager: "OrganizationRuntimeManager | None" = None
 
     @property
     def pool(self) -> TeamRuntimePool:
         """Process-local TeamRuntimePool tracking active team runtimes."""
         return self._pool
+
+    @property
+    def organization_runtime_manager(self) -> "OrganizationRuntimeManager":
+        """Process-local organization binder for already-active teams."""
+
+        if self._organization_runtime_manager is None:
+            from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
+
+            self._organization_runtime_manager = OrganizationRuntimeManager(self)
+        return self._organization_runtime_manager
 
     async def activate(
         self,
@@ -165,13 +177,29 @@ class TeamRuntimeManager:
             team_db_state,
             pool_entry is not None,
         )
-        return await self._apply_action(
+        activation = await self._apply_action(
             action,
             spec=spec,
             team_session=team_session,
             pool_entry=pool_entry,
             inputs=inputs,
         )
+        if activation.agent is not None:
+            await self.organization_runtime_manager.ensure_control_tools(
+                activation.agent,
+                session_id=target_session_id,
+            )
+            # A cold-recovered TeamBackend is rebuilt before the process-local
+            # organization registry exists. Rehydrate the durable membership
+            # before the leader starts, so the first post-restart LLM turn is
+            # given the organization task-pool tools rather than team-only
+            # fallbacks.
+            await self.organization_runtime_manager.ensure_team_binding(
+                team_id=team_name,
+                session_id=target_session_id,
+                agent=activation.agent,
+            )
+        return activation
 
     async def finalize(
         self,
@@ -232,6 +260,52 @@ class TeamRuntimeManager:
                 session_id,
                 exc,
             )
+
+    async def run_organization_turn(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+        inputs: object,
+    ) -> bool:
+        """Run one background leader turn for organization coordination.
+
+        Only a paused leader can be resumed here. A leader already serving a
+        user or executing another task is deliberately left alone; another
+        organization member may claim the open task instead.
+        """
+
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None or entry.state is not RuntimeState.PAUSED:
+            return False
+        spec = entry.agent.spec
+        if spec is None:
+            return False
+
+        activation: TeamRuntimeActivation | None = None
+        ran_turn = False
+        try:
+            activation = await self.activate(spec, session_id, inputs)
+            if activation.action.kind in _REJECT_KINDS or activation.agent is None:
+                return False
+            ran_turn = True
+            await activation.agent.invoke(inputs, session=activation.session)
+            return True
+        except Exception as exc:
+            team_logger.warning(
+                "organization background turn failed for team {} session {}: {}",
+                team_name,
+                session_id,
+                exc,
+            )
+            return False
+        finally:
+            if ran_turn and activation is not None:
+                await self.finalize(team_name=team_name, session_id=session_id)
+                current = await self._resolve_entry(team_name=team_name, session_id=session_id)
+                if current is not None:
+                    await current.interact_gate.close_and_drain()
+                await activation.session.post_run()
 
     # team_member statuses that already encode a finalize-side outcome
     # written by some other party (leader stop/pause marks or shutdown_self).

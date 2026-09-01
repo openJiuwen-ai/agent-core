@@ -490,11 +490,15 @@ def static_tables() -> list[Table]:
     creating a schema grow with that history rather than with the schema. The
     per-session tables are owned by ``create_cur_session_tables()``, which
     creates exactly the current session's set.
+    Organization tables (``org_*``) live in the same metadata registry once
+    imported but are owned by the org task pool's DDL path, not TeamDatabase
+    initialization — whitelist ``TEAM_STATIC_TABLES_TO_CLEAR`` rather than
+    "everything that is not dynamic".
     """
     return [
         table
         for name, table in SQLModel.metadata.tables.items()
-        if not name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES)
+        if name in TEAM_STATIC_TABLES_TO_CLEAR
     ]
 
 

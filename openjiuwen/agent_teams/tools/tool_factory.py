@@ -244,6 +244,19 @@ def create_team_tools(
         "async_task_cancel": AsyncTaskCancelTool(parent_agent, t, language=lang),
     }
 
+    org_task_manager = getattr(agent_team, "org_task_manager", None)
+    if org_task_manager is not None:
+        from openjiuwen.agent_teams.organization.tools import create_org_leader_tools
+
+        leader_id = agent_team.leader_member_name or agent_team.member_name
+        org_tools = create_org_leader_tools(
+            manager=org_task_manager,
+            team_id=agent_team.team_name,
+            leader_id=leader_id,
+            transport=getattr(agent_team, "org_transport", None),
+        )
+        all_tools.update({tool.card.name: tool for tool in org_tools})
+
     if role == "human_agent":
         allowed = HUMAN_AGENT_TOOLS
     elif role == "leader":

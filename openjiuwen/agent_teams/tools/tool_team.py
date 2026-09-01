@@ -230,6 +230,25 @@ class CleanTeamTool(TeamTool):
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         try:
+            if await self.team.owns_active_organization():
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "This Team owns an active organization. Call "
+                        "org_dissolve_organization successfully before clean_team."
+                    ),
+                )
+        except Exception as exc:
+            team_logger.warning(
+                "Could not check organization ownership for {}: {}",
+                self.team.team_name,
+                exc,
+            )
+            return ToolOutput(
+                success=False,
+                error="Could not verify organization ownership. Retry clean_team later.",
+            )
+        try:
             team_name = self.team.team_name
             success = await self.team.clean_team()
             if not success:
