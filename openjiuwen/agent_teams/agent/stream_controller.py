@@ -537,24 +537,29 @@ class StreamController:
         pending interrupt and no in-flight round).
         """
         async with self._interrupt_lock:
-            if self.is_valid_interrupt_resume(user_input):
-                harness = self._resources.harness
-                if harness is not None:
-                    await harness.send(user_input)
-                return "delivered"
-            if self.has_in_flight_round():
-                self._pending_interrupt_resumes.append(user_input)
+            if not self.is_valid_interrupt_resume(user_input):
+                if self.has_in_flight_round():
+                    self._pending_interrupt_resumes.append(user_input)
+                    team_logger.info(
+                        "[{}] queued interrupt resume (round in flight)",
+                        self._member_name() or "?",
+                    )
+                    return "queued"
                 team_logger.info(
-                    "[{}] queued interrupt resume (round in flight)",
+                    "[{}] dropping stale interrupt resume input (no pending "
+                    "interrupt, no in-flight round)",
                     self._member_name() or "?",
                 )
-                return "queued"
-            team_logger.info(
-                "[{}] dropping stale interrupt resume input (no pending "
-                "interrupt, no in-flight round)",
-                self._member_name() or "?",
-            )
-            return "dropped"
+                return "dropped"
+        # Lock released before harness.send: harness.send blocks on the supervisor
+        # (await ack), and holding _interrupt_lock during it deadlocks with
+        # _on_idle_settled which runs on the supervisor thread and tries to
+        # acquire the same lock. The lock only protects is_valid_interrupt_resume
+        # + _pending_interrupt_resumes (queue); harness.send doesn't touch the queue.
+        harness = self._resources.harness
+        if harness is not None:
+            await harness.send(user_input)
+        return "delivered"
 
     async def _drain_pending_interrupt_resumes(self) -> None:
         """Deliver the next queued interrupt resume whose ask the round reached.
