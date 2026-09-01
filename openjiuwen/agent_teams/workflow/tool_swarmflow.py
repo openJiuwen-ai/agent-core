@@ -458,7 +458,7 @@ class SwarmflowTool(AsyncTool):
                 "team_name": self._team_name,
                 "script_path": script_path,
             }
-            async with aiofiles.open(run_dir / "resume.json", "w", encoding="utf-8") as f:
+            async with aiofiles.open(run_dir / f"{run_id}.resume.json", "w", encoding="utf-8") as f:
                 await f.write(json.dumps(payload, ensure_ascii=False))
         except Exception:
             team_logger.debug("[swarmflow] resume metadata write failed", exc_info=True)
@@ -481,7 +481,7 @@ class SwarmflowTool(AsyncTool):
             if not workflows_root.exists():
                 return None
             for sub in workflows_root.iterdir():
-                resume_file = sub / "resume.json"
+                resume_file = sub / f"{resume_id}.resume.json"
                 if not resume_file.exists():
                     continue
                 try:
@@ -492,9 +492,8 @@ class SwarmflowTool(AsyncTool):
                         resume_file, exc_info=True,
                     )
                     continue
-                if meta.get("run_id") == resume_id:
-                    sp = str(meta.get("script_path") or (sub / "script.py"))
-                    return (sp, meta.get("args"))
+                sp = str(meta.get("script_path") or (sub / "script.py"))
+                return (sp, meta.get("args"))
             return None
         except Exception:
             team_logger.debug("[swarmflow] resume sidecar resolve failed", exc_info=True)
@@ -519,12 +518,10 @@ class SwarmflowTool(AsyncTool):
             if not name:
                 return None
             run_dir = workflow_run_dir(self._team_name, get_session_id(), name)
-            resume_file = run_dir / "resume.json"
+            resume_file = run_dir / f"{resume_id}.resume.json"
             if not resume_file.exists():
                 return None
             meta = json.loads(resume_file.read_text(encoding="utf-8"))
-            if meta.get("run_id") != resume_id:
-                return None
             return meta.get("args")
         except Exception:
             team_logger.debug(
