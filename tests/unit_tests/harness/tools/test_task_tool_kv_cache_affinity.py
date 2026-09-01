@@ -67,21 +67,21 @@ def test_team_member_subagent_scope_is_stable_and_distinct() -> None:
 
 @pytest.mark.asyncio
 async def test_sticky_subagent_uses_child_session_prepare_and_suspend() -> None:
-    subagent = _FakeSubAgent("browser")
+    subagent = _FakeSubAgent("verification")
     tool = _make_tool(subagent=subagent)
 
     with patch.object(Session, "prepare_kvc", new=AsyncMock(return_value=True)) as prepare, patch.object(
         Session, "suspend_kvc", new=AsyncMock(return_value=True)
     ) as suspend, patch.object(Session, "release_kvc", new=AsyncMock(return_value=True)) as release:
         result = await tool.invoke(
-            {"subagent_type": "browser_agent", "task_description": "run task"},
+            {"subagent_type": "verification_agent", "task_description": "run task"},
             session=Session(session_id="parent_session"),
         )
 
     assert result.success is True
     child = subagent.sessions[0]
     assert isinstance(child, Session)
-    assert child.get_session_id() == "parent_session_sub_browser_agent"
+    assert child.get_session_id() == "parent_session_sub_verification_agent"
     assert child.get_parent_session_id() == "parent_session"
     prepare.assert_awaited_once_with()
     suspend.assert_awaited_once_with()
@@ -90,20 +90,20 @@ async def test_sticky_subagent_uses_child_session_prepare_and_suspend() -> None:
 
 @pytest.mark.asyncio
 async def test_team_member_child_session_uses_member_cache_lineage() -> None:
-    subagent = _FakeSubAgent("browser")
+    subagent = _FakeSubAgent("verification")
     tool = _make_tool(subagent=subagent)
     parent = Session(session_id="product-session")
     parent.set_team_cache_scope(team_id="team-a", agent_id="member-a")
 
     result = await tool.invoke(
-        {"subagent_type": "browser_agent", "task_description": "run task"},
+        {"subagent_type": "verification_agent", "task_description": "run task"},
         session=parent,
     )
 
     assert result.success is True
     child = subagent.sessions[0]
     assert re.fullmatch(
-        r"product-session_sub_browser_agent_scope_[0-9a-f]{12}",
+        r"product-session_sub_verification_agent_scope_[0-9a-f]{12}",
         child.get_session_id(),
     )
     assert child.get_parent_session_id() == "team:product-session:team:team-a:member:member-a"
@@ -111,17 +111,17 @@ async def test_team_member_child_session_uses_member_cache_lineage() -> None:
 
 @pytest.mark.asyncio
 async def test_sticky_failure_releases_child_and_preserves_original_exception() -> None:
-    subagent = _FakeSubAgent("browser", error=RuntimeError("subagent boom"))
+    subagent = _FakeSubAgent("verification", error=RuntimeError("subagent boom"))
     tool = _make_tool(subagent=subagent)
 
     with patch.object(Session, "prepare_kvc", new=AsyncMock(return_value=True)) as prepare, patch.object(
         Session, "suspend_kvc", new=AsyncMock(return_value=True)
     ) as suspend, patch.object(Session, "release_kvc", new=AsyncMock(return_value=True)) as release:
         with pytest.raises(Exception, match="subagent boom"):
-            await tool.invoke(
-                {"subagent_type": "browser_agent", "task_description": "run task"},
-                session=Session(session_id="parent_session"),
-            )
+                await tool.invoke(
+                    {"subagent_type": "verification_agent", "task_description": "run task"},
+                    session=Session(session_id="parent_session"),
+                )
 
     prepare.assert_awaited_once_with()
     suspend.assert_not_awaited()
@@ -180,4 +180,8 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
     assert result.success is True
     assert "session" not in subagent.invoke.await_args.kwargs
     assert subagent.sessions == [None]
-    assert subagent.inputs == [{"query": "run task", "conversation_id": "parent_session_sub_browser_agent"}]
+    assert subagent.inputs[0]["query"] == "run task"
+    assert re.fullmatch(
+        r"parent_session_sub_browser_agent_[0-9a-f]{8}",
+        subagent.inputs[0]["conversation_id"],
+    )
