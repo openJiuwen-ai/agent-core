@@ -52,7 +52,13 @@ from .engine import RunSpec
 from .events import Emit
 from .judge_domain import grader, judge_domain
 from .logging_config import get_logger
-from .program import bundle, extract_files, files_of, read_promise
+from .program import (
+    bundle,
+    extract_files,
+    files_of,
+    read_promise,
+    reply_carries_program,
+)
 from .prompt import repair_prompt, with_promise_request
 from .provision import missing_candidate_runtime
 from .restore import RestoreError, restore_baseline, restore_tree
@@ -473,7 +479,11 @@ class PuctEngine:
                 files, summary = extract_files(
                     reply, files_of(parent_code, spec.entrypoint), spec.entrypoint,
                 )
-                code = bundle(files)
+                # A reply that proposed nothing merges to the parent, which
+                # would be a valid program costing a full evaluation to learn
+                # the parent's own score. Empty is what it is, and what the rest
+                # of the engine already knows how to record.
+                code = bundle(files) if reply_carries_program(reply) else ""
             if not _has_content(code, spec):
                 reporter.note_empty(iteration)
             # Read from the same reply, so the prior costs no extra call.

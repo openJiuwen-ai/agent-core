@@ -1198,3 +1198,23 @@ def test_a_program_may_import_its_own_modules(tmp_path: Path) -> None:
     assert validate_source(
         "import os\ndef train_and_predict(t, s): ...\n", local=local_roots(["os.py"]),
     )[0] is False
+
+
+def test_a_reply_that_proposed_nothing_is_an_empty_draw_not_a_copy() -> None:
+    """Once a reply became a patch, "the model returned nothing" stopped being
+    visible: merging nothing onto the parent yields the parent, a valid program
+    that costs a full sandboxed evaluation to learn the parent's own score, and
+    puts a duplicate node on the tree. Upstream turns an empty draw into a node
+    scoring `-inf` — deliberately a node, because dropping it shrinks the rank
+    denominator and raises `1/N` for every later iteration."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import reply_carries_program
+
+    assert reply_carries_program("") is False
+    assert reply_carries_program("   \n\n ") is False
+    assert reply_carries_program("```python name=a.py\nx = 1\n```") is True
+    assert reply_carries_program("```python\nx = 1\n```") is True
+    assert reply_carries_program("DELETE helpers/old.py") is True
+    # Upstream's fenceless fallback: prose is taken as the program, becomes a
+    # candidate that cannot parse, and scores `-inf`. That is a draw that
+    # happened and failed, not a draw that never happened.
+    assert reply_carries_program("I could not think of anything better.") is True

@@ -419,6 +419,25 @@ def _summary_for(
     return "changed: " + ", ".join(ordered[:5]) + (", …" if len(ordered) > 5 else "")
 
 
+def reply_carries_program(reply: str) -> bool:
+    """Whether a reply proposed anything at all.
+
+    Needed because "the model returned nothing" stopped being visible in the
+    result once a reply became a *patch*: merging nothing onto the parent yields
+    the parent, which is a valid program that costs a full evaluation to learn
+    the parent's own score. Upstream turns an empty draw into a node scoring
+    `-inf` and moves on -- deliberately a node, because dropping it shrinks the
+    rank denominator and raises `1/N` for every later iteration -- and this is
+    how that case is still recognised.
+    """
+    if _labelled_blocks(reply):
+        return True
+    if _DELETE.search(reply or ""):
+        return True
+    code, _ = extract_program(_DELETE.sub("", reply or "").strip())
+    return bool(code.strip())
+
+
 def _labelled_blocks(reply: str) -> Dict[str, str]:
     """Every fenced block that says which file it is."""
     found: Dict[str, str] = {}
