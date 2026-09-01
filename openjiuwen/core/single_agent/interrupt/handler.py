@@ -22,10 +22,15 @@ from openjiuwen.core.single_agent.interrupt.response import (
     InterruptRequest,
     ToolCallInterruptRequest,
 )
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, RESUME_USER_INPUT_KEY
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    RESUME_USER_INPUT_KEY,
+    SUB_AGENT_RESUME_INPUT_KEY,
+)
 from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptEntry,
     ToolInterruptionState,
+    is_interrupt_envelope,
     RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
 )
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
@@ -85,16 +90,7 @@ class ToolInterruptHandler:
     @staticmethod
     def _is_sub_agent_interrupt(result: Any) -> bool:
         """Check if result is a sub-agent interrupt dict."""
-        if isinstance(result, tuple) and len(result) >= 1:
-            tool_result = result[0]
-        else:
-            tool_result = result
-
-        return (
-                isinstance(tool_result, dict)
-                and tool_result.get("result_type") == "interrupt"
-                and "interrupt_ids" in tool_result
-        )
+        return is_interrupt_envelope(result)
 
     @staticmethod
     def _process_sub_agent_interrupt(
@@ -409,7 +405,13 @@ class ToolInterruptHandler:
         except (json.JSONDecodeError, TypeError):
             args = {}
 
+        # An agent registered directly as an ability is re-invoked with these
+        # arguments, and reads the answer from "query".
         args["query"] = user_input
+        # A tool that delegates to an agent reads its own argument names and
+        # never sees "query", so it cannot tell a resume from a first call
+        # unless the answer is repeated under a key it knows.
+        args[SUB_AGENT_RESUME_INPUT_KEY] = user_input
 
         tool_call.arguments = args
         return tool_call

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
 
@@ -18,6 +17,10 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.interrupt.state import (
+    SUB_AGENT_RESUME_INPUT_KEY,
+    is_interrupt_envelope,
+)
 from openjiuwen.core.single_agent.rail.base import (
     bind_usage_delegation,
     build_usage_delegation_attribution,
@@ -90,6 +93,7 @@ class TaskTool(Tool):
         parent_session_id: str,
         subagent_type: str,
         resume_task_id: str = "",
+        task_description: Any = "",
     ) -> str:
         normalized_type = str(subagent_type or "").strip()
         normalized_resume_id = str(resume_task_id or "").strip()
@@ -101,7 +105,15 @@ class TaskTool(Tool):
         if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
-        return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
+        # Derived from the task rather than random: a delegation that pauses
+        # for user input is re-invoked with the same arguments, and a fresh
+        # random suffix would send that replay to a brand new subagent while
+        # the interrupted one stays parked and unreachable. Distinct tasks
+        # still get distinct sessions; identical ones now share one.
+        digest = hashlib.sha256(
+            str(task_description or "").encode("utf-8", errors="ignore")
+        ).hexdigest()[:8]
+        return f"{parent_session_id}_sub_{normalized_type}_{digest}"
 
     @staticmethod
     def _extract_browser_result(result: Any, output: Any) -> dict[str, Any]:
@@ -152,7 +164,7 @@ class TaskTool(Tool):
         data["resume_context"] = resume_context
         return data
 
-    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput | dict[str, Any]:
         """Execute task by delegating to a subagent.
 
         Args:
@@ -160,7 +172,8 @@ class TaskTool(Tool):
             **kwargs: Additional parameters, including 'session' for parent session context.
 
         Returns:
-            subagent's final result.
+            The subagent's final result, or the raw interrupt envelope when the
+            subagent paused to ask the user something.
 
         Raises:
             ToolError: If subagent creation or execution fails.
@@ -177,6 +190,9 @@ class TaskTool(Tool):
             subagent_type = inputs.get("subagent_type")
             task_description = inputs.get("task_description")
             resume_task_id = inputs.get("resume_task_id")
+            # Present only when ToolInterruptHandler is replaying this call to
+            # deliver the user's answer to a paused subagent.
+            resume_input = inputs.get(SUB_AGENT_RESUME_INPUT_KEY)
         else:
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
@@ -215,6 +231,7 @@ class TaskTool(Tool):
                 parent_session_id,
                 str(subagent_type),
                 str(resume_task_id or ""),
+                task_description,
             )
         except ValueError as exc:
             raise build_error(
@@ -266,8 +283,12 @@ class TaskTool(Tool):
                     parent_session_id=parent_session_id,
                 )
             # Invoke subagent with isolated session_id
+            # On a resume the answer takes the place of the task description:
+            # the subagent finds its parked interruption state under this same
+            # conversation_id and feeds the answer to handle_resume, rather
+            # than starting the original task over.
             subagent_inputs = {
-                "query": task_description,
+                "query": resume_input if resume_input is not None else task_description,
                 "conversation_id": sub_session_id,
             }
             if str(subagent_type) == "browser_agent" and resume_task_id:
@@ -297,6 +318,12 @@ class TaskTool(Tool):
             finally:
                 reset_usage_delegation(delegation_token)
             succeeded = True
+            if is_interrupt_envelope(result):
+                # Hand the envelope back unchanged: flattening it into
+                # ``output`` drops ``result_type`` and ``interrupt_ids``, so
+                # the parent reports an empty success while the subagent waits
+                # for an answer nobody is asked for.
+                return result
             output = result.get("output", "")
             data = self._build_result_data(
                 result,
