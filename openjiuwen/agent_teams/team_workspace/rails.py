@@ -4,13 +4,17 @@
 
 """Team workspace rail for transparent version control and locking.
 
-Intercepts standard filesystem tool calls targeting the .team/ mount point
+Intercepts standard filesystem tool calls targeting the team shared
+deliverables directory (``team-workspace/artifacts/<date>/chat-<n>/outputs/``)
 and applies workspace policies (lock checking, auto-commit, push) without
-the agent needing special workspace APIs.
+the agent needing special workspace APIs. The ``.team/{team}/`` mount point
+is gone: members address shared files by absolute path, so the rail matches
+against the configured outputs directory instead of a ``.team/`` prefix.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -29,21 +33,27 @@ if TYPE_CHECKING:
 class TeamWorkspaceRail(DeepAgentRail):
     """Transparent version control and locking for team shared space.
 
-    Intercepts standard filesystem tool calls (write_file, edit_file).
-    When the target path is under .team/, applies workspace policies
-    (lock checking, auto-commit, push) without the agent needing to know.
+    Intercepts standard filesystem tool calls (write_file, edit_file). When the
+    target path resolves into the shared team deliverables directory, applies
+    workspace policies (lock checking, auto-commit, push) without the agent
+    needing to know.
 
     Agent uses standard read_file/write_file — this rail adds behavior.
     """
 
-    TEAM_PREFIX = ".team/"
     WRITE_TOOLS = frozenset({"write_file", "edit_file"})
     READ_TOOLS = frozenset({"read_file", "glob", "grep", "list_files"})
 
-    def __init__(self, workspace_manager: TeamWorkspaceManager, member_name: str):
+    def __init__(
+        self,
+        workspace_manager: TeamWorkspaceManager,
+        member_name: str,
+        outputs_dir: str | None = None,
+    ):
         super().__init__()
         self._ws = workspace_manager
         self._member_name = member_name
+        self._outputs_dir = os.path.abspath(os.path.expanduser(outputs_dir)) if outputs_dir else None
         self._last_pull_time: float = 0.0
         self._pull_interval: float = 5.0
 
@@ -60,19 +70,34 @@ class TeamWorkspaceRail(DeepAgentRail):
 
         set_team_workspace(self._ws.workspace_path)
 
+    def _is_deliverable_path(self, path: str) -> bool:
+        """Return whether ``path`` targets a file in the shared outputs dir.
+
+        A member writes deliverables by absolute path; this resolves the
+        requested path and asks whether it lives under the configured outputs
+        directory. When no outputs directory is configured (a member bound to a
+        project, which keeps deliverables in the project) the rail never
+        intercepts.
+        """
+        if not self._outputs_dir or not isinstance(path, str) or not path.strip():
+            return False
+        try:
+            resolved = os.path.abspath(os.path.expanduser(path.strip()))
+        except (OSError, ValueError):
+            return False
+        return os.path.commonpath([resolved, self._outputs_dir]) == self._outputs_dir
+
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Before file operations on .team/: pull for reads, check lock for writes.
+        """Before deliverable file ops: pull for reads, check lock for writes.
 
-        Extracts tool_call from ctx.inputs. If the target path starts with
-        .team/, applies read (pull) or write (lock check) policies.
-
-        Args:
-            ctx: Agent callback context with tool_call in inputs.
+        Extracts tool_call from ctx.inputs. If the target path is under the
+        shared outputs directory, applies read (pull) or write (lock check)
+        policies.
         """
         tool_name = ctx.inputs.tool_name
         tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
         path = tool_args.get("file_path", "")
-        if not path or not path.startswith(self.TEAM_PREFIX):
+        if not self._is_deliverable_path(path):
             return
 
         # Read path: pull before read (distributed mode, throttled)
@@ -97,7 +122,7 @@ class TeamWorkspaceRail(DeepAgentRail):
                 ctx.extra["workspace_lock_rejected"] = tool_msg_text
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """After write/edit to .team/: git commit (+ push) + publish event.
+        """After write/edit to a deliverable: git commit (+ push) + publish.
 
         Args:
             ctx: Agent callback context with tool_call in inputs.
@@ -108,7 +133,7 @@ class TeamWorkspaceRail(DeepAgentRail):
 
         tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
         path = tool_args.get("file_path", "")
-        if not path.startswith(self.TEAM_PREFIX):
+        if not self._is_deliverable_path(path):
             return
 
         real_path = self._resolve_workspace_relative(path)
@@ -141,23 +166,19 @@ class TeamWorkspaceRail(DeepAgentRail):
         await self._ws.pull()
 
     def _resolve_workspace_relative(self, path: str) -> str:
-        """Extract the workspace-relative path from a .team/ prefixed path.
+        """Return the team-workspace-relative form of an absolute deliverable path.
 
-        Handles both layouts:
-        - Hub: ``.team/{team_name}/artifacts/report.md`` → ``artifacts/report.md``
-        - Legacy: ``.team/artifacts/report.md`` → ``artifacts/report.md``
-
-        Uses ``self._ws.team_name`` to detect the hub layout.
-
-        Args:
-            path: File path starting with ".team/".
-
-        Returns:
-            Path relative to the team workspace root.
+        The shared outputs directory lives under ``team-workspace/artifacts/``,
+        so a deliverable path is already inside the team workspace's git
+        repository. Resolving to the workspace root keeps ``auto_commit`` and the
+        publish event's ``artifact_path`` in the shape the manager expects.
         """
-        after_prefix = path[len(self.TEAM_PREFIX):]
-        # Hub layout: first segment matches team_name
-        team_name_prefix = self._ws.team_name + "/"
-        if after_prefix.startswith(team_name_prefix):
-            return after_prefix[len(team_name_prefix):]
-        return after_prefix
+        try:
+            resolved = os.path.abspath(os.path.expanduser(path.strip()))
+        except (OSError, ValueError):
+            return path
+        ws_root = self._ws.workspace_path
+        try:
+            return os.path.relpath(resolved, ws_root)
+        except ValueError:
+            return resolved
