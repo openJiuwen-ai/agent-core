@@ -26,7 +26,7 @@ class StringLengthCounter(TokenCounter):
         self.measurement_fallback_reason = fallback_reason
 
     def count(self, text: str, *, model: str = "", **kwargs) -> int:
-        return len(str(text))
+        return len(str(text)) // 3
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:

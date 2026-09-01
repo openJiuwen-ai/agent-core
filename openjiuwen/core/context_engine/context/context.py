@@ -728,19 +728,19 @@ class SessionModelContext(ModelContext):
         """
         Calculate token count for a single tool, using two-level priority:
         1. Use _token_counter (if available)
-        2. Fallback: text string length / 4
+        2. Fallback: text string length / 3
         """
         # Priority 1: Use _token_counter
         if self._token_counter is not None:
             return self._token_counter.count_tools([tool_info])
 
-        # Priority 2: Fallback - estimate based on text string length / 4
+        # Priority 2: Fallback - estimate based on text string length / 3
         # Calculate text length of tool name + description + parameters
         text_content = f"{tool_info.name or ''} {tool_info.description or ''}"
         if tool_info.parameters:
             # Convert parameters dict to string for estimation
             text_content += json.dumps(tool_info.parameters, ensure_ascii=False)
-        return len(text_content) // 4
+        return len(text_content) // 3
 
     def _stat_tools(self, stat: ContextStats, tools: List[ToolInfo], *, add_to_total: bool = True):
         stat.tools = len(tools)
@@ -753,21 +753,21 @@ class SessionModelContext(ModelContext):
         """
         Calculate token count for a single message (without usage_metadata):
         1. Use _token_counter (if available)
-        2. Fallback: text string length / 4
+        2. Fallback: text string length / 3
         """
         if self._token_counter is not None:
             return self._token_counter.count_messages([message])
 
         content = message.content
         if isinstance(content, str):
-            return len(content) // 4
+            return len(content) // 3
         elif isinstance(content, list):
             total = 0
             for part in content:
                 if isinstance(part, str):
-                    total += len(part) // 4
+                    total += len(part) // 3
                 elif isinstance(part, dict) and "text" in part:
-                    total += len(part["text"]) // 4
+                    total += len(part["text"]) // 3
             return total
         return 0
 

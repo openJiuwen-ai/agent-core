@@ -30,7 +30,7 @@ _DISPLAY_LINE_PREFIX_PRESERVE_WS_RE = re.compile(
 def count_tokens(text: str, ctx: RuleContext) -> int:
     if ctx.count_tokens is not None:
         return max(ctx.count_tokens(text), 1)
-    return max(len(text) // 4, 1)
+    return max(len(text) // 3, 1)
 
 
 def meets_savings_ratio(original: str, candidate: str, ctx: RuleContext) -> bool:

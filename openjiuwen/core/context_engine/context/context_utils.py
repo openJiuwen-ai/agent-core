@@ -660,13 +660,13 @@ class ContextUtils:
 
     @staticmethod
     def estimate_tokens(content: Any) -> int:
-        """估计内容的 token 数，使用字符数 // 4 的粗略估算。
+        """估计内容的 token 数，使用字符数 // 3 的粗略估算。
 
-        ``// 4`` 与 ``TiktokenCounter`` 自身 fallback 一致，且更接近真实
+        ``// 3`` 与 ``TiktokenCounter`` 自身 fallback 一致，且更接近真实
         token 量级，可与按真实 context window 标定的阈值对齐。
         """
         text = sanitize_content_for_text(content)
-        return max(len(text) // 4, 1)
+        return max(len(text) // 3, 1)
 
     @staticmethod
     def estimate_message_tokens(message: BaseMessage) -> int:

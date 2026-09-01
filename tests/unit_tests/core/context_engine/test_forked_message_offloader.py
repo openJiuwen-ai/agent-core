@@ -168,7 +168,7 @@ class TestMessageOffloaderAddTrigger:
             )
         )
 
-        assert processor._rule_pipeline.compress.call_args.kwargs["max_chars"] == 40
+        assert processor._rule_pipeline.compress.call_args.kwargs["max_chars"] == 30
 
     @pytest.mark.asyncio
     async def test_does_not_trigger_below_default_token_capacity(self):

@@ -195,7 +195,7 @@ async def test_active_compression_streams_started_and_completed_state():
     assert started.before.time
     assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}", started.before.time)
     assert started.before.messages == 2
-    assert started.before.tokens == 40
+    assert started.before.tokens == 54
     assert started.before.context_percent == 0
     assert started.statistic.total_messages == 2
     assert started.statistic.total_tokens == 0
@@ -211,11 +211,11 @@ async def test_active_compression_streams_started_and_completed_state():
     assert completed.after.tokens == 2
     assert completed.after.context_percent == 0
     assert completed.saved.messages == 1
-    assert completed.saved.tokens == 38
+    assert completed.saved.tokens == 52
     assert completed.statistic.total_messages == 1
     assert completed.statistic.total_tokens == 0
     assert completed.statistic.user_messages == 1
-    assert completed.summary == "Compressed 2 -> 1 messages, ~40 -> ~2 tokens, saved ~38 tokens (95.0%), modified 2 messages"
+    assert completed.summary == "Compressed 2 -> 1 messages, ~54 -> ~2 tokens, saved ~52 tokens (96.3%), modified 2 messages"
     assert completed.duration_ms is not None
 
 
@@ -332,8 +332,8 @@ async def test_context_percent_uses_model_context_window_mapping():
 
     assert result == "noop"
     states = _compression_states(session)
-    assert states[0].before.tokens == 20
-    assert states[0].before.context_percent == 10
+    assert states[0].before.tokens == 27
+    assert states[0].before.context_percent == 14
 
 
 @pytest.mark.asyncio

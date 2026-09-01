@@ -261,11 +261,11 @@ def collect_summary_indices(messages: List[BaseMessage], summary_marker: str) ->
 def estimate_content_tokens(content: Any) -> int:
     """Approximate token count when no token counter is available.
 
-    Uses ``len // 4`` to mirror ``TiktokenCounter``'s own fallback and align
+    Uses ``len // 3`` to mirror ``TiktokenCounter``'s own fallback and align
     with thresholds scaled to real context-window token counts.
     """
     text = sanitize_content_for_text(content)
-    return max(len(text) // 4, 1)
+    return max(len(text) // 3, 1)
 
 
 def count_messages_tokens(
@@ -279,7 +279,7 @@ def count_messages_tokens(
 
     When ``usage_aware`` is True, prefer the cumulative ``total_tokens``
     reported by the last AssistantMessage carrying ``usage_metadata`` and
-    only ``len // 4``-estimate the tail messages after it. This avoids
+    only ``len // 3``-estimate the tail messages after it. This avoids
     re-tokenizing the whole window on threshold checks. Single-message or
     partial-list callers must leave ``usage_aware`` False (default), since a
     per-message size cannot be derived from a conversation-cumulative usage.
@@ -305,7 +305,7 @@ def count_usage_tokens_with_tail(messages: List[BaseMessage]) -> Optional[int]:
     if split is None:
         return None
     base, tail = split
-    return base + sum(_len4(message) for message in tail)
+    return base + sum(_len3(message) for message in tail)
 
 
 def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[BaseMessage]]]:
@@ -313,7 +313,7 @@ def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[Ba
     carrying a positive ``usage_metadata``, or ``None`` when no such message
     exists. ``total_tokens`` is the model-reported cumulative input+output and
     already includes the tools/system present at that turn; ``tail_messages``
-    are the messages added after it (estimated with ``len // 4``).
+    are the messages added after it (estimated with ``len // 3``).
     """
     for idx in range(len(messages) - 1, -1, -1):
         message = messages[idx]
@@ -322,11 +322,11 @@ def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[Ba
     return None
 
 
-def _len4(message: BaseMessage) -> int:
-    """Estimate a single message's tokens with ``len // 4`` (mirrors the
+def _len3(message: BaseMessage) -> int:
+    """Estimate a single message's tokens with ``len // 3`` (mirrors the
     fallback coefficient used elsewhere in this module)."""
     content = getattr(message, "content", "")
-    return len(sanitize_content_for_text(content)) // 4
+    return len(sanitize_content_for_text(content)) // 3
 
 
 def resolve_context_max(context: ModelContext, model_name: str | None = None) -> int:
