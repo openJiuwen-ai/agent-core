@@ -65,9 +65,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence, Tuple
 
+from agentdescent.filetree import materialize
+
 from .domain import Domain
 from .logging_config import get_logger
-from .program import Program
+from .program import Program, files_of
 from .prompt import mutation_prompt
 from .sandbox import SandboxCapability, sandbox_command
 from .scorecard import SCORE_KEY, evaluate_constraints, score_candidate
@@ -114,6 +116,7 @@ def script_domain(
     capability: SandboxCapability,
     statement: str = "",
     baseline_code: str = "",
+    entrypoint: str = CANDIDATE_FILE,
     candidate_timeout: float = 120.0,
     baseline: Optional[MutableMapping[str, float]] = None,
 ) -> Domain:
@@ -138,6 +141,7 @@ def script_domain(
             payload = _run_evaluator(
                 code, script, cases_for(shards, _total, _seed),
                 capability=capability, timeout=candidate_timeout,
+                entrypoint=entrypoint,
             )
         except ScriptError:
             # A broken evaluator is not a bad candidate. Raised so the run
@@ -199,6 +203,7 @@ def script_domain(
             statement=statement,
             scorecard=scorecard,
             parent_code=program.code,
+            entrypoint=entrypoint,
             parent_score=_finite(program.metrics.get(SCORE_KEY)),
             best_score=None,
             recent=(),
@@ -208,7 +213,7 @@ def script_domain(
 
     return Domain(
         name=str(scorecard.get("hash") or "custom-script"),
-        entrypoint=CANDIDATE_FILE,
+        entrypoint=entrypoint,
         metric_key=metric_id,
         metric_better="higher",
         initial_program=baseline_code,
@@ -252,6 +257,7 @@ def _run_evaluator(
     *,
     capability: SandboxCapability,
     timeout: float,
+    entrypoint: str = CANDIDATE_FILE,
 ) -> Dict[str, Any]:
     """Materialise both programs in a throwaway directory and read the result.
 
@@ -261,7 +267,12 @@ def _run_evaluator(
     """
     with tempfile.TemporaryDirectory(prefix="evolve-script-") as scratch_dir:
         scratch = Path(scratch_dir)
-        (scratch / CANDIDATE_FILE).write_text(code, encoding="utf-8")
+        # The whole tree, at its own relative paths. `materialize` is upstream's
+        # and re-validates every path on the way out — this is the last point
+        # before a model-authored string becomes a filesystem write, and a
+        # candidate that named `../../etc/passwd` gets refused here rather than
+        # writing there.
+        materialize(files_of(code, entrypoint), str(scratch))
         (scratch / EVALUATOR_FILE).write_text(script, encoding="utf-8")
         (scratch / _SHIM_FILE).write_text(
             _SHIM.format(evaluator=EVALUATOR_FILE), encoding="utf-8",
@@ -269,7 +280,7 @@ def _run_evaluator(
         result = scratch / "result.json"
 
         extra = {
-            CANDIDATE_ENV: CANDIDATE_FILE,
+            CANDIDATE_ENV: entrypoint,
             RESULT_ENV: str(result),
             SHARDS_ENV: ",".join(str(int(shard)) for shard in shards),
         }

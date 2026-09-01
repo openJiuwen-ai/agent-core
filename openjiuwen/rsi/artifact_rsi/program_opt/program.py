@@ -40,7 +40,7 @@ import math
 import re
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, packages_distributions, version
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 #: Wide enough for the benchmark, and no wider. Upstream ships no gate at all --
 #: `sandbox.py` is an abstract class that raises -- so every name here is this
@@ -85,7 +85,24 @@ BLOCKED_IMPORTS = {
 }
 
 
-def _import_allowed(module: str) -> Tuple[bool, str]:
+def local_roots(files: Iterable[str]) -> frozenset:
+    """The top-level names a program's own files make importable.
+
+    `helpers/scale.py` in the tree means `import helpers.scale` resolves inside
+    the program. Without this the gate asks `find_spec("helpers")` — "is it
+    installed" — and refuses every program made of more than one file for
+    importing itself.
+    """
+    roots = set()
+    for path in files:
+        if not path.endswith(".py"):
+            continue
+        head = path.split("/")[0]
+        roots.add(head[:-3] if head.endswith(".py") else head)
+    return frozenset(roots)
+
+
+def _import_allowed(module: str, local: Iterable[str] = ()) -> Tuple[bool, str]:
     """Whether a candidate may import this, and why not.
 
     "Not installed" and "not allowed" are different answers and need different
@@ -95,6 +112,10 @@ def _import_allowed(module: str) -> Tuple[bool, str]:
     root = module.split(".")[0]
     if root in BLOCKED_IMPORTS:
         return False, f"import {module!r} is not allowed: it reaches outside the sandbox"
+    # A sibling module in the program's own tree. Checked before `find_spec`,
+    # which asks a different question ("is it installed") and would answer no.
+    if root in local:
+        return True, ""
     if importlib.util.find_spec(root) is None:
         return False, f"import {module!r} is not installed in the candidate runtime"
     return True, ""
@@ -212,7 +233,8 @@ def program_id(code: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def validate_source(source: str, max_length: int = 20_000) -> Tuple[bool, str]:
+def validate_source(source: str, max_length: int = 20_000,
+                    local: Iterable[str] = ()) -> Tuple[bool, str]:
     """Reject what the sandbox should never have to contain in the first place.
 
     Deliberately *not* as strict as upstream's own gate: that one allows
@@ -242,13 +264,13 @@ def validate_source(source: str, max_length: int = 20_000) -> Tuple[bool, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                ok, why = _import_allowed(alias.name)
+                ok, why = _import_allowed(alias.name, local)
                 if not ok:
                     return False, why
         elif isinstance(node, ast.ImportFrom):
             if not node.module:
                 return False, "a relative import has nothing to resolve against"
-            ok, why = _import_allowed(node.module)
+            ok, why = _import_allowed(node.module, local)
             if not ok:
                 return False, why
         elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
@@ -282,6 +304,151 @@ def validate_source(source: str, max_length: int = 20_000) -> Tuple[bool, str]:
 #: Shared with the text path: two regexes for "what is a fenced block" is two
 #: answers, and they drift.
 FENCE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+
+#: The same fence, keeping the info string so a labelled block can say which
+#: file it is.
+_LABELLED_FENCE = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
+
+
+#: The path a labelled fence declares, in the four spellings models actually
+#: use: ```python name=a/b.py, ```python:a/b.py, ```a/b.py, and a path on the
+#: line above the fence (`### a/b.py`, `**a/b.py**`, `# a/b.py`, or bare).
+_FENCE_PATH = re.compile(
+    r"^(?:[a-zA-Z0-9_+-]*[:\s]+)?(?:name\s*=\s*)?[\"\']?([\w./-]+\.[\w]+)[\"\']?\s*$"
+)
+_LINE_PATH = re.compile(r"^[\s>*#`]*[\"\']?([\w./-]+\.[\w]+)[\"\']?[\"\'*`:\s]*$")
+#: A file the model wants gone. Deliberately shouty and on its own line: a
+#: program that can only ever grow accumulates dead modules the search then
+#: pays to carry in every prompt.
+_DELETE = re.compile(r"^\s*DELETE(?:D|:)?\s+[\"\'`]?([\w./-]+\.[\w]+)[\"\'`]?\s*$", re.M)
+
+#: Where the evaluator imports the candidate from when nothing says otherwise.
+DEFAULT_ENTRYPOINT = "candidate.py"
+
+
+def files_of(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> Dict[str, str]:
+    """A genome as `{relpath: text}`.
+
+    The genome travels as one string because that is the only channel the
+    engine has -- `Strategy.render` -- and because it is also the evaluation
+    cache key, so the serialisation has to be lossless. `filetree.canonical`
+    is upstream's answer to exactly that, and JSON is used there rather than a
+    delimiter format precisely because a file's *contents* cannot forge it.
+
+    Plain source is still accepted and read as a one-file tree, which is what a
+    resumed run written before this change contains.
+    """
+    from agentdescent.filetree import TreeError, parse_tree
+
+    try:
+        return parse_tree(code)
+    except TreeError:
+        return {entrypoint: code}
+
+
+def bundle(files: Mapping[str, str]) -> str:
+    """`{relpath: text}` as the one string everything downstream carries."""
+    from agentdescent.filetree import canonical
+
+    return canonical(dict(files))
+
+
+def entry_source(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
+    """Just the entrypoint's text, for the checks that are about one module."""
+    return files_of(code, entrypoint).get(entrypoint, "")
+
+
+def extract_files(
+    reply: str,
+    parent: Mapping[str, str],
+    entrypoint: str = DEFAULT_ENTRYPOINT,
+) -> Tuple[Dict[str, str], str]:
+    """The model's reply as a new tree, merged onto the parent's.
+
+    **Only the files it returned.** A model asked to restate ten files to change
+    one spends the tokens on nine copies and, worse, rewrites the nine — so a
+    path that does not appear is inherited unchanged, and the diff the search
+    records is the edit rather than the whole program.
+
+    A single unlabelled block is the entrypoint, which is what a one-file run
+    looks like and what upstream's own parser assumed.
+    """
+    files = dict(parent)
+    labelled = _labelled_blocks(reply)
+    if labelled:
+        files.update(labelled)
+    else:
+        # Upstream's fallback: a reply with no fence at all is taken as the
+        # program. It keeps a junk reply on the tree as a node that scores
+        # `-inf` rather than dropping it, which is deliberate — dropping shrinks
+        # the rank denominator and raises `1/N` for every later iteration.
+        # The delete directives come out first, so a reply that only asks for a
+        # removal does not also overwrite the entrypoint with its own text.
+        code, _ = extract_program(_DELETE.sub("", reply).strip())
+        if code:
+            files[entrypoint] = code
+    for path in _DELETE.findall(reply):
+        # Never the entrypoint: without it there is nothing for the evaluator
+        # to import, and every later candidate would fail identically.
+        if path != entrypoint:
+            files.pop(path, None)
+    return files, _summary_for(files, parent, entrypoint)
+
+
+def _summary_for(
+    files: Mapping[str, str],
+    parent: Mapping[str, str],
+    entrypoint: str,
+) -> str:
+    """One line describing this edit, taken from what the edit touched.
+
+    The docstring of a file that *changed*, entrypoint first. Reading the
+    entrypoint's unconditionally is what a one-file search could get away with
+    and a multi-file one cannot: a candidate that rewrote a helper would be
+    labelled with a docstring it did not touch, or with nothing at all.
+    """
+    changed = [path for path in files if files[path] != parent.get(path)]
+    changed += [path for path in parent if path not in files]
+    if not changed:
+        return ""
+    ordered = sorted(changed, key=lambda path: (path != entrypoint, path))
+    for path in ordered:
+        summary = _summary_of(files.get(path, ""))
+        if summary:
+            return summary
+    return "changed: " + ", ".join(ordered[:5]) + (", …" if len(ordered) > 5 else "")
+
+
+def _labelled_blocks(reply: str) -> Dict[str, str]:
+    """Every fenced block that says which file it is."""
+    found: Dict[str, str] = {}
+    for match in _LABELLED_FENCE.finditer(reply):
+        info, body = match.group(1) or "", match.group(2)
+        path = _path_from(info) or _path_above(reply, match.start())
+        if path:
+            found[path] = body.strip()
+    return found
+
+
+def _path_from(info: str) -> str:
+    match = _FENCE_PATH.match(info.strip())
+    return match.group(1) if match else ""
+
+
+def _path_above(reply: str, start: int) -> str:
+    """The path on the line before the fence, when the fence itself is bare."""
+    head = reply[:start].rstrip("\n")
+    line = head.rsplit("\n", 1)[-1] if "\n" in head else head
+    match = _LINE_PATH.match(line.strip())
+    return match.group(1) if match else ""
+
+
+def _summary_of(code: str) -> str:
+    try:
+        doc = ast.get_docstring(ast.parse(code))
+    except SyntaxError:
+        return ""
+    return doc.strip().splitlines()[0][:200] if doc else ""
 
 
 def extract_program(reply: str) -> Tuple[str, str]:

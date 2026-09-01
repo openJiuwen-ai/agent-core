@@ -29,12 +29,14 @@ import asyncio
 import json
 import re
 import threading
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
 from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
 from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
+from openjiuwen.rsi.artifact_rsi.program_opt.program import DEFAULT_ENTRYPOINT, bundle
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     ModelConfigError,
     SandboxUnavailable,
@@ -96,9 +98,9 @@ class ProgramArtifactProvider:
 
         Starts no optimization and creates no task snapshot. Deliberately cheap
         and synchronous: the contract's `rsi.dataset.validate` is a form check
-        the user waits on. Whether the *scoring* can tell a good
-        candidate from a bad one is a different and far more expensive question —
-        it costs four sandboxed evaluations — and it is asked inside `run`.
+        the user waits on. Whether the *scoring* can tell a good candidate from
+        a bad one is a different and far more expensive question — it costs
+        sandboxed evaluations — and it is asked inside `run`.
         """
         errors: list[dict[str, str]] = []
         if not str(artifact_path or "").strip():
@@ -109,33 +111,57 @@ class ProgramArtifactProvider:
             return ArtifactValidationResult(valid=False, errors=errors)
 
         path = Path(artifact_path).expanduser()
-        if not path.is_file():
+        if not path.exists():
             errors.append({
                 "code": "ARTIFACT_NOT_FOUND",
-                "message": f"no file at {artifact_path}",
+                "message": f"nothing at {artifact_path}",
             })
             return ArtifactValidationResult(valid=False, errors=errors)
 
+        # A directory is a program too. What is being optimized is a file tree
+        # — one file is the common case and not the only one — so a seed that
+        # is a package is read whole, at its own relative paths.
         try:
-            source = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            files = _seed_files(path)
+        except (OSError, UnicodeDecodeError, ValueError) as error:
             return ArtifactValidationResult(valid=False, errors=[{
                 "code": "ARTIFACT_UNREADABLE",
-                "message": f"{artifact_path} could not be read as UTF-8 text: {error}",
+                "message": f"{artifact_path} could not be read as a program: {error}",
             }])
 
-        if not source.strip():
+        if not any(text.strip() for text in files.values()):
             errors.append({"code": "ARTIFACT_EMPTY", "message": "the program is empty"})
 
-        # The same AST gate every candidate passes. Checking the starting point
-        # against it here means a seed that could never be rewritten is refused
-        # while the user is still looking at the form, rather than after a run
-        # has been created and every expansion has failed identically.
+        entrypoint = _entrypoint_of(files)
+        if entrypoint is None:
+            errors.append({
+                "code": "ARTIFACT_ENTRYPOINT_UNCLEAR",
+                "message": "the evaluator has to import one of these files and it is not "
+                           f"clear which: {', '.join(sorted(files)[:10])}. Name it "
+                           f"`{DEFAULT_ENTRYPOINT}`, or set `entrypoint` in the scorecard.",
+            })
+            return ArtifactValidationResult(valid=not errors, errors=errors)
+        source = files[entrypoint]
+
+        # A shape check on the starting point only. Candidates are *not* put
+        # through this during the search -- the sandbox is what confines them,
+        # and the evaluator's own import is what decides whether one is usable.
+        # What it buys here is that a seed which no evaluator could call is
+        # refused while the user is still looking at the form.
+        #
+        # Note the entrypoint name is hard-coded to `train_and_predict`, which
+        # is the contract of the task this algorithm was ported from. A
+        # `custom_script` run's real contract is whatever its evaluator calls,
+        # so this is stricter than the search itself is.
         from openjiuwen.rsi.artifact_rsi.program_opt.program import (
+            local_roots,
             validate_source,
         )
 
-        ok, reason = validate_source(source)
+        # The program's own modules are importable from within it, so the gate
+        # is told what they are. Otherwise `from helpers.scale import factor`
+        # reads as a dependency nobody installed.
+        ok, reason = validate_source(source, local=local_roots(files))
         if not ok:
             errors.append({"code": "ARTIFACT_REJECTED_BY_GATE", "message": reason})
 
@@ -394,9 +420,15 @@ class ProgramArtifactProvider:
             )
         card = json.loads(scorecard_path.read_text(encoding="utf-8"))
 
-        source = ""
+        files: dict[str, str] = {}
         if request.artifact_path:
-            source = Path(request.artifact_path).expanduser().read_text(encoding="utf-8")
+            files = _seed_files(Path(request.artifact_path).expanduser())
+        entrypoint = str(card.get("entrypoint") or "") or _entrypoint_of(files) or DEFAULT_ENTRYPOINT
+        if files and entrypoint not in files:
+            raise ValueError(
+                f"the scorecard names {entrypoint!r} as the entrypoint and the program "
+                f"does not contain it: {', '.join(sorted(files)[:10])}"
+            )
 
         spec = RunSpec(
             search_id=request.task_id,
@@ -410,7 +442,8 @@ class ProgramArtifactProvider:
             rubric=str(card.get("rubric") or ""),
             source_material=str(card.get("source_material") or ""),
             packages=_packages_from(card.get("packages")),
-            baseline_code=source,
+            baseline_code=bundle(files),
+            entrypoint=entrypoint,
             run_dir=str(run_dir),
             sandbox=capability,
             options=dict(card.get("options") or {}),
@@ -464,6 +497,39 @@ def _load_engine() -> Any:
             f"({error})"
         ) from error
     return PuctEngine
+
+
+def _seed_files(path: Path) -> dict[str, str]:
+    """The starting program as `{relpath: text}`, from a file or a directory.
+
+    A single file is placed at the default entrypoint, which is how every
+    one-file run has always worked. A directory keeps its own layout, so a seed
+    that is already a package is not renamed into this provider's conventions
+    just to be optimized.
+    """
+    if path.is_dir():
+        from agentdescent.filetree import load_tree
+
+        return load_tree(str(path))
+    return {DEFAULT_ENTRYPOINT: path.read_text(encoding="utf-8")}
+
+
+def _entrypoint_of(files: Mapping[str, str]) -> str | None:
+    """Which file the evaluator imports, when the scorecard did not say.
+
+    Guessed only where the guess cannot be wrong: the conventional name, a
+    package of that name, or a tree with exactly one Python file in it. A
+    directory of five modules gets asked rather than guessed at — picking one
+    would send every candidate to an evaluator importing the wrong thing, and
+    the run would report that the program never works.
+    """
+    if not files:
+        return DEFAULT_ENTRYPOINT
+    for name in (DEFAULT_ENTRYPOINT, f"{Path(DEFAULT_ENTRYPOINT).stem}/__init__.py"):
+        if name in files:
+            return name
+    python = [path for path in files if path.endswith(".py")]
+    return python[0] if len(python) == 1 else None
 
 
 def _counting(factory: Any, state: ProgramRunState) -> Any:

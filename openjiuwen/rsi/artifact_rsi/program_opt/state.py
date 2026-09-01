@@ -318,9 +318,12 @@ class ProgramRunState:
         self.artifacts[artifact_id] = ArtifactRef(
             artifact_id=artifact_id,
             node_id=node_id_for(self.task_id, index),
-            name=f"candidate-{index}.py",
+            # A directory, because a candidate is a file tree and one file is
+            # only its commonest shape. Named without a suffix for the same
+            # reason: `candidate-3.py` would be a lie about a package.
+            name=f"candidate-{index}",
             kind="program_snapshot",
-            path=str(self.run_dir / "candidates" / f"{digest}.py"),
+            path=str(self.run_dir / "candidates" / digest),
             sha256=digest,
             # AgentServer projects the URL; a provider-local path is not one.
             download_url=None,

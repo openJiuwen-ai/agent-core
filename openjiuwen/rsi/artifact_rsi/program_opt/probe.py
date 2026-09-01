@@ -38,6 +38,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from .engine import RunSpec
 from .logging_config import get_logger
+from .program import DEFAULT_ENTRYPOINT, bundle, files_of
 
 log = get_logger("probe")
 
@@ -118,7 +119,7 @@ def run_probe(spec: RunSpec) -> Dict[str, Any]:
                 "score in the search is measured relative to it. "
                 + (f"The script reported: {why}" if why.strip() else "The script gave no reason.")
             )
-        damaged, damage_label = _damage(spec.baseline_code)
+        damaged, damage_label = _damage(spec.baseline_code, spec.entrypoint)
         try:
             worsened, _damaged_raw, damaged_why = _measure(domain.evaluate, damaged, shards)
         except ScriptError as error:
@@ -148,7 +149,8 @@ def run_probe(spec: RunSpec) -> Dict[str, Any]:
         _refuse_saturated(spec, baseline, worsened)
         _refuse_nameless_diagnosis(damaged_why)
         _refuse_locationless_diagnosis(damaged_why)
-        _refuse_rewarding_the_unimportable(domain.evaluate, shards, baseline)
+        _refuse_rewarding_the_unimportable(domain.evaluate, shards, baseline,
+                                           spec.baseline_code, spec.entrypoint)
         _refuse_noisy(domain.evaluate, spec.baseline_code, shards, baseline, worsened)
         return {"baseline": baseline, "flat": flat,
                 "label": damage_label, "worsened": worsened}
@@ -387,8 +389,12 @@ def _refuse_thin_headroom(spec: RunSpec, baseline: float, worsened: Optional[flo
     )
 
 
-def _damage(source: str) -> Tuple[str, str]:
+def _damage(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> Tuple[str, str]:
     """A deliberately worse copy of the starting point, whatever it is made of.
+
+    The damage lands on the entrypoint and the rest of the tree is left alone:
+    hollowing every file would test whether the scoring notices a program that
+    was deleted, which is a much easier question than the one being asked.
 
     Hollowing out every function is the right damage for code and a no-op for
     anything else. `custom_script` does not promise the candidate is Python — it
@@ -401,14 +407,16 @@ def _damage(source: str) -> Tuple[str, str]:
     the copy is replaced outright. Content that is *there* but says nothing is
     the damage that works on text the way an empty function body works on code.
     """
+    files = files_of(code, entrypoint)
+    source = files.get(entrypoint, "")
     try:
         hollowed = _hollow_out(source)
     except ProbeError:
         # Not parseable as code, so it was never code. Fall through to text.
         hollowed = source
     if hollowed.strip() != source.strip():
-        return hollowed, "every function body hollowed out"
-    return _EMPTY_WORDS, "content replaced with empty phrases"
+        return bundle({**files, entrypoint: hollowed}), "every function body hollowed out"
+    return bundle({**files, entrypoint: _EMPTY_WORDS}), "content replaced with empty phrases"
 
 
 #: A candidate that cannot be imported at all — the single commonest way a
@@ -417,7 +425,9 @@ def _damage(source: str) -> Tuple[str, str]:
 _UNIMPORTABLE = "raise RuntimeError('this candidate does not import')\n"
 
 
-def _refuse_rewarding_the_unimportable(evaluate, shards, baseline: float) -> None:
+def _refuse_rewarding_the_unimportable(evaluate, shards, baseline: float,
+                                       code: str = "",
+                                       entrypoint: str = DEFAULT_ENTRYPOINT) -> None:
     """Refuse a scoring that pays a candidate for failing to load.
 
     The evaluator is told to guard `import candidate`, because a broken module
@@ -440,7 +450,14 @@ def _refuse_rewarding_the_unimportable(evaluate, shards, baseline: float) -> Non
     from .script_domain import ScriptError
 
     try:
-        unimportable = _score(evaluate, _UNIMPORTABLE, shards)
+        # The entrypoint raises; every other file is left as it is, so what is
+        # being scored is a program whose *import* fails and not one whose files
+        # are missing.
+        unimportable = _score(
+            evaluate,
+            bundle({**files_of(code, entrypoint), entrypoint: _UNIMPORTABLE}),
+            shards,
+        )
     except ScriptError:
         # The evaluator died rather than scoring it. That is the other failure
         # mode, and it already has its own diagnosis on the path above.

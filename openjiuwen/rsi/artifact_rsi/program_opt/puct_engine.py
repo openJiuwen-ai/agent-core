@@ -52,7 +52,7 @@ from .engine import RunSpec
 from .events import Emit
 from .judge_domain import grader, judge_domain
 from .logging_config import get_logger
-from .program import extract_program, read_promise
+from .program import bundle, extract_files, files_of, read_promise
 from .prompt import repair_prompt, with_promise_request
 from .provision import missing_candidate_runtime
 from .restore import RestoreError, restore_baseline, restore_tree
@@ -271,6 +271,7 @@ class PuctEngine:
                     capability=spec.sandbox,
                     statement=str(spec.statement or ""),
                     baseline_code=spec.baseline_code,
+                    entrypoint=spec.entrypoint,
                     candidate_timeout=spec.candidate_timeout_seconds,
                     baseline=baseline,
                 )
@@ -352,7 +353,11 @@ class PuctEngine:
                 # rollout shard. Reading the held-out ones would let it choose
                 # between attempts on the split that decides the ranking.
                 check=_rollout_check(domain, _rollout_shards(spec)),
-                repair_prompt=repair_prompt,
+                # Bound to this run's entrypoint: the repair prompt lists the
+                # program, and which file the evaluator imports decides both the
+                # order it is listed in and whether one block or several are
+                # asked for back.
+                repair_prompt=lambda code, error: repair_prompt(code, error, spec.entrypoint),
             ),
             "repo_path": str(repo),
             "run": make_run(domain),
@@ -443,7 +448,8 @@ class PuctEngine:
         # ignores the number, so asking anyway would be paying for nothing.
         ask_promise = _prior_exponent(spec.options) > 0.0
 
-        def call(prompt: str, iteration: int) -> Tuple[str, str, Optional[float]]:
+        def call(prompt: str, iteration: int,
+                 parent_code: str = "") -> Tuple[str, str, Optional[float]]:
             if should_stop():
                 # Upstream's own way of saying "no more expansions": past the
                 # candidate limit, `select_parent` returns None and the workers
@@ -458,14 +464,34 @@ class PuctEngine:
             )
             # A prompt or an abstract has no module docstring and may arrive
             # unfenced; reading it with the program parser would discard it.
-            code, summary = (extract_text(reply) if _mode_of(spec) == "llm_judge"
-                             else extract_program(reply))
-            if not code.strip():
+            if _mode_of(spec) == "llm_judge":
+                code, summary = extract_text(reply)
+            else:
+                # Merged onto the parent's tree: the reply carries only the
+                # files it changed, so the candidate is the parent's program
+                # with those files replaced.
+                files, summary = extract_files(
+                    reply, files_of(parent_code, spec.entrypoint), spec.entrypoint,
+                )
+                code = bundle(files)
+            if not _has_content(code, spec):
                 reporter.note_empty(iteration)
             # Read from the same reply, so the prior costs no extra call.
             return code, summary, (read_promise(reply) if ask_promise else None)
 
         return call
+
+
+def _has_content(code: str, spec: RunSpec) -> bool:
+    """Whether a draw produced anything at all.
+
+    A serialised empty tree is a non-empty string, so `code.strip()` — which is
+    what a one-file genome could be judged by — would call every empty reply a
+    program and never report one.
+    """
+    if _mode_of(spec) == "llm_judge":
+        return bool(code.strip())
+    return any(text.strip() for text in files_of(code, spec.entrypoint).values())
 
 
 # --- Turning the search into the event stream --------------------------------

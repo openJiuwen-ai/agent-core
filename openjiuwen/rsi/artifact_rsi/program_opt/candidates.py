@@ -32,6 +32,11 @@ from .logging_config import get_logger
 
 log = get_logger("candidates")
 
+#: The serialised tree, kept beside the files it was written from. The files
+#: are what a person reads; this is what a resume rebuilds the genome from,
+#: byte for byte, so the hash still matches.
+_MANIFEST = "_tree.json"
+
 #: The tree snapshot's filename inside a search's directory.
 TREE_FILE = "tree.json"
 
@@ -86,17 +91,39 @@ class CandidateStore:
         return (self.root / name) if self.flat else (self.root / search_id / name)
 
     def path_for(self, search_id: str, code_hash: str) -> Path:
-        name = f"{code_hash.removeprefix('sha256:')}.py"
+        """The candidate's own directory.
+
+        A directory rather than a file because a candidate is a *file tree* —
+        one file is the common case, not the only one. Laid out at the tree's
+        own relative paths so what is on disk is the program, openable and
+        runnable, rather than a serialised blob someone has to decode first.
+        """
+        name = code_hash.removeprefix("sha256:")
         return (self.root / "candidates" / name) if self.flat else (self.root / search_id / name)
 
     def put(self, search_id: str, code: str) -> str:
+        from agentdescent.filetree import materialize
+
+        from .program import files_of
+
         digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
         path = self.path_for(search_id, digest)
-        path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            path.write_text(code, encoding="utf-8")
+            path.mkdir(parents=True, exist_ok=True)
+            # Upstream's writer, which re-validates every relative path: this is
+            # the last point before a model-authored string becomes a filesystem
+            # write, and a candidate that named `../../x` is refused here.
+            materialize(files_of(code), str(path))
+            # Beside the files, because the directory alone cannot say which of
+            # them the evaluator imports, and a resumed run must rebuild the
+            # exact string the hash was taken over.
+            (path / _MANIFEST).write_text(code, encoding="utf-8")
         return f"sha256:{digest}"
 
     def get(self, search_id: str, code_hash: str) -> Optional[str]:
-        path = self.path_for(search_id, code_hash)
-        return path.read_text(encoding="utf-8") if path.exists() else None
+        path = self.path_for(search_id, code_hash) / _MANIFEST
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+        # A run written before candidates became directories.
+        legacy = self.path_for(search_id, code_hash).with_suffix(".py")
+        return legacy.read_text(encoding="utf-8") if legacy.exists() else None

@@ -65,8 +65,15 @@ class RunSpec:
     #: The user's goal in their own words, for the mutation prompt. "Improve the
     #: program" is not an objective a candidate can be aimed at.
     statement: str = ""
-    #: The program the search starts from. Empty means the vendored seed.
+    #: The program the search starts from, as a serialised file tree (see
+    #: `program.bundle`). Plain source is still read as a one-file tree, which
+    #: is what a run written before multi-file support contains. Empty means the
+    #: vendored seed.
     baseline_code: str = ""
+    #: Which file in that tree the evaluator imports. The evaluator is told the
+    #: path through `SCIENCE_AGENT_CANDIDATE`, so a multi-file seed keeps its
+    #: own layout instead of being renamed into ours.
+    entrypoint: str = "candidate.py"
     #: Wall-clock ceiling for one candidate execution.
     candidate_timeout_seconds: float = 60.0
     #: The rubric a judged scorecard grades against. Frozen with the goal: a

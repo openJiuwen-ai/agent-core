@@ -57,7 +57,7 @@ from agentdescent.ledger import CASConflict, Ledger
 from agentdescent.staleness import StaleAction, get_policy
 
 from .domain import Domain
-from .program import Program, program_id
+from .program import Program, entry_source, program_id
 from .tree import Node, PuctTree
 
 #: Merge outcomes upstream names for this port. `MergeOutcome` covers the
@@ -191,7 +191,7 @@ _WHY_CHARS = 300
 
 def make_propose(
     tree: PuctTree,
-    complete: Callable[[str, int], Tuple[str, str, Optional[float]]],
+    complete: Callable[[str, int, str], Tuple[str, str, Optional[float]]],
     domain: Domain,
     *,
     on_event: OnEvent = _noop,
@@ -206,7 +206,10 @@ def make_propose(
     upstream's parallel virtual loss — and the thread that is about to spend
     minutes on this parent is the one that should have reserved it.
 
-    ``complete`` is ``(prompt, iteration) -> (code, change_summary, promise)``;
+    ``complete`` is ``(prompt, iteration, parent_code) -> (code, change_summary,
+    promise)``. The parent's own program goes with the prompt because a reply
+    names only the files it changed, so the engine needs the tree those edits
+    land on in order to build the whole candidate.
     the engine owns the model call so that a stop, a token count and an empty
     reply all mean something to it. ``promise`` is the model's own rating of the
     direction, read out of the same reply — `P(s, a)` for `FlatPuct`, and
@@ -253,7 +256,7 @@ def make_propose(
         code, summary, promise = "", "", None
         attempts = max(1, repair_attempts) if check and repair_prompt else 1
         for attempt in range(attempts):
-            code, summary, drawn = complete(prompt, iteration)
+            code, summary, drawn = complete(prompt, iteration, parent.program.code)
             # Kept from the first reply that carried one: a redraw is the same
             # direction being written again, so its rating is a second reading
             # of one direction rather than a reading of a second.
@@ -278,7 +281,7 @@ def make_propose(
         # label is honest about carrying no information; sixteen identical
         # ones actively claim the candidates are the same thing.
         parent_summary = (parent.program.change_summary or "").strip()
-        parent_doc = _first_doc_line(parent.program.code)
+        parent_doc = _first_doc_line(entry_source(parent.program.code))
         if summary.strip() and summary.strip() in (parent_summary, parent_doc):
             summary = ""
         return json.dumps(

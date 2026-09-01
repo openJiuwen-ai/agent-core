@@ -922,3 +922,279 @@ def test_a_missing_search_engine_names_the_extra_that_installs_it(
     assert result.status == "failed"
     assert result.error_code == "SEARCHENGINEUNAVAILABLE"
     assert "openjiuwen[program-opt]" in (result.error_message or "")
+
+
+# -- programs made of more than one file ----------------------------------------
+#
+# The genome is a file tree, serialised with `agentdescent.filetree` — upstream's
+# own answer to "a directory as evolvable state", lossless because the engine
+# caches evaluations on the rendered string. One file is the common shape, not
+# the only one.
+
+
+def _tree(tmp_path: Path) -> Path:
+    """A seed that is a package: an entrypoint plus a helper it imports."""
+    root = tmp_path / "seed"
+    (root / "helpers").mkdir(parents=True)
+    (root / "candidate.py").write_text(
+        "from helpers.scale import factor\n"
+        "def train_and_predict(train, test):\n"
+        "    return [x * factor() for x in test]\n",
+        encoding="utf-8",
+    )
+    (root / "helpers" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "helpers" / "scale.py").write_text(
+        "def factor():\n    return 3.0\n", encoding="utf-8"
+    )
+    return root
+
+
+def test_a_directory_is_a_program(tmp_path: Path) -> None:
+    provider = ProgramArtifactProvider()
+
+    assert provider.validate_input(str(_tree(tmp_path))).valid is True
+
+
+def test_a_directory_seed_reaches_the_spec_whole(tmp_path: Path) -> None:
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import files_of
+
+    provider = ProgramArtifactProvider()
+    request = _request(tmp_path, artifact_path=str(_tree(tmp_path)))
+    _scorecard(Path(request.run_dir))
+
+    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"),
+                              load_model_endpoint(request.model_config), resumed=False)
+
+    assert sorted(files_of(spec.baseline_code)) == [
+        "candidate.py", "helpers/__init__.py", "helpers/scale.py",
+    ]
+    assert spec.entrypoint == "candidate.py"
+
+
+def test_a_tree_with_no_obvious_entrypoint_is_asked_about_rather_than_guessed(
+    tmp_path: Path,
+) -> None:
+    """Guessing would send every candidate to an evaluator importing the wrong
+    module, and the run would report that the program never works."""
+    root = tmp_path / "seed"
+    root.mkdir()
+    (root / "model.py").write_text("def a(): pass\n", encoding="utf-8")
+    (root / "features.py").write_text("def b(): pass\n", encoding="utf-8")
+
+    result = ProgramArtifactProvider().validate_input(str(root))
+
+    assert result.valid is False
+    assert [error["code"] for error in result.errors] == ["ARTIFACT_ENTRYPOINT_UNCLEAR"]
+    assert "entrypoint" in result.errors[0]["message"]
+
+
+def test_one_python_file_in_a_directory_needs_no_asking(tmp_path: Path) -> None:
+    root = tmp_path / "seed"
+    root.mkdir()
+    (root / "solver.py").write_text(SEED, encoding="utf-8")
+    (root / "notes.md").write_text("# how it works\n", encoding="utf-8")
+
+    assert ProgramArtifactProvider().validate_input(str(root)).valid is True
+
+
+def test_a_scorecard_naming_a_file_the_program_does_not_have_is_refused(
+    tmp_path: Path,
+) -> None:
+    provider = ProgramArtifactProvider()
+    request = _request(tmp_path, artifact_path=str(_tree(tmp_path)))
+    _scorecard(Path(request.run_dir), entrypoint="main.py")
+
+    with pytest.raises(ValueError, match="main.py"):
+        provider._spec_for(request, SandboxCapability(backend="bwrap"),
+                           load_model_endpoint(request.model_config), resumed=False)
+
+
+def test_a_reply_carries_only_what_it_changed(tmp_path: Path) -> None:
+    """A model asked to restate ten files to change one spends the tokens on
+    nine copies and rewrites the nine. A path that does not appear is
+    inherited, so what the search records is the edit."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import extract_files
+
+    parent = {
+        "candidate.py": "from helpers.scale import factor\ndef train_and_predict(t, s): ...\n",
+        "helpers/scale.py": "def factor():\n    return 3.0\n",
+    }
+    reply = (
+        "Only the scale needed changing.\n\n"
+        "```python name=helpers/scale.py\n"
+        '"""Fit the factor instead of fixing it."""\n'
+        "def factor():\n    return 7.0\n"
+        "```\n"
+    )
+
+    files, summary = extract_files(reply, parent)
+
+    assert files["candidate.py"] == parent["candidate.py"]
+    assert "7.0" in files["helpers/scale.py"]
+    # The label comes off the file that changed, not off the entrypoint that
+    # did not — otherwise every helper edit would be labelled with a docstring
+    # nobody touched, or with nothing at all.
+    assert summary == "Fit the factor instead of fixing it."
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "```python name=helpers/scale.py\ndef factor(): return 7.0\n```",
+        "```python:helpers/scale.py\ndef factor(): return 7.0\n```",
+        "### helpers/scale.py\n```python\ndef factor(): return 7.0\n```",
+        "**helpers/scale.py**\n```\ndef factor(): return 7.0\n```",
+    ],
+)
+def test_the_four_ways_a_model_labels_a_file_all_land(reply: str) -> None:
+    """The format is described to the model, not enforced on it. These are the
+    spellings that come back."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import extract_files
+
+    parent = {"candidate.py": "x = 1\n", "helpers/scale.py": "def factor(): return 3.0\n"}
+
+    files, _ = extract_files(reply, parent)
+
+    assert "7.0" in files["helpers/scale.py"]
+    assert files["candidate.py"] == parent["candidate.py"]
+
+
+def test_an_unlabelled_block_is_still_the_entrypoint() -> None:
+    """What a one-file run looks like, and what upstream's parser assumed."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import extract_files
+
+    parent = {"candidate.py": "x = 1\n", "helpers/scale.py": "y = 2\n"}
+
+    files, _ = extract_files("```python\nx = 99\n```", parent)
+
+    assert files["candidate.py"] == "x = 99"
+    assert files["helpers/scale.py"] == "y = 2\n"
+
+
+def test_a_file_can_be_removed_but_never_the_entrypoint() -> None:
+    """A program that can only grow accumulates dead modules the search then
+    pays to carry in every prompt. Removing the entrypoint would leave the
+    evaluator nothing to import, so every later candidate would fail alike."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import extract_files
+
+    parent = {"candidate.py": "x = 1\n", "helpers/old.py": "y = 2\n"}
+
+    assert sorted(extract_files("DELETE helpers/old.py\n", parent)[0]) == ["candidate.py"]
+    assert sorted(extract_files("DELETE candidate.py\n", parent)[0]) == [
+        "candidate.py", "helpers/old.py",
+    ]
+
+
+def test_the_serialised_tree_survives_a_round_trip() -> None:
+    """The genome is also the evaluation cache key, so two different programs
+    must never render to the same string."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle, files_of
+
+    tree = {"candidate.py": "x = 1\n", "a/b.py": '"""tricky ``` content"""\n'}
+
+    assert files_of(bundle(tree)) == tree
+    assert bundle(tree) != bundle({**tree, "a/b.py": "other"})
+
+
+def test_plain_source_is_still_read_as_a_one_file_program() -> None:
+    """What a run written before any of this contains."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import files_of
+
+    assert files_of("def train_and_predict(): ...") == {
+        "candidate.py": "def train_and_predict(): ..."
+    }
+
+
+def test_every_file_is_listed_in_the_prompt() -> None:
+    """A model cannot edit a helper it was never shown."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import render_tree
+
+    rendered = render_tree(bundle({
+        "candidate.py": "import helpers.scale\n",
+        "helpers/scale.py": "def factor(): return 3.0\n",
+    }))
+
+    assert "name=candidate.py" in rendered
+    assert "name=helpers/scale.py" in rendered
+    # Entrypoint first: the file the evaluator imports is the one that makes
+    # the others make sense.
+    assert rendered.index("name=candidate.py") < rendered.index("name=helpers/scale.py")
+
+
+def test_a_one_file_program_is_still_shown_the_way_it_always_was() -> None:
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import render_tree
+
+    assert render_tree("def f(): pass") == "```python\ndef f(): pass\n```"
+
+
+def test_a_package_candidate_runs_in_the_sandbox(tmp_path: Path) -> None:
+    """The whole point, end to end: a candidate that is three files, one of them
+    in a subpackage, imported and scored by an evaluator that did not have to
+    know any of that. The evaluator contract is unchanged — it is still told the
+    entrypoint's path through `SCIENCE_AGENT_CANDIDATE`."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
+    from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import detect_local_capability
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import _run_evaluator
+
+    capability = detect_local_capability()
+    if not capability.available:
+        pytest.skip("no isolation backend on this host")
+
+    tree = {
+        "candidate.py": "from helpers.scale import factor\n"
+                        "def train_and_predict(train, test):\n"
+                        "    return [x * factor() for x in test]\n",
+        "helpers/__init__.py": "",
+        "helpers/scale.py": "def factor():\n    return 3.0\n",
+    }
+    evaluator = (
+        "import importlib, json, os\n"
+        'entry = os.environ["SCIENCE_AGENT_CANDIDATE"]\n'
+        'mod = importlib.import_module(entry.removesuffix(".py").replace("/", "."))\n'
+        "got = mod.train_and_predict([], [1.0, 2.0])\n"
+        'json.dump({"valid": True, "metrics": {"total": sum(got)}},\n'
+        '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'
+    )
+
+    payload = _run_evaluator(bundle(tree), evaluator, [0],
+                             capability=capability, timeout=60)
+
+    assert payload["valid"] is True
+    assert payload["metrics"]["total"] == pytest.approx(9.0)
+
+
+def test_a_candidate_is_stored_as_a_directory_you_can_open(tmp_path: Path) -> None:
+    """The run directory is meant to be readable: the files are the program, at
+    their own paths, not a blob someone has to decode first. The serialised tree
+    sits beside them so a resumed run rebuilds the exact string the hash was
+    taken over."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.candidates import CandidateStore
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
+
+    store = CandidateStore(tmp_path, flat=True)
+    code = bundle({"candidate.py": "x = 1\n", "helpers/scale.py": "y = 2\n"})
+
+    digest = store.put("run-1", code)
+    directory = store.path_for("run-1", digest)
+
+    assert (directory / "candidate.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert (directory / "helpers" / "scale.py").read_text(encoding="utf-8") == "y = 2\n"
+    assert store.get("run-1", digest) == code
+
+
+def test_a_program_may_import_its_own_modules(tmp_path: Path) -> None:
+    """The gate asks `find_spec` — "is this installed" — which is the wrong
+    question for a sibling module. Without the program's own roots it refuses
+    every multi-file program for importing itself."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import local_roots, validate_source
+
+    source = "from helpers.scale import factor\ndef train_and_predict(t, s): return factor()\n"
+
+    assert validate_source(source)[0] is False
+    assert validate_source(source, local=local_roots(["helpers/scale.py"]))[0] is True
+    # A blocked import stays blocked even when a file of that name is in the
+    # tree: shadowing `os` must not be the way past the gate.
+    assert validate_source(
+        "import os\ndef train_and_predict(t, s): ...\n", local=local_roots(["os.py"]),
+    )[0] is False

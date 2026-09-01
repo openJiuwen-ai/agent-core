@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agentdescent.selection import Candidate, FlatPuct, SelectionContext
 
-from .program import Program
+from .program import Program, files_of
 
 #: The artifact id the selection rows carry. Only ever compared with itself.
 ARTIFACT_ID = "puct"
@@ -91,7 +91,10 @@ class Node:
             "promise": self.promise,
             "valid": self.program.valid,
             "error": self.program.error,
-            "code_chars": len(self.program.code),
+            # The files, not the container: the genome travels as a serialised
+            # tree, and counting its JSON would report a two-line program as
+            # several hundred characters.
+            "code_chars": sum(len(text) for text in files_of(self.program.code).values()),
         }
 
 

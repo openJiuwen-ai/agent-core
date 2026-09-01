@@ -110,9 +110,14 @@ by something this provider made up.
   "script": "def evaluate(...): ...",
   "rubric": "",
   "packages": ["xgboost"],
+  "entrypoint": "candidate.py",
   "options": {"c_puct": 1.0, "prior_exponent": 1.0}
 }
 ```
+
+`entrypoint` names the file the evaluator imports; it defaults to
+`candidate.py` and is only needed when the seed is a directory whose entrypoint
+cannot be guessed.
 
 `packages` takes **bare distribution names, optionally `==version`, and nothing
 else** — paths, URLs, VCS refs and pip options are refused. The field is written
@@ -125,6 +130,45 @@ them. That is what lets `read_state` / `read_report` / `get_tree` answer after a
 restart, and what lets `resume` continue the original tree instead of starting a
 second root. Set `SCIENCE_AGENT_RSI_RUNS` to the parent of every task directory
 so the queries can still find a task the process no longer remembers.
+
+## What is being optimized: a file tree
+
+The program is `{relative path: text}`, not one file. `artifact_path` may be a
+single `.py` — placed at `candidate.py`, which is what every one-file run has
+always been — or a **directory**, which keeps its own layout so a seed that is
+already a package is not renamed into this provider's conventions.
+
+Serialisation is `agentdescent.filetree`: `load_tree` reads the directory,
+`canonical` / `parse_tree` are the lossless pair the genome travels as (the
+engine caches evaluations on the rendered string, so two different programs must
+never render alike), and `materialize` writes it back — re-validating every
+relative path, which is what stops a model-authored `../../etc/passwd`.
+
+**The evaluator contract does not change.** It is still told the entrypoint's
+path through `SCIENCE_AGENT_CANDIDATE` and still does `import candidate`; a
+multi-file program simply means `candidate` is a package, or that it imports
+siblings that are now on `sys.path` beside it.
+
+Which file is the entrypoint is guessed only where the guess cannot be wrong:
+`candidate.py`, `candidate/__init__.py`, or a tree with exactly one Python file.
+A directory of five modules is refused with `ARTIFACT_ENTRYPOINT_UNCLEAR` rather
+than guessed at — picking one would send every candidate to an evaluator
+importing the wrong module, and the run would report that the program never
+works. Set `entrypoint` in `scorecard.json` to say.
+
+### What the model returns
+
+**Only the files it changed**, each in its own fenced block labelled with its
+path; a path that does not appear is inherited from the parent. A model asked to
+restate ten files to change one spends the tokens on nine copies and rewrites the
+nine. `DELETE path/to/file.py` on its own line removes a file — never the
+entrypoint, without which every later candidate would fail identically. A single
+unlabelled block is still the entrypoint, which is what a one-file run looks
+like.
+
+Each candidate lands in `<run_dir>/candidates/<digest>/` as a real directory you
+can open and run, with the serialised tree beside it so a resumed run rebuilds
+the exact string the hash was taken over.
 
 ## The pre-flight
 
@@ -151,3 +195,9 @@ boundaries, so `terminate` + `resume` is the honest equivalent — it stops at a
 node boundary, keeps everything measured, and continues the same tree. Pausing
 would have to hold the task in the contract's non-terminal `paused`, which this
 search cannot do.
+
+## Divergence from ScienceDiscovery
+
+Multi-file support was added here and not in ScienceDiscovery's evolve service,
+which the search was ported from. The two copies of the engine have diverged
+from that point: a fix on either side has to be carried across by hand.

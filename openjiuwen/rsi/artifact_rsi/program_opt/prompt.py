@@ -54,7 +54,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence
 
-from .program import available_imports_text
+from .program import DEFAULT_ENTRYPOINT, available_imports_text, files_of
 
 #: The closing instruction every code-shaped template ends on.
 #:
@@ -103,6 +103,7 @@ def mutation_prompt(
     scorecard: Mapping[str, Any],
     parent_code: str,
     parent_score: Optional[float],
+    entrypoint: str = DEFAULT_ENTRYPOINT,
     best_score: Optional[float],
     recent: Sequence[str] = (),
     rubric: str = "",
@@ -121,7 +122,7 @@ def mutation_prompt(
         return _SCRIPT_TEMPLATE.format(
             statement=statement.strip() or "Make the evaluator report a higher score.",
             contract=script_contract.strip(),
-            parent_code=parent_code.strip(),
+            parent_code=render_tree(parent_code, entrypoint),
             parent_score=_score(parent_score),
             best_score=_score(best_score),
             feedback=_feedback(feedback),
@@ -172,18 +173,26 @@ run's contract.
 
 Its score: {parent_score}. Best so far: {best_score}.
 {feedback}
-```python
 {parent_code}
-```
 
 {history}## Requirements
 
 1. Write to the interface the evaluator requires — every function name and
    argument exactly as it expects them.
 2. You may import only: {imports}.
-3. Output **one** ```python block containing the complete runnable program (not
-   a patch, not a fragment).
-4. The first line of the module docstring says in one sentence what changed.
+3. Output **only the files you changed**, each as its own fenced block labelled
+   with its path, exactly like the listing above:
+
+   ```python name=path/to/file.py
+   ...the complete new contents of that file...
+   ```
+
+   A file you do not output is kept as it is. Every block you do output replaces
+   that whole file, so give complete contents — never a patch or a fragment.
+   A path that is not in the listing creates a new file. To remove one, put
+   `DELETE path/to/file.py` on a line of its own.
+4. The first line of the module docstring of a file you changed says in one
+   sentence what changed.
 
 {how_to_change}
 """
@@ -276,7 +285,28 @@ def with_promise_request(prompt: str) -> str:
     return prompt.rstrip("\n") + PROMISE_REQUEST + "\n"
 
 
-def repair_prompt(code: str, error: str) -> str:
+def render_tree(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
+    """Every file in the program, each in its own labelled block.
+
+    The same shape the reply is asked for, so the model has a worked example of
+    the format in front of it rather than a description of one. Entrypoint
+    first, then alphabetical: the file the evaluator imports is the one the
+    reader needs to see before any of the others make sense.
+    """
+    files = files_of(code, entrypoint)
+    if len(files) == 1 and entrypoint in files:
+        # A one-file program is shown the way it always was. Labelling a listing
+        # of one file would teach the format at the cost of making the common
+        # case look more complicated than it is.
+        return f"```python\n{files[entrypoint].strip()}\n```"
+    order = sorted(files, key=lambda path: (path != entrypoint, path))
+    blocks = [f"```python name={path}\n{files[path].strip()}\n```" for path in order]
+    listing = ", ".join(order)
+    return f"The program is {len(order)} files: {listing}.\n\n" + "\n\n".join(blocks)
+
+
+def repair_prompt(code: str, error: str,
+                  entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
     """Ask for the one bug this candidate has, not for a different candidate.
 
     A candidate that failed usually failed for something visible in its own
@@ -317,8 +347,12 @@ def repair_prompt(code: str, error: str) -> str:
         "## What this environment has\n\n"
         f"You may import only: {available_imports_text()}\n\n"
         "## Current program\n\n"
-        "```python\n"
-        f"{code}\n"
-        "```\n\n"
-        "Output only the fixed complete program, in a single ```python block.\n"
+        f"{render_tree(code, entrypoint)}\n\n"
+        + (
+            "Output only the fixed complete program, in a single ```python block.\n"
+            if len(files_of(code, entrypoint)) == 1 else
+            "Output only the files you had to change, each as its own fenced block "
+            "labelled with its path (```python name=path/to/file.py). A file you do "
+            "not output is kept as it is.\n"
+        )
     )
