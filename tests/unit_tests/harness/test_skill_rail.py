@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -14,6 +15,7 @@ from openjiuwen.core.foundation.llm.schema.message import SystemMessage
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
@@ -24,7 +26,7 @@ from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
-from openjiuwen.harness.tools import ListSkillTool
+from openjiuwen.harness.tools import BashTool, ListSkillTool, ReadFileTool
 from openjiuwen.harness.tools.skills.skill_tool import SKILL_TOOL_MARKDOWN_IMAGES_HINT
 
 
@@ -101,12 +103,17 @@ def _write_skill(
     return skill_dir
 
 
-def _make_sys_operation(tmp_path: Path):
+def _make_sys_operation(tmp_path: Path, shell_allowlist: List[str] | None = None):
     """Create a local SysOperation for tests."""
+    work_config = (
+        LocalWorkConfig(work_dir=str(tmp_path), shell_allowlist=shell_allowlist)
+        if shell_allowlist is not None
+        else LocalWorkConfig(work_dir=str(tmp_path))
+    )
     card = SysOperationCard(
         id=f"test_skill_rail_sysop_{tmp_path.name}",
         mode=OperationMode.LOCAL,
-        work_config=LocalWorkConfig(work_dir=str(tmp_path)),
+        work_config=work_config,
     )
     Runner.resource_mgr.add_sys_operation(card)
     return Runner.resource_mgr.get_sys_operation(card.id)
@@ -733,6 +740,102 @@ async def test_skill_rail_persists_baseline_and_attaches_only_runtime_additions(
     )
     assert "使用规则" not in (attachments[0].content or "")
     assert "Activation rule" not in (attachments[0].content or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "additions_heading"),
+    [("cn", "新增可用 Skill："), ("en", "Newly available skills:")],
+)
+async def test_skill_rail_runtime_addition_carries_skill_directory(
+    tmp_path: Path, language: str, additions_heading: str
+):
+    """A skill installed mid-session is announced with the directory it lives in.
+
+    The system prompt section is frozen to the session baseline, so this
+    attachment is the only place the model hears about a later installation. A
+    skill announced without its directory cannot resolve the relative paths its
+    own SKILL.md uses for bundled scripts and reference documents.
+    """
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    sys_operation = _make_sys_operation(tmp_path, shell_allowlist=["python", "python3"])
+    rail = SkillUseRail(skills_dir=str(skills_root), skill_mode="all", include_tools=False)
+    rail.set_sys_operation(sys_operation)
+    rail.system_prompt_builder = SystemPromptBuilder(language=language)
+    rail.attachment_manager = PromptAttachmentManager()
+
+    session = _SessionState(f"runtime-directory-{language}")
+    ctx = AgentCallbackContext(agent=None, inputs=ModelCallInputs(tools=[]), session=session)
+    await rail.before_invoke(ctx)
+
+    added_dir = _write_skill(
+        skills_root,
+        "xlsx-writer",
+        "Write xlsx reports",
+        body="\nRun `scripts/render.py` and follow `references/layout.md`.\n",
+    )
+    added_dir.joinpath("references").mkdir()
+    added_dir.joinpath("references", "layout.md").write_text(
+        "# Layout\n\nOne sheet per report.\n", encoding="utf-8"
+    )
+    added_dir.joinpath("scripts").mkdir()
+    added_dir.joinpath("scripts", "render.py").write_text(
+        "print('rendered')\n", encoding="utf-8"
+    )
+    await rail.before_model_call(ctx)
+
+    attachments = await rail.attachment_manager.collect_for_session(session.session_id)
+    content = attachments[0].content or ""
+
+    assert additions_heading in content
+    assert f"Directory: {added_dir.resolve()}" in content
+
+    # Follow the route a model would: take the advertised directory and join
+    # onto it the relative paths the skill's own SKILL.md uses, then read the
+    # reference document and run the script through the result.
+    advertised = re.search(r"^\s*Directory:\s*(.+?)\s*$", content, flags=re.MULTILINE)
+    assert advertised is not None, content
+    skill_dir = advertised.group(1)
+
+    read_res = await ReadFileTool(sys_operation).invoke(
+        {"file_path": str(Path(skill_dir) / "references" / "layout.md")}
+    )
+    assert read_res.success is True, read_res.error
+    assert "One sheet per report." in read_res.data["content"]
+
+    run_res = await BashTool(sys_operation).invoke(
+        {"command": f'python3 "{Path(skill_dir) / "scripts" / "render.py"}"'}
+    )
+    assert run_res.success is True, run_res.error
+    assert "rendered" in run_res.data["content"]
+
+    # The frozen baseline section is what makes the attachment the only route.
+    assert "xlsx-writer" not in rail.system_prompt_builder.build()
+
+
+@pytest.mark.parametrize("language", ["cn", "en"])
+def test_skill_rail_runtime_addition_omits_unresolvable_skill_directory(
+    tmp_path: Path, language: str
+):
+    """No directory is rendered when the skill carries none to render.
+
+    An empty directory resolves to the process working directory, which the
+    model cannot tell apart from a real skill path and would join relative
+    paths onto.
+    """
+    rail = SkillUseRail(skills_dir=str(tmp_path / "skills"), skill_mode="all", include_tools=False)
+    rail.system_prompt_builder = SystemPromptBuilder(language=language)
+
+    addition = Skill(name="xlsx-writer", description="Write xlsx reports", directory=Path(""))
+
+    content = rail._build_runtime_skill_change_content([addition], [], [])
+
+    assert "xlsx-writer" in content
+    assert "Directory:" not in content
+    assert str(Path.cwd()) not in content
 
 
 @pytest.mark.asyncio
