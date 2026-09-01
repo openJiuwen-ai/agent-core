@@ -18,10 +18,6 @@ def _split_name_parts(value: str) -> list[str]:
     return [part.lower() for part in text.strip("-").split("-") if part]
 
 
-def to_kebab_case(value: str) -> str:
-    return "-".join(_split_name_parts(value))
-
-
 def to_camel_case(value: str) -> str:
     parts = _split_name_parts(value)
     if not parts:
