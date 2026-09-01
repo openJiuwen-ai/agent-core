@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from openjiuwen.rsi.artifact_rsi.schema import ArtifactEngineRequest
+from openjiuwen.rsi.artifact_rsi.request import ArtifactEngineRequest
 from openjiuwen.rsi.events import OnEvent
 from openjiuwen.rsi.schema import (
     ArtifactRef,

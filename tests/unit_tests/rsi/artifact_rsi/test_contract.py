@@ -297,12 +297,7 @@ def test_public_dataclasses_are_frozen() -> None:
         result.valid = False  # type: ignore[misc]
 
 
-def test_shared_contracts_are_defined_at_rsi_root_with_legacy_aliases() -> None:
-    from openjiuwen.rsi.artifact_rsi.events import EventStatus as LegacyEventStatus
-    from openjiuwen.rsi.artifact_rsi.schema import RsiTaskCreateRequest as LegacyTaskCreateRequest
-
-    assert LegacyEventStatus is SharedEventStatus
-    assert LegacyTaskCreateRequest is SharedTaskCreateRequest
+def test_shared_contracts_are_defined_at_rsi_root() -> None:
     assert SharedEventStatus.__module__ == "openjiuwen.rsi.events"
     assert SharedTaskCreateRequest.__module__ == "openjiuwen.rsi.schema"
     assert EngineEventSink is not None

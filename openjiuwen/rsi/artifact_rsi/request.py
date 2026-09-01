@@ -4,13 +4,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
-from openjiuwen.rsi.artifact_rsi.schema import ArtifactEngineRequest
 from openjiuwen.rsi.schema import (
     ArtifactValidationResult,
     RsiTaskCreateRequest,
     RsiTaskEnvelope,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactEngineRequest:
+    """Provider-facing request shared by program and paper optimizers."""
+
+    task_id: str
+    run_dir: str
+    artifact_path: str | None
+    model_config: str
+    max_iterations: int
+    optimization_instruction: str | None
 
 
 def _error(code: str, message: str) -> dict[str, str]:
@@ -139,4 +151,4 @@ def build_request(
     )
 
 
-__all__ = ["build_request", "validate_artifact_task_request"]
+__all__ = ["ArtifactEngineRequest", "build_request", "validate_artifact_task_request"]
