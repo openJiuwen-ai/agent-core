@@ -285,16 +285,29 @@ class ProgramArtifactProvider:
         if not index:
             raise FileNotFoundError(f"no artifacts recorded for task {task_id}")
         if artifact_id is None:
-            # The final artifact is the best node's, which the report names.
-            best = report.best_node_id if report else None
-            for ref in index:
-                if best and ref.node_id == best:
-                    return ref
-            return index[-1]
+            # The best node's own `snapshot_artifact_id`, not a scan for a
+            # matching `node_id`. Artifacts are addressed by content, so two
+            # nodes that reached the same program share one — and that one can
+            # only name a single node. Scanning by node_id therefore misses
+            # whenever the winner is not the node the artifact was recorded
+            # under, and the fall-through returns a different program.
+            artifact_id = self._best_artifact_id(task_id, report.best_node_id if report else None)
+            if artifact_id is None:
+                return index[-1]
         for ref in index:
             if ref.artifact_id == artifact_id:
                 return ref
         raise FileNotFoundError(f"artifact {artifact_id} does not belong to task {task_id}")
+
+    def _best_artifact_id(self, task_id: str, best_node_id: str | None) -> str | None:
+        """Which artifact the winning node points at."""
+        if not best_node_id:
+            return None
+        tree = read_tree_file(task_id)
+        for node in tree.nodes if tree else ():
+            if node.node_id == best_node_id:
+                return node.snapshot_artifact_id
+        return None
 
     # -- the bridge ------------------------------------------------------------
 

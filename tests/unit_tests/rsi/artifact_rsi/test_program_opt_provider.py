@@ -1218,3 +1218,63 @@ def test_a_reply_that_proposed_nothing_is_an_empty_draw_not_a_copy() -> None:
     # candidate that cannot parse, and scores `-inf`. That is a draw that
     # happened and failed, not a draw that never happened.
     assert reply_carries_program("I could not think of anything better.") is True
+
+
+def test_the_final_artifact_is_found_when_two_nodes_hold_the_same_program(
+    tmp_path: Path,
+) -> None:
+    """Candidates are addressed by the hash of their content, so two nodes that
+    arrived at the same program share one artifact — and then `node_id` on that
+    artifact can only name one of them. Resolving the final artifact by scanning
+    for a matching `node_id` therefore misses whenever the winner is not the node
+    the artifact ended up recorded under, and falls through to an arbitrary
+    entry. Every node carries its own `snapshot_artifact_id`; that is the lookup.
+    """
+    run = _state(tmp_path)
+    same = "sha256:" + "c" * 64
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:" + "a" * 64))
+    # Node 1 wins. Node 2 is the same program, and is the one the shared
+    # artifact ends up naming.
+    _absorb(run, events.expanded(1, 0, 1, 0.9, True, iteration=1, code_hash=same))
+    _absorb(run, events.evaluated(1, 0.90, {"rmse": 1.0}))
+    _absorb(run, events.merged(1, True, "it scored better"))
+    _absorb(run, events.expanded(2, 0, 1, 0.9, True, iteration=2, code_hash=same))
+    _absorb(run, events.evaluated(2, 0.90, {"rmse": 1.0}))
+    _absorb(run, events.merged(2, False, "the same program again"))
+    # A later, different candidate — so falling through to "the last artifact
+    # recorded" returns something visibly wrong rather than the right answer by
+    # accident.
+    _absorb(run, events.expanded(3, 0, 1, 0.1, True, iteration=3,
+                                 code_hash="sha256:" + "d" * 64))
+    _absorb(run, events.evaluated(3, 0.10, {"rmse": 9.0}))
+    _absorb(run, events.merged(3, False, "it scored worse"))
+
+    final = ProgramArtifactProvider().locate_artifact("task-001")
+
+    assert final.sha256 == "c" * 64
+    assert final.node_id == state_module.node_id_for("task-001", 1)
+
+
+def test_the_final_artifact_is_found_when_the_winner_is_the_later_duplicate(
+    tmp_path: Path,
+) -> None:
+    """The mirror of the case above, and the one that a `node_id` scan cannot
+    survive whichever node the shared artifact names: here the winner is the
+    *second* node to reach the program, and the artifact names the first."""
+    run = _state(tmp_path)
+    same = "sha256:" + "c" * 64
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:" + "a" * 64))
+    _absorb(run, events.expanded(1, 0, 1, 0.4, True, iteration=1, code_hash=same))
+    _absorb(run, events.evaluated(1, 0.40, {"rmse": 2.0}))
+    _absorb(run, events.merged(1, False, "it scored worse on this split"))
+    _absorb(run, events.expanded(2, 0, 1, 0.9, True, iteration=2, code_hash=same))
+    _absorb(run, events.evaluated(2, 0.90, {"rmse": 1.0}))
+    _absorb(run, events.merged(2, True, "it scored better"))
+    _absorb(run, events.expanded(3, 0, 1, 0.1, True, iteration=3,
+                                 code_hash="sha256:" + "d" * 64))
+    _absorb(run, events.evaluated(3, 0.10, {"rmse": 9.0}))
+    _absorb(run, events.merged(3, False, "it scored worse"))
+
+    final = ProgramArtifactProvider().locate_artifact("task-001")
+
+    assert final.sha256 == "c" * 64

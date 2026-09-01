@@ -315,6 +315,13 @@ class ProgramRunState:
         if not digest:
             return None
         artifact_id = f"A-program:{self.task_id}:{digest[:16]}"
+        if artifact_id in self.artifacts:
+            # Two nodes arrived at the same program. One artifact, and its
+            # `node_id` can only name one of them — the first, which is where
+            # this program actually appeared. Overwriting made the field mean
+            # "the most recent node that happened to repeat it", which is not a
+            # fact anyone asked for.
+            return artifact_id
         self.artifacts[artifact_id] = ArtifactRef(
             artifact_id=artifact_id,
             node_id=node_id_for(self.task_id, index),
