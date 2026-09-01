@@ -412,7 +412,13 @@ class BidirectionalBeamPlanner:
                 round_index = _round + 1
                 break
             retained = self._rank_and_trim(next_states, limit=self.top_k)
-            all_states = retained
+            # `frontier` drives expansion; `all_states` is what the final merge sees.
+            # Rebinding it here dropped every state retained in an earlier round that
+            # later fell out of the top-k - including terminal states, which can never
+            # be re-derived because `_apply_judgements` only emits extensions. Keep a
+            # monotone archive instead. Only retained states are archived, so it is
+            # bounded by len(seeds) + top_k * (max_depth - 1).
+            all_states = self._dedupe_states([*all_states, *retained])
             frontier = retained
             round_index = _round + 1
             await self._emit_beam_event(
@@ -421,7 +427,7 @@ class BidirectionalBeamPlanner:
                 graph=self._beam_graph.snapshot(),
             )
 
-        final_states = self._merge_converged_states(all_states)
+        final_states = self._merge_converged_states(self._drop_subsumed_states(all_states))
         plans = self._plans_from_states(final_states)[: self.top_k]
         recommended_plans = [self._plan_payload(plan, query=query) for plan in plans]
         final_rerank = await self._final_rerank_plans(
@@ -1222,6 +1228,25 @@ class BidirectionalBeamPlanner:
             if existing is None or self._state_score(state) > self._state_score(existing):
                 deduped[key] = state
         return list(deduped.values())
+
+    @staticmethod
+    def _drop_subsumed_states(states: list[BeamState]) -> list[BeamState]:
+        """Drop states whose edges are a strict subset of another state's.
+
+        The archive keeps every state that was ever retained, so it holds partial
+        plans alongside the extensions that superseded them. Recommending the
+        partial one would be a regression: before the archive existed only the last
+        round survived, so a superseded prefix was never a candidate plan. Terminal
+        states are subsumed by nothing and are unaffected - they are the states the
+        archive exists to preserve.
+
+        Apply this to the archive *before* merging, never after: a merged state
+        spans the edges of everything it merged, so filtering afterwards would
+        discard the individual paths that converged into it, which today are
+        recommended alongside the merged plan.
+        """
+        edge_sets = [(state, frozenset(state.edge_indices)) for state in states]
+        return [state for state, edges in edge_sets if not any(edges < other for _other_state, other in edge_sets)]
 
     def _rank_and_trim(
         self,
