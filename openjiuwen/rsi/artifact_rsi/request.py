@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from openjiuwen.rsi.artifact_rsi.schema import (
-    ArtifactEngineRequest,
+from openjiuwen.rsi.artifact_rsi.schema import ArtifactEngineRequest
+from openjiuwen.rsi.schema import (
     ArtifactValidationResult,
     RsiTaskCreateRequest,
     RsiTaskEnvelope,

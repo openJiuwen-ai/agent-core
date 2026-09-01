@@ -31,6 +31,9 @@ from openjiuwen.rsi.artifact_rsi import (
     emit,
     validate_artifact_task_request,
 )
+from openjiuwen.rsi.events import EngineEventSink
+from openjiuwen.rsi.events import EventStatus as SharedEventStatus
+from openjiuwen.rsi.schema import RsiTaskCreateRequest as SharedTaskCreateRequest
 
 
 def _request(**overrides: object) -> RsiTaskCreateRequest:
@@ -292,3 +295,14 @@ def test_public_dataclasses_are_frozen() -> None:
 
     with pytest.raises(FrozenInstanceError):
         result.valid = False  # type: ignore[misc]
+
+
+def test_shared_contracts_are_defined_at_rsi_root_with_legacy_aliases() -> None:
+    from openjiuwen.rsi.artifact_rsi.events import EventStatus as LegacyEventStatus
+    from openjiuwen.rsi.artifact_rsi.schema import RsiTaskCreateRequest as LegacyTaskCreateRequest
+
+    assert LegacyEventStatus is SharedEventStatus
+    assert LegacyTaskCreateRequest is SharedTaskCreateRequest
+    assert SharedEventStatus.__module__ == "openjiuwen.rsi.events"
+    assert SharedTaskCreateRequest.__module__ == "openjiuwen.rsi.schema"
+    assert EngineEventSink is not None

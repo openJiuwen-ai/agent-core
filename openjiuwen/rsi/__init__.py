@@ -4,19 +4,27 @@
 from openjiuwen.rsi.artifact_rsi import (
     ArtifactEngineRequest,
     ArtifactProvider,
-    ArtifactRef,
-    ArtifactType,
-    ArtifactValidationResult,
+    PaperArtifactProvider,
+    ProgramArtifactProvider,
+    build_request,
+    validate_artifact_task_request,
+)
+from openjiuwen.rsi.events import (
     EngineEvent,
-    EngineReport,
-    EngineResult,
-    EngineState,
+    EngineEventSink,
     EventNode,
     EventProgress,
     EventStatus,
     OnEvent,
-    PaperArtifactProvider,
-    ProgramArtifactProvider,
+    emit,
+)
+from openjiuwen.rsi.schema import (
+    ArtifactRef,
+    ArtifactType,
+    ArtifactValidationResult,
+    EngineReport,
+    EngineResult,
+    EngineState,
     RsiChange,
     RsiScenario,
     RsiStatus,
@@ -26,9 +34,6 @@ from openjiuwen.rsi.artifact_rsi import (
     RsiUsage,
     RsiUsageTokens,
     TreeResponse,
-    build_request,
-    emit,
-    validate_artifact_task_request,
 )
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
@@ -74,6 +79,7 @@ __all__ = [
     "DataLoaderConfig",
     "DatasetArtifact",
     "EngineEvent",
+    "EngineEventSink",
     "EngineReport",
     "EngineResult",
     "EngineState",

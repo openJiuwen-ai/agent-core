@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from typing import Literal, Protocol, runtime_checkable
 
-from openjiuwen.rsi.artifact_rsi.events import OnEvent
 from openjiuwen.rsi.artifact_rsi.provider import ArtifactProvider
-from openjiuwen.rsi.artifact_rsi.schema import (
-    ArtifactEngineRequest,
+from openjiuwen.rsi.artifact_rsi.schema import ArtifactEngineRequest
+from openjiuwen.rsi.events import OnEvent
+from openjiuwen.rsi.schema import (
     ArtifactRef,
     ArtifactValidationResult,
     EngineReport,
