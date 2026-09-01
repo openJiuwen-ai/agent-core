@@ -310,8 +310,8 @@ def build_identity_text(*, member_name, display_name=None, member_workspace_path
                         member_prompt=None, language="cn",
                         fork_capable=False) -> str | None
 def build_identity_conversion(*, source, member_name, language="cn") -> str
-def build_team_info_text(*, team_info, team_workspace_mount=None,
-                         team_workspace_path=None, language="cn") -> str | None
+def build_team_info_text(*, team_info, team_workspace_path=None,
+                         team_outputs_dir=None, language="cn") -> str | None
 def build_roster_snapshot_text(*, members, mark_humans=False, language="cn") -> str | None
 def build_roster_delta_text(*, delta, mark_humans=False, language="cn") -> str | None
 ```
@@ -343,8 +343,8 @@ class TeamContextTracker:
         display_name: str = "",              # fallback only; the DB row wins
         member_workspace_path: str | None = None,
         member_prompt: str = "",
-        team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
+        team_outputs_dir: str | None = None,
         expose_human_agents_to_teammates: bool = False,
         language: str = "cn",
         fork_source: str | None = None,   # fork 源名；None = 普通 spawn
@@ -400,8 +400,8 @@ class TeamPolicyRail(DeepAgentRail):
         language: str = "cn",
         team_mode: str = "default",
         base_prompt: str | None = None,
-        team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
+        team_outputs_dir: str | None = None,
         team_backend: TeamBackend | None = None,
         expose_human_agents_to_teammates: bool = False,
     ) -> None: ...
@@ -593,6 +593,6 @@ TeamPermissionRail  ✗  conditional ✓ when team-coordinated
 - **S_03 schema**：`TeamRole` 枚举、`TeamAgentSpec.lifecycle / team_mode / teammate_mode / approval_required_tools` 字段定义在 schema 层，本 spec 的 builder / rail 仅消费这些字段。
 - **S_05 agent / TeamHarness**：rail 的实际挂载点（`TeamHarness.build`）、`agent_configurator` 决定挂哪些 rail 的逻辑由 agent spec 负责；本 spec 只规定 rail 各自的契约。
 - **S_07 tools**：`TeamToolRail` 与团队工具集合属于 tools spec；本 spec 仅指出 mount order（tool rail 必须先于 policy rail eager init）。`TeamToolApprovalRail` 调 `approve_tool` 工具的契约由 tools spec 定义。
-- **S_10 team_workspace**：`TeamWorkspaceRail` 与本 spec 平级，但本 spec 的 `team_info` 消息正文携带 `team_workspace_mount` / `team_workspace_path`——workspace 子系统对 prompt 的可见面只通过这两个参数。
+- **S_10 team_workspace**：`TeamWorkspaceRail` 与本 spec 平级，但本 spec 的 `team_info` 消息正文携带 `team_workspace_path` / `team_outputs_dir`——workspace 子系统对 prompt 的可见面只通过这两个参数（`team_outputs_dir` 仅无 project_dir 成员注入，见 [[F_89]] / [[S_26]]）。
 - **S_11 i18n（如有）**：`prompts/cn/` `prompts/en/` 与 `agent_teams/i18n.py` 的边界由本 spec 的不变量 10 落地；新增语言要求 `prompts/<lang>/*.md` 全套对齐 + `_LABELS` / `_I18N_LABELS` 增加映射。
 - **core S_x prompts**：`PromptSection` / `SystemPromptBuilder` / `PromptTemplate` 的契约属于 core；本 spec 假定它们的行为不变（priority 升序拼接 / `add_section` 同名覆盖 / `{{placeholder}}` 渲染）。
