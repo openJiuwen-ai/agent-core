@@ -54,6 +54,7 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -990,6 +991,34 @@ class NativeHarness(DeepAgent):
         await self._emit_round("started", active.round_id)
         self._ack(cmd.ack, None)
 
+    def _interrupt_resume_still_pending(
+        self, content: Any, session: Any,
+    ) -> bool:
+        """Return True if ``content`` still matches a pending interrupt slot.
+
+        Mirrors ``TeamHarness.is_pending_interrupt_resume_valid`` so the
+        supervisor (sole writer of round state) can drop a stale duplicate
+        InteractiveInput follow-up whose interrupt slot was already consumed.
+        Reads the same session the round mutates (``self._session``), where
+        ``react_agent`` publishes/clears ``INTERRUPTION_KEY``.
+        """
+        if not isinstance(content, InteractiveInput):
+            return False
+        if session is None:
+            return False
+        state = session.get_state(INTERRUPTION_KEY)
+        if state is None:
+            return False
+        interrupted = getattr(state, "interrupted_tools", {}) or {}
+        pending_ids: set = set()
+        for entry in interrupted.values():
+            requests = getattr(entry, "interrupt_requests", {}) or {}
+            pending_ids.update(requests.keys())
+        if not pending_ids:
+            return False
+        resume_ids = set(content.user_inputs.keys())
+        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+
     async def _on_round_done(self, cmd: _CmdRoundFinished) -> None:
         """Settle a finished round, always resolving a deferred pause ack.
 
@@ -1123,6 +1152,25 @@ class NativeHarness(DeepAgent):
         # Decision priority (matches _run_task_loop):
         #   follow-up (external immediate=False sends) > remaining task-plan task.
         follow_ups = self._drain_pending_follow_ups(session)
+        # Idempotency: drop InteractiveInput follow-ups whose interrupt slot was
+        # already consumed by the prior resume round. ``resume_interrupt``
+        # releases ``_interrupt_lock`` before ``harness.send`` (to break the
+        # hold-and-wait deadlock with ``_on_idle_settled``), so check-then-send
+        # is no longer atomic under the lock — a double-delivered approval can
+        # reach the supervisor as a second ``_CmdSend`` that parks as a follow-up
+        # while the first resume round runs. Running this filter at settle time
+        # (after the slot is definitively cleared or not) is free of the
+        # ack-before-consume TOCTOU. A follow-up whose slot is still pending
+        # (prior round failed before consuming) is kept — that is a legitimate
+        # retry, not a duplicate.
+        if follow_ups is not None:
+            follow_ups = [
+                f for f in follow_ups
+                if not (
+                    isinstance(f, InteractiveInput)
+                    and not self._interrupt_resume_still_pending(f, session)
+                )
+            ] or None
         if follow_ups is not None:
             nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
