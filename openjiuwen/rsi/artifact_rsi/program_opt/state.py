@@ -27,8 +27,6 @@ from openjiuwen.rsi.schema import (
     RsiChange,
     RsiStatus,
     RsiTreeNode,
-    RsiUsage,
-    RsiUsageTokens,
     TreeResponse,
 )
 
@@ -115,20 +113,15 @@ class ProgramRunState:
     best_node_id: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    #: `node index -> the node as the contract wants it`. Held whole because a
+    #: node arrives in three parts and only the last one completes it.
+    nodes: dict[int, RsiTreeNode] = field(default_factory=dict)
+    artifacts: dict[str, ArtifactRef] = field(default_factory=dict)
     #: What a search that stopped at a node boundary folds to. `terminate` and
     #: `pause` share the whole stop mechanism — the same flag, polled at the
     #: same boundary — and differ only here: `terminated` is a terminal status
     #: and `paused` is the one `resume` accepts.
     stopped_status: str = "terminated" 
-    usage: Optional[RsiUsage] = None
-    #: `node index -> the node as the contract wants it`. Held whole because a
-    #: node arrives in three parts and only the last one completes it.
-    nodes: dict[int, RsiTreeNode] = field(default_factory=dict)
-    artifacts: dict[str, ArtifactRef] = field(default_factory=dict)
-    #: Model calls made so far. Counted here rather than taken off the `cost`
-    #: event, which reports tokens only — and a usage record showing a large
-    #: token total against zero calls is a worse answer than a counted one.
-    model_calls: int = 0
     _summary: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -171,8 +164,6 @@ class ProgramRunState:
             self._evaluated(event)
         elif kind == "merged":
             yield from self._merged(event)
-        elif kind == "cost":
-            yield from self._cost(event)
         elif kind == "search_finished":
             self._finished(event)
 
@@ -266,29 +257,6 @@ class ProgramRunState:
             total_iterations=self.total_iterations,
             score=self.score,
             baseline=self.baseline,
-            usage=self.usage,
-        )
-
-    def _cost(self, event: dict[str, Any]) -> Iterator[EngineEvent]:
-        total = int(event.get("tokens") or 0)
-        # The search reports one total. Splitting it would be inventing a number,
-        # so output carries what was measured and input stays 0 until the engine
-        # reports the two halves separately.
-        self.usage = RsiUsage(
-            tokens=RsiUsageTokens(input=0, output=total, cache_hit=0),
-            # The search has no price table and refuses to invent one, so it
-            # always reports zero cents. The contract's field is not optional,
-            # so zero is what "no estimate" has to look like.
-            cost_estimate=float(event.get("cents") or 0) / 100.0,
-            call_count=self.model_calls,
-        )
-        self._persist()
-        yield EventProgress(
-            iteration=self.iteration,
-            total_iterations=self.total_iterations,
-            score=self.score,
-            baseline=self.baseline,
-            usage=self.usage,
         )
 
     def _finished(self, event: dict[str, Any]) -> None:
@@ -353,7 +321,6 @@ class ProgramRunState:
             total_iterations=self.total_iterations,
             score=self.score,
             baseline=self.baseline,
-            usage=self.usage,
             updated_at=_utc_now(),
             error_code=self.error_code,
             error_message=self.error_message,
@@ -364,7 +331,6 @@ class ProgramRunState:
             task_id=self.task_id,
             status=self.status,
             best_node_id=self.best_node_id,
-            usage=self.usage,
             artifact_index=list(self.artifacts.values()),
             summary=self._summary,
         )
@@ -445,12 +411,10 @@ def read_report_file(task_id: str) -> Optional[EngineReport]:
     payload = _read(task_id, REPORT_FILE)
     if not payload:
         return None
-    usage = payload.get("usage")
     return EngineReport(
         task_id=payload.get("task_id", task_id),
         status=payload.get("status", "created"),
         best_node_id=payload.get("best_node_id"),
-        usage=_usage_from(usage),
         artifact_index=[ArtifactRef(**ref) for ref in payload.get("artifact_index") or []],
         summary=payload.get("summary"),
     )
@@ -481,21 +445,6 @@ def _node_from(raw: dict[str, Any]) -> RsiTreeNode:
     data = dict(raw)
     data["changes"] = [RsiChange(**change) for change in data.get("changes") or []]
     return RsiTreeNode(**data)
-
-
-def _usage_from(raw: Any) -> Optional[RsiUsage]:
-    if not isinstance(raw, dict):
-        return None
-    tokens = raw.get("tokens") or {}
-    return RsiUsage(
-        tokens=RsiUsageTokens(
-            input=int(tokens.get("input") or 0),
-            output=int(tokens.get("output") or 0),
-            cache_hit=int(tokens.get("cache_hit") or 0),
-        ),
-        cost_estimate=float(raw.get("cost_estimate") or 0.0),
-        call_count=int(raw.get("call_count") or 0),
-    )
 
 
 def _read(task_id: str, name: str) -> Optional[dict[str, Any]]:
@@ -540,7 +489,6 @@ class _StoredState:
             total_iterations=int(self._payload.get("total_iterations") or 0),
             score=self._payload.get("score"),
             baseline=self._payload.get("baseline"),
-            usage=_usage_from(self._payload.get("usage")),
             updated_at=str(self._payload.get("updated_at") or ""),
             error_code=self._payload.get("error_code"),
             error_message=self._payload.get("error_message"),

@@ -12,7 +12,7 @@
 - `PuctProgramArtifactProvider`（`puct_provider.py`）：满足 `ProgramArtifactProvider` 协议的实现。契约名归可 `isinstance` 的 Protocol，实现类单独命名，两者由 `program_opt/__init__` 一并导出。
 - `run`/`resume` 共用一条 `_drive` 流程：装配（沙箱探测、RunSpec）→ `EventStatus(running)` → 判别力探针（评分无法区分好坏候选时以 `PROBE_REFUSED` 拒绝，发生在预算花掉之前）→ 工作线程跑搜索 → 事件先落盘、再经 `run_coroutine_threadsafe` 交回调用方事件循环并等待返回（满足契约的顺序与背压要求）。
 - `resume` 从 `run_dir` 读回上次的树快照，节点编号接续，不产生同编号两份内容。
-- `pause` 与 `terminate` 共用同一套节点边界停止机制，分岔只在停下的搜索折叠成什么状态：`paused`（非终态，**唯一可 `resume` 的状态**）或 `terminated`（终态，`resume` 以 `TERMINATED_NOT_RESUMABLE` 拒绝且不构造引擎）。两者竞态时 terminate 赢。评到一半的候选照样记完分。
+- `pause` 与 `terminate` 共用同一套节点边界停止机制，分岔只在停下的搜索折叠成什么状态：`paused`（非终态，**唯一为续跑设计的状态**）或 `terminated`（终态）。`resume` 拒绝 `terminated`（`TERMINATED_NOT_RESUMABLE`，不构造引擎）；`completed` **允许**续跑——请求自带 `max_iterations`，带更大预算延长一个已完成的搜索是合法用法，预算算术按剩余数接续；`failed` 留作修好配置后的重试路径；对在飞任务的第二次 `run`/`resume` 整体拒绝（`TASK_ALREADY_RUNNING`，防两个引擎双写一个 run_dir 并偷走停止标志）。pause 与 terminate 竞态时 terminate 赢。评到一半的候选照样记完分。
 - 产物按内容寻址：每个候选是一个目录（文件树按各自相对路径铺开 + `_tree.json` manifest），两个节点写出同一程序共享一个产物；`locate_artifact(None)` 走最佳节点自己的 `snapshot_artifact_id`。
 
 **提示词按任务拼接**
@@ -37,7 +37,7 @@ Fixes #
 
 **Test Plan and Test result：What scenarios were tested, and what were the verification results（Function, performance, reliability, etc.）**：
 
-- `tests/unit_tests/rsi` 全树：**1072 passed, 3 skipped**（Python 3.12）。
+- `tests/unit_tests/rsi` 全树：**1073 passed, 3 skipped**（Python 3.12）。
 - `tests/unit_tests/rsi/artifact_rsi`：67+19 passed，含上游契约测试（`test_contract.py`，Protocol 可结构化实现、包面不外泄内部结构、`build_request` 要求已解析模型实例）与本实现的行为测试（探针拒绝先于预算、崩溃的搜索变成 failed 任务而非炸掉服务、慢消费者被等待、terminate 到达运行中的搜索、同一程序两节点共享产物时最终产物定位正确、候选沙箱环境不继承宿主机环境变量等）。
 - 模型注入路径用 `_FakeModel`（仅暴露 `invoke`）驱动；缺失模型实例时任务以 `MODELCONFIG` 失败并落盘，`read_state` 与返回一致。
 

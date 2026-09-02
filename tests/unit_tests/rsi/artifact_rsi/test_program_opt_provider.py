@@ -440,24 +440,6 @@ def test_a_failed_candidate_carries_why_it_failed(tmp_path: Path) -> None:
     assert "torch" in (node.node.reason or "")
 
 
-def test_spend_is_reported_against_a_call_count_rather_than_zero(
-    tmp_path: Path,
-) -> None:
-    """The search's `cost` event carries tokens only. A usage record showing
-    hundreds of thousands of tokens against zero calls is a worse answer than a
-    counted one, so the provider counts the calls it wraps."""
-    run = _state(tmp_path)
-    run.model_calls = 4
-
-    emitted = _absorb(run, events.cost(412_000, 0))
-
-    progress = emitted[0]
-    assert isinstance(progress, EventProgress)
-    assert progress.usage is not None
-    assert progress.usage.tokens.output == 412_000
-    assert progress.usage.call_count == 4
-
-
 def test_a_short_run_says_so_in_the_report(tmp_path: Path) -> None:
     """20 planned and 18 made is the difference between a search that finished
     and one that lost two paid-for model calls; unexplained it reads as neither."""
@@ -838,8 +820,7 @@ def test_a_search_running_on_a_thread_delivers_its_events_to_the_callers_loop(
         "EventStatus",   # running, before anything is measured
         "EventNode",     # the root
         "EventNode",     # the candidate, once the merger ruled on it
-        "EventProgress",
-        "EventProgress",  # the cost sweep
+        "EventProgress",  # per merged node; a cost event no longer emits one
         "EventStatus",   # completed, last
     ]
     assert [e.status for e in seen if isinstance(e, EventStatus)] == ["running", "completed"]

@@ -291,7 +291,7 @@ class PuctProgramArtifactProvider:
         if state is None:
             return EngineState(
                 task_id=task_id, status="created", iteration=0, total_iterations=0,
-                best_node_id=None, score=None, baseline=None, usage=None, updated_at="",
+                best_node_id=None, score=None, baseline=None, updated_at="",
                 error_code="TASK_NOT_FOUND", error_message="no state for this task",
             )
         return state.to_engine_state()
@@ -301,7 +301,7 @@ class PuctProgramArtifactProvider:
         report = read_report_file(task_id)
         if report is None:
             return EngineReport(
-                task_id=task_id, status="created", best_node_id=None, usage=None,
+                task_id=task_id, status="created", best_node_id=None,
                 artifact_index=[], summary="no report for this task",
             )
         return report
@@ -445,8 +445,8 @@ class PuctProgramArtifactProvider:
                 error_code="PROBE_REFUSED", error_message=str(refusal),
             )
 
-        engine = PuctEngine(completion_factory=_counting(
-            completion_factory_from_model(request.model, loop), state))
+        engine = PuctEngine(
+            completion_factory=completion_factory_from_model(request.model, loop))
         try:
             await asyncio.to_thread(engine.run, spec, sink, stop.is_set)
         except Exception as error:  # noqa: BLE001 - a crash is a failed task, not a crashed server
@@ -607,30 +607,6 @@ def _entrypoint_of(files: Mapping[str, str]) -> str | None:
             return name
     python = [path for path in files if path.endswith(".py")]
     return python[0] if len(python) == 1 else None
-
-
-def _counting(factory: Any, state: ProgramRunState) -> Any:
-    """The same completion factory, with every call counted.
-
-    The engine passes `on_usage=None` at both of its call sites, so there is no
-    hook inside it to count from; wrapping what it calls is where the number can
-    be had without changing the engine. Locked because a search with more than
-    one worker calls the model from several threads at once, and `+= 1` on a
-    Python attribute is three bytecodes rather than one.
-    """
-    counter = threading.Lock()
-
-    def counted(*args: Any, **kwargs: Any) -> Any:
-        complete = factory(*args, **kwargs)
-
-        def call(*call_args: Any, **call_kwargs: Any) -> Any:
-            with counter:
-                state.model_calls += 1
-            return complete(*call_args, **call_kwargs)
-
-        return call
-
-    return counted
 
 
 #: A distribution name, optionally pinned. Nothing else.
