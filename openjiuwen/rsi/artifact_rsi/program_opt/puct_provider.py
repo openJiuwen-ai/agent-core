@@ -130,7 +130,12 @@ class PuctProgramArtifactProvider:
             }])
 
         if not any(text.strip() for text in files.values()):
-            errors.append({"code": "ARTIFACT_EMPTY", "message": "the program is empty"})
+            # And stop: an empty program has nothing further to say, and
+            # letting it flow on used to double-report the same fact as the
+            # gate's "empty source".
+            return ArtifactValidationResult(valid=False, errors=[
+                {"code": "ARTIFACT_EMPTY", "message": "the program is empty"},
+            ])
 
         entrypoint = _entrypoint_of(files)
         if entrypoint is None:
@@ -146,13 +151,11 @@ class PuctProgramArtifactProvider:
         # A shape check on the starting point only. Candidates are *not* put
         # through this during the search -- the sandbox is what confines them,
         # and the evaluator's own import is what decides whether one is usable.
-        # What it buys here is that a seed which no evaluator could call is
-        # refused while the user is still looking at the form.
-        #
-        # Note the entrypoint name is hard-coded to `train_and_predict`, which
-        # is the contract of the task this algorithm was ported from. A
-        # `custom_script` run's real contract is whatever its evaluator calls,
-        # so this is stricter than the search itself is.
+        # What it buys here is that a seed that is not a program at all — bad
+        # syntax, a forbidden import, a dunder — is refused while the user is
+        # still looking at the form. It deliberately does not require any
+        # particular function: only the scorecard knows what the evaluator
+        # calls, and this method never sees the scorecard.
         from openjiuwen.rsi.artifact_rsi.program_opt.program import (
             local_roots,
             validate_source,

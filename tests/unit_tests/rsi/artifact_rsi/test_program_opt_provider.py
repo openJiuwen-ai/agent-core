@@ -170,16 +170,47 @@ def test_the_probe_answers_when_nothing_is_overridden(
 
 
 def test_a_program_the_gate_would_reject_is_refused_at_the_form(tmp_path: Path) -> None:
-    """The same AST gate every candidate passes. A seed that fails it would fail
-    every expansion identically, and finding that out after paying for three
-    model calls is the outcome this check exists to prevent."""
+    """A seed that is not a runnable program — here, one reaching outside the
+    sandbox — is refused while the user is still looking at the form, instead
+    of failing every expansion identically after three paid model calls."""
     path = tmp_path / "seed.py"
-    path.write_text("def something_else():\n    return 1\n", encoding="utf-8")
+    path.write_text("import requests\ndef fetch():\n    return requests.get('x')\n",
+                    encoding="utf-8")
 
     result = PuctProgramArtifactProvider().validate_input(str(path))
 
     assert result.valid is False
     assert [error["code"] for error in result.errors] == ["ARTIFACT_REJECTED_BY_GATE"]
+
+
+def test_a_seed_is_not_required_to_define_any_particular_function(tmp_path: Path) -> None:
+    """`validate_input` sees a path, never the scorecard — so it cannot know
+    what the evaluator will call. The gate used to demand `train_and_predict`,
+    one ported task's contract, and thereby rejected every legitimate
+    `custom_script` seed: a codec defining `compress`/`decompress` came back
+    ARTIFACT_REJECTED_BY_GATE "missing train_and_predict function". Whether a
+    seed is callable is decided where it can be — the evaluator's own import,
+    and the probe that scores the seed before any budget is spent."""
+    path = tmp_path / "codec.py"
+    path.write_text(
+        "def compress(text):\n    return text.encode()\n"
+        "def decompress(data):\n    return data.decode()\n",
+        encoding="utf-8",
+    )
+
+    assert PuctProgramArtifactProvider().validate_input(str(path)).valid is True
+
+
+def test_an_empty_seed_reports_the_fact_once(tmp_path: Path) -> None:
+    """ARTIFACT_EMPTY used to be followed by the gate's "empty source" — the
+    same fact reported twice. Empty has nothing further to say."""
+    path = tmp_path / "seed.py"
+    path.write_text("", encoding="utf-8")
+
+    result = PuctProgramArtifactProvider().validate_input(str(path))
+
+    assert result.valid is False
+    assert [error["code"] for error in result.errors] == ["ARTIFACT_EMPTY"]
 
 
 def test_a_usable_seed_validates(tmp_path: Path) -> None:

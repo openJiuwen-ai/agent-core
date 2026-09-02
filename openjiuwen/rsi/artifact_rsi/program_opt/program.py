@@ -255,11 +255,13 @@ def validate_source(source: str, max_length: int = 20_000,
     except SyntaxError as exc:
         return False, f"SyntaxError: {exc.msg} at line {exc.lineno}"
 
-    if not any(
-        isinstance(node, ast.FunctionDef) and node.name == "train_and_predict"
-        for node in tree.body
-    ):
-        return False, "missing train_and_predict function"
+    # Deliberately no required-function check. The gate's one caller is the
+    # seed validation, which sees only a path — not the scorecard — so it
+    # cannot know what the evaluator will call: `train_and_predict` is one
+    # task's contract, `compress`/`decompress` another's. Requiring the first
+    # here rejected every legitimate seed of the second kind. Whether the seed
+    # is callable is decided where it can be: the evaluator's own import, and
+    # the probe that scores the seed before any budget is spent.
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
