@@ -462,8 +462,6 @@ class PuctProgramArtifactProvider:
             scorecard_hash=str(card.get("hash") or "sha256:inline"),
             statement=str(card.get("statement") or ""),
             script=str(card.get("script") or ""),
-            rubric=str(card.get("rubric") or ""),
-            source_material=str(card.get("source_material") or ""),
             packages=_packages_from(card.get("packages")),
             baseline_code=bundle(files),
             entrypoint=entrypoint,
@@ -479,16 +477,11 @@ class PuctProgramArtifactProvider:
             max_tokens_per_call=int(card.get("max_tokens_per_call")
                                     or RunSpec.max_tokens_per_call),
             thinking=str(card.get("thinking") or ""),
-            # Deliberately empty. The engine's mutation calls go through the
-            # injected `request.model`; these fields exist for a judge built
-            # from an endpoint, and with an injected instance there is none.
-            # An `llm_judge` scorecard is refused by `_judge_spec` with a
-            # sentence saying the search was given no judge — refused, not
-            # silently graded by something this provider made up.
+            # Deliberately empty: the engine's mutation calls go through the
+            # injected `request.model`, so there is no endpoint to name. The
+            # fields remain for the engine's own default seam, which tests use.
             llm_url="",
             llm_token="",
-            judge_url="",
-            judge_token="",
         )
         if not resumed:
             return spec

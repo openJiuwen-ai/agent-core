@@ -350,11 +350,10 @@ def _evaluate(
     """`domain.evaluate`, except that an empty candidate never reaches it.
 
     Diverges from upstream, in one place used by both the rollout and the
-    aggregator. A model call that returned nothing produces no program, and
-    three of the four scoring modes score that as an ordinary zero — the judge
-    marks a blank page, the suite fails against an emptied entrypoint, the
-    drafted evaluator imports a module with nothing in it and counts every case
-    wrong. All three come back `valid=True, score=0`: a node asserting the
+    aggregator. A model call that returned nothing produces no program, and the
+    drafted evaluator scores that as an ordinary zero — it imports a module
+    with nothing in it and counts every case wrong, coming back
+    `valid=True, score=0`: a node asserting the
     search tried this direction and it was worthless. It tried nothing, and the
     tree ranks against that assertion for the rest of the run. Only the measured
     mode gets this right, and only because its AST gate happens to refuse an

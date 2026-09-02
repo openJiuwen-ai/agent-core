@@ -76,27 +76,15 @@ class RunSpec:
     entrypoint: str = "candidate.py"
     #: Wall-clock ceiling for one candidate execution.
     candidate_timeout_seconds: float = 60.0
-    #: The rubric a judged scorecard grades against. Frozen with the goal: a
-    #: search that could rewrite its own marking scheme would learn to do that
-    #: instead of getting better.
-    rubric: str = ""
     #: The evaluator a `custom_script` scorecard scores with, written by the
-    #: drafting model. Frozen with the goal for the same reason the rubric is:
-    #: a search that could rewrite what measures it would learn to do that
-    #: instead of getting better.
+    #: drafting model. Frozen with the goal: a search that could rewrite what
+    #: measures it would learn to do that instead of getting better.
     script: str = ""
     #: Packages the candidates need that this runtime does not have. Worked out
     #: by the drafting agent from the task and installed before anything runs —
     #: the person who typed "bring the error down" has no way to know a boosting library
     #: is wanted, and no reason to.
     packages: tuple[str, ...] = ()
-    #: Material a judged candidate must stay faithful to. Without it a rubric
-    #: can only reward properties the candidate can fabricate.
-    source_material: str = ""
-    #: ``{url, token}`` for the judge model, when the scorecard needs one. A
-    #: second token because the proxy pins the model to the token.
-    judge_url: str = ""
-    judge_token: str = ""
     #: ``"disabled"`` / ``"enabled"`` / empty for the provider's own default.
     #: The user's trade, not this process's: on, a reasoning model spends ~46k
     #: output tokens per call for better candidates; off, ~1.2k for weaker ones.

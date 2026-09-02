@@ -106,16 +106,10 @@ def mutation_prompt(
     entrypoint: str = DEFAULT_ENTRYPOINT,
     best_score: Optional[float],
     recent: Sequence[str] = (),
-    rubric: str = "",
     script_contract: str = "",
     feedback: str = "",
 ) -> str:
-    """Build the prompt for one expansion.
-
-    ``rubric`` switches this from rewriting a program to rewriting *text*: when
-    a scorecard is graded by a model there is nothing to execute, so none of the
-    program contract applies and the rubric is what the candidate is aimed at.
-    """
+    """Build the prompt for one expansion."""
     if script_contract:
         # A scripted search's contract is whatever its evaluator calls, and the
         # evaluator is the only place that knows.
@@ -130,15 +124,6 @@ def mutation_prompt(
             imports=available_imports_text(),
             how_to_change=_HOW_TO_CHANGE,
         )
-    if rubric:
-        return _TEXT_TEMPLATE.format(
-            statement=statement.strip() or "Improve it against the rubric below.",
-            rubric=rubric.strip(),
-            parent_text=parent_code.strip(),
-            parent_score=_score(parent_score),
-            best_score=_score(best_score),
-            history=_history(recent),
-        )
     # No third template to fall through to, and that is deliberate. The one that
     # used to be here described the staged-dataset mode, and anything reaching it
     # by accident was told to define `train_and_predict(train_path, test_path)`.
@@ -148,9 +133,8 @@ def mutation_prompt(
     # places — a search that finished "succeeded" having learned nothing. Both
     # callers pass one of the two above; failing here says so.
     raise ValueError(
-        "a mutation prompt needs either a script contract or a rubric: one says what the "
-        "evaluator calls, the other says what the judge reads, and a candidate aimed at "
-        "neither is aimed at nothing"
+        "a mutation prompt needs the evaluator's contract: it is the only statement of "
+        "what a candidate must define, and a candidate aimed at nothing is aimed at nothing"
     )
 
 
@@ -196,32 +180,6 @@ Its score: {parent_score}. Best so far: {best_score}.
 
 {how_to_change}
 """
-
-_TEXT_TEMPLATE = """You are rewriting a piece of writing so that it scores higher against the rubric below.
-
-## Goal
-
-{statement}
-
-## Rubric
-
-{rubric}
-
-## Current version
-
-Its score: {parent_score}. Best so far: {best_score}.
-
-```
-{parent_text}
-```
-
-{history}## Output format
-
-Start with one line saying what changed this time, then give the **complete**
-new version inside a single ``` block (not a patch, not a fragment, no
-explanation). That first line is shown to the user as this node's label.
-"""
-
 
 def _feedback(text: str) -> str:
     """The evaluator's own diagnosis of the parent, as a prompt section.

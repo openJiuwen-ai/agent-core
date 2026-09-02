@@ -23,8 +23,9 @@ recorded, the dashboard shows a search that simply found nothing.
 That is why this is worth two evaluations up front. The other pre-flight checks
 catch failures that announce themselves — a wrong scale makes the engine throw,
 a wrong direction is caught by the normalisation table. This one is the silent
-case, and it was not hypothetical: the first judged run gave four candidates in
-a row full marks, so the tree had no signal after the first expansion.
+case, and it was not hypothetical: the first model-graded run (in the system
+this port came from) gave four candidates in a row full marks, so the tree had
+no signal after the first expansion.
 
 The damage is deliberately crude. Being subtle would be measuring something
 else: a scorecard that cannot see a predictor replaced by a constant is not
@@ -49,7 +50,8 @@ TOLERANCE = 0.01
 
 #: What a program candidate is damaged into: a predictor that ignores its input.
 #:
-#: What a text candidate is damaged into. Any rubric worth running marks this
+#: The damage fallback when hollowing changed nothing worth scoring: the
+#: entrypoint's content is replaced with this. Any scoring worth running marks it
 #: down; one that does not is not going to rank two real drafts.
 _EMPTY_WORDS = "This work did some things, obtained some results, and has a certain significance."
 
@@ -60,7 +62,7 @@ class ProbeError(RuntimeError):
 
 def run_probe(spec: RunSpec) -> Dict[str, Any]:
     """`{baseline, worsened, flat, label}` for one scorecard."""
-    from .puct_engine import _default_completion, _judge_spec, _mode_of, _scale_of
+    from .puct_engine import _mode_of
 
     mode = _mode_of(spec)
 
@@ -155,59 +157,17 @@ def run_probe(spec: RunSpec) -> Dict[str, Any]:
         return {"baseline": baseline, "flat": flat,
                 "label": damage_label, "worsened": worsened}
 
-    if mode == "llm_judge":
-        from .judge_domain import grader, judge_domain
-
-        domain = judge_domain(
-            scorecard=spec.scorecard,
-            rubric=spec.rubric,
-            grade=grader(
-                _default_completion(_judge_spec(spec), None, lambda: False),
-                spec.rubric, _scale_of(spec), spec.source_material,
-            ),
-            baseline_text=spec.baseline_code,
-        )
-        shards = tuple(range(_gate_count(spec)))
-        damaged, label = _EMPTY_WORDS, "content replaced with empty phrases"
-
-    baseline, _raw, why = _measure(domain.evaluate, spec.baseline_code, shards)
-    if baseline is None:
-        # Two very different failures arrive here as the same `None`, and they
-        # point at opposite things to fix. "Undecidable" means the candidate ran
-        # perfectly — ten times — and the *judge* could not agree with itself;
-        # reporting that as "the starting point does not run" sends the user
-        # to rewrite a
-        # starting point that was never the problem.
-        # Matched on the judge domain's own wording; the two move together.
-        if "undecidable" in why or "spread across" in why:
-            raise ProbeError(
-                "the scoring is unstable on its own terms: the same starting point was "
-                f"graded several times and the scores spread wider than the threshold ({why}). "
-                "The search ranks candidates by comparing scores, and it cannot rank "
-                "anything when the noise is larger than the differences. Two ways out: "
-                "make the rubric more mechanical (things that can be counted, rather "
-                "than \"is it clear\", which is a matter of opinion), or raise the number "
-                "of held-out gradings so the median settles."
-            )
-        # The starting point really failing is a different and worse problem:
-        # every score in the search is expressed relative to it. Named, because
-        # "fix it first" without saying what is wrong is not something a user can act
-        # on — and the user is usually not the one who wrote this starting
-        # point, since the drafting model writes it when the workspace has none.
-        raise ProbeError(
-            "the starting point does not run, and every score in the search is measured "
-            "relative to it, so this run cannot begin. "
-            + (f"It reported: {why}" if why.strip() else "The evaluation gave no reason either.")
-        )
-    worsened = _score(domain.evaluate, damaged, shards)
-
-    # A damaged copy that will not run says nothing about discrimination, so it
-    # is reported rather than counted as a pass.
-    flat = worsened is not None and abs(baseline - worsened) <= TOLERANCE
-    _refuse_saturated(spec, baseline, worsened)
-    log.info("probe %s: baseline=%.4f worsened=%s flat=%s",
-             spec.search_id, baseline, worsened, flat)
-    return {"baseline": baseline, "flat": flat, "label": label, "worsened": worsened}
+    # `custom_script` returned above, so anything still here is a measurement
+    # kind this engine does not score: `llm_judge` (the request carries one
+    # optimizer model and no judge channel — and grading candidates with the
+    # model that wrote them is self-scoring), or a kind that was never ported
+    # (`dataset_metric`, `test_gate`). Named rather than half-handled: the old
+    # fall-through reached shared code with no domain bound and died as an
+    # UnboundLocalError.
+    raise ProbeError(
+        f"this engine scores by sandboxed evaluation only; a scorecard measured by "
+        f"{mode!r} cannot run here — write an evaluator script instead"
+    )
 
 
 def _refuse_saturated(spec: RunSpec, baseline: float, worsened: Optional[float] = None) -> None:

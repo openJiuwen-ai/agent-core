@@ -50,7 +50,6 @@ from .candidates import TREE_FILE, TREE_SCHEMA_VERSION, CandidateStore, write_tr
 from .completion import CompletionUnavailable, CompletionUsage, completion_for
 from .engine import RunSpec
 from .events import Emit
-from .judge_domain import grader, judge_domain
 from .logging_config import get_logger
 from .program import (
     bundle,
@@ -70,7 +69,6 @@ from .search import (
     make_reward,
     make_run,
 )
-from .text_candidate import extract_text
 from .tree import Node, PuctTree
 
 log = get_logger("puct")
@@ -195,7 +193,6 @@ class PuctEngine:
         self._completion_factory = completion_factory or _default_completion
         # The seam a test substitutes a fake domain through. Defaulted to the
         # scripted one because that is the only domain that executes anything;
-        # a judged card needs a model rather than a sandbox and is built inline.
         self._domain_factory = domain_factory or _script_domain
         # Same data dir the rest of the stack uses: a candidate source that
         # landed in the user's home directory would be invisible to every tool
@@ -244,45 +241,24 @@ class PuctEngine:
         from agentdescent.staleness import get_policy
 
         baseline: Dict[str, float] = {}
-        mode = _mode_of(spec)
-        if mode == "llm_judge":
-            # Nothing to execute and nothing to measure: a model reads the
-            # candidate against a frozen rubric. Same `Domain` seam as the
-            # scripted case, so the engine, the tree and the aggregator are
-            # unchanged — which is the seam doing its job rather than a
-            # coincidence.
-            domain = judge_domain(
+        # One way to score: the drafting model wrote the evaluator, so anything
+        # a task can be scored by fits without a staging pipeline of its own.
+        # Other measurement kinds are refused by name in `_refuse_unrunnable`.
+        from .script_domain import ScriptError
+
+        try:
+            domain = self._domain_factory(
                 scorecard=spec.scorecard,
-                rubric=spec.rubric,
-                grade=grader(
-                    self._completion_factory(_judge_spec(spec), None, should_stop),
-                    spec.rubric,
-                    _scale_of(spec),
-                    spec.source_material,
-                ),
+                script=spec.script,
+                capability=spec.sandbox,
                 statement=str(spec.statement or ""),
-                baseline_text=spec.baseline_code,
+                baseline_code=spec.baseline_code,
+                entrypoint=spec.entrypoint,
+                candidate_timeout=spec.candidate_timeout_seconds,
                 baseline=baseline,
             )
-        else:
-            # The general case: the drafting model wrote the evaluator, so
-            # anything a task can be scored by fits without a staging pipeline
-            # of its own.
-            from .script_domain import ScriptError
-
-            try:
-                domain = self._domain_factory(
-                    scorecard=spec.scorecard,
-                    script=spec.script,
-                    capability=spec.sandbox,
-                    statement=str(spec.statement or ""),
-                    baseline_code=spec.baseline_code,
-                    entrypoint=spec.entrypoint,
-                    candidate_timeout=spec.candidate_timeout_seconds,
-                    baseline=baseline,
-                )
-            except ScriptError as error:
-                raise _Refusal(str(error)) from error
+        except ScriptError as error:
+            raise _Refusal(str(error)) from error
 
         tree = PuctTree(c_puct=float(spec.options.get("c_puct", 1.0)),
                         prior_exponent=_prior_exponent(spec.options),
@@ -468,22 +444,17 @@ class PuctEngine:
                 lambda spent: usage.add(iteration, spent),
                 lambda reason: reporter.note_failure(iteration, reason),
             )
-            # A prompt or an abstract has no module docstring and may arrive
-            # unfenced; reading it with the program parser would discard it.
-            if _mode_of(spec) == "llm_judge":
-                code, summary = extract_text(reply)
-            else:
-                # Merged onto the parent's tree: the reply carries only the
-                # files it changed, so the candidate is the parent's program
-                # with those files replaced.
-                files, summary = extract_files(
-                    reply, files_of(parent_code, spec.entrypoint), spec.entrypoint,
-                )
-                # A reply that proposed nothing merges to the parent, which
-                # would be a valid program costing a full evaluation to learn
-                # the parent's own score. Empty is what it is, and what the rest
-                # of the engine already knows how to record.
-                code = bundle(files) if reply_carries_program(reply) else ""
+            # Merged onto the parent's tree: the reply carries only the
+            # files it changed, so the candidate is the parent's program
+            # with those files replaced.
+            files, summary = extract_files(
+                reply, files_of(parent_code, spec.entrypoint), spec.entrypoint,
+            )
+            # A reply that proposed nothing merges to the parent, which
+            # would be a valid program costing a full evaluation to learn
+            # the parent's own score. Empty is what it is, and what the rest
+            # of the engine already knows how to record.
+            code = bundle(files) if reply_carries_program(reply) else ""
             if not _has_content(code, spec):
                 reporter.note_empty(iteration)
             # Read from the same reply, so the prior costs no extra call.
@@ -496,11 +467,9 @@ def _has_content(code: str, spec: RunSpec) -> bool:
     """Whether a draw produced anything at all.
 
     A serialised empty tree is a non-empty string, so `code.strip()` — which is
-    what a one-file genome could be judged by — would call every empty reply a
+    what a one-file genome could be checked by — would call every empty reply a
     program and never report one.
     """
-    if _mode_of(spec) == "llm_judge":
-        return bool(code.strip())
     return any(text.strip() for text in files_of(code, spec.entrypoint).values())
 
 
@@ -905,13 +874,17 @@ def _refuse_unrunnable(spec: RunSpec) -> None:
                 f"normalisation {kind!r}, which this side does not know; supported are "
                 f"{sorted(KNOWN_NORMALIZE)}"
             )
-    if _mode_of(spec) == "llm_judge":
-        # Nothing is executed, so neither the scientific stack nor the sandbox
-        # is needed. Demanding them would refuse exactly the runs this mode
-        # exists for — a prompt, an abstract, a protocol.
-        if not spec.rubric.strip():
-            raise _Refusal("this scorecard is graded by a model but was given no rubric")
-        return
+    mode = _mode_of(spec)
+    if mode != "custom_script":
+        # One way to score. `llm_judge` has no judge channel here — the request
+        # carries one optimizer model, and grading candidates with the model
+        # that wrote them is self-scoring; `dataset_metric`/`test_gate` were
+        # never ported. Refused by name rather than falling through to code
+        # that has no domain for them.
+        raise _Refusal(
+            f"this engine scores by sandboxed evaluation only; a scorecard measured by "
+            f"{mode!r} cannot run here — write an evaluator script instead"
+        )
     if spec.packages:
         # Before anything is measured, and refused rather than warned about: a
         # run whose candidates were promised a library and did not get it fails
@@ -925,7 +898,7 @@ def _refuse_unrunnable(spec: RunSpec) -> None:
             raise _Refusal(str(error)) from error
         if installed:
             log.info("run %s provisioned %s", spec.search_id, ", ".join(installed))
-    if _mode_of(spec) == "custom_script" and not spec.script.strip():
+    if not spec.script.strip():
         # Said here rather than at the first expansion: every candidate would
         # fail identically, and a search that reports twelve failed candidates
         # sends the user reading candidates for a fault in the configuration.
@@ -942,10 +915,10 @@ def _refuse_unrunnable(spec: RunSpec) -> None:
 def _split_of(spec: RunSpec) -> Dict[str, int]:
     """The scorecard's shard counts.
 
-    Nothing is staged, so the counts live only on the card — and what a shard
-    *is* differs per mode: one independent grading for a judged card, whatever
-    the evaluator slices for a scripted one. Counting them from a directory of
-    rows would be wrong for both, which is why there is no directory.
+    Nothing is staged, so the counts live only on the card. What a shard *is*
+    belongs to the evaluator — it builds case `i` from the index — so counting
+    shards from a directory of rows would be wrong, which is why there is no
+    directory.
     """
     for criterion in spec.scorecard.get("criteria") or []:
         split = (criterion.get("measure") or {}).get("split")
@@ -960,11 +933,8 @@ def _split_of(spec: RunSpec) -> Dict[str, int]:
 def _group_tasks(spec: RunSpec) -> List[Any]:
     """Rollout groups first, gate groups last.
 
-    Same positional rule as the measured mode, and for the same reason: the
-    engine splits its task list by position, so this ordering is what makes its
-    held-out set exactly the groups that decide. A "group" is a repeated grading
-    for a judged card and a set of test ids for a test-gated one — the same
-    three-way split with a different unit.
+    The engine splits its task list by position, so this ordering is what
+    makes its held-out set exactly the groups that decide.
     """
     from agentdescent.evolution import Task
 
@@ -1001,28 +971,6 @@ def _mode_of(spec: RunSpec) -> str:
             f"one at a time"
         )
     return next(iter(kinds), "custom_script")
-
-
-def _scale_of(spec: RunSpec) -> Dict[str, Any]:
-    for criterion in spec.scorecard.get("criteria") or []:
-        scale = (criterion.get("measure") or {}).get("scale")
-        if isinstance(scale, dict):
-            return scale
-    return {"max": 10, "min": 0}
-
-
-def _judge_spec(spec: RunSpec) -> RunSpec:
-    """The same run, pointed at the judge's own proxy token.
-
-    A separate token because the proxy pins the model to the token — which is
-    what stops a caller choosing what it is billed for — so the grader cannot
-    borrow the mutator's.
-    """
-    from dataclasses import replace
-
-    if not spec.judge_url or not spec.judge_token:
-        raise _Refusal("this scorecard is graded by a model, but this search was given no access to one")
-    return replace(spec, llm_url=spec.judge_url, llm_token=spec.judge_token)
 
 
 def _mode(spec: RunSpec) -> str:
