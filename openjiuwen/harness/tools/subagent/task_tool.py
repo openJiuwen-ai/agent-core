@@ -323,6 +323,9 @@ def create_task_tool(
         agent_id=agent_id,
         options=ToolCardBuildOptions(format_args={"available_agents": available_agents}),
     )
+    # task_tool 内部启动子代理，子代理有自己的 completion_timeout 管控执行时长。
+    # 豁免 agent-core 默认 300s tool-call 超时，改由子代理自身 completion_timeout 兜底。
+    card.properties["resilience"] = {"timeout_s": None}
 
     return [TaskTool(card=card, parent_agent=parent_agent, language=language)]
 
