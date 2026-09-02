@@ -393,7 +393,7 @@ class SkillTool(Tool):
                     success=False,
                     error=f"Skill not found: {skill_name}"
                 )
-            
+                
             file_path = str(Path(skill.directory) / relative_file_path)
             read_file_result = await self.operation.fs().read_file(file_path)
             if read_file_result.code != 0:
@@ -403,6 +403,16 @@ class SkillTool(Tool):
                 )
 
             skill_file_content = read_file_result.data.content
+
+            # Activate only after SKILL.md is loaded successfully so later
+            # bash/read_file rails can attribute calls to this skill.
+            # Persist on session (not only ContextVar): tool execution contexts
+            # often do not inherit the ContextVar binding used at set time.
+            from openjiuwen.harness.rails.skills.skill_use_rail import (
+                set_current_skill_name,
+            )
+
+            set_current_skill_name(skill.name, session=kwargs.get("session"))
 
             data: Dict[str, Any] = {
                 "skill_directory": str(skill.directory),
