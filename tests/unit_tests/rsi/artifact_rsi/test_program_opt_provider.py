@@ -669,6 +669,57 @@ def test_pause_stops_at_a_node_boundary_and_resume_continues_the_same_tree(
     assert resumed_specs and len(resumed_specs[0].resume_nodes) == 1
 
 
+def test_a_task_already_in_flight_refuses_a_second_run_or_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two engines on one run_dir would both write state.json and tree.json,
+    and the second registration would steal the stop flag — pause and
+    terminate would only reach the newcomer. Refused before anything touches
+    disk, with the running task untouched."""
+    released = threading.Event()
+
+    class _ParkedEngine:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
+                  "sequence": 0})  # type: ignore[operator]
+            assert released.wait(5)
+            emit({"createdAt": "", "event": events.search_finished("succeeded", 0, 1),
+                  "sequence": 0})  # type: ignore[operator]
+
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        _ParkedEngine,
+    )
+    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+
+    async def drive() -> tuple:
+        seeded = asyncio.Event()
+
+        async def sink(event: object) -> None:
+            if isinstance(event, EventNode):
+                seeded.set()
+
+        task = asyncio.ensure_future(provider.run(request, sink))
+        await seeded.wait()
+        second = await provider.run(request)
+        third = await provider.resume(request)
+        released.set()
+        return second, third, await task
+
+    second, third, result = asyncio.run(drive())
+
+    assert second.error_code == "TASK_ALREADY_RUNNING"
+    assert third.error_code == "TASK_ALREADY_RUNNING"
+    # And the first search was untouched by either attempt.
+    assert result.status == "completed"
+
+
 def test_a_terminated_task_refuses_to_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

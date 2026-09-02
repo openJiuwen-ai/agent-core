@@ -363,6 +363,21 @@ class PuctProgramArtifactProvider:
         *,
         resumed: bool,
     ) -> EngineResult:
+        # Before anything touches disk: a second `run` or `resume` on a task
+        # whose search is still in flight would put two engines on one
+        # `run_dir` — both writing state.json and tree.json, and the second
+        # registration would steal the stop flag so pause/terminate could only
+        # reach the newcomer. Refused whole, with the running task untouched.
+        with self._lock:
+            if request.task_id in self._stopping:
+                return EngineResult(
+                    task_id=request.task_id,
+                    status="running",
+                    final_node_id=None,
+                    error_code="TASK_ALREADY_RUNNING",
+                    error_message="this task already has a search in flight; "
+                                  "pause or terminate it before starting another",
+                )
         loop = asyncio.get_running_loop()
         run_dir = Path(request.run_dir)
         state = ProgramRunState(
