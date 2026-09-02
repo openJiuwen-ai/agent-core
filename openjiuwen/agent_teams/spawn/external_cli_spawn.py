@@ -143,7 +143,7 @@ def _build_team_context_tracker(
         display_name=ctx.display_name or "",
         member_prompt=ctx.prompt or "",
         team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
-        team_outputs_dir=_path_value(ctx.team_outputs_dir),
+        team_outputs_dir=_build_context_team_outputs_dir(spec),
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
     )
@@ -182,6 +182,13 @@ def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
     if build_context is None:
         return None
     return _path_value(getattr(build_context, "project_dir", None))
+
+
+def _build_context_team_outputs_dir(spec: "TeamAgentSpec") -> str | None:
+    build_context = spec.build_context
+    if build_context is None:
+        return None
+    return _path_value(getattr(build_context, "team_outputs_dir", None))
 
 
 def _resolve_external_paths(
