@@ -206,19 +206,31 @@ class PuctProgramArtifactProvider:
         node would take an index the first attempt already spent, and one index
         would hold two different candidates.
 
-        A `terminated` task is not resumable — that is the whole difference
-        between `terminate` and `pause`, and honouring it here is what makes
-        the distinction real rather than a status label.
+        Only an unfinished task is resumable. `terminated` is final — that is
+        its whole difference from `pause` — and `completed` already delivered
+        what it was asked for: a search that spent its budget and reported a
+        result is done, and growing it further should be a new task with its
+        own budget rather than the same task quietly meaning two different
+        runs. `paused` is the state this exists for; `failed` stays resumable
+        as the retry path after a fixed configuration.
         """
         prior = read_state_file(request.task_id)
-        if prior is not None and prior.status == "terminated":
+        finality = {
+            "terminated": ("TERMINATED_NOT_RESUMABLE",
+                           "this task was terminated; terminate is final — "
+                           "only a paused task can be resumed"),
+            "completed": ("COMPLETED_NOT_RESUMABLE",
+                          "this task already completed and reported its result; "
+                          "start a new task to search further"),
+        }
+        if prior is not None and prior.status in finality:
+            code, message = finality[prior.status]
             return EngineResult(
                 task_id=request.task_id,
-                status="terminated",
+                status=prior.status,
                 final_node_id=prior.best_node_id,
-                error_code="TERMINATED_NOT_RESUMABLE",
-                error_message="this task was terminated; terminate is final — "
-                              "only a paused task can be resumed",
+                error_code=code,
+                error_message=message,
             )
         return await self._drive(request, on_event, resumed=True)
 
