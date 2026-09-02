@@ -69,8 +69,14 @@ def completion_factory_from_model(model: Any, loop: Any) -> Callable[..., Any]:
             on_failure: Optional[Callable[[str], None]] = None,
         ) -> str:
             report = sink or on_usage
+            # The same number the wait below uses. Without it the transport
+            # keeps whatever timeout its own config was built with, and the two
+            # can disagree by minutes: a run measured here waited 900s by its
+            # own reckoning while the client gave up at 180s, so the engine's
+            # patience was fiction and every long call came back as a candidate
+            # that "returned nothing". One budget, declared once, told to both.
             future = asyncio.run_coroutine_threadsafe(
-                model.invoke(prompt, max_tokens=max_tokens), loop,
+                model.invoke(prompt, max_tokens=max_tokens, timeout=timeout), loop,
             )
             deadline = time.monotonic() + timeout
             while True:

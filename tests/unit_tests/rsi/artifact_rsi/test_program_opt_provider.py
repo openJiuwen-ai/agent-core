@@ -1709,6 +1709,71 @@ def test_a_refused_resume_leaves_the_paused_trees_record_alone(tmp_path: Path) -
     assert len(provider.get_tree(request.task_id).nodes) == 2
 
 
+def test_the_call_and_the_wait_agree_on_one_budget() -> None:
+    """The engine's deadline is the transport's deadline, or it is fiction.
+
+    `complete` waits `completion_timeout` (900s by default) and used to call
+    `model.invoke` without saying so, leaving the client on whatever timeout it
+    was configured with. Measured on a real run: the engine waited 900s by its
+    own reckoning while the client gave up at 180s, so calls that needed ~550s
+    — a reasoning model spends most of `max_tokens` thinking — came back as
+    candidates that "returned nothing", each costing an expansion of the budget.
+    """
+    import asyncio as _asyncio
+    from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
+        DEFAULT_CALL_TIMEOUT_SECONDS,
+        completion_factory_from_model,
+    )
+
+    seen: dict[str, object] = {}
+
+    class _Recording:
+        async def invoke(self, prompt: object, **kwargs: object) -> object:
+            seen.update(kwargs)
+
+            class _Usage:
+                input_tokens = 1
+                output_tokens = 1
+
+            class _Message:
+                content = "```python name=candidate.py\nx = 1\n```"
+                usage_metadata = _Usage()
+
+            return _Message()
+
+    async def drive() -> None:
+        loop = _asyncio.get_running_loop()
+        factory = completion_factory_from_model(_Recording(), loop)
+
+        class _Spec:
+            max_tokens_per_call = 4096
+            options: dict[str, object] = {}
+
+        complete = factory(_Spec(), None, lambda: False)
+        await _asyncio.to_thread(complete, "hello")
+
+    asyncio.run(drive())
+
+    assert seen.get("timeout") == DEFAULT_CALL_TIMEOUT_SECONDS
+
+    # And a task that sets its own budget moves both halves together.
+    seen.clear()
+
+    async def drive_custom() -> None:
+        loop = _asyncio.get_running_loop()
+        factory = completion_factory_from_model(_Recording(), loop)
+
+        class _Spec:
+            max_tokens_per_call = 4096
+            options = {"completion_timeout": 42.0}
+
+        complete = factory(_Spec(), None, lambda: False)
+        await _asyncio.to_thread(complete, "hello")
+
+    asyncio.run(drive_custom())
+    assert seen.get("timeout") == 42.0
+
+
 # -- task-owned prompt wording ---------------------------------------------------
 
 
