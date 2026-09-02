@@ -64,13 +64,13 @@ from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 
 from .domain import Domain
+from .events import finite as _finite
 from .logging_config import get_logger
 from .program import Program, files_of
 from .prompt import mutation_prompt
 from .execution import EvaluationExecution
 from .scorecard import SCORE_KEY, evaluate_constraints, score_candidate
 from .shard_roles import cases_for, total_slots
-from .tree import finite as _finite
 
 log = get_logger("script")
 

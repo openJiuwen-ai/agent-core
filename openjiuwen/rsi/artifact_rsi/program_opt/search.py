@@ -175,16 +175,6 @@ _REPAIR_ATTEMPTS = 2
 NO_CANDIDATE = "no candidate program came back; the model call returned nothing"
 
 
-def _reward(domain: Domain, valid: bool, metrics: Dict[str, Any]) -> float:
-    """A candidate's reward, or the floor when it did not produce one."""
-    if not valid:
-        return 0.0
-    try:
-        return float(domain.reward(dict(metrics)))
-    except Exception:
-        return 0.0
-
-
 #: How much of a failure reason the repair log line carries.
 _WHY_CHARS = 300
 

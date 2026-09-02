@@ -416,7 +416,6 @@ def test_resuming_continues_the_numbering_the_first_attempt_stopped_at(
         json.dumps({
             "tree": [{"index": 0, "score": 0.1}, {"index": 1, "score": 0.4}],
             "baseline": {"rmse": 2.5},
-            "tokens": 12_345,
         }),
         encoding="utf-8",
     )
@@ -426,7 +425,6 @@ def test_resuming_continues_the_numbering_the_first_attempt_stopped_at(
     assert spec.resume_from_sequence == 2
     assert len(spec.resume_nodes) == 2
     assert spec.resume_baseline == {"rmse": 2.5}
-    assert spec.resume_tokens == 12_345
 
 
 # -- the projection -------------------------------------------------------------
@@ -936,7 +934,7 @@ _SCRIPT: list[dict[str, object]] = [
     events.expanded(1, 0, 1, 0.4, True, iteration=1, code_hash="sha256:bb"),
     events.evaluated(1, 0.42, {"rmse": 1.9}),
     events.merged(1, True, "it scored better"),
-    events.cost(9_000, 0),
+    {"type": "a_kind_this_version_does_not_know", "nodeIndex": 1},
     events.search_finished("completed", 1, 1),
 ]
 

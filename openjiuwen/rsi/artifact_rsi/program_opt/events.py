@@ -12,45 +12,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The event stream this sidecar emits, and its NDJSON encoding.
+"""The vocabulary the search speaks, as plain dicts.
 
-Mirrors ``EvolveEvent`` / ``EvolveEventRecord`` in ``packages/schema`` — the Node
-API parses exactly these shapes. Kept as plain dicts built by small helpers
-rather than as pydantic models: the union has ten arms whose only consumer is
-``json.dumps``, and a second schema definition here would be a second thing to
-keep in sync.
+The engine emits these; :class:`ProgramRunState` folds them into the durable
+``state.json`` / ``report.json`` / ``nodes.json``; the provider translates that
+fold into the contract's three events. Nothing here goes on a wire — the NDJSON
+encoder, the sequence-number assigner and the keep-alive belonged to the
+sidecar this search was ported from, and went when the search moved in-process.
 
-Two encoding rules that are **not** style choices:
+Kept as dicts built by small helpers rather than as models: the constructors
+exist so the field names live in exactly one place, and a second schema
+definition would be a second thing to keep in sync.
 
-* ``-inf`` never goes on the wire. ``json.dumps`` writes it as the bare token
-  ``-Infinity``, which is not valid JSON and which strict parsers (including
-  ``JSON.parse``) reject. A failed candidate carries ``score: null`` and is
+Two rules that are **not** style choices:
+
+* ``-inf`` never leaves this module. ``json.dumps`` writes it as the bare token
+  ``-Infinity``, which is not valid JSON, and these events end up in files that
+  strict parsers read back. A failed candidate carries ``score: null`` and is
   marked ``valid: false``; the node still enters the tree, because dropping it
   would change the rank denominator of every later iteration.
-* Counters are **absolute, never deltas**. ``visits`` is the non-idempotent
-  occupancy) are the only non-idempotent quantities in the system; a replayed
-  delta double-counts where a replayed absolute does not. That is what lets the
-  API drop everything at or below its watermark and lets a mid-run Neo4j outage
-  be repaired by replaying the log.
+* Counters are **absolute, never deltas**. ``visits`` is the one
+  non-idempotent quantity in the system, and a resume re-folds events it has
+  already seen: a replayed delta double-counts where a replayed absolute does
+  not.
 """
 
 from __future__ import annotations
 
-import json
 import math
-import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator
+from typing import Any, Callable
 
 #: What the sidecar hands its engines: one call per event.
 Emit = Callable[[dict[str, Any]], None]
 
 
-def finite(value: float | None) -> float | None:
+def finite(value: Any) -> float | None:
     """``None`` for anything that is not a finite number.
 
     The failure sentinel upstream is ``-inf``; see the module docstring for why
-    it must not reach the wire.
+    it must not reach a file a strict parser reads back. The one definition —
+    `tree` and `script_domain` import this rather than keeping copies, because
+    two versions of "what counts as a score" is how one of them drifts.
     """
     if value is None:
         return None
@@ -60,59 +63,6 @@ def finite(value: float | None) -> float | None:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-class EventStream:
-    """Assigns the monotonic sequence numbers the API's watermark relies on.
-
-    Sequence numbering starts at 1 and is per search, so a resumed run continues
-    the numbering it was handed rather than restarting (``start_at``).
-
-    **Locked**, because with parallel workers `emit` is called from N threads at
-    once and `+= 1` is not atomic. Two events sharing a sequence number is not a
-    cosmetic problem: the API drops everything at or below its watermark, so the
-    second one is silently discarded as a replay.
-    """
-
-    def __init__(self, start_at: int = 0) -> None:
-        self._sequence = start_at
-        self._lock = threading.Lock()
-
-    @property
-    def last_sequence(self) -> int:
-        with self._lock:
-            return self._sequence
-
-    def record(self, event: dict[str, Any], created_at: str | None = None) -> dict[str, Any]:
-        with self._lock:
-            self._sequence += 1
-            sequence = self._sequence
-        return {
-            "createdAt": created_at or utc_now(),
-            "event": event,
-            "sequence": sequence,
-        }
-
-
-#: A keep-alive. The NDJSON reader skips empty lines, so this carries no
-#: sequence number, writes nothing to the log, and cannot be mistaken for
-#: something that happened — it only proves the socket is still alive during a
-#: long expansion.
-HEARTBEAT = b"\n"
-
-
-def encode_ndjson(records: Iterator[dict[str, Any] | bytes]) -> Iterator[bytes]:
-    """One JSON object per line. ``allow_nan=False`` makes the -inf rule a
-    crash here rather than a parse error three processes downstream.
-
-    Raw bytes pass through untouched: that is how the keep-alive gets onto the
-    wire without pretending to be a record.
-    """
-    for record in records:
-        if isinstance(record, bytes):
-            yield record
-            continue
-        yield (json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
 
 
 # --- Event constructors -----------------------------------------------------
@@ -255,10 +205,6 @@ def merged(
     if rejected_by is not None:
         event["rejectedBy"] = rejected_by
     return event
-
-
-def cost(tokens: int, cents: int) -> dict[str, Any]:
-    return {"cents": cents, "tokens": tokens, "type": "cost"}
 
 
 def search_finished(

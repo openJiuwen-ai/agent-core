@@ -42,25 +42,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agentdescent.selection import Candidate, FlatPuct, SelectionContext
 
+from .events import finite
 from .program import Program, files_of
 
 #: The artifact id the selection rows carry. Only ever compared with itself.
 ARTIFACT_ID = "puct"
-
-def finite(value: Any) -> Optional[float]:
-    """``-inf`` is upstream's failure sentinel and is not valid strict JSON.
-
-    ``json.dump`` writes it as the bare token ``-Infinity``, which most parsers
-    reject — so a result file carrying one is readable by exactly the tool that
-    wrote it. Failure is already recorded as ``valid: false``; the score field
-    carries ``None`` instead.
-    """
-    import math
-
-    if value is None:
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
 
 @dataclass
 class Node:

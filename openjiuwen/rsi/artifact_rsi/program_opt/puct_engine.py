@@ -63,6 +63,7 @@ from .execution import EvaluationExecution
 from .provision import CANDIDATE_RUNTIME
 from .restore import RestoreError, restore_baseline, restore_tree
 from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
+from .script_domain import script_domain
 from .search import (
     PuctStrategy,
     PuctTreeAggregator,
@@ -81,18 +82,6 @@ _MAX_SECONDS = 24 * 3600.0
 
 #: How long `async_evolve` waits for in-flight workers once it is done.
 _SHUTDOWN_GRACE = 120.0
-
-
-def _script_domain(**kwargs: Any) -> Any:
-    """`script_domain`, imported at call time.
-
-    Deferred because building a `PuctEngine` must not pull in the sandbox
-    plumbing: `server.py` constructs one at import to fill its engine table, and
-    an import error there takes down the whole sidecar rather than one run.
-    """
-    from .script_domain import script_domain
-
-    return script_domain(**kwargs)
 
 
 def _remaining(spec: RunSpec) -> int:
@@ -139,37 +128,23 @@ class _Refusal(RuntimeError):
 
 
 class _Usage:
-    """Token spend, on top of the framework's own counter.
+    """Which expansion a model call belonged to.
 
-    `agentdescent.agents.Usage` already does the hard half — thread-safe totals
-    of calls, tokens and seconds, which is exactly what the cost event carries —
-    so it is used rather than reimplemented.
-
-    What it does not have is **which expansion** a call belonged to, and this
-    engine needs that: with three calls in flight there is no such thing as "the
-    last call", and blaming expansion 3's empty reply on expansion 5's token
-    count is worse than not explaining it at all.
+    Running totals used to live here too, for a `cost` event; that event was
+    folded by nobody and its `tokens` input was never written to the snapshot
+    it claimed to resume from, so both went. What is left is the part the
+    engine actually reads: with three calls in flight there is no such thing as
+    "the last call", and blaming expansion 3's empty reply on expansion 5's
+    token count is worse than not explaining it at all.
     """
 
-    def __init__(self, already_spent: int = 0) -> None:
-        from agentdescent.agents import Usage
-
-        self.totals = Usage()
-        # A resumed run continues one search, and the `cost` event is absolute
-        # by contract. Starting this process's counter from what the previous
-        # attempt spent is what keeps that true across a restart.
-        self._already_spent = max(0, already_spent)
+    def __init__(self) -> None:
         self._per_expansion: Dict[int, CompletionUsage] = {}
         self._lock = threading.Lock()
 
     def add(self, iteration: int, usage: CompletionUsage) -> None:
-        self.totals.record(completion_tokens=usage.completion,
-                           prompt_tokens=max(0, usage.total - usage.completion))
         with self._lock:
             self._per_expansion[iteration] = usage
-
-    def read(self) -> int:
-        return self._already_spent + self.totals.total_tokens
 
     def of(self, iteration: int) -> Optional[CompletionUsage]:
         with self._lock:
@@ -178,8 +153,6 @@ class _Usage:
 
 class PuctEngine:
     """One search: seed, expand N times, report the winner."""
-
-    name = "puct"
 
     def __init__(
         self,
@@ -210,7 +183,7 @@ class PuctEngine:
         self._evaluation_execution = evaluation_execution
         # The seam a test substitutes a fake domain through. Defaulted to the
         # scripted one because that is the only domain that executes anything;
-        self._domain_factory = domain_factory or _script_domain
+        self._domain_factory = domain_factory or script_domain
         # Same data dir the rest of the stack uses: a candidate source that
         # landed in the user's home directory would be invisible to every tool
         # that knows where this deployment keeps its state.
@@ -291,7 +264,7 @@ class PuctEngine:
             Path(spec.run_dir) if spec.run_dir else self._store_root,
             flat=bool(spec.run_dir),
         )
-        usage = _Usage(spec.resume_tokens)
+        usage = _Usage()
         resumed = bool(spec.resume_nodes)
         if resumed:
             try:
@@ -752,7 +725,6 @@ class _Reporter:
         # Absolute, never a delta: a replayed delta double-counts where a
         # replayed absolute does not. Cents stay 0 — this system has no price
         # table, and a fabricated number would be shown to the user as fact.
-        self.emit(events.cost(self.usage.read(), 0))
 
     def note_outcome(self, outcome: Any, planned: int) -> None:
         """Say why the search stopped, when that is not "it ran out of budget".

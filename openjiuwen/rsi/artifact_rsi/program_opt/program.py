@@ -57,13 +57,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 #: `catboost`, the gate refused it, and the probe reported that the starting
 #: point would not run.
 #:
-#: The gate is explicitly *not* the isolation boundary — bubblewrap and Seatbelt
-#: are, and this module's own docstring says so. So refusing an import was never
+#: The gate is explicitly *not* the isolation boundary — agent-core's gateway
+#: sandbox is. So refusing an import was never
 #: a security decision; it was a claim that the import would not work here, and
 #: for an installed package that claim is simply false. What is left on this
-#: list is the handful that reach outside the process: they die against the
-#: sandbox profile anyway, and failing in-process with a readable message is the
-#: whole reason this gate exists.
+#: list is the handful that reach outside the process: the sandbox stops them
+#: anyway, and failing early with a readable message is the whole reason this
+#: gate exists.
 BLOCKED_IMPORTS = {
     "asyncio",
     "ctypes",

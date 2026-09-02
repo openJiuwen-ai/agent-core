@@ -14,12 +14,11 @@
 
 """Rebuilding a :class:`PuctTree` so an interrupted search can carry on.
 
-**Neither side holds the whole tree, and that is deliberate.** The control plane
-owns ``events.ndjson`` -- every node's index, parent, score, visit count and
-rating -- and this sidecar owns the candidate sources, content-addressed on its
-own disk. So a resume ships node *rows* over the wire and rehydrates the bodies
-here by hash: no program text crosses the boundary, and each side supplies the
-half it already had.
+**The tree snapshot and the candidate store hold different halves.** The
+snapshot (``tree.json``) carries every node's index, parent, score, visit count
+and rating; the candidate store holds the program bodies, content-addressed. So
+a resume reads node *rows* from the snapshot and rehydrates the bodies by hash,
+which is why a resume needs nothing beyond the same ``run_dir``.
 
 What has to come back, and why each one:
 
@@ -41,7 +40,7 @@ What has to come back, and why each one:
     the criteria columns all read them, and none of that survives a resume that
     keeps only the aggregate.
 
-A body this sidecar cannot find is a refusal, not a gap. A node whose code is
+A body the store cannot find is a refusal, not a gap. A node whose code is
 missing can still be *selected* -- its rank is real -- and the mutation prompt
 would then be built from an empty parent, which spends a model call to ask for a
 rewrite of nothing.
@@ -121,7 +120,7 @@ def restore_tree(
     if missing:
         raise RestoreError(
             f"{len(missing)} of {len(ordered)} candidate sources are missing from this "
-            f"sidecar's store (nodes {missing[:8]}{'…' if len(missing) > 8 else ''}), so the "
+            f"candidate store (nodes {missing[:8]}{'…' if len(missing) > 8 else ''}), so the "
             "search cannot be resumed from them; starting again is the only way forward"
         )
 

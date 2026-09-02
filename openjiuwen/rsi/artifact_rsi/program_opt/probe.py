@@ -270,14 +270,6 @@ def _gate_slots(spec: RunSpec) -> Tuple[int, ...]:
     return (0,)
 
 
-def _gate_count(spec: RunSpec) -> int:
-    for criterion in spec.scorecard.get("criteria") or []:
-        split = (criterion.get("measure") or {}).get("split")
-        if isinstance(split, dict):
-            return max(1, int(split.get("gateShards") or 1))
-    return 1
-
-
 def _refuse_noisy(evaluate, baseline_code: str, shards, baseline: float,
                   worsened: Optional[float]) -> None:
     """Refuse a scoring that moves as much on a re-run as it does on real damage.

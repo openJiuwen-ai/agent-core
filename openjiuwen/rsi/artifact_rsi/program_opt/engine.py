@@ -96,7 +96,6 @@ class RunSpec:
     #: model spends it on hidden thinking and returns nothing; the control
     #: plane's pre-flight refuses that before the run is created.
     max_tokens_per_call: int = 16_000
-    baseline_score: float | None = None
     workers: int = 1
     #: The run's own directory in the user's workspace. Candidate sources are
     #: written to ``<run_dir>/candidates/`` so the directory is self-contained:
@@ -109,17 +108,13 @@ class RunSpec:
     resume_from_sequence: int = 0
     #: The tree an interrupted run left behind, as node rows the control plane
     #: folded out of its own event log. Bodies are *not* here: they are addressed
-    #: by hash and rehydrated from this sidecar's own store. Empty means a fresh
+    #: by hash and rehydrated from the provider's candidate store. Empty means a fresh
     #: search, which is the only case that seeds a root.
     resume_nodes: tuple[dict[str, Any], ...] = ()
     #: The root's raw measurements, which every criterion is normalised against.
     #: Restored rather than re-measured so a resumed run's scores stay on the
     #: same scale as the ones already written down.
     resume_baseline: dict[str, float] = field(default_factory=dict)
-    #: Output tokens a previous attempt at this search already spent. The `cost`
-    #: event is absolute by contract, so without this a resume would report the
-    #: spend dropping back to near zero.
-    resume_tokens: int = 0
     #: Engine-specific knobs (``c_puct``, ``prior_exponent``, …). Unknown keys ignored.
     options: dict[str, Any] = field(default_factory=dict)
 
@@ -131,8 +126,6 @@ class Engine(Protocol):
     with a ``search_finished`` event carrying the terminal status — a run that
     stops without one leaves the API unable to tell "still running" from "died".
     """
-
-    name: str
 
     def run(self, spec: RunSpec, emit: Emit, should_stop: Callable[[], bool]) -> None:
         ...

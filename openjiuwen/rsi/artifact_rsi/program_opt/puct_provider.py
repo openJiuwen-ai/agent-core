@@ -402,10 +402,6 @@ class PuctProgramArtifactProvider:
 
     # -- the bridge ------------------------------------------------------------
 
-    def _status_of(self, task_id: str) -> str:
-        state = read_state_file(task_id)
-        return state.status if state else "created"
-
     async def _drive(
         self,
         request: ArtifactEngineRequest,
@@ -595,12 +591,11 @@ class PuctProgramArtifactProvider:
         if not resumed:
             return spec
 
-        nodes, baseline, tokens, sequence = _resume_from(run_dir)
+        nodes, baseline, sequence = _resume_from(run_dir)
         return replace(
             spec,
             resume_nodes=nodes,
             resume_baseline=baseline,
-            resume_tokens=tokens,
             resume_from_sequence=sequence,
         )
 
@@ -699,7 +694,7 @@ def _packages_from(raw: Any) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _resume_from(run_dir: Path) -> tuple[tuple[dict[str, Any], ...], dict[str, float], int, int]:
+def _resume_from(run_dir: Path) -> tuple[tuple[dict[str, Any], ...], dict[str, float], int]:
     """The previous attempt's tree, read back off disk.
 
     The snapshot the search writes after every expansion is exactly what a
@@ -710,10 +705,10 @@ def _resume_from(run_dir: Path) -> tuple[tuple[dict[str, Any], ...], dict[str, f
 
     path = run_dir / TREE_FILE
     if not path.is_file():
-        return (), {}, 0, 0
+        return (), {}, 0
     snapshot = json.loads(path.read_text(encoding="utf-8"))
     nodes = tuple(snapshot.get("tree") or ())
-    return nodes, dict(snapshot.get("baseline") or {}), int(snapshot.get("tokens") or 0), len(nodes)
+    return nodes, dict(snapshot.get("baseline") or {}), len(nodes)
 
 
 __all__ = ["DEFAULT_WORKERS", "PuctProgramArtifactProvider"]
