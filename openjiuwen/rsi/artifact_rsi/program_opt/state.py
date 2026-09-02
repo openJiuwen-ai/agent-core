@@ -217,7 +217,9 @@ class ProgramRunState:
             type="root",
             adopted=True,
             score=self.baseline,
-            summary="the starting program",
+            summary=("the starting program"
+                     + (f" — gate {self.baseline:.4f} (baseline)"
+                        if self.baseline is not None else "")),
             snapshot_artifact_id=(seed_artifact := self._artifact(0, event.get("codeHash"))),
             reason=None,
             failure_class=None,
@@ -232,6 +234,36 @@ class ProgramRunState:
         self.best_node_id = node.node_id
         self._persist()
         yield EventNode(node=node)
+
+    def _composed_summary(self, node: RsiTreeNode, accepted: bool) -> str:
+        """The contract's `summary`: the change *and* how it fared, one line.
+
+        Composed mechanically at the merge — the one point where both halves
+        exist — from numbers the events already carry; no model is asked to
+        restate what the fold can format. Recomposed from scratch on every
+        call: the pristine change text lives in `changes[0].summary` (that is
+        the field's contract meaning), so a replayed merge produces the same
+        line instead of appending a second verdict.
+        """
+        change = node.changes[0].summary if node.changes else ""
+        evaluation = (node.extra.get("program") or {}).get("evaluation") or {}
+        score = next((v for v in (evaluation.get("gate"), evaluation.get("reward"),
+                                  node.score) if v is not None), None)
+        if not evaluation.get("valid", True):
+            first_line = str(node.reason or "").strip().splitlines()[0][:120] \
+                if str(node.reason or "").strip() else "no diagnosis"
+            outcome = f"did not run: {first_line}"
+        elif accepted:
+            outcome = (f"gate {score:.4f}" if score is not None else "scored")
+            if self.baseline is not None:
+                outcome += f" (baseline {self.baseline:.4f})"
+            outcome += ", adopted"
+        else:
+            outcome = (f"gate {score:.4f}" if score is not None else "scored")
+            if self.score is not None:
+                outcome += f", below the current best {self.score:.4f}"
+            outcome += ", not adopted"
+        return f"{change} — {outcome}" if change else outcome
 
     def _recompute_chain(self) -> list[RsiTreeNode]:
         """`adopted` = membership of the current version chain, per contract.
@@ -362,6 +394,7 @@ class ProgramRunState:
             failure_class=node.failure_class or _class_of_category(event.get("category")),
         )
         node = _with(node, extra=self._update_program(node, logical_kind=node.type))
+        node = _with(node, summary=self._composed_summary(node, accepted))
         self.nodes[index] = node
         flipped: list[RsiTreeNode] = []
         if accepted:

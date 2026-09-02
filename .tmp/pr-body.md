@@ -22,7 +22,7 @@
 
 **契约对齐**
 
-- `extra["program"]` 按契约产出九键 `ProgramNodeExtra`（恒在、各按 null 语义）：`logical_kind` 随 merge 裁决更新，`evaluation` 聚合 valid/score/criteria/gate/rollout/reward，`selected` 事件的 visits/rank/puct 与模型自评先验归档进 `puct`，失败节点带结构化 `error`。
+- `extra["program"]` 按契约产出九键 `ProgramNodeExtra`（恒在、各按 null 语义）：`logical_kind` 随 merge 裁决更新，`evaluation` 聚合 valid/score/criteria/gate/rollout/reward，`selected` 事件的 visits/rank/puct 与模型自评先验归档进 `puct`（选择即落盘，`tree.get` 不滞后），失败节点带结构化 `error`；`adopted` 按契约字面实现为**当前版本链成员资格**（best 迁移后旧链回收、翻转节点经 `EventNode` 补推），历史裁决保留在 `type`/`logical_kind`。
 - `RsiUsage`/`RsiUsageTokens` 按契约决定整体删除：schema 类型、`EngineState`/`EngineReport`/`EventProgress` 的 `usage` 字段、state 的 `_cost` 折叠器（只为刷新 usage 而存在）、provider 的调用计数包装器一并退役。引擎内部的 `CompletionUsage`（空回复触顶判定）与续跑 tokens 不属于该通道，保留。旧 state.json 的 `usage` 键被忽略，读取自然兼容。
 
 - `agentdescent==0.4.6` 进主依赖（本项目按应用部署，精确钉死不再给第三方解析器添负担；vendored 的 PUCT 移植 import 了不承诺稳定的内部件，所以钉死而非下限。`program-opt` extra 留空壳保持老安装命令合法）。引擎顶层直连，`_load_engine`/`SearchEngineUnavailable` 的"可选轮子"路径整体退役。
@@ -40,7 +40,7 @@ Fixes #
 
 **Test Plan and Test result：What scenarios were tested, and what were the verification results（Function, performance, reliability, etc.）**：
 
-- `tests/unit_tests/rsi` 全树：**1075 passed, 3 skipped**（Python 3.12）。
+- `tests/unit_tests/rsi` 全树：**1076 passed, 3 skipped**（Python 3.12）。
 - `tests/unit_tests/rsi/artifact_rsi`：67+19 passed，含上游契约测试（`test_contract.py`，Protocol 可结构化实现、包面不外泄内部结构、`build_request` 要求已解析模型实例）与本实现的行为测试（探针拒绝先于预算、崩溃的搜索变成 failed 任务而非炸掉服务、慢消费者被等待、terminate 到达运行中的搜索、同一程序两节点共享产物时最终产物定位正确、候选沙箱环境不继承宿主机环境变量等）。
 - 模型注入路径用 `_FakeModel`（仅暴露 `invoke`）驱动；缺失模型实例时任务以 `MODELCONFIG` 失败并落盘，`read_state` 与返回一致。
 

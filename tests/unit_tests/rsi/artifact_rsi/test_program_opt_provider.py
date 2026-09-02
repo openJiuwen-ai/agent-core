@@ -1651,3 +1651,44 @@ def test_adopted_means_the_current_version_chain_not_merge_history(tmp_path: Pat
     pushed = [e.node.node_id for e in emitted if isinstance(e, EventNode)]
     assert any(node_id.endswith(":1") for node_id in pushed)
     assert any(node_id.endswith(":2") for node_id in pushed)
+
+
+def test_summary_carries_the_change_and_how_it_fared(tmp_path: Path) -> None:
+    """The contract's `summary` is 修改和评测结果摘要 — both halves. Composed
+    mechanically at the merge from numbers the events already carry; no model
+    is asked to restate what the fold can format. Recomposition is from the
+    pristine text in `changes[0].summary`, so a replayed merge yields the same
+    line instead of a second appended verdict."""
+    run = _state(tmp_path)
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aaaa"))
+    _absorb(run, events.expanded(1, 0, 1, 0.4, True, change_summary="tighten the loop",
+                                 code_hash="sha256:bbbb", iteration=1))
+    _absorb(run, events.evaluated(1, 0.4, {"score": 0.4}, gate_score=0.42))
+    _absorb(run, events.merged(1, True, reason="提升"))
+    _absorb(run, events.expanded(2, 0, 1, 0.1, True, change_summary="a worse idea",
+                                 code_hash="sha256:cccc", iteration=2))
+    _absorb(run, events.evaluated(2, 0.1, {"score": 0.1}, gate_score=0.10))
+    _absorb(run, events.merged(2, False, reason="低于最优"))
+    _absorb(run, events.expanded(3, 0, 1, None, False,
+                                 change_summary="an idea that crashes",
+                                 error="IndexError at line 3\nlong traceback…",
+                                 code_hash="sha256:dddd", iteration=3))
+    _absorb(run, events.merged(3, False, reason="没跑起来", category="candidate-failed"))
+
+    tree = state_module.read_tree_file("task-001")
+    by = {n.node_id.rsplit(":", 1)[-1]: n for n in tree.nodes}
+
+    assert by["0"].summary == "the starting program — gate 0.2500 (baseline)"
+    assert by["1"].summary == \
+        "tighten the loop — gate 0.4200 (baseline 0.2500), adopted"
+    assert by["2"].summary == \
+        "a worse idea — gate 0.1000, below the current best 0.4000, not adopted"
+    # A crash shows the first diagnosis line, not the whole traceback.
+    assert by["3"].summary == "an idea that crashes — did not run: IndexError at line 3"
+
+    # Replay: the merge arrives twice, the line stays one verdict long.
+    _absorb(run, events.merged(1, True, reason="提升"))
+    tree = state_module.read_tree_file("task-001")
+    replayed = next(n for n in tree.nodes if n.node_id.endswith(":1"))
+    assert replayed.summary == \
+        "tighten the loop — gate 0.4200 (baseline 0.2500), adopted"
