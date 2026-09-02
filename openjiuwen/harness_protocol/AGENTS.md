@@ -1,4 +1,4 @@
-# external/protocol maintenance guide
+# harness_protocol maintenance guide
 
 This directory defines the provider-neutral public Python SPI for third-party
 agent harnesses. It contains contracts and immutable value objects only. The
@@ -28,19 +28,19 @@ packages that depend on this SPI.
 
 - `Session`: the full conversation lifecycle.
 - `Turn`: one external input through one stable external output.
-- `Iteration`: one Agent Loop control cycle inside a turn.
-- `Step`: one observable atomic execution action inside an iteration.
+- `Step`: one Agent Loop control cycle inside a turn.
 - `Round`: a multi-agent collaboration/protocol phase. Do not use it for a
   single-agent turn.
 
 Public names and documentation in this package must preserve
-`Session > Turn > Iteration > Step`. Use `turn_id`, `TurnLifecycleEvent`, and
-`turn_events()` for the harness boundary. Do not introduce Round aliases for
-these concepts.
+`Session > Turn > Step`. The former atomic-action meaning of Step is not part
+of this protocol; tool calls, commands, and subagents are ordinary provider
+items. Use `turn_id`, `TurnLifecycleEvent`, and `turn_events()` for the harness
+boundary. Do not introduce Round aliases for these concepts.
 
 ## Invariants
 
-1. `ExternalHarnessProtocol` remains a high-level, multi-turn behavior
+1. `HarnessProtocol` remains a high-level, multi-turn behavior
    contract. Do not reduce it to only a provider-specific `receive_response`,
    raw notification, or single-turn driver interface.
 2. `events()` is observation, interactions are SDK request/response control,
@@ -61,12 +61,12 @@ these concepts.
    non-terminal and retain the same turn ID. The stream views consume the same
    logical stream and cannot be active concurrently.
 6. Checkpoints are opaque, versioned by the provider, JSON-serializable, and
-   scoped to one member. Checkpoint IDs make retries idempotent and sequence
+   scoped to one agent and host session. Checkpoint IDs make retries idempotent and sequence
    numbers prevent stale overwrite. Harnesses proactively save material
    changes through the host sink; snapshot export is not the sole persistence
    path. Protocol code must not inspect provider checkpoint data.
-7. Static implementation metadata belongs in `ExternalHarnessCard`; runtime
-   values belong in `ExternalHarnessContext` or the live harness.
+7. Static implementation metadata belongs in `HarnessCard`; runtime
+   values belong in `HarnessContext` or the live harness.
 8. Context environment and credentials are sensitive. Never render them in
    events, exceptions, examples, or logs.
 9. Terminal turn events carry a structured `TurnResult` whose status matches
@@ -109,11 +109,10 @@ these concepts.
 ## Change checklist
 
 - Update `README.md` and
-  `docs/dev/agent_teams/external_harness_integration.md` for public changes.
-- Update `agent_teams/docs/specs/S_24_external-harness-protocol.md` when the
+  `docs/dev/harness_protocol_integration.md` for public changes.
+- Update `harness_protocol/SPEC.md` when the
   long-lived contract changes.
-- Add or update mirrored unit tests under
-  `tests/unit_tests/agent_teams/external/protocol/`.
+- Add or update mirrored unit tests under `tests/unit_tests/harness_protocol/`.
 - Verify importability without installing optional Claude, Codex, or other
   provider SDK dependencies.
 - Run the targeted tests and Ruff on changed Python files.

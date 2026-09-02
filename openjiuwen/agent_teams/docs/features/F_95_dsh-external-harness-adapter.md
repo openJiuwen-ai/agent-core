@@ -6,19 +6,19 @@
 |---|---|
 | 日期 | 2026-08-20 |
 | 范围 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/dsh/` |
-| 协议版本 | `4.0`（未修改） |
+| 协议版本 | `1.0` |
 | 关联 feature | `F_94_external-harness-protocol.md` |
 | Refs | 未关联 issue |
 
 ## 背景
 
-F_94 已定义 provider-neutral 的 `ExternalHarnessProtocol`，但尚无真实三方 SDK 实现，也没有从该
+F_94 已定义 provider-neutral 的 `HarnessProtocol`，但尚无真实三方 SDK 实现，也没有从该
 协议到 AgentTeam 内部 `MemberRuntime` 行为面的通用接线。DeepSeek Harness（DSH）Python SDK
 提供可复用 runtime/session、阻塞式 `Session.run()` 和 notification callback，适合作为第一条协议
 落地路径，同时也暴露出两边边界并不完全对等：DSH 当前 Python SDK 没有 steer、abort、pause、
 resume、checkpoint 或动态 MCP 配置接口。
 
-本 feature 在不改变协议 4.0 的前提下新增 DSH provider adapter 和通用
+本 feature 新增 DSH provider adapter 和通用
 `ExternalHarnessMemberRuntime`。现有 Claude Code、Codex 及 subprocess runtime 不迁移；
 `ExternalCliAgentSpec`、`build_cli_runtime` 和声明式 spawn/registry 也不接线。
 
@@ -34,9 +34,9 @@ resume、checkpoint 或动态 MCP 配置接口。
 - DSH 的 native turn 是 provider 内部执行记录，step 表示一次模型调用及其请求的工具；它们不能
   重新定义 OpenJiuwen 面向外部输入的 Turn。
 - Python SDK 不提供协议 checkpoint 的恢复 API，也不能在 session 启动时动态接收
-  `ExternalHarnessContext.mcp_servers`。
+  `HarnessContext.mcp_servers`。
 - system prompt 不属于 Python SDK initialize 参数。只有 custom Cordis composition 显式读取某个
-  环境变量时，adapter 才能通过该变量传入 `ExternalHarnessContext.system_prompt`。
+  环境变量时，adapter 才能通过该变量传入 `HarnessContext.system_prompt`。
 
 ## 决策
 
@@ -85,7 +85,7 @@ whole-agent idle -> external terminal TurnResult
 - adapter 为每个输入只发布一对 external STARTED/terminal；
 - follow-up 队列未耗尽时 Harness 保持 RUNNING，避免团队调度器把 Turn 间隙误判为整条链已结算；
 - DSH native turn 保留为 namespaced `ProviderEvent`；
-- DSH native step 映射为 `item_type="iteration"` 的 `ItemLifecycleEvent`；
+- DSH native step 映射为 `item_type="step"` 的 `ItemLifecycleEvent`；
 - text/reasoning chunk 映射为带稳定 output ID 的 DELTA；assistant message 提供 FINAL 与终态消息；
 - tool call/result 映射为 tool item 生命周期，usage 映射为 `UsageUpdatedEvent`；
 - 未识别的 DSH notification 保留为 `ProviderEvent`。
@@ -111,7 +111,7 @@ producer 与 stop 等待容量是预期背压，不得通过丢事件、提前 c
 
 - STEER、graceful/force abort、pause/resume；
 - checkpoint export/restore 与跨 runtime session 恢复；
-- 从 `ExternalHarnessContext.mcp_servers` 动态安装 MCP；
+- 从 `HarnessContext.mcp_servers` 动态安装 MCP；
 - 未配置 `system_prompt_env_var` 时传入非空 system prompt。
 
 `export_checkpoint()` 返回 `None`；`REQUIRE_RESUME` 或非空 checkpoint 在 start 前失败，
@@ -121,7 +121,7 @@ producer 与 stop 等待容量是预期背压，不得通过丢事件、提前 c
 ### 4. DSH SDK 保持 optional dependency
 
 公共包和 provider/config 的导入不能要求安装 `deepseek-harness-sdk`。只有 `DshHarness.start()` 才
-lazy import `deepseek_harness`；缺依赖时返回明确的 `ExternalHarnessError`。SDK 的 config/client、
+lazy import `deepseek_harness`；缺依赖时返回明确的 `HarnessError`。SDK 的 config/client、
 凭据与可能含 stderr 的异常文本不得进入公共 event、checkpoint 或日志。
 
 ### 5. 首版只提供程序化装配

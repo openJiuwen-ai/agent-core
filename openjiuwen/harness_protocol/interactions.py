@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, TypeAlias, overload, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.errors import ExternalHarnessProtocolError
-from openjiuwen.agent_teams.external.protocol.models import (
+from openjiuwen.harness_protocol.errors import HarnessProtocolError
+from openjiuwen.harness_protocol.models import (
     JsonObject,
     JsonValue,
     freeze_json_object,
@@ -23,7 +23,7 @@ def _validate_request_common(request: object) -> None:
     request_id = getattr(request, "request_id")
     if not request_id:
         raise ValueError("interaction request_id must not be empty")
-    for field_name in ("session_id", "turn_id"):
+    for field_name in ("provider_session_id", "turn_id"):
         if getattr(request, field_name) == "":
             raise ValueError(f"interaction {field_name} must not be empty")
     deadline_at = getattr(request, "deadline_at")
@@ -71,7 +71,7 @@ class ToolApprovalRequest:
     call_id: str
     tool_name: str
     arguments: JsonObject = field(default_factory=dict)
-    session_id: str | None = None
+    provider_session_id: str | None = None
     turn_id: str | None = None
     title: str | None = None
     description: str | None = None
@@ -93,7 +93,7 @@ class UserInputRequest:
 
     request_id: str
     prompt: str
-    session_id: str | None = None
+    provider_session_id: str | None = None
     turn_id: str | None = None
     choices: tuple[str, ...] = ()
     deadline_at: float | None = None
@@ -115,7 +115,7 @@ class McpElicitationRequest:
     server_name: str
     prompt: str
     schema: JsonObject | None = None
-    session_id: str | None = None
+    provider_session_id: str | None = None
     turn_id: str | None = None
     deadline_at: float | None = None
     provider_data: JsonObject = field(default_factory=dict)
@@ -138,7 +138,7 @@ class DynamicToolCallRequest:
     tool_name: str
     arguments: JsonObject = field(default_factory=dict)
     namespace: str | None = None
-    session_id: str | None = None
+    provider_session_id: str | None = None
     turn_id: str | None = None
     deadline_at: float | None = None
     provider_data: JsonObject = field(default_factory=dict)
@@ -160,7 +160,7 @@ class ProviderInteractionRequest:
     request_type: str
     schema_version: str
     payload: JsonObject = field(default_factory=dict)
-    session_id: str | None = None
+    provider_session_id: str | None = None
     turn_id: str | None = None
     deadline_at: float | None = None
 
@@ -277,12 +277,12 @@ def validate_interaction_response(
     """Validate request identity and the response shape required by its type."""
 
     if response.request_id != request.request_id:
-        raise ExternalHarnessProtocolError(
+        raise HarnessProtocolError(
             f"interaction response id {response.request_id!r} does not match request {request.request_id!r}"
         )
     expected_type = _EXPECTED_RESPONSE_TYPE[type(request)]
     if not isinstance(response, expected_type):
-        raise ExternalHarnessProtocolError(
+        raise HarnessProtocolError(
             f"{type(request).__name__} requires {expected_type.__name__}, got {type(response).__name__}"
         )
     return response

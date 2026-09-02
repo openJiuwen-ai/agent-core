@@ -1,6 +1,6 @@
 # DSH external harness adapter
 
-本目录是 DeepSeek Harness Python SDK 到 `external.protocol` 4.0 的 provider adapter。附近代码、测试和
+本目录是 DeepSeek Harness Python SDK 到 `openjiuwen.harness_protocol` 1.0 的 provider adapter。附近代码、测试和
 DSH SDK 当前源码优先于历史文档；不要根据其它厂商能力推断 DSH 能力。
 
 ## 模块职责
@@ -18,7 +18,7 @@ DSH SDK 当前源码优先于历史文档；不要根据其它厂商能力推断
 
 1. 一个 OpenJiuwen Turn 对应一次序列化的 `Session.run()` activity interval：adapter 派发已接受
    输入后发布 STARTED，DSH 以 prompt durable receipt 作为通知收集边界，并等待到 whole-agent
-   idle。DSH native turn 保留为 provider observation，native step 映射为 Iteration item；两者都不能
+   idle。DSH native turn 保留为 provider observation，native step 映射为 `item_type="step"`；两者都不能
    重新定义公共 Turn。
 2. `send()` 在接受时分配 receipt；active Turn 后的输入排为 FOLLOW_UP。不得并发调用
    `Session.run()` 或用 stop/restart 模拟 steer。
@@ -30,7 +30,7 @@ DSH SDK 当前源码优先于历史文档；不要根据其它厂商能力推断
    close、内部丢弃或隐藏的无界 replay queue 伪造无 consumer 的无阻塞停机。
 5. Card capability 必须对应可验证 SDK 行为。首版 capabilities 为空：不支持 steer、abort、
    pause/resume、checkpoint/restore 或动态 MCP。
-6. `ExternalHarnessContext.mcp_servers` 非空必须明确失败。Cordis 中静态装配 MCP 不等价于动态 MCP
+6. `HarnessContext.mcp_servers` 非空必须明确失败。Cordis 中静态装配 MCP 不等价于动态 MCP
    capability。
 7. system prompt 只能在 `system_prompt_env_var` 与消费该变量的 custom Cordis composition 同时存在
    时传递；不要宣称 bundled 默认配置会消费任意环境变量。
@@ -50,4 +50,4 @@ DSH SDK 当前源码优先于历史文档；不要根据其它厂商能力推断
   仅有 Cordis/TypeScript 内部能力不够。
 - 保持测试不启动真实 DSH subprocess，不依赖网络或凭据；使用 fake SDK/session 验证 lifecycle、顺序、
   backpressure 与敏感信息清洗。
-- 公共协议形状的变更不在本目录完成；先修改 `external/protocol` spec 和版本，再适配本实现。
+- 公共协议形状的变更不在本目录完成；先修改 `openjiuwen/harness_protocol` spec 和版本，再适配本实现。

@@ -1,25 +1,23 @@
 # Third-party agent harness protocol
 
-`openjiuwen.agent_teams.external.protocol` defines the public Python SPI for a
-third-party agent harness that runs as an OpenJiuwen team member. The package is
-independent of the current Claude Code, Codex, and subprocess runtimes; those
-backends will migrate separately.
+`openjiuwen.harness_protocol` defines the public Python SPI for a third-party
+agent harness hosted by OpenJiuwen. It is independent of single-agent or team
+orchestration and of the current Claude Code, Codex, and subprocess runtimes;
+those backends migrate separately.
 
-The current contract version is `4.0`.
+The current contract version is `1.0`.
 
 ## Boundary
 
 ```text
-Team coordination / MemberRuntime
+OpenJiuwen host / runtime adapter
               |
- ExternalHarnessMemberRuntime
-              |
-     ExternalHarnessProtocol
+     HarnessProtocol
               |
   Claude Code / Codex / Jiuwen SDK / other harness
 ```
 
-`ExternalHarnessProtocol` is a high-level, multi-turn behavioral contract. A
+`HarnessProtocol` is a high-level, multi-turn behavioral contract. A
 conforming implementation owns the provider session, accepts concurrent
 commands, emits a cycle-long ordered event stream, answers provider-initiated
 interactions through host services when required, and publishes recoverable
@@ -32,9 +30,11 @@ This protocol uses the following hierarchy consistently:
 ```text
 Session
 └── Turn          external input -> stable external output
-    └── Iteration one Agent Loop cycle
-        └── Step  one observable atomic execution action
+    └── Step       one Agent Loop cycle
 ```
+
+Tool calls, commands, file changes, and subagents remain ordinary provider
+items; this version does not model the former atomic-action meaning of Step.
 
 `Round` is reserved for a multi-agent collaboration or protocol phase that may
 contain turns from multiple agents. The single-agent harness API therefore uses
@@ -42,15 +42,15 @@ contain turns from multiple agents. The single-agent harness API therefore uses
 
 ## Public concepts
 
-- `ExternalHarnessProtocol`: lifecycle, input delivery, abort/pause/resume,
+- `HarnessProtocol`: lifecycle, input delivery, abort/pause/resume,
   cycle-long `events()`, finite per-turn `turn_events()`, and checkpoint
   snapshot export.
-- `ExternalHarnessProvider`: provider-owned configuration validation and
+- `HarnessProvider`: provider-owned configuration validation and
   construction of an unstarted harness.
-- `ExternalHarnessCard`: static identity, protocol version, and optional
+- `HarnessCard`: static identity, protocol version, and optional
   harness capabilities, compatible protocol versions, and required/optional
   host capabilities.
-- `ExternalHarnessContext`: member identity plus host services injected at
+- `HarnessContext`: agent identity plus host services injected at
   `start`, including tools, MCP, hooks, interactions, and checkpoint storage.
 - `HarnessEvent`: an event envelope with global ordering and correlation IDs.
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
@@ -96,7 +96,7 @@ receipt = await harness.send(input)
 async for event in harness.turn_events(receipt.turn_id):
     consume(event)
 
-# Long-running team workflow: crosses turn boundaries, ends at stop.
+# Long-running host workflow: crosses turn boundaries, ends at stop.
 async for event in harness.events():
     consume(event)
 ```
@@ -109,30 +109,30 @@ Concurrent runtimes consume `events()` and group by receipt turn ID instead of
 skipping intervening turns. `PAUSED` and `RESUMED` are
 non-terminal transitions and do not close the iterator. The terminal event is
 included so the caller receives the complete `TurnResult` before the iterator
-ends. A second active iterator must fail with `ExternalHarnessStateError`.
+ends. A second active iterator must fail with `HarnessStateError`.
 
 ## Minimal shape
 
 ```python
-from openjiuwen.agent_teams.external.protocol import (
-    ExternalHarnessCard,
-    ExternalHarnessProtocol,
+from openjiuwen.harness_protocol import (
+    HarnessCard,
+    HarnessProtocol,
     HostCapability,
 )
 
 
 class MyHarness:
-    card = ExternalHarnessCard(
+    card = HarnessCard(
         name="my-agent",
         implementation_version="1.0.0",
         required_host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
     )
 
-    # Implement every member of ExternalHarnessProtocol.
+    # Implement every member of HarnessProtocol.
 
 
 # Structural presence only; behavioral contract tests are still required.
-# assert isinstance(MyHarness(), ExternalHarnessProtocol)
+# assert isinstance(MyHarness(), HarnessProtocol)
 ```
 
 ## Required invariants
@@ -154,7 +154,7 @@ class MyHarness:
 7. Awaited provider requests use `context.interactions`; events are observation
    and hooks are lifecycle policy callbacks.
 8. Checkpoints are provider-owned, versioned, JSON-serializable, scoped to one
-   `member_agent_id`, and carry an idempotency ID plus monotonic sequence. The
+   `agent_id`, and carry an idempotency ID plus monotonic sequence. The
    sink rejects stale or failed compare-and-set writes.
 9. Interaction responses match both the request ID and request type. Requests
    may declare a deadline; abort and stop cancel all pending interactions.
@@ -163,7 +163,7 @@ class MyHarness:
     `final_output` is a convenience projection.
 11. Provider startup validates the host protocol version and every required
     fine-grained host capability before doing work.
-12. Events carry team-session/member scope. `correlation_id` groups a logical
+12. Events carry host-session/agent scope. `correlation_id` groups a logical
     trace; `causation_ids` lists every exact input/request that caused an event.
 13. JSON data is recursively validated and frozen. Event buffers are bounded;
     required events never drop, and cursors expose idempotent `aclose()`.
@@ -175,12 +175,12 @@ class MyHarness:
 ## Documents
 
 - Third-party development guide:
-  `docs/dev/agent_teams/external_harness_integration.md`
-- Long-lived team subsystem specification:
-  `openjiuwen/agent_teams/docs/specs/S_24_external-harness-protocol.md`
+  `docs/dev/harness_protocol_integration.md`
+- Long-lived protocol specification:
+  `openjiuwen/harness_protocol/SPEC.md`
 
-`external/member_runtime.py` now provides the provider-neutral projection onto
-the internal MemberRuntime behavior. `external/dsh/` is the first protocol
+`agent_teams.external.member_runtime` provides an optional projection onto the
+team `MemberRuntime` behavior. `agent_teams.external.dsh` is the first protocol
 implementation and is currently wired programmatically. The Claude Code and
-Codex implementations remain under `external/cli_agent/` and do not yet
-implement this package.
+Codex implementations remain under `agent_teams.external.cli_agent` and do not
+yet implement this package.

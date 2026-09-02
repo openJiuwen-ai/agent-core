@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Mapping
 
-from openjiuwen.agent_teams.external.protocol import JsonObject
+from openjiuwen.harness_protocol import JsonObject
 
 
 @dataclass(frozen=True, slots=True)

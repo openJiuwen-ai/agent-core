@@ -6,30 +6,30 @@
 from __future__ import annotations
 
 
-class ExternalHarnessError(RuntimeError):
-    """Base error for the external harness protocol boundary."""
+class HarnessError(RuntimeError):
+    """Base error for the third-party harness protocol boundary."""
 
 
-class ExternalHarnessStateError(ExternalHarnessError):
+class HarnessStateError(HarnessError):
     """Raised when a command is invalid for the harness's current state."""
 
 
-class UnsupportedHarnessCapabilityError(ExternalHarnessError):
+class UnsupportedHarnessCapabilityError(HarnessError):
     """Raised when the caller requests a capability the harness did not declare."""
 
 
-class ExternalHarnessProtocolError(ExternalHarnessError):
+class HarnessProtocolError(HarnessError):
     """Raised when an implementation violates a protocol invariant."""
 
 
-class CheckpointConflictError(ExternalHarnessProtocolError):
+class CheckpointConflictError(HarnessProtocolError):
     """Raised when a checkpoint write is stale or violates compare-and-set."""
 
 
 __all__ = [
-    "ExternalHarnessError",
-    "ExternalHarnessProtocolError",
-    "ExternalHarnessStateError",
+    "HarnessError",
+    "HarnessProtocolError",
+    "HarnessStateError",
     "CheckpointConflictError",
     "UnsupportedHarnessCapabilityError",
 ]

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.models import JsonObject, freeze_json_object, json_value_to_builtin
+from openjiuwen.harness_protocol.models import JsonObject, freeze_json_object, json_value_to_builtin
 
 MAX_CHECKPOINT_BYTES = 4 * 1024 * 1024
 
@@ -27,7 +27,7 @@ class CheckpointReason(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class HarnessCheckpoint:
-    """Opaque provider state scoped to one team member.
+    """Opaque provider state scoped to one agent and host session.
 
     Only the provider named by ``provider`` may interpret ``data`` and
     ``schema_version``. The host persists the complete envelope unchanged.
@@ -35,20 +35,20 @@ class HarnessCheckpoint:
 
     provider: str
     schema_version: str
-    member_agent_id: str
-    team_session_id: str
+    agent_id: str
+    host_session_id: str
     checkpoint_id: str
     sequence: int
     data: JsonObject = field(default_factory=dict)
-    session_id: str | None = None
+    provider_session_id: str | None = None
     revision: str | None = None
 
     def __post_init__(self) -> None:
         required = {
             "provider": self.provider,
             "schema_version": self.schema_version,
-            "member_agent_id": self.member_agent_id,
-            "team_session_id": self.team_session_id,
+            "agent_id": self.agent_id,
+            "host_session_id": self.host_session_id,
             "checkpoint_id": self.checkpoint_id,
         }
         for field_name, value in required.items():
@@ -56,7 +56,7 @@ class HarnessCheckpoint:
                 raise ValueError(f"checkpoint {field_name} must not be empty")
         if self.sequence < 0:
             raise ValueError("checkpoint sequence must be non-negative")
-        if self.session_id == "" or self.revision == "":
+        if self.provider_session_id == "" or self.revision == "":
             raise ValueError("optional checkpoint ids must not be empty strings")
         data = freeze_json_object(self.data)
         encoded_size = len(json.dumps(json_value_to_builtin(data), separators=(",", ":")).encode("utf-8"))
@@ -84,7 +84,7 @@ class CheckpointSaveReceipt:
 class HarnessCheckpointSink(Protocol):
     """Durable host-side destination for proactively published checkpoints.
 
-    Sequence numbers are monotonic within one provider/member/session scope.
+    Sequence numbers are monotonic within one provider/agent/host-session scope.
     Retrying the same ``checkpoint_id`` is idempotent and returns the original
     receipt. A different write at an existing or lower sequence, or a failed
     ``expected_storage_revision`` comparison, raises

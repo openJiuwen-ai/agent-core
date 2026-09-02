@@ -1,23 +1,23 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Public protocol for integrating third-party agent harnesses with teams."""
+"""Provider-neutral protocol for integrating third-party agent harnesses."""
 
-from openjiuwen.agent_teams.external.protocol.checkpoints import (
+from openjiuwen.harness_protocol.checkpoints import (
     MAX_CHECKPOINT_BYTES,
     CheckpointReason,
     CheckpointSaveReceipt,
     HarnessCheckpoint,
     HarnessCheckpointSink,
 )
-from openjiuwen.agent_teams.external.protocol.errors import (
+from openjiuwen.harness_protocol.errors import (
     CheckpointConflictError,
-    ExternalHarnessError,
-    ExternalHarnessProtocolError,
-    ExternalHarnessStateError,
+    HarnessError,
+    HarnessProtocolError,
+    HarnessStateError,
     UnsupportedHarnessCapabilityError,
 )
-from openjiuwen.agent_teams.external.protocol.events import (
+from openjiuwen.harness_protocol.events import (
     TERMINAL_TURN_EVENT_KINDS,
     DiagnosticEvent,
     DiagnosticLevel,
@@ -43,7 +43,7 @@ from openjiuwen.agent_teams.external.protocol.events import (
     UsageUpdateMode,
     event_retention,
 )
-from openjiuwen.agent_teams.external.protocol.hooks import (
+from openjiuwen.harness_protocol.hooks import (
     AfterToolContext,
     AfterToolResult,
     BeforePromptContext,
@@ -54,7 +54,7 @@ from openjiuwen.agent_teams.external.protocol.hooks import (
     ToolDecision,
     ToolDecisionKind,
 )
-from openjiuwen.agent_teams.external.protocol.interactions import (
+from openjiuwen.harness_protocol.interactions import (
     DynamicToolCallRequest,
     DynamicToolCallResponse,
     HarnessInteractionHandler,
@@ -73,13 +73,13 @@ from openjiuwen.agent_teams.external.protocol.interactions import (
     UserInputResponse,
     validate_interaction_response,
 )
-from openjiuwen.agent_teams.external.protocol.models import (
+from openjiuwen.harness_protocol.models import (
     PROTOCOL_VERSION,
     AbortMode,
     DeliveryMode,
-    ExternalHarnessCard,
-    ExternalHarnessContext,
-    ExternalHarnessInput,
+    HarnessCard,
+    HarnessContext,
+    HarnessInput,
     HarnessCapability,
     HarnessTelemetry,
     HostCapability,
@@ -91,11 +91,11 @@ from openjiuwen.agent_teams.external.protocol.models import (
     freeze_json_value,
     json_value_to_builtin,
 )
-from openjiuwen.agent_teams.external.protocol.protocol import (
-    ExternalHarnessProtocol,
-    ExternalHarnessProvider,
+from openjiuwen.harness_protocol.protocol import (
+    HarnessProtocol,
+    HarnessProvider,
 )
-from openjiuwen.agent_teams.external.protocol.results import (
+from openjiuwen.harness_protocol.results import (
     ContentBlock,
     MessageRole,
     MonetaryAmount,
@@ -107,14 +107,15 @@ from openjiuwen.agent_teams.external.protocol.results import (
     TurnTerminationKind,
     TurnUsage,
 )
-from openjiuwen.agent_teams.external.protocol.serialization import (
+from openjiuwen.harness_protocol.serialization import (
     EVENT_WIRE_SCHEMA_VERSION,
     harness_event_from_dict,
     harness_event_to_dict,
 )
-from openjiuwen.agent_teams.external.protocol.stream import HarnessEventCursor
-from openjiuwen.agent_teams.external.protocol.tools import (
-    ExternalToolGateway,
+from openjiuwen.harness_protocol.state import HarnessState
+from openjiuwen.harness_protocol.stream import HarnessEventCursor
+from openjiuwen.harness_protocol.tools import (
+    ToolGateway,
     McpServerConfig,
     McpTransport,
     ToolDefinition,
@@ -139,17 +140,18 @@ __all__ = [
     "DiagnosticLevel",
     "DynamicToolCallRequest",
     "DynamicToolCallResponse",
-    "ExternalHarnessCard",
+    "HarnessCard",
     "HarnessCheckpoint",
     "HarnessCheckpointSink",
-    "ExternalHarnessContext",
-    "ExternalHarnessError",
-    "ExternalHarnessInput",
-    "ExternalHarnessProtocol",
-    "ExternalHarnessProtocolError",
-    "ExternalHarnessProvider",
-    "ExternalHarnessStateError",
-    "ExternalToolGateway",
+    "HarnessContext",
+    "HarnessError",
+    "HarnessInput",
+    "HarnessProtocol",
+    "HarnessProtocolError",
+    "HarnessProvider",
+    "HarnessState",
+    "HarnessStateError",
+    "ToolGateway",
     "EVENT_WIRE_SCHEMA_VERSION",
     "EventBufferConfig",
     "EventOverflowPolicy",

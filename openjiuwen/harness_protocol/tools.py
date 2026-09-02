@@ -10,7 +10,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Mapping, Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.models import JsonObject, JsonValue, freeze_json_object, freeze_json_value
+from openjiuwen.harness_protocol.models import JsonObject, JsonValue, freeze_json_object, freeze_json_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,11 +53,11 @@ class ToolExecutionResult:
 
 
 @runtime_checkable
-class ExternalToolGateway(Protocol):
+class ToolGateway(Protocol):
     """Native SDK tool surface supplied by the OpenJiuwen host."""
 
     async def definitions(self) -> tuple[ToolDefinition, ...]:
-        """Return the tools visible to this member."""
+        """Return the tools visible to this agent."""
         ...
 
     async def invoke(self, invocation: ToolInvocation) -> ToolExecutionResult:
@@ -116,7 +116,7 @@ class McpServerConfig:
 
 
 __all__ = [
-    "ExternalToolGateway",
+    "ToolGateway",
     "McpServerConfig",
     "McpTransport",
     "ToolDefinition",

@@ -1,8 +1,8 @@
 # 三方 Agent Harness 接入开发指南
 
-本文面向希望让自有 Python Agent、CLI Agent SDK 或 Jiuwen 后续 SDK 作为
-OpenJiuwen Team 成员运行的开发者，说明如何实现
-`openjiuwen.agent_teams.external.protocol` 4.0。
+本文面向希望让自有 Python Agent、CLI Agent SDK 或 Jiuwen 后续 SDK 接入 OpenJiuwen 的开发者，
+说明如何实现 `openjiuwen.harness_protocol` 1.0。协议不绑定 single-agent 或 team 场景；具体 runtime
+adapter 决定如何托管实现。
 
 > 当前已提供通用 `ExternalHarnessMemberRuntime`，并以 DSH Python SDK 作为首个协议实现。
 > DSH 目前只支持程序化装配；team spawn 尚未通过 provider registry 自动加载三方实现，现有
@@ -13,11 +13,11 @@ OpenJiuwen Team 成员运行的开发者，说明如何实现
 本协议定义完整 Harness 行为，而不是一次模型调用：
 
 ```text
-OpenJiuwen Team
+OpenJiuwen host / runtime adapter
       |
 ExternalHarnessMemberRuntime
       |
-ExternalHarnessProtocol
+HarnessProtocol
       |
 三方 Agent Harness
       |
@@ -39,32 +39,31 @@ Turn 生命周期、事件转换、provider interaction、取消和 checkpoint �
 ```text
 Session
 └── Turn          一次外部输入 -> 一次稳定外部输出
-    └── Iteration 一次 Agent Loop 控制循环
-        └── Step  一次可观测原子执行动作
+    └── Step       一次 Agent Loop 控制循环
 ```
 
 `Round` 只表示 multi-agent 协作或协议阶段，一个 Round 可以包含多个 Agent Turn。本接入协议属于
 单 Agent Harness 边界，因此统一使用 `turn_id`、`TurnLifecycleEvent`、`TurnEventKind` 和
-`turn_events()`。不要把一次 Agent Loop 循环称为 step；应使用 iteration，step 留给 model/tool/
-memory/middleware 等原子执行动作。
+`turn_events()`。Step 只表示一次 Agent Loop 控制循环；原先的原子动作含义不在本版协议中建模。
+model/tool/memory/middleware 与 subagent 等细节可作为普通 provider item 观测，但不构成协议层级。
 
 ## 2. 固定导入入口
 
 只从公共包导入，不依赖 `external.cli_agent` 或 protocol 私有模块：
 
 ```python
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     AbortMode,
     CheckpointReason,
     ContentBlock,
     DeliveryMode,
     EventBufferConfig,
-    ExternalHarnessCard,
-    ExternalHarnessContext,
-    ExternalHarnessInput,
-    ExternalHarnessProtocol,
-    ExternalHarnessProtocolError,
-    ExternalHarnessProvider,
+    HarnessCard,
+    HarnessContext,
+    HarnessInput,
+    HarnessProtocol,
+    HarnessProtocolError,
+    HarnessProvider,
     HarnessCapability,
     HostCapability,
     HarnessCheckpoint,
@@ -101,7 +100,7 @@ checkpoint 可序列化；生产 provider 必须另跑行为契约测试。
 
 ## 3. 生命周期和状态机
 
-每个 Harness 实例只代表一个 team member：
+每个 Harness 实例只代表一个 agent：
 
 ```text
 构造实例
@@ -179,10 +178,10 @@ Observation channel 提供两个消费视图：
 两个订阅：它们消费同一个逻辑单消费者流，禁止并发迭代。简单调用方可以逐轮使用：
 
 ```python
-first = await harness.send(ExternalHarnessInput("first task"))
+first = await harness.send(HarnessInput("first task"))
 first_turn = [event async for event in harness.turn_events(first.turn_id)]
 
-second = await harness.send(ExternalHarnessInput("follow-up"))
+second = await harness.send(HarnessInput("follow-up"))
 second_turn = [event async for event in harness.turn_events(second.turn_id)]
 ```
 
@@ -192,10 +191,10 @@ receipt 的 `turn_id` 聚合。找到 STARTED 后按全局顺序产出所有事�
 FINISHED/ABORTED/FAILED 产出后
 立即结束。PAUSED/RESUMED 是非终态，有限流必须跨越它们继续消费。Terminal event 不能被吞掉，因为
 调用方需要从中读取完整 `TurnResult`。Cycle 在 STARTED 前关闭时可空结束；STARTED 后没有 terminal
-就关闭必须抛 `ExternalHarnessProtocolError`。
+就关闭必须抛 `HarnessProtocolError`。
 
 实现必须为 observation channel 加 consumer lease；第二个 active iterator 立即抛
-`ExternalHarnessStateError`，不能让两个 async generator 竞争同一个 queue。Iterator 正常结束或
+`HarnessStateError`，不能让两个 async generator 竞争同一个 queue。Iterator 正常结束或
 被幂等 `aclose()` 后释放 lease，后续调用才能继续消费；因此公开返回类型使用
 `HarnessEventCursor`，不是无法保证 close 的普通 `AsyncIterator`。
 
@@ -207,9 +206,9 @@ FINISHED/ABORTED/FAILED 产出后
 event = HarnessEvent(
     sequence=next_sequence(),
     timestamp=time.time(),
-    team_session_id=context.team_session_id,
-    member_agent_id=context.member_agent_id,
-    session_id=provider_session_id,
+    host_session_id=context.host_session_id,
+    agent_id=context.agent_id,
+    provider_session_id=provider_session_id,
     turn_id=turn_id,
     correlation_id=accepted_message_id,
     causation_ids=(accepted_message_id, *steering_message_ids),
@@ -226,7 +225,7 @@ await event_queue.put(event)
 ```
 
 `correlation_id` 用于把事件聚合到同一逻辑 trace，`causation_ids` 列出实际造成该事件的输入/request。
-message/turn ID 在 member + team session 内唯一，item/call ID 在 Turn 内唯一，request ID 在 cycle 内
+message/turn ID 在 agent + host session 内唯一，item/call ID 在 Turn 内唯一，request ID 在 cycle 内
 唯一。timestamp/deadline 使用有限 UTC Unix seconds；duration 使用 monotonic clock 计算的毫秒数。
 
 公共载荷包括：
@@ -234,7 +233,7 @@ message/turn ID 在 member + team session 内唯一，item/call ID 在 Turn 内�
 | 载荷 | 用途 |
 |---|---|
 | `OutputEvent` | 稳定 block ID/index，TEXT/STRUCTURED 表示，ANSWER/REASONING/SYSTEM channel，DELTA/SNAPSHOT/FINAL operation |
-| `ItemLifecycleEvent` | tool call、command、file change 等 provider item |
+| `ItemLifecycleEvent` | `item_type="step"` 表示 Agent Loop 控制循环；tool、command、subagent 等是普通 provider item |
 | `UsageUpdatedEvent` | 标准化 token usage |
 | `StateChangedEvent` | Harness state 转换 |
 | `TurnLifecycleEvent` | Turn start、pause/resume 和唯一 terminal |
@@ -293,7 +292,7 @@ request = ToolApprovalRequest(
     call_id=sdk_request.call_id,
     tool_name=sdk_request.tool_name,
     arguments=sdk_request.arguments,
-    session_id=self.session_id,
+    provider_session_id=self.provider_session_id,
     turn_id=self._active_turn_id,
     deadline_at=time.time() + 60,
     provider_data={"provider_method": sdk_request.method},
@@ -324,14 +323,14 @@ event 后无限等待。
 
 ### interactions 与 tools 的关系
 
-`ExternalToolGateway` 是 host 预先向 provider 暴露工具的执行入口；`DynamicToolCallRequest` 是
+`ToolGateway` 是 host 预先向 provider 暴露工具的执行入口；`DynamicToolCallRequest` 是
 provider 在 active SDK control protocol 中反向委托 host 的请求。实现可以让两者最终使用同一
-team tool policy，但不能跳过权限和成员可见性规则。
+host tool policy，但不能跳过权限和可见性规则。
 
 ## 7. Hooks
 
 `HarnessHookDispatcher` 提供 before-prompt、before-tool、after-tool 和 on-stop 生命周期策略。
-例如 adapter 真正执行 team tool 前 await `before_tool`，使用 `ToolDecision` 拒绝或改写参数。
+例如 adapter 真正执行 host tool 前 await `before_tool`，使用 `ToolDecision` 拒绝或改写参数。
 
 Tool decision 语义固定为：ALLOW 直接执行；DENY 拒绝；REWRITE 使用必填 `updated_arguments`；ASK
 转为 `ToolApprovalRequest` 并 await interaction handler；PROVIDER_POLICY 交给明确配置的 provider
@@ -345,9 +344,9 @@ OpenJiuwen 统一策略。二者不要用同一个未经区分的回调类型。
 
 ## 8. Context、工具和 MCP
 
-`ExternalHarnessContext` 由 host 在 `start()` 时提供：
+`HarnessContext` 由 host 在 `start()` 时提供：
 
-- team/member/session 身份和 system prompt；
+- agent、host session 身份和 system prompt；
 - cwd 和环境变量；
 - resume policy、versioned checkpoint 和 checkpoint sink；
 - native tool gateway 和 MCP server 配置；
@@ -379,11 +378,11 @@ def _current_checkpoint(self) -> HarnessCheckpoint:
     return HarnessCheckpoint(
         provider="acme-code-agent",
         schema_version="2",
-        member_agent_id=self._context.member_agent_id,
-        team_session_id=self._context.team_session_id,
+        agent_id=self._context.agent_id,
+        host_session_id=self._context.host_session_id,
         checkpoint_id=str(uuid.uuid4()),
         sequence=self._checkpoint_sequence,
-        session_id=self._session_id,
+        provider_session_id=self._session_id,
         revision=self._provider_revision,
         data={"conversation_id": self._conversation_id},
     )
@@ -410,7 +409,7 @@ provider 发出 checkpoint 通知。相同 `checkpoint_id` 用于 retry；每次
 `CheckpointConflictError`。实现需决定失败时重试还是让 Turn 失败，不能静默声称已持久化。
 
 `export_checkpoint()` 返回 `_latest_checkpoint`，用于按需快照和停机兜底，但不能作为唯一保存
-机制。恢复时先验证 `provider`、`member_agent_id` 和 `schema_version`：`REQUIRE_RESUME` 下缺失、
+机制。恢复时先验证 `provider`、`agent_id` 和 `schema_version`：`REQUIRE_RESUME` 下缺失、
 错配或不可迁移必须失败，不能悄悄创建新 session。
 
 `data` 必须 JSON-safe，不能包含 token、完整 env、SDK client、event loop、文件句柄或任意 Python
@@ -428,15 +427,16 @@ import asyncio
 import time
 import uuid
 
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     AbortMode,
     CheckpointReason,
     DeliveryMode,
-    ExternalHarnessCard,
-    ExternalHarnessContext,
-    ExternalHarnessInput,
-    ExternalHarnessProtocolError,
-    ExternalHarnessStateError,
+    HarnessCard,
+    HarnessContext,
+    HarnessInput,
+    HarnessProtocolError,
+    HarnessState,
+    HarnessStateError,
     HarnessCapability,
     HarnessCheckpoint,
     HarnessEvent,
@@ -458,7 +458,6 @@ from openjiuwen.agent_teams.external.protocol import (
     UnsupportedHarnessCapabilityError,
     validate_interaction_response,
 )
-from openjiuwen.agent_teams.harness import HarnessState
 
 
 _END = object()
@@ -466,7 +465,7 @@ _END = object()
 
 class AcmeHarness:
     event_buffer_config = EventBufferConfig(capacity=1024)
-    card = ExternalHarnessCard(
+    card = HarnessCard(
         name="acme-code-agent",
         implementation_version="1.0.0",
         capabilities=frozenset(
@@ -502,10 +501,10 @@ class AcmeHarness:
         return self._state
 
     @property
-    def session_id(self):
+    def provider_session_id(self):
         return self._session_id
 
-    async def start(self, context: ExternalHarnessContext):
+    async def start(self, context: HarnessContext):
         self._context = context
         self.card.validate_host(
             protocol_version=context.protocol_version,
@@ -529,16 +528,16 @@ class AcmeHarness:
                 await self._client.steer(content.content)
                 return SendReceipt(message_id, self._active_turn_id, DeliveryMode.STEER)
             if self._state is not HarnessState.IDLE:
-                raise ExternalHarnessStateError(f"cannot send while {self._state}")
+                raise HarnessStateError(f"cannot send while {self._state}")
             if mode is DeliveryMode.STEER:
-                raise ExternalHarnessStateError("there is no active turn")
+                raise HarnessStateError("there is no active turn")
             turn_id = str(uuid.uuid4())
             self._active_turn_id = turn_id
             await self._transition(HarnessState.RUNNING)
             self._turn_task = asyncio.create_task(self._run_turn(content, message_id, turn_id))
         return SendReceipt(message_id, turn_id, mode)
 
-    async def _run_turn(self, content: ExternalHarnessInput, message_id: str, turn_id: str):
+    async def _run_turn(self, content: HarnessInput, message_id: str, turn_id: str):
         await self._emit(
             TurnLifecycleEvent(kind=TurnEventKind.STARTED),
             turn_id=turn_id,
@@ -611,7 +610,7 @@ class AcmeHarness:
 
     async def events(self):
         if self._consumer_lock.locked():
-            raise ExternalHarnessStateError("observation stream already has a consumer")
+            raise HarnessStateError("observation stream already has a consumer")
         async with self._consumer_lock:
             while (event := await self._events.get()) is not _END:
                 yield event
@@ -638,7 +637,7 @@ class AcmeHarness:
                 return
 
         if selected_turn_id is not None:
-            raise ExternalHarnessProtocolError(
+            raise HarnessProtocolError(
                 f"event stream closed before turn {selected_turn_id} terminated"
             )
 
@@ -668,9 +667,9 @@ class AcmeHarness:
             HarnessEvent(
                 sequence=self._sequence,
                 timestamp=time.time(),
-                team_session_id=self._context.team_session_id,
-                member_agent_id=self._context.member_agent_id,
-                session_id=self._session_id,
+                host_session_id=self._context.host_session_id,
+                agent_id=self._context.agent_id,
+                provider_session_id=self._session_id,
                 event=payload,
                 **correlation,
             )
@@ -685,11 +684,11 @@ class AcmeHarness:
         self._latest_checkpoint = HarnessCheckpoint(
             provider=self.card.name,
             schema_version="1",
-            member_agent_id=self._context.member_agent_id,
-            team_session_id=self._context.team_session_id,
+            agent_id=self._context.agent_id,
+            host_session_id=self._context.host_session_id,
             checkpoint_id=str(uuid.uuid4()),
             sequence=self._checkpoint_sequence,
-            session_id=self._session_id,
+            provider_session_id=self._session_id,
         )
         if self._context.checkpoint_sink is not None:
             receipt = await self._context.checkpoint_sink.save(
@@ -741,7 +740,7 @@ import asyncio
 
 from openjiuwen.agent_teams.external import ExternalHarnessMemberRuntime
 from openjiuwen.agent_teams.external.dsh import DshHarnessProvider
-from openjiuwen.agent_teams.external.protocol import ExternalHarnessContext
+from openjiuwen.harness_protocol import HarnessContext
 
 
 async def consume_outputs(runtime: ExternalHarnessMemberRuntime) -> None:
@@ -760,12 +759,12 @@ async def main() -> None:
             "system_prompt_env_var": "DSH_SYSTEM_PROMPT",
         }
     )
-    context = ExternalHarnessContext(
-        team_name="research-team",
-        member_name="dsh-worker",
-        member_agent_id="agent-dsh-worker",
-        team_session_id="team-session-1",
+    context = HarnessContext(
+        agent_name="dsh-worker",
+        agent_id="agent-dsh-worker",
+        host_session_id="team-session-1",
         system_prompt="You are the research teammate.",
+        metadata={"team_name": "research-team"},
     )
     runtime = ExternalHarnessMemberRuntime(
         harness=harness,
@@ -793,7 +792,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-真实 Team 装配时由宿主提供实际 `team_session` 和 `ExternalHarnessContext`；也可给 runtime 传入
+真实 Team 装配时由宿主提供实际 `team_session` 和 `HarnessContext`；也可给 runtime 传入
 context factory，在 start 时根据 team session 构造上下文。示例使用现有 legacy `on_round` callback
 等待 terminal，只是内部 `StreamController` 兼容面；三方协议本身仍使用 Turn。
 
@@ -812,7 +811,7 @@ turn/step 只描述内部 Agent Loop：
 | DSH 数据 | 协议映射 |
 |---|---|
 | native `turn/start` / `turn/end` | namespaced `ProviderEvent` |
-| native `step/start` / `step/end` | `item_type="iteration"` 的 `ItemLifecycleEvent` |
+| native `step/start` / `step/end` | `item_type="step"` 的 `ItemLifecycleEvent` |
 | assistant text/reasoning chunk | 稳定 output ID 的 `OutputEvent` DELTA |
 | assistant message | FINAL output 与终态 `TurnMessage` |
 | tool call/result | tool `ItemLifecycleEvent` |
@@ -831,7 +830,7 @@ Turn 边界。whole-agent idle 时若没有任何 native `turn/end`，该外部 
 
 - STEER、graceful/force abort、pause/resume；
 - checkpoint export/restore 或跨 runtime 的持久恢复；
-- 将 `ExternalHarnessContext.mcp_servers` 动态安装进 DSH；
+- 将 `HarnessContext.mcp_servers` 动态安装进 DSH；
 - 在 bundled Cordis 配置中自动注入 system prompt。
 
 `system_prompt_env_var="DSH_SYSTEM_PROMPT"` 只把 system prompt 放入 runtime env。custom Cordis
@@ -873,7 +872,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 
 三方项目至少覆盖：
 
-1. 实例满足 `isinstance(harness, ExternalHarnessProtocol)`；
+1. 实例满足 `isinstance(harness, HarnessProtocol)`；
 2. `start` 后为 IDLE，`stop` 后为 TERMINATED，重复 stop 不报错；
 3. `events()` 在多个 Turn 之间不结束，stop 后正常 EOF；
 4. `turn_events(receipt.turn_id)` 包含 STARTED 和 terminal，跨 PAUSED/RESUMED，terminal 后 EOF；
@@ -886,7 +885,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 11. interaction request/response 的 id 和类型一致，deadline 生效，abort/stop cancel 全部 pending；
 12. 缺 interaction handler 时不会默认授权或永久等待；
 13. hook deny 阻止执行，rewrite/ask/provider-policy 路径明确，hook event consumer 不参与授权；
-14. checkpoint envelope JSON round-trip、member/provider/version/id/sequence 校验和恢复失败路径；
+14. checkpoint envelope JSON round-trip、agent/host-session/provider/version/id/sequence 校验和恢复失败路径；
 15. session 激活和 turn 完成主动调用 sink，retry 幂等，stale/CAS 冲突不覆盖新状态；
 16. event consumer 慢时背压有界，不会无限占用内存；
 17. SDK 鉴权、限流、崩溃和超时落为 FAILED + `TurnError`，并且诊断不泄露凭据；

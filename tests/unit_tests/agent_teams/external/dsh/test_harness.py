@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for the DeepSeek Harness ``ExternalHarnessProtocol`` adapter."""
+"""Unit tests for the DeepSeek Harness ``HarnessProtocol`` adapter."""
 
 from __future__ import annotations
 
@@ -22,14 +22,15 @@ from openjiuwen.agent_teams.external.dsh import (
     DshHarnessConfig,
     DshHarnessProvider,
 )
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     DeliveryMode,
-    ExternalHarnessContext,
-    ExternalHarnessError,
-    ExternalHarnessInput,
-    ExternalHarnessProtocol,
-    ExternalHarnessProvider,
-    ExternalHarnessStateError,
+    HarnessContext,
+    HarnessError,
+    HarnessInput,
+    HarnessProtocol,
+    HarnessProvider,
+    HarnessState,
+    HarnessStateError,
     HarnessCapability,
     HarnessEvent,
     ItemEventKind,
@@ -49,7 +50,6 @@ from openjiuwen.agent_teams.external.protocol import (
     UnsupportedHarnessCapabilityError,
     UsageUpdatedEvent,
 )
-from openjiuwen.agent_teams.harness.state import HarnessState
 
 
 @dataclass(slots=True)
@@ -138,16 +138,16 @@ def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch, *scripts: _RunScript) -> 
     return state
 
 
-def _context(**overrides: object) -> ExternalHarnessContext:
+def _context(**overrides: object) -> HarnessContext:
     values: dict[str, object] = {
-        "team_name": "team-a",
-        "member_name": "researcher",
-        "member_agent_id": "team-a_researcher",
-        "team_session_id": "team-session-1",
+        "agent_name": "researcher",
+        "agent_id": "team-a_researcher",
+        "host_session_id": "team-session-1",
         "system_prompt": "",
+        "metadata": {"team_name": "team-a"},
     }
     values.update(overrides)
-    return ExternalHarnessContext(**values)  # type: ignore[arg-type]
+    return HarnessContext(**values)  # type: ignore[arg-type]
 
 
 def _session_event(event_type: str, data: dict[str, object]) -> dict[str, object]:
@@ -165,7 +165,7 @@ async def _wait_for_thread_event(event: threading.Event) -> None:
     assert await asyncio.to_thread(event.wait, 2), "fake DSH worker did not reach the expected boundary"
 
 
-async def _wait_until_idle(harness: ExternalHarnessProtocol) -> None:
+async def _wait_until_idle(harness: HarnessProtocol) -> None:
     """Wait for the adapter to quiesce after its whole Turn chain.
 
     A script's ``finished`` event is set inside the SDK worker thread, while
@@ -227,8 +227,8 @@ async def test_provider_construction_is_lazy_and_start_stop_use_fake_sdk(monkeyp
     assert "deepseek_harness" not in sys.modules
     assert harness.state is HarnessState.TERMINATED
     assert provider.card is DshHarness.card
-    assert isinstance(harness, ExternalHarnessProtocol)
-    assert isinstance(provider, ExternalHarnessProvider)
+    assert isinstance(harness, HarnessProtocol)
+    assert isinstance(provider, HarnessProvider)
 
     sdk = _install_fake_sdk(monkeypatch)
     await harness.start(
@@ -240,8 +240,8 @@ async def test_provider_construction_is_lazy_and_start_stop_use_fake_sdk(monkeyp
     )
 
     assert harness.state is HarnessState.IDLE
-    assert harness.session_id is not None
-    assert sdk.session_ids == [harness.session_id]
+    assert harness.provider_session_id is not None
+    assert sdk.session_ids == [harness.provider_session_id]
     assert sdk.constructor_options == [
         {
             "provider": "test-provider",
@@ -279,12 +279,12 @@ async def test_missing_optional_sdk_does_not_open_a_partial_cycle(monkeypatch: p
     )
     harness = DshHarness()
 
-    with pytest.raises(ExternalHarnessError, match="deepseek-harness-sdk is required"):
+    with pytest.raises(HarnessError, match="deepseek-harness-sdk is required"):
         await harness.start(_context())
 
     assert harness.state is HarnessState.TERMINATED
-    assert harness.session_id is None
-    with pytest.raises(ExternalHarnessStateError, match="no active or completed event cycle"):
+    assert harness.provider_session_id is None
+    with pytest.raises(HarnessStateError, match="no active or completed event cycle"):
         harness.events()
 
 
@@ -309,9 +309,9 @@ async def test_auto_follow_up_is_accepted_immediately_but_runs_are_serial(monkey
     harness = DshHarness()
     await harness.start(_context())
 
-    first = await harness.send(ExternalHarnessInput(content="first"))
+    first = await harness.send(HarnessInput(content="first"))
     await _wait_for_thread_event(first_script.started)
-    second = await harness.send(ExternalHarnessInput(content="second"))
+    second = await harness.send(HarnessInput(content="second"))
 
     assert first.accepted_mode is DeliveryMode.AUTO
     assert second.accepted_mode is DeliveryMode.FOLLOW_UP
@@ -347,10 +347,10 @@ async def test_turn_events_is_finite_releases_lease_and_does_not_discard_mismatc
     _install_fake_sdk(monkeypatch, _RunScript(result=_FakeRunResult(final_response="turn output")))
     harness = DshHarness()
     await harness.start(_context())
-    receipt = await harness.send(ExternalHarnessInput(content="hello"))
+    receipt = await harness.send(HarnessInput(content="hello"))
 
     wrong_cursor = harness.turn_events("not-the-next-turn")
-    with pytest.raises(ExternalHarnessStateError, match="not the next unconsumed turn"):
+    with pytest.raises(HarnessStateError, match="not the next unconsumed turn"):
         await anext(wrong_cursor)
 
     turn = [event async for event in harness.turn_events(receipt.turn_id)]
@@ -461,15 +461,15 @@ async def test_continuous_events_map_output_usage_and_runtime_items(monkeypatch:
     _install_fake_sdk(monkeypatch, script)
     harness = DshHarness()
     await harness.start(_context())
-    receipt = await harness.send(ExternalHarnessInput(content="inspect"))
+    receipt = await harness.send(HarnessInput(content="inspect"))
     await _wait_for_thread_event(script.finished)
     await _wait_until_idle(harness)
     await harness.stop()
     events = [event async for event in harness.events()]
 
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
-    assert all(event.team_session_id == "team-session-1" for event in events)
-    assert all(event.member_agent_id == "team-a_researcher" for event in events)
+    assert all(event.host_session_id == "team-session-1" for event in events)
+    assert all(event.agent_id == "team-a_researcher" for event in events)
 
     output_events = [event.event for event in events if isinstance(event.event, OutputEvent)]
     assert [(event.operation, event.channel, event.content) for event in output_events] == [
@@ -491,15 +491,15 @@ async def test_continuous_events_map_output_usage_and_runtime_items(monkeypatch:
 
     item_envelopes = [event for event in events if isinstance(event.event, ItemLifecycleEvent)]
     assert [(event.event.item_type, event.event.kind, event.item_id) for event in item_envelopes] == [
-        ("iteration", ItemEventKind.STARTED, "dsh-iteration:1:1"),
+        ("step", ItemEventKind.STARTED, "dsh-step:1:1"),
         ("tool", ItemEventKind.STARTED, "call-1"),
         ("tool", ItemEventKind.COMPLETED, "call-1"),
-        ("iteration", ItemEventKind.COMPLETED, "dsh-iteration:1:1"),
+        ("step", ItemEventKind.COMPLETED, "dsh-step:1:1"),
         ("subagent", ItemEventKind.STARTED, "child-1"),
         ("subagent", ItemEventKind.COMPLETED, "child-1"),
     ]
     assert item_envelopes[2].event.data["tool_name"] == "read_file"
-    assert item_envelopes[-1].session_id == "child-1"
+    assert item_envelopes[-1].provider_session_id == "child-1"
 
     terminal = _turn_terminals(events)[receipt.turn_id]
     assert terminal.kind is TurnEventKind.FINISHED
@@ -517,7 +517,7 @@ async def test_sdk_failures_are_redacted_from_terminal_events(monkeypatch: pytes
     _install_fake_sdk(monkeypatch, script)
     harness = DshHarness(DshHarnessConfig(api_key=secret))
     await harness.start(_context(env={"PROVIDER_TOKEN": secret}))
-    receipt = await harness.send(ExternalHarnessInput(content="fail"))
+    receipt = await harness.send(HarnessInput(content="fail"))
 
     turn = [event async for event in harness.turn_events(receipt.turn_id)]
     await harness.stop()
@@ -565,7 +565,7 @@ async def test_turn_end_error_is_redacted_in_terminal_and_provider_event(monkeyp
     _install_fake_sdk(monkeypatch, script)
     harness = DshHarness()
     await harness.start(_context())
-    receipt = await harness.send(ExternalHarnessInput(content="fail safely"))
+    receipt = await harness.send(HarnessInput(content="fail safely"))
 
     turn = [event async for event in harness.turn_events(receipt.turn_id)]
     await harness.stop()
@@ -589,7 +589,7 @@ async def test_idle_without_native_turn_end_is_a_protocol_failure(monkeypatch: p
     )
     harness = DshHarness()
     await harness.start(_context())
-    receipt = await harness.send(ExternalHarnessInput(content="accepted but no turn"))
+    receipt = await harness.send(HarnessInput(content="accepted but no turn"))
 
     turn = [event async for event in harness.turn_events(receipt.turn_id)]
     await harness.stop()
@@ -611,13 +611,13 @@ async def test_unsupported_capabilities_fail_explicitly(monkeypatch: pytest.Monk
     assert not harness.card.supports(HarnessCapability.STEER)
     assert await harness.export_checkpoint() is None
     with pytest.raises(UnsupportedHarnessCapabilityError, match="steering"):
-        await harness.send(ExternalHarnessInput(content="steer"), mode=DeliveryMode.STEER)
+        await harness.send(HarnessInput(content="steer"), mode=DeliveryMode.STEER)
     with pytest.raises(UnsupportedHarnessCapabilityError, match="abort"):
         await harness.abort()
     with pytest.raises(UnsupportedHarnessCapabilityError, match="pause/resume"):
         await harness.pause()
     with pytest.raises(UnsupportedHarnessCapabilityError, match="pause/resume"):
-        await harness.resume(query=ExternalHarnessInput(content="resume"))
+        await harness.resume(query=HarnessInput(content="resume"))
 
     with pytest.raises(UnsupportedHarnessCapabilityError, match="restore protocol checkpoints"):
         await harness.start(_context(resume_policy=ResumePolicy.REQUIRE_RESUME))
@@ -637,9 +637,9 @@ async def test_stop_interrupts_active_and_queued_turns(monkeypatch: pytest.Monke
     harness = DshHarness()
     await harness.start(_context())
 
-    active = await harness.send(ExternalHarnessInput(content="active"))
+    active = await harness.send(HarnessInput(content="active"))
     await _wait_for_thread_event(active_script.started)
-    queued = await harness.send(ExternalHarnessInput(content="queued"))
+    queued = await harness.send(HarnessInput(content="queued"))
     await harness.stop()
     events = [event async for event in harness.events()]
 
@@ -677,10 +677,10 @@ async def test_stop_waits_for_supervisor_queued_terminals_before_closing(
     harness = DshHarness()
     await harness.start(_context())
 
-    active = await harness.send(ExternalHarnessInput(content="active"))
+    active = await harness.send(HarnessInput(content="active"))
     await _wait_for_thread_event(active_script.started)
-    queued_one = await harness.send(ExternalHarnessInput(content="queued-1"))
-    queued_two = await harness.send(ExternalHarnessInput(content="queued-2"))
+    queued_one = await harness.send(HarnessInput(content="queued-1"))
+    queued_two = await harness.send(HarnessInput(content="queued-2"))
 
     abort_entered = asyncio.Event()
     release_abort = asyncio.Event()
@@ -740,9 +740,9 @@ async def test_event_cursor_is_single_consumer_and_close_is_idempotent(monkeypat
     await harness.start(_context())
 
     first = harness.events()
-    with pytest.raises(ExternalHarnessStateError, match="active consumer"):
+    with pytest.raises(HarnessStateError, match="active consumer"):
         harness.events()
-    with pytest.raises(ExternalHarnessStateError, match="active consumer"):
+    with pytest.raises(HarnessStateError, match="active consumer"):
         harness.turn_events()
 
     await first.aclose()

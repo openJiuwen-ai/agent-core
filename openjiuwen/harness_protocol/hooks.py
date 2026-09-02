@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.models import (
+from openjiuwen.harness_protocol.models import (
     JsonObject,
     JsonValue,
     freeze_json_object,
@@ -31,8 +31,8 @@ class ToolDecisionKind(str, Enum):
 class BeforePromptContext:
     """Context supplied before an input reaches the external agent."""
 
-    member_name: str
-    session_id: str | None
+    agent_name: str
+    provider_session_id: str | None
     turn_id: str | None
     prompt: str
 
@@ -51,8 +51,8 @@ class BeforePromptResult:
 class BeforeToolContext:
     """Context supplied before an external agent invokes a tool."""
 
-    member_name: str
-    session_id: str | None
+    agent_name: str
+    provider_session_id: str | None
     turn_id: str | None
     call_id: str
     tool_name: str
@@ -84,8 +84,8 @@ class ToolDecision:
 class AfterToolContext:
     """Context supplied after a successful or failed tool invocation."""
 
-    member_name: str
-    session_id: str | None
+    agent_name: str
+    provider_session_id: str | None
     turn_id: str | None
     call_id: str
     tool_name: str
@@ -114,8 +114,8 @@ class AfterToolResult:
 class StopHookContext:
     """Context supplied when a turn is about to stop."""
 
-    member_name: str
-    session_id: str | None
+    agent_name: str
+    provider_session_id: str | None
     turn_id: str | None
     reason: str | None = None
     metadata: JsonObject = field(default_factory=dict)

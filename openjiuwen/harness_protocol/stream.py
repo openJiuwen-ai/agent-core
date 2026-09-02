@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Protocol, Self, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.events import HarnessEvent
+from openjiuwen.harness_protocol.events import HarnessEvent
 
 
 @runtime_checkable

@@ -7,14 +7,14 @@ from __future__ import annotations
 
 from openjiuwen.agent_teams.external.dsh.config import DshHarnessConfig
 from openjiuwen.agent_teams.external.dsh.harness import DshHarness
-from openjiuwen.agent_teams.external.protocol import ExternalHarnessCard, JsonObject
+from openjiuwen.harness_protocol import HarnessCard, JsonObject
 
 
 class DshHarnessProvider:
     """Validate provider configuration and create an unstarted DSH harness."""
 
     @property
-    def card(self) -> ExternalHarnessCard:
+    def card(self) -> HarnessCard:
         return DshHarness.card
 
     @staticmethod

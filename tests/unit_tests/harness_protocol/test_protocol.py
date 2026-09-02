@@ -1,17 +1,21 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Contract-model tests for the third-party agent harness protocol."""
+"""Contract-model tests for the provider-neutral third-party harness protocol."""
 
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+import sys
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from typing import AsyncIterator
 
 import pytest
 
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     MAX_CHECKPOINT_BYTES,
     PROTOCOL_VERSION,
     AbortMode,
@@ -26,12 +30,13 @@ from openjiuwen.agent_teams.external.protocol import (
     EventBufferConfig,
     EventOverflowPolicy,
     EventRetention,
-    ExternalHarnessCard,
-    ExternalHarnessContext,
-    ExternalHarnessInput,
-    ExternalHarnessProtocol,
-    ExternalHarnessProtocolError,
-    ExternalHarnessProvider,
+    HarnessCard,
+    HarnessContext,
+    HarnessInput,
+    HarnessProtocol,
+    HarnessProtocolError,
+    HarnessProvider,
+    HarnessState,
     HarnessCapability,
     HarnessCheckpoint,
     HarnessCheckpointSink,
@@ -79,12 +84,11 @@ from openjiuwen.agent_teams.external.protocol import (
     harness_event_to_dict,
     validate_interaction_response,
 )
-from openjiuwen.agent_teams.harness import HarnessState
 
 
 class _Harness:
     event_buffer_config = EventBufferConfig(capacity=16)
-    card = ExternalHarnessCard(
+    card = HarnessCard(
         name="test-harness",
         implementation_version="1.0.0",
         capabilities=frozenset(
@@ -103,39 +107,39 @@ class _Harness:
             HarnessEvent(
                 sequence=1,
                 timestamp=0.0,
-                team_session_id="team-session-1",
-                member_agent_id="team-a_member-a",
+                host_session_id="team-session-1",
+                agent_id="team-a_member-a",
                 event=StateChangedEvent(old=HarnessState.IDLE, new=HarnessState.RUNNING),
             ),
             HarnessEvent(
                 sequence=2,
                 timestamp=0.1,
-                team_session_id="team-session-1",
-                member_agent_id="team-a_member-a",
+                host_session_id="team-session-1",
+                agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(kind=TurnEventKind.STARTED),
                 turn_id=turn_id,
             ),
             HarnessEvent(
                 sequence=3,
                 timestamp=0.2,
-                team_session_id="team-session-1",
-                member_agent_id="team-a_member-a",
+                host_session_id="team-session-1",
+                agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(kind=TurnEventKind.PAUSED),
                 turn_id=turn_id,
             ),
             HarnessEvent(
                 sequence=4,
                 timestamp=0.3,
-                team_session_id="team-session-1",
-                member_agent_id="team-a_member-a",
+                host_session_id="team-session-1",
+                agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(kind=TurnEventKind.RESUMED),
                 turn_id=turn_id,
             ),
             HarnessEvent(
                 sequence=5,
                 timestamp=0.4,
-                team_session_id="team-session-1",
-                member_agent_id="team-a_member-a",
+                host_session_id="team-session-1",
+                agent_id="team-a_member-a",
                 event=OutputEvent(
                     output_id="answer-1",
                     kind=OutputKind.TEXT,
@@ -147,8 +151,8 @@ class _Harness:
             HarnessEvent(
                 sequence=6,
                 timestamp=0.5,
-                team_session_id="team-session-1",
-                member_agent_id="team-a_member-a",
+                host_session_id="team-session-1",
+                agent_id="team-a_member-a",
                 event=TurnLifecycleEvent(
                     kind=TurnEventKind.FINISHED,
                     result=TurnResult(status=TurnStatus.COMPLETED, final_output="done"),
@@ -163,10 +167,10 @@ class _Harness:
         return self._state
 
     @property
-    def session_id(self) -> str | None:
+    def provider_session_id(self) -> str | None:
         return "provider-session"
 
-    async def start(self, context: ExternalHarnessContext) -> None:
+    async def start(self, context: HarnessContext) -> None:
         _ = context
         self._state = HarnessState.IDLE
 
@@ -202,7 +206,7 @@ class _Harness:
 
     async def send(
         self,
-        content: ExternalHarnessInput,
+        content: HarnessInput,
         *,
         mode: DeliveryMode = DeliveryMode.AUTO,
     ) -> SendReceipt:
@@ -215,18 +219,18 @@ class _Harness:
     async def pause(self) -> None:
         pass
 
-    async def resume(self, *, query: ExternalHarnessInput | None = None) -> None:
+    async def resume(self, *, query: HarnessInput | None = None) -> None:
         _ = query
 
     async def export_checkpoint(self) -> HarnessCheckpoint:
         return HarnessCheckpoint(
             provider="test",
             schema_version="1",
-            member_agent_id="team-a_member-a",
-            team_session_id="team-session-1",
+            agent_id="team-a_member-a",
+            host_session_id="team-session-1",
             checkpoint_id="checkpoint-1",
             sequence=1,
-            session_id="provider-session",
+            provider_session_id="provider-session",
         )
 
 
@@ -295,8 +299,8 @@ class _InteractionHandler:
 
 
 def test_structural_protocols_accept_complete_implementations() -> None:
-    assert isinstance(_Harness(), ExternalHarnessProtocol)
-    assert isinstance(_Provider(), ExternalHarnessProvider)
+    assert isinstance(_Harness(), HarnessProtocol)
+    assert isinstance(_Provider(), HarnessProvider)
     assert isinstance(_CheckpointSink(), HarnessCheckpointSink)
     assert isinstance(_InteractionHandler(), HarnessInteractionHandler)
 
@@ -318,14 +322,14 @@ async def test_event_cursor_supports_explicit_close() -> None:
 def test_card_is_immutable_and_reports_capabilities() -> None:
     card = _Harness.card
 
-    assert card.protocol_version == PROTOCOL_VERSION == "4.0"
+    assert card.protocol_version == PROTOCOL_VERSION == "1.0"
     assert card.supports(HarnessCapability.STEER)
     assert not card.supports(HarnessCapability.PAUSE_RESUME)
     card.validate_host(protocol_version=PROTOCOL_VERSION, capabilities=frozenset({HostCapability.TOOL_APPROVAL}))
 
-    with pytest.raises(ExternalHarnessProtocolError, match="missing required capabilities"):
+    with pytest.raises(HarnessProtocolError, match="missing required capabilities"):
         card.validate_host(protocol_version=PROTOCOL_VERSION, capabilities=frozenset())
-    with pytest.raises(ExternalHarnessProtocolError, match="is not supported"):
+    with pytest.raises(HarnessProtocolError, match="is not supported"):
         card.validate_host(protocol_version="99.0", capabilities=frozenset({HostCapability.TOOL_APPROVAL}))
 
     with pytest.raises(FrozenInstanceError):
@@ -342,19 +346,18 @@ def test_context_keeps_checkpoint_and_host_services() -> None:
     checkpoint = HarnessCheckpoint(
         provider="claude-code",
         schema_version="1",
-        member_agent_id="team-a_member-a",
-        team_session_id="session-a",
+        agent_id="team-a_member-a",
+        host_session_id="session-a",
         checkpoint_id="checkpoint-1",
         sequence=1,
         data={"conversation_id": "conversation-a"},
     )
     checkpoint_sink = _CheckpointSink()
     interactions = _InteractionHandler()
-    context = ExternalHarnessContext(
-        team_name="team-a",
-        member_name="member-a",
-        member_agent_id="team-a_member-a",
-        team_session_id="session-a",
+    context = HarnessContext(
+        agent_name="member-a",
+        agent_id="team-a_member-a",
+        host_session_id="session-a",
         system_prompt="You are a teammate.",
         host_capabilities=frozenset({HostCapability.TOOL_APPROVAL}),
         resume_policy=ResumePolicy.REQUIRE_RESUME,
@@ -362,6 +365,7 @@ def test_context_keeps_checkpoint_and_host_services() -> None:
         checkpoint_sink=checkpoint_sink,
         mcp_servers=(mcp,),
         interactions=interactions,
+        metadata={"team_name": "team-a"},
     )
 
     assert context.resume_policy is ResumePolicy.REQUIRE_RESUME
@@ -370,6 +374,7 @@ def test_context_keeps_checkpoint_and_host_services() -> None:
     assert context.interactions is interactions
     assert context.host_capabilities == frozenset({HostCapability.TOOL_APPROVAL})
     assert context.mcp_servers == (mcp,)
+    assert context.metadata == {"team_name": "team-a"}
 
 
 @pytest.mark.asyncio
@@ -386,8 +391,8 @@ async def test_checkpoint_sink_accepts_proactive_updates() -> None:
     stale = HarnessCheckpoint(
         provider="test",
         schema_version="1",
-        member_agent_id="team-a_member-a",
-        team_session_id="team-session-1",
+        agent_id="team-a_member-a",
+        host_session_id="team-session-1",
         checkpoint_id="checkpoint-stale",
         sequence=0,
     )
@@ -400,8 +405,8 @@ def test_checkpoint_requires_provider_version_and_member_scope() -> None:
         HarnessCheckpoint(
             provider="",
             schema_version="1",
-            member_agent_id="member-a",
-            team_session_id="session-a",
+            agent_id="member-a",
+            host_session_id="session-a",
             checkpoint_id="checkpoint-1",
             sequence=1,
         )
@@ -409,26 +414,26 @@ def test_checkpoint_requires_provider_version_and_member_scope() -> None:
         HarnessCheckpoint(
             provider="acme",
             schema_version="",
-            member_agent_id="member-a",
-            team_session_id="session-a",
+            agent_id="member-a",
+            host_session_id="session-a",
             checkpoint_id="checkpoint-1",
             sequence=1,
         )
-    with pytest.raises(ValueError, match="member_agent_id must not be empty"):
+    with pytest.raises(ValueError, match="agent_id must not be empty"):
         HarnessCheckpoint(
             provider="acme",
             schema_version="1",
-            member_agent_id="",
-            team_session_id="session-a",
+            agent_id="",
+            host_session_id="session-a",
             checkpoint_id="checkpoint-1",
             sequence=1,
         )
-    with pytest.raises(ValueError, match="team_session_id must not be empty"):
+    with pytest.raises(ValueError, match="host_session_id must not be empty"):
         HarnessCheckpoint(
             provider="acme",
             schema_version="1",
-            member_agent_id="member-a",
-            team_session_id="",
+            agent_id="member-a",
+            host_session_id="",
             checkpoint_id="checkpoint-1",
             sequence=1,
         )
@@ -436,8 +441,8 @@ def test_checkpoint_requires_provider_version_and_member_scope() -> None:
         HarnessCheckpoint(
             provider="acme",
             schema_version="1",
-            member_agent_id="member-a",
-            team_session_id="session-a",
+            agent_id="member-a",
+            host_session_id="session-a",
             checkpoint_id="",
             sequence=1,
         )
@@ -445,8 +450,8 @@ def test_checkpoint_requires_provider_version_and_member_scope() -> None:
         HarnessCheckpoint(
             provider="acme",
             schema_version="1",
-            member_agent_id="member-a",
-            team_session_id="session-a",
+            agent_id="member-a",
+            host_session_id="session-a",
             checkpoint_id="checkpoint-1",
             sequence=-1,
         )
@@ -457,8 +462,8 @@ def test_checkpoint_rejects_oversized_provider_data() -> None:
         HarnessCheckpoint(
             provider="acme",
             schema_version="1",
-            member_agent_id="member-a",
-            team_session_id="session-a",
+            agent_id="member-a",
+            host_session_id="session-a",
             checkpoint_id="checkpoint-1",
             sequence=1,
             data={"payload": "x" * MAX_CHECKPOINT_BYTES},
@@ -485,12 +490,12 @@ async def test_interaction_handler_returns_correlated_response_and_cancels() -> 
     assert request.turn_id == "turn-1"
     assert request.deadline_at == 2_000_000_000.0
 
-    with pytest.raises(ExternalHarnessProtocolError, match="requires ToolApprovalResponse"):
+    with pytest.raises(HarnessProtocolError, match="requires ToolApprovalResponse"):
         validate_interaction_response(
             request,
             UserInputResponse(request_id=request.request_id, status=InteractionResponseStatus.COMPLETED),
         )
-    with pytest.raises(ExternalHarnessProtocolError, match="does not match"):
+    with pytest.raises(HarnessProtocolError, match="does not match"):
         validate_interaction_response(
             request,
             ToolApprovalResponse(request_id="wrong-id", decision=ToolApprovalDecision.DENY),
@@ -499,8 +504,8 @@ async def test_interaction_handler_returns_correlated_response_and_cancels() -> 
 
 def test_hook_context_uses_turn_identity() -> None:
     context = BeforeToolContext(
-        member_name="member-a",
-        session_id="session-1",
+        agent_name="member-a",
+        provider_session_id="session-1",
         turn_id="turn-1",
         call_id="call-1",
         tool_name="shell",
@@ -513,7 +518,7 @@ def test_hook_context_uses_turn_identity() -> None:
 @pytest.mark.asyncio
 async def test_turn_events_is_finite_and_includes_terminal_event() -> None:
     harness = _Harness()
-    receipt = await harness.send(ExternalHarnessInput(content="hello"))
+    receipt = await harness.send(HarnessInput(content="hello"))
     response = [event async for event in harness.turn_events(receipt.turn_id)]
     remaining = [event async for event in harness.events()]
 
@@ -577,9 +582,9 @@ def test_event_envelope_carries_neutral_output_and_correlation() -> None:
         sequence=1,
         timestamp=1.5,
         event=payload,
-        team_session_id="team-session-1",
-        member_agent_id="team-a_member-a",
-        session_id="session-1",
+        host_session_id="team-session-1",
+        agent_id="team-a_member-a",
+        provider_session_id="session-1",
         turn_id="turn-1",
         correlation_id="message-1",
         causation_ids=("message-1", "steer-1"),
@@ -640,8 +645,8 @@ def test_turn_terminal_event_requires_matching_structured_result() -> None:
         sequence=2,
         timestamp=2.0,
         event=payload,
-        team_session_id="team-session-1",
-        member_agent_id="team-a_member-a",
+        host_session_id="team-session-1",
+        agent_id="team-a_member-a",
         turn_id="turn-1",
     )
 
@@ -659,8 +664,8 @@ def test_turn_terminal_event_requires_matching_structured_result() -> None:
             sequence=3,
             timestamp=3.0,
             event=payload,
-            team_session_id="team-session-1",
-            member_agent_id="team-a_member-a",
+            host_session_id="team-session-1",
+            agent_id="team-a_member-a",
         )
 
 
@@ -686,9 +691,9 @@ def test_provider_event_preserves_namespaced_extension_payload() -> None:
         sequence=4,
         timestamp=4.0,
         event=payload,
-        team_session_id="team-session-1",
-        member_agent_id="team-a_member-a",
-        session_id="thread-1",
+        host_session_id="team-session-1",
+        agent_id="team-a_member-a",
+        provider_session_id="thread-1",
     )
 
     assert event.event is payload
@@ -696,16 +701,16 @@ def test_provider_event_preserves_namespaced_extension_payload() -> None:
 
 def test_protocol_json_values_are_validated_and_frozen() -> None:
     content = {"parts": ["one", {"value": 2}]}
-    harness_input = ExternalHarnessInput(content=content, metadata={"source": "test"})
+    harness_input = HarnessInput(content=content, metadata={"source": "test"})
     content["parts"].append("mutated")
 
     assert harness_input.content == {"parts": ("one", {"value": 2})}
     with pytest.raises(TypeError):
         harness_input.metadata["source"] = "changed"  # type: ignore[index]
     with pytest.raises(ValueError, match="finite"):
-        ExternalHarnessInput(content=float("nan"))
+        HarnessInput(content=float("nan"))
     with pytest.raises(TypeError, match="not JSON-compatible"):
-        ExternalHarnessInput(content=object())  # type: ignore[arg-type]
+        HarnessInput(content=object())  # type: ignore[arg-type]
 
 
 def test_event_backpressure_retention_is_not_provider_selected() -> None:
@@ -740,9 +745,9 @@ def test_event_json_codec_round_trips_and_preserves_unknown_events() -> None:
             content={"answer": [1, 2]},
             operation=OutputOperation.FINAL,
         ),
-        team_session_id="team-session-1",
-        member_agent_id="team-a_member-a",
-        session_id="provider-session-1",
+        host_session_id="team-session-1",
+        agent_id="team-a_member-a",
+        provider_session_id="provider-session-1",
         turn_id="turn-1",
         correlation_id="trace-1",
         causation_ids=("message-1",),
@@ -750,6 +755,10 @@ def test_event_json_codec_round_trips_and_preserves_unknown_events() -> None:
 
     wire = harness_event_to_dict(event)
     json.dumps(wire)
+    assert wire["host_session_id"] == "team-session-1"
+    assert wire["agent_id"] == "team-a_member-a"
+    assert wire["provider_session_id"] == "provider-session-1"
+    assert {"team_session_id", "member_agent_id", "session_id"}.isdisjoint(wire)
     assert harness_event_from_dict(wire) == event
 
     wire["event_type"] = "future_event"
@@ -769,15 +778,63 @@ def test_event_scope_time_and_causation_are_validated() -> None:
             sequence=1,
             timestamp=float("inf"),
             event=payload,
-            team_session_id="team-session-1",
-            member_agent_id="member-a",
+            host_session_id="team-session-1",
+            agent_id="member-a",
         )
     with pytest.raises(ValueError, match="duplicates"):
         HarnessEvent(
             sequence=1,
             timestamp=1.0,
             event=payload,
-            team_session_id="team-session-1",
-            member_agent_id="member-a",
+            host_session_id="team-session-1",
+            agent_id="member-a",
             causation_ids=("message-1", "message-1"),
         )
+
+
+def test_public_import_is_independent_and_old_protocol_is_unavailable() -> None:
+    repository = Path(__file__).parents[3]
+    script = """
+import sys
+
+import openjiuwen.harness_protocol as protocol
+
+assert protocol.PROTOCOL_VERSION == "1.0"
+assert "openjiuwen.agent_teams" not in sys.modules
+assert "deepseek_harness" not in sys.modules
+assert not hasattr(protocol, "ExternalHarnessProtocol")
+
+try:
+    import openjiuwen.agent_teams.external.protocol  # noqa: F401
+except ModuleNotFoundError:
+    pass
+else:
+    raise AssertionError("the removed agent_teams.external.protocol path is still importable")
+"""
+    subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_harness_state_is_shared_with_agent_teams() -> None:
+    from openjiuwen.agent_teams.harness import HarnessState as TeamHarnessState
+
+    assert TeamHarnessState is HarnessState
+
+
+def test_public_protocol_uses_turn_and_step_terminology() -> None:
+    repository = Path(__file__).parents[3]
+    package_root = repository / "openjiuwen" / "harness_protocol"
+    public_sources = [
+        *package_root.glob("*.py"),
+        *package_root.glob("*.md"),
+        repository / "docs" / "dev" / "harness_protocol_integration.md",
+        repository / "openjiuwen" / "agent_teams" / "external" / "dsh" / "README.md",
+    ]
+
+    for source in public_sources:
+        assert re.search(r"\bIteration\b", source.read_text(encoding="utf-8")) is None, source

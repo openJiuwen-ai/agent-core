@@ -8,8 +8,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-from openjiuwen.agent_teams.external.protocol.errors import ExternalHarnessProtocolError
-from openjiuwen.agent_teams.external.protocol.events import (
+from openjiuwen.harness_protocol.errors import HarnessProtocolError
+from openjiuwen.harness_protocol.events import (
     DiagnosticEvent,
     DiagnosticLevel,
     HarnessEvent,
@@ -30,8 +30,8 @@ from openjiuwen.agent_teams.external.protocol.events import (
     UsageUpdatedEvent,
     UsageUpdateMode,
 )
-from openjiuwen.agent_teams.external.protocol.models import JsonObject, JsonValue, json_value_to_builtin
-from openjiuwen.agent_teams.external.protocol.results import (
+from openjiuwen.harness_protocol.models import JsonObject, JsonValue, json_value_to_builtin
+from openjiuwen.harness_protocol.results import (
     ContentBlock,
     MessageRole,
     MonetaryAmount,
@@ -43,7 +43,7 @@ from openjiuwen.agent_teams.external.protocol.results import (
     TurnTerminationKind,
     TurnUsage,
 )
-from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.harness_protocol.state import HarnessState
 
 EVENT_WIRE_SCHEMA_VERSION = "1"
 
@@ -285,7 +285,7 @@ def _payload_to_wire(event: HarnessEventPayload) -> tuple[str, str, dict[str, ob
         )
     if isinstance(event, UnknownEvent):
         return event.event_type, event.schema_version, cast(dict[str, object], _json(event.payload))
-    raise ExternalHarnessProtocolError(f"unsupported event payload type: {type(event).__name__}")
+    raise HarnessProtocolError(f"unsupported event payload type: {type(event).__name__}")
 
 
 def harness_event_to_dict(event: HarnessEvent) -> dict[str, object]:
@@ -297,9 +297,9 @@ def harness_event_to_dict(event: HarnessEvent) -> dict[str, object]:
         "event_type": event_type,
         "sequence": event.sequence,
         "timestamp": event.timestamp,
-        "team_session_id": event.team_session_id,
-        "member_agent_id": event.member_agent_id,
-        "session_id": event.session_id,
+        "host_session_id": event.host_session_id,
+        "agent_id": event.agent_id,
+        "provider_session_id": event.provider_session_id,
         "turn_id": event.turn_id,
         "item_id": event.item_id,
         "correlation_id": event.correlation_id,
@@ -382,21 +382,21 @@ def harness_event_from_dict(data: Mapping[str, object]) -> HarnessEvent:
             sequence=_integer(data, "sequence"),
             timestamp=_number(data, "timestamp"),
             event=_payload_from_wire(event_type, schema_version, payload),
-            team_session_id=_string(data, "team_session_id"),
-            member_agent_id=_string(data, "member_agent_id"),
-            session_id=_optional_string(data.get("session_id"), "session_id"),
+            host_session_id=_string(data, "host_session_id"),
+            agent_id=_string(data, "agent_id"),
+            provider_session_id=_optional_string(data.get("provider_session_id"), "provider_session_id"),
             turn_id=_optional_string(data.get("turn_id"), "turn_id"),
             item_id=_optional_string(data.get("item_id"), "item_id"),
             correlation_id=_optional_string(data.get("correlation_id"), "correlation_id"),
             causation_ids=causation_ids,
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise ExternalHarnessProtocolError(f"invalid harness event wire object: {exc}") from exc
+        raise HarnessProtocolError(f"invalid harness event wire object: {exc}") from exc
 
 
 def _mapping(value: object, field_name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-        raise ExternalHarnessProtocolError(f"{field_name} must be a JSON object")
+        raise HarnessProtocolError(f"{field_name} must be a JSON object")
     return cast(Mapping[str, object], value)
 
 
@@ -406,7 +406,7 @@ def _json_object(value: object, field_name: str) -> JsonObject:
 
 def _list(value: object, field_name: str) -> list[object]:
     if not isinstance(value, list):
-        raise ExternalHarnessProtocolError(f"{field_name} must be a JSON array")
+        raise HarnessProtocolError(f"{field_name} must be a JSON array")
     return value
 
 
@@ -416,7 +416,7 @@ def _string(data: Mapping[str, object], field_name: str) -> str:
 
 def _required_string(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value:
-        raise ExternalHarnessProtocolError(f"{field_name} must be a non-empty string")
+        raise HarnessProtocolError(f"{field_name} must be a non-empty string")
     return value
 
 
@@ -429,24 +429,24 @@ def _optional_string(value: object, field_name: str) -> str | None:
 def _integer(data: Mapping[str, object], field_name: str) -> int:
     value = data[field_name]
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ExternalHarnessProtocolError(f"{field_name} must be an integer")
+        raise HarnessProtocolError(f"{field_name} must be an integer")
     return value
 
 
 def _number(data: Mapping[str, object], field_name: str) -> float:
     value = data[field_name]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ExternalHarnessProtocolError(f"{field_name} must be a number")
+        raise HarnessProtocolError(f"{field_name} must be a number")
     return float(value)
 
 
 def _enum(enum_type, value: object, field_name: str):
     if not isinstance(value, str):
-        raise ExternalHarnessProtocolError(f"{field_name} must be a string enum value")
+        raise HarnessProtocolError(f"{field_name} must be a string enum value")
     try:
         return enum_type(value)
     except ValueError as exc:
-        raise ExternalHarnessProtocolError(f"unknown {field_name}: {value!r}") from exc
+        raise HarnessProtocolError(f"unknown {field_name}: {value!r}") from exc
 
 
 __all__ = ["EVENT_WIRE_SCHEMA_VERSION", "harness_event_from_dict", "harness_event_to_dict"]

@@ -10,13 +10,14 @@ import inspect
 import json
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
-    ExternalHarnessContext,
-    ExternalHarnessInput,
-    ExternalHarnessProtocol,
-    ExternalHarnessStateError,
+    HarnessContext,
+    HarnessInput,
+    HarnessProtocol,
+    HarnessState,
+    HarnessStateError,
     HarnessCapability,
     ItemEventKind,
     ItemLifecycleEvent,
@@ -30,7 +31,6 @@ from openjiuwen.agent_teams.external.protocol import (
     json_value_to_builtin,
 )
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
-from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
@@ -42,7 +42,7 @@ _EVENT_NAMESPACE = "external_harness_runtime"
 
 ContextFactory = Callable[
     [Any | None],
-    ExternalHarnessContext | Awaitable[ExternalHarnessContext],
+    HarnessContext | Awaitable[HarnessContext],
 ]
 
 
@@ -61,7 +61,7 @@ class TeamContextAwareRuntime(Protocol):
 
 
 class ExternalHarnessMemberRuntime:
-    """Project ``ExternalHarnessProtocol`` onto the internal team runtime seam.
+    """Project ``HarnessProtocol`` onto the internal team runtime seam.
 
     ``immediate=True`` is capability-aware: it starts normally from IDLE,
     steers only when the provider declares STEER, and otherwise becomes an
@@ -72,8 +72,8 @@ class ExternalHarnessMemberRuntime:
     def __init__(
         self,
         *,
-        harness: ExternalHarnessProtocol,
-        context: ExternalHarnessContext | ContextFactory,
+        harness: HarnessProtocol,
+        context: HarnessContext | ContextFactory,
         team_context_tracker: TeamContextTracker | None = None,
         stop_on_unsupported_force_abort: bool = False,
     ) -> None:
@@ -81,9 +81,9 @@ class ExternalHarnessMemberRuntime:
         self._context_source = context
         self._team_context_tracker = team_context_tracker
         self._stop_on_unsupported_force_abort = stop_on_unsupported_force_abort
-        if isinstance(context, ExternalHarnessContext):
-            self._member_name = context.member_name
-            self._member_agent_id = context.member_agent_id
+        if isinstance(context, HarnessContext):
+            self._member_name = context.agent_name
+            self._member_agent_id = context.agent_id
         else:
             self._member_name = harness.card.name
             self._member_agent_id = None
@@ -103,7 +103,7 @@ class ExternalHarnessMemberRuntime:
 
     @property
     def session_id(self) -> str | None:
-        return self._harness.session_id
+        return self._harness.provider_session_id
 
     async def start(self, *, team_session: Optional[Any] = None) -> None:
         """Start the provider cycle and its single continuous event pump."""
@@ -113,12 +113,12 @@ class ExternalHarnessMemberRuntime:
 
     async def _start(self, team_session: Any | None) -> None:
         if not self._stopped:
-            raise ExternalHarnessStateError("external harness member runtime is already started")
+            raise HarnessStateError("external harness member runtime is already started")
         async with self._context_delivery_lock:
             await self._finalize_member_session()
         context = await self._resolve_context(team_session)
-        self._member_name = context.member_name
-        self._member_agent_id = context.member_agent_id
+        self._member_name = context.agent_name
+        self._member_agent_id = context.agent_id
         await self._ensure_member_session(team_session)
         self._output_queue = asyncio.Queue()
         self._output_index = 0
@@ -140,16 +140,14 @@ class ExternalHarnessMemberRuntime:
         self._stopped = False
         self._event_task = asyncio.create_task(
             self._pump_events(cursor),
-            name=f"external_harness_events[{context.member_name}]",
+            name=f"external_harness_events[{context.agent_name}]",
         )
 
     async def stop(self) -> None:
         """Stop the provider and close the projected MemberRuntime output."""
 
         if asyncio.current_task() is self._event_task:
-            raise ExternalHarnessStateError(
-                "event callbacks must schedule external member runtime stop from a separate task"
-            )
+            raise HarnessStateError("event callbacks must schedule external member runtime stop from a separate task")
         async with self._lifecycle_lock:
             await self._stop()
 
@@ -190,7 +188,7 @@ class ExternalHarnessMemberRuntime:
             mode = self._delivery_mode(immediate=immediate)
             try:
                 receipt = await self._harness.send(external_input, mode=mode)
-            except ExternalHarnessStateError:
+            except HarnessStateError:
                 # A terminal event may win the race after a RUNNING snapshot but
                 # before provider STEER acceptance.  Retry only when the provider
                 # confirms it is now IDLE; a rejected command was not accepted.
@@ -207,7 +205,7 @@ class ExternalHarnessMemberRuntime:
             if not pending:
                 return
             mode = self._delivery_mode(immediate=False)
-            await self._harness.send(ExternalHarnessInput(content=pending), mode=mode)
+            await self._harness.send(HarnessInput(content=pending), mode=mode)
             await self._commit_team_context()
 
     async def abort(self, *, immediate: bool = False) -> None:
@@ -267,7 +265,7 @@ class ExternalHarnessMemberRuntime:
                         _EVENT_STATE,
                         old=payload.old,
                         new=payload.new,
-                        session_id=envelope.session_id,
+                        session_id=envelope.provider_session_id,
                     )
                 elif isinstance(payload, TurnLifecycleEvent):
                     kind = _member_round_kind(payload.kind)
@@ -366,15 +364,15 @@ class ExternalHarnessMemberRuntime:
             return DeliveryMode.STEER
         return DeliveryMode.FOLLOW_UP
 
-    async def _resolve_context(self, team_session: Any | None) -> ExternalHarnessContext:
+    async def _resolve_context(self, team_session: Any | None) -> HarnessContext:
         source = self._context_source
-        if isinstance(source, ExternalHarnessContext):
+        if isinstance(source, HarnessContext):
             return source
         context = source(team_session)
         if inspect.isawaitable(context):
             context = await context
-        if not isinstance(context, ExternalHarnessContext):
-            raise TypeError("external harness context factory must return ExternalHarnessContext")
+        if not isinstance(context, HarnessContext):
+            raise TypeError("external harness context factory must return HarnessContext")
         return context
 
     async def _ensure_member_session(self, team_session: Any | None) -> Any:
@@ -453,15 +451,15 @@ class ExternalHarnessMemberRuntime:
         return None
 
 
-def _external_input(content: Any) -> ExternalHarnessInput:
-    if isinstance(content, ExternalHarnessInput):
+def _external_input(content: Any) -> HarnessInput:
+    if isinstance(content, HarnessInput):
         return content
     if isinstance(content, (str, int, float, bool, list, tuple, dict)) or content is None:
-        return ExternalHarnessInput(content=content)
-    return ExternalHarnessInput(content=str(content))
+        return HarnessInput(content=content)
+    return HarnessInput(content=str(content))
 
 
-def _prepend_context(content: ExternalHarnessInput, prefix: str) -> ExternalHarnessInput:
+def _prepend_context(content: HarnessInput, prefix: str) -> HarnessInput:
     value = json_value_to_builtin(content.content)
     if isinstance(value, str):
         combined: Any = f"{prefix}\n\n{value}" if value else prefix
@@ -469,7 +467,7 @@ def _prepend_context(content: ExternalHarnessInput, prefix: str) -> ExternalHarn
         combined = [{"type": "text", "text": prefix}, *value]
     else:
         combined = f"{prefix}\n\n{json.dumps(value, ensure_ascii=False)}"
-    return ExternalHarnessInput(content=combined, metadata=content.metadata)
+    return HarnessInput(content=combined, metadata=content.metadata)
 
 
 def _member_round_kind(kind: TurnEventKind) -> str:

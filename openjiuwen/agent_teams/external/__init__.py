@@ -13,8 +13,8 @@ Public surface:
         hands to an external agent (db + transport + identity).
     ExternalTeamClient — opens db + messager from a descriptor and exposes
         the collaboration operations (send / view / claim / ... + inbox).
-    external.protocol — provider-neutral Python SPI for third-party agent
-        harnesses. DSH implements it under ``external.dsh``; existing
+    openjiuwen.harness_protocol — provider-neutral Python SPI for third-party
+        agent harnesses. DSH implements it under ``external.dsh``; existing
         Claude Code/Codex backends are not migrated yet.
     ExternalHarnessMemberRuntime — adapts that public SPI to the internal
         AgentTeam MemberRuntime behavior.

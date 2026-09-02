@@ -10,14 +10,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TypeAlias
 
-from openjiuwen.agent_teams.external.protocol.models import (
+from openjiuwen.harness_protocol.models import (
     JsonObject,
     JsonValue,
     freeze_json_object,
     freeze_json_value,
 )
-from openjiuwen.agent_teams.external.protocol.results import TurnResult, TurnStatus, TurnUsage
-from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.harness_protocol.results import TurnResult, TurnStatus, TurnUsage
+from openjiuwen.harness_protocol.state import HarnessState
 
 
 class TurnEventKind(str, Enum):
@@ -291,9 +291,9 @@ class HarnessEvent:
     sequence: int
     timestamp: float
     event: HarnessEventPayload
-    team_session_id: str
-    member_agent_id: str
-    session_id: str | None = None
+    host_session_id: str
+    agent_id: str
+    provider_session_id: str | None = None
     turn_id: str | None = None
     item_id: str | None = None
     correlation_id: str | None = None
@@ -304,9 +304,9 @@ class HarnessEvent:
             raise ValueError("event sequence must be non-negative")
         if not math.isfinite(self.timestamp) or self.timestamp < 0:
             raise ValueError("event timestamp must be a finite Unix timestamp")
-        if not self.team_session_id or not self.member_agent_id:
-            raise ValueError("event team_session_id and member_agent_id must not be empty")
-        optional_ids = (self.session_id, self.turn_id, self.item_id, self.correlation_id)
+        if not self.host_session_id or not self.agent_id:
+            raise ValueError("event host_session_id and agent_id must not be empty")
+        optional_ids = (self.provider_session_id, self.turn_id, self.item_id, self.correlation_id)
         if any(identifier == "" for identifier in optional_ids):
             raise ValueError("optional event IDs must not be empty strings")
         causation_ids = tuple(self.causation_ids)

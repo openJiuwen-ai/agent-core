@@ -1,7 +1,7 @@
 # DeepSeek Harness external adapter
 
 本包使用 DeepSeek Harness（DSH）Python SDK 实现
-`openjiuwen.agent_teams.external.protocol` 4.0。它负责 provider session、输入排队、DSH notification
+`openjiuwen.harness_protocol` 1.0。它负责 provider session、输入排队、DSH notification
 归一化和有界事件流；`external.member_runtime.ExternalHarnessMemberRuntime` 再把公共协议投影成
 AgentTeam 内部 `MemberRuntime` 行为。
 
@@ -11,7 +11,7 @@ AgentTeam 内部 `MemberRuntime` 行为。
 DshHarnessProvider
        |
        v
-   DshHarness  -- ExternalHarnessProtocol 4.0
+   DshHarness  -- HarnessProtocol 1.0
        |
        v
 ExternalHarnessMemberRuntime
@@ -30,7 +30,7 @@ DSH 以 prompt durable receipt 作为通知收集边界，并持续到整个 age
 DSH native turn/step 不改变该边界：
 
 - native turn 作为 `ProviderEvent` 保留；
-- native step 映射为 `item_type="iteration"` 的 `ItemLifecycleEvent`；
+- native step 映射为 `item_type="step"` 的 `ItemLifecycleEvent`；
 - assistant text/reasoning chunk 映射为 `OutputEvent` DELTA；assistant message 提供 FINAL；
 - tool call/result 映射为 tool item lifecycle；
 - usage 映射为 `UsageUpdatedEvent`；
@@ -53,7 +53,7 @@ adapter 会在接受输入时立即返回外部 `message_id`/`turn_id`。如果�
 | abort | 否 | graceful/force abort 均不声明 |
 | pause/resume | 否 | 不声明 warm/cold resume |
 | checkpoint | 否 | `export_checkpoint()` 返回 `None`；拒绝 checkpoint/REQUIRE_RESUME |
-| 动态 MCP | 否 | `ExternalHarnessContext.mcp_servers` 非空时启动失败 |
+| 动态 MCP | 否 | `HarnessContext.mcp_servers` 非空时启动失败 |
 | system prompt | 有条件 | 需要 custom Cordis composition 读取配置的环境变量 |
 
 DSH 可在 custom Cordis composition 中静态装配 MCP，但这不是协议层动态 MCP 支持。不要仅凭 DSH
@@ -90,13 +90,13 @@ uv pip install 'openjiuwen[dsh]'
 uv pip install -e /path/to/deepseek-harness/python/sdk
 ```
 
-缺少 SDK 时，start 会抛出 `ExternalHarnessError`，不会让公共 package import 失败——单元测试
+缺少 SDK 时，start 会抛出 `HarnessError`，不会让公共 package import 失败——单元测试
 因此不需要装 SDK，它们注入的是 fake `deepseek_harness` 模块。
 
 ## System prompt
 
 DSH Python SDK 没有原生 system-prompt 参数。要传入
-`ExternalHarnessContext.system_prompt`，必须同时配置：
+`HarnessContext.system_prompt`，必须同时配置：
 
 1. `DshHarnessConfig.system_prompt_env_var`；
 2. 一个显式读取该环境变量的 custom Cordis composition。
@@ -106,4 +106,4 @@ DSH Python SDK 没有原生 system-prompt 参数。要传入
 这个变量。
 
 完整程序化示例见
-[`docs/dev/agent_teams/external_harness_integration.md`](../../../../docs/dev/agent_teams/external_harness_integration.md)。
+[`docs/dev/harness_protocol_integration.md`](../../../../docs/dev/harness_protocol_integration.md)。

@@ -1,19 +1,20 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Translate DeepSeek Harness notifications into protocol v4 observations."""
+"""Translate DeepSeek Harness notifications into protocol v1 observations."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, TypedDict
 
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     ContentBlock,
     ItemEventKind,
     ItemLifecycleEvent,
     JsonObject,
+    JsonValue,
     MessageRole,
     OutputChannel,
     OutputEvent,
@@ -29,10 +30,25 @@ from openjiuwen.agent_teams.external.protocol import (
     TurnTerminationKind,
     TurnUsage,
     UsageUpdatedEvent,
+    freeze_json_object,
+    freeze_json_value,
 )
 
 _PROVIDER = "deepseek-harness"
 _SCHEMA_VERSION = "1"
+
+
+class _TurnResultCommon(TypedDict):
+    """Precisely typed keyword arguments shared by terminal results."""
+
+    messages: tuple[TurnMessage, ...]
+    final_output: JsonValue
+    stop_reason: str | None
+    usage: TurnUsage | None
+    started_at: float
+    completed_at: float
+    duration_ms: int
+    provider_data: JsonObject
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +57,7 @@ class MappedDshEvent:
 
     payload: Any
     item_id: str | None = None
-    session_id: str | None = None
+    provider_session_id: str | None = None
 
 
 class DshTurnAccumulator:
@@ -55,7 +71,7 @@ class DshTurnAccumulator:
         self._finalized_output_ids: set[str] = set()
         self._usage_by_step: dict[tuple[int, int], TurnUsage] = {}
         self._tool_names: dict[str, str] = {}
-        self.last_turn_reason: JsonObject | None = None
+        self.last_turn_reason: Mapping[str, object] | None = None
         self.native_turn_end_count = 0
         self.last_text_output = ""
 
@@ -74,7 +90,13 @@ class DshTurnAccumulator:
         if session_id != self.root_session_id:
             if raw_event.get("type") == "turn/end":
                 raw_event = _redact_turn_end_event(raw_event)
-            return [self._provider_event("child.session.event", {"event": raw_event}, session_id=session_id)]
+            return [
+                self._provider_event(
+                    "child.session.event",
+                    {"event": raw_event},
+                    provider_session_id=session_id,
+                )
+            ]
         return self._map_root_session_event(raw_event)
 
     def build_terminal_result(
@@ -94,13 +116,13 @@ class DshTurnAccumulator:
         final_response = getattr(run_result, "final_response", None)
         if not isinstance(final_response, str):
             final_response = self.last_text_output
-        provider_data: dict[str, object] = {
+        provider_data: dict[str, JsonValue] = {
             "native_turn_end_count": self.native_turn_end_count,
         }
         if finish_reason is not None:
             provider_data["native_finish_reason"] = finish_reason
 
-        common = {
+        common: _TurnResultCommon = {
             "messages": tuple(self.messages),
             "final_output": final_response,
             "stop_reason": finish_reason,
@@ -108,7 +130,7 @@ class DshTurnAccumulator:
             "started_at": started_at,
             "completed_at": completed_at,
             "duration_ms": duration_ms,
-            "provider_data": provider_data,
+            "provider_data": freeze_json_object(provider_data),
         }
         if finish_reason is None:
             return TurnEventKind.FAILED, TurnResult(
@@ -215,7 +237,7 @@ class DshTurnAccumulator:
 
     @property
     def total_usage(self) -> TurnUsage | None:
-        """Return cumulative usage across DSH model-call iterations."""
+        """Return cumulative usage across DSH model-call steps."""
 
         if not self._usage_by_step:
             return None
@@ -251,7 +273,7 @@ class DshTurnAccumulator:
         if event_type == "tool/result":
             return [self._map_tool_result(data)]
         if event_type in {"step/start", "step/end"}:
-            return [self._map_iteration(event_type, data)]
+            return [self._map_step(event_type, data)]
         if event_type == "turn/end":
             reason = _mapping(data.get("reason"))
             self.last_turn_reason = reason
@@ -365,15 +387,15 @@ class DshTurnAccumulator:
         if message_id not in self._message_ids:
             self._message_ids.add(message_id)
             source = _mapping(message.get("source"))
-            message_data: dict[str, object] = {"native_turn": native_turn, "native_step": native_step}
+            message_data: dict[str, JsonValue] = {"native_turn": native_turn, "native_step": native_step}
             if source:
-                message_data["source"] = source
+                message_data["source"] = freeze_json_object(source)
             self.messages.append(
                 TurnMessage(
                     message_id=message_id,
                     role=MessageRole.ASSISTANT,
                     content=tuple(blocks),
-                    data=message_data,
+                    data=freeze_json_object(message_data),
                 )
             )
         usage = _mapping(data.get("usage"))
@@ -389,12 +411,14 @@ class DshTurnAccumulator:
             ItemLifecycleEvent(
                 kind=ItemEventKind.STARTED,
                 item_type="tool",
-                data={
-                    "name": tool_name,
-                    "arguments": data.get("arguments"),
-                    "provider_turn": _int(data.get("turn")),
-                    "provider_step": _int(data.get("step")),
-                },
+                data=freeze_json_object(
+                    {
+                        "name": tool_name,
+                        "arguments": freeze_json_value(data.get("arguments")),
+                        "provider_turn": _int(data.get("turn")),
+                        "provider_step": _int(data.get("step")),
+                    }
+                ),
             ),
             item_id=call_id,
         )
@@ -404,33 +428,37 @@ class DshTurnAccumulator:
         source = _mapping(message.get("source"))
         call_id = _string(source.get("callId")) or _string(data.get("callId")) or "unknown-tool-call"
         content = message.get("content") if message else data.get("content")
-        item_data: dict[str, object] = {
+        item_data: dict[str, JsonValue] = {
             "tool_name": self._tool_names.get(call_id, "unknown"),
-            "result": content,
+            "result": freeze_json_value(content),
             "provider_turn": _int(data.get("turn")),
             "provider_step": _int(data.get("step")),
         }
         if data.get("error") is not None:
-            item_data["error"] = data.get("error")
+            item_data["error"] = freeze_json_value(data.get("error"))
         if data.get("meta") is not None:
-            item_data["meta"] = data.get("meta")
+            item_data["meta"] = freeze_json_value(data.get("meta"))
         return MappedDshEvent(
-            ItemLifecycleEvent(kind=ItemEventKind.COMPLETED, item_type="tool", data=item_data),
+            ItemLifecycleEvent(
+                kind=ItemEventKind.COMPLETED,
+                item_type="tool",
+                data=freeze_json_object(item_data),
+            ),
             item_id=call_id,
         )
 
     @staticmethod
-    def _map_iteration(event_type: str, data: Mapping[str, object]) -> MappedDshEvent:
+    def _map_step(event_type: str, data: Mapping[str, object]) -> MappedDshEvent:
         native_turn = _int(data.get("turn")) or 0
         native_step = _int(data.get("step")) or 0
         kind = ItemEventKind.STARTED if event_type == "step/start" else ItemEventKind.COMPLETED
         return MappedDshEvent(
             ItemLifecycleEvent(
                 kind=kind,
-                item_type="iteration",
+                item_type="step",
                 data={"provider_turn": native_turn, "provider_step": native_step},
             ),
-            item_id=f"dsh-iteration:{native_turn}:{native_step}",
+            item_id=f"dsh-step:{native_turn}:{native_step}",
         )
 
     @staticmethod
@@ -438,9 +466,9 @@ class DshTurnAccumulator:
         child_id = _string(payload.get("childSessionId")) or _string(payload.get("sessionId")) or "unknown-subagent"
         kind = ItemEventKind.STARTED if method == "subagent.started" else ItemEventKind.COMPLETED
         return MappedDshEvent(
-            ItemLifecycleEvent(kind=kind, item_type="subagent", data=payload),
+            ItemLifecycleEvent(kind=kind, item_type="subagent", data=freeze_json_object(payload)),
             item_id=child_id,
-            session_id=child_id,
+            provider_session_id=child_id,
         )
 
     def _update_usage(
@@ -462,16 +490,16 @@ class DshTurnAccumulator:
         event_type: str,
         payload: Mapping[str, object],
         *,
-        session_id: str | None = None,
+        provider_session_id: str | None = None,
     ) -> MappedDshEvent:
         return MappedDshEvent(
             ProviderEvent(
                 provider=_PROVIDER,
                 event_type=event_type,
                 schema_version=_SCHEMA_VERSION,
-                payload=payload,
+                payload=freeze_json_object(payload),
             ),
-            session_id=session_id,
+            provider_session_id=provider_session_id,
         )
 
     def _termination_kind(self, finish_reason: str) -> TurnTerminationKind:
@@ -518,7 +546,7 @@ def _notification_payload(notification: object) -> Mapping[str, object]:
 
 
 def _provider_payload(value: Mapping[str, object] | None) -> JsonObject:
-    return dict(value or {})
+    return freeze_json_object(value or {})
 
 
 def _safe_reason_data(reason: Mapping[str, object] | None) -> JsonObject:
@@ -526,18 +554,18 @@ def _safe_reason_data(reason: Mapping[str, object] | None) -> JsonObject:
 
     if not reason:
         return {}
-    result: dict[str, object] = {}
+    result: dict[str, JsonValue] = {}
     kind = _string(reason.get("kind"))
     if kind:
         result["kind"] = kind
     cause = _mapping(reason.get("reason"))
     if cause:
-        result["cause"] = {key: value for key, value in cause.items() if key != "message"}
+        result["cause"] = freeze_json_object({key: value for key, value in cause.items() if key != "message"})
     error = _mapping(reason.get("error"))
     if error:
-        result["error"] = {
-            key: value for key, value in error.items() if key in {"code", "status", "requestId", "retryable"}
-        }
+        result["error"] = freeze_json_object(
+            {key: value for key, value in error.items() if key in {"code", "status", "requestId", "retryable"}}
+        )
     return _provider_payload(result)
 
 
@@ -595,11 +623,11 @@ def _content_block(block_id: str, block_type: str, block: Mapping[str, object]) 
             kind="tool_call",
             content={
                 "name": _string(block.get("name")) or "unknown",
-                "arguments": block.get("arguments"),
+                "arguments": freeze_json_value(block.get("arguments")),
             },
             data={"call_id": _string(block.get("id")) or block_id},
         )
-    return ContentBlock(block_id=block_id, kind=block_type, content=dict(block))
+    return ContentBlock(block_id=block_id, kind=block_type, content=freeze_json_object(block))
 
 
 def _output_id(native_turn: int, native_step: int, content_index: int, channel: OutputChannel) -> str:

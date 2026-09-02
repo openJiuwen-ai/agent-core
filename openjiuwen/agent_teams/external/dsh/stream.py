@@ -8,10 +8,10 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     TERMINAL_TURN_EVENT_KINDS,
-    ExternalHarnessProtocolError,
-    ExternalHarnessStateError,
+    HarnessProtocolError,
+    HarnessStateError,
     HarnessEvent,
     TurnEventKind,
     TurnLifecycleEvent,
@@ -74,7 +74,7 @@ class BoundedEventBuffer:
         """Acquire the single consumer lease and return a cursor."""
 
         if self._consumer_active:
-            raise ExternalHarnessStateError("the DSH observation stream already has an active consumer")
+            raise HarnessStateError("the DSH observation stream already has an active consumer")
         self._consumer_active = True
         return DshEventCursor(self, expected_turn_id=turn_id, per_turn=per_turn)
 
@@ -120,9 +120,7 @@ class DshEventCursor:
                 selected_turn_id = self._selected_turn_id
                 await self.aclose()
                 if self._per_turn and selected_turn_id is not None:
-                    raise ExternalHarnessProtocolError(
-                        f"DSH event stream closed before turn {selected_turn_id!r} terminated"
-                    )
+                    raise HarnessProtocolError(f"DSH event stream closed before turn {selected_turn_id!r} terminated")
                 raise StopAsyncIteration
 
             if not self._per_turn:
@@ -136,14 +134,14 @@ class DshEventCursor:
                     continue
                 if self._expected_turn_id is not None and event.turn_id != self._expected_turn_id:
                     await self.aclose()
-                    raise ExternalHarnessStateError(
+                    raise HarnessStateError(
                         "requested DSH turn is not the next unconsumed turn: "
                         f"expected {self._expected_turn_id!r}, found {event.turn_id!r}"
                     )
                 consumed = await self._buffer.get()
                 if consumed is None:
                     await self.aclose()
-                    raise ExternalHarnessProtocolError("DSH event stream changed while selecting a turn")
+                    raise HarnessProtocolError("DSH event stream changed while selecting a turn")
                 event = consumed
                 payload = event.event
                 self._selected_turn_id = event.turn_id

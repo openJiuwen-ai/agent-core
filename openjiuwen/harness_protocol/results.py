@@ -9,7 +9,7 @@ import math
 from dataclasses import dataclass, field
 from enum import Enum
 
-from openjiuwen.agent_teams.external.protocol.models import (
+from openjiuwen.harness_protocol.models import (
     JsonObject,
     JsonValue,
     freeze_json_object,

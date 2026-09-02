@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""ExternalHarnessProtocol implementation backed by the DSH Python SDK."""
+"""HarnessProtocol implementation backed by the DSH Python SDK."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from openjiuwen.agent_teams.external.dsh.config import DshHarnessConfig
 from openjiuwen.agent_teams.external.dsh.mapping import (
@@ -21,18 +21,19 @@ from openjiuwen.agent_teams.external.dsh.mapping import (
     build_queued_stop_result,
 )
 from openjiuwen.agent_teams.external.dsh.stream import BoundedEventBuffer
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     AbortMode,
     DeliveryMode,
     EventBufferConfig,
     EventOverflowPolicy,
-    ExternalHarnessCard,
-    ExternalHarnessContext,
-    ExternalHarnessError,
-    ExternalHarnessInput,
-    ExternalHarnessProtocolError,
-    ExternalHarnessStateError,
+    HarnessCard,
+    HarnessContext,
+    HarnessError,
+    HarnessInput,
+    HarnessProtocolError,
+    HarnessState,
+    HarnessStateError,
     HarnessCheckpoint,
     HarnessEvent,
     HarnessEventCursor,
@@ -44,7 +45,6 @@ from openjiuwen.agent_teams.external.protocol import (
     UnsupportedHarnessCapabilityError,
     json_value_to_builtin,
 )
-from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.core.common.logging import team_logger
 
 ADAPTER_VERSION = "0.1.0"
@@ -52,14 +52,14 @@ ADAPTER_VERSION = "0.1.0"
 
 @dataclass(frozen=True, slots=True)
 class _PendingTurn:
-    content: ExternalHarnessInput
+    content: HarnessInput
     message_id: str
     turn_id: str
     accepted_mode: DeliveryMode
 
 
 class DshHarness:
-    """Adapt one reusable DeepSeek Harness session to protocol v4.
+    """Adapt one reusable DeepSeek Harness session to protocol v1.
 
     Each OpenJiuwen Turn is one serialized DSH activity interval: input
     acceptance through the next whole-agent idle.  DSH's own ``turn`` and
@@ -67,7 +67,7 @@ class DshHarness:
     this public Turn boundary.
     """
 
-    card = ExternalHarnessCard(
+    card = HarnessCard(
         name="deepseek-harness",
         implementation_version=ADAPTER_VERSION,
         protocol_version=PROTOCOL_VERSION,
@@ -81,7 +81,7 @@ class DshHarness:
             overflow=EventOverflowPolicy.BLOCK,
         )
         self._state = HarnessState.TERMINATED
-        self._context: ExternalHarnessContext | None = None
+        self._context: HarnessContext | None = None
         self._session_id: str | None = None
         self._event_buffer: BoundedEventBuffer | None = None
         self._sequence = 0
@@ -101,19 +101,19 @@ class DshHarness:
         return self._state
 
     @property
-    def session_id(self) -> str | None:
+    def provider_session_id(self) -> str | None:
         return self._session_id
 
     @property
     def event_buffer_config(self) -> EventBufferConfig:
         return self._buffer_config
 
-    async def start(self, context: ExternalHarnessContext) -> None:
+    async def start(self, context: HarnessContext) -> None:
         """Start a fresh DSH subprocess/session cycle and settle in IDLE."""
 
         async with self._lifecycle_lock:
             if self._cycle_started:
-                raise ExternalHarnessStateError("DeepSeek Harness adapter is already started")
+                raise HarnessStateError("DeepSeek Harness adapter is already started")
             self._validate_context(context)
             # Resolve the optional dependency and pure SDK options before
             # opening an observable protocol cycle.  A missing SDK must not
@@ -139,7 +139,7 @@ class DshHarness:
                 # SDK transport errors may include a subprocess stderr tail;
                 # do not retain it as an exception cause because context.env
                 # and provider credentials are explicitly sensitive.
-                raise ExternalHarnessError("failed to start the DeepSeek Harness SDK runtime") from None
+                raise HarnessError("failed to start the DeepSeek Harness SDK runtime") from None
             except BaseException:
                 # Cancellation and interpreter shutdown must still roll the
                 # partially started runtime back before they propagate.
@@ -184,7 +184,7 @@ class DshHarness:
 
         buffer = self._event_buffer
         if buffer is None:
-            raise ExternalHarnessStateError("DeepSeek Harness adapter has no active or completed event cycle")
+            raise HarnessStateError("DeepSeek Harness adapter has no active or completed event cycle")
         return buffer.cursor()
 
     def turn_events(self, turn_id: str | None = None) -> HarnessEventCursor:
@@ -192,12 +192,12 @@ class DshHarness:
 
         buffer = self._event_buffer
         if buffer is None:
-            raise ExternalHarnessStateError("DeepSeek Harness adapter has no active or completed event cycle")
+            raise HarnessStateError("DeepSeek Harness adapter has no active or completed event cycle")
         return buffer.cursor(turn_id=turn_id, per_turn=True)
 
     async def send(
         self,
-        content: ExternalHarnessInput,
+        content: HarnessInput,
         *,
         mode: DeliveryMode = DeliveryMode.AUTO,
     ) -> SendReceipt:
@@ -207,7 +207,7 @@ class DshHarness:
             raise UnsupportedHarnessCapabilityError("the DSH Python SDK does not support steering")
         async with self._command_lock:
             if not self._cycle_started or self._stopping or self._state is HarnessState.TERMINATED:
-                raise ExternalHarnessStateError("cannot send to a stopped DeepSeek Harness adapter")
+                raise HarnessStateError("cannot send to a stopped DeepSeek Harness adapter")
             has_earlier_turn = self._active_turn is not None or bool(self._pending)
             accepted_mode = DeliveryMode.FOLLOW_UP if mode is DeliveryMode.AUTO and has_earlier_turn else mode
             pending = _PendingTurn(
@@ -241,7 +241,7 @@ class DshHarness:
 
         raise UnsupportedHarnessCapabilityError("the DSH Python SDK does not support pause/resume")
 
-    async def resume(self, *, query: ExternalHarnessInput | None = None) -> None:
+    async def resume(self, *, query: HarnessInput | None = None) -> None:
         """Reject resume because the current DSH wire protocol has no resume."""
 
         _ = query
@@ -311,7 +311,7 @@ class DshHarness:
         session = self._sdk_session
         session_id = self._session_id
         if session is None or session_id is None:
-            raise ExternalHarnessProtocolError("DSH session disappeared during an active cycle")
+            raise HarnessProtocolError("DSH session disappeared during an active cycle")
         accumulator = DshTurnAccumulator(turn_id=turn.turn_id, root_session_id=session_id)
         loop = asyncio.get_running_loop()
 
@@ -409,16 +409,18 @@ class DshHarness:
         context = self._context
         buffer = self._event_buffer
         if context is None or buffer is None:
-            raise ExternalHarnessProtocolError("cannot emit a DSH event outside an active cycle")
+            raise HarnessProtocolError("cannot emit a DSH event outside an active cycle")
         self._sequence += 1
         await buffer.put(
             HarnessEvent(
                 sequence=self._sequence,
                 timestamp=time.time(),
                 event=payload,
-                team_session_id=context.team_session_id,
-                member_agent_id=context.member_agent_id,
-                session_id=(mapped.session_id if mapped and mapped.session_id else self._session_id),
+                host_session_id=context.host_session_id,
+                agent_id=context.agent_id,
+                provider_session_id=(
+                    mapped.provider_session_id if mapped and mapped.provider_session_id else self._session_id
+                ),
                 turn_id=turn.turn_id if turn else None,
                 item_id=mapped.item_id if mapped else None,
                 correlation_id=turn.message_id if turn else None,
@@ -426,7 +428,7 @@ class DshHarness:
             )
         )
 
-    def _validate_context(self, context: ExternalHarnessContext) -> None:
+    def _validate_context(self, context: HarnessContext) -> None:
         self.card.validate_host(
             protocol_version=context.protocol_version,
             capabilities=context.host_capabilities,
@@ -435,15 +437,15 @@ class DshHarness:
             raise UnsupportedHarnessCapabilityError("the DSH Python SDK cannot restore protocol checkpoints")
         if context.mcp_servers:
             raise UnsupportedHarnessCapabilityError(
-                "the DSH Python SDK cannot dynamically install ExternalHarnessContext MCP servers"
+                "the DSH Python SDK cannot dynamically install HarnessContext MCP servers"
             )
         if context.system_prompt and self._config.system_prompt_env_var is None:
-            raise ExternalHarnessProtocolError(
+            raise HarnessProtocolError(
                 "the DSH Python SDK has no native system-prompt parameter; configure system_prompt_env_var "
                 "and a Cordis composition that consumes it"
             )
 
-    def _sdk_options(self, context: ExternalHarnessContext) -> dict[str, object]:
+    def _sdk_options(self, context: HarnessContext) -> dict[str, object]:
         env = dict(self._config.env)
         env.update(context.env)
         if context.system_prompt and self._config.system_prompt_env_var is not None:
@@ -471,7 +473,7 @@ def _load_dsh_sdk() -> Any:
     try:
         return importlib.import_module("deepseek_harness")
     except ImportError as exc:
-        raise ExternalHarnessError(
+        raise HarnessError(
             "deepseek-harness-sdk is required for the DSH adapter; install the optional SDK before start()"
         ) from exc
 
@@ -483,12 +485,12 @@ async def _close_sdk_quietly(sdk_harness: Any) -> None:
         team_logger.debug("DSH SDK close failed during teardown: {}", exc)
 
 
-def _to_dsh_input(content: ExternalHarnessInput) -> str | list[dict[str, object]]:
+def _to_dsh_input(content: HarnessInput) -> str | list[dict[str, object]]:
     value = json_value_to_builtin(content.content)
     if isinstance(value, str):
         return value
     if isinstance(value, list) and all(isinstance(block, dict) for block in value):
-        return value
+        return cast(list[dict[str, object]], value)
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 

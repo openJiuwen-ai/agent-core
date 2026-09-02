@@ -7,23 +7,23 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.checkpoints import HarnessCheckpoint
-from openjiuwen.agent_teams.external.protocol.events import EventBufferConfig
-from openjiuwen.agent_teams.external.protocol.models import (
+from openjiuwen.harness_protocol.checkpoints import HarnessCheckpoint
+from openjiuwen.harness_protocol.events import EventBufferConfig
+from openjiuwen.harness_protocol.models import (
     AbortMode,
     DeliveryMode,
-    ExternalHarnessCard,
-    ExternalHarnessContext,
-    ExternalHarnessInput,
+    HarnessCard,
+    HarnessContext,
+    HarnessInput,
     JsonObject,
     SendReceipt,
 )
-from openjiuwen.agent_teams.external.protocol.stream import HarnessEventCursor
-from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.harness_protocol.state import HarnessState
+from openjiuwen.harness_protocol.stream import HarnessEventCursor
 
 
 @runtime_checkable
-class ExternalHarnessProtocol(Protocol):
+class HarnessProtocol(Protocol):
     """Concurrent-safe harness behavior required of a third-party agent.
 
     ``events`` and ``turn_events`` are alternative views over one logical
@@ -32,7 +32,7 @@ class ExternalHarnessProtocol(Protocol):
     """
 
     @property
-    def card(self) -> ExternalHarnessCard:
+    def card(self) -> HarnessCard:
         """Return static implementation identity and declared capabilities."""
         ...
 
@@ -42,7 +42,7 @@ class ExternalHarnessProtocol(Protocol):
         ...
 
     @property
-    def session_id(self) -> str | None:
+    def provider_session_id(self) -> str | None:
         """Return the provider-native session id once one is available."""
         ...
 
@@ -51,7 +51,7 @@ class ExternalHarnessProtocol(Protocol):
         """Return the bounded backpressure policy used for observations."""
         ...
 
-    async def start(self, context: ExternalHarnessContext) -> None:
+    async def start(self, context: HarnessContext) -> None:
         """Validate host compatibility, start a cycle, and settle in IDLE."""
         ...
 
@@ -67,7 +67,7 @@ class ExternalHarnessProtocol(Protocol):
 
         The iterator remains open across turn boundaries and ends only when
         the current ``start``/``stop`` cycle closes. Implementations must raise
-        ``ExternalHarnessStateError`` if another observation iterator is
+        ``HarnessStateError`` if another observation iterator is
         already active.
         """
         ...
@@ -83,14 +83,14 @@ class ExternalHarnessProtocol(Protocol):
         and ``RESUMED`` do not end the iterator. This is a serialized
         convenience view over the same logical channel as ``events``; the two
         methods must not be consumed concurrently. Implementations must reject
-        a second active iterator with ``ExternalHarnessStateError`` rather than
+        a second active iterator with ``HarnessStateError`` rather than
         racing it.
         """
         ...
 
     async def send(
         self,
-        content: ExternalHarnessInput,
+        content: HarnessInput,
         *,
         mode: DeliveryMode = DeliveryMode.AUTO,
     ) -> SendReceipt:
@@ -110,12 +110,12 @@ class ExternalHarnessProtocol(Protocol):
         """Pause the active turn when ``PAUSE_RESUME`` is supported."""
         ...
 
-    async def resume(self, *, query: ExternalHarnessInput | None = None) -> None:
+    async def resume(self, *, query: HarnessInput | None = None) -> None:
         """Resume a warm or checkpoint-restored paused turn."""
         ...
 
     async def export_checkpoint(self) -> HarnessCheckpoint | None:
-        """Return the latest versioned provider snapshot for this member.
+        """Return the latest versioned provider snapshot for this agent.
 
         Implementations should also publish recoverable checkpoints through
         ``context.checkpoint_sink`` when provider state changes materially.
@@ -124,17 +124,17 @@ class ExternalHarnessProtocol(Protocol):
 
 
 @runtime_checkable
-class ExternalHarnessProvider(Protocol):
-    """Factory SPI used to discover and construct external harnesses."""
+class HarnessProvider(Protocol):
+    """Factory SPI used to discover and construct third-party harnesses."""
 
     @property
-    def card(self) -> ExternalHarnessCard:
+    def card(self) -> HarnessCard:
         """Return metadata for harnesses created by this provider."""
         ...
 
-    def create(self, config: JsonObject) -> ExternalHarnessProtocol:
+    def create(self, config: JsonObject) -> HarnessProtocol:
         """Validate provider configuration and create an unstarted harness."""
         ...
 
 
-__all__ = ["ExternalHarnessProtocol", "ExternalHarnessProvider"]
+__all__ = ["HarnessProtocol", "HarnessProvider"]

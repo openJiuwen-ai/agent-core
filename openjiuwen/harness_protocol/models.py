@@ -11,15 +11,15 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping, Protocol, TypeAlias, runtime_checkable
 
-from openjiuwen.agent_teams.external.protocol.errors import ExternalHarnessProtocolError
+from openjiuwen.harness_protocol.errors import HarnessProtocolError
 
 if TYPE_CHECKING:
-    from openjiuwen.agent_teams.external.protocol.checkpoints import HarnessCheckpoint, HarnessCheckpointSink
-    from openjiuwen.agent_teams.external.protocol.hooks import HarnessHookDispatcher
-    from openjiuwen.agent_teams.external.protocol.interactions import HarnessInteractionHandler
-    from openjiuwen.agent_teams.external.protocol.tools import ExternalToolGateway, McpServerConfig
+    from openjiuwen.harness_protocol.checkpoints import HarnessCheckpoint, HarnessCheckpointSink
+    from openjiuwen.harness_protocol.hooks import HarnessHookDispatcher
+    from openjiuwen.harness_protocol.interactions import HarnessInteractionHandler
+    from openjiuwen.harness_protocol.tools import McpServerConfig, ToolGateway
 
-PROTOCOL_VERSION = "4.0"
+PROTOCOL_VERSION = "1.0"
 
 JsonValue: TypeAlias = (
     str | int | float | bool | None | list["JsonValue"] | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
@@ -129,7 +129,7 @@ class ResumePolicy(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class ExternalHarnessCard:
+class HarnessCard:
     """Static identity and capability metadata for one harness implementation."""
 
     name: str
@@ -167,15 +167,15 @@ class ExternalHarnessCard:
         """Fail fast when a host cannot satisfy this provider's requirements."""
 
         if protocol_version not in self.compatible_protocol_versions:
-            raise ExternalHarnessProtocolError(f"host protocol {protocol_version!r} is not supported by {self.name!r}")
+            raise HarnessProtocolError(f"host protocol {protocol_version!r} is not supported by {self.name!r}")
         missing = self.required_host_capabilities - capabilities
         if missing:
             names = ", ".join(sorted(capability.value for capability in missing))
-            raise ExternalHarnessProtocolError(f"host is missing required capabilities: {names}")
+            raise HarnessProtocolError(f"host is missing required capabilities: {names}")
 
 
 @dataclass(frozen=True, slots=True)
-class ExternalHarnessInput:
+class HarnessInput:
     """One input accepted by an external harness."""
 
     content: JsonValue
@@ -202,8 +202,8 @@ class SendReceipt:
 
 
 @dataclass(frozen=True, slots=True)
-class ExternalHarnessContext:
-    """Per-member runtime context supplied when an external harness starts.
+class HarnessContext:
+    """Per-agent runtime context supplied when a third-party harness starts.
 
     ``env`` may contain secrets and must not be logged or copied into events.
     ``checkpoint`` is opaque to OpenJiuwen; only the owning implementation may
@@ -211,10 +211,9 @@ class ExternalHarnessContext:
     must not be replaced by observation events.
     """
 
-    team_name: str
-    member_name: str
-    member_agent_id: str
-    team_session_id: str
+    agent_name: str
+    agent_id: str
+    host_session_id: str
     system_prompt: str
     protocol_version: str = PROTOCOL_VERSION
     host_capabilities: frozenset[HostCapability] = field(default_factory=frozenset)
@@ -223,7 +222,7 @@ class ExternalHarnessContext:
     env: Mapping[str, str] = field(default_factory=dict)
     checkpoint: "HarnessCheckpoint | None" = None
     checkpoint_sink: "HarnessCheckpointSink | None" = None
-    tools: "ExternalToolGateway | None" = None
+    tools: "ToolGateway | None" = None
     mcp_servers: tuple["McpServerConfig", ...] = ()
     hooks: "HarnessHookDispatcher | None" = None
     interactions: "HarnessInteractionHandler | None" = None
@@ -232,17 +231,16 @@ class ExternalHarnessContext:
 
     def __post_init__(self) -> None:
         required = {
-            "team_name": self.team_name,
-            "member_name": self.member_name,
-            "member_agent_id": self.member_agent_id,
-            "team_session_id": self.team_session_id,
+            "agent_name": self.agent_name,
+            "agent_id": self.agent_id,
+            "host_session_id": self.host_session_id,
             "protocol_version": self.protocol_version,
         }
         for field_name, value in required.items():
             if not value:
-                raise ValueError(f"external harness context {field_name} must not be empty")
+                raise ValueError(f"harness context {field_name} must not be empty")
         if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
-            raise TypeError("external harness context env must map strings to strings")
+            raise TypeError("harness context env must map strings to strings")
         object.__setattr__(self, "host_capabilities", frozenset(self.host_capabilities))
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
         object.__setattr__(self, "mcp_servers", tuple(self.mcp_servers))
@@ -253,9 +251,9 @@ __all__ = [
     "PROTOCOL_VERSION",
     "AbortMode",
     "DeliveryMode",
-    "ExternalHarnessCard",
-    "ExternalHarnessContext",
-    "ExternalHarnessInput",
+    "HarnessCard",
+    "HarnessContext",
+    "HarnessInput",
     "HarnessCapability",
     "HarnessTelemetry",
     "HostCapability",
