@@ -1457,6 +1457,27 @@ class OtelCallbackHandler:
             if value and not (skip_existing and dst_attr in state.span.attributes):
                 state.span.set_attribute(dst_attr, value)
 
+        provider_cost = (
+            float(getattr(usage, "input_cost", 0) or 0)
+            + float(getattr(usage, "output_cost", 0) or 0)
+            + float(getattr(usage, "total_cost", 0) or 0)
+        )
+        span_attributes = getattr(state.span, "attributes", None) or {}
+        model = str(
+            getattr(usage, "model_name", "")
+            or span_attributes.get(GEN_AI_RESPONSE_MODEL)
+            or ""
+        )
+        if not provider_cost and model:
+            from openjiuwen.extensions.observability.cost_tracker import estimate_cost
+            prompt = int(span_attributes.get(GEN_AI_USAGE_INPUT_TOKENS, 0) or 0)
+            completion = int(span_attributes.get(GEN_AI_USAGE_OUTPUT_TOKENS, 0) or 0)
+            est = estimate_cost(model, prompt, completion)
+            if est.known and not (skip_existing and OJ_GEN_AI_USAGE_TOTAL_COST in span_attributes):
+                state.span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, est.input_cost)
+                state.span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, est.output_cost)
+                state.span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, est.total_cost)
+
         raw_output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         has_chunk_window = (
             state.first_chunk_ns is not None
