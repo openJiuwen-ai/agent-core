@@ -449,7 +449,8 @@ def read_tree_file(task_id: str) -> Optional[TreeResponse]:
     payload = _read(task_id, NODES_FILE)
     if not payload:
         return None
-    nodes = [_node_from(raw) for raw in payload.get("nodes") or []]
+    nodes = [node for node in (_node_from(raw) for raw in payload.get("nodes") or [])
+             if node is not None]
     by_id = {node.node_id: node for node in nodes}
     return TreeResponse(nodes=nodes, depth=_depth_of(nodes, by_id),
                         iteration=max((node.iteration for node in nodes), default=0))
@@ -466,10 +467,42 @@ def _depth_of(nodes: list[RsiTreeNode], by_id: dict[str, RsiTreeNode]) -> int:
     return deepest
 
 
-def _node_from(raw: dict[str, Any]) -> RsiTreeNode:
-    data = dict(raw)
-    data["changes"] = [RsiChange(**change) for change in data.get("changes") or []]
-    return RsiTreeNode(**data)
+def _node_from(raw: dict[str, Any]) -> Optional[RsiTreeNode]:
+    """One persisted node, rebuilt field by field.
+
+    Not `RsiTreeNode(**raw)`, for the same reason `_artifact_ref_from` exists:
+    a nodes.json written by another build may carry a key this dataclass no
+    longer has, and `**raw` turns that drift into a TypeError that takes the
+    whole tree with it — `get_tree` is a correctness channel (AgentServer's
+    restart compensation reads it), so it degrading to a partial tree beats it
+    raising.
+    """
+    if not isinstance(raw, dict):
+        return None
+    changes = [
+        RsiChange(
+            group=str(change.get("group") or "program"),
+            operation=str(change.get("operation") or ""),
+            function=change.get("function"),
+            target=change.get("target"),
+            summary=str(change.get("summary") or ""),
+        )
+        for change in raw.get("changes") or [] if isinstance(change, dict)
+    ]
+    return RsiTreeNode(
+        node_id=str(raw.get("node_id") or ""),
+        iteration=int(raw.get("iteration") or 0),
+        parent_id=raw.get("parent_id"),
+        type=str(raw.get("type") or "candidate"),
+        adopted=bool(raw.get("adopted")),
+        score=raw.get("score"),
+        summary=raw.get("summary"),
+        snapshot_artifact_id=raw.get("snapshot_artifact_id"),
+        reason=raw.get("reason"),
+        failure_class=raw.get("failure_class"),
+        changes=changes,
+        extra=raw.get("extra") if isinstance(raw.get("extra"), dict) else {},
+    )
 
 
 def _read(task_id: str, name: str) -> Optional[dict[str, Any]]:

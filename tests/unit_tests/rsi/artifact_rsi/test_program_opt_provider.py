@@ -1545,3 +1545,36 @@ def test_read_report_survives_schema_drift_in_the_persisted_file(tmp_path: Path)
     assert report.status == "completed"
     assert len(report.artifact_index) == 1                     # corrupt entry skipped
     assert report.artifact_index[0].artifact_id == "A-program:task-001:abcd"
+
+
+def test_get_tree_survives_schema_drift_in_the_persisted_file(tmp_path: Path) -> None:
+    """Same hole `read_report` had, in the tree's clothing: `RsiTreeNode(**raw)`
+    turned one unknown key into a TypeError that took the whole tree — and
+    `get_tree` is a correctness channel, the one AgentServer's restart
+    compensation reads."""
+    import json as jsonlib
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    state_module.register_run_dir("task-001", run_dir)
+    (run_dir / "nodes.json").write_text(jsonlib.dumps({"nodes": [
+        {"node_id": "artifact:task-001:node:0", "iteration": 0, "parent_id": None,
+         "type": "root", "adopted": True, "score": 0.25, "summary": "seed",
+         "snapshot_artifact_id": None, "reason": None, "failure_class": None,
+         "changes": [], "extra": {"program": {}},
+         "field_from_the_future": 1},                       # unknown key
+        {"node_id": "artifact:task-001:node:1", "iteration": 1,
+         "parent_id": "artifact:task-001:node:0", "type": "adopted",
+         "adopted": True, "score": 0.4,
+         "changes": [{"group": "program", "operation": "modify",
+                      "summary": "…", "obsolete_change_key": True}],
+         "extra": {}},                                      # 缺了若干可选键
+        "not-a-mapping",
+    ]}), encoding="utf-8")
+
+    tree = PuctProgramArtifactProvider().get_tree("task-001")
+
+    assert len(tree.nodes) == 2                             # corrupt entry skipped
+    assert tree.depth == 1
+    assert tree.nodes[1].parent_id == "artifact:task-001:node:0"
+    assert tree.nodes[1].changes[0].operation == "modify"
