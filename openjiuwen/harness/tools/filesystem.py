@@ -30,6 +30,7 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.rg_binary import resolve_rg_binary
 
 
 _FILE_EDIT_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -1933,9 +1934,10 @@ class GrepTool(Tool):
             case_insensitive: bool,
             file_type: Optional[str],
             multiline: bool,
+            rg_path: str = "rg",
     ) -> str:
         parts: List[str] = [
-            "rg",
+            self._shell_quote(rg_path),
             "--hidden",
             "--color=never",
             "--max-columns",
@@ -2078,7 +2080,10 @@ class GrepTool(Tool):
         if multiline:
             return None
 
-        parts: List[str] = ["grep", "-R", "--binary-files=without-match"]
+        # Use POSIX ERE (-E) so patterns with (, |, etc. match rg semantics
+        # better than basic regex. Always pass the pattern via -e and end
+        # options with -- so values like "--config" are never treated as flags.
+        parts: List[str] = ["grep", "-R", "-E", "--binary-files=without-match"]
 
         for directory in self.VCS_DIRECTORIES_TO_EXCLUDE:
             parts.append(f"--exclude-dir={self._shell_quote(directory)}")
@@ -2107,7 +2112,12 @@ class GrepTool(Tool):
         for glob_pattern in self._split_glob_patterns(glob):
             parts.append(f"--include={self._shell_quote(glob_pattern)}")
 
-        parts.extend([self._shell_quote(pattern), self._shell_quote(path)])
+        parts.extend([
+            "-e",
+            self._shell_quote(pattern),
+            "--",
+            self._shell_quote(path),
+        ])
         return " ".join(parts)
 
     @staticmethod
@@ -2243,7 +2253,8 @@ class GrepTool(Tool):
             context_c = None
             context = None
 
-        if shutil.which("rg"):
+        rg_bin = resolve_rg_binary()
+        if rg_bin:
             cmd = self._build_rg_command(
                 pattern=str(pattern),
                 path=path,
@@ -2257,6 +2268,7 @@ class GrepTool(Tool):
                 case_insensitive=ignore_case,
                 file_type=file_type,
                 multiline=multiline,
+                rg_path=rg_bin,
             )
         elif os.name == "nt":
             if file_type:
