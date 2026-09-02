@@ -585,6 +585,7 @@ class PuctProgramArtifactProvider:
             entrypoint=entrypoint,
             run_dir=str(run_dir),
             options=dict(card.get("options") or {}),
+            reply_format=str(card.get("reply_format") or "").strip() or "files",
             # From the scorecard when it says, else `RunSpec`'s default. The
             # model's own request config is opaque here — the contract hands
             # over an initialized instance, not its settings — so the per-run
@@ -617,6 +618,7 @@ def _prompt_templates(run_dir: Path) -> dict[str, str]:
     the whole budget.
     """
     from openjiuwen.rsi.artifact_rsi.program_opt.prompt import (
+        MUTATION_REQUIRED,
         MUTATION_SLOTS,
         PRIOR_SLOTS,
         REPAIR_SLOTS,
@@ -624,13 +626,17 @@ def _prompt_templates(run_dir: Path) -> dict[str, str]:
     )
 
     out = {"mutation": "", "repair": "", "prior": ""}
-    vocabularies = {"mutation": MUTATION_SLOTS, "repair": REPAIR_SLOTS, "prior": PRIOR_SLOTS}
-    for name, allowed in vocabularies.items():
+    vocabularies = {
+        "mutation": (MUTATION_SLOTS, MUTATION_REQUIRED),
+        "repair": (REPAIR_SLOTS, frozenset()),
+        "prior": (PRIOR_SLOTS, frozenset()),
+    }
+    for name, (allowed, required) in vocabularies.items():
         path = run_dir / "prompts" / f"{name}.md"
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8")
-        validate_template(f"prompts/{name}.md", text, allowed)
+        validate_template(f"prompts/{name}.md", text, allowed, required)
         out[name] = text
     return out
 

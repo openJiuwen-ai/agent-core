@@ -115,6 +115,10 @@ class RunSpec:
     #: Restored rather than re-measured so a resumed run's scores stay on the
     #: same scale as the ones already written down.
     resume_baseline: dict[str, float] = field(default_factory=dict)
+    #: Which output protocol the model is asked for, and read back with. The
+    #: prompt wording and the parser travel together under this name; an unknown
+    #: one is refused before the run rather than at the first expansion.
+    reply_format: str = "files"
     #: Engine-specific knobs (``c_puct``, ``prior_exponent``, …). Unknown keys ignored.
     options: dict[str, Any] = field(default_factory=dict)
 

@@ -1737,7 +1737,7 @@ def test_a_tasks_mutation_template_reaches_the_real_prompt(tmp_path: Path) -> No
         mutation_template=(
             "TASK SAYS: ${statement}\n"
             'a JSON example the model should copy: {"bins": [1, 2]}\n'
-            "PROGRAM:\n${parent_code}\n"
+            "PROGRAM:\n${parent_code}\n${reply_format}\n"
         ),
     )
     code = "def pack():\n    return [[0]]\n"
@@ -1830,6 +1830,129 @@ def _domain_recording_prompts(seen: list[str]):
     )
 
 
+def test_a_template_that_never_says_how_to_reply_is_refused_at_load(tmp_path: Path) -> None:
+    """The output protocol is the one section a task cannot silently drop.
+
+    A template may say anything it likes — except leave out how the model must
+    answer. The reader on the other side expects one shape; a reply in another
+    is treated as the program itself (deliberately, so junk still becomes a
+    node), so it lands in the candidate file as a syntax error, scores -inf,
+    and the next expansion does the same. The whole budget burns with every
+    step reporting success. Refused here, where it is still a sentence.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import _prompt_templates
+
+    prompts = tmp_path / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "mutation.md").write_text(
+        "Rewrite ${parent_code} to score better.", encoding="utf-8")
+
+    with pytest.raises(ValueError) as refusal:
+        _prompt_templates(tmp_path)
+
+    assert "${reply_format}" in str(refusal.value)
+    assert "budget" in str(refusal.value)
+
+
+def test_the_instructions_and_the_reader_are_one_thing() -> None:
+    """Every shipped protocol round-trips: a reply written to its own
+    instructions is read back by its own parser.
+
+    This is the property the pairing exists for — the two halves used to live
+    in different modules and could drift apart with nothing failing.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import format_for
+
+    program = "def solve():\n    return 42\n"
+    replies = {
+        "files": f"```python name=candidate.py\n{program}```",
+        "tagged": f"<PROGRAM>\n{program}</PROGRAM>\n<CHANGE_SUMMARY>made it 42</CHANGE_SUMMARY>",
+    }
+    for name, reply in replies.items():
+        shape = format_for(name)
+        assert shape.carries_program(reply), name
+        files, summary = shape.parse(reply, {"candidate.py": "x = 1\n"}, "candidate.py")
+        assert files["candidate.py"].strip() == program.strip(), name
+    # And the summary the tagged shape asks for is the summary it reads.
+    _files, summary = format_for("tagged").parse(replies["tagged"], {}, "candidate.py")
+    assert summary == "made it 42"
+
+
+def test_a_reply_in_the_other_protocol_is_not_mistaken_for_a_program() -> None:
+    """The failure this whole seam exists to stop, pinned from the other side:
+    `tagged` output handed to the `files` reader used to become the candidate,
+    tags and all."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import format_for
+
+    tagged = "<PROGRAM>\ndef solve():\n    return 42\n</PROGRAM>"
+    files, _summary = format_for("files").parse(tagged, {"candidate.py": "x = 1\n"}, "candidate.py")
+
+    # It still becomes *something* — dropping it would shrink the rank
+    # denominator — but the tags prove it was never the declared shape, which
+    # is why the load-time refusal above is the guard that matters.
+    assert "<PROGRAM>" in files["candidate.py"]
+    assert format_for("tagged").parse(tagged, {"candidate.py": "x = 1\n"},
+                                      "candidate.py")[0]["candidate.py"] == "def solve():\n    return 42"
+
+
+def test_an_unknown_protocol_is_refused_by_name_before_the_budget(tmp_path: Path) -> None:
+    from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import ReplyFormatError, format_for
+
+    with pytest.raises(ReplyFormatError) as refusal:
+        format_for("search_replace_diff")
+    assert "files" in str(refusal.value) and "tagged" in str(refusal.value)
+
+    # And the name reaches the spec from the task's own scorecard.
+    provider = PuctProgramArtifactProvider()
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), reply_format="tagged")
+    assert provider._spec_for(request, resumed=False).reply_format == "tagged"
+
+
+def test_the_engine_reads_replies_with_the_protocol_the_spec_named() -> None:
+    """The dispatch itself, driven through the engine's own closure.
+
+    The tests above prove each protocol is internally consistent and that the
+    name reaches the spec — neither notices if the engine ignores the name and
+    reads every reply as `files`. This one hands the real `_model_call` closure
+    a `tagged` reply under a `tagged` spec and asks what the candidate became.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine, _Usage
+
+    reply = ("<PROGRAM>\ndef solve():\n    return 42\n</PROGRAM>\n"
+             "<CHANGE_SUMMARY>answered 42</CHANGE_SUMMARY>")
+
+    def factory(spec, sink, should_stop):
+        def complete(prompt, on_usage=None, on_failure=None):
+            return reply
+        return complete
+
+    engine = PuctEngine(completion_factory=factory, evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=1,
+        scorecard_hash="sha256:x", scorecard={"criteria": []},
+        statement="", baseline_code="x = 1\n", script="s",
+        reply_format="tagged",
+    )
+
+    class _Reporter:
+        def note_empty(self, iteration): pass
+        def note_failure(self, iteration, reason): pass
+
+    call = engine._model_call(spec, _Usage(), _Reporter(), lambda: False, PuctTreeStub())
+    code, summary, _promise = call("prompt", 1, "x = 1\n")
+
+    assert "def solve()" in code and "<PROGRAM>" not in code
+    assert summary == "answered 42"
+
+
+class PuctTreeStub:
+    """Only what `_model_call` touches when the search is not stopping."""
+
+    candidate_limit = None
+
+
 def test_an_unknown_placeholder_is_refused_by_name_at_load(tmp_path: Path) -> None:
     """`safe_substitute` would leave `${statment}` in the prompt as literal
     text, and the model would optimise against a prompt with a hole in it for
@@ -1839,7 +1962,8 @@ def test_an_unknown_placeholder_is_refused_by_name_at_load(tmp_path: Path) -> No
 
     prompts = tmp_path / "prompts"
     prompts.mkdir(parents=True)
-    (prompts / "mutation.md").write_text("goal: ${statment}", encoding="utf-8")
+    (prompts / "mutation.md").write_text(
+        "goal: ${statment}\n${reply_format}", encoding="utf-8")
 
     with pytest.raises(ValueError) as refusal:
         _prompt_templates(tmp_path)
@@ -1854,13 +1978,14 @@ def test_prompt_templates_land_on_the_spec(tmp_path: Path) -> None:
     _scorecard(Path(request.run_dir))
     prompts = Path(request.run_dir) / "prompts"
     prompts.mkdir(parents=True)
-    (prompts / "mutation.md").write_text("M ${statement}", encoding="utf-8")
+    (prompts / "mutation.md").write_text(
+        "M ${statement}\n${reply_format}", encoding="utf-8")
     (prompts / "repair.md").write_text("R ${error}\n${code}", encoding="utf-8")
     (prompts / "prior.md").write_text("${prompt}\nRate it.", encoding="utf-8")
 
     spec = provider._spec_for(request, resumed=False)
 
-    assert spec.mutation_template == "M ${statement}"
+    assert spec.mutation_template == "M ${statement}\n${reply_format}"
     assert spec.repair_template.startswith("R ")
     assert spec.prior_template.endswith("Rate it.")
 

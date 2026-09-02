@@ -114,6 +114,7 @@ def script_domain(
     baseline_code: str = "",
     entrypoint: str = CANDIDATE_FILE,
     candidate_timeout: float = 120.0,
+    reply_format: str = "",
     baseline: Optional[MutableMapping[str, float]] = None,
     mutation_template: str = "",
 ) -> Domain:
@@ -194,6 +195,11 @@ def script_domain(
         return max(0.0, min(1.0, float(value)))
 
     contract = _contract_of(script)
+    # Resolved once, and by name: an unknown protocol is a refusal here rather
+    # than a run whose every reply is unreadable.
+    from .reply_format import format_for
+
+    _reply_instructions = format_for(reply_format or None).instructions
 
     def prompt(program: Program, best_score: Optional[float] = None) -> str:
         return mutation_prompt(
@@ -205,6 +211,7 @@ def script_domain(
             best_score=best_score,
             recent=(),
             script_contract=contract,
+            reply_format=_reply_instructions,
             feedback=program.error,
             template=mutation_template,
         )

@@ -53,14 +53,13 @@ from .events import Emit
 from .logging_config import get_logger
 from .program import (
     bundle,
-    extract_files,
     files_of,
     read_promise,
-    reply_carries_program,
 )
 from .prompt import repair_prompt, with_promise_request
 from .execution import EvaluationExecution
 from .provision import CANDIDATE_RUNTIME
+from .reply_format import ReplyFormatError, format_for
 from .restore import RestoreError, restore_baseline, restore_tree
 from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
 from .script_domain import script_domain
@@ -417,6 +416,10 @@ class PuctEngine:
         except CompletionUnavailable as error:
             raise _Refusal(f"this search has no access to a model: {error}") from error
 
+        # The prompt asked for this shape; this is the reader that understands
+        # it. Resolved once per search, from the same name.
+        reply_format = format_for(spec.reply_format)
+
         # Asked for only when the prior will read it: the request costs a line
         # of prompt and a line of reply, and a run at the upstream default
         # ignores the number, so asking anyway would be paying for nothing.
@@ -439,14 +442,14 @@ class PuctEngine:
             # Merged onto the parent's tree: the reply carries only the
             # files it changed, so the candidate is the parent's program
             # with those files replaced.
-            files, summary = extract_files(
+            files, summary = reply_format.parse(
                 reply, files_of(parent_code, spec.entrypoint), spec.entrypoint,
             )
             # A reply that proposed nothing merges to the parent, which
             # would be a valid program costing a full evaluation to learn
             # the parent's own score. Empty is what it is, and what the rest
             # of the engine already knows how to record.
-            code = bundle(files) if reply_carries_program(reply) else ""
+            code = bundle(files) if reply_format.carries_program(reply) else ""
             if not _has_content(code, spec):
                 reporter.note_empty(iteration)
             # Read from the same reply, so the prior costs no extra call.
@@ -889,6 +892,10 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
     # pip is reached only when something is actually missing.
     from .provision import ProvisionError, ensure, import_name, probe_imports, validate_names
 
+    try:
+        format_for(spec.reply_format)
+    except ReplyFormatError as error:
+        raise _Refusal(str(error)) from error
     try:
         wanted = validate_names(spec.packages or [])
     except ProvisionError as error:

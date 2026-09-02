@@ -104,13 +104,21 @@ change that part."""
 #: text is full of code, and code is full of braces.
 MUTATION_SLOTS = frozenset({
     "statement", "contract", "parent_code", "parent_score", "best_score",
-    "feedback", "history", "imports", "how_to_change",
+    "feedback", "history", "imports", "how_to_change", "reply_format",
 })
+
+#: Slots a task's template cannot leave out. `reply_format` states the output
+#: protocol, and it is the one section whose absence is not a worse prompt but
+#: a broken run: the reader on the other side expects that shape, and a reply
+#: in any other becomes a candidate that cannot compile — silently, for the
+#: whole budget. Refused at load, where it is still a sentence.
+MUTATION_REQUIRED = frozenset({"reply_format"})
 REPAIR_SLOTS = frozenset({"code", "error", "imports"})
 PRIOR_SLOTS = frozenset({"prompt"})
 
 
-def validate_template(name: str, template: str, allowed: frozenset) -> None:
+def validate_template(name: str, template: str, allowed: frozenset,
+                      required: frozenset = frozenset()) -> None:
     """Refuse an unknown placeholder at load time, by name.
 
     `safe_substitute` would leave a typo like `${statment}` in the prompt as
@@ -119,7 +127,16 @@ def validate_template(name: str, template: str, allowed: frozenset) -> None:
     author wrote; the load is the one moment a mistake in it can still be a
     sentence instead of a wasted budget.
     """
-    unknown = sorted(set(string.Template(template).get_identifiers()) - allowed)
+    used = set(string.Template(template).get_identifiers())
+    absent = sorted(required - used)
+    if absent:
+        raise ValueError(
+            f"prompt template {name!r} leaves out "
+            f"{', '.join('${' + a + '}' for a in absent)}, which states how the model must "
+            "reply; without it the reply cannot be read back and every candidate fails to "
+            "compile, for the whole budget"
+        )
+    unknown = sorted(used - allowed)
     if unknown:
         raise ValueError(
             f"prompt template {name!r} uses unknown placeholder(s) "
@@ -132,6 +149,12 @@ def _render(template: str, slots: dict) -> str:
     return string.Template(template).safe_substitute(slots)
 
 
+def _format_instructions_default() -> str:
+    from .reply_format import format_for
+
+    return format_for(None).instructions
+
+
 def mutation_prompt(
     *,
     statement: str,
@@ -142,6 +165,7 @@ def mutation_prompt(
     best_score: Optional[float],
     recent: Sequence[str] = (),
     script_contract: str = "",
+    reply_format: str = "",
     feedback: str = "",
     template: str = "",
 ) -> str:
@@ -167,6 +191,9 @@ def mutation_prompt(
             history=_history(recent),
             imports=available_imports_text(),
             how_to_change=_HOW_TO_CHANGE,
+            # The protocol's own sentences, so the prompt and the reader on the
+            # other side are never two independent statements of one thing.
+            reply_format=reply_format or _format_instructions_default(),
         )
         if template.strip():
             return _render(template, slots)
@@ -211,17 +238,7 @@ Its score: {parent_score}. Best so far: {best_score}.
 1. Write to the interface the evaluator requires — every function name and
    argument exactly as it expects them.
 2. You may import only: {imports}.
-3. Output **only the files you changed**, each as its own fenced block labelled
-   with its path, exactly like the listing above:
-
-   ```python name=path/to/file.py
-   ...the complete new contents of that file...
-   ```
-
-   A file you do not output is kept as it is. Every block you do output replaces
-   that whole file, so give complete contents — never a patch or a fragment.
-   A path that is not in the listing creates a new file. To remove one, put
-   `DELETE path/to/file.py` on a line of its own.
+3. {reply_format}
 4. The first line of the module docstring of a file you changed says in one
    sentence what changed.
 
