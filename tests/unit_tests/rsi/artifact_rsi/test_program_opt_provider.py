@@ -1512,3 +1512,36 @@ def test_the_engine_wires_the_task_templates_not_the_defaults() -> None:
     assert "mutation_template=spec.mutation_template" in source
     assert "template=spec.repair_template" in source
     assert "with_promise_request(prompt, spec.prior_template)" in source
+
+
+def test_read_report_survives_schema_drift_in_the_persisted_file(tmp_path: Path) -> None:
+    """A report written by another build may carry keys this one no longer
+    has — this branch has removed persisted fields twice already. Drift must
+    degrade to a best-effort report, not turn every future read into a
+    TypeError."""
+    import json as jsonlib
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    state_module.register_run_dir("task-001", run_dir)
+    (run_dir / "report.json").write_text(jsonlib.dumps({
+        "task_id": "task-001",
+        "status": "completed",
+        "best_node_id": "artifact:task-001:node:1",
+        "usage": {"tokens": {"input": 1, "output": 2}},        # removed field
+        "artifact_index": [
+            {"artifact_id": "A-program:task-001:abcd", "node_id": None,
+             "name": "candidate-1", "kind": "program_snapshot",
+             "path": str(run_dir / "candidates" / "abcd"), "sha256": "abcd",
+             "download_url": None,
+             "legacy_field_nobody_remembers": True},           # unknown key
+            "not-a-mapping",                                    # corrupt entry
+        ],
+        "summary": None,
+    }), encoding="utf-8")
+
+    report = PuctProgramArtifactProvider().read_report("task-001")
+
+    assert report.status == "completed"
+    assert len(report.artifact_index) == 1                     # corrupt entry skipped
+    assert report.artifact_index[0].artifact_id == "A-program:task-001:abcd"

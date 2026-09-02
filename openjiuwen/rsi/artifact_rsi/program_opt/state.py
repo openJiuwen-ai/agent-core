@@ -415,8 +415,33 @@ def read_report_file(task_id: str) -> Optional[EngineReport]:
         task_id=payload.get("task_id", task_id),
         status=payload.get("status", "created"),
         best_node_id=payload.get("best_node_id"),
-        artifact_index=[ArtifactRef(**ref) for ref in payload.get("artifact_index") or []],
+        artifact_index=[ref for ref in
+                        (_artifact_ref_from(raw) for raw in payload.get("artifact_index") or [])
+                        if ref is not None],
         summary=payload.get("summary"),
+    )
+
+
+def _artifact_ref_from(raw: Any) -> Optional[ArtifactRef]:
+    """One persisted artifact entry, rebuilt field by field.
+
+    Not `ArtifactRef(**raw)`: a report written by an older or newer build may
+    carry a key this dataclass no longer has — this branch has removed
+    persisted fields twice already — and `**raw` turns that drift into a
+    TypeError that breaks every future `read_report` of the task. Unknown keys
+    are dropped, missing optional ones default, and an entry that is not a
+    mapping at all is skipped rather than allowed to take the report with it.
+    """
+    if not isinstance(raw, dict):
+        return None
+    return ArtifactRef(
+        artifact_id=str(raw.get("artifact_id") or ""),
+        node_id=raw.get("node_id"),
+        name=str(raw.get("name") or ""),
+        kind=str(raw.get("kind") or "program_snapshot"),
+        path=str(raw.get("path") or ""),
+        sha256=raw.get("sha256"),
+        download_url=raw.get("download_url"),
     )
 
 
