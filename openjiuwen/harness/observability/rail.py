@@ -28,6 +28,7 @@ contribution belongs to.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -89,6 +90,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
+    OJ_TEAM_ID,
     OJ_TOOL_AUTHORITATIVE,
     OJ_TOOL_RESOURCE_ID,
     OJ_TOOL_TYPE,
@@ -544,6 +546,7 @@ class AgentObservabilityRail(DeepAgentRail):
             if inputs is not None:
                 output = getattr(inputs, "result", None)
 
+            self._emit_iteration_metrics(scope, exception=ctx.exception)
             scope.close(output=output, exception=ctx.exception)
 
             # Iteration close restores current to None (parent_agent_span is
@@ -563,6 +566,28 @@ class AgentObservabilityRail(DeepAgentRail):
             )
         except Exception as exc:
             logger.warning("[AgentObservability] after_task_iteration failed: %s", exc)
+
+    def _emit_iteration_metrics(self, scope, exception: BaseException | None) -> None:
+        from openjiuwen.extensions.observability import metrics as _metrics
+
+        rec = _metrics.get_metrics_recorder()
+        if rec is None:
+            return
+        span = scope.span
+        if not span.is_recording():
+            return
+        attributes = getattr(span, "attributes", None) or {}
+        agent_id = str(attributes.get(DA_AGENT_NAME) or "unknown")
+        team_id = str(attributes.get(OJ_TEAM_ID) or "")
+        start_time = getattr(span, "start_time", None)
+        duration_ms = (
+            (time.time_ns() - start_time) / 1_000_000.0
+            if start_time is not None
+            else 0.0
+        )
+        rec.record_iteration_duration(agent_id, team_id, duration_ms)
+        if exception is not None:
+            rec.record_iteration_error(agent_id, team_id)
 
     # ------------------------------------------------------------------
     # Invoke-level fallback (covers single-round agents and sub-agents)
