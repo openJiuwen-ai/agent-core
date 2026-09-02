@@ -103,6 +103,11 @@ class BuildContext:
             platform does not allocate one (members bound to a project, or a
             base ``BuildContext`` with no platform convention).
         """
+        # A base BuildContext has no platform work-directory convention; only
+        # the platform subclass allocates one. Reference self so static analysis
+        # treats this as an instance method, matching the overridden signature.
+        if self.team_outputs_dir is None:
+            return None
         return None
 
 
