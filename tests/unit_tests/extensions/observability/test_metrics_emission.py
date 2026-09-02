@@ -9,6 +9,7 @@ from opentelemetry.trace import set_span_in_context
 from openjiuwen.extensions.observability import metrics as metrics_mod
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.semconv import OJ_GEN_AI_USAGE_TOTAL_COST
 
 
 class _FakeMetricsRecorder:
@@ -75,3 +76,59 @@ async def test_tool_error_emits_error_metric(monkeypatch):
     assert ("bash", "agent-1") in rec.tool_error_calls
     assert rec.tool_duration_calls
     provider.shutdown()
+
+
+def test_cost_estimated_when_provider_omits_it(monkeypatch):
+    import openjiuwen.extensions.observability.cost_tracker as ct
+    from openjiuwen.extensions.observability.cost_tracker import ModelPrice, register_model_prices
+
+    saved_prices = ct._PRICING
+    saved_version = ct._VERSION
+    register_model_prices("test", {"my-model": ModelPrice(1.0, 2.0)})
+    try:
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        tracer = provider.get_tracer("cost-test")
+        root = tracer.start_span("agent.root")
+        handler = OtelCallbackHandler(
+            ObservabilityConfig(enabled=True, service_name="cost-test"),
+            tracer=tracer,
+        )
+        monkeypatch.setattr(
+            handler,
+            "_get_parent_context_for_llm_tool",
+            lambda: set_span_in_context(root),
+        )
+        monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: None)
+
+        span = handler._open_llm_span({"messages": [], "model": "my-model"})
+        assert span is not None
+        state = getattr(span, "otel_llm_state")
+        usage = SimpleNamespace(
+            input_tokens=1000,
+            output_tokens=500,
+            total_tokens=1500,
+            model_name="my-model",
+        )
+        response = SimpleNamespace(
+            content="done",
+            reasoning_content="",
+            finish_reason="stop",
+            tool_calls=None,
+            usage_metadata=usage,
+        )
+
+        handler._close_llm_span(state, response)
+
+        finished = [s for s in exporter.get_finished_spans() if s.name == "llm.call"]
+        assert finished
+        span_attrs = finished[0].attributes
+        assert abs(span_attrs[OJ_GEN_AI_USAGE_TOTAL_COST] - 0.002) < 1e-9
+        provider.shutdown()
+    finally:
+        ct._PRICING = saved_prices
+        ct._VERSION = saved_version
