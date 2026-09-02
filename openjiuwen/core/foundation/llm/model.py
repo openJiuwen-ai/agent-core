@@ -606,6 +606,9 @@ def init_model(
         max_retries: int = 3,
         verify_ssl: bool = False,
         custom_headers: Optional[dict[str, str]] = None,
+        extra_body: Optional[dict] = None,
+        reasoning_effort: Optional[str] = None,
+        **request_extras,
 ) -> Model:
     """Convenience factory to create a Model instance.
 
@@ -621,6 +624,10 @@ def init_model(
         max_retries: Maximum number of retries.
         verify_ssl: Whether to verify SSL certificates.
         custom_headers: Additional headers sent with each model request.
+        extra_body: Extra JSON body fields (e.g. DeepSeek ``thinking``).
+        reasoning_effort: Top-level reasoning effort (e.g. ``low``/``high``/``max``).
+        **request_extras: Additional ``ModelRequestConfig`` fields (e.g.
+            OpenLux ``enable_thinking``). ``ModelRequestConfig`` allows extras.
 
     Returns:
         Configured Model instance.
@@ -634,11 +641,19 @@ def init_model(
         verify_ssl=verify_ssl,
         custom_headers=custom_headers,
     )
+    request_kwargs: dict = {}
+    if reasoning_effort is not None:
+        request_kwargs["reasoning_effort"] = reasoning_effort
+    if extra_body:
+        request_kwargs["extra_body"] = dict(extra_body)
+    if request_extras:
+        request_kwargs.update(request_extras)
     request_config = ModelRequestConfig(
         model=model_name,
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
+        **request_kwargs,
     )
     return Model(
         model_client_config=client_config,
