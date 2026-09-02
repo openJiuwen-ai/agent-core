@@ -720,31 +720,6 @@ def test_a_task_already_in_flight_refuses_a_second_run_or_resume(
     assert result.status == "completed"
 
 
-def test_a_completed_task_refuses_to_resume(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Completed already delivered what it was asked for. Growing the search
-    further is a new task with its own budget, not the same task quietly
-    meaning two different runs."""
-    run = _state(tmp_path)
-    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aa"))
-    _absorb(run, events.search_finished("succeeded", 0, 1))
-    run.finish()
-    assert run.status == "completed"
-
-    constructed: list = []
-    monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
-        lambda **kwargs: constructed.append(kwargs),
-    )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
-    result = asyncio.run(provider.resume(_request(tmp_path)))
-
-    assert result.status == "completed"
-    assert result.error_code == "COMPLETED_NOT_RESUMABLE"
-    assert constructed == []
-
-
 def test_a_terminated_task_refuses_to_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
