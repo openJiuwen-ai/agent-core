@@ -115,11 +115,12 @@ def _build_team_context_tracker(
     """Build the tracker feeding team state into this CLI member's messages.
 
     An external CLI has no rail, so the runtime folds the tracker's output into
-    the next message it sends. Unlike an in-process member, an external CLI has
-    no ``.team/{team}`` mount in its cwd (``setup_agent`` short-circuits before
-    ``mount_into_workspace`` is ever called), so the agent-relative mount string
-    would be a path the member cannot reach. We therefore expose only the
-    shared workspace's absolute path — the member writes there directly.
+    the next message it sends. Unlike an in-process member, an external CLI
+    never has the team workspace mounted into its cwd (``setup_agent``
+    short-circuits before ``mount_into_workspace`` is ever called), so any
+    agent-relative mount string would be a path the member cannot reach. We
+    therefore expose only the shared workspace's absolute path — the member
+    writes there directly.
 
     Args:
         team_backend: The external member's own TeamBackend.

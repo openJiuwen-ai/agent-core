@@ -67,7 +67,9 @@ _MOUNT_MERGE_SKIP_NAMES = frozenset(
 class TeamWorkspaceManager:
     """Manages team shared workspace metadata and version control.
 
-    File I/O is handled by standard SysOperation tools via .team/ mount.
+    File I/O is handled by standard SysOperation tools against absolute paths
+    under the team workspace (the shared outputs directory for projectless
+    members, the user project for members bound to one).
     This manager handles locking, versioning, sync, and conflict detection.
 
     Operates in two modes:
