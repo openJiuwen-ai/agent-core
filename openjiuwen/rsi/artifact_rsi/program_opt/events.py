@@ -43,7 +43,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-#: What the sidecar hands its engines: one call per event.
+#: What an engine is handed: one call per event, the event itself.
 Emit = Callable[[dict[str, Any]], None]
 
 

@@ -146,14 +146,21 @@ class ProgramRunState:
 
     # -- the projection --------------------------------------------------------
 
-    def absorb(self, record: dict[str, Any]) -> Iterator[EngineEvent]:
+    def absorb(self, event: dict[str, Any]) -> Iterator[EngineEvent]:
         """One search event in, zero or more contract events out.
 
         Zero is the common case: `selected` and `evaluated` change a node that is
         not finished yet, and emitting a partial node would break the contract's
         rule that `EventNode` carries a complete one.
+
+        The argument is the event itself — what `Emit` is documented to carry
+        and what `PuctEngine` actually passes. It used to unwrap a
+        ``{"createdAt", "event", "sequence"}`` envelope, which was the
+        sidecar's wire record and which nothing in this package has produced
+        since the search moved in-process: every engine event was silently
+        dropped, so a real run finished with an empty tree and a `completed`
+        status it had not earned.
         """
-        event = record.get("event") or {}
         kind = event.get("type")
 
         if kind == "seeded":

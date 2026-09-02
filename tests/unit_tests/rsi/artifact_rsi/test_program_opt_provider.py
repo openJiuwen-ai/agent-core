@@ -435,7 +435,7 @@ def _state(tmp_path: Path, total: int = 3) -> ProgramRunState:
 
 
 def _absorb(run: ProgramRunState, event: dict[str, object]) -> list[object]:
-    return list(run.absorb({"createdAt": "", "event": event, "sequence": 1}))
+    return list(run.absorb(event))
 
 
 def test_the_root_arrives_as_one_complete_node(tmp_path: Path) -> None:
@@ -657,12 +657,10 @@ def test_pause_stops_at_a_node_boundary_and_resume_continues_the_same_tree(
             pass
 
         def run(self, spec: object, emit: object, should_stop: object) -> None:
-            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.seeded(0, 0.25, code_hash="sha256:aa"))  # type: ignore[operator]
             assert released.wait(5), "the test never released the search"
             assert should_stop()  # type: ignore[operator]
-            emit({"createdAt": "", "event": events.search_finished("stopped", 0, 1),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.search_finished("stopped", 0, 1))  # type: ignore[operator]
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
@@ -710,8 +708,7 @@ def test_pause_stops_at_a_node_boundary_and_resume_continues_the_same_tree(
 
         def run(self, spec: object, emit: object, should_stop: object) -> None:
             resumed_specs.append(spec)
-            emit({"createdAt": "", "event": events.search_finished("succeeded", 0, 1),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.search_finished("succeeded", 0, 1))  # type: ignore[operator]
 
     monkeypatch.setattr(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
@@ -738,11 +735,9 @@ def test_a_task_already_in_flight_refuses_a_second_run_or_resume(
             pass
 
         def run(self, spec: object, emit: object, should_stop: object) -> None:
-            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.seeded(0, 0.25, code_hash="sha256:aa"))  # type: ignore[operator]
             assert released.wait(5)
-            emit({"createdAt": "", "event": events.search_finished("succeeded", 0, 1),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.search_finished("succeeded", 0, 1))  # type: ignore[operator]
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
@@ -817,11 +812,9 @@ def test_terminate_reports_terminated_and_says_which_node_won(
             pass
 
         def run(self, spec: object, emit: object, should_stop: object) -> None:
-            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.seeded(0, 0.25, code_hash="sha256:aa"))  # type: ignore[operator]
             assert released.wait(5)
-            emit({"createdAt": "", "event": events.search_finished("stopped", 0, 1),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.search_finished("stopped", 0, 1))  # type: ignore[operator]
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
@@ -904,7 +897,7 @@ class _CannedEngine:
 
     def run(self, spec: object, emit: object, should_stop: object) -> None:
         for event in self._script:
-            emit({"createdAt": "", "event": event, "sequence": 0})  # type: ignore[operator]
+            emit(event)  # type: ignore[operator]
         self.saw_stop = bool(should_stop())  # type: ignore[operator]
 
 
@@ -1008,13 +1001,11 @@ def test_terminate_reaches_a_search_that_is_already_running(
             engines.append(self)
 
         def run(self, spec: object, emit: object, should_stop: object) -> None:
-            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.seeded(0, 0.25, code_hash="sha256:aa"))  # type: ignore[operator]
             assert released.wait(5), "the test never released the search"
             self.stopped = bool(should_stop())  # type: ignore[operator]
             if self.stopped:
-                emit({"createdAt": "", "event": events.search_finished("stopped", 0, 1),
-                      "sequence": 0})  # type: ignore[operator]
+                emit(events.search_finished("stopped", 0, 1))  # type: ignore[operator]
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
@@ -1588,6 +1579,52 @@ def test_the_engine_has_no_execution_channel_of_its_own() -> None:
                    evaluation_execution=None)          # type: ignore[arg-type]
 
 
+def test_the_real_engines_events_actually_reach_the_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one seam every test used to fake: what `PuctEngine` hands `emit`.
+
+    Every other test in this file either substitutes the engine or calls
+    `absorb` with a record it built itself. Both spoke a
+    ``{"createdAt", "event", "sequence"}`` envelope that no engine has produced
+    since the search moved in-process — so `absorb` unwrapped a key that was
+    never there, dropped every event, and a refused run came back `completed`
+    with an empty tree. Found by an end-to-end run, not by this file.
+
+    Driven through the real `PuctEngine`: no engine fake, no hand-built event.
+    Only the discrimination probe is stepped past — it would refuse this
+    fixture before the engine is ever built, and it is not what is under test.
+    A normalisation the engine does not know makes it refuse in-thread, emit
+    its own `search_finished("failed")`, and return; the assertion is that
+    those events arrive.
+    """
+    _no_probe(monkeypatch)
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), scorecard={
+        "aggregate": "weighted_sum", "constraints": [],
+        "criteria": [{"id": "score", "name": "score", "direction": "maximize",
+                      "weight": 1.0, "normalize": {"kind": "no_such_normalisation"},
+                      "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                                  "timeoutSeconds": 30,
+                                  "split": {"gateShards": 4, "rolloutShards": 2,
+                                            "testShards": 2, "shardRows": 2,
+                                            "seed": 1, "trainRows": None}}}],
+    })
+    seen: list[object] = []
+
+    async def sink(event: object) -> None:
+        seen.append(event)
+
+    result = asyncio.run(provider.run(request, sink))
+
+    # The refusal survives the trip: not "completed" with nothing in it.
+    assert result.status == "failed", result
+    assert result.error_code == "SEARCH_FAILED"
+    assert [e.status for e in seen if isinstance(e, EventStatus)] == ["running", "failed"]
+    assert provider.read_state(request.task_id).status == "failed"
+
+
 # -- task-owned prompt wording ---------------------------------------------------
 
 
@@ -1888,10 +1925,8 @@ def test_a_raising_callback_does_not_fail_the_search(
             pass
 
         def run(self, spec: object, emit: object, should_stop: object) -> None:
-            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
-                  "sequence": 0})  # type: ignore[operator]
-            emit({"createdAt": "", "event": events.search_finished("succeeded", 0, 1),
-                  "sequence": 0})  # type: ignore[operator]
+            emit(events.seeded(0, 0.25, code_hash="sha256:aa"))  # type: ignore[operator]
+            emit(events.search_finished("succeeded", 0, 1))  # type: ignore[operator]
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(

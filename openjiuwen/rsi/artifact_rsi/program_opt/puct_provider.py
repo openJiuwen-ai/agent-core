@@ -463,8 +463,8 @@ class PuctProgramArtifactProvider:
         # Every event the search emits is projected, persisted, then handed to
         # the caller's loop — in that order, because the contract requires a
         # snapshot to be durable before the event announcing it is delivered.
-        def sink(record: dict[str, Any]) -> None:
-            for event in state.absorb(record):
+        def sink(emitted: dict[str, Any]) -> None:
+            for event in state.absorb(emitted):
                 if on_event is None:
                     continue
                 future = asyncio.run_coroutine_threadsafe(on_event(event), loop)
