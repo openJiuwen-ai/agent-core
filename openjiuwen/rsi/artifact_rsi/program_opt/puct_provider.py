@@ -267,18 +267,31 @@ class PuctProgramArtifactProvider:
         with self._lock:
             flag = self._stopping.get(task_id)
             live = self._live.get(task_id)
-        if live is not None:
-            # A terminate that races a pause wins: the stronger intent, and the
-            # one the caller can still see refused nowhere.
-            live.stopped_status = "terminated"
-        if flag is not None:
-            flag.set()
-        state = read_state_file(task_id)
+        if flag is None or live is None:
+            # Nothing is in flight, so nothing gets terminated — and saying
+            # "terminated" about a completed task is a status change the next
+            # `read_state` contradicts, delivered to the event stream as fact.
+            # Same honesty rule `pause` follows. Terminating an already
+            # terminated task is the one idempotent success in this branch.
+            state = read_state_file(task_id)
+            status = state.status if state else "created"
+            return EngineResult(
+                task_id=task_id,
+                status=status,
+                final_node_id=state.best_node_id if state else None,
+                error_code=None if status == "terminated" else "TASK_NOT_RUNNING",
+                error_message=None if status == "terminated"
+                else "terminate reached no running search for this task",
+            )
+        # A terminate that races a pause wins: the stronger intent, and the
+        # one the caller can still see refused nowhere.
+        live.stopped_status = "terminated"
+        flag.set()
         await emit(on_event, EventStatus(status="terminated"))
         return EngineResult(
             task_id=task_id,
             status="terminated",
-            final_node_id=state.best_node_id if state else None,
+            final_node_id=live.best_node_id,
             error_code=None,
             error_message=None,
         )

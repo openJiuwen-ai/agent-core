@@ -732,9 +732,64 @@ def test_pausing_a_task_that_is_not_running_says_so(tmp_path: Path) -> None:
     assert result.status == "created"
 
 
-def test_terminate_reports_terminated_and_says_which_node_won(tmp_path: Path) -> None:
+def test_terminate_reports_terminated_and_says_which_node_won(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The earlier version of this test terminated a task with no live search
+    and passed on the answer being faked; it now drives a real one."""
+    released = threading.Event()
+
+    class _ParkedEngine:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
+                  "sequence": 0})  # type: ignore[operator]
+            assert released.wait(5)
+            emit({"createdAt": "", "event": events.search_finished("stopped", 0, 1),
+                  "sequence": 0})  # type: ignore[operator]
+
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        _ParkedEngine,
+    )
+    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+    seen: list[object] = []
+
+    async def drive() -> object:
+        seeded = asyncio.Event()
+
+        async def sink(event: object) -> None:
+            seen.append(event)
+            if isinstance(event, EventNode):
+                seeded.set()
+
+        task = asyncio.ensure_future(provider.run(request, sink))
+        await seeded.wait()
+        terminated = await provider.terminate(request.task_id, sink)
+        released.set()
+        await task
+        return terminated
+
+    result = asyncio.run(drive())
+
+    assert result.status == "terminated"
+    assert result.final_node_id == state_module.node_id_for("task-001", 0)
+    assert "terminated" in [e.status for e in seen if isinstance(e, EventStatus)]
+
+
+def test_terminating_a_task_that_is_not_running_says_so(tmp_path: Path) -> None:
+    """Saying "terminated" about a completed task is a status change the next
+    `read_state` contradicts, delivered to the event stream as fact. The one
+    idempotent success is terminating a task that already is terminated."""
     run = _state(tmp_path)
     _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aa"))
+    _absorb(run, events.search_finished("succeeded", 0, 1))
+    run.finish()
     seen: list[object] = []
 
     async def sink(event: object) -> None:
@@ -742,9 +797,21 @@ def test_terminate_reports_terminated_and_says_which_node_won(tmp_path: Path) ->
 
     result = asyncio.run(PuctProgramArtifactProvider().terminate("task-001", sink))
 
+    assert result.status == "completed"                    # 真实状态，不是谎言
+    assert result.error_code == "TASK_NOT_RUNNING"
+    assert seen == []                                      # 没有假的状态变更事件
+
+
+def test_terminating_twice_is_an_idempotent_success(tmp_path: Path) -> None:
+    run = _state(tmp_path)
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aa"))
+    _absorb(run, events.search_finished("stopped", 0, 1))
+    assert run.status == "terminated"
+
+    result = asyncio.run(PuctProgramArtifactProvider().terminate("task-001"))
+
     assert result.status == "terminated"
-    assert result.final_node_id == state_module.node_id_for("task-001", 0)
-    assert [e.status for e in seen if isinstance(e, EventStatus)] == ["terminated"]
+    assert result.error_code is None                       # 已是终态，幂等成功
 
 
 # -- the thread-to-loop bridge --------------------------------------------------
