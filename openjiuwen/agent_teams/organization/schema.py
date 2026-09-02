@@ -224,7 +224,6 @@ class OrgLeaderMessageReceiptRecord(SQLModel, table=True):
     recipient_team_id: str = SQLField(primary_key=True)
     organization_id: str = SQLField(index=True)
     recipient_leader_id: str | None = None
-    read_at: int | None = None
     handled_at: int | None = SQLField(default=None, index=True)
     handling_result_json: str | None = None
     created_at: int

@@ -15,8 +15,7 @@ from sqlalchemy import delete, or_, select, update
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.organization.db import (
-    ensure_org_schema,
-    ensure_org_static_tables,
+    OrgDbContext,
     json_dumps,
     json_loads,
 )
@@ -55,7 +54,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 
 
 logger = logging.getLogger(__name__)
@@ -72,7 +71,6 @@ class OrgTaskOpResult:
 # Local aliases keep call sites stable while sharing helpers with message_service.
 _json_dumps = json_dumps
 _json_loads = json_loads
-_ensure_org_schema = ensure_org_schema
 
 
 class OrgTaskManager:
@@ -85,21 +83,22 @@ class OrgTaskManager:
         organization_id: str,
         messager: Messager | None = None,
         session_id: str | None = None,
+        db_context: OrgDbContext | None = None,
     ) -> None:
         self.db = db
         self.organization_id = organization_id
         self.messager = messager
         self.session_id = session_id
-        self._sessions: DbSessions | None = None
+        self.db_context = db_context or OrgDbContext(db)
 
     async def initialize(self) -> None:
-        await self.db.initialize()
-        if self.db.session_local is None or self.db.engine is None:
-            raise RuntimeError("TeamDatabase is not initialized")
-        if self._sessions is None:
-            self._sessions = DbSessions(self.db.session_local)
-        async with self.db.engine.begin() as conn:
-            await conn.run_sync(ensure_org_static_tables)
+        await self.db_context.initialize()
+
+    def _read(self):
+        return self.db_context.sessions.read()
+
+    def _write(self):
+        return self.db_context.sessions.write()
 
     async def ensure_organization(
         self,
@@ -177,10 +176,8 @@ class OrgTaskManager:
         organization binding before its leader tool set is assembled.
         """
 
-        await _ensure_org_schema(db)
-        if db.session_local is None:
-            raise RuntimeError("TeamDatabase is not initialized")
-        sessions = DbSessions(db.session_local)
+        context = OrgDbContext(db)
+        sessions = await context.initialize()
         async with sessions.read() as session:
             stmt = select(OrgLeaderRecord.organization_id).where(OrgLeaderRecord.team_id == team_id)
             return list((await session.execute(stmt)).scalars().all())
@@ -851,25 +848,6 @@ class OrgTaskManager:
                 )
             return {"summary_task": self._to_task(summary).model_dump(), "source_tasks": sources}
 
-    async def _set_assigned_task_status(
-        self,
-        task_id: str,
-        team_id: str,
-        status: OrgTaskStatus,
-    ) -> OrgTaskOpResult:
-        await self.initialize()
-        now = get_current_time()
-        async with self._write() as session:
-            row = await session.get(OrgTaskRecord, task_id)
-            if row is None or row.organization_id != self.organization_id:
-                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
-            if row.assigned_team_id != team_id:
-                return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
-            row.status = status.value
-            row.updated_at = now
-            await session.commit()
-        return OrgTaskOpResult(ok=True, task=self._to_task(row))
-
     async def _publish_task_created(self, task: OrgTask) -> None:
         await self._publish_event(
             OrgTaskCreatedEvent(
@@ -1048,16 +1026,6 @@ class OrgTaskManager:
         if isinstance(value, OrgTaskOutputContext):
             return value
         return OrgTaskOutputContext.model_validate(value)
-
-    def _read(self):
-        if self._sessions is None:
-            raise RuntimeError("OrgTaskManager is not initialized")
-        return self._sessions.read()
-
-    def _write(self):
-        if self._sessions is None:
-            raise RuntimeError("OrgTaskManager is not initialized")
-        return self._sessions.write()
 
 
 __all__ = ["OrgTaskManager", "OrgTaskOpResult"]

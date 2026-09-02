@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -12,20 +13,42 @@ from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.organization.schema import org_static_tables
 from openjiuwen.agent_teams.tools.database import TeamDatabase
+from openjiuwen.agent_teams.tools.database.engine import DbSessions
 
 
 def ensure_org_static_tables(sync_conn) -> None:
     SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
 
 
-async def ensure_org_schema(db: TeamDatabase) -> None:
-    """Initialize the team DB engine and create organization static tables."""
+class OrgDbContext:
+    """Shared org DB bootstrap for task pool and message service."""
 
-    await db.initialize()
-    if db.engine is None:
-        return
-    async with db.engine.begin() as conn:
-        await conn.run_sync(ensure_org_static_tables)
+    def __init__(self, db: TeamDatabase) -> None:
+        self.db = db
+        self._sessions: DbSessions | None = None
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
+
+    async def initialize(self) -> DbSessions:
+        if self._initialized and self._sessions is not None:
+            return self._sessions
+        async with self._init_lock:
+            if self._initialized and self._sessions is not None:
+                return self._sessions
+            await self.db.initialize()
+            if self.db.session_local is None or self.db.engine is None:
+                raise RuntimeError("TeamDatabase is not initialized")
+            self._sessions = DbSessions(self.db.session_local, self.db.read_session_local)
+            async with self.db.engine.begin() as conn:
+                await conn.run_sync(ensure_org_static_tables)
+            self._initialized = True
+            return self._sessions
+
+    @property
+    def sessions(self) -> DbSessions:
+        if self._sessions is None:
+            raise RuntimeError("OrgDbContext is not initialized")
+        return self._sessions
 
 
 def json_dumps(value: Any) -> str | None:
@@ -44,7 +67,7 @@ def json_loads(value: str | None, default: Any) -> Any:
 
 
 __all__ = [
-    "ensure_org_schema",
+    "OrgDbContext",
     "ensure_org_static_tables",
     "json_dumps",
     "json_loads",

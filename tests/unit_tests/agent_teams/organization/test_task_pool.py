@@ -78,7 +78,6 @@ class FakeBackend:
         self.messager = messager
         self.org_task_manager = None
         self.org_message_service = None
-        self.org_transport = None
 
 
 class FakeAgent:
@@ -436,6 +435,7 @@ async def test_org_send_leader_message_tool_delivers_via_transport(org_manager):
         organization_id=manager.organization_id,
         session_id=manager.session_id,
         messager=messager,
+        db_context=manager.db_context,
     )
     await manager.register_leader(team_id="team-a", leader_id="leader-a")
     await manager.register_leader(team_id="team-b", leader_id="leader-b")

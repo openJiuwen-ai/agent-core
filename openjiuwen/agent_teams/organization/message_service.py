@@ -11,8 +11,7 @@ from typing import Any
 from sqlalchemy import delete, select
 
 from openjiuwen.agent_teams.organization.db import (
-    ensure_org_schema,
-    ensure_org_static_tables,
+    OrgDbContext,
     json_dumps,
     json_loads,
 )
@@ -23,7 +22,7 @@ from openjiuwen.agent_teams.organization.schema import (
 )
 from openjiuwen.agent_teams.organization.transport_api import TransportAPI, create_message_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 
 
 @dataclass
@@ -47,31 +46,22 @@ class OrgMessageService:
         organization_id: str,
         session_id: str | None = None,
         messager: Any | None = None,
+        db_context: OrgDbContext | None = None,
     ) -> None:
         self.db = db
         self.organization_id = organization_id
         self.session_id = session_id
         self.messager = messager
-        self._sessions: DbSessions | None = None
+        self.db_context = db_context or OrgDbContext(db)
 
     async def initialize(self) -> None:
-        await ensure_org_schema(self.db)
-        if self.db.session_local is None or self.db.engine is None:
-            raise RuntimeError("TeamDatabase is not initialized")
-        if self._sessions is None:
-            self._sessions = DbSessions(self.db.session_local)
-        async with self.db.engine.begin() as conn:
-            await conn.run_sync(ensure_org_static_tables)
+        await self.db_context.initialize()
 
     def _read(self):
-        if self._sessions is None:
-            raise RuntimeError("OrgMessageService is not initialized")
-        return self._sessions.read()
+        return self.db_context.sessions.read()
 
     def _write(self):
-        if self._sessions is None:
-            raise RuntimeError("OrgMessageService is not initialized")
-        return self._sessions.write()
+        return self.db_context.sessions.write()
 
     async def send_leader_message(
         self,
@@ -212,7 +202,6 @@ class OrgMessageService:
             if not already_handled:
                 now = get_current_time()
                 receipt.recipient_leader_id = leader_id
-                receipt.read_at = now
                 receipt.handled_at = now
                 receipt.handling_result_json = json_dumps(handling_result)
                 await session.commit()
@@ -285,7 +274,6 @@ class OrgMessageService:
         return {
             "recipient_team_id": receipt.recipient_team_id,
             "recipient_leader_id": receipt.recipient_leader_id,
-            "read_at": receipt.read_at,
             "handled_at": receipt.handled_at,
             "handling_result": json_loads(receipt.handling_result_json, None),
         }

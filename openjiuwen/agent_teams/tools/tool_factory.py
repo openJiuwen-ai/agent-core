@@ -257,6 +257,7 @@ def create_team_tools(
                 organization_id=org_task_manager.organization_id,
                 session_id=org_task_manager.session_id,
                 messager=getattr(agent_team, "messager", None),
+                db_context=org_task_manager.db_context,
             )
         org_tools = create_org_leader_tools(
             manager=org_task_manager,

@@ -340,10 +340,6 @@ class OrganizationRuntimeManager:
                         self._subscribed_topics.discard(subscribed)
                 backend.org_task_manager = None
                 backend.org_message_service = None
-                transport = getattr(backend, "org_transport", None)
-                if transport is not None:
-                    await transport.shutdown()
-                backend.org_transport = None
                 self._set_owner_lifecycle_prompt(entry.agent, is_owner=False)
                 harness = getattr(entry.agent, "harness", None)
                 remove_tool = getattr(harness, "remove_tool", None)
@@ -482,18 +478,8 @@ class OrganizationRuntimeManager:
         }
 
     async def _bind_team(self, *, agent: "TeamAgent", backend: TeamBackend, manager: Any, session_id: str) -> None:
-        from openjiuwen.agent_teams.organization.transport_api import TransportAPI
-
         backend.org_task_manager = manager.task_pool
         backend.org_message_service = manager.message_service
-        if backend.messager is None:
-            raise ValueError(f"team has no messager for organization transport: {backend.team_name}")
-        backend.org_transport = TransportAPI(
-            organization_id=manager.organization_id,
-            session_id=session_id,
-            from_team_id=backend.team_name,
-            messager=backend.messager,
-        )
         self._team_organizations[(session_id, backend.team_name)] = manager.organization_id
         organization = await manager.get_organization()
         self._set_owner_lifecycle_prompt(

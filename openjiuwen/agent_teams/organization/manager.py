@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.organization.events import BaseOrgEvent, OrgTopic
+from openjiuwen.agent_teams.organization.db import OrgDbContext
 from openjiuwen.agent_teams.organization.message_service import OrgMessageService
 from openjiuwen.agent_teams.organization.schema import OrgLeaderHandle, OrganizationSpec
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
@@ -29,17 +30,20 @@ class TeamOrganizationManager:
         self.organization_id = organization_id
         self.messager = messager
         self.session_id = session_id
+        self.db_context = OrgDbContext(db)
         self.task_pool = OrgTaskManager(
             db=db,
             organization_id=organization_id,
             messager=messager,
             session_id=session_id,
+            db_context=self.db_context,
         )
         self.message_service = OrgMessageService(
             db=db,
             organization_id=organization_id,
             session_id=session_id,
             messager=messager,
+            db_context=self.db_context,
         )
 
     async def initialize(
