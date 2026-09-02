@@ -29,7 +29,7 @@ from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.tools.member_options import get_member_fallback_model_ref
 from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ModelPoolEntry, TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -609,6 +609,8 @@ def test_external_cli_schema_requires_fallback_and_restricts_model_override(agen
     """The tool requires fallback and forbids inferred model overrides."""
     tool = SpawnExternalCliTool(agent_team, t)
     assert "fallback_model_name" in tool.card.input_params["required"]
+    fallback_schema = tool.card.input_params["properties"]["fallback_model_name"]
+    assert fallback_schema["anyOf"] == [{"type": "string", "minLength": 1}, {"type": "null"}]
     assert "model_name" not in tool.card.input_params["required"]
     model_description = tool.card.input_params["properties"]["model_name"]["description"]
     assert "仅当用户明确指定" in model_description
@@ -619,18 +621,171 @@ def test_external_cli_schema_requires_fallback_and_restricts_model_override(agen
     assert "支持的模型调用协议选择兼容模型" in fallback_description
     assert "该第三方 Agent" in fallback_description
     assert "运行时明确报告的认证失败" in fallback_description
+    assert "没有兼容模型时允许为 null" in fallback_description
+    assert "当前模型在模型池中且协议兼容时，优先选择" in fallback_description
+    assert "当前模型不在模型池中或协议不兼容时，再选择其他兼容模型" in fallback_description
+    assert "当前模型在模型池中且协议兼容时优先选择当前模型" in tool.card.description
     for description in (model_description, fallback_description):
         assert "Claude" not in description
         assert "Codex" not in description
 
+    english_tool = SpawnExternalCliTool(agent_team, make_translator("en"))
+    english_fallback_description = english_tool.card.input_params["properties"]["fallback_model_name"]["description"]
+    assert "Prefer the current model when it is present in the pool" in english_fallback_description
+    assert "current model is absent from the pool" in english_fallback_description
+    assert "prefer the current model when it is present in the pool" in english_tool.card.description
+
+
+def test_external_cli_schema_exposes_safe_model_protocol_catalog(db, message_bus, t):
+    """The tool exposes model names and protocols without endpoint secrets."""
+    entries = [
+        ModelPoolEntry(
+            model_name="deepseek-v4-flash",
+            api_key="secret-openai",
+            api_base_url="https://openai.example/v1",
+            api_provider="DeepSeek",
+        ),
+        ModelPoolEntry(
+            model_name="claude-fallback",
+            api_key="secret-anthropic",
+            api_base_url="https://anthropic.example/v1",
+            api_provider="Anthropic",
+        ),
+    ]
+    team = TeamBackend(
+        team_name="ext_cli_catalog_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: entries,
+        current_model_name="deepseek-v4-flash",
+        current_model_provider="DeepSeek",
+        external_cli_agents=[
+            ExternalCliAgentSpec(cli_agent="claude"),
+            ExternalCliAgentSpec(cli_agent="codex"),
+        ],
+    )
+
+    tool = SpawnExternalCliTool(team, t)
+    description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+
+    assert '"model_name": "deepseek-v4-flash", "protocol": "OpenAI"' in description
+    assert '"model_name": "claude-fallback", "protocol": "Anthropic"' in description
+    assert "secret-openai" not in description
+    assert "secret-anthropic" not in description
+    assert "openai.example" not in description
+    assert "anthropic.example" not in description
+
 
 @pytest.mark.asyncio
-async def test_external_cli_native_mode_allows_incompatible_fallback(db, message_bus, t):
-    """An unavailable fallback does not prevent a native CLI member from being created."""
+async def test_external_cli_requires_current_model_when_present_and_compatible(db, message_bus, t):
+    """A compatible current model in the pool has strict fallback priority."""
+    await db.team.create_team(
+        team_name="ext_cli_current_priority_team",
+        display_name="Ext Current Priority",
+        leader_member_name="leader1",
+    )
+    entries = [
+        ModelPoolEntry(
+            model_name="leader-model",
+            api_key="secret",
+            api_base_url="https://leader.example/v1",
+            api_provider="OpenAI",
+        ),
+        ModelPoolEntry(
+            model_name="other-model",
+            api_key="secret",
+            api_base_url="https://other.example/v1",
+            api_provider="OpenAI",
+        ),
+    ]
+    team = TeamBackend(
+        team_name="ext_cli_current_priority_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: entries,
+        current_model_name="leader-model",
+        current_model_provider="OpenAI",
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
+    )
+    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: AsyncMock())
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-priority",
+            "display_name": "Codex Priority",
+            "prompt": "writer",
+            "cli_agent": "codex",
+            "fallback_model_name": "other-model",
+        }
+    )
+
+    assert result.success is False
+    assert "must use current model 'leader-model'" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool(db, message_bus, t):
+    """A per-agent current model outside the pool does not block fallback."""
+    await db.team.create_team(
+        team_name="ext_cli_current_outside_pool_team",
+        display_name="Ext Current Outside Pool",
+        leader_member_name="leader1",
+    )
+    fallback_entry = ModelPoolEntry(
+        model_name="pool-fallback",
+        api_key="secret",
+        api_base_url="https://fallback.example/v1",
+        api_provider="OpenAI",
+    )
+    fallback_allocation = AsyncMock()
+    fallback_allocation.to_db_ref = lambda: {"model_name": "pool-fallback", "model_index": 0}
+    team = TeamBackend(
+        team_name="ext_cli_current_outside_pool_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: [fallback_entry],
+        current_model_name="per-agent-model",
+        current_model_provider="OpenAI",
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
+    )
+    tool = SpawnExternalCliTool(
+        team,
+        t,
+        model_config_allocator=lambda model_name, **kwargs: fallback_allocation,
+    )
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-pool-fallback",
+            "display_name": "Codex Pool Fallback",
+            "prompt": "writer",
+            "cli_agent": "codex",
+            "fallback_model_name": "pool-fallback",
+        }
+    )
+
+    assert result.success is True, result.error
+
+
+@pytest.mark.asyncio
+async def test_external_cli_native_mode_allows_null_without_compatible_fallback(db, message_bus, t):
+    """Null explicitly selects native mode when no compatible fallback exists."""
     await db.team.create_team(
         team_name="ext_cli_native_team",
         display_name="Ext Native",
         leader_member_name="leader1",
+    )
+    incompatible_entry = ModelPoolEntry(
+        model_name="openai-only-model",
+        api_key="secret",
+        api_base_url="https://openai.example/v1",
+        api_provider="OpenAI",
     )
     team = TeamBackend(
         team_name="ext_cli_native_team",
@@ -638,6 +793,7 @@ async def test_external_cli_native_mode_allows_incompatible_fallback(db, message
         is_leader=True,
         db=db,
         messager=message_bus,
+        model_pool_provider=lambda: [incompatible_entry],
         external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
     )
     tool = SpawnExternalCliTool(
@@ -651,13 +807,85 @@ async def test_external_cli_native_mode_allows_incompatible_fallback(db, message
             "display_name": "Claude Native",
             "prompt": "reviewer",
             "cli_agent": "claude",
-            "fallback_model_name": "openai-only-model",
+            "fallback_model_name": None,
         }
     )
     assert result.success is True, result.error
     member = await team.get_member("claude-native")
     assert member is not None
     assert get_member_fallback_model_ref(member) is None
+
+
+@pytest.mark.asyncio
+async def test_external_cli_rejects_null_when_compatible_fallback_exists(db, message_bus, t):
+    """Null cannot bypass an available protocol-compatible fallback."""
+    await db.team.create_team(
+        team_name="ext_cli_required_fallback_team",
+        display_name="Ext Required Fallback",
+        leader_member_name="leader1",
+    )
+    compatible_entry = ModelPoolEntry(
+        model_name="claude-fallback",
+        api_key="secret",
+        api_base_url="https://anthropic.example/v1",
+        api_provider="Anthropic",
+    )
+    team = TeamBackend(
+        team_name="ext_cli_required_fallback_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: [compatible_entry],
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+    )
+    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+
+    result = await tool.invoke(
+        {
+            "member_name": "claude-required",
+            "display_name": "Claude Required",
+            "prompt": "reviewer",
+            "cli_agent": "claude",
+            "fallback_model_name": None,
+        }
+    )
+
+    assert result.success is False
+    assert "claude-fallback" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_external_cli_rejects_unavailable_fallback_name(db, message_bus, t):
+    """An invented fallback name fails instead of silently selecting native mode."""
+    await db.team.create_team(
+        team_name="ext_cli_invalid_fallback_team",
+        display_name="Ext Invalid Fallback",
+        leader_member_name="leader1",
+    )
+    team = TeamBackend(
+        team_name="ext_cli_invalid_fallback_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: [],
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+    )
+    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+
+    result = await tool.invoke(
+        {
+            "member_name": "claude-invalid",
+            "display_name": "Claude Invalid",
+            "prompt": "reviewer",
+            "cli_agent": "claude",
+            "fallback_model_name": "invented-model",
+        }
+    )
+
+    assert result.success is False
+    assert "use null" in (result.error or "")
 
 
 class TestSpawnToolCapabilityGate:
