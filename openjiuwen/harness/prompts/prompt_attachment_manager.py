@@ -9,13 +9,13 @@ import json
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.foundation.llm import UserMessage
+from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
 
 
 class PromptAttachmentKind(str, Enum):
@@ -74,6 +74,10 @@ _PROMPT_ATTACHMENT_HISTORY_STATE_KEY = "state"
 _PROMPT_ATTACHMENT_HISTORY_SESSION_KEY = "session_id"
 _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT = "snapshot"
 _PROMPT_ATTACHMENT_HISTORY_DELTA = "delta"
+_SYSTEM_ATTACHMENT_ROLE_PROVIDERS = frozenset({"bailian", "dashscope"})
+_SYSTEM_ATTACHMENT_ROLE_ENDPOINT_PROFILES = frozenset({"bailian", "dashscope"})
+_ANTHROPIC_API_MODES = frozenset({"anthropic", "anthropic-messages", "messages"})
+_GENERIC_ENDPOINT_PROFILES = frozenset({"", "openai", "openai-compatible"})
 
 
 def _utc_now() -> str:
@@ -152,6 +156,36 @@ def _resolve_session_id_from_context(ctx: Any) -> str | None:
             if session_id:
                 return str(session_id)
     return None
+
+
+def _config_value(config: Any, key: str) -> Any:
+    if isinstance(config, dict):
+        return config.get(key)
+    return getattr(config, key, None)
+
+
+def _normalized_config_value(value: Any) -> str:
+    value = getattr(value, "value", value)
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def _uses_system_attachment_role(model_client_config: Any) -> bool:
+    """Return whether the active route preserves attachment system messages in place."""
+
+    provider = _normalized_config_value(_config_value(model_client_config, "client_provider"))
+    legacy_provider = _normalized_config_value(
+        _config_value(model_client_config, "legacy_client_provider")
+    )
+    endpoint_profile = _normalized_config_value(_config_value(model_client_config, "endpoint_profile"))
+    api_mode = _normalized_config_value(_config_value(model_client_config, "api_mode"))
+
+    if provider == "anthropic" or api_mode in _ANTHROPIC_API_MODES:
+        return False
+
+    backend = endpoint_profile
+    if backend in _GENERIC_ENDPOINT_PROFILES:
+        backend = legacy_provider or provider
+    return backend in _SYSTEM_ATTACHMENT_ROLE_ENDPOINT_PROFILES or backend in _SYSTEM_ATTACHMENT_ROLE_PROVIDERS
 
 
 class PromptAttachmentContextWriter:
@@ -553,6 +587,64 @@ class PromptAttachmentManager:
                 sorted(current_state),
             )
             return message
+
+    @staticmethod
+    def build_model_window_mutator(
+        *,
+        session_id: str,
+        model_client_config: Any,
+    ) -> Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]:
+        """Build a final-window projection for the active model provider.
+
+        Attachment history remains persisted as ``UserMessage``.  For
+        DashScope/Bailian routes using the OpenAI chat-completions client only
+        replace marked history messages in place with ``SystemMessage``.
+        Ordinary user messages and attachment positions remain unchanged.
+        Native Anthropic routes keep the persisted ``UserMessage`` because
+        their client moves ``SystemMessage`` content to the top-level system
+        field.
+        """
+
+        use_system_role = _uses_system_attachment_role(model_client_config)
+
+        async def mutate(_context: ModelContext, window: ContextWindow) -> ContextWindow:
+            if not use_system_role:
+                return window
+
+            context_messages: list[BaseMessage] = []
+            for message in window.context_messages:
+                metadata = getattr(message, "metadata", {}) or {}
+                history_session_id = metadata.get(_PROMPT_ATTACHMENT_HISTORY_SESSION_KEY)
+                is_attachment = (
+                    isinstance(message, UserMessage)
+                    and bool(metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY))
+                    and (
+                        history_session_id is None
+                        or str(history_session_id) == str(session_id)
+                    )
+                )
+                if not is_attachment:
+                    context_messages.append(message)
+                    continue
+
+                context_messages.append(
+                    SystemMessage(
+                        content=message.content,
+                        name=message.name,
+                        metadata=dict(metadata),
+                    )
+                )
+
+            if context_messages == window.context_messages:
+                return window
+
+            return window.model_copy(
+                update={
+                    "context_messages": context_messages,
+                }
+            )
+
+        return mutate
 
     @staticmethod
     def _state_by_section(prompt_attachments: Iterable[PromptAttachment]) -> dict[str, str]:

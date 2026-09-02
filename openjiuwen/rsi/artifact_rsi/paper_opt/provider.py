@@ -52,7 +52,9 @@ class PaperArtifactProvider(ArtifactProvider, Protocol):
         """Start a new paper optimization task.
 
         Persist state, reporting nodes, reports, and artifacts before invoking
-        ``on_event``.  Emit running status first and a terminal status last.
+        ``on_event``.  Emit running status first, use ``NodeStageEvent`` for
+        subprocess transitions when applicable, and emit a terminal status
+        last.
         """
         ...
 

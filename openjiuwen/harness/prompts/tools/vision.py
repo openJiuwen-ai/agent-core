@@ -10,13 +10,26 @@ from openjiuwen.harness.prompts.tools.base import (
 )
 
 IMAGE_OCR_DESCRIPTION: Dict[str, str] = {
-    "cn": "读取图片中的可见文本，适合 OCR、票据文本提取和截图文字识别。",
-    "en": "Extract visible text from an image for OCR, screenshot text recognition, and document snippets.",
+    "cn": (
+        "使用配置的专用视觉模型精确提取图片中的可见文本，适合 OCR、票据和截图文字识别。"
+        "如果主模型已通过 read_file 看过图片，不要重复调用，除非用户需要精确转写或结果复核。"
+    ),
+    "en": (
+        "Use the configured dedicated vision model to extract visible image text for OCR, receipts, and screenshots. "
+        "Do not repeat a successful read_file inspection unless exact transcription or verification is needed."
+    ),
 }
 
 VISUAL_QUESTION_ANSWERING_DESCRIPTION: Dict[str, str] = {
-    "cn": "理解图片内容并回答问题，可选先做 OCR 再结合识别到的文字回答。",
-    "en": "Understand an image and answer questions, optionally grounding the answer with OCR first.",
+    "cn": (
+        "使用配置的专用视觉模型理解图片并回答问题，可选先做 OCR。"
+        "适合主模型原生读图不可用、需要专用模型分析或第二模型复核的场景；避免与成功的 read_file 重复。"
+    ),
+    "en": (
+        "Use the configured dedicated vision model to answer questions about an image, optionally with OCR. "
+        "Use it when native image input is unavailable or dedicated analysis or verification is needed; "
+        "avoid duplicating a successful read_file inspection."
+    ),
 }
 
 IMAGE_OCR_PARAMS: Dict[str, Dict[str, str]] = {

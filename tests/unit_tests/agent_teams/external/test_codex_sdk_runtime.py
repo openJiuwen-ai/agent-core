@@ -589,8 +589,7 @@ async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_native_model_request_sets_exact_llm_span_timing(
-):
+async def test_codex_native_model_request_sets_exact_llm_span_timing():
     exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
     from openjiuwen.agent_teams.observability import (
         ObservabilityConfig,
@@ -598,6 +597,7 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing(
         shutdown_observability,
     )
     from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
+
     exporter = exporter_module.InMemorySpanExporter()
     init_observability(
         ObservabilityConfig(
@@ -637,6 +637,7 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing(
         clear_team_span()
 
         end_ns = time.time_ns()
+
         async def deliver_native_span():
             await asyncio.sleep(0)
             bridge.record_native_model_span(
@@ -703,10 +704,13 @@ async def test_codex_native_mode_preserves_exact_unpaired_span():
             get_or_create_team_span,
         )
 
-        assert get_or_create_team_span(
-            "team",
-            get_tracer("codex-unpaired-observation-test"),
-        ) is not None
+        assert (
+            get_or_create_team_span(
+                "team",
+                get_tracer("codex-unpaired-observation-test"),
+            )
+            is not None
+        )
         bridge = CodexSpanBridge(
             member_name="developer",
             member_agent_id="team_developer",
@@ -733,9 +737,7 @@ async def test_codex_native_mode_preserves_exact_unpaired_span():
         )
         bridge.finish_turn(status="completed")
 
-        llm_span = next(
-            span for span in exporter.get_finished_spans() if span.name == "llm.call"
-        )
+        llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
         assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
         assert llm_span.attributes["codex.model.call.observed"] is True
         assert llm_span.attributes["codex.model.call.paired"] is False
@@ -771,10 +773,13 @@ async def test_codex_turn_does_not_infer_llm_call_when_native_export_is_missing(
             get_or_create_team_span,
         )
 
-        assert get_or_create_team_span(
-            "team",
-            get_tracer("codex-missing-native-export-test"),
-        ) is not None
+        assert (
+            get_or_create_team_span(
+                "team",
+                get_tracer("codex-missing-native-export-test"),
+            )
+            is not None
+        )
         bridge = CodexSpanBridge(
             member_name="developer",
             member_agent_id="team_developer",
@@ -791,9 +796,7 @@ async def test_codex_turn_does_not_infer_llm_call_when_native_export_is_missing(
 
         spans = list(exporter.get_finished_spans())
         assert not [span for span in spans if span.name == "llm.call"]
-        turn_span = next(
-            span for span in spans if span.name == "agent.developer.codex_turn.1"
-        )
+        turn_span = next(span for span in spans if span.name == "agent.developer.codex_turn.1")
         assert turn_span.attributes["codex.native.model_span_count"] == 0
     finally:
         shutdown_observability()
@@ -1071,16 +1074,29 @@ async def test_codex_sdk_runtime_does_not_queue_unrelated_steer_errors():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_sdk_runtime_reports_non_retryable_sdk_errors():
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_non_retryable_error_does_not_raise_without_reliability_ctx():
+    """A non-retryable error no longer raises from _notification_chunks.
+
+    Failure classification lives in ``_handle_failure_notification`` (which
+    records a pending candidate and finalizes on the terminal state), not in
+    ``_notification_chunks``. Without a reliability context injected — the
+    common test path — the turn simply ends; the failure path itself is
+    covered by ``test_codex_runtime_reliability``.
+    """
     error = SimpleNamespace(message="boom")
-    turn = [_notification("error", error=error, will_retry=False)]
+    turn = [
+        _notification("error", error=error, will_retry=False),
+        _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+    ]
     thread = _FakeThread("thread-developer", [turn])
     runtime, _ = _runtime(thread=thread)
     await _start(runtime)
 
-    with pytest.raises(RuntimeError, match="codex SDK turn failed"):
-        async for _ in runtime._drive({"query": "fail"}):
-            pass
+    # No RuntimeError: the error is classified, not raised.
+    chunks = [chunk async for chunk in runtime._drive({"query": "fail"})]
+    assert chunks == []
 
 
 @pytest.mark.asyncio

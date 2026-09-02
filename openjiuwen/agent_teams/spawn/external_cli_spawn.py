@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 
@@ -30,6 +31,26 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.team import TeamAgentSpec, TeamRuntimeContext
     from openjiuwen.agent_teams.team_context import TeamContextTracker
     from openjiuwen.agent_teams.tools.team import TeamBackend
+
+
+def _team_model_config_to_external(
+    member_model: Any,
+) -> Optional[ExternalCliModelConfig]:
+    """Convert a pool-allocated TeamModelConfig to ExternalCliModelConfig."""
+    client_config = getattr(member_model, "model_client_config", None)
+    request_config = getattr(member_model, "model_request_config", None)
+    if client_config is None:
+        return None
+    provider = str(getattr(client_config, "client_provider", "") or "")
+    model = ""
+    if request_config is not None:
+        model = str(getattr(request_config, "model_name", "") or getattr(request_config, "model", "") or "")
+    return ExternalCliModelConfig(
+        provider=provider or None,
+        model=model or None,
+        api_base=str(getattr(client_config, "api_base", "") or "") or None,
+        api_key=str(getattr(client_config, "api_key", "") or "") or None,
+    )
 
 
 async def _build_member_system_prompt(
@@ -238,14 +259,50 @@ async def external_cli_spawn(
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
-    # The member was registered through ``spawn_external_cli_agent`` which
-    # already validated a matching entry exists; fall back to defaults if it
-    # is somehow absent so the launch still produces a usable runtime.
     cli_cfg = None
     for entry in spec.external_cli_agents:
         if entry.cli_agent == ctx.cli_agent:
             cli_cfg = entry
             break
+
+    # When the pool allocator assigned a model to this member, convert it to
+    # an ExternalCliModelConfig, filtering by provider compatibility: Claude
+    # needs Anthropic, Codex needs OpenAI-compatible. Falls back to the static
+    # spec config when no pool allocation or no provider match exists.
+    external_model_config = cli_cfg.external_model_config if cli_cfg is not None else None
+    fallback_external_model_config = None
+    if ctx.member_model is not None:
+        pool_model_config = _team_model_config_to_external(ctx.member_model)
+        if pool_model_config is not None:
+            team_logger.info(
+                "[external-cli] member {} using pool-allocated model: provider={} model={} api_base={}",
+                ctx.member_name,
+                pool_model_config.provider,
+                pool_model_config.model,
+                pool_model_config.api_base,
+            )
+            external_model_config = pool_model_config
+        else:
+            team_logger.info(
+                "[external-cli] member {} pool model conversion returned None; falling back to static config",
+                ctx.member_name,
+            )
+    else:
+        team_logger.info(
+            "[external-cli] member {} no pool model assigned; using static config",
+            ctx.member_name,
+        )
+    if ctx.fallback_member_model is not None:
+        fallback_external_model_config = _team_model_config_to_external(ctx.fallback_member_model)
+
+    async def promote_fallback_model() -> bool:
+        """Persist the fallback model as this member's active model."""
+        if teammate_backend is None:
+            return False
+        return await teammate_backend.db.member.promote_member_fallback_model(
+            ctx.member_name or "",
+            team_name,
+        )
 
     if cli_cfg is not None:
         cwd, add_dirs = _resolve_external_paths(
@@ -266,7 +323,9 @@ async def external_cli_spawn(
             codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
             codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
             codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
-            external_model_config=cli_cfg.external_model_config,
+            external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
@@ -285,6 +344,9 @@ async def external_cli_spawn(
             ctx,
             cwd=cwd,
             add_dirs=add_dirs,
+            external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             system_prompt=system_prompt,
             resume_external_backend=resume_external_backend,
             member_agent_id=card.id,
@@ -320,6 +382,7 @@ async def external_cli_spawn(
         ),
     )
     from openjiuwen.agent_teams.external.cli_agent.claude import ClaudeSdkRuntime
+    from openjiuwen.agent_teams.external.cli_agent.codex import CodexSdkRuntime
 
     if isinstance(runtime, ClaudeSdkRuntime) and teammate_backend is not None:
         runtime.bind_team_tools(
@@ -333,6 +396,18 @@ async def external_cli_spawn(
             messager=teammate.infra.messager,
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
+        )
+
+    # Inject the reliability delivery surface (failed message to the
+    # leader mailbox + member ERROR status) for Claude/Codex SDK runtimes only.
+    if isinstance(runtime, (ClaudeSdkRuntime, CodexSdkRuntime)) and teammate_backend is not None:
+        leader_name = await teammate_backend.resolve_leader_member_name()
+        runtime.bind_reliability_context(
+            session_id=session_id or "",
+            team_backend=teammate_backend,
+            leader_name=leader_name,
+            update_status_cb=teammate.update_status,
+            messager=teammate.infra.messager,
         )
 
     base_query = initial_message or ""

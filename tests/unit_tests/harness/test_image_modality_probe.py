@@ -30,9 +30,15 @@ class _FakeModelConfig:
 
 
 class _FakeResponse:
-    def __init__(self, content: Any, finish_reason: str = "stop") -> None:
+    def __init__(
+        self,
+        content: Any,
+        finish_reason: str = "stop",
+        reasoning_content: str | None = None,
+    ) -> None:
         self.content = content
         self.finish_reason = finish_reason
+        self.reasoning_content = reasoning_content
 
 
 def _make_llm(
@@ -126,6 +132,34 @@ async def test_probe_naming_the_color_wins_over_truncation() -> None:
 
     assert await probe_image_support(llm) is True
     assert get_cached_image_support(llm) is True
+
+
+@pytest.mark.asyncio
+async def test_probe_accepts_color_from_reasoning_when_answer_is_truncated() -> None:
+    """Mandatory reasoning may consume the budget after already inspecting the image."""
+    answered = _FakeResponse(
+        "",
+        finish_reason="length",
+        reasoning_content="The image is a solid red square. The answer should be Red.",
+    )
+    llm = _make_llm(invoke=AsyncMock(return_value=answered))
+
+    assert await probe_image_support(llm) is True
+    assert get_cached_image_support(llm) is True
+
+
+@pytest.mark.asyncio
+async def test_probe_timeout_is_inconclusive_and_not_cached(monkeypatch) -> None:
+    """A transiently slow image endpoint must not be cached as image-blind."""
+
+    async def _timeout(*_args: Any, **_kwargs: Any) -> _FakeResponse:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(image_modality_probe, "_invoke_probe", _timeout)
+    llm = _make_llm()
+
+    assert await probe_image_support(llm) is None
+    assert get_cached_image_support(llm) is None
 
 
 @pytest.mark.asyncio

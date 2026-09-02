@@ -583,6 +583,7 @@ class TeamBackend:
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
         mode: MemberMode = MemberMode.BUILD_MODE,
         allocation: Optional["Allocation"] = None,
+        fallback_allocation: Optional["Allocation"] = None,
         role: TeamRole = TeamRole.TEAMMATE,
         isolation: Optional[str] = None,
         cli_agent: Optional[str] = None,
@@ -607,6 +608,8 @@ class TeamBackend:
                 can refresh in-place via the live session pool. ``None``
                 when the team is not configured with a pool, in which
                 case the member uses its per-agent default model.
+            fallback_allocation: Pool allocation reserved for an external CLI
+                member when its native authentication is unavailable.
             role: ``TeamRole`` enum value persisted on the member row.
                 Defaults to ``TEAMMATE`` for the ordinary teammate
                 spawn paths; ``spawn_human_agent`` overrides with
@@ -639,6 +642,7 @@ class TeamBackend:
 
         options = build_member_options(
             model_ref=allocation.to_db_ref() if allocation is not None else None,
+            fallback_model_ref=(fallback_allocation.to_db_ref() if fallback_allocation is not None else None),
             cli_agent=cli_agent,
             worktree_isolation=isolation,
             permissions_override=permissions_override,
@@ -2408,6 +2412,8 @@ class TeamBackend:
         desc: str = "",
         prompt: str,
         model_name: Optional[str] = None,
+        allocation: Optional["Allocation"] = None,
+        fallback_allocation: Optional["Allocation"] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 
@@ -2427,8 +2433,13 @@ class TeamBackend:
                 Optional; defaults to empty.
             prompt: Private system prompt the CLI adopts to act as this
                 member. Required.
-            model_name: Ignored for external-CLI members (the model lives in
-                the external CLI); accepted for signature symmetry.
+            model_name: Optional model-name hint; passed to the pool allocator
+                to select a matching model endpoint.
+            allocation: Optional pool allocation for this member; persisted as a
+                ``{model_name, model_index}`` reference so credentials
+                refreshes propagate without re-spawning.
+            fallback_allocation: Required fallback allocation used only when
+                the native CLI reports an authentication failure.
 
         Returns:
             ``MemberOpResult`` — failure if the backend name is unknown or the
@@ -2469,6 +2480,8 @@ class TeamBackend:
             mode=self.teammate_mode,
             role=TeamRole.EXTERNAL_CLI,
             cli_agent=cli_agent,
+            allocation=allocation,
+            fallback_allocation=fallback_allocation,
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

@@ -507,12 +507,10 @@ class AgentConfigurator:
             mode=OperationMode.LOCAL,
             work_config=LocalWorkConfig(shell_allowlist=None),
         )
-        # Members default to metadata-only read_file images: the modality probe
-        # costs a full LLM round-trip per member on every team start. A blueprint
-        # that wants native image input says so explicitly on the agent spec.
+        # Keep ``None`` as auto mode. Image support is cached process-wide by
+        # endpoint and model, so team members reuse the main warm-up verdict
+        # instead of paying for one probe per member.
         enable_read_image_multimodal = agent_spec.enable_read_image_multimodal
-        if enable_read_image_multimodal is None:
-            enable_read_image_multimodal = False
         # Skills are cleared and discovery is switched off on purpose: the
         # DeepAgent factory auto-adds the generic SkillUseRail when either is
         # truthy, and that rail scans the member workspace's own ``skills/``

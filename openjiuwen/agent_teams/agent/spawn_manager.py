@@ -21,6 +21,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    get_member_fallback_model_ref,
     get_member_model_ref,
 )
 from openjiuwen.agent_teams.worktree import TeammateWorktreeLifecycle
@@ -337,7 +338,9 @@ class SpawnManager:
             return None
 
         model_ref = get_member_model_ref(teammate)
+        fallback_model_ref = get_member_fallback_model_ref(teammate)
         member_model = None
+        fallback_member_model = None
         if model_ref is not None:
             team_spec = self._configurator.team_spec
             if team_spec is not None:
@@ -345,6 +348,14 @@ class SpawnManager:
                     team_spec,
                     model_name=model_ref.model_name,
                     model_index=model_ref.model_index,
+                )
+        if fallback_model_ref is not None:
+            team_spec = self._configurator.team_spec
+            if team_spec is not None:
+                fallback_member_model = resolve_member_model(
+                    team_spec,
+                    model_name=fallback_model_ref.model_name,
+                    model_index=fallback_model_ref.model_index,
                 )
 
         ctx = self._configurator.ctx
@@ -389,6 +400,7 @@ class SpawnManager:
             messager_config=self._configurator.build_member_messager_config(teammate.member_name),
             db_config=ctx.db_config if ctx else None,
             member_model=member_model,
+            fallback_member_model=fallback_member_model,
             worktree_path=worktree_path,
             cli_agent=cli_agent,
             permissions_override=permissions_override,

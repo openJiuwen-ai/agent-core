@@ -163,6 +163,14 @@ class CliRuntimeBase(ABC):
         # Set by ``abort`` so the turn driver classifies its end as ``aborted``
         # rather than ``finished``; reset when the next turn starts.
         self._turn_aborted = False
+        # Round id of the in-flight turn, read by ``_drive`` so the SDK runtime
+        # can stamp it onto reliability failure records.
+        self._current_round_id: Optional[int] = None
+        # Reliability context for Claude/Codex SDK runtimes; injected via
+        # ``bind_reliability_context``. ``None`` for CLI adapter runtimes that
+        # are out of scope for the external-runtime reliability loop
+        # (traditional stdin / reinvoke CLIs).
+        self._reliability_ctx: Any = None
 
     # ------------------------------------------------------------------
     # MemberRuntime: lifecycle
@@ -184,6 +192,24 @@ class CliRuntimeBase(ABC):
     def bind_team_context_tracker(self, tracker: "TeamContextTracker | None") -> None:
         """Bind the tracker that injects pending team state into outbound messages."""
         self._team_context_tracker = tracker
+
+    def bind_reliability_context(
+        self,
+        *,
+        session_id: str,
+        team_backend: Any,
+        leader_name: str,
+        update_status_cb: Any,
+        messager: Any,
+    ) -> None:
+        """Bind the reliability failure/retry delivery surface.
+
+        Claude and Codex SDK runtimes override this to construct a
+        :class:`RuntimeReliabilityContext` for their ``agent_kind``. The base
+        CLI adapter runtimes (traditional stdin / reinvoke CLIs) leave it a
+        no-op — they are out of scope for the external-runtime reliability loop.
+        """
+        return None
 
     async def _ensure_member_session(self, team_session: Optional[Any]) -> Any:
         """Open this member's stable child AgentSession once.
@@ -380,31 +406,110 @@ class CliRuntimeBase(ABC):
         """Drive one turn through ``_drive``, then fire its terminal round event.
 
         Pumps each narration chunk into the output queue, then maps the turn's
-        outcome onto a round event (``failed`` on a crash, ``aborted`` when
-        ``abort`` signalled, else ``finished``) and settles back to IDLE — unless
-        ``stop`` already moved the phase to TERMINATED, in which case the trailing
-        events are suppressed.
+        outcome onto a round event and settles back to IDLE — unless ``stop``
+        already moved the phase to TERMINATED, in which case the trailing events
+        are suppressed.
+
+        Finalizer — covers normal end, explicit abort/stop, unexpected
+        cancellation and crash exit, guaranteeing at most one
+        terminal round event and at most one finalized failure per round:
+
+        * Normal end with no finalized failure → ``finished``.
+        * Explicit abort/stop (``_turn_aborted`` set) → ``aborted``; no failed
+          message is written.
+        * An unexpected ``CancelledError`` without an abort mark is a runtime
+          task abnormal exit: the runtime finalizes a ``sdk_error`` failure and
+          flips the member to ``ERROR``.
+        * Any other exception: if the SDK runtime already finalized a failure,
+          the failure is reused (no second message); otherwise a ``sdk_error``
+          fallback is finalized. An in-turn exception does NOT set ``ERROR`` —
+          the member settles back to ``READY`` through the normal round failure
+          semantics.
         """
-        error: Optional[BaseException] = None
-        # CancelledError is BaseException, never caught by ``except Exception`` —
-        # cancellation propagates while a crash is captured into ``error``.
+        self._current_round_id = round_id
+        finalized_by_turn = False
+        abnormal_exit = False
+        crashed = False
         try:
             async for chunk in self._drive({"query": content}):
                 await self._output_queue.put(chunk)
+            # The SDK runtime may finalize a failure and then end the generator
+            # cleanly; that is an in-turn failure, not a normal finish.
+            finalized_by_turn = self._reliability_ctx is not None and self._reliability_ctx.has_finalized
+        except GeneratorExit:
+            # Consumer closed the generator early; not a failure.
+            self._turn_task = None
+            raise
+        except asyncio.CancelledError:
+            # An abort sets ``_turn_aborted`` first; a cancellation without it is
+            # an unexpected runtime task exit.
+            if not self._turn_aborted:
+                abnormal_exit = True
+                await self._finalize_abnormal_exit(round_id)
         except Exception as exc:  # noqa: BLE001 - reported via round event
-            error = exc
             team_logger.exception("[{}] external cli turn crashed", self._member_name)
+            crashed = True
+            await self._finalize_crash_exit(exc, round_id)
         finally:
             self._turn_task = None
         if self._phase is HarnessState.TERMINATED:
             return
-        if error is not None:
-            await self._emit_round("failed", round_id)
-        elif self._turn_aborted:
+        if self._turn_aborted:
             await self._emit_round("aborted", round_id)
+        elif finalized_by_turn or abnormal_exit or crashed:
+            await self._emit_round("failed", round_id)
         else:
             await self._emit_round("finished", round_id)
         await self._transition(HarnessState.IDLE)
+
+    async def _finalize_abnormal_exit(self, round_id: int) -> None:
+        """Finalize a ``sdk_error`` failure for an unexpected task exit.
+
+        Only the unexpected-cancel path (runtime task abnormal exit) sets the
+        member to ``ERROR``; an in-turn failure does not.
+        """
+        ctx = self._reliability_ctx
+        if ctx is None:
+            return
+        if not ctx.has_finalized:
+            from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+                ExternalRuntimeFailureReason,
+            )
+
+            await ctx.finalize_failure(
+                category="sdk_error",
+                reason=ExternalRuntimeFailureReason(
+                    message="external runtime task exited unexpectedly",
+                    sdk_error_type="CancelledError",
+                ),
+                summary=f"{self._member_name} external runtime task exited unexpectedly",
+            )
+        await ctx.mark_member_error()
+
+    async def _finalize_crash_exit(self, exc: BaseException, round_id: int) -> None:
+        """Finalize a fallback failure for an unmapped crash, if not already done.
+
+        The SDK runtime is expected to classify and finalize structured
+        failures itself; this is the ``CliRuntimeBase`` backstop that covers an
+        unmapped exception. An in-turn crash does NOT set ``ERROR`` — the
+        member settles back to ``READY``.
+        """
+        ctx = self._reliability_ctx
+        if ctx is None or ctx.has_finalized:
+            return
+        from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+            ExternalRuntimeFailureReason,
+        )
+
+        exc_type_name = type(exc).__name__
+        await ctx.finalize_failure(
+            category="sdk_error",
+            reason=ExternalRuntimeFailureReason(
+                message=str(exc) or exc_type_name,
+                sdk_error_type=exc_type_name,
+            ),
+            summary=f"{self._member_name} external runtime turn crashed: {exc_type_name}",
+        )
 
     def _next_round_id(self) -> int:
         """Return a monotonic round id for this runtime instance."""

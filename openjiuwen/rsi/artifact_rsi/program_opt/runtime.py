@@ -10,12 +10,11 @@ from the provider so the provider reads as the contract and nothing else.
 
 from __future__ import annotations
 
-import json
-import os
+import asyncio
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import yaml
 
 from openjiuwen.rsi.artifact_rsi.program_opt.completion import (
     CompletionUsage,
@@ -41,81 +40,6 @@ DEFAULT_CALL_TIMEOUT_SECONDS = 900.0
 
 class ModelConfigError(RuntimeError):
     """`model_config` could not be resolved into something callable."""
-
-
-def load_model_endpoint(model_config: str) -> dict[str, Any]:
-    """Read `ArtifactEngineRequest.model_config` into an OpenAI-compatible endpoint.
-
-    The reference is a path to the same YAML/JSON the rest of RSI uses --
-    `model_client_config` mapping to `ModelClientConfig` -- so a task that
-    already names a model for the harness names it the same way here. Read
-    rather than resolved through `Model`: the search calls one endpoint with one
-    prompt and reads one string back, and building the platform's full client
-    would buy retry rails and streaming this path does not use.
-
-    `${VAR}` in any string is expanded from the environment, which is how a key
-    stays out of the file that names the model.
-    """
-    reference = str(model_config or "").strip()
-    if not reference:
-        raise ModelConfigError("model_config is required: the search cannot run without a model")
-
-    path = Path(reference).expanduser().resolve()
-    if not path.is_file():
-        raise ModelConfigError(f"model_config not found: {reference}")
-
-    try:
-        text = path.read_text(encoding="utf-8")
-        raw = yaml.safe_load(text) if path.suffix.lower() in {".yaml", ".yml"} else json.loads(text)
-    except Exception as error:  # noqa: BLE001 - the path is user-supplied
-        raise ModelConfigError(f"failed to read model_config {path}: {error}") from error
-
-    if not isinstance(raw, dict):
-        raise ModelConfigError(f"model_config must decode to a mapping: {path}")
-
-    model = raw.get("model", raw)
-    client = model.get("model_client_config") if isinstance(model, dict) else None
-    if not isinstance(client, dict):
-        raise ModelConfigError("model_config must contain a mapping field: model_client_config")
-
-    client = _expand_env(client)
-    base = str(client.get("api_base") or "").rstrip("/")
-    if not base:
-        raise ModelConfigError("model_client_config.api_base is required")
-
-    request = model.get("model_request_config") if isinstance(model, dict) else None
-    request = _expand_env(request) if isinstance(request, dict) else {}
-
-    return {
-        # The engine posts to an absolute chat-completions URL. `api_base` in a
-        # platform model config is conventionally the `/v1` root, so only the
-        # path is appended — and a base that already carries either half is left
-        # alone, because both spellings appear in real config files.
-        "endpoint": _chat_completions_url(base),
-        "token": str(client.get("api_key") or ""),
-        "timeout": float(client.get("timeout") or DEFAULT_CALL_TIMEOUT_SECONDS),
-        "max_tokens": int(request.get("max_tokens") or DEFAULT_MAX_TOKENS_PER_CALL),
-        # Absent leaves it to the provider's own default. A reasoning model with
-        # thinking left on spends forty times the tokens for a better candidate,
-        # which is the task's trade to make and not this module's.
-        "thinking": str(request.get("thinking") or ""),
-    }
-
-
-def _chat_completions_url(base: str) -> str:
-    """`api_base` in whatever spelling a config used, as one absolute URL."""
-    if base.endswith("/chat/completions"):
-        return base
-    if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
-
-
-def _expand_env(data: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: os.path.expandvars(value) if isinstance(value, str) else value
-        for key, value in data.items()
-    }
 
 
 class SearchEngineUnavailable(RuntimeError):
@@ -153,33 +77,74 @@ def require_sandbox(override: Optional[str] = None) -> SandboxCapability:
     return capability
 
 
-def completion_factory_for(endpoint: dict[str, Any]) -> Callable[..., Any]:
-    """Adapt `load_model_endpoint`'s result to the engine's injection seam.
+def completion_factory_from_model(model: Any, loop: Any) -> Callable[..., Any]:
+    """The engine's injection seam, filled by an initialized ``Model`` service.
 
-    The engine takes `(spec, on_usage, should_stop) -> (prompt, ...) -> str`, and
-    builds the call itself so that a stop, a token count and an empty reply each
-    mean something to it. All this does is put the endpoint in front of that.
+    The contract hands the provider a process-local model instance and forbids
+    it from resolving IDs or building clients — ``request.model.invoke(...)``
+    is the whole permission. The engine's seam is synchronous and runs on
+    worker threads, while ``Model.invoke`` is a coroutine, so every call is
+    scheduled onto the loop that owns the model and waited on from the worker —
+    the same bridge the event sink already crosses in the other direction.
+
+    ``should_stop`` is honoured by abandoning the wait, not the call: the
+    coroutine cannot be cancelled from here without racing the client, so the
+    answer of a stopped call is dropped and the loop is left to finish it.
     """
-    from openjiuwen.rsi.artifact_rsi.program_opt.completion import (
-        completion_for,
-    )
+    import concurrent.futures
+
+    from openjiuwen.rsi.artifact_rsi.program_opt.completion import CompletionUsage
 
     def factory(
         spec: Any,
         on_usage: Optional[Callable[[CompletionUsage], None]],
         should_stop: Callable[[], bool],
     ) -> Callable[..., str]:
-        return completion_for(
-            endpoint["endpoint"],
-            endpoint["token"],
-            # The spec's ceiling wins when the caller set one: it is per-run and
-            # the endpoint's is per-deployment.
-            max_tokens=int(getattr(spec, "max_tokens_per_call", 0) or endpoint["max_tokens"]),
-            thinking=(getattr(spec, "thinking", "") or endpoint["thinking"]) or None,
-            timeout=endpoint["timeout"],
-            on_usage=on_usage,
-            should_stop=should_stop,
-        )
+        max_tokens = int(getattr(spec, "max_tokens_per_call", 0) or DEFAULT_MAX_TOKENS_PER_CALL)
+        timeout = float(getattr(spec, "options", {}).get("completion_timeout", DEFAULT_CALL_TIMEOUT_SECONDS))
+
+        def complete(
+            prompt: str,
+            sink: Optional[Callable[[CompletionUsage], None]] = None,
+            on_failure: Optional[Callable[[str], None]] = None,
+        ) -> str:
+            report = sink or on_usage
+            future = asyncio.run_coroutine_threadsafe(
+                model.invoke(prompt, max_tokens=max_tokens), loop,
+            )
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    reply = future.result(timeout=1.0)
+                    break
+                except concurrent.futures.TimeoutError:
+                    if should_stop is not None and should_stop():
+                        return ""
+                    if time.monotonic() > deadline:
+                        if on_failure is not None:
+                            on_failure(f"model call exceeded {timeout:.0f}s")
+                        return ""
+                except Exception as error:  # noqa: BLE001 - a failed call is a failed candidate
+                    if on_failure is not None:
+                        on_failure(str(error))
+                    return ""
+
+            content = getattr(reply, "content", "")
+            if isinstance(content, list):
+                content = "".join(part for part in content if isinstance(part, str))
+            text = str(content or "")
+
+            usage = getattr(reply, "usage_metadata", None)
+            if report is not None and usage is not None:
+                completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+                total = completion_tokens + int(getattr(usage, "input_tokens", 0) or 0)
+                # An empty reply at the output ceiling is a budget spent on
+                # hidden thinking, not a model with nothing to say.
+                capped = bool(max_tokens and completion_tokens >= max_tokens and not text.strip())
+                report(CompletionUsage(total=total, completion=completion_tokens, capped=capped))
+            return text
+
+        return complete
 
     return factory
 
@@ -190,7 +155,6 @@ __all__ = [
     "ModelConfigError",
     "SandboxUnavailable",
     "SearchEngineUnavailable",
-    "completion_factory_for",
-    "load_model_endpoint",
+    "completion_factory_from_model",
     "require_sandbox",
 ]

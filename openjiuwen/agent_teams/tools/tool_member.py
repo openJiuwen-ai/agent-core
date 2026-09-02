@@ -18,6 +18,20 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.team import MemberOpResult
 
 
+def _is_anthropic_provider(provider: str) -> bool:
+    """Return whether a provider name is Anthropic-compatible."""
+    return "anthropic" in provider.lower()
+
+
+def _provider_filter_for_cli(cli_agent: str) -> Callable[[str], bool] | None:
+    """Return a provider filter for the CLI kind, or None for unknown kinds."""
+    if cli_agent == "claude":
+        return _is_anthropic_provider
+    if cli_agent == "codex":
+        return lambda p: not _is_anthropic_provider(p)
+    return None
+
+
 # ========== Member Management ==========
 
 
@@ -579,8 +593,15 @@ class SpawnExternalCliTool(_SpawnToolBase):
     (see ``create_team_tools``).
     """
 
-    def __init__(self, team: TeamBackend, t: Translator):
+    def __init__(
+        self,
+        team: TeamBackend,
+        t: Translator,
+        *,
+        model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
+    ):
         super().__init__(team, t, "spawn_external_cli")
+        self._allocate_model_config = model_config_allocator
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -598,8 +619,16 @@ class SpawnExternalCliTool(_SpawnToolBase):
                     "type": "string",
                     "description": t("spawn_external_cli", "cli_agent"),
                 },
+                "model_name": {
+                    "type": "string",
+                    "description": t("spawn_external_cli", "model_name"),
+                },
+                "fallback_model_name": {
+                    "type": "string",
+                    "description": t("spawn_external_cli", "fallback_model_name"),
+                },
             },
-            "required": ["member_name", "display_name", "prompt", "cli_agent"],
+            "required": ["member_name", "display_name", "prompt", "cli_agent", "fallback_model_name"],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
@@ -621,12 +650,41 @@ class SpawnExternalCliTool(_SpawnToolBase):
 
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
+        model_name = inputs.get("model_name")
+        fallback_model_name = str(inputs.get("fallback_model_name") or "").strip()
+        if not fallback_model_name:
+            return self._fail("spawn_external_cli requires a non-empty 'fallback_model_name'")
+        allocation = None
+        fallback_allocation = None
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        if model_name:
+            if self._allocate_model_config is None:
+                return self._fail("spawn_external_cli requires a team model pool when 'model_name' is specified")
+            if provider_filter is not None:
+                allocation = self._allocate_model_config(model_name, provider_filter=provider_filter)
+            else:
+                allocation = self._allocate_model_config(model_name)
+            if allocation is None:
+                return self._fail(
+                    f"model_name '{model_name}' is unavailable or incompatible with cli_agent '{cli_agent}'"
+                )
+        if self._allocate_model_config is not None:
+            if provider_filter is not None:
+                fallback_allocation = self._allocate_model_config(
+                    fallback_model_name,
+                    provider_filter=provider_filter,
+                )
+            else:
+                fallback_allocation = self._allocate_model_config(fallback_model_name)
         result = await self.team.spawn_external_cli_agent(
             member_name=member_name,
             display_name=display_name,
             cli_agent=cli_agent,
             desc=desc,
             prompt=prompt,
+            model_name=model_name,
+            allocation=allocation,
+            fallback_allocation=fallback_allocation,
         )
         return self._from_result(
             result,

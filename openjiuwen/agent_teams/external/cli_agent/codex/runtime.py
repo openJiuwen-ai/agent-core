@@ -11,7 +11,7 @@ import inspect
 import json
 import os
 from enum import Enum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.external.cli_agent.codex.options import (
     build_codex_config,
@@ -27,6 +27,7 @@ from openjiuwen.core.session.stream.base import OutputSchema
 _INTERRUPT_TIMEOUT_S = 5.0
 _DEFAULT_TURN_IDLE_TIMEOUT_S = 180.0
 _DEFAULT_TURN_IDLE_RETRIES = 1
+_DEFAULT_MAX_WILL_RETRY_COUNT = 5
 _NO_ACTIVE_TURN_ERROR_CODE = -32600
 _NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
 _TOOL_ITEM_TYPES = {"commandExecution", "dynamicToolCall", "fileChange", "mcpToolCall"}
@@ -143,6 +144,27 @@ class _CodexTurnIdleTimeout(RuntimeError):
         self.interrupted = interrupted
 
 
+class _CodexRetryBudgetExceeded(RuntimeError):
+    """Codex SDK kept emitting will_retry beyond the allowed count."""
+
+    def __init__(
+        self,
+        *,
+        member_name: str,
+        max_count: int,
+        category: str,
+    ) -> None:
+        super().__init__(
+            f"Codex SDK member {member_name!r} exceeded will_retry count "
+            f"{max_count} (last category={category})",
+        )
+        self.category = category
+
+
+class _CodexAuthFallbackRequested(RuntimeError):
+    """Signal that the current prompt must be retried on the fallback model."""
+
+
 class CodexSdkRuntime(CliRuntimeBase):
     """Keep one SDK client and one isolated Codex thread per Jiuwen member."""
 
@@ -156,9 +178,13 @@ class CodexSdkRuntime(CliRuntimeBase):
         sdk: Any,
         config: Any,
         thread_options: dict[str, Any],
+        fallback_config: Any | None = None,
+        fallback_thread_options: dict[str, Any] | None = None,
+        promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
         resume_external_backend: bool = False,
         turn_idle_timeout_s: float = _DEFAULT_TURN_IDLE_TIMEOUT_S,
         turn_idle_retries: int = _DEFAULT_TURN_IDLE_RETRIES,
+        max_will_retry_count: int = _DEFAULT_MAX_WILL_RETRY_COUNT,
         team_context_tracker: Any = None,
         span_bridge: Any | None = None,
         native_otel_receiver: Any | None = None,
@@ -174,6 +200,7 @@ class CodexSdkRuntime(CliRuntimeBase):
         if turn_idle_retries < 0:
             raise ValueError("turn_idle_retries must be non-negative")
         self._member_agent_id = member_agent_id
+        self._team_name = team_name
         self._span_bridge = span_bridge or _build_span_bridge(
             member_name=member_name,
             member_agent_id=member_agent_id,
@@ -185,9 +212,17 @@ class CodexSdkRuntime(CliRuntimeBase):
         self._sdk = sdk
         self._config = config
         self._thread_options = dict(thread_options)
+        self._fallback_config = fallback_config
+        self._fallback_thread_options = (
+            dict(fallback_thread_options) if fallback_thread_options is not None else None
+        )
+        self._promote_fallback_model = promote_fallback_model
+        self._fallback_activated = False
         self._resume_external_backend = resume_external_backend
         self._turn_idle_timeout_s = turn_idle_timeout_s
         self._turn_idle_retries = turn_idle_retries
+        self._max_will_retry_count = max_will_retry_count
+        self._will_retry_count: int = 0
         self._thread_id: str | None = None
         self._persisted_thread_id: str | None = None
         self._client: Any | None = None
@@ -196,17 +231,140 @@ class CodexSdkRuntime(CliRuntimeBase):
         self._pending: list[str] = []
         self._aborted = False
         self._close_lock = asyncio.Lock()
+        # Reliability context; injected via bind_reliability_context.
+        self._reliability_ctx: Any = None
 
     @property
     def session_id(self) -> str | None:
         """Return the Codex thread id once the SDK thread is available."""
         return self._thread_id
 
+    def bind_reliability_context(
+        self,
+        *,
+        session_id: str,
+        team_backend: Any,
+        leader_name: str,
+        update_status_cb: Any,
+        messager: Any,
+    ) -> None:
+        """Bind the reliability failure/retry delivery surface."""
+        from openjiuwen.agent_teams.external.reliability import RuntimeReliabilityContext
+
+        self._reliability_ctx = RuntimeReliabilityContext(
+            member_name=self._member_name,
+            team_name=self._team_name,
+            session_id=session_id,
+            agent_kind="codex",
+            message_manager=team_backend.message_manager if team_backend is not None else None,
+            messager=messager,
+            leader_name=leader_name,
+            update_status_cb=update_status_cb,
+            span_bridge=self._span_bridge,
+        )
+
     async def start(self, *, team_session: Any | None = None) -> None:
         """Restore the member checkpoint, then create or resume its SDK thread."""
         await super().start(team_session=team_session)
         self._restore_thread_id()
-        await self._ensure_thread()
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.begin_attempt(phase="startup", round_id=None)
+        try:
+            await self._ensure_thread()
+        except BaseException as exc:
+            await self._finalize_startup_failure(exc)
+            raise
+
+    async def _activate_auth_fallback(self) -> bool:
+        """Replace the native Codex client and thread with the fallback endpoint."""
+        if self._fallback_activated:
+            return False
+        if (
+            self._fallback_config is None
+            or self._fallback_thread_options is None
+            or self._promote_fallback_model is None
+        ):
+            return False
+        original_config = self._config
+        original_thread_options = self._thread_options
+        original_thread_id = self._thread_id
+        original_persisted_thread_id = self._persisted_thread_id
+        team_logger.info(
+            "[external-cli] member {} activating Codex authentication fallback thread_id={}",
+            self._member_name,
+            original_thread_id,
+        )
+        client = self._client
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:
+                team_logger.exception(
+                    "[external-cli] member {} failed to close native Codex client before authentication fallback",
+                    self._member_name,
+                )
+            else:
+                team_logger.info(
+                    "[external-cli] member {} closed native Codex client before authentication fallback",
+                    self._member_name,
+                )
+        self._client = None
+        self._thread = None
+        self._thread_id = original_thread_id
+        self._persisted_thread_id = original_persisted_thread_id
+        self._config = self._fallback_config
+        self._thread_options = dict(self._fallback_thread_options)
+        try:
+            await self._ensure_thread(persist=False)
+            promoted = await self._promote_fallback_model()
+        except Exception:
+            team_logger.exception(
+                "[external-cli] member {} failed to activate Codex authentication fallback",
+                self._member_name,
+            )
+            await self._restore_after_failed_fallback(
+                config=original_config,
+                thread_options=original_thread_options,
+                thread_id=original_thread_id,
+                persisted_thread_id=original_persisted_thread_id,
+            )
+            return False
+        if not promoted:
+            team_logger.warning(
+                "[external-cli] member {} resumed Codex authentication fallback but failed to persist it",
+                self._member_name,
+            )
+            await self._restore_after_failed_fallback(
+                config=original_config,
+                thread_options=original_thread_options,
+                thread_id=original_thread_id,
+                persisted_thread_id=original_persisted_thread_id,
+            )
+            return False
+        await self._persist_thread_id()
+        self._fallback_activated = True
+        team_logger.info("[external-cli] member {} activated Codex authentication fallback", self._member_name)
+        return True
+
+    async def _restore_after_failed_fallback(
+        self,
+        *,
+        config: Any,
+        thread_options: dict[str, Any],
+        thread_id: str | None,
+        persisted_thread_id: str | None,
+    ) -> None:
+        """Restore native runtime settings after fallback promotion fails."""
+        client = self._client
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.close()
+        self._client = None
+        self._thread = None
+        self._config = config
+        self._thread_options = thread_options
+        self._thread_id = thread_id
+        self._persisted_thread_id = persisted_thread_id
 
     def _restore_thread_id(self) -> None:
         """Pick the Codex thread id back up from this member's checkpoint.
@@ -265,10 +423,11 @@ class CodexSdkRuntime(CliRuntimeBase):
         await member_session.commit()
         self._persisted_thread_id = thread_id
 
-    async def _ensure_thread(self) -> Any:
+    async def _ensure_thread(self, *, persist: bool = True) -> Any:
         """Lazily initialize ``AsyncCodex`` and this runtime's single thread."""
         if self._thread is not None:
-            await self._persist_thread_id()
+            if persist:
+                await self._persist_thread_id()
             return self._thread
         if self._client is None:
             self._client = self._sdk.AsyncCodex(config=self._config)
@@ -322,7 +481,8 @@ class CodexSdkRuntime(CliRuntimeBase):
                 raise
             activation = "started"
         self._thread_id = self._thread.id
-        await self._persist_thread_id()
+        if persist:
+            await self._persist_thread_id()
         team_logger.info(
             "[external-cli] member {} {} codex SDK thread {}",
             self._member_name,
@@ -350,30 +510,36 @@ class CodexSdkRuntime(CliRuntimeBase):
         chunk_index = 0
         thread = await self._ensure_thread()
         while prompt is not None and not self._aborted:
-            idle_retries = 0
-            while True:
+            for _ in range(2):
+                idle_retries = 0
                 try:
-                    async for chunk in self._run_turn(thread, prompt, chunk_index):
-                        yield chunk
-                        chunk_index = chunk.index + 1
-                except _CodexTurnIdleTimeout as exc:
-                    can_retry = (
-                        idle_retries < self._turn_idle_retries
-                        and exc.notifications_seen == 0
-                        and exc.interrupted
-                        and not self._aborted
-                    )
-                    if not can_retry:
-                        raise
-                    idle_retries += 1
-                    team_logger.warning(
-                        "[external-cli] member {} codex SDK turn was silent for {}s; "
-                        "retrying prompt on the same thread ({}/{})",
-                        self._member_name,
-                        self._turn_idle_timeout_s,
-                        idle_retries,
-                        self._turn_idle_retries,
-                    )
+                    while True:
+                        try:
+                            async for chunk in self._run_turn(thread, prompt, chunk_index):
+                                yield chunk
+                                chunk_index = chunk.index + 1
+                        except _CodexTurnIdleTimeout as exc:
+                            can_retry = (
+                                idle_retries < self._turn_idle_retries
+                                and exc.notifications_seen == 0
+                                and exc.interrupted
+                                and not self._aborted
+                            )
+                            if not can_retry:
+                                raise
+                            idle_retries += 1
+                            team_logger.warning(
+                                "[external-cli] member {} codex SDK turn was silent for {}s; "
+                                "retrying prompt on the same thread ({}/{})",
+                                self._member_name,
+                                self._turn_idle_timeout_s,
+                                idle_retries,
+                                self._turn_idle_retries,
+                            )
+                            continue
+                        break
+                except _CodexAuthFallbackRequested:
+                    thread = self._thread
                     continue
                 break
             prompt = None if self._aborted else self._drain_pending()
@@ -385,6 +551,10 @@ class CodexSdkRuntime(CliRuntimeBase):
         start_index: int,
     ) -> AsyncIterator[OutputSchema]:
         """Start one SDK turn and convert its typed notification stream."""
+        # One reliability attempt per turn.
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.begin_attempt(phase="turn", round_id=self._current_round_id)
+        self._will_retry_count = 0
         self._span_bridge.start_turn(
             prompt=prompt,
             thread_id=self._thread_id,
@@ -395,6 +565,12 @@ class CodexSdkRuntime(CliRuntimeBase):
             handle = await thread.turn(prompt)
         except BaseException as exc:
             self._span_bridge.finish_turn(status="failed", error=exc)
+            if self._fallback_config is not None:
+                from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import classify_codex_exception
+
+                category, _ = classify_codex_exception(exc)
+                if category == "auth_required" and await self._activate_auth_fallback():
+                    raise _CodexAuthFallbackRequested() from exc
             raise
         self._active_turn = handle
         if self._aborted:
@@ -421,6 +597,16 @@ class CodexSdkRuntime(CliRuntimeBase):
                     ) from exc
                 notifications_seen += 1
                 self._trace_notification(notification)
+                # Classify structured failure signals before chunk conversion:
+                # error notifications publish retrying or record a pending
+                # candidate; turn/completed finalizes the one failure. Failure
+                # notifications produce no stream chunks.
+                fallback_activated = await self._handle_failure_notification(
+                    notification,
+                    safe_to_retry=index == start_index,
+                )
+                if fallback_activated:
+                    raise _CodexAuthFallbackRequested()
                 chunks = _notification_chunks(notification, index)
                 for chunk in chunks:
                     team_logger.debug(
@@ -437,6 +623,20 @@ class CodexSdkRuntime(CliRuntimeBase):
             with contextlib.suppress(Exception):
                 await self._span_bridge.wait_for_native_observations()
             self._span_bridge.finish_turn(status="failed", error=exc)
+            # Abort/cancellation is not a runtime failure.
+            if not (
+                self._aborted
+                or isinstance(exc, (asyncio.CancelledError, _CodexAuthFallbackRequested))
+            ):
+                if self._fallback_config is not None:
+                    from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import (
+                        classify_codex_exception,
+                    )
+
+                    category, _ = classify_codex_exception(exc)
+                    if category == "auth_required" and index == start_index and await self._activate_auth_fallback():
+                        raise _CodexAuthFallbackRequested() from exc
+                await self._finalize_turn_failure(exc)
             raise
         else:
             # Native sampling spans can arrive shortly after the SDK emits
@@ -530,6 +730,134 @@ class CodexSdkRuntime(CliRuntimeBase):
             # Do not close the bridge here. The App Server's batched native
             # model span may not have reached the local receiver yet.
             return
+
+    async def _handle_failure_notification(
+        self,
+        notification: Any,
+        *,
+        safe_to_retry: bool,
+    ) -> bool:
+        """Classify a Codex failure notification before chunk conversion.
+
+        ``ErrorNotification(will_retry=True)`` publishes retrying progress and
+        keeps the round running; ``will_retry=False`` records a pending
+        candidate. ``TurnCompletedNotification(turn.status=failed)`` is the
+        authoritative terminal state: it finalizes the one failure from
+        ``turn.error`` when present, or falls back to the pending candidate.
+        """
+        from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import (
+            classify_error_notification,
+            classify_turn_error,
+        )
+
+        ctx = self._reliability_ctx
+        method = getattr(notification, "method", "")
+        payload = getattr(notification, "payload", None)
+        if method == "error":
+            if ctx is None:
+                return False
+            category, reason, will_retry = classify_error_notification(payload)
+            if will_retry:
+                if ctx.has_finalized:
+                    handle = self._active_turn
+                    if handle is not None:
+                        await self._interrupt_handle(handle)
+                    return False
+                if category == "auth_required" and safe_to_retry and await self._activate_auth_fallback():
+                    return True
+                self._will_retry_count += 1
+                if self._will_retry_count > self._max_will_retry_count:
+                    handle = self._active_turn
+                    if handle is not None:
+                        await self._interrupt_handle(handle)
+                    raise _CodexRetryBudgetExceeded(
+                        member_name=self._member_name,
+                        max_count=self._max_will_retry_count,
+                        category=category,
+                    )
+                await ctx.publish_retrying(
+                    category=category,
+                    reason=reason,
+                    summary=f"{self._member_name} Codex SDK retrying: {category}",
+                )
+            else:
+                ctx.record_pending(category=category, reason=reason)
+            return False
+        if method == "turn/completed":
+            turn = getattr(payload, "turn", None)
+            if _enum_value(getattr(turn, "status", None)) != "failed":
+                return False
+            turn_error = getattr(turn, "error", None)
+            if turn_error is not None:
+                category, reason = classify_turn_error(turn_error)
+            elif (
+                ctx is not None
+                and ctx.pending_category is not None
+                and ctx.pending_reason is not None
+            ):
+                category, reason = ctx.pending_category, ctx.pending_reason
+            else:
+                # No pending candidate and no turn.error: degrade to sdk_error.
+                from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+                    ExternalRuntimeFailureReason,
+                )
+
+                category = "sdk_error"
+                reason = ExternalRuntimeFailureReason(
+                    message="codex SDK turn failed without a structured error",
+                )
+            if category == "auth_required" and safe_to_retry and await self._activate_auth_fallback():
+                return True
+            if ctx is not None:
+                await ctx.finalize_failure(
+                    category=category,
+                    reason=reason,
+                    summary=_codex_failure_summary(category, reason),
+                )
+        return False
+
+    async def _finalize_turn_failure(self, exc: BaseException) -> None:
+        """Finalize a Codex SDK exception, merging any pending candidate."""
+        from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import (
+            classify_codex_exception,
+        )
+        from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+            ExternalRuntimeFailureReason,
+        )
+
+        ctx = self._reliability_ctx
+        if ctx is None or ctx.has_finalized:
+            return
+        if isinstance(exc, _CodexRetryBudgetExceeded):
+            category = exc.category
+            reason = ctx.pending_reason or ExternalRuntimeFailureReason(message=str(exc))
+        else:
+            category, reason = classify_codex_exception(exc)
+            if ctx.has_pending:
+                category = ctx.pending_category if ctx.pending_category is not None else category
+                reason = ctx.pending_reason or reason
+        await ctx.finalize_failure(
+            category=category,
+            reason=reason,
+            summary=f"{self._member_name} Codex SDK turn failed: {type(exc).__name__}",
+        )
+
+    async def _finalize_startup_failure(self, exc: BaseException) -> None:
+        """Finalize and surface a Codex startup failure (member → ERROR)."""
+        from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import (
+            classify_codex_exception,
+        )
+
+        ctx = self._reliability_ctx
+        if ctx is None or ctx.has_finalized:
+            return
+        category, reason = classify_codex_exception(exc)
+        await ctx.finalize_failure(
+            category=category,
+            reason=reason,
+            summary=f"{self._member_name} Codex SDK startup failed: {type(exc).__name__}",
+        )
+        await ctx.mark_member_error()
 
     def _drain_pending(self) -> str | None:
         """Combine ordinary messages queued while a turn was running."""
@@ -726,15 +1054,25 @@ def _notification_chunks(notification: Any, start_index: int) -> list[OutputSche
         if _item_type(item) in _TOOL_ITEM_TYPES:
             return [_tool_result_chunk(item, start_index)]
     if method == "error":
+        # Failure classification is handled by _handle_failure_notification
+        # before this function runs. Produce no chunks; the turn continues for
+        # a retrying error or ends via the terminal state.
         if getattr(payload, "will_retry", False):
-            team_logger.warning("Codex SDK turn error will retry: {}", _jsonable(getattr(payload, "error", None)))
-            return []
-        raise RuntimeError(f"codex SDK turn failed: {_jsonable(getattr(payload, 'error', None))}")
+            team_logger.debug("Codex SDK turn error will retry: {}", _jsonable(getattr(payload, "error", None)))
+        return []
     if method == "turn/completed":
-        turn = getattr(payload, "turn", None)
-        if _enum_value(getattr(turn, "status", None)) == "failed":
-            raise RuntimeError(f"codex SDK turn failed: {_jsonable(getattr(turn, 'error', None))}")
+        # A failed turn is finalized by _handle_failure_notification; a
+        # completed/interrupted turn produces no chunks and ends the stream.
+        return []
     return []
+
+
+def _codex_failure_summary(category: Any, reason: Any) -> str:
+    """Build a one-line Codex failure summary from category and reason."""
+    message = getattr(reason, "message", "") or ""
+    if message:
+        return f"Codex SDK turn failed: {message}"
+    return f"Codex SDK turn failed: {category}"
 
 
 def _delta_chunks(chunk_type: str, payload: Any, index: int) -> list[OutputSchema]:
@@ -900,9 +1238,12 @@ async def build_codex_runtime(
     system_prompt: str | None,
     codex_bin: str | None,
     external_model_config: ExternalCliModelConfig | None = None,
+    fallback_external_model_config: ExternalCliModelConfig | None = None,
+    promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
     resume_external_backend: bool = False,
     turn_idle_timeout_s: float | None = None,
     turn_idle_retries: int | None = None,
+    max_will_retry_count: int | None = None,
     team_context_tracker: Any = None,
     role: str | None = None,
 ) -> CodexSdkRuntime:
@@ -943,22 +1284,36 @@ async def build_codex_runtime(
             span_bridge,
             _NoopCodexSpanBridge,
         ):
-            from openjiuwen.agent_teams.observability.codex import (
-                CodexOtelTraceReceiver,
-                CodexRolloutTraceReader,
-            )
+            # Observability augmentation is best-effort: a failure to start the
+            # native OTEL receiver or rollout trace reader only logs a warning and
+            # disables that augmentation; it must not block CodexSdkRuntime
+            # construction or MemberRuntime.start, must not enter failure
+            # collection, and must not update member status.
+            try:
+                from openjiuwen.agent_teams.observability.codex import (
+                    CodexOtelTraceReceiver,
+                    CodexRolloutTraceReader,
+                )
 
-            team_logger.info("[external-cli] starting codex rollout trace reader for member {}", member_name)
-            rollout_trace_reader = await CodexRolloutTraceReader.start(
-                span_bridge.record_rollout_event,
-            )
-            span_bridge.enable_rollout_trace()
-            team_logger.info("[external-cli] starting codex native otel receiver for member {}", member_name)
-            native_otel_receiver = await CodexOtelTraceReceiver.start(
-                span_bridge.record_native_model_span,
-            )
-            if native_otel_receiver is not None:
-                span_bridge.enable_native_model_spans()
+                team_logger.info("[external-cli] starting codex rollout trace reader for member {}", member_name)
+                rollout_trace_reader = await CodexRolloutTraceReader.start(
+                    span_bridge.record_rollout_event,
+                )
+                span_bridge.enable_rollout_trace()
+                team_logger.info("[external-cli] starting codex native otel receiver for member {}", member_name)
+                native_otel_receiver = await CodexOtelTraceReceiver.start(
+                    span_bridge.record_native_model_span,
+                )
+                if native_otel_receiver is not None:
+                    span_bridge.enable_native_model_spans()
+            except Exception as exc:  # noqa: BLE001 - observability is optional
+                team_logger.warning(
+                    "[external-cli] codex observability augmentation disabled for member {}: {}",
+                    member_name,
+                    exc,
+                )
+                rollout_trace_reader = None
+                native_otel_receiver = None
 
         process_env = dict(env)
         traceparent = span_bridge.native_traceparent()
@@ -988,6 +1343,32 @@ async def build_codex_runtime(
             bypass_approvals_and_sandbox=bypass_approvals_and_sandbox,
             sdk=sdk,
         )
+        fallback_config = None
+        fallback_thread_options = None
+        if external_model_config is None and fallback_external_model_config is not None:
+            fallback_config = build_codex_config(
+                cwd=cwd,
+                env=process_env,
+                inject_mcp=inject_mcp,
+                mcp_server_name=mcp_server_name,
+                mcp_server_command=mcp_server_command,
+                mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
+                member_name=member_name,
+                codex_bin=codex_bin,
+                external_model_config=fallback_external_model_config,
+                native_otel_trace_endpoint=(
+                    native_otel_receiver.endpoint if native_otel_receiver is not None else None
+                ),
+                rollout_trace_root=(str(rollout_trace_reader.root) if rollout_trace_reader is not None else None),
+                sdk=sdk,
+            )
+            fallback_thread_options = build_codex_thread_options(
+                cwd=cwd,
+                system_prompt=system_prompt,
+                external_model_config=fallback_external_model_config,
+                bypass_approvals_and_sandbox=bypass_approvals_and_sandbox,
+                sdk=sdk,
+            )
         return CodexSdkRuntime(
             member_name=member_name,
             member_agent_id=member_agent_id,
@@ -996,9 +1377,17 @@ async def build_codex_runtime(
             sdk=sdk,
             config=config,
             thread_options=thread_options,
+            fallback_config=fallback_config,
+            fallback_thread_options=fallback_thread_options,
+            promote_fallback_model=promote_fallback_model,
             resume_external_backend=resume_external_backend,
-            turn_idle_timeout_s=(_DEFAULT_TURN_IDLE_TIMEOUT_S if turn_idle_timeout_s is None else turn_idle_timeout_s),
+            turn_idle_timeout_s=(
+                _DEFAULT_TURN_IDLE_TIMEOUT_S if turn_idle_timeout_s is None else turn_idle_timeout_s
+            ),
             turn_idle_retries=(_DEFAULT_TURN_IDLE_RETRIES if turn_idle_retries is None else turn_idle_retries),
+            max_will_retry_count=(
+                _DEFAULT_MAX_WILL_RETRY_COUNT if max_will_retry_count is None else max_will_retry_count
+            ),
             team_context_tracker=team_context_tracker,
             span_bridge=span_bridge,
             native_otel_receiver=native_otel_receiver,

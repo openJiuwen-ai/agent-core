@@ -174,6 +174,16 @@ STRINGS: dict[str, str] = {
         "取值必须命中 spec.external_cli_agents 中预先声明的某条静态配置——"
         "具体启动命令、工作目录、MCP 注入等都在那条配置里，本字段只负责按名引用"
     ),
+    "spawn_external_cli.model_name": (
+        "可选。仅当用户明确指定该第三方 Agent 使用的模型名称时填写。"
+        "你不得自行选择、推断或补全；用户未明确指定时必须省略，使该 Agent 使用其自身默认模型"
+    ),
+    "spawn_external_cli.fallback_model_name": (
+        "必填。必须从团队模型池中选择，并根据该第三方 Agent 支持的模型调用协议选择兼容模型。"
+        "该第三方 Agent 使用自身默认模型但认证不可用时，将使用此模型自动回退；"
+        "仅对运行时明确报告的认证失败生效。模型不存在、协议不兼容或该 Agent 不支持认证回退时，"
+        "仍可使用其自身默认模型，但不启用自动回退"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/member/shutdown_member.md
     "shutdown_member.member_name": "要请求关闭的成员 member_name（语义化 slug，不是显示名）",
