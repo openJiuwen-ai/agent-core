@@ -1625,6 +1625,90 @@ def test_the_real_engines_events_actually_reach_the_state(
     assert provider.read_state(request.task_id).status == "failed"
 
 
+def test_a_failed_candidate_does_not_make_a_run_unresumable() -> None:
+    """A model timeout is the ordinary failure, not corruption.
+
+    The reporter stores only text it was given, so a candidate that came back
+    empty has `code_hash: null` by design. `restore_tree` treated that as a
+    missing body and refused the whole resume — and since a real run of five
+    candidates had one such node, it meant a run could not be continued after
+    the first timeout. Found end to end, where a paused run refused to resume.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.candidates import CandidateStore
+    from openjiuwen.rsi.artifact_rsi.program_opt.restore import restore_tree
+    from openjiuwen.rsi.artifact_rsi.program_opt.tree import PuctTree
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as root:
+        store = CandidateStore(Path(root), flat=True)
+        seed = "def f():\n    return 1\n"
+        rows = [
+            {"index": 0, "code_hash": store.put("run-1", seed), "valid": True,
+             "score": 0.25, "visits": 2},
+            # What a timed-out expansion actually leaves behind.
+            {"index": 1, "parent_index": 0, "code_hash": None, "valid": False,
+             "score": None, "visits": 1, "error": "the call returned nothing"},
+        ]
+
+        tree = restore_tree(PuctTree(), rows, store=store, search_id="run-1",
+                            fallback_code=seed)
+
+    assert [node.index for node in tree.nodes] == [0, 1]
+    # The failed node keeps its identity and its verdict; only its body is empty.
+    assert tree.nodes[1].program.valid is False
+    assert tree.nodes[1].program.code == ""
+
+
+def test_a_valid_node_whose_body_is_gone_still_refuses() -> None:
+    """The tolerance above must not swallow real corruption: a node that
+    scored must have the program that scored it, or the search would build a
+    mutation prompt from an empty parent."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.candidates import CandidateStore
+    from openjiuwen.rsi.artifact_rsi.program_opt.restore import RestoreError, restore_tree
+    from openjiuwen.rsi.artifact_rsi.program_opt.tree import PuctTree
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as root:
+        store = CandidateStore(Path(root), flat=True)
+        seed = "def f():\n    return 1\n"
+        rows = [
+            {"index": 0, "code_hash": store.put("run-1", seed), "valid": True, "score": 0.25},
+            {"index": 1, "parent_index": 0, "code_hash": "sha256:" + "d" * 64,
+             "valid": True, "score": 0.9},
+        ]
+
+        with pytest.raises(RestoreError, match="missing"):
+            restore_tree(PuctTree(), rows, store=store, search_id="run-1", fallback_code=seed)
+
+
+def test_a_refused_resume_leaves_the_paused_trees_record_alone(tmp_path: Path) -> None:
+    """A resume continues one task, so it continues one durable record.
+
+    The state used to start empty on resume, and its first write truncated
+    `nodes.json` to the new attempt's nodes — so a resume that was then refused
+    destroyed the paused run's tree on its way out. Seen end to end: two nodes
+    went to zero, and the only copy of the work was gone.
+    """
+    run = _state(tmp_path)
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:" + "a" * 64))
+    _absorb(run, events.expanded(1, 0, 1, 0.4, True, iteration=1,
+                                 code_hash="sha256:" + "b" * 64))
+    _absorb(run, events.merged(1, True, "it scored better"))
+    before = json.loads((Path(run.run_dir) / "nodes.json").read_text(encoding="utf-8"))
+    assert len(before["nodes"]) == 2
+
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, model=None)      # fails on the model, after the state is built
+    _scorecard(Path(request.run_dir))
+    result = asyncio.run(provider.resume(request))
+
+    assert result.status == "failed"
+    after = json.loads((Path(run.run_dir) / "nodes.json").read_text(encoding="utf-8"))
+    assert [n["node_id"] for n in after["nodes"]] == [n["node_id"] for n in before["nodes"]]
+    # And the tree the caller can read is still the paused run's tree.
+    assert len(provider.get_tree(request.task_id).nodes) == 2
+
+
 # -- task-owned prompt wording ---------------------------------------------------
 
 

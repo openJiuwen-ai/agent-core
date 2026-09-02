@@ -431,6 +431,12 @@ class PuctProgramArtifactProvider:
             run_dir=run_dir,
             total_iterations=int(request.max_iterations),
         )
+        if resumed:
+            # One task, one durable record. A fresh state would truncate
+            # `nodes.json` to this attempt's own nodes on its first write —
+            # losing every earlier branch from `get_tree`, and destroying the
+            # paused run's tree even when the resume is then refused.
+            state.rehydrate()
 
         try:
             if request.model is None:

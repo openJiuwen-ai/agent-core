@@ -40,10 +40,13 @@ What has to come back, and why each one:
     the criteria columns all read them, and none of that survives a resume that
     keeps only the aggregate.
 
-A body the store cannot find is a refusal, not a gap. A node whose code is
-missing can still be *selected* -- its rank is real -- and the mutation prompt
-would then be built from an empty parent, which spends a model call to ask for a
-rewrite of nothing.
+A **valid** node whose body the store cannot find is a refusal, not a gap: it
+can still be selected -- its rank is real -- and the mutation prompt would then
+be built from an empty parent, which spends a model call to ask for a rewrite of
+nothing. An *invalid* node is the opposite case and must not refuse: the
+reporter stores only text it was given, so a model timeout or an empty reply
+leaves that node with no body by design, and treating the ordinary failure as
+corruption made every run containing one permanently unresumable.
 """
 
 from __future__ import annotations
@@ -97,8 +100,16 @@ def restore_tree(
         code = _body(row, store=store, search_id=search_id,
                      fallback=fallback_code if index == 0 else "")
         if code is None:
-            missing.append(index)
-            continue
+            if row.get("valid"):
+                missing.append(index)
+                continue
+            # A candidate that never produced text has no body to be missing:
+            # the reporter only stores what it was given, so a model timeout or
+            # an empty reply leaves `code_hash` null by design. Refusing here
+            # meant one such candidate — the ordinary case, not the exotic one —
+            # made the whole run unresumable for ever. It is restored as what it
+            # was: a node holding its index, its rank and its failure.
+            code = ""
         nodes.append(Node(
             index=index,
             parent_index=_parent(row, index),

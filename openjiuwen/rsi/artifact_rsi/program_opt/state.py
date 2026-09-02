@@ -127,6 +127,38 @@ class ProgramRunState:
     def __post_init__(self) -> None:
         register_run_dir(self.task_id, self.run_dir)
 
+    def rehydrate(self) -> None:
+        """Load what a previous attempt already wrote, before absorbing more.
+
+        A resume continues one task, so its durable record has to continue too.
+        Without this the state started empty and the first `_persist` truncated
+        `nodes.json` to the new attempt's nodes alone — `get_tree` lost every
+        earlier branch, and a resume that was *refused* (a bad scorecard, a
+        missing body) destroyed the paused run's tree on its way out.
+
+        Tolerant by construction: it reuses the same `_node_from` /
+        `_artifact_ref_from` rebuilds `get_tree` and `read_report` use, so a
+        file written by an older version degrades to the rows it can still
+        read rather than failing the resume.
+        """
+        tree = read_tree_file(self.task_id)
+        if tree is not None:
+            for node in tree.nodes:
+                index = _index_of(node.node_id)
+                if index is not None:
+                    self.nodes[index] = node
+            self.iteration = max((node.iteration for node in tree.nodes), default=0)
+        report = read_report_file(self.task_id)
+        if report is not None:
+            for ref in report.artifact_index:
+                self.artifacts[ref.artifact_id] = ref
+        stored = _read(self.task_id, STATE_FILE) or {}
+        self.best_node_id = stored.get("best_node_id") or self.best_node_id
+        for name in ("baseline", "score"):
+            value = stored.get(name)
+            if isinstance(value, (int, float)):
+                setattr(self, name, float(value))
+
     # -- lifecycle -------------------------------------------------------------
 
     def start(self) -> None:
@@ -566,6 +598,12 @@ def _class_of_category(category: Any) -> Optional[str]:
 
 
 # -- reading back ---------------------------------------------------------------
+
+
+def _index_of(node_id: str) -> Optional[int]:
+    """The index inside a node id, or None if it is not shaped like one."""
+    tail = str(node_id).rsplit(":", 1)[-1]
+    return int(tail) if tail.isdigit() else None
 
 
 def read_state_file(task_id: str) -> Optional["_StoredState"]:
