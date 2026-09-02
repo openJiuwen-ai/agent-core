@@ -773,6 +773,7 @@ class OtelCallbackHandler:
                     StatusCode.ERROR,
                     redact_error_summary(failure_reason, self._config),
                 ))
+            self._accumulate_tool_usage(span, is_error=failure_reason is not None)
             self._emit_tool_metrics(
                 tool_name,
                 self._metrics_agent_id(span),
@@ -820,6 +821,7 @@ class OtelCallbackHandler:
                     default="tool call error",
                     config=self._config,
                 )
+                self._accumulate_tool_usage(span, is_error=True)
                 self._emit_tool_metrics(
                     tool_name,
                     self._metrics_agent_id(span),
@@ -1060,6 +1062,7 @@ class OtelCallbackHandler:
             self._maybe_record_response_attrs(state, response)
 
             self._emit_llm_metrics(state)
+            self._accumulate_llm_usage(state)
 
             self._finalize_llm_span_output(
                 state, completion_text, reasoning_text,
@@ -1243,6 +1246,36 @@ class OtelCallbackHandler:
         rec.record_tool_duration(tool_name, agent_id, duration_ms)
         if is_error:
             rec.record_tool_error(tool_name, agent_id)
+
+    def _accumulate_llm_usage(self, state: LlmSpanState) -> None:
+        """Add one LLM call's final token/cost facts to the trace rollup."""
+        try:
+            attributes = getattr(state.span, "attributes", None) or {}
+            prompt = int(attributes.get(GEN_AI_USAGE_INPUT_TOKENS, 0) or 0)
+            completion = int(attributes.get(GEN_AI_USAGE_OUTPUT_TOKENS, 0) or 0)
+            if not prompt and not completion:
+                return
+            trace_id = getattr(getattr(state.span, "context", None), "trace_id", None)
+            if trace_id is None:
+                return
+            from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+            cost = float(attributes.get(OJ_GEN_AI_USAGE_TOTAL_COST, 0) or 0)
+            get_accumulator().accumulate_llm(trace_id, prompt=prompt, completion=completion, cost=cost)
+        except Exception as exc:
+            logger.warning("otel: llm usage accumulation failed - {}", exc)
+
+    def _accumulate_tool_usage(self, span: Span, *, is_error: bool) -> None:
+        """Add one tool call's outcome fact to the trace rollup."""
+        try:
+            trace_id = getattr(getattr(span, "context", None), "trace_id", None)
+            if trace_id is None:
+                return
+            from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+            get_accumulator().accumulate_tool(trace_id, is_error=is_error)
+        except Exception as exc:
+            logger.warning("otel: tool usage accumulation failed - {}", exc)
 
     @staticmethod
     def _record_usage_attrs(state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
