@@ -12,6 +12,16 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.semconv import OJ_GEN_AI_USAGE_TOTAL_COST
 
 
+@pytest.fixture(autouse=True)
+def _reset_usage_accumulator():
+    from openjiuwen.extensions.observability import usage_aggregation as usage_mod
+
+    saved = usage_mod._ACCUMULATOR
+    usage_mod._ACCUMULATOR = None
+    yield
+    usage_mod._ACCUMULATOR = saved
+
+
 class _FakeMetricsRecorder:
     def __init__(self) -> None:
         self.llm_usage_calls: list[tuple] = []
@@ -132,3 +142,52 @@ def test_cost_estimated_when_provider_omits_it(monkeypatch):
     finally:
         ct._PRICING = saved_prices
         ct._VERSION = saved_version
+
+
+def test_llm_close_accumulates_usage_into_trace_rollup(monkeypatch):
+    from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+    rec = _FakeMetricsRecorder()
+    provider, _root, handler = _handler(monkeypatch, rec)
+    accumulator = get_accumulator()
+    try:
+        span = handler._open_llm_span({"messages": [], "model": "gpt-4o"})
+        assert span is not None
+        span.set_attribute("gen_ai.usage.input_tokens", 1000)
+        span.set_attribute("gen_ai.usage.output_tokens", 500)
+        state = getattr(span, "otel_llm_state")
+        trace_id = span.context.trace_id
+
+        handler._close_llm_span(state, SimpleNamespace())
+
+        snap = accumulator.snapshot(trace_id)
+        assert snap["prompt_tokens"] == 1000
+        assert snap["completion_tokens"] == 500
+        assert snap["tool_calls"] == 0
+        accumulator.clear(trace_id)
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_tool_close_accumulates_outcome_into_trace_rollup(monkeypatch):
+    from openjiuwen.extensions.observability import span_context as shared_span_context
+    from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+    rec = _FakeMetricsRecorder()
+    provider, _root, handler = _handler(monkeypatch, rec)
+    monkeypatch.setattr(handler, "_metrics_agent_id", lambda span: "agent-1")
+    accumulator = get_accumulator()
+    try:
+        await handler.on_tool_call_started(tool_name="bash", tool_id=None, inputs=None)
+        tool_span = shared_span_context.get_current_tool_span()
+        assert tool_span is not None
+        trace_id = tool_span.context.trace_id
+        await handler.on_tool_call_error(tool_name="bash", error=RuntimeError("boom"), tool_id=None)
+
+        snap = accumulator.snapshot(trace_id)
+        assert snap["tool_calls"] == 1
+        assert snap["tool_errors"] == 1
+        accumulator.clear(trace_id)
+    finally:
+        provider.shutdown()

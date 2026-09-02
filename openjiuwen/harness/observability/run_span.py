@@ -285,6 +285,16 @@ def close_agent_run_span(
         if forced_close_count:
             handle.set_attribute(OJ_TRACE_FORCED_CLOSE, True)
 
+        from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+        if trace_id is not None:
+            snapshot = get_accumulator().snapshot(trace_id)
+            if snapshot:
+                handle.set_attribute("openjiuwen.run.total_prompt_tokens", int(snapshot["prompt_tokens"]))
+                handle.set_attribute("openjiuwen.run.total_completion_tokens", int(snapshot["completion_tokens"]))
+                handle.set_attribute("openjiuwen.run.total_tool_calls", int(snapshot["tool_calls"]))
+                handle.set_attribute("openjiuwen.run.estimated_cost_usd", snapshot["cost"])
+                get_accumulator().clear(trace_id)
+
         if output is not _OUTPUT_UNSET:
             try:
                 stamp_run_output(handle, output, allow_empty=True)
