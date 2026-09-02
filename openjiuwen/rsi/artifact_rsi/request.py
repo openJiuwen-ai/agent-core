@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from openjiuwen.core.foundation.llm import Model
 from openjiuwen.rsi.schema import (
     ArtifactValidationResult,
     RsiTaskCreateRequest,
@@ -15,12 +16,17 @@ from openjiuwen.rsi.schema import (
 
 @dataclass(frozen=True, slots=True)
 class ArtifactEngineRequest:
-    """Provider-facing request shared by program and paper optimizers."""
+    """Provider-facing request shared by program and paper optimizers.
+
+    ``model`` is a process-local, initialized ``Model`` service.  The public
+    task request carries only a model resource ID; AgentServer resolves that
+    ID before constructing this provider-facing request.
+    """
 
     task_id: str
     run_dir: str
     artifact_path: str | None
-    model_config: str
+    model: Model
     max_iterations: int
     optimization_instruction: str | None
 
@@ -118,12 +124,15 @@ def validate_artifact_task_request(request: RsiTaskCreateRequest) -> ArtifactVal
 def build_request(
     task: RsiTaskEnvelope,
     validation: ArtifactValidationResult,
+    *,
+    model: Model,
 ) -> ArtifactEngineRequest:
     """Build the provider-facing request after public/provider validation.
 
     The function performs no file reads and starts no provider work.  It is
     intended for the AgentServer integration layer; Provider implementations
-    must not implement or override it.
+    must not implement or override it.  ``model`` must already be initialized
+    by AgentServer, typically through ``Runner.resource_mgr.get_model``.
     """
 
     if not validation.valid:
@@ -138,14 +147,15 @@ def build_request(
         raise TypeError([_error("MAX_ITERATIONS_INVALID", "max_iterations must be an integer")])
     if task.config.max_iterations < 1:
         raise ValueError([_error("MAX_ITERATIONS_INVALID", "max_iterations must be at least 1")])
+    if model is None:
+        raise ValueError([_error("OPTIMIZER_MODEL_INSTANCE_REQUIRED", "an initialized Model instance is required")])
 
     config = task.config
-    model_config = config.model_refs["optimizer"]
     return ArtifactEngineRequest(
         task_id=task.task_id,
         run_dir=task.run_dir,
         artifact_path=config.artifact_path,
-        model_config=model_config,
+        model=model,
         max_iterations=config.max_iterations,
         optimization_instruction=(config.optimization_instruction if task.artifact_type == "paper" else None),
     )

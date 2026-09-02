@@ -52,12 +52,20 @@ class ArtifactProvider(Protocol):
     ) -> EngineResult:
         """Start a new task and return its current or terminal result.
 
+        ``request.model`` is the initialized agent-core ``Model`` service
+        resolved by AgentServer.  The Provider may call its ``invoke`` or
+        ``stream`` methods, but must not resolve model IDs or construct a
+        model client from task configuration.
+
         A fresh run creates the provider's root state/tree snapshot.  The
         provider persists each state, node, report, and artifact before
         emitting the corresponding event.  It should emit
         ``EventStatus("running")`` first, then node/progress events as
-        snapshots become available, and a terminal status last.  The request's
-        task ID and run directory must be used consistently for all snapshots.
+        snapshots become available.  It may emit ``NodeStageEvent`` when an
+        existing node enters a subprocess; a stage event
+        updates that node and does not create a new tree node.  A terminal
+        status is emitted last.  The request's task ID and run directory must
+        be used consistently for all snapshots.
         """
         ...
 
@@ -112,7 +120,9 @@ class ArtifactProvider(Protocol):
         """Read the complete persisted tree, including rejected branches.
 
         Every node must use the same ``RsiTreeNode`` shape as ``EventNode``;
-        return the root and all branches rather than only the best chain.
+        ``NodeStageEvent`` only updates the stage description of an existing
+        node.  Return the root and all branches rather than only the best
+        chain.
         """
         ...
 

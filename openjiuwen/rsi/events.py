@@ -1,9 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Shared engine event contracts for RSI scenarios.
 
-Harness and artifact engines use the same callback boundary.  The event
-payloads intentionally contain complete snapshots so AgentServer can project
-them to the common RSI transport without rebuilding scenario-specific data.
+Harness and artifact engines use the same callback boundary. Snapshot events
+contain complete persisted data, while ``NodeStageEvent`` is a pass-through
+notification for a subprocess transition inside an existing node.
 """
 
 from __future__ import annotations
@@ -37,13 +37,34 @@ class EventProgress:
 
 @dataclass(frozen=True, slots=True)
 class EventNode:
-    """A newly persisted complete tree node."""
+    """A persisted complete tree-node snapshot."""
 
     node: RsiTreeNode
     event_type: Literal["node"] = field(default="node", init=False)
 
 
-EngineEvent: TypeAlias = EventStatus | EventProgress | EventNode
+@dataclass(frozen=True, slots=True)
+class NodeStageEvent:
+    """A subprocess-stage transition for an existing tree node.
+
+    ``stage`` is intentionally a JSON-like object. The engine owns its stage
+    taxonomy and the AgentServer forwards the values without interpreting
+    them.
+    """
+
+    node_ref: str
+    stage: dict[str, str]
+    note: str | None = None
+    event_type: Literal["node.stage"] = field(default="node.stage", init=False)
+
+
+# Keep the Event* naming convention available to callers that use the current
+# artifact event names; the canonical name follows the end-to-end event
+# contract.
+EventNodeStage: TypeAlias = NodeStageEvent
+
+
+EngineEvent: TypeAlias = EventStatus | EventProgress | EventNode | NodeStageEvent
 OnEvent: TypeAlias = Callable[[EngineEvent], Awaitable[None]]
 
 # Name used by the cross-scenario engine adapter design.  Keep ``OnEvent`` as
@@ -68,8 +89,10 @@ __all__ = [
     "EngineEvent",
     "EngineEventSink",
     "EventNode",
+    "EventNodeStage",
     "EventProgress",
     "EventStatus",
+    "NodeStageEvent",
     "OnEvent",
     "emit",
 ]
