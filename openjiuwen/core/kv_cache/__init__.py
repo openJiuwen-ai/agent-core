@@ -21,6 +21,8 @@ from openjiuwen.core.kv_cache.kv_cache_metadata import (
     team_member_cache_identity,
     tools_range_kwargs,
 )
+from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
+from openjiuwen.core.kv_cache.kv_cache_runtime_config import KVCacheRuntimeConfig
 from openjiuwen.core.kv_cache.kv_cache_types import (
     KVCacheIdentity,
     KVCacheRuntimeProtocol,
@@ -34,6 +36,8 @@ __all__ = [
     "KVC_TERMINAL_CLEANUP_TIMEOUT_SECONDS",
     "KVCacheAffinityConfig",
     "KVCacheIdentity",
+    "KVCacheRuntime",
+    "KVCacheRuntimeConfig",
     "KVCacheRuntimeProtocol",
     "KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV",
     "KV_CACHE_AFFINITY_SESSION_ID_ENV",

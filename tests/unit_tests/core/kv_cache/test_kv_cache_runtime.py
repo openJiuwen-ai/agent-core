@@ -3,8 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
-from openjiuwen.core.kv_cache.kv_cache_runtime_config import KVCacheRuntimeConfig
+from openjiuwen.core.kv_cache import KVCacheRuntime, KVCacheRuntimeConfig
 from openjiuwen.core.kv_cache.kv_cache_types import KVCacheIdentity
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.agent_team import Session as TeamSession
