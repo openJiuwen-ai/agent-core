@@ -236,8 +236,11 @@ class ProgramRunState:
     def _selected(self, event: dict[str, Any]) -> None:
         """Visit counts and selection scores, filed under `extra["program"].puct`.
 
-        Quiet: no node event goes out — a selection changes no node's identity,
-        and the next `EventNode` or a `tree.get` carries the refreshed numbers.
+        Quiet but durable: no node event goes out — a selection changes no
+        node's identity — yet the update is persisted, because `tree.get`
+        reads the file, and an in-memory-only visit count would leave the
+        contract's "get and delta use the same node" true in shape but stale
+        in content until the next merge happened to flush it.
         """
         for entry in event.get("ancestorVisits") or []:
             node = self.nodes.get(int(entry.get("nodeIndex", -1)))
@@ -256,6 +259,7 @@ class ProgramRunState:
             if puct:
                 self.nodes[int(event.get("nodeIndex", 0))] = _with(
                     chosen, extra=self._update_program(chosen, puct=puct))
+        self._persist()
 
     def _expanded(self, event: dict[str, Any]) -> None:
         index = int(event.get("nodeIndex", 0))
