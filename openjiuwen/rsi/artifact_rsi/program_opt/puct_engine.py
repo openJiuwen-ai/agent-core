@@ -59,7 +59,8 @@ from .program import (
     reply_carries_program,
 )
 from .prompt import repair_prompt, with_promise_request
-from .provision import missing_candidate_runtime
+from .execution import EvaluationExecution
+from .provision import CANDIDATE_RUNTIME
 from .restore import RestoreError, restore_baseline, restore_tree
 from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
 from .search import (
@@ -179,14 +180,12 @@ class PuctEngine:
     """One search: seed, expand N times, report the winner."""
 
     name = "puct"
-    #: Candidates are model-written Python that gets executed. A run without a
-    #: backend is refused at the seam in `server.py`, not here.
-    requires_sandbox = True
 
     def __init__(
         self,
         *,
         completion_factory: Callable[..., Callable[[str], str]],
+        evaluation_execution: "EvaluationExecution",
         domain_factory: Optional[Callable[..., Any]] = None,
         store_root: Optional[Path] = None,
     ) -> None:
@@ -200,6 +199,15 @@ class PuctEngine:
                 "through the request's injected Model"
             )
         self._completion_factory = completion_factory
+        # Required for the same reason: the injected execution is the only way
+        # a candidate is ever run, and a default that executed locally was the
+        # bypass the sandbox deletion exists to close.
+        if evaluation_execution is None:
+            raise ValueError(
+                "PuctEngine needs an evaluation_execution: every candidate runs "
+                "through the injected SysOperation sandbox"
+            )
+        self._evaluation_execution = evaluation_execution
         # The seam a test substitutes a fake domain through. Defaulted to the
         # scripted one because that is the only domain that executes anything;
         self._domain_factory = domain_factory or _script_domain
@@ -213,7 +221,7 @@ class PuctEngine:
 
     def run(self, spec: RunSpec, emit: Emit, should_stop: Callable[[], bool]) -> None:
         try:
-            _refuse_unrunnable(spec)
+            _refuse_unrunnable(spec, self._evaluation_execution)
         except _Refusal as refusal:
             # Nothing measurable was set up, so every candidate would fail
             # identically. Reporting that as a search which found nothing would
@@ -259,7 +267,7 @@ class PuctEngine:
             domain = self._domain_factory(
                 scorecard=spec.scorecard,
                 script=spec.script,
-                capability=spec.sandbox,
+                execute=self._evaluation_execution,
                 statement=str(spec.statement or ""),
                 baseline_code=spec.baseline_code,
                 entrypoint=spec.entrypoint,
@@ -861,7 +869,7 @@ def _change_summary_of(payload: dict[str, Any]) -> str:
     return summary[:120] or "no summary"
 
 
-def _refuse_unrunnable(spec: RunSpec) -> None:
+def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
     if spec.resume_from_sequence and not spec.resume_nodes:
         # Continuing the sequence numbering without the tree those numbers were
         # written against would append node 0 on top of a graph that already has
@@ -897,31 +905,41 @@ def _refuse_unrunnable(spec: RunSpec) -> None:
             f"this engine scores by sandboxed evaluation only; a scorecard measured by "
             f"{mode!r} cannot run here — write an evaluator script instead"
         )
-    if spec.packages:
-        # Before anything is measured, and refused rather than warned about: a
-        # run whose candidates were promised a library and did not get it fails
-        # every expansion with ModuleNotFoundError and reads as a model that
-        # cannot write code.
-        from .provision import ProvisionError, ensure
-
-        try:
-            installed, _note = ensure(spec.packages)
-        except ProvisionError as error:
-            raise _Refusal(str(error)) from error
-        if installed:
-            log.info("run %s provisioned %s", spec.search_id, ", ".join(installed))
     if not spec.script.strip():
         # Said here rather than at the first expansion: every candidate would
         # fail identically, and a search that reports twelve failed candidates
         # sends the user reading candidates for a fault in the configuration.
         raise _Refusal("this scorecard is scored by an evaluator script but was given none")
-    missing = missing_candidate_runtime()
-    if missing:
-        raise _Refusal(
-            f"the sidecar is missing the candidate runtime: {', '.join(missing)}. "
-            "The AST gate lets candidates import them, so without them every candidate "
-            "fails. Run `uv sync --extra candidates` in services/evolve"
-        )
+    # Asked of the environment candidates actually run in, through the seam —
+    # the host interpreter's answer stopped being the truth when execution
+    # moved behind the gateway. One probe covers the allowlisted runtime and
+    # the promised packages together: on a warm sandbox nothing else runs, and
+    # pip is reached only when something is actually missing.
+    from .provision import ProvisionError, ensure, import_name, probe_imports, validate_names
+
+    try:
+        wanted = validate_names(spec.packages or [])
+    except ProvisionError as error:
+        raise _Refusal(str(error)) from error
+    names = sorted({*CANDIDATE_RUNTIME, *(import_name(package) for package in wanted)})
+    if probe_imports(names, execute) is not None:
+        if wanted:
+            # Refused rather than warned about: a run whose candidates were
+            # promised a library and did not get it fails every expansion with
+            # ModuleNotFoundError and reads as a model that cannot write code.
+            try:
+                installed, _note = ensure(spec.packages, execute)
+            except ProvisionError as error:
+                raise _Refusal(str(error)) from error
+            if installed:
+                log.info("run %s provisioned %s", spec.search_id, ", ".join(installed))
+        failure = probe_imports(CANDIDATE_RUNTIME, execute)
+        if failure is not None:
+            raise _Refusal(
+                f"the execution environment is missing part of the candidate runtime "
+                f"({', '.join(CANDIDATE_RUNTIME)}): {failure}. The AST gate lets "
+                "candidates import these, so without them every candidate fails"
+            )
 
 
 def _split_of(spec: RunSpec) -> Dict[str, int]:

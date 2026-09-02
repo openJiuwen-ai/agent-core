@@ -41,7 +41,6 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from .events import Emit
-from .sandbox import SandboxCapability
 
 
 @dataclass(frozen=True)
@@ -123,23 +122,10 @@ class RunSpec:
     resume_tokens: int = 0
     #: Engine-specific knobs (``c_puct``, ``prior_exponent``, …). Unknown keys ignored.
     options: dict[str, Any] = field(default_factory=dict)
-    #: What the control plane's probe found. The sidecar never probes for
-    #: itself: the container corrections (`--disable-userns`, the procfs
-    #: fallback) are knowledge that has one owner, and asking twice is how two
-    #: answers start to disagree.
-    sandbox: SandboxCapability = field(default_factory=SandboxCapability)
-    #: Where to reach the control plane's model proxy, and the run-scoped token
-    #: that authenticates there. **Never a provider key**: this process runs
-    #: model-written code, so the worst a leak here can do is spend the run it
 
 
 class Engine(Protocol):
     """Emit the event sequence for one search.
-
-    ``requires_sandbox`` is what makes the isolation refusal enforceable in one
-    place: an engine that executes model-written code says so, and a run that
-    asks for it without a backend is refused before it starts rather than at the
-    first expansion. The stub executes nothing, so it runs anywhere.
 
     Implementations must call ``should_stop()`` between expansions and finish
     with a ``search_finished`` event carrying the terminal status — a run that
@@ -147,7 +133,6 @@ class Engine(Protocol):
     """
 
     name: str
-    requires_sandbox: bool
 
     def run(self, spec: RunSpec, emit: Emit, should_stop: Callable[[], bool]) -> None:
         ...

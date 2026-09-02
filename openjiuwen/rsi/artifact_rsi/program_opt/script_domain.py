@@ -60,18 +60,14 @@ exactly the shape the probe refuses to start.
 from __future__ import annotations
 
 import json
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence, Tuple
 
-from agentdescent.filetree import materialize
 
 from .domain import Domain
 from .logging_config import get_logger
 from .program import Program, files_of
 from .prompt import mutation_prompt
-from .sandbox import SandboxCapability, sandbox_command
+from .execution import EvaluationExecution
 from .scorecard import SCORE_KEY, evaluate_constraints, score_candidate
 from .shard_roles import cases_for, total_slots
 from .tree import finite as _finite
@@ -113,7 +109,7 @@ def script_domain(
     *,
     scorecard: Mapping[str, Any],
     script: str,
-    capability: SandboxCapability,
+    execute: EvaluationExecution,
     statement: str = "",
     baseline_code: str = "",
     entrypoint: str = CANDIDATE_FILE,
@@ -141,7 +137,7 @@ def script_domain(
         try:
             payload = _run_evaluator(
                 code, script, cases_for(shards, _total, _seed),
-                capability=capability, timeout=candidate_timeout,
+                execute=execute, timeout=candidate_timeout,
                 entrypoint=entrypoint,
             )
         except ScriptError:
@@ -257,7 +253,7 @@ def _run_evaluator(
     script: str,
     shards: Sequence[int],
     *,
-    capability: SandboxCapability,
+    execute: EvaluationExecution,
     timeout: float,
     entrypoint: str = CANDIDATE_FILE,
 ) -> Dict[str, Any]:
@@ -267,75 +263,62 @@ def _run_evaluator(
     damaged for exactly one evaluation and the next one starts from the text the
     user approved.
     """
-    with tempfile.TemporaryDirectory(prefix="evolve-script-") as scratch_dir:
-        scratch = Path(scratch_dir)
-        # The whole tree, at its own relative paths. `materialize` is upstream's
-        # and re-validates every path on the way out — this is the last point
-        # before a model-authored string becomes a filesystem write, and a
-        # candidate that named `../../etc/passwd` gets refused here rather than
-        # writing there.
-        materialize(files_of(code, entrypoint), str(scratch))
-        (scratch / EVALUATOR_FILE).write_text(script, encoding="utf-8")
-        (scratch / _SHIM_FILE).write_text(
-            _SHIM.format(evaluator=EVALUATOR_FILE), encoding="utf-8",
-        )
-        result = scratch / "result.json"
+    # The whole tree at its own relative paths, plus the evaluator and shim,
+    # handed to the injected execution as *content*. Path validation happened
+    # when the tree was parsed (`files_of` refuses traversal); where and how a
+    # scratch directory exists is the execution's business — agent-core's own
+    # sandbox stages it behind the gateway.
+    files = dict(files_of(code, entrypoint))
+    files[EVALUATOR_FILE] = script
+    files[_SHIM_FILE] = _SHIM.format(evaluator=EVALUATOR_FILE)
 
-        extra = {
-            CANDIDATE_ENV: entrypoint,
-            RESULT_ENV: str(result),
-            SHARDS_ENV: ",".join(str(int(shard)) for shard in shards),
-        }
-        # Through the sandbox seam, never merged into `subprocess.run(env=...)`:
-        # bubblewrap clears the inherited environment and re-adds only what is
-        # --setenv-ed, so a merge works on macOS and silently vanishes on Linux
-        # — which is exactly how it shipped.
-        argv, env = sandbox_command(
-            scratch, [_SHIM_FILE], capability=capability, timeout=timeout,
-            extra_env=extra,
-        )
+    result_file = "result.json"
+    env = {
+        CANDIDATE_ENV: entrypoint,
+        # Relative to the run's own working directory: a host-absolute path
+        # means nothing inside a remote sandbox instance.
+        RESULT_ENV: result_file,
+        SHARDS_ENV: ",".join(str(int(shard)) for shard in shards),
+    }
+    try:
+        outcome = execute(files, ["python", "-I", _SHIM_FILE], env, timeout, result_file)
+    except Exception as error:  # noqa: BLE001 - the seam's own failure is run-level
+        raise ScriptError(f"the evaluator could not be executed: {error}") from error
+
+    tail = (outcome.output or "").strip()[-400:]
+    if outcome.result_text is not None:
         try:
-            completed = subprocess.run(
-                argv, capture_output=True, text=True, cwd=str(scratch),
-                env=env, timeout=timeout + 30,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise ScriptError(f"the evaluator ran for over {timeout + 30:.0f}s without finishing") from error
+            payload = json.loads(outcome.result_text)
+        except json.JSONDecodeError as error:
+            raise ScriptError(f"what the evaluator wrote is not parsable JSON: {error}") from error
+        if not isinstance(payload, dict):
+            raise ScriptError("the JSON the evaluator wrote is not an object")
+        # What the candidate itself printed while dying. An evaluator that
+        # wraps each case in try/except — which it is told to do — usually
+        # records that the case failed and not why, so this is the only
+        # place the traceback survives. Carried, not merged: only used when
+        # the evaluator's own diagnosis turns out to say nothing.
+        payload["_processTail"] = tail
+        return payload
 
-        if result.exists():
-            try:
-                payload = json.loads(result.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as error:
-                raise ScriptError(f"what the evaluator wrote is not parsable JSON: {error}") from error
-            if not isinstance(payload, dict):
-                raise ScriptError("the JSON the evaluator wrote is not an object")
-            # What the candidate itself printed while dying. An evaluator that
-            # wraps each case in try/except — which it is told to do — usually
-            # records that the case failed and not why, so this is the only
-            # place the traceback survives. Carried, not merged: only used when
-            # the evaluator's own diagnosis turns out to say nothing.
-            payload["_processTail"] = ((completed.stderr or "") + (completed.stdout or "")).strip()[-400:]
-            return payload
+    # No file, but the answer may still be right there. The contract says
+    # write the file and says it twice, and a real model printed the correct
+    # object to stdout anyway — refusing a correct answer for arriving in
+    # the wrong envelope is the same mistake as refusing a drafted plan that
+    # came back as prose. The file stays preferred; this is the fallback.
+    printed = _last_result(outcome.output or "")
+    if printed is not None:
+        log.info("evaluator printed its result instead of writing %s", RESULT_ENV)
+        return printed
 
-        # No file, but the answer may still be right there. The contract says
-        # write the file and says it twice, and a real model printed the correct
-        # object to stdout anyway — refusing a correct answer for arriving in
-        # the wrong envelope is the same mistake as refusing a drafted plan that
-        # came back as prose. The file stays preferred; this is the fallback.
-        printed = _last_result(completed.stdout or "")
-        if printed is not None:
-            log.info("evaluator printed its result instead of writing %s", RESULT_ENV)
-            return printed
-
-        tail = ((completed.stderr or "") + (completed.stdout or "")).strip()[-400:]
-        raise ScriptError(
-            f"the evaluator wrote neither the result file {RESULT_ENV} points at nor a "
-            "result JSON on its output. "
-            + (f"It said: {tail}" if tail else _silent_death(completed.returncode))
-        )
+    raise ScriptError(
+        f"the evaluator wrote neither the result file {RESULT_ENV} points at nor a "
+        "result JSON on its output. "
+        + (f"It said: {tail}" if tail else _silent_death(outcome.exit_code))
+    )
 
 
-def _silent_death(returncode: int) -> str:
+def _silent_death(returncode: Optional[int]) -> str:
     """What to say when a process died without a byte of output.
 
     The exit code is the only witness left, and the negative ones are signals —

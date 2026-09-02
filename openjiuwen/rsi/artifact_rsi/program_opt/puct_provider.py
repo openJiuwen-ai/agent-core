@@ -41,11 +41,14 @@ from openjiuwen.rsi.artifact_rsi.program_opt.program import DEFAULT_ENTRYPOINT, 
 from agentdescent.filetree import load_tree
 
 from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
+    EvaluationExecution,
+    ExecutionUnavailable,
+    execution_from_sys_operation,
+)
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     ModelConfigError,
-    SandboxUnavailable,
     completion_factory_from_model,
-    require_sandbox,
 )
 from openjiuwen.rsi.artifact_rsi.program_opt.state import (
     ProgramRunState,
@@ -104,10 +107,21 @@ class PuctProgramArtifactProvider:
 
     artifact_type: Literal["program"] = "program"
 
-    def __init__(self, *, sandbox_backend: str | None = None) -> None:
-        #: Names an isolation backend explicitly, for a deployment that knows
-        #: better than the probe. Absent means detect.
-        self._sandbox_backend = sandbox_backend
+    def __init__(
+        self,
+        *,
+        sys_operation: Any | None = None,
+        execution: EvaluationExecution | None = None,
+    ) -> None:
+        #: agent-core's own sandbox: a `SysOperation` (mode=sandbox) that
+        #: AgentServer registered as a `SysOperationCard` and resolved via
+        #: `Runner.resource_mgr.get_sys_operation(card_id)`. The provider-local
+        #: bwrap/seatbelt isolation is gone — this is the only way a candidate
+        #: is ever executed.
+        self._sys_operation = sys_operation
+        #: Test seam: a ready-made execution wins over building one from the
+        #: SysOperation, the same way an injected completion factory does.
+        self._execution = execution
         #: `task_id -> stop flag`. The search polls it between expansions, which
         #: is what makes `terminate` land at a node boundary rather than mid
         #: sandbox run.
@@ -432,9 +446,10 @@ class PuctProgramArtifactProvider:
                     "an initialized Model instance is required: AgentServer resolves "
                     "model_refs['optimizer'] via Runner.resource_mgr.get_model"
                 )
-            capability = require_sandbox(self._sandbox_backend)
-            spec = self._spec_for(request, capability, resumed=resumed)
-        except (ModelConfigError, SandboxUnavailable,
+            execute = self._execution or execution_from_sys_operation(
+                self._sys_operation, loop)
+            spec = self._spec_for(request, resumed=resumed)
+        except (ModelConfigError, ExecutionUnavailable,
                 FileNotFoundError, ValueError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
             state.fail(code, str(error))
@@ -478,7 +493,7 @@ class PuctProgramArtifactProvider:
         # simply reports that it found nothing. Worth a handful of evaluations to
         # turn that into a sentence naming the evaluator.
         try:
-            await asyncio.to_thread(run_probe, spec)
+            await asyncio.to_thread(run_probe, spec, execute)
         except ProbeError as refusal:
             state.fail("PROBE_REFUSED", str(refusal))
             await _notify(on_event, EventStatus(status="failed"))
@@ -488,7 +503,8 @@ class PuctProgramArtifactProvider:
             )
 
         engine = PuctEngine(
-            completion_factory=completion_factory_from_model(request.model, loop))
+            completion_factory=completion_factory_from_model(request.model, loop),
+            evaluation_execution=execute)
         try:
             await asyncio.to_thread(engine.run, spec, sink, stop.is_set)
         except Exception as error:  # noqa: BLE001 - a crash is a failed task, not a crashed server
@@ -516,7 +532,6 @@ class PuctProgramArtifactProvider:
     def _spec_for(
         self,
         request: ArtifactEngineRequest,
-        capability: Any,
         *,
         resumed: bool,
     ) -> RunSpec:
@@ -567,7 +582,6 @@ class PuctProgramArtifactProvider:
             baseline_code=bundle(files),
             entrypoint=entrypoint,
             run_dir=str(run_dir),
-            sandbox=capability,
             options=dict(card.get("options") or {}),
             # From the scorecard when it says, else `RunSpec`'s default. The
             # model's own request config is opaque here — the contract hands

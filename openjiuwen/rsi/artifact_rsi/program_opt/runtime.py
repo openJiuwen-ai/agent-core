@@ -19,10 +19,6 @@ from typing import Any, Callable, Optional
 from openjiuwen.rsi.artifact_rsi.program_opt.completion import (
     CompletionUsage,
 )
-from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import (
-    SandboxCapability,
-    detect_local_capability,
-)
 
 #: Ceiling for one mutation call.
 #:
@@ -40,37 +36,6 @@ DEFAULT_CALL_TIMEOUT_SECONDS = 900.0
 
 class ModelConfigError(RuntimeError):
     """`model_config` could not be resolved into something callable."""
-
-
-class SandboxUnavailable(RuntimeError):
-    """No isolation backend, so no candidate may be executed."""
-
-
-def require_sandbox(override: Optional[str] = None) -> SandboxCapability:
-    """The isolation a candidate is executed under, or a refusal.
-
-    **The contract has no sandbox field, and this is the one thing that cannot
-    be defaulted away.** A program optimizer runs code a model wrote against an
-    evaluator, dozens of times; without isolation a single candidate can read the
-    task's own model key, reach the network, or write outside its scratch
-    directory. Refusing is the only honest answer.
-
-    Detected here rather than taken from the caller. ScienceDiscovery's control
-    plane probes once and tells its sidecar, because probing twice is how two
-    answers disagree -- but there the two are separate processes. In-process
-    there is only one answer to have, so it is taken where it is used.
-
-    `override` names a backend explicitly for a deployment that knows better
-    than the probe (a container where bubblewrap needs `--disable-userns`, say).
-    """
-    capability = detect_local_capability() if not override else SandboxCapability(backend=override)
-    if not capability.available:
-        raise SandboxUnavailable(
-            "no isolation backend is available, and a program optimizer will not execute "
-            "model-written code without one. Install bubblewrap (bwrap) on Linux; macOS "
-            "ships sandbox-exec."
-        )
-    return capability
 
 
 def completion_factory_from_model(model: Any, loop: Any) -> Callable[..., Any]:
@@ -149,7 +114,5 @@ __all__ = [
     "DEFAULT_CALL_TIMEOUT_SECONDS",
     "DEFAULT_MAX_TOKENS_PER_CALL",
     "ModelConfigError",
-    "SandboxUnavailable",
     "completion_factory_from_model",
-    "require_sandbox",
 ]

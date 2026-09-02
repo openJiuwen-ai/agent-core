@@ -28,16 +28,53 @@ from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import (
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     DEFAULT_MAX_TOKENS_PER_CALL,
     ModelConfigError,
-    SandboxUnavailable,
-    require_sandbox,
 )
-from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import (
-    SandboxCapability,
+from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
+    ExecutionOutcome,
+    ExecutionUnavailable,
+    execution_from_sys_operation,
 )
 from openjiuwen.rsi.artifact_rsi.program_opt.state import ProgramRunState
 from openjiuwen.rsi.artifact_rsi.provider import ArtifactProvider
 from openjiuwen.rsi.artifact_rsi.request import ArtifactEngineRequest
 from openjiuwen.rsi.events import EventNode, EventProgress, EventStatus
+
+def _local_execution(files, command, env, timeout, result_file):
+    """The seam, realised with a plain subprocess for tests.
+
+    Honest here and nowhere else: a test executes only text the test itself
+    wrote. Production has exactly one channel — the injected SysOperation —
+    and this stand-in exists so the evaluation pipeline (staging, shim,
+    result parsing, fallbacks) keeps being exercised for real.
+    """
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path as _Path
+
+    with tempfile.TemporaryDirectory(prefix="evolve-test-exec-") as scratch:
+        root = _Path(scratch)
+        for path, text in files.items():
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        argv = [sys.executable, *command[1:]] if command and command[0] == "python" else list(command)
+        try:
+            completed = subprocess.run(
+                argv, capture_output=True, text=True, cwd=scratch,
+                env={"PATH": "/usr/bin:/bin", **env}, timeout=timeout + 30,
+            )
+        except subprocess.TimeoutExpired:
+            return ExecutionOutcome(exit_code=None, output="timed out", result_text=None)
+        result_text = None
+        if result_file is not None and (root / result_file).exists():
+            result_text = (root / result_file).read_text(encoding="utf-8")
+        return ExecutionOutcome(
+            exit_code=completed.returncode,
+            output=(completed.stderr or "") + (completed.stdout or ""),
+            result_text=result_text,
+        )
+
 
 SEED = """
 def train_and_predict(train, test):
@@ -130,7 +167,7 @@ def test_a_request_without_a_model_instance_fails_the_task(tmp_path: Path) -> No
     client-building the contract forbids — so a missing instance is a failed
     task naming the resolution path, not a default.
     """
-    provider = PuctProgramArtifactProvider(sandbox_backend="seatbelt")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path, model=None)
     _scorecard(Path(request.run_dir))
 
@@ -144,26 +181,25 @@ def test_a_request_without_a_model_instance_fails_the_task(tmp_path: Path) -> No
 # -- isolation ------------------------------------------------------------------
 
 
-def test_no_isolation_backend_means_no_run() -> None:
+def test_no_execution_channel_means_no_run(tmp_path: Path) -> None:
     """The contract has no sandbox field, so this refusal is the only thing
-    standing between model-written code and the task's own model key."""
-    with pytest.raises(SandboxUnavailable):
-        require_sandbox(override="none")
+    standing between model-written code and the task's own model key: with
+    neither a SysOperation nor an execution injected, the run fails before
+    anything is staged."""
+    provider = PuctProgramArtifactProvider()
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+
+    result = asyncio.run(provider.run(request))
+
+    assert result.status == "failed"
+    assert result.error_code == "EXECUTIONUNAVAILABLE"
+    assert "SysOperationCard" in (result.error_message or "")
 
 
-def test_an_override_is_taken_over_the_probe() -> None:
-    assert require_sandbox(override="bwrap") == SandboxCapability(backend="bwrap")
-
-
-def test_the_probe_answers_when_nothing_is_overridden(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.runtime.detect_local_capability",
-        lambda: SandboxCapability(backend="seatbelt"),
-    )
-
-    assert require_sandbox().backend == "seatbelt"
+def test_the_sys_operation_bridge_refuses_nothing_injected() -> None:
+    with pytest.raises(ExecutionUnavailable):
+        execution_from_sys_operation(None, loop=None)
 
 
 # -- validate_input -------------------------------------------------------------
@@ -247,7 +283,7 @@ def test_a_run_without_a_scorecard_is_refused_rather_than_scored_by_a_guess(
     Path(request.run_dir).mkdir(parents=True)
 
     with pytest.raises(FileNotFoundError, match="scorecard"):
-        provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+        provider._spec_for(request, resumed=False)
 
 
 def test_the_token_ceiling_comes_from_the_scorecard_when_it_says(
@@ -261,12 +297,12 @@ def test_the_token_ceiling_comes_from_the_scorecard_when_it_says(
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir), max_tokens_per_call=64_000)
 
-    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+    spec = provider._spec_for(request, resumed=False)
 
     assert spec.max_tokens_per_call == 64_000
 
     _scorecard(Path(request.run_dir))
-    silent = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+    silent = provider._spec_for(request, resumed=False)
     assert silent.max_tokens_per_call == 16_000   # RunSpec's own default
 
 
@@ -275,7 +311,7 @@ def test_the_starting_program_reaches_the_spec(tmp_path: Path) -> None:
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
-    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+    spec = provider._spec_for(request, resumed=False)
 
     assert "train_and_predict" in spec.baseline_code
     assert spec.expansions == request.max_iterations
@@ -304,7 +340,7 @@ def test_packages_takes_names_a_reviewer_can_recognise_and_nothing_else(
     _scorecard(Path(request.run_dir), packages=[package])
 
     with pytest.raises(ValueError, match="bare distribution names"):
-        provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+        provider._spec_for(request, resumed=False)
 
 
 def test_an_ordinary_pinned_dependency_still_gets_through(tmp_path: Path) -> None:
@@ -312,9 +348,59 @@ def test_an_ordinary_pinned_dependency_still_gets_through(tmp_path: Path) -> Non
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir), packages=["xgboost", "scikit-learn==1.5.0"])
 
-    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+    spec = provider._spec_for(request, resumed=False)
 
     assert spec.packages == ("xgboost", "scikit-learn==1.5.0")
+
+
+def test_provisioning_probes_before_it_installs() -> None:
+    """`ensure` is reached more than once per run — the discrimination probe
+    and the engine pre-flight both call it — and pip resolves for seconds even
+    when every requirement is already satisfied. A package that already
+    imports must therefore cost one probe and no pip; a version pin rides the
+    same fast path, satisfied by importability exactly as the old host-side
+    `find_spec` treated it."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.provision import ensure
+
+    commands: list[list[str]] = []
+
+    def warm_execute(files, command, env, timeout, result_file):
+        commands.append(list(command))
+        return ExecutionOutcome(exit_code=0, output="", result_text=None)
+
+    installed, note = ensure(["xgboost", "scikit-learn==1.5.0"], warm_execute)
+
+    assert installed == []
+    assert "already importable" in note
+    assert len(commands) == 1 and commands[0][:2] == ["python", "-c"]
+    assert not any("pip" in part for command in commands for part in command)
+
+
+def test_a_package_the_probe_cannot_find_is_installed_and_verified() -> None:
+    """The slow path still exists and still verifies: when the import probe
+    fails, pip runs, and the same probe then checks what pip claims."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.provision import ensure
+
+    commands: list[list[str]] = []
+    probes = iter([1, 0])  # the pre-install probe fails, the verification passes
+
+    def cold_execute(files, command, env, timeout, result_file):
+        commands.append(list(command))
+        if command[:4] == ["python", "-m", "pip", "install"]:
+            return ExecutionOutcome(exit_code=0, output="", result_text=None)
+        return ExecutionOutcome(
+            exit_code=next(probes), output="No module named 'xgboost'", result_text=None,
+        )
+
+    installed, note = ensure(["xgboost"], cold_execute)
+
+    assert installed == ["xgboost"]
+    assert "installed" in note
+    assert [command[:4] for command in commands] == [
+        ["python", "-c", "import xgboost"][:4],
+        ["python", "-m", "pip", "install"],
+        ["python", "-c", "import xgboost"][:4],
+    ]
 
 
 def test_resuming_continues_the_numbering_the_first_attempt_stopped_at(
@@ -335,7 +421,7 @@ def test_resuming_continues_the_numbering_the_first_attempt_stopped_at(
         encoding="utf-8",
     )
 
-    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=True)
+    spec = provider._spec_for(request, resumed=True)
 
     assert spec.resume_from_sequence == 2
     assert len(spec.resume_nodes) == 2
@@ -544,7 +630,7 @@ def test_a_missing_model_instance_fails_the_task_rather_than_the_server(
 ) -> None:
     """A missing model is a task-level failure with a status the caller can
     see, not an exception AgentServer has to interpret."""
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path, model=None)
     seen: list[object] = []
 
@@ -558,17 +644,6 @@ def test_a_missing_model_instance_fails_the_task_rather_than_the_server(
     assert [e.status for e in seen if isinstance(e, EventStatus)] == ["failed"]
     # And it was written down, so `read_state` agrees with what was returned.
     assert provider.read_state(request.task_id).status == "failed"
-
-
-def test_a_run_without_isolation_never_starts(tmp_path: Path) -> None:
-    provider = PuctProgramArtifactProvider(sandbox_backend="none")
-    request = _request(tmp_path)
-    _scorecard(Path(request.run_dir))
-
-    result = asyncio.run(provider.run(request))
-
-    assert result.status == "failed"
-    assert result.error_code == "SANDBOXUNAVAILABLE"
 
 
 def test_pause_stops_at_a_node_boundary_and_resume_continues_the_same_tree(
@@ -596,7 +671,7 @@ def test_pause_stops_at_a_node_boundary_and_resume_continues_the_same_tree(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         _HaltingEngine,
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -676,7 +751,7 @@ def test_a_task_already_in_flight_refuses_a_second_run_or_resume(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         _ParkedEngine,
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -717,7 +792,7 @@ def test_a_terminated_task_refuses_to_resume(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: constructed.append(kwargs),
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     result = asyncio.run(provider.resume(_request(tmp_path)))
 
     assert result.status == "terminated"
@@ -755,7 +830,7 @@ def test_terminate_reports_terminated_and_says_which_node_won(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         _ParkedEngine,
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
     seen: list[object] = []
@@ -844,7 +919,7 @@ def _no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.run_probe",
-        lambda spec: {"baseline": 0.25, "worsened": 0.05, "flat": False, "label": "test"},
+        lambda spec, execute: {"baseline": 0.25, "worsened": 0.05, "flat": False, "label": "test"},
     )
 
 
@@ -870,7 +945,7 @@ def test_a_search_running_on_a_thread_delivers_its_events_to_the_callers_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _canned(monkeypatch, _SCRIPT)
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
     seen: list[object] = []
@@ -900,7 +975,7 @@ def test_the_search_waits_for_a_slow_consumer(
     events go to a bounded queue, and a search that fired and forgot would drop
     the node it just told everyone about."""
     _canned(monkeypatch, _SCRIPT)
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
     order: list[str] = []
@@ -948,7 +1023,7 @@ def test_terminate_reaches_a_search_that_is_already_running(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         _HaltingEngine,
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -990,7 +1065,7 @@ def test_a_crashing_search_becomes_a_failed_task(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: _Exploding(**kwargs),
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 
@@ -1015,7 +1090,7 @@ def test_a_scorecard_that_cannot_rank_is_refused_before_the_budget_is_spent(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: built.append(kwargs) or _CannedEngine(_SCRIPT, **kwargs),
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     # The fixture scorecard has no criteria, so nothing can be ranked with it.
     _scorecard(Path(request.run_dir))
@@ -1032,52 +1107,55 @@ def test_a_scorecard_that_cannot_rank_is_refused_before_the_budget_is_spent(
 # -- what a candidate can see ---------------------------------------------------
 
 
-def test_a_candidate_is_not_handed_the_hosts_environment(tmp_path: Path) -> None:
-    """The environment the sandbox builds is an allowlist, not the host's.
+def test_a_candidate_is_not_handed_the_hosts_environment() -> None:
+    """The environment an evaluation carries is an allowlist, not the host's.
 
-    This mattered the moment the search moved in-process. As a sidecar the
-    surrounding environment held no provider key; in a host that runs the model
-    it holds every one of them. Bubblewrap has always been clean
-    (`--clearenv`); seatbelt inherited whatever the subprocess was given, and
-    the host environment was being merged in.
-    """
+    This mattered the moment the search moved in-process: in a host that runs
+    the model, `os.environ` holds every provider key. The provider-local
+    sandboxes are gone, so the property now lives at the seam — the evaluation
+    pipeline hands the execution exactly the three declared names, and never
+    reaches for the host environment. What the gateway sandbox adds around
+    them is its business; a secret can only leak through what *this* side
+    passes."""
     import os
-    import subprocess
 
-    from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import (
-        detect_local_capability,
-        sandbox_command,
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import (
+        CANDIDATE_ENV,
+        RESULT_ENV,
+        SHARDS_ENV,
+        _run_evaluator,
     )
 
-    capability = detect_local_capability()
-    if not capability.available:
-        pytest.skip("no isolation backend on this host")
+    handed: list[dict[str, str]] = []
+
+    def peeking_execute(files, command, env, timeout, result_file):
+        handed.append(dict(env))
+        return _local_execution(files, command, env, timeout, result_file)
+
+    evaluator = (
+        "import json, os\n"
+        'json.dump({"valid": True,\n'
+        '           "metrics": {"secret_seen": int("PROGRAM_OPT_TEST_SECRET" in os.environ)}},\n'
+        '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'
+    )
 
     os.environ["PROGRAM_OPT_TEST_SECRET"] = "sk-must-not-be-visible"
     try:
-        peek = tmp_path / "peek.py"
-        peek.write_text(
-            "import json, os\n"
-            "print(json.dumps({'secret': os.environ.get('PROGRAM_OPT_TEST_SECRET'),\n"
-            "                  'threads': os.environ.get('OMP_NUM_THREADS'),\n"
-            "                  'home': os.environ.get('HOME')}))\n",
-            encoding="utf-8",
-        )
-        command, env = sandbox_command(tmp_path, [str(peek)], capability=capability, timeout=30)
-        completed = subprocess.run(
-            command, capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=60
+        payload = _run_evaluator(
+            bundle({"candidate.py": "x = 1\n"}), evaluator, [0],
+            execute=peeking_execute, timeout=60,
         )
     finally:
         os.environ.pop("PROGRAM_OPT_TEST_SECRET", None)
 
-    assert completed.returncode == 0, completed.stderr
-    seen = json.loads(completed.stdout.strip().splitlines()[-1])
-    assert seen["secret"] is None
-    # Still gets what the sandbox does mean to give it: the thread cap that
-    # keeps a candidate from burning its CPU budget eight ways at once, and a
-    # writable home inside the scratch directory.
-    assert seen["threads"] == "1"
-    assert seen["home"] == str(tmp_path.resolve())
+    # The seam received the three declared names and nothing else — no merge
+    # of `os.environ`, however convenient one would have been.
+    assert handed and set(handed[0]) == {CANDIDATE_ENV, RESULT_ENV, SHARDS_ENV}
+    # And the candidate, run with exactly that allowlist, could not see the
+    # secret sitting in this process's environment.
+    assert payload["valid"] is True
+    assert payload["metrics"]["secret_seen"] == 0
 
 
 def test_the_search_engine_is_a_declared_dependency() -> None:
@@ -1141,7 +1219,7 @@ def test_a_directory_seed_reaches_the_spec_whole(tmp_path: Path) -> None:
     request = _request(tmp_path, artifact_path=str(_tree(tmp_path)))
     _scorecard(Path(request.run_dir))
 
-    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+    spec = provider._spec_for(request, resumed=False)
 
     assert sorted(files_of(spec.baseline_code)) == [
         "candidate.py", "helpers/__init__.py", "helpers/scale.py",
@@ -1183,7 +1261,7 @@ def test_a_scorecard_naming_a_file_the_program_does_not_have_is_refused(
     _scorecard(Path(request.run_dir), entrypoint="main.py")
 
     with pytest.raises(ValueError, match="main.py"):
-        provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+        provider._spec_for(request, resumed=False)
 
 
 def test_a_reply_carries_only_what_it_changed(tmp_path: Path) -> None:
@@ -1305,18 +1383,13 @@ def test_a_one_file_program_is_still_shown_the_way_it_always_was() -> None:
     assert render_tree("def f(): pass") == "```python\ndef f(): pass\n```"
 
 
-def test_a_package_candidate_runs_in_the_sandbox(tmp_path: Path) -> None:
+def test_a_package_candidate_runs_through_the_execution_seam(tmp_path: Path) -> None:
     """The whole point, end to end: a candidate that is three files, one of them
     in a subpackage, imported and scored by an evaluator that did not have to
     know any of that. The evaluator contract is unchanged — it is still told the
     entrypoint's path through `SCIENCE_AGENT_CANDIDATE`."""
     from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
-    from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import detect_local_capability
     from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import _run_evaluator
-
-    capability = detect_local_capability()
-    if not capability.available:
-        pytest.skip("no isolation backend on this host")
 
     tree = {
         "candidate.py": "from helpers.scale import factor\n"
@@ -1335,10 +1408,42 @@ def test_a_package_candidate_runs_in_the_sandbox(tmp_path: Path) -> None:
     )
 
     payload = _run_evaluator(bundle(tree), evaluator, [0],
-                             capability=capability, timeout=60)
+                             execute=_local_execution, timeout=60)
 
     assert payload["valid"] is True
     assert payload["metrics"]["total"] == pytest.approx(9.0)
+
+
+def test_the_domain_scores_a_candidate_through_the_seam() -> None:
+    """The same trip, but through the domain's own `evaluate` closure — the
+    path the search actually takes. `_run_evaluator` tested directly leaves
+    the closure's wiring unexercised, and that wiring is where a rename once
+    left a NameError the rest of this file could not see."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import script_domain
+
+    domain = script_domain(
+        scorecard={"criteria": [{
+            "id": "score", "name": "score", "direction": "maximize",
+            "weight": 1.0, "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 2,
+                                  "testShards": 2, "shardRows": 1, "seed": 1,
+                                  "trainRows": None}, "timeoutSeconds": 60},
+        }]},
+        script=(
+            '"""contract doc"""\n'
+            "import json, os\n"
+            'json.dump({"valid": True, "metrics": {"score": 0.75}},\n'
+            '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'
+        ),
+        execute=_local_execution,
+        baseline_code="x = 1\n",
+    )
+
+    ok, metrics, _diagnosis = domain.evaluate("x = 2\n", [0])
+
+    assert ok is True
+    assert metrics["score"] == pytest.approx(0.75)
 
 
 def test_a_candidate_is_stored_as_a_directory_you_can_open(tmp_path: Path) -> None:
@@ -1470,7 +1575,19 @@ def test_the_engine_has_no_model_channel_of_its_own() -> None:
     with pytest.raises(TypeError):
         PuctEngine()                                   # type: ignore[call-arg]
     with pytest.raises(ValueError, match="injected Model"):
-        PuctEngine(completion_factory=None)            # type: ignore[arg-type]
+        PuctEngine(completion_factory=None,            # type: ignore[arg-type]
+                   evaluation_execution=_local_execution)
+
+
+def test_the_engine_has_no_execution_channel_of_its_own() -> None:
+    """Same shape as the model guard: the injected execution is the only way a
+    candidate ever runs, and a default that executed locally would be the
+    bypass the sandbox deletion exists to close."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    with pytest.raises(ValueError, match="injected SysOperation"):
+        PuctEngine(completion_factory=lambda **_: (lambda prompt: ""),
+                   evaluation_execution=None)          # type: ignore[arg-type]
 
 
 # -- task-owned prompt wording ---------------------------------------------------
@@ -1483,7 +1600,6 @@ def test_a_tasks_mutation_template_reaches_the_real_prompt(tmp_path: Path) -> No
     template deliberately contains JSON braces, which is why the syntax is
     `${...}` (`string.Template`) and not `str.format`."""
     from openjiuwen.rsi.artifact_rsi.program_opt.program import Program, program_id
-    from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import SandboxCapability
     from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import script_domain
 
     domain = script_domain(
@@ -1496,7 +1612,7 @@ def test_a_tasks_mutation_template_reaches_the_real_prompt(tmp_path: Path) -> No
                                   "trainRows": None}, "timeoutSeconds": 60},
         }]},
         script='"""contract doc"""\nprint(1)\n',
-        capability=SandboxCapability(backend="seatbelt"),
+        execute=_local_execution,
         statement="pack the bins tighter",
         baseline_code="def pack():\n    return []\n",
         mutation_template=(
@@ -1545,7 +1661,7 @@ def test_prompt_templates_land_on_the_spec(tmp_path: Path) -> None:
     (prompts / "repair.md").write_text("R ${error}\n${code}", encoding="utf-8")
     (prompts / "prior.md").write_text("${prompt}\nRate it.", encoding="utf-8")
 
-    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+    spec = provider._spec_for(request, resumed=False)
 
     assert spec.mutation_template == "M ${statement}"
     assert spec.repair_template.startswith("R ")
@@ -1784,7 +1900,7 @@ def test_a_raising_callback_does_not_fail_the_search(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         _Finishing,
     )
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
     request = _request(tmp_path)
     _scorecard(Path(request.run_dir))
 

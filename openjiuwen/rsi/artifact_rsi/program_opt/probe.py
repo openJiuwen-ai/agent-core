@@ -38,6 +38,7 @@ import math
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .engine import RunSpec
+from .execution import EvaluationExecution
 from .logging_config import get_logger
 from .program import DEFAULT_ENTRYPOINT, bundle, files_of
 
@@ -60,7 +61,7 @@ class ProbeError(RuntimeError):
     """The probe could not be taken, which is not the same as failing it."""
 
 
-def run_probe(spec: RunSpec) -> Dict[str, Any]:
+def run_probe(spec: RunSpec, execute: "EvaluationExecution") -> Dict[str, Any]:
     """`{baseline, worsened, flat, label}` for one scorecard."""
     from .puct_engine import _mode_of
 
@@ -74,7 +75,7 @@ def run_probe(spec: RunSpec) -> Dict[str, Any]:
         from .provision import ProvisionError, ensure
 
         try:
-            ensure(spec.packages)
+            ensure(spec.packages, execute)
         except ProvisionError as error:
             raise ProbeError(str(error)) from error
 
@@ -89,7 +90,7 @@ def run_probe(spec: RunSpec) -> Dict[str, Any]:
 
         try:
             domain = script_domain(
-                scorecard=spec.scorecard, script=spec.script, capability=spec.sandbox,
+                scorecard=spec.scorecard, script=spec.script, execute=execute,
                 baseline_code=spec.baseline_code,
                 candidate_timeout=spec.candidate_timeout_seconds,
             )

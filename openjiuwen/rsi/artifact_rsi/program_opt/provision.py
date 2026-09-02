@@ -18,9 +18,9 @@ The person who types "bring the error down" has no way to know the search wants 
 gradient-boosting library, and no reason to. The drafting agent does know, so it
 says, and this is the half that acts on it.
 
-**Only what is missing, and only into the candidate runtime.** `find_spec`
-first: on a warm host the common case is that everything asked for is already
-there and nothing runs at all.
+**Only what is missing, and only into the candidate runtime.** An import
+probe first, inside the execution environment: on a warm sandbox the common
+case is that everything asked for is already importable and pip never runs.
 
 **A name is a name.** Anything that could redirect where the package comes from
 — an index URL, an editable path, a VCS reference, an environment marker — is
@@ -30,23 +30,21 @@ different supply chain wearing the same field.
 
 **Failure is a refusal, not a warning.** A run whose candidates were promised
 `xgboost` and did not get it fails every expansion with `ModuleNotFoundError`
-and reads as a model that cannot write code — the same failure this module's
-sibling `missing_candidate_runtime` exists to prevent at the other end.
+and reads as a model that cannot write code — the same failure the engine's
+pre-flight probe of `CANDIDATE_RUNTIME` exists to prevent at the other end.
 """
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import re
-import shutil
-import subprocess
-import sys
-from typing import Iterable, List, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 from .logging_config import get_logger
 
 log = get_logger("provision")
+
+if TYPE_CHECKING:
+    from .execution import EvaluationExecution
 
 #: A bare distribution name, optionally with a version pin. Deliberately narrow:
 #: everything pip would read as an option, a path or a URL falls outside it.
@@ -70,54 +68,19 @@ class ProvisionError(RuntimeError):
     """The runtime could not be made to match what the run was promised."""
 
 
-def _installer(packages: Sequence[str]) -> List[str]:
-    """The command that puts `packages` into *this* interpreter's environment.
-
-    `uv` first, because on this deployment `uv` is what created the venv and a
-    uv-made venv has no `pip` in it — the first real attempt to provision one
-    came back "No module named pip", which reads as a broken runtime rather
-    than as a missing tool. `--python sys.executable` rather than an activated
-    environment: this process is the one whose import cache the AST gate reads,
-    so it has to be this environment and not whichever one uv would guess.
-    """
-    uv = shutil.which("uv")
-    if uv:
-        return [uv, "pip", "install", "--python", sys.executable, *packages]
-    if importlib.util.find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip", "install", "--no-input",
-                "--disable-pip-version-check", *packages]
-    raise ProvisionError(
-        "this candidate runtime has neither uv nor pip, so nothing can be installed. "
-        "Either ship the packages with the deployment, or put uv on the PATH"
-    )
-
-
 def import_name(package: str) -> str:
     """What `import` would spell this distribution."""
     base = package.split("==")[0].strip().lower()
     return _IMPORT_NAME.get(base, base.replace("-", "_"))
 
 
-def missing(packages: Iterable[str]) -> List[str]:
-    """Those not importable here, in the order given, without duplicates."""
-    seen, absent = set(), []
-    for package in packages:
-        name = package.strip()
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        if importlib.util.find_spec(import_name(name)) is None:
-            absent.append(name)
-    return absent
+def validate_names(packages: Sequence[str]) -> List[str]:
+    """The stripped entries, after refusing anything that is not a bare name.
 
-
-def ensure(packages: Sequence[str]) -> Tuple[List[str], str]:
-    """Install whatever is missing. `(what was installed, one line about it)`.
-
-    Raises :class:`ProvisionError` when a name is not a name, or when pip
-    refuses: both are things the user has to see before a run starts, and both
-    are invisible afterwards — the run would just report that every candidate
-    failed to import something.
+    Split out of `ensure` so a caller can compose an import probe from these
+    names without first paying for an install attempt — splicing an
+    *unvalidated* entry into ``python -c "import …"`` would let a pip option
+    ride into a command line.
     """
     wanted = [package.strip() for package in packages if package.strip()]
     for package in wanted:
@@ -126,50 +89,67 @@ def ensure(packages: Sequence[str]) -> Tuple[List[str], str]:
                 f"{package!r} is not a package name. Only names are accepted here "
                 "(optionally with ==version); not paths, URLs, index addresses or pip options"
             )
-
-    absent = missing(wanted)
-    if not absent:
-        return [], ("every package this run asked for is already installed" if wanted else "")
-
-    command = _installer(absent)
-    log.info("installing %s with %s", ", ".join(absent), command[0])
-    try:
-        completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise ProvisionError(
-            f"installing {', '.join(absent)} ran for over {TIMEOUT_SECONDS:.0f}s without finishing"
-        ) from error
-    if completed.returncode != 0:
-        tail = ((completed.stderr or "") + (completed.stdout or "")).strip()[-400:]
-        raise ProvisionError(f"installing {', '.join(absent)} failed: {tail or '(no output)'}")
-
-    # The interpreter cached the failed lookups on the way in, and this process
-    # is the one that runs the AST gate — without this the gate keeps reporting
-    # that a package installed a second ago is not installed.
-    importlib.invalidate_caches()
-    still = missing(absent)
-    if still:
-        raise ProvisionError(
-            f"installed, but still not importable: {', '.join(still)}. Most likely the "
-            "package name and the import name differ"
-        )
-    return absent, f"installed {', '.join(absent)} into the candidate runtime"
+    return wanted
 
 
-#: Third-party modules the AST gate admits. A candidate runs with this process's
-#: interpreter, so this venv is the environment the gate makes promises about.
-_CANDIDATE_RUNTIME = ("numpy", "pandas", "scipy", "sklearn")
+def probe_imports(names: Sequence[str], execute: "EvaluationExecution") -> Optional[str]:
+    """``None`` when every module imports inside the execution environment,
+    else the probe's output tail. Only vetted names go in — they are spliced
+    into a command line."""
+    joined = ", ".join(names)
+    outcome = execute({}, ["python", "-c", f"import {joined}"], {}, 120.0, None)
+    if outcome.exit_code == 0:
+        return None
+    return (outcome.output or "").strip()[-200:] or "(no output)"
 
 
-def missing_candidate_runtime() -> list[str]:
-    """Allowlisted modules a candidate could import but this venv does not have.
+def ensure(packages: Sequence[str], execute: "EvaluationExecution") -> Tuple[List[str], str]:
+    """Install `packages` into the run's execution environment.
 
-    Checked once at run start rather than discovered per candidate: without it
-    every expansion fails with `ModuleNotFoundError` and the run reads as a
-    model that cannot write code.
+    Through the injected execution, because that is where candidates actually
+    run: the old version installed into *this* interpreter, which was the
+    truth when the local sandbox reused the host Python and is a lie against a
+    gateway sandbox with its own environment.
+
+    An import probe first, and pip only when it fails: pip resolves for
+    seconds even when every requirement is already satisfied, and `ensure` is
+    reached more than once per run. A ``==version`` pin is treated as
+    satisfied by importability alone, exactly as the old host-side
+    `find_spec` fast path treated it.
+
+    Raises :class:`ProvisionError` when a name is not a name, or when pip
+    refuses: both are things the user has to see before a run starts, and both
+    are invisible afterwards — the run would just report that every candidate
+    failed to import something.
     """
-    import importlib.util
+    wanted = validate_names(packages)
+    if not wanted:
+        return [], ""
+    names = sorted({import_name(package) for package in wanted})
 
-    return [name for name in _CANDIDATE_RUNTIME if importlib.util.find_spec(name) is None]
+    try:
+        if probe_imports(names, execute) is None:
+            return [], f"already importable: {', '.join(names)}"
+        command = ["python", "-m", "pip", "install", "--no-input",
+                   "--disable-pip-version-check", *wanted]
+        log.info("installing %s inside the execution environment", ", ".join(wanted))
+        outcome = execute({}, command, {}, float(TIMEOUT_SECONDS), None)
+    except Exception as error:  # noqa: BLE001 - the seam's failure is run-level
+        raise ProvisionError(
+            f"installing {', '.join(wanted)} could not be run: {error}") from error
+    if outcome.exit_code != 0:
+        tail = (outcome.output or "").strip()[-400:]
+        raise ProvisionError(f"installing {', '.join(wanted)} failed: {tail or '(no output)'}")
+
+    # Verified where it matters: the same probe, after the install.
+    failure = probe_imports(names, execute)
+    if failure is not None:
+        raise ProvisionError(
+            f"pip reported success and yet importing {', '.join(names)} still fails: {failure}"
+        )
+    return wanted, f"installed {', '.join(names)}"
+
+
+#: Allowlisted modules a candidate may import; probed at run start through the
+#: injected execution, because that is the environment candidates run in.
+CANDIDATE_RUNTIME = ("numpy", "pandas", "scipy", "sklearn")
