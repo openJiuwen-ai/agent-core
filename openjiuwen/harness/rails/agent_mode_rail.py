@@ -35,7 +35,11 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.agent_mode import build_plan_mode_section
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.subagent_types import (
+    listed_subagent_types,
+    subagent_type_name,
+    tool_owner_id_of,
+)
 from openjiuwen.harness.tools import SwitchModeTool, EnterPlanModeTool, ExitPlanModeTool, create_task_tool
 
 if TYPE_CHECKING:
@@ -637,7 +641,7 @@ class AgentModeRail(DeepAgentRail):
         if existing:
             logger.info("[AgentModeRail] task tool already registered, skip register")
             return
-        if not agent.deep_config.subagents:
+        if not listed_subagent_types(agent.deep_config.subagents):
             return
 
         available_agents = self._build_available_agents(agent.deep_config.subagents)
@@ -645,6 +649,7 @@ class AgentModeRail(DeepAgentRail):
             parent_agent=agent,
             available_agents=available_agents,
             language=self.system_prompt_builder.language,
+            agent_id=tool_owner_id_of(agent),
         )
         self._owned_task_tool_names = {
             tool.card.name for tool in (self._task_tools or [])
@@ -689,13 +694,13 @@ class AgentModeRail(DeepAgentRail):
         """
         lines = []
         for spec in subagents:
-            if isinstance(spec, SubAgentConfig):
-                name = spec.agent_card.name
-                desc = spec.agent_card.description
-            else:
-                card = getattr(spec, "card", None)
-                name = getattr(card, "name", None) or "general-purpose"
-                desc = getattr(card, "description", None) or "DeepAgent instance"
+            name = subagent_type_name(spec)
+            if not name:
+                continue
+            card = getattr(spec, "agent_card", None) or getattr(spec, "card", None)
+            desc = getattr(card, "description", None)
+            if not isinstance(desc, str):
+                desc = ""
             lines.append(f'"{name}": {desc}')
         return "\n".join(lines)
 

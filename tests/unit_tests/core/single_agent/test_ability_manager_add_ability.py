@@ -63,6 +63,38 @@ def test_stateful_add_ability_refreshes_on_same_id() -> None:
     asyncio.run(_run())
 
 
+def test_stateful_execute_uses_local_instance_after_peer_refresh() -> None:
+    async def _run():
+        from openjiuwen.core.session.agent import Session
+
+        await Runner.start()
+        am1 = AbilityManager(owner_id="shared-session")
+        am2 = AbilityManager(owner_id="shared-session")
+        first = _make_tool("task_tool", marker="first")
+        second = _make_tool("task_tool", marker="second")
+        try:
+            am1.add_ability(first.card, first)
+            am2.add_ability(second.card, second)
+
+            assert Runner.resource_mgr.get_tool("task_tool_shared-session") is second
+            result, _msg = await am1._execute_single_tool_call(
+                ToolCall(id="c1", type="function", name="task_tool", arguments="{}"),
+                Session(session_id="s"),
+            )
+            assert result == "first"
+            peer_result, _peer_msg = await am2._execute_single_tool_call(
+                ToolCall(id="c2", type="function", name="task_tool", arguments="{}"),
+                Session(session_id="s"),
+            )
+            assert peer_result == "second"
+        finally:
+            am1.remove_ability("task_tool")
+            am2.remove_ability("task_tool")
+            await Runner.stop()
+
+    asyncio.run(_run())
+
+
 def test_teardown_tools_removes_only_owned_stateful_tools() -> None:
     async def _run():
         await Runner.start()

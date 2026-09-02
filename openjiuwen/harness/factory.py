@@ -109,10 +109,11 @@ def _inject_general_purpose_subagent(
     if not add_general_purpose_agent:
         return effective_subagents
 
+    from openjiuwen.harness.subagent_types import GENERAL_PURPOSE_TYPE, subagent_type_name
+
     has_gp = any(
-        (isinstance(s, SubAgentConfig) and s.agent_card.name == "general-purpose")
-        or (isinstance(s, DeepAgent) and getattr(getattr(s, "card", None), "name", None) == "general-purpose")
-        for s in effective_subagents
+        subagent_type_name(spec) == GENERAL_PURPOSE_TYPE
+        for spec in effective_subagents
     )
     if has_gp:
         return effective_subagents
@@ -123,7 +124,7 @@ def _inject_general_purpose_subagent(
         gp_rails = [SysOperationRail(), *gp_rails]
     gp_rails = gp_rails or None
     effective_subagents.insert(0, SubAgentConfig(
-        agent_card=AgentCard(name="general-purpose", description=desc),
+        agent_card=AgentCard(name=GENERAL_PURPOSE_TYPE, description=desc),
         system_prompt=system_prompt or "",
         tools=list(tools or []),
         mcps=list(mcps or []),

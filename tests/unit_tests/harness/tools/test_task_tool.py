@@ -336,6 +336,85 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             browser_capabilities=["pdf", "vision"],
         )
 
+    async def test_task_tool_maps_general_agent_alias(self) -> None:
+        created: list[str] = []
+
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="gp", description="test", id="gp_id")
+
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                return {"output": "done"}
+
+            async def prepare_task_resources(self) -> None:
+                return None
+
+            async def cleanup_task_resources(self) -> None:
+                return None
+
+        spec = SubAgentConfig(
+            agent_card=AgentCard(name="general-purpose", description="gp"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+
+        def _create(subagent_type, *_args, **_kwargs):
+            created.append(subagent_type)
+            return FakeSubAgent()
+
+        with patch.object(parent_agent, "create_subagent", side_effect=_create):
+            result = await tool.invoke(
+                {"subagent_type": "general_agent", "task_description": "research"},
+                session=Session(session_id="parent_session"),
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(created, ["general-purpose"])
+
+    async def test_task_tool_unknown_type_returns_available_names(self) -> None:
+        spec = SubAgentConfig(
+            agent_card=AgentCard(name="research_agent", description="research"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+
+        result = await tool.invoke(
+            {"subagent_type": "general-purpose", "task_description": "research"},
+            session=Session(session_id="parent_session"),
+        )
+
+        self.assertFalse(result.success)
+        self.assertIn("research_agent", result.error)
+        self.assertIn("general-purpose", result.error)
+
 
 class TestTaskToolSync(unittest.TestCase):
     def test_create_task_tool(self) -> None:
@@ -356,6 +435,30 @@ class TestTaskToolSync(unittest.TestCase):
             AbilityManager._resolve_call_timeout(tools[0].card),
             DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
         )
+
+    def test_create_task_tool_writes_subagent_type_enum(self) -> None:
+        spec = SubAgentConfig(
+            agent_card=AgentCard(name="general-purpose", description="gp"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tools = create_task_tool(
+            parent_agent=parent_agent,
+            available_agents="- general-purpose: gp",
+            language="cn",
+        )
+        enum_names = tools[0].card.input_params["properties"]["subagent_type"]["enum"]
+        self.assertEqual(enum_names, ["general-purpose"])
 
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
         tools = [ToolCard(id="parent_tool", name="read_file", description="read file")]

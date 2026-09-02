@@ -152,6 +152,13 @@ class TestSubagentRail:
         tool.card.name = "task_tool"
         tool.card.id = "task_tool"
         tool.card.description = "old description"
+        tool.card.input_params = {
+            "type": "object",
+            "properties": {
+                "subagent_type": {"type": "string", "description": "type"},
+            },
+            "required": ["subagent_type", "task_description"],
+        }
         mock_create.return_value = [tool]
 
         mock_agent = Mock()
@@ -180,6 +187,10 @@ class TestSubagentRail:
         mock_agent.ability_manager.remove.assert_not_called()
         assert rail.tools == [original_tool]
         assert "evolution_reviewer" in tool.card.description
+        assert tool.card.input_params["properties"]["subagent_type"]["enum"] == [
+            "stub_agent",
+            "evolution_reviewer",
+        ]
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
@@ -330,13 +341,14 @@ class TestSubagentRail:
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
-    def test_extract_agent_meta_with_deepagent_fallback(mock_create):
-        """DeepAgent-like mock without card uses fallback meta in available_agents."""
+    def test_nameless_deepagent_is_omitted_from_menu(mock_create):
+        """Nameless DeepAgent-like specs are omitted from the menu."""
         mock_tool = _make_tool_mock()
         mock_create.return_value = [mock_tool]
 
         sub = Mock()
         sub.card = None
+        sub.agent_card = None
 
         mock_parent_agent = Mock()
         mock_parent_agent.system_prompt_builder = Mock()
@@ -347,11 +359,8 @@ class TestSubagentRail:
         rail = SubagentRail()
         rail.init(mock_parent_agent)
 
-        mock_create.assert_called_once()
-        call_args = mock_create.call_args
-        assert "available_agents" in call_args.kwargs
-        available_agents = call_args.kwargs["available_agents"]
-        assert "- general-purpose: DeepAgent instance (Tools: All tools)" in available_agents
+        mock_create.assert_not_called()
+        assert rail.tools is None
 
     @staticmethod
     @pytest.mark.asyncio
