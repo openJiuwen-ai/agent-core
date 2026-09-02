@@ -33,7 +33,7 @@ which is exactly what this seam was cut for.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Sequence, Tuple
+from typing import Any, Callable, Optional, Dict, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -60,8 +60,12 @@ class Domain:
     evaluate: Callable[[str, Sequence[int]], Tuple[bool, Dict[str, Any], str]]
     #: `metrics -> [0, 1]`, order-preserving with `metrics["score"]`.
     reward: Callable[[Dict[str, Any]], float]
-    #: `parent_program -> prompt`, upstream's `PlaygroundGenerator.__call__`.
-    prompt: Callable[[Any], str]
+    #: `(parent_program, best_score) -> prompt`, upstream's
+    #: `PlaygroundGenerator.__call__` plus the one number upstream had no place
+    #: for: what the run's best candidate scores. Without it the mutation prompt
+    #: says "Best so far: not measured yet" for the whole budget, and the model
+    #: optimises with no idea what it has to beat.
+    prompt: Callable[[Any, Optional[float]], str]
     #: `shard_index -> task prompt`, for the rollout tasks.
     task_prompt: Callable[[int], str]
     #: The shards the search never sees, scored once at the end.

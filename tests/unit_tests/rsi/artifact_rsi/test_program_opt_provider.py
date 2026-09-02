@@ -1752,6 +1752,84 @@ def test_a_tasks_mutation_template_reaches_the_real_prompt(tmp_path: Path) -> No
     assert "fixed evaluator script" not in prompt  # the built-in template stepped aside
 
 
+def test_the_prompt_never_argues_with_the_tasks_own_contract() -> None:
+    """The built-in template used to name `train_and_predict` as an example of
+    a function "the evaluator never asked for". For any task whose evaluator
+    asks for exactly that — one of the most ordinary interfaces there is — the
+    prompt said define it and don't define it, on the same screen. Seen in a
+    real run's prompt; the model happened to ignore the contradiction.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import mutation_prompt
+
+    text = mutation_prompt(
+        statement="fit the curve",
+        scorecard={"criteria": []},
+        parent_code="def train_and_predict(train, test):\n    return []\n",
+        entrypoint="candidate.py",
+        parent_score=0.1,
+        best_score=None,
+        recent=(),
+        script_contract="Your program must define train_and_predict(train, test).",
+        feedback="",
+        template="",
+    )
+
+    # The principle survives; the example that could contradict the task does not.
+    assert "An interface that does not match scores zero" in text
+    assert "never asked for (`train_and_predict`" not in text
+
+
+def test_the_model_is_told_what_it_has_to_beat() -> None:
+    """`best_score` is the run's selection pressure, and it was wired to None.
+
+    Every mutation prompt in a real run read "Best so far: not measured yet",
+    for the whole budget. Driven through the real `make_propose` closure — the
+    thing that actually builds the prompt — rather than by calling
+    `mutation_prompt` with a number a test chose.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import program_id
+    from openjiuwen.rsi.artifact_rsi.program_opt.search import make_propose
+    from openjiuwen.rsi.artifact_rsi.program_opt.tree import Node, PuctTree
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import Program
+
+    def program(code: str, score: float) -> Node:
+        return Node(index=0, parent_index=None,
+                    program=Program(program_id(code), 0, None, code, "", {}, True, ""),
+                    score=score, num_visits=1, promise=None)
+
+    tree = PuctTree()
+    tree.nodes.append(program("x = 1\n", 0.25))
+    tree.nodes.append(program("x = 2\n", 0.75))     # the one to beat
+    tree.nodes[1].index = 1
+
+    seen: list[str] = []
+    domain = _domain_recording_prompts(seen)
+    propose = make_propose(tree, lambda prompt, i, code: ("x = 3\n", "", None), domain)
+
+    propose("", object(), "", 0.0)
+
+    assert seen, "the closure never built a prompt"
+    assert "0.75" in seen[0] or "0.7500" in seen[0], seen[0]
+
+
+def _domain_recording_prompts(seen: list[str]):
+    """A Domain whose `prompt` records the best score it was handed."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.domain import Domain
+
+    def prompt(program: object, best_score: float | None = None) -> str:
+        rendered = f"parent + best={best_score}"
+        seen.append(rendered)
+        return rendered
+
+    return Domain(
+        name="recorder", entrypoint="candidate.py", metric_key="score",
+        metric_better="higher", initial_program="x = 1\n", initial_summary="",
+        evaluate=lambda code, shards: (True, {"score": 1.0}, ""),
+        reward=lambda metrics: 1.0, prompt=prompt,
+        task_prompt=lambda shard: "", test_shards=(), data_summary={},
+    )
+
+
 def test_an_unknown_placeholder_is_refused_by_name_at_load(tmp_path: Path) -> None:
     """`safe_substitute` would leave `${statment}` in the prompt as literal
     text, and the model would optimise against a prompt with a hole in it for

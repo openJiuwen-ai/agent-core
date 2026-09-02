@@ -179,6 +179,18 @@ NO_CANDIDATE = "no candidate program came back; the model call returned nothing"
 _WHY_CHARS = 300
 
 
+def _best_score(tree: PuctTree) -> Optional[float]:
+    """The best score on the tree, or None while nothing has been measured."""
+    try:
+        best = tree.best()
+    except RuntimeError:
+        return None
+    score = getattr(best, "score", None)
+    if not isinstance(score, (int, float)) or not math.isfinite(float(score)):
+        return None
+    return float(score)
+
+
 def make_propose(
     tree: PuctTree,
     complete: Callable[[str, int, str], Tuple[str, str, Optional[float]]],
@@ -242,7 +254,10 @@ def make_propose(
             "iteration": iteration,
             "parent_index": parent.index,
         })
-        prompt = domain.prompt(parent.program)
+        # What the candidate has to beat. Read at prompt time rather than
+        # captured once: with N workers in flight the best moves under us, and
+        # a stale number is a selection pressure pointing at the wrong place.
+        prompt = domain.prompt(parent.program, _best_score(tree))
         code, summary, promise = "", "", None
         attempts = max(1, repair_attempts) if check and repair_prompt else 1
         for attempt in range(attempts):

@@ -196,9 +196,9 @@ _SCRIPT_TEMPLATE = """You are rewriting a program that is scored by a **fixed ev
 {contract}
 
 The evaluator does `import candidate` and calls it through the interface above.
-**An interface that does not match scores zero** — do not add functions the
-evaluator never asked for (`train_and_predict`, for instance); that is not this
-run's contract.
+**An interface that does not match scores zero.** Write exactly the names the
+contract above asks for — inventing a different one, or adding an entry point
+it never mentioned, is not this run's contract.
 
 ## Current program
 

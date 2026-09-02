@@ -195,14 +195,14 @@ def script_domain(
 
     contract = _contract_of(script)
 
-    def prompt(program: Program) -> str:
+    def prompt(program: Program, best_score: Optional[float] = None) -> str:
         return mutation_prompt(
             statement=statement,
             scorecard=scorecard,
             parent_code=program.code,
             entrypoint=entrypoint,
             parent_score=_finite(program.metrics.get(SCORE_KEY)),
-            best_score=None,
+            best_score=best_score,
             recent=(),
             script_contract=contract,
             feedback=program.error,
