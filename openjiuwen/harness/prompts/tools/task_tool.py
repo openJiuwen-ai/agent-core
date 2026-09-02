@@ -23,17 +23,11 @@ from openjiuwen.harness.prompts.tools.base import (
 # ---------------------------------------------------------------------------
 GENERAL_PURPOSE_AGENT_DESC: Dict[str, str] = {
     "cn": "通用型子代理，继承主代理的工具与能力（文件读写、bash、MCP、skills 等），"
-          "适合执行独立的复杂子任务（调研、搜代码、多步实现等）。"
-          "子代理运行在独立上下文窗口中，中间工具调用结果不会污染主代理上下文。"
-          "当你在搜索关键词或文件时，如果不确定前几次尝试就能找到正确匹配，"
-          "就用这个子代理来帮你搜索。",
+          "在独立上下文中执行被委派的子任务；中间工具调用结果不进入主代理上下文。",
     "en": "General-purpose subagent that inherits the parent agent's tools and "
-          "capabilities (file I/O, bash, MCP, skills, etc.) for independent complex "
-          "subtasks such as research, code search, and multi-step implementation. "
-          "Runs in an isolated context window so intermediate tool results do not "
-          "pollute the parent agent's context. When you are searching for a keyword "
-          "or file and are not confident you will find the right match in the first "
-          "few tries, use this subagent to perform the search for you.",
+          "capabilities (file I/O, bash, MCP, skills, etc.) and runs delegated "
+          "subtasks in an isolated context; intermediate tool results do not "
+          "enter the parent agent's context.",
 }
 
 # ---------------------------------------------------------------------------
