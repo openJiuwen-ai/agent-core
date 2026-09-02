@@ -64,6 +64,23 @@ def get_current_session():
     return _current_session.get()
 
 
+def _reset_current_session(
+    token: contextvars.Token,
+    previous: Any,
+) -> None:
+    """Restore ``current_session`` after ``with_session``.
+
+    ``ContextVar.reset(token)`` raises ``ValueError`` when the token was
+    created in another Context (common for async generators closed from a
+    different task, e.g. ReAct ``create_task(stream_process)`` + yield).
+    Fall back to setting the previous value in the active Context.
+    """
+    try:
+        _current_session.reset(token)
+    except ValueError:
+        _current_session.set(previous)
+
+
 def with_session_for_class(cls):
     methods = ['invoke', 'stream', 'collect', 'transform']
     for method_name in methods:
@@ -101,12 +118,13 @@ def with_session(session: Any = None):
             @functools.wraps(func)
             async def async_gen_wrapper(*args, **kwargs):
                 target_session = get_target_session(args, kwargs)
+                previous = _current_session.get()
                 token = _current_session.set(target_session)
                 try:
                     async for value in func(*args, **kwargs):
                         yield value
                 finally:
-                    _current_session.reset(token)
+                    _reset_current_session(token, previous)
 
             return async_gen_wrapper
 
@@ -114,12 +132,13 @@ def with_session(session: Any = None):
             @functools.wraps(func)
             def sync_gen_wrapper(*args, **kwargs):
                 target_session = get_target_session(args, kwargs)
+                previous = _current_session.get()
                 token = _current_session.set(target_session)
                 try:
                     for value in func(*args, **kwargs):
                         yield value
                 finally:
-                    _current_session.reset(token)
+                    _reset_current_session(token, previous)
 
             return sync_gen_wrapper
 
@@ -128,22 +147,24 @@ def with_session(session: Any = None):
                 @functools.wraps(func)
                 async def async_wrapper(*args, **kwargs):
                     target_session = get_target_session(args, kwargs)
+                    previous = _current_session.get()
                     token = _current_session.set(target_session)
                     try:
                         return await func(*args, **kwargs)
                     finally:
-                        _current_session.reset(token)
+                        _reset_current_session(token, previous)
 
                 return async_wrapper
             else:
                 @functools.wraps(func)
                 def sync_wrapper(*args, **kwargs):
                     target_session = get_target_session(args, kwargs)
+                    previous = _current_session.get()
                     token = _current_session.set(target_session)
                     try:
                         return func(*args, **kwargs)
                     finally:
-                        _current_session.reset(token)
+                        _reset_current_session(token, previous)
 
                 return sync_wrapper
 
