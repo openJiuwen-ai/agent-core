@@ -117,6 +117,98 @@ class LexicalIndex:
             )
         )
 
+    def search_terms(
+        self,
+        query: str,
+        *,
+        keys: Iterable[str] | None = None,
+    ) -> tuple[LexicalHit, ...]:
+        """Rank metadata that covers the natural-language query terms."""
+
+        text = str(query or "").strip()
+        if not text:
+            raise ValueError("query must be non-empty")
+        scope = (
+            self._documents
+            if keys is None
+            else {key: self._documents[key] for key in keys if key in self._documents}
+        )
+        exact = tuple(
+            document
+            for document in scope.values()
+            if text.casefold() in {document.key.casefold(), document.name.casefold()}
+        )
+        if exact:
+            return tuple(
+                LexicalHit(document.key, 0.0)
+                for document in sorted(
+                    exact,
+                    key=lambda document: (document.key.casefold(), document.key),
+                )
+            )
+        query_tokens = tuple(dict.fromkeys(_tokens(text)))
+        present = tuple(token for token in query_tokens if self._bm25.postings.get(token))
+        if not present:
+            return ()
+        present_set = set(present)
+        identity_singleton = len(present) == 1 and any(
+            present[0]
+            in self._field_tokens[document.key][0].union(
+                self._field_tokens[document.key][1]
+            )
+            for document in scope.values()
+        )
+        unique_singleton = (
+            len(present) == 1 and self._bm25.postings[present[0]] == 1
+        )
+        distinctive_singleton = identity_singleton or unique_singleton
+        required_overlap = (
+            2 if len(query_tokens) >= 3 and not distinctive_singleton else 1
+        )
+        if len(present) < required_overlap:
+            return ()
+        matched = [
+            document
+            for document in scope.values()
+            if len(
+                present_set.intersection(
+                    set().union(*self._field_tokens[document.key][:3])
+                )
+            )
+            >= required_overlap
+        ]
+        scored: list[LexicalHit] = []
+        for document in matched:
+            score = _bm25_score(
+                query_tokens,
+                self._frequencies[document.key],
+                self._lengths[document.key],
+                self._bm25,
+            )
+            score += _field_score(
+                query_tokens,
+                field_tokens=self._field_tokens[document.key],
+            )
+            score += _phrase_score(document, text, case_insensitive=True)
+            scored.append(LexicalHit(document.key, score))
+        return tuple(
+            sorted(
+                scored,
+                key=lambda hit: (
+                    _term_identity_tier(self._documents[hit.key], present),
+                    -hit.score,
+                    hit.key.casefold(),
+                    hit.key,
+                ),
+            )
+        )
+
+    def missing_terms(self, query: str) -> tuple[str, ...]:
+        """Return query terms absent from all indexed Skill metadata."""
+
+        query_tokens = tuple(dict.fromkeys(_tokens(str(query or "").strip())))
+        return tuple(token for token in query_tokens if not self._bm25.postings.get(token))
+
 
 def compile_matcher(query: str, *, case_insensitive: bool, fixed_strings: bool):
     """Build the bounded literal-or-regex matcher used by Skill search."""
@@ -241,6 +333,15 @@ def _identity_tier(
     if case_insensitive:
         values = tuple(value.casefold() for value in values)
         terms = tuple(term.casefold() for term in terms)
+    if any(value == term for value in values for term in terms):
+        return 0
+    if any(value.startswith(term) for value in values for term in terms):
+        return 1
+    return 2
+
+
+def _term_identity_tier(document: LexicalDocument, terms: Sequence[str]) -> int:
+    values = (document.key.casefold(), document.name.casefold())
     if any(value == term for value in values for term in terms):
         return 0
     if any(value.startswith(term) for value in values for term in terms):
