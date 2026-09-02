@@ -49,9 +49,9 @@ class PromptTaskCase:
         return _first_value(self.case.label, ("output", "expected"))
 
     @classmethod
-    def from_text(cls, input: str, expected: str = "", *, hidden: bool = False) -> "PromptTaskCase":
+    def from_text(cls, text: str, expected: str = "", *, hidden: bool = False) -> "PromptTaskCase":
         """Convenience constructor for the common single-string input/expected shape."""
-        return cls(case=Case(inputs={"query": input}, label={"output": expected}), hidden=hidden)
+        return cls(case=Case(inputs={"query": text}, label={"output": expected}), hidden=hidden)
 
 
 @dataclass
