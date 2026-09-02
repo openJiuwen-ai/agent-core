@@ -47,7 +47,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import events
 from .candidates import TREE_FILE, TREE_SCHEMA_VERSION, CandidateStore, write_tree_snapshot
-from .completion import CompletionUnavailable, CompletionUsage, completion_for
+from .completion import CompletionUnavailable, CompletionUsage
 from .engine import RunSpec
 from .events import Emit
 from .logging_config import get_logger
@@ -186,11 +186,20 @@ class PuctEngine:
     def __init__(
         self,
         *,
-        completion_factory: Optional[Callable[..., Callable[[str], str]]] = None,
+        completion_factory: Callable[..., Callable[[str], str]],
         domain_factory: Optional[Callable[..., Any]] = None,
         store_root: Optional[Path] = None,
     ) -> None:
-        self._completion_factory = completion_factory or _default_completion
+        # Required, with no endpoint fallback. The contract routes every model
+        # call through the request's injected `Model`; a default that built its
+        # own HTTP client from spec fields was the one path that could bypass
+        # it, and a bypass that exists is a bypass that eventually gets used.
+        if completion_factory is None:
+            raise ValueError(
+                "PuctEngine needs a completion_factory: every model call goes "
+                "through the request's injected Model"
+            )
+        self._completion_factory = completion_factory
         # The seam a test substitutes a fake domain through. Defaulted to the
         # scripted one because that is the only domain that executes anything;
         self._domain_factory = domain_factory or _script_domain
@@ -1039,27 +1048,3 @@ def _depth(tree: PuctTree, node: Node) -> int:
         cursor = tree.nodes[cursor.parent_index]
         depth += 1
     return depth
-
-
-def _default_completion(
-    spec: RunSpec,
-    on_usage: Optional[Callable[[CompletionUsage], None]],
-    should_stop: Callable[[], bool],
-) -> Callable[..., str]:
-    """The mutation call, built once per run.
-
-    Not wrapped in `agentdescent.agents.with_retries`: that helper retries a
-    `prompt -> str` callable, and this one takes a per-call usage sink as a
-    second argument. Retrying here would also fight the stop path — a run being
-    wound down would sit through three attempts of a call whose answer is
-    already being discarded. The engine's own handling is the retry: a failed
-    call is a failed candidate, the node is appended, and the search continues.
-    """
-    return completion_for(
-        spec.llm_url, spec.llm_token,
-        max_tokens=spec.max_tokens_per_call,
-        thinking=spec.thinking or None,
-        timeout=float(spec.options.get("completion_timeout", 900.0)),
-        on_usage=on_usage,
-        should_stop=should_stop,
-    )

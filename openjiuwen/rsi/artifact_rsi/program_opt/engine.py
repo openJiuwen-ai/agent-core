@@ -127,9 +127,6 @@ class RunSpec:
     #: Where to reach the control plane's model proxy, and the run-scoped token
     #: that authenticates there. **Never a provider key**: this process runs
     #: model-written code, so the worst a leak here can do is spend the run it
-    #: belongs to, and only until the run ends.
-    llm_url: str = ""
-    llm_token: str = ""
 
 
 class Engine(Protocol):

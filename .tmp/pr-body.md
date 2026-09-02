@@ -19,7 +19,8 @@
 
 - `agentdescent==0.4.6` 进主依赖（本项目按应用部署，精确钉死不再给第三方解析器添负担；vendored 的 PUCT 移植 import 了不承诺稳定的内部件，所以钉死而非下限。`program-opt` extra 留空壳保持老安装命令合法）。引擎顶层直连，`_load_engine`/`SearchEngineUnavailable` 的"可选轮子"路径整体退役。
 - `ArtifactEngineRequest.model` 为 AgentServer 注入的已初始化 `Model` 实例。新增 `completion_factory_from_model`：工作线程到异步 `Model.invoke` 的桥（轮询等待，`should_stop` 触发时放弃等待而不取消调用）。删除 `load_model_endpoint`/`completion_factory_for` —— 契约明确 Provider 不读模型配置、不自建客户端，保留它们等于留下被禁止的回退路径。
-- token 上限 / thinking 从任务的 `scorecard.json` 读取（模型实例不透出自身配置）；`llm_judge` 评分卡由 `_judge_spec` 明确拒绝而不是用错误的模型悄悄评。
+- token 上限 / thinking 从任务的 `scorecard.json` 读取（模型实例不透出自身配置）。
+- **打分只有沙箱评测一种**：`llm_judge` 死路整体退役（-465 行：`judge_domain`/`text_candidate`/`_judge_spec`/rubric 通道/RunSpec 四字段）——契约只有一个 `model_refs["optimizer"]`，judge 与 mutator 共用模型是自我评分；等契约有 `model_refs["judge"]` 再接回。未移植的 `dataset_metric`/`test_gate` 也按名拒绝，顺带封掉旧的 UnboundLocalError 死状。
 - `EngineState.best_node_id` 在三处构造点全部补齐。
 
 ---
@@ -31,7 +32,7 @@ Fixes #
 
 **Test Plan and Test result：What scenarios were tested, and what were the verification results（Function, performance, reliability, etc.）**：
 
-- `tests/unit_tests/rsi` 全树：**1062 passed, 3 skipped**（Python 3.12）。
+- `tests/unit_tests/rsi` 全树：**1064 passed, 3 skipped**（Python 3.12）。
 - `tests/unit_tests/rsi/artifact_rsi`：67+19 passed，含上游契约测试（`test_contract.py`，Protocol 可结构化实现、包面不外泄内部结构、`build_request` 要求已解析模型实例）与本实现的行为测试（探针拒绝先于预算、崩溃的搜索变成 failed 任务而非炸掉服务、慢消费者被等待、terminate 到达运行中的搜索、同一程序两节点共享产物时最终产物定位正确、候选沙箱环境不继承宿主机环境变量等）。
 - 模型注入路径用 `_FakeModel`（仅暴露 `invoke`）驱动；缺失模型实例时任务以 `MODELCONFIG` 失败并落盘，`read_state` 与返回一致。
 

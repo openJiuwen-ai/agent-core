@@ -1252,3 +1252,19 @@ def test_the_final_artifact_is_found_when_the_winner_is_the_later_duplicate(
     final = PuctProgramArtifactProvider().locate_artifact("task-001")
 
     assert final.sha256 == "c" * 64
+
+
+def test_the_engine_has_no_model_channel_of_its_own() -> None:
+    """Every model call goes through the request's injected ``Model``.
+
+    The engine used to fall back to building an HTTP client from
+    ``spec.llm_url`` when no factory was injected — the one path that could
+    bypass the injection, and a bypass that exists is a bypass that eventually
+    gets used. Construction now demands the factory outright.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    with pytest.raises(TypeError):
+        PuctEngine()                                   # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="injected Model"):
+        PuctEngine(completion_factory=None)            # type: ignore[arg-type]

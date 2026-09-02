@@ -477,11 +477,6 @@ class PuctProgramArtifactProvider:
             max_tokens_per_call=int(card.get("max_tokens_per_call")
                                     or RunSpec.max_tokens_per_call),
             thinking=str(card.get("thinking") or ""),
-            # Deliberately empty: the engine's mutation calls go through the
-            # injected `request.model`, so there is no endpoint to name. The
-            # fields remain for the engine's own default seam, which tests use.
-            llm_url="",
-            llm_token="",
         )
         if not resumed:
             return spec
