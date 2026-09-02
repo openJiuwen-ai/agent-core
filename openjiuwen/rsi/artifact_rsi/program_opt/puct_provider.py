@@ -476,7 +476,6 @@ class PuctProgramArtifactProvider:
             # one should say so.
             max_tokens_per_call=int(card.get("max_tokens_per_call")
                                     or RunSpec.max_tokens_per_call),
-            thinking=str(card.get("thinking") or ""),
         )
         if not resumed:
             return spec

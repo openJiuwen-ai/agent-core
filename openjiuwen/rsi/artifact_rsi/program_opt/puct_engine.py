@@ -570,8 +570,9 @@ class _Reporter:
                 self._empty[iteration] = (
                     f"the model spent all {spent.completion} output tokens on hidden "
                     f"thinking and had not started the answer when it hit the "
-                    f"{self.spec.max_tokens_per_call} per-call ceiling. Raise the ceiling, "
-                    "or turn thinking off"
+                    f"{self.spec.max_tokens_per_call} per-call ceiling. Raise "
+                    "max_tokens_per_call in the task's scorecard.json — whether the "
+                    "model thinks at all is the injected Model's own configuration"
                 )
             else:
                 self._empty[iteration] = "the model returned an empty reply"

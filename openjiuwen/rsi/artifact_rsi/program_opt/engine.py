@@ -85,10 +85,6 @@ class RunSpec:
     #: the person who typed "bring the error down" has no way to know a boosting library
     #: is wanted, and no reason to.
     packages: tuple[str, ...] = ()
-    #: ``"disabled"`` / ``"enabled"`` / empty for the provider's own default.
-    #: The user's trade, not this process's: on, a reasoning model spends ~46k
-    #: output tokens per call for better candidates; off, ~1.2k for weaker ones.
-    thinking: str = ""
     #: Ceiling for one mutation call. Below the algorithm's floor a reasoning
     #: model spends it on hidden thinking and returns nothing; the control
     #: plane's pre-flight refuses that before the run is created.
