@@ -89,6 +89,9 @@ class PuctProgramArtifactProvider:
         #: is what makes `terminate` land at a node boundary rather than mid
         #: sandbox run.
         self._stopping: dict[str, threading.Event] = {}
+        #: `task_id -> live state`, so `pause`/`terminate` can set the stop
+        #: *intent* on the run they are stopping. Same lifetime as the flag.
+        self._live: dict[str, ProgramRunState] = {}
         self._lock = threading.Lock()
 
     # -- validation ------------------------------------------------------------
@@ -202,25 +205,55 @@ class PuctProgramArtifactProvider:
         appends continue where the previous attempt stopped. Without it a new
         node would take an index the first attempt already spent, and one index
         would hold two different candidates.
+
+        A `terminated` task is not resumable — that is the whole difference
+        between `terminate` and `pause`, and honouring it here is what makes
+        the distinction real rather than a status label.
         """
+        prior = read_state_file(request.task_id)
+        if prior is not None and prior.status == "terminated":
+            return EngineResult(
+                task_id=request.task_id,
+                status="terminated",
+                final_node_id=prior.best_node_id,
+                error_code="TERMINATED_NOT_RESUMABLE",
+                error_message="this task was terminated; terminate is final — "
+                              "only a paused task can be resumed",
+            )
         return await self._drive(request, on_event, resumed=True)
 
     async def pause(self, task_id: str, on_event: OnEvent | None = None) -> EngineResult:
-        """Not implemented: the search has no state between node boundaries.
+        """Stop at the next node boundary, resumable under the same task.
 
-        `terminate` plus `resume` gets most of the way there — the tree is
-        durable and a resumed task continues it — but pausing means stopping
-        *and staying resumable under the same task*, and the contract's
-        `paused` is a non-terminal status. Returning the code rather than
-        pretending, so AgentServer can hide the control.
+        The whole stop mechanism is `terminate`'s — the same flag, polled at
+        the same boundary, a candidate mid-evaluation finished and recorded.
+        The two differ only in what the stopped search folds to: `paused` is
+        the one non-terminal outcome, and the one `resume` accepts.
         """
+        with self._lock:
+            flag = self._stopping.get(task_id)
+            live = self._live.get(task_id)
+        if flag is None or live is None:
+            # Nothing is running: there is no boundary to stop at, and saying
+            # "paused" about a task that is not moving would be a lie the next
+            # query contradicts.
+            state = read_state_file(task_id)
+            return EngineResult(
+                task_id=task_id,
+                status=state.status if state else "created",
+                final_node_id=state.best_node_id if state else None,
+                error_code="TASK_NOT_RUNNING",
+                error_message="pause reached no running search for this task",
+            )
+        live.stopped_status = "paused"
+        flag.set()
+        await emit(on_event, EventStatus(status="paused"))
         return EngineResult(
             task_id=task_id,
-            status=self._status_of(task_id),
-            final_node_id=None,
-            error_code="NOT_IMPLEMENTED",
-            error_message="program optimization does not support pause yet; "
-                          "terminate and resume continues the same tree",
+            status="paused",
+            final_node_id=live.best_node_id,
+            error_code=None,
+            error_message=None,
         )
 
     async def terminate(self, task_id: str, on_event: OnEvent | None = None) -> EngineResult:
@@ -233,6 +266,11 @@ class PuctProgramArtifactProvider:
         """
         with self._lock:
             flag = self._stopping.get(task_id)
+            live = self._live.get(task_id)
+        if live is not None:
+            # A terminate that races a pause wins: the stronger intent, and the
+            # one the caller can still see refused nowhere.
+            live.stopped_status = "terminated"
         if flag is not None:
             flag.set()
         state = read_state_file(task_id)
@@ -358,6 +396,7 @@ class PuctProgramArtifactProvider:
         stop = threading.Event()
         with self._lock:
             self._stopping[request.task_id] = stop
+            self._live[request.task_id] = state
 
         # Every event the search emits is projected, persisted, then handed to
         # the caller's loop — in that order, because the contract requires a
@@ -405,6 +444,7 @@ class PuctProgramArtifactProvider:
         finally:
             with self._lock:
                 self._stopping.pop(request.task_id, None)
+                self._live.pop(request.task_id, None)
 
         state.finish()
         await emit(on_event, EventStatus(status=state.status))

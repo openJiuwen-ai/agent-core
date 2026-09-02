@@ -15,6 +15,11 @@
 - `pause` 诚实返回 `NOT_IMPLEMENTED`；`terminate` 在节点边界停止，评到一半的候选先记完分。
 - 产物按内容寻址：每个候选是一个目录（文件树按各自相对路径铺开 + `_tree.json` manifest），两个节点写出同一程序共享一个产物；`locate_artifact(None)` 走最佳节点自己的 `snapshot_artifact_id`。
 
+**提示词按任务拼接**
+
+- 上游（`Birfy/agentdescent` `examples/era`）一个任务一个模块，`Domain.prompt` 是任务自己写的函数。Provider 的信任模型是 run_dir 只作数据，所以拆成两半：**措辞**归 `run_dir/prompts/{mutation,repair,prior}.md`（`${slot}` 语法，缺省用内置模板），**动态反馈段落**归评测脚本的 `error` 通道（任务代码，在沙箱内计算，流入 `${feedback}`）。
+- 槽位词表是框架的（`MUTATION_SLOTS` 等）；模板加载时校验，未知占位符按名拒绝并列出词表——`safe_substitute` 会把笔误留成字面量，模型对着带洞的提示优化一整个预算。
+
 **契约对齐**
 
 - `agentdescent==0.4.6` 进主依赖（本项目按应用部署，精确钉死不再给第三方解析器添负担；vendored 的 PUCT 移植 import 了不承诺稳定的内部件，所以钉死而非下限。`program-opt` extra 留空壳保持老安装命令合法）。引擎顶层直连，`_load_engine`/`SearchEngineUnavailable` 的"可选轮子"路径整体退役。
@@ -32,7 +37,7 @@ Fixes #
 
 **Test Plan and Test result：What scenarios were tested, and what were the verification results（Function, performance, reliability, etc.）**：
 
-- `tests/unit_tests/rsi` 全树：**1065 passed, 3 skipped**（Python 3.12）。
+- `tests/unit_tests/rsi` 全树：**1070 passed, 3 skipped**（Python 3.12）。
 - `tests/unit_tests/rsi/artifact_rsi`：67+19 passed，含上游契约测试（`test_contract.py`，Protocol 可结构化实现、包面不外泄内部结构、`build_request` 要求已解析模型实例）与本实现的行为测试（探针拒绝先于预算、崩溃的搜索变成 failed 任务而非炸掉服务、慢消费者被等待、terminate 到达运行中的搜索、同一程序两节点共享产物时最终产物定位正确、候选沙箱环境不继承宿主机环境变量等）。
 - 模型注入路径用 `_FakeModel`（仅暴露 `invoke`）驱动；缺失模型实例时任务以 `MODELCONFIG` 失败并落盘，`read_state` 与返回一致。
 

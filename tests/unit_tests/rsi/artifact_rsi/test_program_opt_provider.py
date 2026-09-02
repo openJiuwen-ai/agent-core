@@ -589,10 +589,114 @@ def test_a_run_without_isolation_never_starts(tmp_path: Path) -> None:
     assert result.error_code == "SANDBOXUNAVAILABLE"
 
 
-def test_pause_is_declined_in_words_rather_than_faked(tmp_path: Path) -> None:
+def test_pause_stops_at_a_node_boundary_and_resume_continues_the_same_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pause` is `terminate`'s stop mechanism with the one non-terminal
+    outcome: the stopped search folds to `paused`, and `resume` picks the same
+    tree back up where it stopped."""
+    released = threading.Event()
+
+    class _HaltingEngine:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
+                  "sequence": 0})  # type: ignore[operator]
+            assert released.wait(5), "the test never released the search"
+            assert should_stop()  # type: ignore[operator]
+            emit({"createdAt": "", "event": events.search_finished("stopped", 0, 1),
+                  "sequence": 0})  # type: ignore[operator]
+
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        _HaltingEngine,
+    )
+    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+
+    async def drive() -> tuple:
+        seeded = asyncio.Event()
+
+        async def sink(event: object) -> None:
+            if isinstance(event, EventNode):
+                seeded.set()
+
+        task = asyncio.ensure_future(provider.run(request, sink))
+        await seeded.wait()
+        paused = await provider.pause(request.task_id)
+        released.set()
+        return paused, await task
+
+    paused, result = asyncio.run(drive())
+
+    assert paused.status == "paused"
+    assert result.status == "paused"
+    # Persisted as paused, which is exactly what makes it resumable.
+    assert provider.read_state(request.task_id).status == "paused"
+
+    # The real engine writes `tree.json` after every expansion; the halting
+    # fake above does not, so the snapshot a resume reads back is seeded here.
+    from openjiuwen.rsi.artifact_rsi.program_opt.candidates import TREE_FILE, write_tree_snapshot
+
+    write_tree_snapshot(Path(request.run_dir) / TREE_FILE, {
+        "tree": [{"index": 0, "parent": None, "code": SEED, "score": 0.25}],
+        "baseline": {}, "tokens": 0,
+    })
+
+    resumed_specs: list = []
+
+    class _Finishing:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            resumed_specs.append(spec)
+            emit({"createdAt": "", "event": events.search_finished("succeeded", 0, 1),
+                  "sequence": 0})  # type: ignore[operator]
+
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        _Finishing,
+    )
+    result = asyncio.run(provider.resume(request))
+
+    assert result.status == "completed"
+    # The same tree, not a fresh root: the paused attempt's nodes came along.
+    assert resumed_specs and len(resumed_specs[0].resume_nodes) == 1
+
+
+def test_a_terminated_task_refuses_to_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Terminate is final — that is its whole difference from pause, and it is
+    only real if resume enforces it."""
+    run = _state(tmp_path)
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aa"))
+    _absorb(run, events.search_finished("stopped", 0, 1))
+    assert run.status == "terminated"
+
+    constructed: list = []
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        lambda **kwargs: constructed.append(kwargs),
+    )
+    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    result = asyncio.run(provider.resume(_request(tmp_path)))
+
+    assert result.status == "terminated"
+    assert result.error_code == "TERMINATED_NOT_RESUMABLE"
+    assert constructed == []          # the engine was never even built
+
+
+def test_pausing_a_task_that_is_not_running_says_so(tmp_path: Path) -> None:
     result = asyncio.run(PuctProgramArtifactProvider().pause("task-001"))
 
-    assert result.error_code == "NOT_IMPLEMENTED"
+    assert result.error_code == "TASK_NOT_RUNNING"
+    assert result.status == "created"
 
 
 def test_terminate_reports_terminated_and_says_which_node_won(tmp_path: Path) -> None:

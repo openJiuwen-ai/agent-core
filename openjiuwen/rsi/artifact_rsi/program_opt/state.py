@@ -115,6 +115,11 @@ class ProgramRunState:
     best_node_id: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    #: What a search that stopped at a node boundary folds to. `terminate` and
+    #: `pause` share the whole stop mechanism — the same flag, polled at the
+    #: same boundary — and differ only here: `terminated` is a terminal status
+    #: and `paused` is the one `resume` accepts.
+    stopped_status: str = "terminated" 
     usage: Optional[RsiUsage] = None
     #: `node index -> the node as the contract wants it`. Held whole because a
     #: node arrives in three parts and only the last one completes it.
@@ -142,7 +147,7 @@ class ProgramRunState:
         self._persist()
 
     def finish(self) -> None:
-        if self.status not in ("failed", "terminated"):
+        if self.status not in ("failed", "terminated", "paused"):
             self.status = "completed"
         self._persist()
 
@@ -292,7 +297,7 @@ class ProgramRunState:
             self.status = "failed"
             self.error_code = self.error_code or "SEARCH_FAILED"
         elif status == "stopped":
-            self.status = "terminated"
+            self.status = self.stopped_status
         else:
             self.status = "completed"
         best = event.get("bestNodeIndex")
