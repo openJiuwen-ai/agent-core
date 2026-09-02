@@ -1172,6 +1172,17 @@ class NativeHarness(DeepAgent):
                     continue
                 kept.append(f)
             follow_ups = kept or None
+        # InteractiveInput must go through _start_round directly (structured
+        # resume); the batch text pipeline (from_user_input(list)) would
+        # str() it into a text frame, breaking the resume.
+        if follow_ups is not None and any(isinstance(f, InteractiveInput) for f in follow_ups):
+            interactive = next(f for f in follow_ups if isinstance(f, InteractiveInput))
+            nxt = self._start_round(interactive, is_follow_up=True)
+            await self._emit_round("started", nxt.round_id)
+            for f in follow_ups:
+                if f is not interactive:
+                    self.loop_controller.enqueue_follow_up(f)
+            return
         if follow_ups is not None:
             nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
@@ -1247,6 +1258,27 @@ class NativeHarness(DeepAgent):
                 ``query`` is only kept as ``original_query`` so a task-plan
                 continuation can still reuse it.
         """
+        # Invariant: an InteractiveInput is a single-round resume payload and
+        # must never ride the text batch pipeline — ``InputEvent.from_user_input(list)``
+        # str-ifies list items, which would corrupt the structured approval
+        # into its repr. ``_settle_round_done`` splits InteractiveInput
+        # follow-ups out of the batch before reaching here; this defensive
+        # split normalizes any producer that skips that step instead of
+        # mangling the resume or raising (a raise here would be terminal for
+        # the supervisor): the InteractiveInput starts as its own
+        # single-object round, the remaining items re-queue for the next
+        # settle drain (FIFO preserved).
+        if isinstance(query, list) and any(isinstance(q, InteractiveInput) for q in query):
+            interactive = next(q for q in query if isinstance(q, InteractiveInput))
+            logger.error(
+                "[NativeHarness] list round query contained an InteractiveInput; "
+                "splitting it into a single-object resume round (remaining "
+                "items re-queue for the next settle drain)",
+            )
+            for q in query:
+                if q is not interactive:
+                    self.loop_controller.enqueue_follow_up(q)
+            return self._start_round(interactive, is_follow_up=is_follow_up)
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
         pre_round = capture_snapshot(self, self._session, index=0)
