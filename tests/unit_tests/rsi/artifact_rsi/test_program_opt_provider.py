@@ -1578,3 +1578,47 @@ def test_get_tree_survives_schema_drift_in_the_persisted_file(tmp_path: Path) ->
     assert tree.depth == 1
     assert tree.nodes[1].parent_id == "artifact:task-001:node:0"
     assert tree.nodes[1].changes[0].operation == "modify"
+
+
+def test_node_extra_carries_the_contracts_program_object(tmp_path: Path) -> None:
+    """`extra["program"]` is `ProgramNodeExtra`: nine keys, always present,
+    null semantics per field — a reader that must probe which keys exist has
+    been handed a different structure per node."""
+    run = _state(tmp_path)
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aaaa"))
+    _absorb(run, events.selected(0, [{"nodeIndex": 0, "visits": 2}],
+                                 rank_score=0.5, puct=0.9))
+    _absorb(run, events.expanded(1, 0, 1, 0.4, True, change_summary="tighten the loop",
+                                 code_hash="sha256:bbbb", iteration=1))
+    _absorb(run, events.evaluated(1, 0.4, {"score": 0.4},
+                                  gate_score=0.42, rollout_score=0.38))
+    _absorb(run, events.merged(1, True, reason="提升"))
+    _absorb(run, events.expanded(2, 1, 2, None, False, error="IndexError at line 3",
+                                 code_hash="sha256:cccc", iteration=2))
+    _absorb(run, events.merged(2, False, reason="没跑起来", category="candidate-failed"))
+
+    keys = {"logical_kind", "candidate_index", "source_ref", "program_path",
+            "parent_index", "evaluation", "puct", "artifacts", "error"}
+    tree = state_module.read_tree_file("task-001")
+    root, adopted, rejected = tree.nodes
+
+    for node in tree.nodes:
+        assert set(node.extra["program"]) == keys, node.node_id
+
+    r = root.extra["program"]
+    assert r["logical_kind"] == "root" and r["candidate_index"] is None
+    assert r["source_ref"] == "sha256:aaaa" and r["parent_index"] is None
+    assert r["evaluation"] == {"valid": True, "gate": 0.25}
+    assert r["puct"] == {"visits": 2, "rank": 0.5, "value": 0.9}
+
+    a = adopted.extra["program"]
+    assert a["logical_kind"] == "adopted" and a["candidate_index"] == 1
+    assert a["parent_index"] == 0
+    assert a["evaluation"]["gate"] == 0.42 and a["evaluation"]["rollout"] == 0.38
+    assert a["error"] is None and len(a["artifacts"]) == 1
+
+    x = rejected.extra["program"]
+    assert x["logical_kind"] == "rejected"
+    assert x["evaluation"] == {"valid": False, "score": None}
+    assert x["error"]["message"] == "IndexError at line 3"
+    assert x["error"]["class"] is not None

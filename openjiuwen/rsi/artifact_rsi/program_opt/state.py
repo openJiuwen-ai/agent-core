@@ -158,6 +158,8 @@ class ProgramRunState:
 
         if kind == "seeded":
             yield from self._seeded(event)
+        elif kind == "selected":
+            self._selected(event)
         elif kind == "expanded":
             self._expanded(event)
         elif kind == "evaluated":
@@ -166,6 +168,44 @@ class ProgramRunState:
             yield from self._merged(event)
         elif kind == "search_finished":
             self._finished(event)
+
+    def _program_extra(
+        self,
+        *,
+        logical_kind: str,
+        candidate_index: Optional[int],
+        parent_index: Optional[int],
+        artifact_id: Optional[str],
+        evaluation: Optional[dict[str, Any]],
+        error: Optional[dict[str, Any]] = None,
+        puct: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """`extra["program"]`, in exactly the contract's nine keys.
+
+        Every key is always present — the contract's tables define null
+        semantics per field, and a reader that must first probe which keys
+        exist has been handed a different structure per node.
+        """
+        ref = self.artifacts.get(artifact_id or "")
+        return {"program": {
+            "logical_kind": logical_kind,
+            "candidate_index": candidate_index,
+            "source_ref": ref.sha256 and f"sha256:{ref.sha256}" if ref else None,
+            "program_path": ref.path if ref else None,
+            "parent_index": parent_index,
+            "evaluation": evaluation,
+            "puct": puct,
+            "artifacts": [ref] if ref else [],
+            "error": error,
+        }}
+
+    @staticmethod
+    def _update_program(node: RsiTreeNode, **changes: Any) -> dict[str, Any]:
+        extra = dict(node.extra)
+        program = dict(extra.get("program") or {})
+        program.update(changes)
+        extra["program"] = program
+        return extra
 
     def _seeded(self, event: dict[str, Any]) -> Iterator[EngineEvent]:
         self.baseline = event.get("baselineScore")
@@ -178,21 +218,52 @@ class ProgramRunState:
             adopted=True,
             score=self.baseline,
             summary="the starting program",
-            snapshot_artifact_id=self._artifact(0, event.get("codeHash")),
+            snapshot_artifact_id=(seed_artifact := self._artifact(0, event.get("codeHash"))),
             reason=None,
             failure_class=None,
             changes=[],
-            extra={"program": {"depth": 0, "code_chars": event.get("codeChars")}},
+            extra=self._program_extra(
+                logical_kind="root", candidate_index=None, parent_index=None,
+                artifact_id=seed_artifact,
+                evaluation={"valid": True, "gate": self.baseline},
+            ),
         )
         self.nodes[0] = node
         self.best_node_id = node.node_id
         self._persist()
         yield EventNode(node=node)
 
+    def _selected(self, event: dict[str, Any]) -> None:
+        """Visit counts and selection scores, filed under `extra["program"].puct`.
+
+        Quiet: no node event goes out — a selection changes no node's identity,
+        and the next `EventNode` or a `tree.get` carries the refreshed numbers.
+        """
+        for entry in event.get("ancestorVisits") or []:
+            node = self.nodes.get(int(entry.get("nodeIndex", -1)))
+            if node is None:
+                continue
+            puct = dict((node.extra.get("program") or {}).get("puct") or {})
+            puct["visits"] = int(entry.get("visits") or 0)
+            self.nodes[int(entry["nodeIndex"])] = _with(
+                node, extra=self._update_program(node, puct=puct))
+        chosen = self.nodes.get(int(event.get("nodeIndex", -1)))
+        if chosen is not None:
+            puct = dict((chosen.extra.get("program") or {}).get("puct") or {})
+            for key, field_name in (("rank", "rankScore"), ("value", "puct")):
+                if event.get(field_name) is not None:
+                    puct[key] = event.get(field_name)
+            if puct:
+                self.nodes[int(event.get("nodeIndex", 0))] = _with(
+                    chosen, extra=self._update_program(chosen, puct=puct))
+
     def _expanded(self, event: dict[str, Any]) -> None:
         index = int(event.get("nodeIndex", 0))
         parent = event.get("parentIndex")
         valid = bool(event.get("valid"))
+        failure_class = None if valid else classify_failure(event.get("error"))
+        artifact_id = self._artifact(index, event.get("codeHash"))
+        promise = event.get("promise")
         self.nodes[index] = RsiTreeNode(
             node_id=node_id_for(self.task_id, index),
             iteration=int(event.get("iteration") or index),
@@ -201,16 +272,23 @@ class ProgramRunState:
             adopted=False,
             score=event.get("score"),
             summary=event.get("changeSummary"),
-            snapshot_artifact_id=self._artifact(index, event.get("codeHash")),
+            snapshot_artifact_id=artifact_id,
             reason=event.get("error"),
-            failure_class=None if valid else classify_failure(event.get("error")),
+            failure_class=failure_class,
             changes=_changes_from(event.get("changeSummary")),
-            extra={"program": {
-                "depth": event.get("depth"),
-                "promise": event.get("promise"),
-                "code_chars": event.get("codeChars"),
-                "valid": valid,
-            }},
+            extra=self._program_extra(
+                logical_kind="candidate",
+                candidate_index=index,
+                parent_index=None if parent is None else int(parent),
+                artifact_id=artifact_id,
+                evaluation={"valid": valid, "score": event.get("score")},
+                error=None if valid else {
+                    "message": event.get("error"), "class": failure_class,
+                },
+                # The model's own rating of its candidate feeds the search's
+                # selection prior, which is where the contract files it.
+                puct={"prior": promise} if promise is not None else None,
+            ),
         )
         self.iteration = max(self.iteration, int(event.get("iteration") or 0))
 
@@ -219,12 +297,17 @@ class ProgramRunState:
         node = self.nodes.get(index)
         if node is None:
             return
-        extra = dict(node.extra)
-        program = dict(extra.get("program") or {})
-        program["criteria"] = event.get("criteria")
-        program["gate_score"] = event.get("gateScore")
-        extra["program"] = program
-        self.nodes[index] = _with(node, score=event.get("reward"), extra=extra)
+        evaluation = dict((node.extra.get("program") or {}).get("evaluation") or {})
+        evaluation.update({
+            "criteria": event.get("criteria"),
+            "gate": event.get("gateScore"),
+            "rollout": event.get("rolloutScore"),
+            "reward": event.get("reward"),
+        })
+        self.nodes[index] = _with(
+            node, score=event.get("reward"),
+            extra=self._update_program(node, evaluation=evaluation),
+        )
 
     def _merged(self, event: dict[str, Any]) -> Iterator[EngineEvent]:
         index = int(event.get("nodeIndex", 0))
@@ -243,6 +326,7 @@ class ProgramRunState:
             reason=node.reason or event.get("reason"),
             failure_class=node.failure_class or _class_of_category(event.get("category")),
         )
+        node = _with(node, extra=self._update_program(node, logical_kind=node.type))
         self.nodes[index] = node
         if accepted:
             self.best_node_id = node.node_id
