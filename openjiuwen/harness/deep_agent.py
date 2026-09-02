@@ -1199,11 +1199,26 @@ class DeepAgent(BaseAgent):
         Raises:
             BaseError: If subagent spec not found.
         """
-        spec = self._find_subagent_spec(subagent_type)
-        if spec is None:
+        resolved_type = self.resolve_subagent_type(subagent_type)
+        if resolved_type is None:
+            available = ", ".join(self.available_subagent_types()) or "(none)"
             raise build_error(
                 StatusCode.DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND,
-                error_msg=f"Subagent spec not found: {subagent_type}",
+                error_msg=(
+                    f"Subagent spec not found: {subagent_type}. "
+                    f"Available: {available}"
+                ),
+            )
+        subagent_type = resolved_type
+        spec = self._find_subagent_spec(subagent_type)
+        if spec is None:
+            available = ", ".join(self.available_subagent_types()) or "(none)"
+            raise build_error(
+                StatusCode.DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND,
+                error_msg=(
+                    f"Subagent spec not found: {subagent_type}. "
+                    f"Available: {available}"
+                ),
             )
 
         if isinstance(spec, DeepAgent):
@@ -1355,6 +1370,20 @@ class DeepAgent(BaseAgent):
             create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
         )
 
+    def available_subagent_types(self) -> list[str]:
+        """Return the live subagent type names registered on this agent."""
+        if self._deep_config is None:
+            return []
+        from openjiuwen.harness.subagent_types import listed_subagent_types
+
+        return listed_subagent_types(self._deep_config.subagents)
+
+    def resolve_subagent_type(self, subagent_type: str) -> Optional[str]:
+        """Map a model-supplied type onto a currently registered name."""
+        from openjiuwen.harness.subagent_types import resolve_subagent_type
+
+        return resolve_subagent_type(subagent_type, self.available_subagent_types())
+
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.
 
@@ -1367,15 +1396,14 @@ class DeepAgent(BaseAgent):
         if self._deep_config is None:
             return None
 
-        from openjiuwen.harness.schema.config import SubAgentConfig
+        from openjiuwen.harness.subagent_types import subagent_type_name
 
+        requested = str(subagent_type or "").strip()
+        if not requested:
+            return None
         for spec in self._deep_config.subagents or []:
-            if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
+            if subagent_type_name(spec) == requested:
                 return spec
-            if isinstance(spec, DeepAgent):
-                card = getattr(spec, "card", None)
-                if getattr(card, "name", None) == subagent_type:
-                    return spec
 
         return None
 

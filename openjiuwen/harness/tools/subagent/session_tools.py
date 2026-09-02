@@ -17,6 +17,13 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.subagent_types import (
+    apply_subagent_type_enum,
+    format_unknown_subagent_type,
+    listed_subagent_types,
+    listed_types_from_parent,
+    resolved_type_from_parent,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -254,6 +261,11 @@ class SessionsSpawnTool(Tool):
                 ),
             )
         )
+        config = getattr(parent_agent, "deep_config", None)
+        apply_subagent_type_enum(
+            self.card,
+            listed_subagent_types(getattr(config, "subagents", None)),
+        )
         self._parent_agent = parent_agent
         self._toolkit = toolkit
         self._language = language
@@ -284,6 +296,25 @@ class SessionsSpawnTool(Tool):
                 reason=f"Invalid inputs type: {type(inputs)}",
             )
 
+        if not subagent_type or not task_description:
+            raise build_error(
+                StatusCode.TOOL_SESSION_TOOL_INVOKED,
+                reason="Both 'subagent_type' and 'task_description' are required",
+            )
+
+        resolver_result = resolved_type_from_parent(
+            self._parent_agent, str(subagent_type)
+        )
+        if resolver_result is None:
+            return ToolOutput(
+                success=False,
+                error=format_unknown_subagent_type(
+                    str(subagent_type),
+                    listed_types_from_parent(self._parent_agent),
+                    self._language,
+                ),
+            )
+        subagent_type = resolver_result
         browser_capabilities: Optional[List[str]] = None
         if str(subagent_type) == "browser_agent":
             raw_capabilities = inputs.get("browser_capabilities")

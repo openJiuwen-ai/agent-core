@@ -13,6 +13,12 @@ from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.tools import get_tool_description
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.subagent_types import (
+    apply_subagent_type_enum,
+    listed_subagent_types,
+    subagent_type_name,
+    tool_owner_id_of,
+)
 from openjiuwen.harness.tools import SessionToolkit, build_session_tools, create_task_tool
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
     DEFAULT_BROWSER_CAPABILITIES,
@@ -68,14 +74,14 @@ class SubagentRail(DeepAgentRail):
         """
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
-        # Skip registration if no subagents are configured
-        if not agent.deep_config.subagents:
+        # Skip registration if no named subagents are configured
+        if not listed_subagent_types(agent.deep_config.subagents):
             logger.info("[SubagentRail] No subagents configured, skipping")
             return
 
         # Build available_agents description for tool registration
         available_agents = self._build_available_agents_description(agent.deep_config.subagents)
-        agent_id = getattr(getattr(agent, "card", None), "id", None)
+        agent_id = tool_owner_id_of(agent)
 
         if self.enable_async_subagent:
             self._toolkit = SessionToolkit()
@@ -107,6 +113,7 @@ class SubagentRail(DeepAgentRail):
             return
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", self.system_prompt_builder)
         language = getattr(self.system_prompt_builder, "language", "cn")
+        names = listed_subagent_types(agent.deep_config.subagents or [])
         available_agents = self._build_available_agents_description(agent.deep_config.subagents or [])
         refreshed = []
         for tool in self.tools:
@@ -115,6 +122,7 @@ class SubagentRail(DeepAgentRail):
             if name not in {"task_tool", "sessions_spawn"}:
                 continue
             card.description = get_tool_description(name, language).format(available_agents=available_agents)
+            apply_subagent_type_enum(card, names)
             refreshed.append(name)
         if refreshed:
             logger.info("[SubagentRail] Refreshed available_agents for %s", ", ".join(refreshed))
@@ -211,6 +219,8 @@ class SubagentRail(DeepAgentRail):
 
         for spec in subagents:
             agent_name, agent_desc = self._extract_agent_meta(spec)
+            if not agent_name:
+                continue
             tools_str = self._extract_agent_tools(spec, agent_name)
             lines.append(f"- {agent_name}: {agent_desc} (Tools: {tools_str})")
             if agent_name == "browser_agent":
@@ -221,14 +231,15 @@ class SubagentRail(DeepAgentRail):
 
         return "\n".join(lines)
 
-    def _extract_agent_meta(self, spec: SubAgentConfig | "DeepAgent") -> tuple[str, str]:
-        if isinstance(spec, SubAgentConfig):
-            return spec.agent_card.name, spec.agent_card.description
-
-        card = getattr(spec, "card", None)
-        name = getattr(card, "name", None) or "general-purpose"
-        description = getattr(card, "description", None) or "DeepAgent instance"
-        return name, description
+    def _extract_agent_meta(self, spec: SubAgentConfig | "DeepAgent") -> tuple[Optional[str], str]:
+        name = subagent_type_name(spec)
+        if not name:
+            return None, ""
+        for card in (getattr(spec, "agent_card", None), getattr(spec, "card", None)):
+            description = getattr(card, "description", None)
+            if isinstance(description, str) and description.strip():
+                return name, description
+        return name, ""
 
     def _extract_agent_tools(self, spec: SubAgentConfig | "DeepAgent", agent_name: str) -> str:
         """Extract a human-readable tool list for a subagent spec.

@@ -24,6 +24,13 @@ from openjiuwen.harness.subagent_lifecycle import (
 )
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.subagent_types import (
+    apply_subagent_type_enum,
+    format_unknown_subagent_type,
+    listed_subagent_types,
+    listed_types_from_parent,
+    resolved_type_from_parent,
+)
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -96,6 +103,20 @@ class TaskTool(Tool):
             return f"{parent_session_id}_sub_{normalized_type}_{normalized_tool_call_id}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
 
+    def _resolve_requested_type(self, requested: str) -> str | ToolOutput:
+        """Return a registered type name, or a model-visible error output."""
+        resolved = resolved_type_from_parent(self.parent_agent, requested)
+        if resolved is not None:
+            return resolved
+        return ToolOutput(
+            success=False,
+            error=format_unknown_subagent_type(
+                requested,
+                listed_types_from_parent(self.parent_agent),
+                self.language,
+            ),
+        )
+
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput | dict[str, Any]:
         """Execute task by delegating to a subagent.
 
@@ -131,6 +152,11 @@ class TaskTool(Tool):
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason="Both 'subagent_type' and 'task' are required",
             )
+
+        resolved_type = self._resolve_requested_type(str(subagent_type))
+        if isinstance(resolved_type, ToolOutput):
+            return resolved_type
+        subagent_type = resolved_type
 
         browser_capabilities: Optional[List[str]] = None
         if str(subagent_type) == "browser_agent":
@@ -279,6 +305,11 @@ def create_task_tool(
         **(card.properties if isinstance(card.properties, dict) else {}),
         "resilience": {"timeout_s": DEFAULT_SUBAGENT_TASK_TIMEOUT_S},
     }
+    config = getattr(parent_agent, "deep_config", None)
+    apply_subagent_type_enum(
+        card,
+        listed_subagent_types(getattr(config, "subagents", None)),
+    )
 
     return [TaskTool(card=card, parent_agent=parent_agent, language=language)]
 

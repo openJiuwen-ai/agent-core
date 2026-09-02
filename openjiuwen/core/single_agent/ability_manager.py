@@ -101,6 +101,7 @@ class AbilityManager:
 
     def __init__(self, owner_id: Optional[str] = None):
         self._tools: Dict[str, ToolCard] = {}
+        self._tool_instances: Dict[str, Tool] = {}
         self._workflows: Dict[str, WorkflowCard] = {}
         self._agents: Dict[str, AgentCard] = {}
         self._mcp_servers: Dict[str, McpServerConfig] = {}
@@ -615,7 +616,10 @@ class AbilityManager:
         if self._owner_id:
             card.id = self.qualify_tool_id(card, self._owner_id)
         Runner.resource_mgr.add_tool(resource, refresh=True)
-        return self.add(card)
+        result = self.add(card)
+        if result.added:
+            self._tool_instances[card.name] = resource
+        return result
 
     def remove_ability(self, name: Union[str, List[str]]) -> None:
         """Remove tool ability(ies) by name from this manager and the resource manager.
@@ -672,6 +676,7 @@ class AbilityManager:
             removed = None
             if name in self._tools:
                 removed = self._tools.pop(name, None)
+                self._tool_instances.pop(name, None)
             if name in self._workflows:
                 removed = self._workflows.pop(name, None)
             if name in self._agents:
@@ -688,6 +693,7 @@ class AbilityManager:
                     ]
                     for tool_name in tools_to_remove:
                         self._tools.pop(tool_name, None)
+                        self._tool_instances.pop(tool_name, None)
                     self._mcp_tool_allowlists.pop(server_id, None)
                 removed = mcp_server
             return removed
@@ -697,6 +703,7 @@ class AbilityManager:
                 removed = None
                 if item in self._tools:
                     removed = self._tools.pop(item, None)
+                    self._tool_instances.pop(item, None)
                 if item in self._workflows:
                     removed = self._workflows.pop(item, None)
                 if item in self._agents:
@@ -713,6 +720,7 @@ class AbilityManager:
                         ]
                         for tool_name in tools_to_remove:
                             self._tools.pop(tool_name, None)
+                            self._tool_instances.pop(tool_name, None)
                         self._mcp_tool_allowlists.pop(server_id, None)
                     removed = mcp_server
                 result.append(removed)
@@ -1180,11 +1188,15 @@ class AbilityManager:
 
         # Check ability type and execute accordingly
         if tool_name in self._tools:
-            # Execute Tool - get instance from Runner.resource_mgr
+            # Execute Tool — prefer the instance this manager registered so a
+            # later owner refreshing the same resource-manager id cannot steal
+            # this agent's stateful tools (e.g. task_tool).
             tool_card = self._tools[tool_name]
             tool_id = tool_card.id or tool_card.name
-            from openjiuwen.core.runner import Runner
-            tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag, session=session)
+            tool = self._tool_instances.get(tool_name)
+            if tool is None:
+                from openjiuwen.core.runner import Runner
+                tool = Runner.resource_mgr.get_tool(tool_id=tool_id, tag=tag, session=session)
             if not tool:
                 raise self._build_execution_error(
                     tool_call,
@@ -1289,9 +1301,11 @@ class AbilityManager:
                 f"MCP tool execution not yet implemented: {tool_name}",
             )
         else:
-            # Fallback: try to get tool from Runner.resource_mgr by name
+            # Fallback: local instance first, then resource_mgr by name
             from openjiuwen.core.runner import Runner
-            tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=tag, session=session)
+            tool = self._tool_instances.get(tool_name)
+            if tool is None:
+                tool = Runner.resource_mgr.get_tool(tool_id=tool_name, tag=tag, session=session)
             if not tool:
                 raise self._build_execution_error(
                     tool_call,
