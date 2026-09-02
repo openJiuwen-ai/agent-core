@@ -1901,6 +1901,62 @@ class GrepTool(Tool):
         was_truncated = len(items) - offset > effective_limit
         return sliced, effective_limit if was_truncated else None
 
+    # Models often pass language extensions (``rs``, ``py``) as ``type``.
+    # ripgrep expects type *names* (``rust``, ``py``). Map common aliases.
+    _RG_TYPE_ALIASES: Dict[str, str] = {
+        "rs": "rust",
+        "rust": "rust",
+        "py": "py",
+        "python": "py",
+        "js": "js",
+        "javascript": "js",
+        "ts": "ts",
+        "typescript": "ts",
+        "tsx": "tsx",
+        "jsx": "jsx",
+        "go": "go",
+        "golang": "go",
+        "c": "c",
+        "h": "c",
+        "cpp": "cpp",
+        "cc": "cpp",
+        "cxx": "cpp",
+        "java": "java",
+        "kt": "kotlin",
+        "kotlin": "kotlin",
+        "rb": "ruby",
+        "ruby": "ruby",
+        "php": "php",
+        "swift": "swift",
+        "scala": "scala",
+        "sh": "sh",
+        "bash": "sh",
+        "zsh": "sh",
+        "md": "markdown",
+        "markdown": "markdown",
+        "toml": "toml",
+        "yaml": "yaml",
+        "yml": "yaml",
+        "json": "json",
+        "html": "html",
+        "css": "css",
+        "sql": "sql",
+    }
+
+    @classmethod
+    def _normalize_rg_file_type(cls, file_type: Optional[str]) -> Optional[str]:
+        """Map extension-style type filters to ripgrep ``--type`` names."""
+        if file_type is None:
+            return None
+        raw = str(file_type).strip()
+        if not raw:
+            return None
+        key = raw.lower()
+        # Strip a leading dot if the model passed ".rs".
+        if key.startswith("."):
+            key = key[1:]
+        return cls._RG_TYPE_ALIASES.get(key, key)
+
     @staticmethod
     def _split_glob_patterns(glob_value: Optional[str]) -> List[str]:
         if not glob_value:
@@ -2242,7 +2298,7 @@ class GrepTool(Tool):
         offset = self._as_int(inputs.get("offset"), 0) or 0
         multiline = self._as_bool(inputs.get("multiline", False))
         glob = inputs.get("glob")
-        file_type = inputs.get("type")
+        file_type = self._normalize_rg_file_type(inputs.get("type"))
 
         has_context_controls = any(
             value is not None for value in [context_before, context_after, context_c, context]

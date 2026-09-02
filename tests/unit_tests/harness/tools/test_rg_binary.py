@@ -76,3 +76,43 @@ def test_build_rg_command_quotes_custom_binary_path(tmp_path: Path) -> None:
     )
     assert str(rg) in cmd or "my rg" in cmd
     assert cmd.startswith("'") or cmd.startswith('"') or cmd.startswith(str(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("rs", "rust"),
+        (".rs", "rust"),
+        ("Rust", "rust"),
+        ("py", "py"),
+        ("python", "py"),
+        ("ts", "ts"),
+        ("unknownlang", "unknownlang"),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_normalize_rg_file_type(raw: str | None, expected: str | None) -> None:
+    assert GrepTool._normalize_rg_file_type(raw) == expected
+
+
+def test_build_rg_command_uses_normalized_rust_type() -> None:
+    tool = GrepTool(MagicMock())
+    normalized = GrepTool._normalize_rg_file_type("rs")
+    cmd = tool._build_rg_command(
+        pattern="--config",
+        path="/workspace/ruff",
+        glob="*.rs",
+        output_mode="content",
+        context_before=2,
+        context_after=2,
+        context_c=None,
+        context=None,
+        show_line_numbers=True,
+        case_insensitive=False,
+        file_type=normalized,
+        multiline=False,
+        rg_path="rg",
+    )
+    assert "--type rust" in cmd or "--type 'rust'" in cmd or '--type "rust"' in cmd
+    assert "--type rs" not in cmd
