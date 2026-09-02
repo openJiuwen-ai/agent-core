@@ -1065,12 +1065,15 @@ class AbilityManager:
                     results.append(result)
         finally:
             # Ensure leftover parallel tool tasks are cancelled if the outer
-            # gather was interrupted (stall / abort) mid-batch.
+            # gather was interrupted (stall / abort) mid-batch. Shield so a
+            # second parent cancel cannot abandon children mid-cleanup.
             for task in scheduled_tasks:
                 if not task.done():
                     task.cancel()
             if scheduled_tasks:
-                await asyncio.gather(*scheduled_tasks, return_exceptions=True)
+                await asyncio.shield(
+                    asyncio.gather(*scheduled_tasks, return_exceptions=True)
+                )
 
         # Process results
         final_results: List[Tuple[Any, ToolMessage]] = []

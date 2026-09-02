@@ -2805,6 +2805,26 @@ class DeepAgent(BaseAgent):
             await self._cancel_stream_process_task()
             raise
         finally:
+            # Stall aclose / GeneratorExit does not raise CancelledError, so
+            # CancelledError-only teardown left _stream_process and parallel
+            # tool gathers pending ("Task was destroyed but it is pending").
+            if not task.done():
+                try:
+                    await self._cancel_session_deep_tasks(
+                        session.get_session_id()
+                    )
+                except Exception:
+                    logger.debug(
+                        "deep task cancel during stream close failed",
+                        exc_info=True,
+                    )
+                try:
+                    await self._cancel_stream_process_task()
+                except Exception:
+                    logger.debug(
+                        "stream process cancel during stream close failed",
+                        exc_info=True,
+                    )
             if self._stream_process_task is task:
                 self._stream_process_task = None
 
