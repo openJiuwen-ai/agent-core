@@ -411,6 +411,28 @@ async def test_handle_retry_stops_after_attempt_budget_exhausted() -> None:
     assert consumed is False
     assert runtime.sent == []
 
+    # 吞帧标志必须复位：上一轮重试置位的 _swallow_failed_round 若残留为 True，
+    # _forward_outputs 会把这条终结性 task_failed 也吞掉，外部永远收不到失败信号
+    assert sc._swallow_failed_round is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handle_retry_exhaustion_after_prior_retry_unswallows() -> None:
+    """重试过一次（吞帧标志已置位）后再耗尽：终结性失败帧必须放行。"""
+    from openjiuwen.agent_teams.agent.stream_controller import _MAX_RETRY_ATTEMPTS
+
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+    # 模拟：上一次失败在预算内被吞（标志置 True）且已重试过一次
+    sc._swallow_failed_round = True
+    sc._retry_attempt = _MAX_RETRY_ATTEMPTS
+
+    consumed = await sc._handle_retry(_task_failed_chunk("[181001] transient"))
+
+    assert consumed is False
+    assert sc._swallow_failed_round is False
+
 
 # ----------------------------------------------------------------------
 # Phase → MemberStatus mapping

@@ -291,6 +291,10 @@ class StreamController:
             self._retry_attempt,
             text,
         )
+        # 重试耗尽：失败必须透传到消费端。_swallow_failed_round 上一轮重试时置位，
+        # 不复位的话下方 _forward_outputs 的吞帧检查会把这条终结性 task_failed
+        # 一并吞掉——外部（jiuwenswarm team 流）收不到 chat.error，回合静默挂死。
+        self._swallow_failed_round = False
         return False
 
     # ------------------------------------------------------------------
