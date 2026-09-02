@@ -127,6 +127,7 @@ class EngineState:
     status: RsiStatus
     iteration: int
     total_iterations: int
+    best_node_id: str | None
     score: float | None
     baseline: float | None
     usage: RsiUsage | None
