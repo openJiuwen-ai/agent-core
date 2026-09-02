@@ -1622,3 +1622,32 @@ def test_node_extra_carries_the_contracts_program_object(tmp_path: Path) -> None
     assert x["evaluation"] == {"valid": False, "score": None}
     assert x["error"]["message"] == "IndexError at line 3"
     assert x["error"]["class"] is not None
+
+
+def test_adopted_means_the_current_version_chain_not_merge_history(tmp_path: Path) -> None:
+    """The contract reads 当前版本链 — one chain at a time. Merge acceptance
+    used to set the flag permanently, so adopted nodes accumulated as best
+    moved. History keeps its own fields: `type` and `logical_kind` still say
+    "adopted" for a node the chain has since left."""
+    run = _state(tmp_path)
+    _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aaaa"))
+    _absorb(run, events.expanded(1, 0, 1, 0.4, True, code_hash="sha256:bbbb", iteration=1))
+    emitted_first = _absorb(run, events.merged(1, True, reason="提升"))
+    # A sibling from the root overtakes: the chain becomes 0 → 2.
+    _absorb(run, events.expanded(2, 0, 1, 0.6, True, code_hash="sha256:cccc", iteration=2))
+    emitted = _absorb(run, events.merged(2, True, reason="更高"))
+
+    tree = state_module.read_tree_file("task-001")
+    flags = {n.node_id.rsplit(":", 1)[-1]: n.adopted for n in tree.nodes}
+    assert flags == {"0": True, "1": False, "2": True}
+
+    overtaken = next(n for n in tree.nodes if n.node_id.endswith(":1"))
+    assert overtaken.type == "adopted"                             # 历史裁决保留
+    assert overtaken.extra["program"]["logical_kind"] == "adopted"
+
+    # The delta channel heard about the old chain going stale, not only the
+    # new winner — otherwise a consumer holds an adopted=True node the tree
+    # no longer claims.
+    pushed = [e.node.node_id for e in emitted if isinstance(e, EventNode)]
+    assert any(node_id.endswith(":1") for node_id in pushed)
+    assert any(node_id.endswith(":2") for node_id in pushed)

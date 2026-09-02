@@ -233,6 +233,37 @@ class ProgramRunState:
         self._persist()
         yield EventNode(node=node)
 
+    def _recompute_chain(self) -> list[RsiTreeNode]:
+        """`adopted` = membership of the current version chain, per contract.
+
+        The chain is the walk from the current best node to the root. Merge
+        acceptance used to set the flag permanently, so adopted nodes
+        *accumulated* as best moved — the contract reads "当前版本链", one
+        chain at a time. History is not lost: `type` and
+        `extra["program"].logical_kind` keep the merge verdict ("was
+        accepted"), and the two fields follow their own contract rows.
+
+        Returns the nodes whose flag flipped, so the caller can re-push them —
+        a delta consumer that never hears the old chain went stale would hold
+        `adopted=True` nodes the tree no longer claims.
+        """
+        by_id = {node.node_id: node for node in self.nodes.values()}
+        chain: set[str] = set()
+        cursor = by_id.get(self.best_node_id or "")
+        guard = 0
+        while cursor is not None and guard <= len(by_id):
+            chain.add(cursor.node_id)
+            cursor = by_id.get(cursor.parent_id or "")
+            guard += 1
+        flipped: list[RsiTreeNode] = []
+        for index, node in list(self.nodes.items()):
+            wanted = node.node_id in chain
+            if node.adopted != wanted:
+                node = _with(node, adopted=wanted)
+                self.nodes[index] = node
+                flipped.append(node)
+        return flipped
+
     def _selected(self, event: dict[str, Any]) -> None:
         """Visit counts and selection scores, filed under `extra["program"].puct`.
 
@@ -332,14 +363,20 @@ class ProgramRunState:
         )
         node = _with(node, extra=self._update_program(node, logical_kind=node.type))
         self.nodes[index] = node
+        flipped: list[RsiTreeNode] = []
         if accepted:
             self.best_node_id = node.node_id
             if node.score is not None:
                 self.score = node.score
+            flipped = self._recompute_chain()
         # Persisted before the event goes out: a consumer that hears about a node
         # and then cannot read it back has been told something untrue.
         self._persist()
+        node = self.nodes[index]        # the recompute may have touched it too
         yield EventNode(node=node)
+        for other in flipped:
+            if other.node_id != node.node_id:
+                yield EventNode(node=other)
         yield EventProgress(
             iteration=self.iteration,
             total_iterations=self.total_iterations,
@@ -359,6 +396,7 @@ class ProgramRunState:
         best = event.get("bestNodeIndex")
         if best is not None:
             self.best_node_id = node_id_for(self.task_id, int(best))
+            self._recompute_chain()
         planned = event.get("expansionsPlanned")
         made = event.get("candidates")
         reason = event.get("stopReason")
