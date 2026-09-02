@@ -3086,15 +3086,31 @@ class DeepAgent(BaseAgent):
         )
 
     async def _cancel_stream_process_task(self) -> None:
-        """Cancel the in-flight task-loop stream background task, if any."""
+        """Cancel the in-flight task-loop stream background task, if any.
+
+        Must not ``await`` the current task. Doing so (or cancelling a
+        gather that includes the waiter) creates an asyncio
+        ``Task.cancel`` parent cycle and raises ``RecursionError`` —
+        observed when headless stream-stall timeouts cancel a DeepAgent
+        mid parallel tool batch.
+        """
         task = self._stream_process_task
         if task is None or task.done():
+            return
+        # Same guard as ``_cancel_active_round`` for ``_interaction_round_task``.
+        if task is asyncio.current_task():
+            task.cancel()
             return
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
+        except RecursionError:
+            logger.warning(
+                "RecursionError while awaiting cancelled stream process task; "
+                "leaving task to be collected by the event loop"
+            )
         except Exception:
             logger.debug(
                 "stream process task raised during cancel",

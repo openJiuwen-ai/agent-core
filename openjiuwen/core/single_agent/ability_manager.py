@@ -989,9 +989,11 @@ class AbilityManager:
             return []
 
         # Each tool call gets an isolated callback context to avoid races
-        # between concurrent BEFORE/AFTER_TOOL_CALL hooks.
+        # between concurrent BEFORE/AFTER_TOOL_CALL hooks. Copy ``extra`` so
+        # parallel tools do not race on shared dict mutations (e.g. pop).
         tool_contexts: List[AgentCallbackContext] = []
-        tasks = []
+        call_coros = []
+        shared_extra = ctx.extra if isinstance(ctx.extra, dict) else {}
         for single_tool_call in tool_calls:
             tool_ctx = AgentCallbackContext(
                 agent=ctx.agent,
@@ -1011,7 +1013,7 @@ class AbilityManager:
                 config=ctx.config,
                 session=session,
                 context=ctx.context,
-                extra=ctx.extra,
+                extra=dict(shared_extra),
             )
             # Propagate steering queue so after_tool_call
             # rails can push_steering() on the same queue.
@@ -1020,7 +1022,7 @@ class AbilityManager:
                     ctx.steering_queue
                 )
             tool_contexts.append(tool_ctx)
-            tasks.append(
+            call_coros.append(
                 self._railed_execute_single_tool_call(
                     ctx=tool_ctx,
                     tool_call=single_tool_call,
@@ -1030,23 +1032,45 @@ class AbilityManager:
             )
 
         results = []
-        if parallel_tool_calls:
-            # Preserve parallelism across independent resources while executing
-            # calls for the same file in model-emitted order. Tools marked as
-            # non-parallel-safe execute as exclusive barriers within the turn.
-            results = await self._execute_parallel_tool_tasks(
-                tool_calls,
-                tasks,
-                tool_cards=self._tools,
-            )
-        else:
-            # Execute all tool calls in sequence.
-            for task in tasks:
-                try:
-                    result = await task
-                except Exception as e:
-                    result = e
-                results.append(result)
+        scheduled_tasks: List[asyncio.Task] = []
+        try:
+            if parallel_tool_calls:
+                # Schedule as Tasks (not bare coroutines) so parallel lane
+                # gathers cancel children cleanly without aliasing the waiter.
+                scheduled_tasks = [
+                    asyncio.create_task(
+                        coro,
+                        name=(
+                            f"tool:{tool_calls[i].name}:"
+                            f"{tool_calls[i].id}"
+                        ),
+                    )
+                    for i, coro in enumerate(call_coros)
+                ]
+                # Preserve parallelism across independent resources while executing
+                # calls for the same file in model-emitted order. Tools marked as
+                # non-parallel-safe execute as exclusive barriers within the turn.
+                results = await self._execute_parallel_tool_tasks(
+                    tool_calls,
+                    scheduled_tasks,
+                    tool_cards=self._tools,
+                )
+            else:
+                # Execute all tool calls in sequence (do not pre-schedule).
+                for coro in call_coros:
+                    try:
+                        result = await coro
+                    except Exception as e:
+                        result = e
+                    results.append(result)
+        finally:
+            # Ensure leftover parallel tool tasks are cancelled if the outer
+            # gather was interrupted (stall / abort) mid-batch.
+            for task in scheduled_tasks:
+                if not task.done():
+                    task.cancel()
+            if scheduled_tasks:
+                await asyncio.gather(*scheduled_tasks, return_exceptions=True)
 
         # Process results
         final_results: List[Tuple[Any, ToolMessage]] = []
