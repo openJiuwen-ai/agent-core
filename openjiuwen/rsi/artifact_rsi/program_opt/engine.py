@@ -85,6 +85,14 @@ class RunSpec:
     #: the person who typed "bring the error down" has no way to know a boosting library
     #: is wanted, and no reason to.
     packages: tuple[str, ...] = ()
+    #: The task's own prompt wording, read from `run_dir/prompts/*.md` when
+    #: present and empty otherwise — different tasks need differently
+    #: assembled prompts. Rendered over the framework's slot vocabulary
+    #: (`prompt.MUTATION_SLOTS` etc.); an unknown placeholder is refused at
+    #: load, not discovered as a hole in the prompt mid-run.
+    mutation_template: str = ""
+    repair_template: str = ""
+    prior_template: str = ""
     #: Ceiling for one mutation call. Below the algorithm's floor a reasoning
     #: model spends it on hidden thinking and returns nothing; the control
     #: plane's pre-flight refuses that before the run is created.

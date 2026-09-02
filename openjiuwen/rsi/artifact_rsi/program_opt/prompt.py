@@ -52,6 +52,8 @@ Everything in it earns its place by preventing a specific failure:
 
 from __future__ import annotations
 
+import string
+
 from typing import Any, Mapping, Optional, Sequence
 
 from .program import DEFAULT_ENTRYPOINT, available_imports_text, files_of
@@ -97,6 +99,39 @@ same name, and nobody reading the graph can tell them apart.
 Work out which part of the current version is weakest against the scoring, then
 change that part."""
 
+#: The placeholder vocabulary a task's own template may draw on, per prompt.
+#: `${name}` syntax (`string.Template`), not `str.format`: a task's template
+#: text is full of code, and code is full of braces.
+MUTATION_SLOTS = frozenset({
+    "statement", "contract", "parent_code", "parent_score", "best_score",
+    "feedback", "history", "imports", "how_to_change",
+})
+REPAIR_SLOTS = frozenset({"code", "error", "imports"})
+PRIOR_SLOTS = frozenset({"prompt"})
+
+
+def validate_template(name: str, template: str, allowed: frozenset) -> None:
+    """Refuse an unknown placeholder at load time, by name.
+
+    `safe_substitute` would leave a typo like `${statment}` in the prompt as
+    literal text, and the model would faithfully optimise against a prompt with
+    a hole in it — for the whole run, silently. A template is data the task
+    author wrote; the load is the one moment a mistake in it can still be a
+    sentence instead of a wasted budget.
+    """
+    unknown = sorted(set(string.Template(template).get_identifiers()) - allowed)
+    if unknown:
+        raise ValueError(
+            f"prompt template {name!r} uses unknown placeholder(s) "
+            f"{', '.join('${' + u + '}' for u in unknown)}; available: "
+            f"{', '.join('${' + a + '}' for a in sorted(allowed))}"
+        )
+
+
+def _render(template: str, slots: dict) -> str:
+    return string.Template(template).safe_substitute(slots)
+
+
 def mutation_prompt(
     *,
     statement: str,
@@ -108,12 +143,21 @@ def mutation_prompt(
     recent: Sequence[str] = (),
     script_contract: str = "",
     feedback: str = "",
+    template: str = "",
 ) -> str:
-    """Build the prompt for one expansion."""
+    """Build the prompt for one expansion.
+
+    ``template`` is the task's own wording (`run_dir/prompts/mutation.md`),
+    rendered over the same slots the built-in uses — different tasks need
+    differently assembled prompts, and the words are the task's to choose.
+    The **slots** stay the framework's: what a parent's score is, how the
+    program is rendered, what the environment offers. A task changes the
+    prose around the facts, not the facts.
+    """
     if script_contract:
         # A scripted search's contract is whatever its evaluator calls, and the
         # evaluator is the only place that knows.
-        return _SCRIPT_TEMPLATE.format(
+        slots = dict(
             statement=statement.strip() or "Make the evaluator report a higher score.",
             contract=script_contract.strip(),
             parent_code=render_tree(parent_code, entrypoint),
@@ -124,6 +168,9 @@ def mutation_prompt(
             imports=available_imports_text(),
             how_to_change=_HOW_TO_CHANGE,
         )
+        if template.strip():
+            return _render(template, slots)
+        return _SCRIPT_TEMPLATE.format(**slots)
     # No third template to fall through to, and that is deliberate. The one that
     # used to be here described the staged-dataset mode, and anything reaching it
     # by accident was told to define `train_and_predict(train_path, test_path)`.
@@ -238,8 +285,15 @@ where <n> is 1 to 10: how much better than the current version you expect this
 the best score this scoring can express once tuned."""
 
 
-def with_promise_request(prompt: str) -> str:
-    """The mutation prompt plus the rating request, for a run that asked for one."""
+def with_promise_request(prompt: str, template: str = "") -> str:
+    """The mutation prompt plus the rating request, for a run that asked for one.
+
+    A task's template (`run_dir/prompts/prior.md`) replaces the whole assembly
+    and receives the finished mutation prompt as ``${prompt}`` — full control,
+    because the request's phrasing and its placement are one design decision.
+    """
+    if template.strip():
+        return _render(template, dict(prompt=prompt))
     return prompt.rstrip("\n") + PROMISE_REQUEST + "\n"
 
 
@@ -264,7 +318,8 @@ def render_tree(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
 
 
 def repair_prompt(code: str, error: str,
-                  entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
+                  entrypoint: str = DEFAULT_ENTRYPOINT,
+                  template: str = "") -> str:
     """Ask for the one bug this candidate has, not for a different candidate.
 
     A candidate that failed usually failed for something visible in its own
@@ -278,6 +333,12 @@ def repair_prompt(code: str, error: str,
     candidate — because a wider prompt invites a redesign, and a redesign is
     what the ordinary expansion already does.
     """
+    if template.strip():
+        return _render(template, dict(
+            code=render_tree(code, entrypoint),
+            error=error.strip()[:1500] or "(the evaluator gave no reason)",
+            imports=available_imports_text(),
+        ))
     return (
         # Not "it does not run": it may well run. A candidate reaches here
         # whenever it scored nothing at all, and "every case came out wrong" is

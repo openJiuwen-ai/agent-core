@@ -453,6 +453,7 @@ class PuctProgramArtifactProvider:
                 f"does not contain it: {', '.join(sorted(files)[:10])}"
             )
 
+        templates = _prompt_templates(run_dir)
         spec = RunSpec(
             search_id=request.task_id,
             algorithm="puct",
@@ -463,6 +464,9 @@ class PuctProgramArtifactProvider:
             statement=str(card.get("statement") or ""),
             script=str(card.get("script") or ""),
             packages=_packages_from(card.get("packages")),
+            mutation_template=templates["mutation"],
+            repair_template=templates["repair"],
+            prior_template=templates["prior"],
             baseline_code=bundle(files),
             entrypoint=entrypoint,
             run_dir=str(run_dir),
@@ -488,6 +492,35 @@ class PuctProgramArtifactProvider:
             resume_tokens=tokens,
             resume_from_sequence=sequence,
         )
+
+
+def _prompt_templates(run_dir: Path) -> dict[str, str]:
+    """The task's own prompt wording, from `run_dir/prompts/`, defaults empty.
+
+    Different tasks need differently assembled prompts — the words are the
+    task's to choose, so they are data beside the scorecard rather than code
+    inside the provider. Each file is validated against its slot vocabulary
+    here, at load: a typo like `${statment}` refused by name now is a sentence;
+    discovered mid-run it is a prompt with a hole in it, optimised against for
+    the whole budget.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import (
+        MUTATION_SLOTS,
+        PRIOR_SLOTS,
+        REPAIR_SLOTS,
+        validate_template,
+    )
+
+    out = {"mutation": "", "repair": "", "prior": ""}
+    vocabularies = {"mutation": MUTATION_SLOTS, "repair": REPAIR_SLOTS, "prior": PRIOR_SLOTS}
+    for name, allowed in vocabularies.items():
+        path = run_dir / "prompts" / f"{name}.md"
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        validate_template(f"prompts/{name}.md", text, allowed)
+        out[name] = text
+    return out
 
 
 def _seed_files(path: Path) -> dict[str, str]:

@@ -119,6 +119,7 @@ def script_domain(
     entrypoint: str = CANDIDATE_FILE,
     candidate_timeout: float = 120.0,
     baseline: Optional[MutableMapping[str, float]] = None,
+    mutation_template: str = "",
 ) -> Domain:
     """Build a domain that scores a candidate by running the drafted evaluator."""
     reference: MutableMapping[str, float] = {} if baseline is None else baseline
@@ -209,6 +210,7 @@ def script_domain(
             recent=(),
             script_contract=contract,
             feedback=program.error,
+            template=mutation_template,
         )
 
     return Domain(

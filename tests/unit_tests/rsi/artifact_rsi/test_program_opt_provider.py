@@ -1268,3 +1268,111 @@ def test_the_engine_has_no_model_channel_of_its_own() -> None:
         PuctEngine()                                   # type: ignore[call-arg]
     with pytest.raises(ValueError, match="injected Model"):
         PuctEngine(completion_factory=None)            # type: ignore[arg-type]
+
+
+# -- task-owned prompt wording ---------------------------------------------------
+
+
+def test_a_tasks_mutation_template_reaches_the_real_prompt(tmp_path: Path) -> None:
+    """Different tasks need differently assembled prompts, so the wording is
+    task data (`run_dir/prompts/mutation.md`) rendered over the framework's
+    slots. Driven through the real domain closure, not a copy of it — and the
+    template deliberately contains JSON braces, which is why the syntax is
+    `${...}` (`string.Template`) and not `str.format`."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import Program, program_id
+    from openjiuwen.rsi.artifact_rsi.program_opt.sandbox import SandboxCapability
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import script_domain
+
+    domain = script_domain(
+        scorecard={"criteria": [{
+            "id": "score", "name": "score", "direction": "maximize",
+            "weight": 1.0, "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 2,
+                                  "testShards": 2, "shardRows": 1, "seed": 1,
+                                  "trainRows": None}, "timeoutSeconds": 60},
+        }]},
+        script='"""contract doc"""\nprint(1)\n',
+        capability=SandboxCapability(backend="seatbelt"),
+        statement="pack the bins tighter",
+        baseline_code="def pack():\n    return []\n",
+        mutation_template=(
+            "TASK SAYS: ${statement}\n"
+            'a JSON example the model should copy: {"bins": [1, 2]}\n'
+            "PROGRAM:\n${parent_code}\n"
+        ),
+    )
+    code = "def pack():\n    return [[0]]\n"
+    prompt = domain.prompt(Program(
+        program_id=program_id(code), iteration=1, parent_id=None, code=code,
+        change_summary="", metrics={"score": 0.4}, valid=True, error="",
+    ))
+
+    assert "TASK SAYS: pack the bins tighter" in prompt
+    assert '{"bins": [1, 2]}' in prompt          # braces survive rendering
+    assert "def pack()" in prompt                 # the slot was filled
+    assert "fixed evaluator script" not in prompt  # the built-in template stepped aside
+
+
+def test_an_unknown_placeholder_is_refused_by_name_at_load(tmp_path: Path) -> None:
+    """`safe_substitute` would leave `${statment}` in the prompt as literal
+    text, and the model would optimise against a prompt with a hole in it for
+    the whole budget. The load is the one moment the mistake can still be a
+    sentence."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import _prompt_templates
+
+    prompts = tmp_path / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "mutation.md").write_text("goal: ${statment}", encoding="utf-8")
+
+    with pytest.raises(ValueError) as refusal:
+        _prompt_templates(tmp_path)
+
+    assert "${statment}" in str(refusal.value)          # the typo, by name
+    assert "${statement}" in str(refusal.value)         # and the vocabulary to fix it
+
+
+def test_prompt_templates_land_on_the_spec(tmp_path: Path) -> None:
+    provider = PuctProgramArtifactProvider()
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+    prompts = Path(request.run_dir) / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "mutation.md").write_text("M ${statement}", encoding="utf-8")
+    (prompts / "repair.md").write_text("R ${error}\n${code}", encoding="utf-8")
+    (prompts / "prior.md").write_text("${prompt}\nRate it.", encoding="utf-8")
+
+    spec = provider._spec_for(request, SandboxCapability(backend="bwrap"), resumed=False)
+
+    assert spec.mutation_template == "M ${statement}"
+    assert spec.repair_template.startswith("R ")
+    assert spec.prior_template.endswith("Rate it.")
+
+
+def test_repair_and_prior_render_their_task_templates() -> None:
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import (
+        repair_prompt,
+        with_promise_request,
+    )
+
+    fixed = repair_prompt("def f():\n    return 1\n", "IndexError: x",
+                          template="FIX THIS: ${error}\n${code}\nusing ${imports}")
+    assert fixed.startswith("FIX THIS: IndexError: x")
+    assert "def f()" in fixed and "numpy" in fixed
+
+    rated = with_promise_request("THE PROMPT", template="${prompt}\n\nGive a number.")
+    assert rated == "THE PROMPT\n\nGive a number."
+
+
+def test_the_engine_wires_the_task_templates_not_the_defaults() -> None:
+    """The three call sites, pinned in the real source: a template that lands
+    on the spec but is never passed onward is wording the task chose and the
+    model never saw."""
+    import inspect
+
+    from openjiuwen.rsi.artifact_rsi.program_opt import puct_engine
+
+    source = inspect.getsource(puct_engine)
+    assert "mutation_template=spec.mutation_template" in source
+    assert "template=spec.repair_template" in source
+    assert "with_promise_request(prompt, spec.prior_template)" in source

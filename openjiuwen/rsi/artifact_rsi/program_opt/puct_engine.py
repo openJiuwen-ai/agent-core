@@ -265,6 +265,7 @@ class PuctEngine:
                 entrypoint=spec.entrypoint,
                 candidate_timeout=spec.candidate_timeout_seconds,
                 baseline=baseline,
+                mutation_template=spec.mutation_template,
             )
         except ScriptError as error:
             raise _Refusal(str(error)) from error
@@ -348,7 +349,8 @@ class PuctEngine:
                 # program, and which file the evaluator imports decides both the
                 # order it is listed in and whether one block or several are
                 # asked for back.
-                repair_prompt=lambda code, error: repair_prompt(code, error, spec.entrypoint),
+                repair_prompt=lambda code, error: repair_prompt(
+                    code, error, spec.entrypoint, template=spec.repair_template),
             ),
             "repo_path": str(repo),
             "run": make_run(domain),
@@ -449,7 +451,7 @@ class PuctEngine:
                 tree.candidate_limit = 0
                 return "", "", None
             reply = complete(
-                with_promise_request(prompt) if ask_promise else prompt,
+                with_promise_request(prompt, spec.prior_template) if ask_promise else prompt,
                 lambda spent: usage.add(iteration, spent),
                 lambda reason: reporter.note_failure(iteration, reason),
             )

@@ -19,7 +19,7 @@
 
 - `agentdescent==0.4.6` 进主依赖（本项目按应用部署，精确钉死不再给第三方解析器添负担；vendored 的 PUCT 移植 import 了不承诺稳定的内部件，所以钉死而非下限。`program-opt` extra 留空壳保持老安装命令合法）。引擎顶层直连，`_load_engine`/`SearchEngineUnavailable` 的"可选轮子"路径整体退役。
 - **模型调用只有一条通道**：`ArtifactEngineRequest.model`（AgentServer 注入的已初始化 `Model` 实例）。`completion_factory_from_model` 是工作线程到异步 `Model.invoke` 的桥（轮询等待，`should_stop` 触发时放弃等待而不取消调用）。所有端点式旁路整体拆除——`load_model_endpoint`/`completion_factory_for`/引擎默认缝 `_default_completion`/`RunSpec.llm_url/llm_token` 全删，`PuctEngine` 的 `completion_factory` 必传，`completion.py` 从 HTTP 客户端瘦身为缝的词汇表（226→51 行），并有测试钉住「引擎无法在没有模型通道时被构造」。
-- token 上限 / thinking 从任务的 `scorecard.json` 读取（模型实例不透出自身配置）。
+- token 上限从任务的 `scorecard.json` 读取（模型实例不透出自身配置）；`RunSpec.thinking` 随端点客户端一并删除——思考开关归注入 `Model` 自己的 `ModelRequestConfig`，不生效的旋钮比没有旋钮更误导。
 - **打分只有沙箱评测一种**：`llm_judge` 死路整体退役（-465 行：`judge_domain`/`text_candidate`/`_judge_spec`/rubric 通道/RunSpec 四字段）——契约只有一个 `model_refs["optimizer"]`，judge 与 mutator 共用模型是自我评分；等契约有 `model_refs["judge"]` 再接回。未移植的 `dataset_metric`/`test_gate` 也按名拒绝，顺带封掉旧的 UnboundLocalError 死状。
 - `EngineState.best_node_id` 在三处构造点全部补齐。
 
