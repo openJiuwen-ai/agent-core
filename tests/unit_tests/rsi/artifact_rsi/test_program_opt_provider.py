@@ -1759,3 +1759,41 @@ def test_summary_carries_the_change_and_how_it_fared(tmp_path: Path) -> None:
     replayed = next(n for n in tree.nodes if n.node_id.endswith(":1"))
     assert replayed.summary == \
         "tighten the loop — gate 0.4200 (baseline 0.2500), adopted"
+
+
+def test_a_raising_callback_does_not_fail_the_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The contract's own words: a callback exception is an observability-
+    channel fault; it must not roll back persisted results or mark the task
+    failed — AgentServer compensates through the query interfaces. Before the
+    fix, the exception propagated into the engine and came back out as
+    ENGINE_ERROR: the search died of a broken telescope."""
+    class _Finishing:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            emit({"createdAt": "", "event": events.seeded(0, 0.25, code_hash="sha256:aa"),
+                  "sequence": 0})  # type: ignore[operator]
+            emit({"createdAt": "", "event": events.search_finished("succeeded", 0, 1),
+                  "sequence": 0})  # type: ignore[operator]
+
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
+        _Finishing,
+    )
+    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+
+    async def broken_sink(event: object) -> None:
+        raise RuntimeError("the queue is gone")
+
+    result = asyncio.run(provider.run(request, broken_sink))
+
+    assert result.status == "completed"
+    assert result.error_code is None
+    # And the durable snapshots survived the broken telescope.
+    assert provider.read_state(request.task_id).status == "completed"

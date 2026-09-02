@@ -33,6 +33,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
+import logging
+
 from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
 from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
 from openjiuwen.rsi.artifact_rsi.program_opt.program import DEFAULT_ENTRYPOINT, bundle
@@ -52,7 +54,7 @@ from openjiuwen.rsi.artifact_rsi.program_opt.state import (
     read_tree_file,
 )
 from openjiuwen.rsi.artifact_rsi.request import ArtifactEngineRequest
-from openjiuwen.rsi.events import EventStatus, OnEvent, emit
+from openjiuwen.rsi.events import EventStatus, OnEvent
 from openjiuwen.rsi.schema import (
     ArtifactRef,
     ArtifactValidationResult,
@@ -69,6 +71,27 @@ from openjiuwen.rsi.schema import (
 #: provider, four concurrent mutation calls each took 11-20 minutes where one
 #: alone took 3, and the wave finished *slower* than running them in sequence.
 DEFAULT_WORKERS = 1
+
+
+logger = logging.getLogger(__name__)
+
+
+async def _notify(on_event: OnEvent | None, event: Any) -> None:
+    """Deliver one event, honouring back-pressure but not dying of it.
+
+    The contract's two rules meet here: the provider must *await* `on_event`
+    (the queue's back-pressure is ours to carry), and a callback exception is
+    an observability-channel fault that must not roll back persisted results
+    or fail the task — AgentServer compensates through the query interfaces.
+    Before this wrapper, a raising callback propagated into the engine and
+    came back out as ENGINE_ERROR: the search died of a broken telescope.
+    """
+    if on_event is None:
+        return
+    try:
+        await on_event(event)
+    except Exception as error:  # noqa: BLE001 - observation must not kill the run
+        logger.warning("event delivery failed (observability channel): %s", error)
 
 
 class PuctProgramArtifactProvider:
@@ -247,7 +270,7 @@ class PuctProgramArtifactProvider:
             )
         live.stopped_status = "paused"
         flag.set()
-        await emit(on_event, EventStatus(status="paused"))
+        await _notify(on_event, EventStatus(status="paused"))
         return EngineResult(
             task_id=task_id,
             status="paused",
@@ -287,7 +310,7 @@ class PuctProgramArtifactProvider:
         # one the caller can still see refused nowhere.
         live.stopped_status = "terminated"
         flag.set()
-        await emit(on_event, EventStatus(status="terminated"))
+        await _notify(on_event, EventStatus(status="terminated"))
         return EngineResult(
             task_id=task_id,
             status="terminated",
@@ -415,7 +438,7 @@ class PuctProgramArtifactProvider:
                 FileNotFoundError, ValueError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
             state.fail(code, str(error))
-            await emit(on_event, EventStatus(status="failed"))
+            await _notify(on_event, EventStatus(status="failed"))
             return EngineResult(
                 task_id=request.task_id, status="failed", final_node_id=None,
                 error_code=code, error_message=str(error),
@@ -435,10 +458,16 @@ class PuctProgramArtifactProvider:
                     continue
                 future = asyncio.run_coroutine_threadsafe(on_event(event), loop)
                 # Waited on, not fired and forgotten: the contract makes the
-                # provider carry the queue's back-pressure.
-                future.result()
+                # provider carry the queue's back-pressure. But waited-on is
+                # not died-of: a callback exception is an observability fault,
+                # and the search it was watching must outlive it.
+                try:
+                    future.result()
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(
+                        "event delivery failed (observability channel): %s", error)
 
-        await emit(on_event, EventStatus(status="running"))
+        await _notify(on_event, EventStatus(status="running"))
         state.start()
 
         # Before any budget is spent: score the starting point, then score a copy
@@ -452,7 +481,7 @@ class PuctProgramArtifactProvider:
             await asyncio.to_thread(run_probe, spec)
         except ProbeError as refusal:
             state.fail("PROBE_REFUSED", str(refusal))
-            await emit(on_event, EventStatus(status="failed"))
+            await _notify(on_event, EventStatus(status="failed"))
             return EngineResult(
                 task_id=request.task_id, status="failed", final_node_id=None,
                 error_code="PROBE_REFUSED", error_message=str(refusal),
@@ -464,7 +493,7 @@ class PuctProgramArtifactProvider:
             await asyncio.to_thread(engine.run, spec, sink, stop.is_set)
         except Exception as error:  # noqa: BLE001 - a crash is a failed task, not a crashed server
             state.fail("ENGINE_ERROR", str(error))
-            await emit(on_event, EventStatus(status="failed"))
+            await _notify(on_event, EventStatus(status="failed"))
             return EngineResult(
                 task_id=request.task_id, status="failed", final_node_id=state.best_node_id,
                 error_code="ENGINE_ERROR", error_message=str(error),
@@ -475,7 +504,7 @@ class PuctProgramArtifactProvider:
                 self._live.pop(request.task_id, None)
 
         state.finish()
-        await emit(on_event, EventStatus(status=state.status))
+        await _notify(on_event, EventStatus(status=state.status))
         return EngineResult(
             task_id=request.task_id,
             status=state.status,
