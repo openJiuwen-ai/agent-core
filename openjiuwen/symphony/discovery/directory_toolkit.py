@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import hashlib
-import json
 import re
 import weakref
 from dataclasses import dataclass
@@ -22,7 +21,9 @@ from .toolkit import IncrementalNoticeSession, SKILL_INDEX_TOOL_NAME, SkillDCICo
 _MIN_OUTPUT_CHARS = 512
 _MAX_OUTPUT_CHARS = 48_000
 _MAX_LINES = 5_000
+_SKILL_DESCRIPTION_CHARS = 700
 _OPERATIONS = ("list", "search", "read")
+_MODEL_OPERATIONS = ("list", "search")
 _LIST_VIEWS = ("names", "details", "tree")
 _SEARCH_MATCHES = ("content", "name", "path")
 _SEARCH_RESULTS = ("files", "matches")
@@ -68,233 +69,35 @@ class _Execution:
     scope: tuple[str, ...]
     complete: bool
     query_counts: tuple[int, ...] = ()
+    missing_terms: tuple[str, ...] = ()
+    note: str = ""
 
 
-def _tool_card(tool_id: str, *, default_max_output_chars: int) -> ToolCard:
+def _tool_card(tool_id: str) -> ToolCard:
     return ToolCard(
         id=tool_id,
         name=SKILL_INDEX_TOOL_NAME,
         description=(
-            "List, search, and read the read-only directory of installed Skills. "
-            "This tool applies only to the Skill catalog, never to project, workspace, "
-            "or system files; use filesystem tools or Bash for those. Use `/` for a "
-            "catalog-wide operation and only use narrower paths returned by this tool. "
-            "For one discovery need, use `search` with `match=content` and one "
-            "high-signal `query` for exact formats, libraries, APIs, methods, or "
-            "unknown locations. When a request names two or more independent "
-            "capability constraints, prefer one `search` with `queries` (one item "
-            "per constraint) and `per_query_limit`; do not split those constraints "
-            "across calls or follow content results with a provider-wide name "
-            "enumeration. In a content query, join "
-            "alternative terms with `|` (for example, `youtube|subtitle|字幕|翻译`); "
-            "spaces mean consecutive text, not alternative keywords. Use `list` first when a "
-            "relevant classification branch is already visible. Do not mechanically "
-            "run both. Refine only to close a concrete evidence gap. Selection and "
-            "recommendation requests should normally finish with one search and, "
-            "only when its descriptions cannot distinguish the candidates, one "
-            "batched metadata read (at most 2 calls). Candidate descriptions in "
-            "detailed list and content-search "
-            "output are selection evidence. When candidates still need comparison, "
-            "read all of their metadata paths in one `read` call; do not call once per "
-            "candidate. Content search returns readable `META.md` paths; structured "
-            "read accepts only exact metadata paths returned by an earlier result and "
-            "rejects `SKILL.md`. A false `result_complete` after a limit only means more "
-            "catalog matches may exist; it is not a reason to enumerate them when "
-            "visible evidence covers the request. Do not read full `SKILL.md` files "
-            "during discovery or selection. "
-            "Use the exact observed Skill ID with the Skill execution tool only after a "
-            "candidate is selected and the user requests execution. Put a `limit` stage "
-            "in multi-row discovery calls (5 per independent need by default; use a "
-            "larger value only when the user requests broad or exhaustive discovery). "
-            "Omit it only when the user explicitly requests every result. Use "
-            "`output_mode=count` when only a total is needed; use a pipeline `count` "
-            "stage only after another ordered transformation. A line count is a "
-            "candidate count only when the source emits one line per candidate. If "
-            "output is shortened, answer from "
-            "what was returned and do not automatically retry. Only when an explicit "
-            "display request is incomplete should you ask after answering whether to "
-            "continue, noting that it may use more context. Set "
-            "`disable_output_truncation=true` only after the user explicitly permits "
-            "output without truncation or collapsing. Arguments are structured fields, "
-            "not shell commands or flags."
+            "Discover installed Skills. `list` the deepest fitting category. `search` once only "
+            "if no category fits or a continued list lacks the target; never use variants or "
+            "retry. Reuse results. Skip tasks needing no Skill. Load returned names with "
+            "`skill_tool` only to execute."
         ),
         input_params={
             "type": "object",
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": list(_OPERATIONS),
-                    "description": "Required operation: list, search, or read.",
+                    "enum": list(_MODEL_OPERATIONS),
+                    "description": "List categories or search Skills.",
                 },
-                "paths": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 1,
-                    "description": (
-                        "One or more Skill-directory paths. Defaults to [`/`] for list "
-                        "and search; required for read. Read accepts only exact `META.md` "
-                        "paths returned by an earlier result. Batch related paths in one call."
-                    ),
-                },
-                "view": {
+                "category": {
                     "type": "string",
-                    "enum": list(_LIST_VIEWS),
-                    "default": "names",
-                    "description": (
-                        "List only: names for a compact listing, details for descriptions, "
-                        "or tree for hierarchical navigation."
-                    ),
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "List names/details recursively. Tree is inherently recursive.",
-                },
-                "directory_entry": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "List only: describe each path itself rather than its children.",
-                },
-                "directories_only": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Tree view only: omit Skill leaves and show directories.",
+                    "description": "Full, most specific returned category; omit for all Skills.",
                 },
                 "query": {
                     "type": "string",
-                    "description": (
-                        "Search query for one discovery need. Use queries instead when "
-                        "the request has multiple independent capability constraints. "
-                        "Content search accepts a regular expression unless "
-                        "fixed_strings is true. Name search accepts a glob; a plain value "
-                        "is treated as a substring. For content search, combine alternative "
-                        "terms with `|`, for example `youtube|subtitle|字幕|翻译`; spaces "
-                        "mean consecutive text."
-                    ),
-                },
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 2,
-                    "maxItems": 8,
-                    "description": (
-                        "Search only: preferred for 2-8 independent capability "
-                        "constraints. Put one constraint in each item so one call "
-                        "replaces sequential searches. Results annotate each deduplicated "
-                        "candidate with the matching 1-based query indexes. Mutually "
-                        "exclusive with query."
-                    ),
-                },
-                "per_query_limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10,
-                    "description": (
-                        "Search only: maximum candidates retained for query, or per need "
-                        "for queries. Use 5 for ordinary discovery; use 6-10 only for an "
-                        "explicitly broad or exhaustive request. Equivalent to a limit "
-                        "pipeline stage."
-                    ),
-                },
-                "match": {
-                    "type": "string",
-                    "enum": list(_SEARCH_MATCHES),
-                    "default": "content",
-                    "description": ("Search content with ranked retrieval, or glob-match entry names or full paths."),
-                },
-                "result": {
-                    "type": "string",
-                    "enum": list(_SEARCH_RESULTS),
-                    "default": "files",
-                    "description": ("Content search only: return matching candidate files or matching text snippets."),
-                },
-                "case_insensitive": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Search without case sensitivity by default.",
-                },
-                "fixed_strings": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Content search only: interpret query as literal text.",
-                },
-                "max_depth": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Optional depth bound for tree view or search.",
-                },
-                "read_mode": {
-                    "type": "string",
-                    "enum": list(_READ_MODES),
-                    "default": "full",
-                    "description": "Read full files, their first lines, or an inclusive line range.",
-                },
-                "line_count": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Read head only: number of leading lines; defaults to 10.",
-                },
-                "start_line": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Read range only: inclusive first line.",
-                },
-                "end_line": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Read range only: inclusive last line.",
-                },
-                "pipeline": {
-                    "type": "array",
-                    "description": (
-                        "Optional ordered output stages. limit uses lines; slice uses "
-                        "start_line/end_line; filter uses query and optional matching "
-                        "booleans; count takes no other fields."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "operation": {"type": "string", "enum": list(_PIPELINE_OPERATIONS)},
-                            "query": {"type": "string"},
-                            "lines": {"type": "integer", "minimum": 1, "maximum": _MAX_LINES},
-                            "start_line": {"type": "integer", "minimum": 1},
-                            "end_line": {"type": "integer", "minimum": 1},
-                            "case_insensitive": {"type": "boolean", "default": False},
-                            "invert": {"type": "boolean", "default": False},
-                            "fixed_strings": {"type": "boolean", "default": False},
-                        },
-                        "required": ["operation"],
-                        "additionalProperties": False,
-                    },
-                },
-                "output_mode": {
-                    "type": "string",
-                    "enum": list(_OUTPUT_MODES),
-                    "default": "entries",
-                    "description": (
-                        "Return entries, or only their logical line count. Count is an "
-                        "output mode of list/search, never an operation. To obtain both "
-                        "a total and a bounded page, make count and limited-entry calls "
-                        "independently; a line count is a candidate count only when the "
-                        "selected source emits one line per candidate."
-                    ),
-                },
-                "max_output_chars": {
-                    "type": "integer",
-                    "minimum": _MIN_OUTPUT_CHARS,
-                    "maximum": _MAX_OUTPUT_CHARS,
-                    "description": (
-                        "Maximum output characters. Omit to use "
-                        f"{default_max_output_chars}; use a limit stage to bound rows."
-                    ),
-                },
-                "disable_output_truncation": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": (
-                        "Bypass normal character truncation. Set true only after explicit "
-                        "user permission for output without truncation or collapsing."
-                    ),
+                    "description": "Capability, format, API, or other terms to search for.",
                 },
             },
             "required": ["operation"],
@@ -348,16 +151,35 @@ class InstalledSkillsDirectoryToolkit:
     async def skill_index(
         self,
         operation: str,
-        paths: list[str] | None = None,
+        category: str | None = None,
+        query: str | None = None,
+        skills: list[str] | None = None,
+        limit: int | None = None,
         **values: Any,
     ) -> SkillDCICommandResult:
         """Run one serialized structured directory operation."""
 
+        paths = values.pop("paths", None)
         unexpected = set(values).difference(_SKILL_INDEX_DEFAULTS)
         if unexpected:
             name = sorted(unexpected)[0]
             raise TypeError(f"skill_index() got an unexpected keyword argument '{name}'")
-        arguments = {"operation": operation, "paths": paths, **_SKILL_INDEX_DEFAULTS, **values}
+        simple_request = paths is None and not values
+        if category is not None and paths is not None:
+            raise ValueError("category and paths are mutually exclusive")
+        arguments = {
+            "operation": operation,
+            "skills": skills,
+            "paths": paths,
+            **_SKILL_INDEX_DEFAULTS,
+            **values,
+        }
+        arguments["query"] = query
+        arguments["category"] = category
+        if simple_request:
+            _apply_simple_defaults(arguments, limit)
+        elif limit is not None:
+            raise ValueError("limit cannot be combined with advanced arguments")
         async with self._lock:
             if self._closed:
                 raise RuntimeError("skill_index toolkit is closed")
@@ -365,7 +187,7 @@ class InstalledSkillsDirectoryToolkit:
 
     def get_tools(self) -> list[Tool]:
         tool = LocalFunction(
-            card=_tool_card(self._tool_id, default_max_output_chars=self._default_max_output_chars),
+            card=_tool_card(self._tool_id),
             func=self.skill_index,
         )
         weakref.finalize(tool, self.close)
@@ -380,21 +202,28 @@ class InstalledSkillsDirectoryToolkit:
 
     def _execute(self, arguments: dict[str, Any]) -> SkillDCICommandResult:
         operation = _enum(arguments["operation"], _OPERATIONS, "operation")
+        view = self._environment.directory
+        category = arguments.pop("category", None)
+        if operation == "read":
+            if category is not None:
+                raise ValueError("category is valid only for list and search")
+        else:
+            arguments["paths"] = list(_category_paths(view, category, arguments["paths"]))
         pipeline = _validate_request(operation, arguments)
-        paths = _paths(arguments["paths"], required=operation == "read")
+        paths = _paths(arguments["paths"], required=False)
         budget = _output_budget(
             arguments["max_output_chars"],
             disable=arguments["disable_output_truncation"],
             default=self._default_max_output_chars,
         )
-        view = self._environment.directory
         artifact = self._environment.artifact
         if operation == "list":
             execution = self._list(view, paths, arguments)
         elif operation == "search":
             execution = self._search(view, paths, arguments)
         else:
-            execution = self._read(view, paths, arguments)
+            skills = self._read_skills(view, arguments["skills"], arguments["paths"])
+            execution = self._read(view, skills, arguments)
 
         rows, pipeline_complete, count_value, transformed_count = _apply_pipeline(
             execution.rows,
@@ -433,7 +262,7 @@ class InstalledSkillsDirectoryToolkit:
             count_value=count_value,
         )
         if not fitted and not pipeline:
-            empty = _empty_message(operation)
+            empty = _empty_message(operation, execution.missing_terms)
             if budget is None:
                 fitted = empty
                 model_content = f"{model_content}\n{empty}"
@@ -442,6 +271,9 @@ class InstalledSkillsDirectoryToolkit:
                 if remaining > 3:
                     fitted = _compact(empty, remaining)
                     model_content = f"{model_content}\n{fitted}"
+        if execution.note:
+            fitted = _append_note(fitted, execution.note, budget)
+            model_content = _append_note(model_content, execution.note, budget)
         cards = {
             item.worker_id: {"name": item.worker_id, "description": item.description or item.name}
             for item in artifact.items
@@ -493,7 +325,7 @@ class InstalledSkillsDirectoryToolkit:
                 directory_entry=_boolean(arguments["directory_entry"], "directory_entry"),
             )
         )
-        rows = tuple(_list_row(entry, view=list_view) for entry in entries)
+        rows = tuple(_list_row(entry, view=list_view, directory=view) for entry in entries)
         return _Execution(rows, len(entries), paths, True)
 
     def _search(self, view: SkillDirectoryView, paths: tuple[str, ...], arguments: Mapping[str, Any]) -> _Execution:
@@ -515,25 +347,26 @@ class InstalledSkillsDirectoryToolkit:
         selected_by_id: dict[str, SkillRecord | DirectoryEntry] = {}
         query_indexes_by_id: dict[str, tuple[int, ...]] = {}
         query_counts: list[int] = []
+        missing_terms: list[str] = []
         order: list[str] = []
         all_matches: set[str] = set()
         for query_index, current_query in enumerate(queries, start=1):
-            matches: Sequence[SkillRecord | DirectoryEntry] = (
-                self._search_content_one(
+            if match == "content":
+                matches, current_missing = self._search_content_one(
                     scoped_records,
                     current_query,
                     case_insensitive=case_insensitive,
                     fixed_strings=fixed_strings,
                 )
-                if match == "content"
-                else self._search_entry_one(
+                missing_terms.extend(current_missing)
+            else:
+                matches = self._search_entry_one(
                     view,
                     scoped_entries,
                     current_query,
                     match=match,
                     case_insensitive=case_insensitive,
                 )
-            )
             identities = tuple(_search_identity(item) for item in matches)
             all_matches.update(identities)
             selected = matches if limit is None else matches[:limit]
@@ -553,14 +386,13 @@ class InstalledSkillsDirectoryToolkit:
             indexes = query_indexes_by_id[identity]
             if isinstance(item, DirectoryEntry):
                 if item.kind == "dir":
-                    rows.append(_search_directory_row(item, indexes))
+                    rows.append(_search_directory_row(item, view, indexes))
                 else:
                     record = view.record_by_id[item.worker_id]
-                    rows.append(_search_row(record, view.metadata_path(item.worker_id), indexes))
+                    rows.append(_search_row(record, view, indexes))
                 continue
-            metadata_path = view.metadata_path(item.worker_id)
             if result == "files":
-                rows.append(_search_row(item, metadata_path, indexes))
+                rows.append(_search_row(item, view, indexes))
                 continue
             matched_queries = tuple(queries[index - 1] for index in indexes) or queries
             snippets = self._matched_snippets(
@@ -569,18 +401,21 @@ class InstalledSkillsDirectoryToolkit:
                 match=match,
                 case_insensitive=case_insensitive,
                 fixed_strings=fixed_strings,
-                metadata_path=metadata_path,
+                skill_path=item.skill_file,
             )
             for snippet in snippets:
-                rows.append(_search_match_row(item, metadata_path, indexes, snippet))
+                rows.append(_search_match_row(item, view, indexes, snippet))
         complete = limit is None or all(count < limit for count in query_counts)
         total_count = len(rows) if result == "matches" else len(all_matches)
+        missing = tuple(dict.fromkeys(missing_terms))[:5]
         return _Execution(
             tuple(rows),
             total_count,
             paths,
             complete,
             tuple(query_counts) if len(queries) > 1 else (),
+            missing,
+            _missing_terms_note(missing) if rows and missing else "",
         )
 
     def _search_content_one(
@@ -590,24 +425,17 @@ class InstalledSkillsDirectoryToolkit:
         *,
         case_insensitive: bool,
         fixed_strings: bool,
-    ) -> tuple[SkillRecord, ...]:
+    ) -> tuple[tuple[SkillRecord, ...], tuple[str, ...]]:
         identifiers = self._environment.search_content(
             records,
             query,
             case_insensitive=case_insensitive,
             fixed_strings=fixed_strings,
+            term_mode=not fixed_strings,
         )
-        if not identifiers and not fixed_strings:
-            fallback = _safe_or_query(query)
-            if fallback:
-                identifiers = self._environment.search_content(
-                    records,
-                    fallback,
-                    case_insensitive=case_insensitive,
-                    fixed_strings=False,
-                )
         by_id = {record.worker_id: record for record in records}
-        return tuple(by_id[worker_id] for worker_id in identifiers)
+        missing = self._environment.missing_content_terms(query) if not fixed_strings else ()
+        return tuple(by_id[worker_id] for worker_id in identifiers), missing
 
     @staticmethod
     def _search_entry_one(
@@ -624,11 +452,10 @@ class InstalledSkillsDirectoryToolkit:
         for entry in entries:
             if entry.kind == "skill":
                 record = view.record_by_id[entry.worker_id]
-                metadata_path = view.metadata_path(entry.worker_id)
                 candidates = (
                     (PurePosixPath(entry.path).name, record.worker_id, record.name)
                     if match == "name"
-                    else (metadata_path,)
+                    else (record.skill_file,)
                 )
             else:
                 candidates = (PurePosixPath(entry.path).name or ".", entry.label) if match == "name" else (entry.path,)
@@ -656,7 +483,7 @@ class InstalledSkillsDirectoryToolkit:
         match: str,
         case_insensitive: bool,
         fixed_strings: bool,
-        metadata_path: str,
+        skill_path: str,
     ) -> tuple[str, ...]:
         if match != "content":
             return ()
@@ -677,7 +504,7 @@ class InstalledSkillsDirectoryToolkit:
             ("name", record.name),
             ("description", record.description),
             ("body", self._environment.read_body(record)),
-            ("path", metadata_path),
+            ("path", skill_path),
         )
         snippets: list[str] = []
         seen_snippets: set[str] = set()
@@ -703,17 +530,36 @@ class InstalledSkillsDirectoryToolkit:
                     return (f"{label}: {safe}",)
         return ()
 
-    def _read(self, view: SkillDirectoryView, paths: tuple[str, ...], arguments: Mapping[str, Any]) -> _Execution:
+    def _read_skills(
+        self,
+        view: SkillDirectoryView,
+        skills: Any,
+        legacy_paths: Any,
+    ) -> tuple[str, ...]:
+        if skills is not None and legacy_paths is not None:
+            raise ValueError("skills and paths are mutually exclusive")
+        if legacy_paths is not None:
+            resolved: list[str] = []
+            for path in _paths(legacy_paths, required=True):
+                worker_id = self._observed_meta_paths.get(view.normalize_path(path))
+                if worker_id is None:
+                    raise ValueError("read accepts only Skills returned by an earlier skill_index result")
+                resolved.append(worker_id)
+            return tuple(dict.fromkeys(resolved))
+        return _identifiers(skills, "skills", required=True)
+
+    @staticmethod
+    def _read(
+        view: SkillDirectoryView,
+        skills: tuple[str, ...],
+        arguments: Mapping[str, Any],
+    ) -> _Execution:
         mode = _enum(arguments["read_mode"], _READ_MODES, "read_mode")
         rows: list[_Row] = []
-        for path in paths:
-            normalized = view.normalize_path(path)
-            observed_worker_id = self._observed_meta_paths.get(normalized)
-            if observed_worker_id is None:
-                raise ValueError("read accepts only exact META.md paths returned by an earlier skill_index result")
-            record = view.resolve_metadata_path(normalized)
-            if record.worker_id != observed_worker_id:
-                raise ValueError("observed Skill metadata path no longer resolves to the same Skill")
+        for skill in skills:
+            record = view.record_by_id.get(skill)
+            if record is None:
+                raise ValueError(f"Unknown Skill: {skill}")
             content = _metadata_card(record)
             lines = content.splitlines()
             if mode == "head":
@@ -725,50 +571,113 @@ class InstalledSkillsDirectoryToolkit:
                     raise ValueError("end_line must be greater than or equal to start_line")
                 lines = lines[slice(start - 1, end)]
             rows.append(_Row("\n".join(lines), record.worker_id))
-        return _Execution(tuple(rows), len(rows), paths, True)
+        return _Execution(tuple(rows), len(rows), skills, True)
 
 
-def _list_row(entry: DirectoryEntry, *, view: str) -> _Row:
+def _list_row(entry: DirectoryEntry, *, view: str, directory: SkillDirectoryView) -> _Row:
     indent = "  " * entry.depth if view == "tree" else ""
     if entry.kind == "dir":
-        detail = f"  desc: {_compact(entry.description, 240)}" if view != "names" and entry.description else ""
-        display_path = "/" if entry.path == "/" else f"{entry.path}/"
-        return _Row(f"{indent}[dir] {display_path}{detail}")
-    meta_path = f"{entry.path}/META.md"
-    detail = f"  desc: {_compact(entry.description, 240)}" if view != "names" and entry.description else ""
-    return _Row(f"{indent}[skill] {meta_path}{detail}", entry.worker_id)
+        description = _directory_description(entry.description, 240)
+        detail = f"  desc: {description}" if view != "names" and description else ""
+        return _Row(f"{indent}- [category] {_category_from_path(directory, entry.path)}{detail}")
+    record = directory.record_by_id[entry.worker_id]
+    category = _skill_category(directory, entry.worker_id)
+    detail = (
+        f"  desc: {_compact(entry.description, _SKILL_DESCRIPTION_CHARS)}"
+        if view != "names" and entry.description
+        else ""
+    )
+    return _Row(
+        f"{indent}- [skill] {entry.worker_id}  category: {category}  "
+        f"path: {_skill_path(record)}{detail}",
+        entry.worker_id,
+    )
 
 
 def _search_row(
     record: SkillRecord,
-    path: str,
+    directory: SkillDirectoryView,
     indexes: tuple[int, ...],
 ) -> _Row:
     mapping = f"  matches_queries: {list(indexes)}" if indexes else ""
     return _Row(
-        f"[skill] {path}{mapping}  desc: {_compact(record.description or record.name, 300)}",
+        f"- [skill] {record.worker_id}  category: {_skill_category(directory, record.worker_id)}  "
+        f"path: {_skill_path(record)}{mapping}  "
+        f"desc: {_compact(record.description or record.name, _SKILL_DESCRIPTION_CHARS)}",
         record.worker_id,
     )
 
 
 def _search_match_row(
     record: SkillRecord,
-    path: str,
+    directory: SkillDirectoryView,
     indexes: tuple[int, ...],
     snippet: str,
 ) -> _Row:
     mapping = f"  matches_queries: {list(indexes)}" if indexes else ""
     return _Row(
-        f"[skill] {path}{mapping}  match: {snippet}  desc: {_compact(record.description or record.name, 300)}",
+        f"- [skill] {record.worker_id}  category: {_skill_category(directory, record.worker_id)}  "
+        f"path: {_skill_path(record)}{mapping}  match: {snippet}  "
+        f"desc: {_compact(record.description or record.name, _SKILL_DESCRIPTION_CHARS)}",
         record.worker_id,
     )
 
 
-def _search_directory_row(entry: DirectoryEntry, indexes: tuple[int, ...]) -> _Row:
+def _search_directory_row(
+    entry: DirectoryEntry,
+    directory: SkillDirectoryView,
+    indexes: tuple[int, ...],
+) -> _Row:
     mapping = f"  matches_queries: {list(indexes)}" if indexes else ""
-    detail = f"  desc: {_compact(entry.description, 300)}" if entry.description else ""
-    path = "/" if entry.path == "/" else f"{entry.path}/"
-    return _Row(f"[dir] {path}{mapping}{detail}")
+    description = _directory_description(entry.description, 300)
+    detail = f"  desc: {description}" if description else ""
+    return _Row(f"- [category] {_category_from_path(directory, entry.path)}{mapping}{detail}")
+
+
+def _skill_category(directory: SkillDirectoryView, worker_id: str) -> str:
+    path = str(PurePosixPath(directory.record_path_by_id[worker_id]).parent)
+    return _category_from_path(directory, path)
+
+
+def _category_from_path(directory: SkillDirectoryView, path: str) -> str:
+    labels: list[str] = []
+    while path not in {"", ".", "/"}:
+        node = directory.node_by_path.get(path)
+        label = node.label if node is not None else PurePosixPath(path).name
+        labels.append(sanitize_model_text(label))
+        path = str(PurePosixPath(path).parent)
+    return " > ".join(reversed(labels)) or "ROOT"
+
+
+def _skill_path(record: SkillRecord) -> str:
+    return sanitize_model_text(record.skill_file)
+
+
+def _directory_description(value: str, limit: int) -> str:
+    """Keep routing evidence while dropping index-construction statistics."""
+
+    text = sanitize_model_text(value)
+    select_when = ""
+    semantic_lines: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        current: list[str] = []
+        for raw_line in paragraph.splitlines():
+            line = raw_line.strip()
+            lowered = line.casefold()
+            if lowered.startswith("select when:"):
+                if not select_when:
+                    select_when = line.split(":", 1)[1].strip()
+                continue
+            if lowered.startswith(("covers ", "representative ", "don't select when:")):
+                continue
+            if line:
+                current.append(line)
+        if current and not semantic_lines:
+            semantic_lines = current
+
+    semantic = _compact(" ".join(semantic_lines), min(limit, 180)) if semantic_lines else ""
+    routing = f"Select when: {_compact(select_when, 96)}" if select_when else ""
+    return _compact(" ".join(part for part in (semantic, routing) if part), limit)
 
 
 def _search_identity(item: SkillRecord | DirectoryEntry) -> str:
@@ -781,7 +690,6 @@ def _metadata_card(record: SkillRecord) -> str:
     lines = [
         f"# {record.name or record.worker_id}",
         "",
-        f"- Skill ID: `{record.worker_id}`",
         f"- Description: {record.description or record.name or record.worker_id}",
         f"- Source: {record.source or 'local'}",
     ]
@@ -914,31 +822,17 @@ def _row_count(rows: Sequence[_Row]) -> int:
     return sum(max(1, len(row.text.splitlines())) for row in rows)
 
 
-def _summary_line(payload: Mapping[str, Any]) -> str:
-    return "skill_index_summary=" + json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"))
+def _summary_line(summary: Mapping[str, Any]) -> str:
+    if summary.get("operation") == "list" and not summary.get("result_complete"):
+        return "Results continue; search this category once if needed:"
+    if summary.get("returned_skill_count"):
+        return "Candidates (enough for selection; load with skill_tool only to execute):"
+    return "Results:"
 
 
 def _bounded_summary_line(payload: Mapping[str, Any], budget: int | None) -> str:
     line = _summary_line(payload)
-    if budget is None or len(line) <= budget:
-        return line
-    reduced = dict(payload)
-    reduced.pop("scope", None)
-    line = _summary_line(reduced)
-    if len(line) <= budget:
-        return line
-    essential: dict[str, Any] = {}
-    for key in (
-        "operation",
-        "catalog_skill_count",
-        "result_complete",
-        "result_entry_count",
-        "shown_entry_count",
-        "remaining_entry_count",
-    ):
-        if key in reduced:
-            essential[key] = reduced[key]
-    return _summary_line(essential)
+    return line if budget is None else _compact(line, budget)
 
 
 def _queries(query: Any, queries: Any) -> tuple[str, ...]:
@@ -952,6 +846,59 @@ def _queries(query: Any, queries: Any) -> tuple[str, ...]:
             raise ValueError("queries must contain at least two distinct values")
         return values
     return (_bounded_query(query, "query"),)
+
+
+def _apply_simple_defaults(arguments: dict[str, Any], limit: Any) -> None:
+    operation = _enum(arguments["operation"], _OPERATIONS, "operation")
+    result_limit = _positive(limit, "limit", optional=True)
+    result_limit = result_limit or (10 if operation == "list" else 5)
+    maximum = 10 if operation == "list" else 5
+    if result_limit > maximum:
+        raise ValueError(f"limit must not exceed {maximum} for {operation}")
+    if operation == "list":
+        if arguments.get("query") is not None or arguments.get("skills") is not None:
+            raise ValueError("list accepts only category and limit")
+        arguments["view"] = "details"
+        arguments["pipeline"] = [{"operation": "limit", "lines": result_limit}]
+    elif operation == "search":
+        if arguments.get("skills") is not None:
+            raise ValueError("skills are valid only for read")
+        arguments["per_query_limit"] = result_limit
+    else:
+        if arguments.get("query") is not None:
+            raise ValueError("query is valid only for search")
+
+
+def _category_paths(
+    directory: SkillDirectoryView,
+    category: Any,
+    legacy_paths: Any,
+) -> tuple[str, ...]:
+    if category is None:
+        return _paths(legacy_paths, required=False)
+    if legacy_paths is not None:
+        raise ValueError("category and paths are mutually exclusive")
+    value = _nonempty(category, "category")
+    if value in {"/", "ROOT"}:
+        return ("/",)
+
+    normalized = " > ".join(part.strip() for part in value.split(">") if part.strip())
+    matches = [
+        path
+        for path in directory.node_by_path
+        if path != "/" and _category_from_path(directory, path).casefold() == normalized.casefold()
+    ]
+    if not matches and ">" not in normalized:
+        matches = [
+            path
+            for path, node in directory.node_by_path.items()
+            if path != "/" and str(node.label).strip().casefold() == normalized.casefold()
+        ]
+    if not matches:
+        raise ValueError(f"Unknown Skill category: {value}")
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous Skill category; use its full category chain: {value}")
+    return (matches[0],)
 
 
 def _validate_request(operation: str, arguments: Mapping[str, Any]) -> list[dict[str, Any]] | None:
@@ -982,6 +929,12 @@ def _validate_request(operation: str, arguments: Mapping[str, Any]) -> list[dict
         raise ValueError("query, queries, per_query_limit, match, result, and search flags are only valid for search")
     if operation != "read" and read_fields:
         raise ValueError("read_mode and line range fields are only valid for read")
+    if operation == "read" and arguments.get("skills") is None and arguments.get("paths") is None:
+        raise ValueError("skills are required for read")
+    if operation != "read" and arguments.get("skills") is not None:
+        raise ValueError("skills are valid only for read")
+    if operation == "read" and arguments.get("skills") is not None and arguments.get("paths") is not None:
+        raise ValueError("skills and paths are mutually exclusive")
     if operation == "list":
         view = _enum(arguments.get("view"), _LIST_VIEWS, "view")
         if view == "tree":
@@ -1146,13 +1099,21 @@ def _paths(value: Any, *, required: bool) -> tuple[str, ...]:
     return paths
 
 
-def _safe_or_query(query: str) -> str | None:
-    tokens = query.split()
-    if not 2 <= len(tokens) <= 12 or "|" in query:
-        return None
-    if any(len(token) > 64 or not any(character.isalnum() for character in token) for token in tokens):
-        return None
-    return "|".join(re.escape(token) for token in tokens)
+def _identifiers(values: Any, name: str, *, required: bool) -> tuple[str, ...]:
+    if values is None:
+        if required:
+            raise ValueError(f"{name} are required")
+        return ()
+    if not isinstance(values, list) or not values:
+        raise ValueError(f"{name} must be a non-empty array")
+    if len(values) > 32:
+        raise ValueError(f"{name} must contain at most 32 items")
+    identifiers = tuple(dict.fromkeys(_nonempty(item, name) for item in values))
+    if any("\0" in identifier for identifier in identifiers):
+        raise ValueError(f"{name} must not contain null bytes")
+    if any(len(identifier) > 512 for identifier in identifiers):
+        raise ValueError(f"{name} must not exceed 512 characters")
+    return identifiers
 
 
 def _output_budget(value: Any, *, disable: Any, default: int) -> int | None:
@@ -1199,13 +1160,35 @@ def _compact(value: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 3].rstrip()}..."
 
 
+def _append_note(content: str, note: str, budget: int | None) -> str:
+    if not content:
+        return note if budget is None else _compact(note, budget)
+    if budget is None:
+        return f"{content}\n{note}"
+    remaining = budget - len(content) - 1
+    return content if remaining <= 3 else f"{content}\n{_compact(note, remaining)}"
+
+
 def _candidate_tokens(records: Sequence[SkillRecord]) -> int:
     rendered = "\n".join(f"- {record.worker_id}: {' '.join(record.description.split())}" for record in records)
     return (len(rendered) + 3) // 4
 
 
-def _empty_message(operation: str) -> str:
-    return "No Skill candidates matched the requested catalog scope." if operation == "search" else "No entries."
+def _empty_message(operation: str, missing_terms: Sequence[str] = ()) -> str:
+    if operation != "search":
+        return "No entries."
+    message = "No matching installed Skill."
+    if missing_terms:
+        message += f" Metadata lacks: {', '.join(missing_terms[:5])}; do not retry synonyms."
+    return message
+
+
+def _missing_terms_note(missing_terms: Sequence[str]) -> str:
+    terms = ", ".join(missing_terms[:5])
+    return (
+        f"Evidence gap: no installed Skill metadata names {terms}. "
+        "More searches cannot prove explicit support."
+    )
 
 
 __all__ = ["InstalledSkillsDirectoryToolkit", "SKILL_INDEX_TOOL_NAME"]
