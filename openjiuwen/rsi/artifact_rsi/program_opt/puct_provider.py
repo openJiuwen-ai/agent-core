@@ -36,10 +36,12 @@ from typing import Any, Literal
 from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
 from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
 from openjiuwen.rsi.artifact_rsi.program_opt.program import DEFAULT_ENTRYPOINT, bundle
+from agentdescent.filetree import load_tree
+
+from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     ModelConfigError,
     SandboxUnavailable,
-    SearchEngineUnavailable,
     completion_factory_from_model,
     require_sandbox,
 )
@@ -329,7 +331,6 @@ class PuctProgramArtifactProvider:
         )
 
         try:
-            engine_type = _load_engine()
             if request.model is None:
                 # The contract routes the model resource through AgentServer:
                 # it resolves `model_refs["optimizer"]` and hands over a live
@@ -341,7 +342,7 @@ class PuctProgramArtifactProvider:
                 )
             capability = require_sandbox(self._sandbox_backend)
             spec = self._spec_for(request, capability, resumed=resumed)
-        except (ModelConfigError, SandboxUnavailable, SearchEngineUnavailable,
+        except (ModelConfigError, SandboxUnavailable,
                 FileNotFoundError, ValueError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
             state.fail(code, str(error))
@@ -387,7 +388,7 @@ class PuctProgramArtifactProvider:
                 error_code="PROBE_REFUSED", error_message=str(refusal),
             )
 
-        engine = engine_type(completion_factory=_counting(
+        engine = PuctEngine(completion_factory=_counting(
             completion_factory_from_model(request.model, loop), state))
         try:
             await asyncio.to_thread(engine.run, spec, sink, stop.is_set)
@@ -499,29 +500,6 @@ class PuctProgramArtifactProvider:
         )
 
 
-def _load_engine() -> Any:
-    """`PuctEngine`, imported at call time rather than at module scope.
-
-    `puct_engine` is the one module on the chain that hard-imports
-    `agentdescent`, and `artifact_rsi/__init__` imports this file eagerly --
-    at module scope a missing wheel would make the whole `openjiuwen.rsi`
-    package unimportable rather than making one provider unusable.
-
-    The extra is optional, so "not installed" is an ordinary configuration
-    fault and deserves the sentence that fixes it, not a `ModuleNotFoundError`
-    raised three files deep in the vendored search.
-    """
-    try:
-        from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
-    except ImportError as error:
-        raise SearchEngineUnavailable(
-            "program optimization needs the search engine: "
-            "pip install 'openjiuwen[program-opt]' "
-            f"({error})"
-        ) from error
-    return PuctEngine
-
-
 def _seed_files(path: Path) -> dict[str, str]:
     """The starting program as `{relpath: text}`, from a file or a directory.
 
@@ -531,8 +509,6 @@ def _seed_files(path: Path) -> dict[str, str]:
     just to be optimized.
     """
     if path.is_dir():
-        from agentdescent.filetree import load_tree
-
         return load_tree(str(path))
     return {DEFAULT_ENTRYPOINT: path.read_text(encoding="utf-8")}
 

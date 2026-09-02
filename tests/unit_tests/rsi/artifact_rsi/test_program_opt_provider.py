@@ -616,7 +616,7 @@ def _no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 def _canned(monkeypatch: pytest.MonkeyPatch, script: list[dict[str, object]]) -> None:
     _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: _CannedEngine(script, **kwargs),
     )
 
@@ -711,7 +711,7 @@ def test_terminate_reaches_a_search_that_is_already_running(
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         _HaltingEngine,
     )
     provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
@@ -753,7 +753,7 @@ def test_a_crashing_search_becomes_a_failed_task(
 
     _no_probe(monkeypatch)
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: _Exploding(**kwargs),
     )
     provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
@@ -778,7 +778,7 @@ def test_a_scorecard_that_cannot_rank_is_refused_before_the_budget_is_spent(
     after it has spent the model calls."""
     built: list[object] = []
     monkeypatch.setattr(
-        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.PuctEngine",
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine",
         lambda **kwargs: built.append(kwargs) or _CannedEngine(_SCRIPT, **kwargs),
     )
     provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
@@ -846,63 +846,27 @@ def test_a_candidate_is_not_handed_the_hosts_environment(tmp_path: Path) -> None
     assert seen["home"] == str(tmp_path.resolve())
 
 
-def test_importing_the_provider_does_not_require_the_search_engines_wheel() -> None:
-    """`artifact_rsi/__init__` imports this provider eagerly, and it is
-    re-exported from `openjiuwen.rsi`. So a module-level `agentdescent` import
-    anywhere on the chain would make the whole RSI package unimportable wherever
-    that wheel is absent -- and agent-core does not declare it. That is why
-    `PuctEngine` is imported inside `_drive` rather than at the top.
-
-    Checked in a fresh interpreter: within this session `agentdescent` is
-    already in `sys.modules` from the tests above.
+def test_the_search_engine_is_a_declared_dependency() -> None:
+    """`agentdescent` moved from the `program-opt` extra into the main
+    dependencies: this project ships as an application, so the exact pin
+    burdens no third-party resolver, and the provider imports the engine at
+    module scope with no fallback path. The two tests this replaces guarded
+    the optional-extra story — import stays light without the wheel, a missing
+    wheel names the extra — and both premises died with the promotion.
     """
-    import subprocess
-    import sys
+    import tomllib
 
-    completed = subprocess.run(
-        [sys.executable, "-c",
-         "import sys; import openjiuwen.rsi;"
-         " from openjiuwen.rsi.artifact_rsi.program_opt import PuctProgramArtifactProvider;"
-         " print('agentdescent' in sys.modules)"],
-        capture_output=True, text=True, timeout=180,
-    )
+    root = Path(__file__).resolve()
+    for parent in root.parents:
+        if (parent / "pyproject.toml").is_file():
+            pyproject = tomllib.loads((parent / "pyproject.toml").read_text(encoding="utf-8"))
+            break
+    else:  # pragma: no cover - the repo always has one
+        pytest.fail("no pyproject.toml above this test")
 
-    assert completed.returncode == 0, completed.stderr[-2000:]
-    assert completed.stdout.strip().splitlines()[-1] == "False"
-
-
-def test_a_missing_search_engine_names_the_extra_that_installs_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`agentdescent` is an optional extra, so "not installed" is an ordinary
-    configuration fault. It deserves the sentence that fixes it, not a
-    `ModuleNotFoundError` raised three files deep in the vendored search."""
-    import sys
-
-    # Drop the cached modules that carry the import, then make the wheel
-    # unreachable -- `None` in `sys.modules` is what an absent package looks
-    # like to `import`.
-    for name in ("openjiuwen.rsi.artifact_rsi.program_opt.puct_engine",
-                 "openjiuwen.rsi.artifact_rsi.program_opt.search",
-                 "openjiuwen.rsi.artifact_rsi.program_opt.tree"):
-        monkeypatch.delitem(sys.modules, name, raising=False)
-    # Every submodule, not just the package: `from agentdescent.aggregator
-    # import X` is served straight out of `sys.modules` when that entry is
-    # cached, and never looks at the parent. Blocking only the parent passes
-    # this test alone and does nothing once an earlier test has imported one.
-    for name in [name for name in sys.modules if name.split(".")[0] == "agentdescent"]:
-        monkeypatch.delitem(sys.modules, name, raising=False)
-    monkeypatch.setitem(sys.modules, "agentdescent", None)
-
-    provider = PuctProgramArtifactProvider(sandbox_backend="bwrap")
-    request = _request(tmp_path)
-    _scorecard(Path(request.run_dir))
-
-    result = asyncio.run(provider.run(request))
-
-    assert result.status == "failed"
-    assert result.error_code == "SEARCHENGINEUNAVAILABLE"
-    assert "openjiuwen[program-opt]" in (result.error_message or "")
+    dependencies = pyproject["project"]["dependencies"]
+    pins = [entry for entry in dependencies if entry.startswith("agentdescent==")]
+    assert pins, "agentdescent must be a pinned main dependency"
 
 
 # -- programs made of more than one file ----------------------------------------

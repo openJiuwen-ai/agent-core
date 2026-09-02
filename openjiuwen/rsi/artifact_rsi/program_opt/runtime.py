@@ -42,10 +42,6 @@ class ModelConfigError(RuntimeError):
     """`model_config` could not be resolved into something callable."""
 
 
-class SearchEngineUnavailable(RuntimeError):
-    """The optional `program-opt` extra is not installed."""
-
-
 class SandboxUnavailable(RuntimeError):
     """No isolation backend, so no candidate may be executed."""
 
@@ -154,7 +150,6 @@ __all__ = [
     "DEFAULT_MAX_TOKENS_PER_CALL",
     "ModelConfigError",
     "SandboxUnavailable",
-    "SearchEngineUnavailable",
     "completion_factory_from_model",
     "require_sandbox",
 ]
