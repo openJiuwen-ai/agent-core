@@ -14,9 +14,10 @@ against the configured outputs directory instead of a ``.team/`` prefix.
 
 from __future__ import annotations
 
+import json
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.team_workspace.models import (
     ConflictStrategy,
@@ -70,6 +71,29 @@ class TeamWorkspaceRail(DeepAgentRail):
 
         set_team_workspace(self._ws.workspace_path)
 
+    @staticmethod
+    def _extract_file_path(tool_args: Any) -> str:
+        """Return the ``file_path`` argument from raw tool-call args.
+
+        ``ctx.inputs.tool_args`` is the LMT tool-call ``arguments`` field, which
+        arrives as a JSON string in the rail callback phase (the framework only
+        parses it to a dict inside ``_execute_single_tool_call``, and only writes
+        back when the JSON needed repair). Accept both shapes so the rail sees the
+        real path instead of an empty string that silently skips every policy.
+        """
+        if isinstance(tool_args, dict):
+            args = tool_args
+        elif isinstance(tool_args, str) and tool_args.strip():
+            try:
+                args = json.loads(tool_args)
+            except (json.JSONDecodeError, TypeError):
+                return ""
+            if not isinstance(args, dict):
+                return ""
+        else:
+            return ""
+        return str(args.get("file_path") or "")
+
     def _is_deliverable_path(self, path: str) -> bool:
         """Return whether ``path`` targets a file in the shared outputs dir.
 
@@ -95,8 +119,7 @@ class TeamWorkspaceRail(DeepAgentRail):
         policies.
         """
         tool_name = ctx.inputs.tool_name
-        tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
-        path = tool_args.get("file_path", "")
+        path = self._extract_file_path(ctx.inputs.tool_args)
         if not self._is_deliverable_path(path):
             return
 
@@ -131,8 +154,7 @@ class TeamWorkspaceRail(DeepAgentRail):
         if tool_name not in self.WRITE_TOOLS:
             return
 
-        tool_args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
-        path = tool_args.get("file_path", "")
+        path = self._extract_file_path(ctx.inputs.tool_args)
         if not self._is_deliverable_path(path):
             return
 
