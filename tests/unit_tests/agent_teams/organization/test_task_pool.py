@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskReviewedEvent,
     OrgTaskReviewRequestedEvent,
     OrgTopic,
 )
@@ -1472,6 +1473,241 @@ async def test_review_requested_wakes_reviewer_team(active_organization_runtime)
     prompt = turns[0]["inputs"]["query"]
     assert "child" in prompt
     assert "at most one focused repair task" in prompt
+
+
+@pytest.mark.asyncio
+async def test_rejected_review_wakes_parent_for_repair(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-rejected-repair",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-rejected-repair",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="parent",
+        title="Parent",
+        description="Parent task",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-rejected-repair",
+        ),
+    )
+    await manager.claim_task(task_id="parent", team_id="team-a", leader_id="leader-team-a")
+    await manager.create_task(
+        task_id="child",
+        parent_task_id="parent",
+        title="Child",
+        description="Child task",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-team-a",
+            organization_id="org-rejected-repair",
+            team_id="team-a",
+        ),
+    )
+    await manager.claim_task(task_id="child", team_id="team-b", leader_id="leader-team-b")
+    completed = await manager.complete_task(task_id="child", team_id="team-b")
+    assert completed.ok
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-rejected-repair")
+    handler = next(
+        handler for topic, handler in agents["team-a"].team_backend.messager.subscriptions if topic == topic_id
+    )
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskReviewedEvent(
+                organization_id="org-rejected-repair",
+                team_id="team-a",
+                task_id="child",
+                review_id="review-1",
+                review_status=OrgTaskReviewStatus.REJECTED.value,
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-a"
+    prompt = turns[0]["inputs"]["query"]
+    assert "REJECTED" in prompt
+    assert "org_create_task" in prompt
+    assert "repair" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_accepted_review_wakes_parent_when_all_children_accepted(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-accepted-ready",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-accepted-ready",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="parent",
+        title="Parent",
+        description="Parent task",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-accepted-ready",
+        ),
+    )
+    await manager.claim_task(task_id="parent", team_id="team-a", leader_id="leader-team-a")
+    await manager.create_task(
+        task_id="child",
+        parent_task_id="parent",
+        title="Child",
+        description="Child task",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-team-a",
+            organization_id="org-accepted-ready",
+            team_id="team-a",
+        ),
+    )
+    await manager.claim_task(task_id="child", team_id="team-b", leader_id="leader-team-b")
+    completed = await manager.complete_task(task_id="child", team_id="team-b")
+    assert completed.ok
+    accepted = await manager.review_task(
+        task_id="child",
+        reviewer_team_id="team-a",
+        review_status=OrgTaskReviewStatus.ACCEPTED,
+    )
+    assert accepted.ok
+    assert await manager.can_complete_parent_task(parent_task_id="parent", team_id="team-a")
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-accepted-ready")
+    handler = next(
+        handler for topic, handler in agents["team-a"].team_backend.messager.subscriptions if topic == topic_id
+    )
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskReviewedEvent(
+                organization_id="org-accepted-ready",
+                team_id="team-a",
+                task_id="child",
+                review_id="review-accepted",
+                review_status=OrgTaskReviewStatus.ACCEPTED.value,
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-a"
+    prompt = turns[0]["inputs"]["query"]
+    assert "parent" in prompt
+    assert "org_update_task(action='complete')" in prompt
+
+
+@pytest.mark.asyncio
+async def test_accepted_review_does_not_wake_when_siblings_pending(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-accepted-not-ready",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-accepted-not-ready",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="parent",
+        title="Parent",
+        description="Parent task",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-accepted-not-ready",
+        ),
+    )
+    await manager.claim_task(task_id="parent", team_id="team-a", leader_id="leader-team-a")
+    for child_id in ("child-a", "child-b"):
+        await manager.create_task(
+            task_id=child_id,
+            parent_task_id="parent",
+            title=child_id,
+            description="Child task",
+            required_capabilities=["analysis"],
+            created_by=OrgTaskCreator(
+                creator_type="team_leader",
+                creator_id="leader-team-a",
+                organization_id="org-accepted-not-ready",
+                team_id="team-a",
+            ),
+        )
+    await manager.claim_task(task_id="child-a", team_id="team-b", leader_id="leader-team-b")
+    completed = await manager.complete_task(task_id="child-a", team_id="team-b")
+    assert completed.ok
+    accepted = await manager.review_task(
+        task_id="child-a",
+        reviewer_team_id="team-a",
+        review_status=OrgTaskReviewStatus.ACCEPTED,
+    )
+    assert accepted.ok
+    assert not await manager.can_complete_parent_task(parent_task_id="parent", team_id="team-a")
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-accepted-not-ready")
+    handler = next(
+        handler for topic, handler in agents["team-a"].team_backend.messager.subscriptions if topic == topic_id
+    )
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskReviewedEvent(
+                organization_id="org-accepted-not-ready",
+                team_id="team-a",
+                task_id="child-a",
+                review_id="review-partial",
+                review_status=OrgTaskReviewStatus.ACCEPTED.value,
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns == []
 
 
 @pytest.mark.asyncio

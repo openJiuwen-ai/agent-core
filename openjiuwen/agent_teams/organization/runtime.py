@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCreatedEvent,
     OrgTaskCompletedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskReviewedEvent,
     OrgTaskReviewRequestedEvent,
     OrgTeamInvitedEvent,
     OrgTeamJoinedEvent,
@@ -25,7 +26,7 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
     ExpertTeamLauncher,
 )
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
-from openjiuwen.agent_teams.organization.schema import OrgTaskStatus, OrganizationSpec
+from openjiuwen.agent_teams.organization.schema import OrgTaskReviewStatus, OrgTaskStatus, OrganizationSpec
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -708,15 +709,48 @@ class OrganizationRuntimeManager:
                     completed_task_id=event.task_id,
                 )
                 return
-            if not isinstance(event, OrgTaskReviewRequestedEvent):
+            if isinstance(event, OrgTaskReviewRequestedEvent):
+                if event.reviewer_team_id != backend.team_name:
+                    return
+                self._schedule_parent_review_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    child_task_id=event.task_id,
+                    parent_task_id=event.parent_task_id,
+                    organization_id=manager.organization_id,
+                )
                 return
-            if event.reviewer_team_id != backend.team_name:
+            if not isinstance(event, OrgTaskReviewedEvent):
                 return
-            self._schedule_parent_review_turn(
+            if event.team_id != backend.team_name:
+                return
+            task = await manager.task_pool.get_task(event.task_id)
+            if task is None or not task.parent_task_id:
+                return
+            if event.review_status in {
+                OrgTaskReviewStatus.REJECTED.value,
+                OrgTaskReviewStatus.NEEDS_REVISION.value,
+            }:
+                self._schedule_parent_repair_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    child_task_id=event.task_id,
+                    parent_task_id=task.parent_task_id,
+                    organization_id=manager.organization_id,
+                    review_status=event.review_status,
+                )
+                return
+            if event.review_status != OrgTaskReviewStatus.ACCEPTED.value:
+                return
+            if not await manager.task_pool.can_complete_parent_task(
+                parent_task_id=task.parent_task_id,
+                team_id=backend.team_name,
+            ):
+                return
+            self._schedule_parent_ready_turn(
                 team_id=backend.team_name,
                 session_id=session_id,
-                child_task_id=event.task_id,
-                parent_task_id=event.parent_task_id,
+                parent_task_id=task.parent_task_id,
                 organization_id=manager.organization_id,
             )
 
@@ -923,6 +957,62 @@ class OrganizationRuntimeManager:
             "For the root task, put the user-facing final delivery in org_update_task output_context.description: "
             "project structure, startup instructions, API contract, executed test results, and known limitations. "
             "Also provide a concise output_abstract."
+        )
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
+
+    def _schedule_parent_repair_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        child_task_id: str,
+        parent_task_id: str,
+        organization_id: str,
+        review_status: str,
+    ) -> None:
+        review_key = (session_id, team_id, f"repair:{child_task_id}")
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
+        prompt = (
+            f"Child organization task {child_task_id} was reviewed as {review_status} "
+            f"in {organization_id}. Parent task {parent_task_id} cannot advance on that child. "
+            "Read the child result and review verdict/required_changes, then either create at most "
+            "one focused repair task with org_create_task (include defect report and acceptance "
+            "criteria; prefer capabilities that match the defect) or re-delegate with "
+            "org_delegate_task. Do not leave the parent waiting without a repair/re-delegation "
+            "decision, and do not silently reopen the rejected child task."
+        )
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
+
+    def _schedule_parent_ready_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        parent_task_id: str,
+        organization_id: str,
+    ) -> None:
+        review_key = (session_id, team_id, f"complete:{parent_task_id}")
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
+        prompt = (
+            f"All direct child tasks for parent organization task {parent_task_id} "
+            f"in {organization_id} are completed and accepted. Integrate the child outputs "
+            "and call org_update_task(action='complete') on the parent with the final "
+            "output_context and output_abstract. For a root task, put the user-facing delivery "
+            "in output_context.description."
         )
         self._schedule_leader_turn(
             team_id=team_id,
