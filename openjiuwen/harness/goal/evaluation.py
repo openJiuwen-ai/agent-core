@@ -65,7 +65,8 @@ def _parse_assessment_json(text: str) -> Optional[GoalAssessment]:
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
             try:
-                data = json.loads(text[start : end + 1])
+                stop = end + 1
+                data = json.loads(text[start:stop])
             except ValueError:
                 data = None
 
