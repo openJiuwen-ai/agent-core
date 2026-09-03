@@ -54,42 +54,24 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MAX_TOKENS,
-    GEN_AI_REQUEST_MESSAGE_COUNT,
-    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
-    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_STREAM,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_P,
-    GEN_AI_RESPONSE_FINISH_REASON,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_ID,
     GEN_AI_RESPONSE_MODEL,
-    GEN_AI_RESPONSE_TTFC,
-    GEN_AI_RESPONSE_TTFT_MS,
-    GEN_AI_SYSTEM,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
-    GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_TOOL_OUTPUT,
-    GEN_AI_TOOL_ID,
-    GEN_AI_TOOL_TYPE,
-    GEN_AI_TOOL_CALLS,
     GEN_AI_TOOL_DEFINITIONS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_TOTAL_TOKENS,
-    GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
-    GEN_AI_USAGE_REASONING_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-    GEN_AI_REASONING_DURATION_MS,
-    GEN_AI_REASONING_TIMING,
-    REASONING_TIMING_UNMEASURED,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
@@ -103,6 +85,9 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
+    OJ_GEN_AI_REASONING_DURATION_MS,
+    OJ_GEN_AI_REASONING_TIMING,
+    OJ_GEN_AI_REASONING_TIMING_UNMEASURED,
     OJ_GEN_AI_RESPONSE_LOGPROBS,
     OJ_GEN_AI_RESPONSE_PARSER_RESULT,
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
@@ -115,6 +100,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INFERENCE_ID,
     OJ_REQUEST_ID,
+    OJ_REQUEST_MESSAGE_COUNT,
+    OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX,
     OJ_REQUEST_NUMBER,
     OJ_REQUEST_PURPOSE,
     OJ_RUN_ID,
@@ -129,8 +116,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TOOL_AUTHORITATIVE,
+    OJ_TOOL_PROTOCOL,
     OJ_TOOL_RESOURCE_ID,
-    OJ_TOOL_TYPE,
     OJ_TRACE_ROOT,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
@@ -188,11 +175,6 @@ _PROVIDER_METADATA_ALLOWLIST = frozenset({
     "stop_sequence",
     "incomplete_details",
 })
-
-
-def _gen_ai_system_name(config: ObservabilityConfig | None = None) -> str:
-    """Return gen_ai.system value from config.service_name, default 'openjiuwen'."""
-    return config.service_name if config else "openjiuwen"
 
 
 def _coerce_message_content(content: Any) -> str:
@@ -514,8 +496,7 @@ class OtelCallbackHandler:
                 state.first_chunk_ns = now_ns
                 ttft_ms = (state.first_chunk_ns - state.start_ns) / 1_000_000.0
                 if state.span.is_recording():
-                    state.span.set_attribute(GEN_AI_RESPONSE_TTFT_MS, ttft_ms)
-                    state.span.set_attribute(GEN_AI_RESPONSE_TTFC, ttft_ms / 1000.0)
+                    state.span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, ttft_ms / 1000.0)
             state.last_chunk_ns = now_ns
             delta = _coerce_message_content(_message_content(chunk))
             reasoning_chunk = str(getattr(chunk, "reasoning_content", "") or "")
@@ -718,14 +699,11 @@ class OtelCallbackHandler:
 
             authoritative = self._matching_authoritative_tool_span(tool_name, tool_id)
             if authoritative is not None:
-                # The Ability rail owns start/end, but this lower-level event
-                # has the exact legacy input tuple and resource id. Enrich the
-                # same span so old fields retain their historical value shape.
                 if tool_id is not None:
-                    authoritative.set_attribute(GEN_AI_TOOL_ID, str(tool_id))
+                    authoritative.set_attribute(OJ_TOOL_RESOURCE_ID, str(tool_id))
                 raw_input = self._serialize_tool_inputs(inputs)
                 redacted_input = redact_prompt(raw_input, self._config)
-                authoritative.set_attribute(GEN_AI_TOOL_INPUT, redacted_input)
+                authoritative.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_input)
                 authoritative.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_input)
                 publish_span_snapshot(authoritative, "attributes")
                 return
@@ -735,7 +713,7 @@ class OtelCallbackHandler:
                 return
 
             span = self._tracer().start_span(
-                name=f"tool.{tool_name}",
+                name=f"execute_tool {tool_name}",
                 kind=SpanKind.INTERNAL,
                 context=parent_ctx,
             )
@@ -745,10 +723,9 @@ class OtelCallbackHandler:
             span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "tool")
             span.set_attribute(GEN_AI_TOOL_NAME, tool_name)
             if tool_id is not None:
-                span.set_attribute(GEN_AI_TOOL_ID, str(tool_id))
+                span.set_attribute(OJ_TOOL_RESOURCE_ID, str(tool_id))
             raw_input = self._serialize_tool_inputs(inputs)
             redacted_input = redact_prompt(raw_input, self._config)
-            span.set_attribute(GEN_AI_TOOL_INPUT, redacted_input)
             span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_input)
             span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_input)
             self._propagate_session_context(span)
@@ -767,7 +744,6 @@ class OtelCallbackHandler:
             if authoritative is not None:
                 serialized_output = self._serialize_tool_result(result)
                 redacted = redact_completion(serialized_output, self._config)
-                authoritative.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
                 authoritative.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
                 authoritative.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
                 publish_span_snapshot(authoritative, "output")
@@ -786,7 +762,6 @@ class OtelCallbackHandler:
 
             serialized_output = self._serialize_tool_result(result)
             redacted = redact_completion(serialized_output, self._config)
-            span.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
             span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
             span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
             # A tool that returns ``success=False`` never raises, so the status
@@ -830,7 +805,6 @@ class OtelCallbackHandler:
                     # nothing.
                     recorded_output = tool_result_for_exception(exc)
                     redacted = redact_completion(recorded_output, self._config)
-                    span.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
                     span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
                     span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
                     span.record_exception(exc)
@@ -939,21 +913,21 @@ class OtelCallbackHandler:
         # callback still runs inside the caller's LLM call scope.
         call_id = get_current_llm_call_id()
         span = self._tracer().start_span(
-            name="llm.call",
+            name=f"chat {model_name}" if model_name else "chat",
             kind=SpanKind.CLIENT,
             context=parent_ctx,
         )
         if call_id:
-            span.set_attribute(GEN_AI_REQUEST_ID, call_id)
+            span.set_attribute(OJ_REQUEST_ID, call_id)
         span.set_attribute(OJ_INFERENCE_ID, f"{span.context.span_id:016x}")
-        span.set_attribute(GEN_AI_SYSTEM, _gen_ai_system_name(self._config))
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "inference")
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
         span.set_attribute(GEN_AI_REQUEST_STREAM, is_streaming)
         provider_name = self._derive_provider_name(kwargs)
-        span.set_attribute(GEN_AI_PROVIDER_NAME, provider_name)
+        if provider_name:
+            span.set_attribute(GEN_AI_PROVIDER_NAME, provider_name)
         if model_name and model_name.lower() != "unknown":
             span.set_attribute(GEN_AI_REQUEST_MODEL, model_name)
 
@@ -970,7 +944,7 @@ class OtelCallbackHandler:
                     pass
 
         msg_count = len(messages)
-        span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
+        span.set_attribute(OJ_REQUEST_MESSAGE_COUNT, msg_count)
         self._record_input_message_provenance(span, messages)
         self._record_standard_structured_input(span, messages)
 
@@ -998,7 +972,7 @@ class OtelCallbackHandler:
         # closes its own agent span — a count stored there is lost before the
         # next iteration's first LLM call, which would then re-emit the full
         # prompt. Each agent keeps its own chain
-        # (gen_ai.request.prev_message_count.<agent_id>); OTel span
+        # (openjiuwen.request.previous_message_count.<agent_id>); OTel span
         # set_attribute is internally locked so no manual locking is needed.
         agent_span = get_current_agent_span()
         root_span = get_root_span()
@@ -1010,7 +984,7 @@ class OtelCallbackHandler:
 
         prev_count_raw: int = 0
         if root_span is not None and agent_id:
-            prev_attr = root_span.attributes.get(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}")
+            prev_attr = root_span.attributes.get(f"{OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX}{agent_id}")
             if prev_attr is not None:
                 try:
                     prev_count_raw = int(str(prev_attr))
@@ -1023,9 +997,9 @@ class OtelCallbackHandler:
         # of this member (across iterations). Also keep the per-span display
         # count on the current iteration span.
         if root_span is not None and root_span.is_recording() and agent_id:
-            root_span.set_attribute(f"{GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX}{agent_id}", msg_count)
+            root_span.set_attribute(f"{OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX}{agent_id}", msg_count)
         if agent_span is not None:
-            agent_span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, msg_count)
+            agent_span.set_attribute(OJ_REQUEST_MESSAGE_COUNT, msg_count)
 
         # ── langfuse.observation.input (delta, same logic) ───────────
         if is_first_call:
@@ -1123,10 +1097,8 @@ class OtelCallbackHandler:
 
             tool_calls = getattr(response, "tool_calls", None)
             tc_json = _serialize_tool_calls(tool_calls)
-            if tc_json:
-                state.span.set_attribute(GEN_AI_TOOL_CALLS, tc_json)
-                if not isinstance(raw_content, str):
-                    completion_text = ""
+            if tc_json and not isinstance(raw_content, str):
+                completion_text = ""
 
             self._maybe_record_response_attrs(state, response)
 
@@ -1176,13 +1148,11 @@ class OtelCallbackHandler:
             self._record_response_details(state, response)
             total_latency_ms = (time.monotonic_ns() - state.start_ns) / 1_000_000.0
             state.span.set_attribute(OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS, total_latency_ms)
-            redacted_compl = redact_completion(completion_text, self._config)
-
             # Build langfuse.observation.output
             choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
-            finish_reason = state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASON)
-            if finish_reason:
-                choice_obj["finish_reason"] = finish_reason
+            finish_reasons = state.span.attributes.get(GEN_AI_RESPONSE_FINISH_REASONS)
+            if finish_reasons:
+                choice_obj["finish_reason"] = finish_reasons[0]
             if completion_text:
                 choice_obj["message"]["content"] = completion_text
             if tc_json:
@@ -1269,13 +1239,13 @@ class OtelCallbackHandler:
                 # from the usage object — never compute it.
                 rt = getattr(usage, "reasoning_tokens", 0) or 0
                 if rt:
-                    reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_TOKENS, int(rt))
+                    reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, int(rt))
                 self._stamp_parent_member_name(reasoning_span)
                 reasoning_span.set_status(Status(StatusCode.OK))
                 if has_timing:
                     dur_ns = reasoning_last_ns - reasoning_first_ns  # type: ignore[operator]
                     reasoning_span.set_attribute(
-                        GEN_AI_REASONING_DURATION_MS,
+                        OJ_GEN_AI_REASONING_DURATION_MS,
                         dur_ns / 1_000_000.0,
                     )
                     reasoning_span.end(end_time=reasoning_start_wall_ns + dur_ns)  # type: ignore[operator]
@@ -1283,7 +1253,7 @@ class OtelCallbackHandler:
                     # No duration attribute: none was measured, and a zero is a
                     # measurement. The reason is recorded instead.
                     reasoning_span.set_attribute(
-                        GEN_AI_REASONING_TIMING, REASONING_TIMING_UNMEASURED
+                        OJ_GEN_AI_REASONING_TIMING, OJ_GEN_AI_REASONING_TIMING_UNMEASURED
                     )
                     reasoning_span.end(end_time=call_start_wall_ns)
             except Exception as exc:
@@ -1294,7 +1264,7 @@ class OtelCallbackHandler:
         """Keep inference identity after bounded-attribute FIFO eviction."""
         span = state.span
         if state.call_id:
-            span.set_attribute(GEN_AI_REQUEST_ID, state.call_id)
+            span.set_attribute(OJ_REQUEST_ID, state.call_id)
         span.set_attribute(OJ_INFERENCE_ID, f"{span.context.span_id:016x}")
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
@@ -1303,24 +1273,12 @@ class OtelCallbackHandler:
         span.set_attribute(GEN_AI_REQUEST_STREAM, state.is_streaming)
 
     def _record_usage_attrs(self, state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
-        """Record usage attributes (tokens, model_name) from usage_metadata.
+        """Record current OpenTelemetry GenAI token and model attributes.
 
-        Cached prompt tokens and reasoning tokens are *subsets* of the prompt
-        and completion counts the provider reports, not additional tokens. A
-        backend that treats every ``gen_ai.usage.*`` key as its own additive
-        category — Langfuse does, summing them per observation and per trace —
-        then counts the cached prefix twice, which on a long agent run (where
-        most of each prompt is a cache hit) inflates the trace total by more
-        than half.
-
-        For such a backend the subsets are carved out of their parent, so the
-        keys are disjoint and add up to the reported total: ``prompt`` becomes
-        the freshly processed prompt and ``completion`` the visible output.
-        The subtraction is skipped when a subset does not fit inside its parent
-        (a provider counting reasoning outside the completion), leaving the raw
-        numbers rather than inventing one. For plain OTLP consumers nothing
-        changes: ``gen_ai.usage.prompt_tokens`` keeps its semconv meaning of
-        all input tokens.
+        Input/output totals stay as reported by the provider. Cache and
+        reasoning counts are breakdowns included in those totals, as required
+        by the GenAI semantic conventions; no backend-specific carve-out is
+        applied to standard fields.
 
         Args:
             state: Span state for the LLM call being recorded.
@@ -1330,34 +1288,12 @@ class OtelCallbackHandler:
         """
         if usage is None:
             return
-        prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-        completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         cache_read_raw = getattr(usage, "cache_read_tokens", None)
         cache_read_tokens = (
             max(int(cache_read_raw), 0)
             if cache_read_raw is not None
             else None
         )
-        cache_tokens = cache_read_tokens or 0
-        reasoning_tokens = int(getattr(usage, "reasoning_tokens", 0) or 0)
-        if self._config is not None and self._config.backend == "langfuse":
-            if 0 < cache_tokens <= prompt_tokens:
-                prompt_tokens -= cache_tokens
-            if 0 < reasoning_tokens <= completion_tokens:
-                completion_tokens -= reasoning_tokens
-
-        for value, dst_attr in (
-            (prompt_tokens, GEN_AI_USAGE_PROMPT_TOKENS),
-            (completion_tokens, GEN_AI_USAGE_COMPLETION_TOKENS),
-            (int(getattr(usage, "total_tokens", 0) or 0), GEN_AI_USAGE_TOTAL_TOKENS),
-            (reasoning_tokens, GEN_AI_USAGE_REASONING_TOKENS),
-        ):
-            if value and not (skip_existing and state.span.attributes.get(dst_attr)):
-                state.span.set_attribute(dst_attr, value)
-
-        # Additive current-profile fields always carry the provider's raw
-        # totals. They deliberately do not inherit Langfuse's legacy carve-out
-        # because cache/reasoning values are breakdowns, not extra tokens.
         raw_usage = (
             (int(getattr(usage, "input_tokens", 0) or 0), GEN_AI_USAGE_INPUT_TOKENS),
             (int(getattr(usage, "output_tokens", 0) or 0), GEN_AI_USAGE_OUTPUT_TOKENS),
@@ -1378,10 +1314,10 @@ class OtelCallbackHandler:
             )
         cache_write_tokens = getattr(usage, "cache_write_tokens", None)
         if cache_write_tokens is not None and not (
-            skip_existing and GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS in state.span.attributes
+            skip_existing and GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS in state.span.attributes
         ):
             state.span.set_attribute(
-                GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+                GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
                 max(int(cache_write_tokens), 0),
             )
 
@@ -1420,7 +1356,6 @@ class OtelCallbackHandler:
             self._record_usage_attrs(state, usage, skip_existing=False)
         finish_reason = getattr(response, "finish_reason", None)
         if finish_reason and finish_reason != "null":
-            state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASON, str(finish_reason))
             state.span.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [str(finish_reason)])
 
     def _record_stream_event(
@@ -1752,10 +1687,6 @@ class OtelCallbackHandler:
         message_name = _get_field(message, "name")
         if message_name:
             structured["name"] = str(message_name)
-        if is_output:
-            finish_reason = _get_field(message, "finish_reason")
-            if finish_reason and finish_reason != "null":
-                structured["finish_reason"] = str(finish_reason)
         return structured
 
     def _structured_content_parts(
@@ -1958,16 +1889,11 @@ class OtelCallbackHandler:
         if str(span.attributes.get(GEN_AI_TOOL_NAME) or "") == tool_name:
             return span
 
-        tool_type = str(
-            span.attributes.get(OJ_TOOL_TYPE)
-            or span.attributes.get(GEN_AI_TOOL_TYPE)
-            or ""
-        )
-        if tool_type != "mcp" or tool_id is None:
+        tool_protocol = str(span.attributes.get(OJ_TOOL_PROTOCOL) or "")
+        if tool_protocol != "mcp" or tool_id is None:
             return None
         authoritative_id = str(
             span.attributes.get(OJ_TOOL_RESOURCE_ID)
-            or span.attributes.get(GEN_AI_TOOL_ID)
             or ""
         )
         if not authoritative_id or authoritative_id != str(tool_id):
@@ -1992,7 +1918,7 @@ class OtelCallbackHandler:
             cp = getattr(mc, "client_provider", None)
             if cp:
                 return str(cp.value if hasattr(cp, "value") else cp).lower()
-        return _gen_ai_system_name(self._config)
+        return ""
 
     @staticmethod
     def _propagate_session_context(

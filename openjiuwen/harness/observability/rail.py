@@ -70,10 +70,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_DESCRIPTION,
-    GEN_AI_TOOL_ID,
-    GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_TOOL_OUTPUT,
     GEN_AI_TOOL_TYPE,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
@@ -90,8 +87,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TOOL_AUTHORITATIVE,
+    OJ_TOOL_PROTOCOL,
     OJ_TOOL_RESOURCE_ID,
-    OJ_TOOL_TYPE,
     OJ_TRACE_ROOT,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
@@ -328,23 +325,14 @@ class ToolSpanScope:
         recorded_output = (
             tool_result_for_exception(exception) if exception is not None else output
         )
-        raw_output = serialize_ability_value(recorded_output)
-        raw_call_result = (
-            "null" if recorded_output is None else raw_output
-        )
-        redacted = (
-            redact_completion(raw_output, self._config)
-            if self._config
-            else raw_output
-        )
+        raw_call_result = "null" if recorded_output is None else serialize_ability_value(recorded_output)
         redacted_call_result = (
             redact_completion(raw_call_result, self._config)
             if self._config
             else raw_call_result
         )
-        span.set_attribute(GEN_AI_TOOL_OUTPUT, redacted)
         span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted_call_result)
-        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_call_result)
 
         if exception is not None:
             span.record_exception(exception)
@@ -867,7 +855,7 @@ class AgentObservabilityRail(DeepAgentRail):
 
             parent_ctx = set_span_in_context(parent, otel_context.get_current())
             span = self._tracer().start_span(
-                name=f"tool.{tool_name}",
+                name=f"execute_tool {tool_name}",
                 context=parent_ctx,
                 kind=SpanKind.INTERNAL,
             )
@@ -886,15 +874,17 @@ class AgentObservabilityRail(DeepAgentRail):
             card = self._resolve_ability_card(ctx, tool_name)
             resource_id = str(getattr(card, "id", "") or "")
             if resource_id:
-                span.set_attribute(GEN_AI_TOOL_ID, resource_id)
                 span.set_attribute(OJ_TOOL_RESOURCE_ID, resource_id)
             description = str(getattr(card, "description", "") or "")
             if description:
                 span.set_attribute(GEN_AI_TOOL_DESCRIPTION, description)
-            ability_type = self._ability_type(ctx, card, tool_name)
-            if ability_type:
-                span.set_attribute(GEN_AI_TOOL_TYPE, ability_type)
-                span.set_attribute(OJ_TOOL_TYPE, ability_type)
+            # AbilityManager executes tools inside the agent-controlled
+            # runtime, which is an OTel GenAI "extension".  Transport details
+            # such as MCP are separate OpenJiuwen correlation metadata.
+            span.set_attribute(GEN_AI_TOOL_TYPE, "extension")
+            ability_protocol = self._ability_protocol(ctx, card, tool_name)
+            if ability_protocol:
+                span.set_attribute(OJ_TOOL_PROTOCOL, ability_protocol)
 
             raw_arguments = serialize_ability_value(
                 getattr(inputs, "tool_args", None)
@@ -903,7 +893,6 @@ class AgentObservabilityRail(DeepAgentRail):
             redacted_arguments = (
                 redact_prompt(raw_arguments, config) if config else raw_arguments
             )
-            span.set_attribute(GEN_AI_TOOL_INPUT, redacted_arguments)
             span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_arguments)
             span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_arguments)
             self._copy_parent_correlation(parent, span)
@@ -946,7 +935,7 @@ class AgentObservabilityRail(DeepAgentRail):
             return None
 
     @staticmethod
-    def _ability_type(
+    def _ability_protocol(
         ctx: AgentCallbackContext,
         card: Any,
         tool_name: str,
@@ -961,14 +950,8 @@ class AgentObservabilityRail(DeepAgentRail):
                 # Fall through to the card class name heuristic below.
                 logger.debug("otel: mcp scope resolution failed for {} - {}", tool_name, exc)
         class_name = type(card).__name__.lower() if card is not None else ""
-        if "workflow" in class_name:
-            return "workflow"
-        if "agent" in class_name:
-            return "subagent"
         if "mcp" in class_name:
             return "mcp"
-        if "tool" in class_name:
-            return "tool"
         return None
 
     @staticmethod

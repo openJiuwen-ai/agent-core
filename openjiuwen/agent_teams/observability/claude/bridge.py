@@ -26,13 +26,14 @@ from openjiuwen.extensions.observability.semconv import (
     AT_SESSION_ID,
     AT_TEAM_ID,
     AT_TEAM_NAME,
+    GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_TOOL_ID,
-    GEN_AI_TOOL_INPUT,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_ID,
+    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_TOOL_OUTPUT,
     GEN_AI_USAGE_CACHE_TOKENS,
     GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_PROMPT_TOKENS,
@@ -676,7 +677,7 @@ class ClaudeSpanBridge:
         if tracer is None:
             return
         span = tracer.start_span(
-            name=f"tool.{tool_name}",
+            name=f"execute_tool {tool_name}",
             context=set_span_in_context(turn_span, otel_context.get_current()),
             kind=SpanKind.INTERNAL,
         )
@@ -684,10 +685,11 @@ class ClaudeSpanBridge:
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "tool")
         span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_input)
         span.set_attribute(GEN_AI_TOOL_NAME, tool_name)
-        span.set_attribute(GEN_AI_TOOL_INPUT, safe_input)
+        span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
+        span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, safe_input)
         tool_call_id = str(record.get("tool_call_id") or "")
         if tool_call_id:
-            span.set_attribute(GEN_AI_TOOL_ID, tool_call_id)
+            span.set_attribute(GEN_AI_TOOL_CALL_ID, tool_call_id)
             span.set_attribute("claude.tool.call_id", tool_call_id)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         span.set_attribute("agentteam.backend", "claude")
@@ -699,7 +701,7 @@ class ClaudeSpanBridge:
 
         if record.get("completed"):
             safe_output = redact_completion(_json_text(record.get("tool_result")), config)
-            span.set_attribute(GEN_AI_TOOL_OUTPUT, safe_output)
+            span.set_attribute(GEN_AI_TOOL_CALL_RESULT, safe_output)
             span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_output)
             span.set_status(Status(StatusCode.OK))
         else:
@@ -729,8 +731,8 @@ class ClaudeSpanBridge:
         span.set_attribute(
             GEN_AI_OUTPUT_MESSAGES,
             _json_text([{
-                "role": "reasoning",
-                "parts": [{"type": "text", "content": safe_reasoning}],
+                "role": "assistant",
+                "parts": [{"type": "reasoning", "content": safe_reasoning}],
             }]),
         )
         span.set_attribute(AT_MEMBER_NAME, self._member_name)

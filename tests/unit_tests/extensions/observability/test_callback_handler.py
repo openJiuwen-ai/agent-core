@@ -39,24 +39,18 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
-    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_STREAM,
-    GEN_AI_RESPONSE_FINISH_REASON,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_ID,
-    GEN_AI_RESPONSE_TTFC,
-    GEN_AI_RESPONSE_TTFT_MS,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_DEFINITIONS,
-    GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
-    GEN_AI_USAGE_CACHE_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_TYPE,
     OJ_EVENT_SEQUENCE,
@@ -108,6 +102,13 @@ class _LiveRecordConsumer:
         self.snapshots.append(record)
 
 
+def _llm_spans(exporter: InMemorySpanExporter) -> list[Any]:
+    return [
+        span for span in exporter.get_finished_spans()
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
+    ]
+
+
 def test_llm_span_omits_unknown_request_model(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = TracerProvider()
     tracer = provider.get_tracer("unknown-model-test")
@@ -154,9 +155,8 @@ def test_usage_does_not_fallback_to_legacy_cache_fields() -> None:
 
     handler._record_usage_attrs(state, usage)
 
-    assert GEN_AI_USAGE_CACHE_TOKENS not in span.attributes
     assert GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS not in span.attributes
-    assert GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS not in span.attributes
+    assert GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS not in span.attributes
     span.end()
     provider.shutdown()
 
@@ -229,9 +229,10 @@ async def test_runtime_initialize_wires_global_callback_framework() -> None:
         runtime.shutdown()
         reset_state()
 
-    names = [span.name for exporter in exporters for span in exporter.get_finished_spans()]
-    assert names.count("llm.call") == 2
-    assert names.count("tool.search") == 2
+    spans = [span for exporter in exporters for span in exporter.get_finished_spans()]
+    assert sum(span.attributes.get(GEN_AI_OPERATION_NAME) == "chat" for span in spans) == 2
+    assert sum(span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool" for span in spans) == 2
+    names = [span.name for span in spans]
     assert names.count("agent.root") == 2
 
 
@@ -448,9 +449,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
                 response="hello",
                 usage=usage,
             )
-        assert not [
-            span for span in exporter.get_finished_spans() if span.name == "llm.call"
-        ], "provider enrichment must not close a streaming span"
+        assert not _llm_spans(exporter), "provider enrichment must not close a streaming span"
 
         await framework.trigger(
             LLMCallEvents.LLM_STREAM_COMPLETED,
@@ -482,7 +481,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         runtime.shutdown()
         reset_state()
 
-    llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    llm_span = _llm_spans(exporter)[0]
     attrs = llm_span.attributes
     # The only system turn here is injected prompt-attachment history, which
     # belongs to the chat history rather than to the instructions given
@@ -517,21 +516,14 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         "arguments": {"q": "next"},
     }
 
-    # Existing Langfuse carve-out remains unchanged; additive totals stay raw.
-    assert attrs[GEN_AI_USAGE_PROMPT_TOKENS] == 8
-    assert attrs[GEN_AI_USAGE_COMPLETION_TOKENS] == 5
     assert attrs[GEN_AI_USAGE_INPUT_TOKENS] == 11
     assert attrs[GEN_AI_USAGE_OUTPUT_TOKENS] == 7
-    assert GEN_AI_USAGE_CACHE_TOKENS not in attrs
     assert attrs[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 3
-    assert attrs[GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS] == 2
+    assert attrs[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 2
     assert attrs[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 2
-    assert attrs[GEN_AI_RESPONSE_FINISH_REASON] == "stop"
     assert list(attrs[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
     assert attrs[GEN_AI_RESPONSE_ID] == "resp-1"
-    assert attrs[GEN_AI_RESPONSE_TTFC] == pytest.approx(
-        attrs[GEN_AI_RESPONSE_TTFT_MS] / 1000.0
-    )
+    assert attrs[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] >= 0
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS]) == [1, 2]
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS]) == [3, 4]
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROVIDER_METADATA]) == {
@@ -589,7 +581,7 @@ async def test_structured_input_and_output_share_redaction_decisions() -> None:
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     input_text = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]["parts"][0]["content"]
     output_text = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
     assert input_text.startswith("sha256:")
@@ -666,7 +658,7 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     provenance = json.loads(span.attributes[OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE])
     assert provenance == [
         {
@@ -768,7 +760,7 @@ async def test_prompt_attachment_provenance_survives_attribute_pressure_and_reda
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     # Every message is recorded now: the per-message expansion that used to
     # crowd this attribute out of the span's budget is gone.
     assert GEN_AI_INPUT_MESSAGES in span.attributes
@@ -858,8 +850,8 @@ async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> Non
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
-    assert span.attributes[GEN_AI_REQUEST_ID] == "semantic-pressure-call"
+    span = _llm_spans(exporter)[0]
+    assert span.attributes[OJ_REQUEST_ID] == "semantic-pressure-call"
     assert span.attributes[OJ_INFERENCE_ID] == f"{span.context.span_id:016x}"
     assert span.attributes[GEN_AI_OPERATION_NAME] == "chat"
     assert span.attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
@@ -934,7 +926,7 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     input_message = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]
     assert input_message["name"] == "named-reviewer"
     assert [part["type"] for part in input_message["parts"]] == [
@@ -960,7 +952,8 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
 
     output_message = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]
     assert output_message["name"] == "named-assistant"
-    assert output_message["finish_reason"] == "stop"
+    assert "finish_reason" not in output_message
+    assert span.attributes[GEN_AI_RESPONSE_FINISH_REASONS] == ("stop",)
     assert [part["type"] for part in output_message["parts"]] == [
         "output_text",
         "citation",
@@ -1002,7 +995,7 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
                 response="unified answer",
                 usage=UsageMetadata(input_tokens=1, output_tokens=1, total_tokens=2),
             )
-            assert not [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+            assert not _llm_spans(exporter)
             await framework.trigger(
                 LLMCallEvents.LLM_STREAM_COMPLETED,
                 result=AssistantMessage(content="unified answer", finish_reason="stop"),
@@ -1038,7 +1031,7 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
         runtime.shutdown()
         reset_state()
 
-    llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+    llm_spans = _llm_spans(exporter)
     assert len(llm_spans) == 2
     assert {
         json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
@@ -1085,9 +1078,7 @@ async def test_internal_probe_callback_flow_does_not_create_trajectory_span() ->
         runtime.shutdown()
         reset_state()
 
-    assert not [
-        span for span in exporter.get_finished_spans() if span.name == "llm.call"
-    ]
+    assert not _llm_spans(exporter)
 
 
 @pytest.mark.asyncio
@@ -1148,7 +1139,7 @@ async def test_tool_definitions_model_dump_before_string_fallback() -> None:
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
     assert definitions == [
         {
@@ -1215,7 +1206,7 @@ async def test_tool_definitions_failures_fallback_per_item_without_orphaning_spa
         runtime.shutdown()
         reset_state()
 
-    llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+    llm_spans = _llm_spans(exporter)
     assert len(llm_spans) == 1
     span = llm_spans[0]
     definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
@@ -1282,7 +1273,7 @@ async def test_real_model_stream_early_close_is_forced_unset_before_root(
         runtime.shutdown()
         reset_state()
 
-    llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    llm_span = _llm_spans(exporter)[0]
     root_span = next(span for span in exporter.get_finished_spans() if span.name == "agent.root")
     assert llm_span.status.status_code is StatusCode.UNSET
     assert llm_span.attributes[OJ_SPAN_FORCED_CLOSE] is True
@@ -1345,7 +1336,7 @@ async def test_stream_callbacks_publish_recoverable_live_snapshots(
         reset_state()
         provider.shutdown()
 
-    llm_snapshots = [record for record in consumer.snapshots if record.name == "llm.call"]
+    llm_snapshots = [record for record in consumer.snapshots if record.name == "chat test-model"]
     assert [record.update_kind for record in llm_snapshots] == [
         "started",
         "attributes",

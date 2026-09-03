@@ -27,7 +27,6 @@ from openjiuwen.core.common.exception.codes import StatusCode as ErrStatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.callback.events import AgentEvents, ContextEvents, LLMCallEvents, ToolCallEvents
-from openjiuwen.extensions.observability.backend_projection import project_for_backend
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.context_compression_handler import (
@@ -145,10 +144,7 @@ class ObservabilityRuntime:
                 )
                 provider.add_span_processor(tracker)
 
-                exporter = project_for_backend(
-                    span_exporter_override or build_span_exporter(config),
-                    config.backend,
-                )
+                exporter = span_exporter_override or build_span_exporter(config)
                 if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
                     provider.add_span_processor(SimpleSpanProcessor(exporter))
                 else:

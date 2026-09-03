@@ -23,8 +23,6 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_llm_messages,
     read_tool_call,
 )
-from openjiuwen.extensions.observability import semconv
-
 
 def _span(span_id: str, name: str = "tool.lookup") -> dict:
     return {
@@ -164,4 +162,4 @@ def test_extractor_handles_missing_tracer_with_canonical_empty_payload() -> None
 def test_offline_modules_do_not_import_legacy_step_model() -> None:
     source = inspect.getsource(TrajectoryBuilder) + inspect.getsource(TrajectoryExtractor)
     assert "trajectory.types" not in source
-    assert semconv.GEN_AI_PROMPT not in {MEMBER_ID, SESSION_ID}
+    assert "gen_ai.prompt" not in {MEMBER_ID, SESSION_ID}

@@ -10,6 +10,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import SpanKind, StatusCode, set_span_in_context
 
 from openjiuwen.extensions.observability.semconv import (
+    GEN_AI_OPERATION_NAME,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
     OJ_TRACE_FORCED_CLOSE,
@@ -133,6 +134,7 @@ def test_cascade_marks_abandoned_llm_unset_and_surfaces_forced_root() -> None:
     root = tracer.start_span("agent.root", kind=SpanKind.SERVER)
     agent = tracer.start_span("agent.solo.step", context=set_span_in_context(root))
     llm = tracer.start_span("llm.call", context=set_span_in_context(agent))
+    llm.set_attribute(GEN_AI_OPERATION_NAME, "chat")
     set_root_span(root, session_id="single-agent")
     set_current_agent_span(agent)
     set_active_span_tracker(tracker)

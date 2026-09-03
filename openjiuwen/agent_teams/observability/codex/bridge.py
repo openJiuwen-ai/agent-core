@@ -41,6 +41,14 @@ def _json_text(value: Any) -> str:
         return str(value)
 
 
+def _json_value(value: str) -> Any:
+    """Keep structured JSON structured after redaction, otherwise keep text."""
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return value
+
+
 def _structured_text(value: Any) -> str:
     """Keep SDK-rendered text intact and serialize only structured values."""
     return value if isinstance(value, str) else _json_text(value)
@@ -622,21 +630,18 @@ class CodexSpanBridge:
             GEN_AI_OPERATION_NAME,
             GEN_AI_OUTPUT_MESSAGES,
             GEN_AI_PROVIDER_NAME,
-            GEN_AI_REQUEST_MESSAGE_COUNT,
             GEN_AI_REQUEST_MODEL,
             GEN_AI_RESPONSE_MODEL,
-            GEN_AI_SYSTEM,
             GEN_AI_SYSTEM_INSTRUCTIONS,
-            GEN_AI_TOOL_CALLS,
-            GEN_AI_USAGE_CACHE_TOKENS,
-            GEN_AI_USAGE_COMPLETION_TOKENS,
-            GEN_AI_USAGE_PROMPT_TOKENS,
-            GEN_AI_USAGE_REASONING_TOKENS,
-            GEN_AI_USAGE_TOTAL_TOKENS,
+            GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+            GEN_AI_USAGE_INPUT_TOKENS,
+            GEN_AI_USAGE_OUTPUT_TOKENS,
+            GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
             LANGFUSE_OBSERVATION_INPUT,
             LANGFUSE_OBSERVATION_OUTPUT,
             LANGFUSE_OBSERVATION_TYPE,
             LANGFUSE_SESSION_ID,
+            OJ_REQUEST_MESSAGE_COUNT,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
 
@@ -647,18 +652,17 @@ class CodexSpanBridge:
         provider = str(started_payload.get("provider_name") or "openai")
         self._llm_index += 1
         span = get_tracer(_TRACER_NAME).start_span(
-            name="llm.call",
+            name=f"chat {model}",
             context=set_span_in_context(turn_span, otel_context.get_current()),
             kind=SpanKind.CLIENT,
             start_time=start_ns,
         )
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
-        span.set_attribute(GEN_AI_SYSTEM, "codex")
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute(GEN_AI_PROVIDER_NAME, provider)
         span.set_attribute(GEN_AI_REQUEST_MODEL, model)
         span.set_attribute(GEN_AI_RESPONSE_MODEL, model)
-        span.set_attribute(GEN_AI_REQUEST_MESSAGE_COUNT, len(messages))
+        span.set_attribute(OJ_REQUEST_MESSAGE_COUNT, len(messages))
         span.set_attribute("codex.observation.granularity", "rollout_inference")
         span.set_attribute("codex.model.call.observed", True)
         span.set_attribute("codex.model.call.paired", True)
@@ -713,18 +717,29 @@ class CodexSpanBridge:
         )
 
         safe_completion = redact_completion(completion, config)
+        output_parts: list[dict[str, Any]] = []
+        if safe_completion:
+            output_parts.append({"type": "text", "content": safe_completion})
+        for call in tool_calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            function = function if isinstance(function, dict) else {}
+            raw_arguments = call.get("arguments", function.get("arguments")) if isinstance(call, dict) else None
+            safe_arguments = redact_completion(_json_text(raw_arguments), config)
+            part: dict[str, Any] = {
+                "type": "tool_call",
+                "arguments": _json_value(safe_arguments),
+            }
+            call_id = call.get("id") if isinstance(call, dict) else None
+            call_name = call.get("name", function.get("name")) if isinstance(call, dict) else None
+            if call_id:
+                part["id"] = str(call_id)
+            if call_name:
+                part["name"] = str(call_name)
+            output_parts.append(part)
         span.set_attribute(
             GEN_AI_OUTPUT_MESSAGES,
-            _json_text([{
-                "role": "assistant",
-                "parts": [{"type": "text", "content": safe_completion}],
-            }]),
+            _json_text([{"role": "assistant", "parts": output_parts}]),
         )
-        if tool_calls:
-            span.set_attribute(
-                GEN_AI_TOOL_CALLS,
-                redact_completion(_json_text(tool_calls), config),
-            )
         output_message: dict[str, Any] = {
             "role": "assistant",
             "content": completion,
@@ -741,18 +756,16 @@ class CodexSpanBridge:
             redact_completion(_json_text(output_object), config),
         )
         if usage["input_tokens"]:
-            span.set_attribute(GEN_AI_USAGE_PROMPT_TOKENS, usage["input_tokens"])
+            span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, usage["input_tokens"])
         if usage["cached_input_tokens"]:
-            span.set_attribute(GEN_AI_USAGE_CACHE_TOKENS, usage["cached_input_tokens"])
+            span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, usage["cached_input_tokens"])
         if usage["output_tokens"]:
-            span.set_attribute(GEN_AI_USAGE_COMPLETION_TOKENS, usage["output_tokens"])
+            span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage["output_tokens"])
         if usage["reasoning_output_tokens"]:
             span.set_attribute(
-                GEN_AI_USAGE_REASONING_TOKENS,
+                GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
                 usage["reasoning_output_tokens"],
             )
-        if usage["total_tokens"]:
-            span.set_attribute(GEN_AI_USAGE_TOTAL_TOKENS, usage["total_tokens"])
 
         self._record_rollout_tools(
             tool_calls,
@@ -772,15 +785,10 @@ class CodexSpanBridge:
             reasoning_span.set_attribute(
                 GEN_AI_OUTPUT_MESSAGES,
                 _json_text([{
-                    "role": "reasoning",
-                    "parts": [{"type": "text", "content": safe_reasoning}],
+                    "role": "assistant",
+                    "parts": [{"type": "reasoning", "content": safe_reasoning}],
                 }]),
             )
-            if usage["reasoning_output_tokens"]:
-                reasoning_span.set_attribute(
-                    GEN_AI_USAGE_REASONING_TOKENS,
-                    usage["reasoning_output_tokens"],
-                )
             reasoning_span.set_status(Status(StatusCode.OK))
             reasoning_span.end(end_time=end_ns)
 
@@ -919,26 +927,25 @@ class CodexSpanBridge:
             GEN_AI_OPERATION_NAME,
             GEN_AI_PROVIDER_NAME,
             GEN_AI_REQUEST_MODEL,
-            GEN_AI_SYSTEM,
             LANGFUSE_OBSERVATION_TYPE,
             LANGFUSE_SESSION_ID,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
 
         self._llm_index += 1
+        model = str(attributes.get("model") or self._model or "unknown")
         span = get_tracer(_TRACER_NAME).start_span(
-            name="llm.call",
+            name=f"chat {model}",
             context=set_span_in_context(turn_span, otel_context.get_current()),
             kind=SpanKind.CLIENT,
             start_time=start_ns,
         )
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
-        span.set_attribute(GEN_AI_SYSTEM, "codex")
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute(GEN_AI_PROVIDER_NAME, "openai")
         span.set_attribute(
             GEN_AI_REQUEST_MODEL,
-            str(attributes.get("model") or self._model or "unknown"),
+            model,
         )
         span.set_attribute("codex.observation.granularity", "native_sampling_span")
         span.set_attribute("codex.llm.call.proxy", False)
@@ -1077,10 +1084,11 @@ class CodexSpanBridge:
             AT_MEMBER_NAME,
             AT_SESSION_ID,
             AT_TEAM_NAME,
-            GEN_AI_TOOL_ID,
-            GEN_AI_TOOL_INPUT,
+            GEN_AI_OPERATION_NAME,
+            GEN_AI_TOOL_CALL_ARGUMENTS,
+            GEN_AI_TOOL_CALL_ID,
             GEN_AI_TOOL_NAME,
-            GEN_AI_TOOL_OUTPUT,
+            GEN_AI_TOOL_CALL_RESULT,
             LANGFUSE_OBSERVATION_INPUT,
             LANGFUSE_OBSERVATION_OUTPUT,
             LANGFUSE_OBSERVATION_TYPE,
@@ -1104,7 +1112,7 @@ class CodexSpanBridge:
             start_ns = int(record.get("start_ns") or now_ns)
             end_ns = max(start_ns, int(record.get("end_ns") or now_ns))
             span = tracer.start_span(
-                name=f"tool.{display_name}",
+                name=f"execute_tool {display_name}",
                 context=set_span_in_context(turn_span, otel_context.get_current()),
                 kind=SpanKind.INTERNAL,
                 start_time=start_ns,
@@ -1113,10 +1121,11 @@ class CodexSpanBridge:
             span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "tool")
             span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_input)
             span.set_attribute(GEN_AI_TOOL_NAME, observation_tool_name)
+            span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
             if observation_tool_name != tool_name:
                 span.set_attribute("codex.tool.logical_name", tool_name)
-            span.set_attribute(GEN_AI_TOOL_INPUT, safe_input)
-            span.set_attribute(GEN_AI_TOOL_ID, call_id)
+            span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, safe_input)
+            span.set_attribute(GEN_AI_TOOL_CALL_ID, call_id)
             span.set_attribute("codex.item.type", item_type)
             parent_inference_call_id = str(
                 record.get("parent_inference_call_id") or "",
@@ -1155,7 +1164,7 @@ class CodexSpanBridge:
                     _structured_text(record.get("tool_result")),
                     config,
                 )
-                span.set_attribute(GEN_AI_TOOL_OUTPUT, safe_output)
+                span.set_attribute(GEN_AI_TOOL_CALL_RESULT, safe_output)
                 span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_output)
             if error is None and completed:
                 span.set_status(Status(StatusCode.OK))
@@ -1313,9 +1322,6 @@ class CodexSpanBridge:
             redact_prompt,
         )
         from openjiuwen.extensions.observability.semconv import (
-            GEN_AI_USAGE_COMPLETION_TOKENS,
-            GEN_AI_USAGE_PROMPT_TOKENS,
-            GEN_AI_USAGE_TOTAL_TOKENS,
             LANGFUSE_OBSERVATION_INPUT,
             LANGFUSE_OBSERVATION_OUTPUT,
             LANGFUSE_OBSERVATION_TYPE,
@@ -1336,19 +1342,6 @@ class CodexSpanBridge:
         summary.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, output)
         if self._response_ids:
             summary.set_attribute("codex.response.ids", self._response_ids)
-        if self._usage["total_tokens"]:
-            summary.set_attribute(
-                GEN_AI_USAGE_PROMPT_TOKENS,
-                self._usage["input_tokens"],
-            )
-            summary.set_attribute(
-                GEN_AI_USAGE_COMPLETION_TOKENS,
-                self._usage["output_tokens"],
-            )
-            summary.set_attribute(
-                GEN_AI_USAGE_TOTAL_TOKENS,
-                self._usage["total_tokens"],
-            )
         reasoning = redact_completion("".join(self._reasoning), config)
         if reasoning:
             reasoning_span = tracer.start_span(

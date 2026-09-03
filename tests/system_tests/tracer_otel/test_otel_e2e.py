@@ -23,9 +23,9 @@ import pytest
 
 from opentelemetry import trace
 
-from tests.conftest_otel import _EXPORTER, _OTEL_TRACER, jaeger_is_available
-from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
-from openjiuwen.core.session.workflow import Session, create_workflow_session
+from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
+from openjiuwen.core.session.tracer.tracer import TracerHandlerRegistry
+from openjiuwen.core.session.workflow import create_workflow_session
 from openjiuwen.core.workflow import (
     Workflow, Start, End, SubWorkflowComponent, BranchComponent,
     LLMComponent, LLMCompConfig,
@@ -34,14 +34,10 @@ from openjiuwen.core.workflow import (
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.workflow.components import Session as WFSession
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
-from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler, OtelWorkflowHandler
 from openjiuwen.extensions.tracer_otel.semconv import (
-    GEN_AI_SYSTEM,
-    GEN_AI_SYSTEM_VALUE,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_REQUEST_MODEL,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_NAME,
     OJ_WORKFLOW_COMPONENT_TYPE,
@@ -132,9 +128,6 @@ class TestE2ESimpleWorkflow:
         finished = _EXPORTER.get_finished_spans()
         # workflow root + start + add_one + end
         assert len(finished) >= 4
-
-        for s in finished:
-            assert s.attributes.get(GEN_AI_SYSTEM) == GEN_AI_SYSTEM_VALUE
 
         # Component spans should include real node class names
         comp_spans = [s for s in finished if s.name.startswith("component.")]
@@ -410,12 +403,10 @@ class TestE2EWorkflowWithSubWorkflowAndLLM:
 
         # Verify all spans carry gen_ai.system attribute
         # for s in finished:
-        #     assert s.attributes.get(GEN_AI_SYSTEM) == GEN_AI_SYSTEM_VALUE
 
         # Verify LLM component span exists (identified by name containing "sub_llm")
         # llm_spans = [s for s in finished if "sub_llm" in s.name]
         # assert len(llm_spans) >= 1
-        # assert llm_spans[0].attributes.get(GEN_AI_SYSTEM) == GEN_AI_SYSTEM_VALUE
 
         # Verify workflow root span exists
         # wf_root_spans = [s for s in finished
@@ -455,10 +446,11 @@ class TestE2EWorkflowWithSubWorkflowAndLLM:
 
         finished = _EXPORTER.get_finished_spans()
 
-        # Verify LLM span exists
-        llm_spans = [s for s in finished if "sub_llm" in s.name]
+        # Verify LLM span exists. LLM spans are named after the GenAI operation
+        # ("chat <model>"), so identify them by the component id attribute.
+        llm_spans = [s for s in finished if s.attributes.get(OJ_WORKFLOW_COMPONENT_ID) == "sub_llm"]
         assert len(llm_spans) >= 1
-        assert llm_spans[0].attributes.get(GEN_AI_SYSTEM) == GEN_AI_SYSTEM_VALUE
+        assert llm_spans[0].attributes.get(GEN_AI_OPERATION_NAME) == "chat"
 
 
 # ---------------------------------------------------------------------------
@@ -610,4 +602,3 @@ class TestE2EAgentTeamTraceId:
         # Access internal tracer to verify trace_id propagated
         inner = session._inner
         assert inner._tracer._trace_id == "team-trace-abc"
-

@@ -390,8 +390,8 @@ async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
         shutdown_observability,
     )
     from openjiuwen.extensions.observability.semconv import (
-        GEN_AI_TOOL_INPUT,
-        GEN_AI_TOOL_OUTPUT,
+        GEN_AI_TOOL_CALL_ARGUMENTS,
+        GEN_AI_TOOL_CALL_RESULT,
         LANGFUSE_OBSERVATION_INPUT,
         LANGFUSE_OBSERVATION_OUTPUT,
     )
@@ -459,7 +459,11 @@ async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
 
         spans = list(exporter.get_finished_spans())
         turn_span = next(span for span in spans if span.name == "agent.developer.codex_turn.1")
-        tool_span = next(span for span in spans if span.name == "tool.claim_task")
+        tool_span = next(
+            span for span in spans
+            if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+            and span.attributes.get("gen_ai.tool.name") == "openjiuwen-team.claim_task"
+        )
 
         assert turn_span.parent is not None
         assert turn_span.parent.span_id == team_span.context.span_id
@@ -467,8 +471,8 @@ async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
         assert tool_span.parent.span_id == turn_span.context.span_id
         assert turn_span.attributes[LANGFUSE_OBSERVATION_INPUT] == "claim task-1"
         assert turn_span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "task claimed"
-        assert '"task_id": "task-1"' in tool_span.attributes[GEN_AI_TOOL_INPUT]
-        assert '"status": "claimed"' in tool_span.attributes[GEN_AI_TOOL_OUTPUT]
+        assert '"task_id": "task-1"' in tool_span.attributes[GEN_AI_TOOL_CALL_ARGUMENTS]
+        assert '"status": "claimed"' in tool_span.attributes[GEN_AI_TOOL_CALL_RESULT]
     finally:
         shutdown_observability()
 
@@ -482,12 +486,7 @@ async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
         init_observability,
         shutdown_observability,
     )
-    from openjiuwen.extensions.observability.semconv import (
-        GEN_AI_USAGE_COMPLETION_TOKENS,
-        GEN_AI_USAGE_PROMPT_TOKENS,
-        GEN_AI_USAGE_TOTAL_TOKENS,
-        LANGFUSE_OBSERVATION_OUTPUT,
-    )
+    from openjiuwen.extensions.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
 
     exporter = exporter_module.InMemorySpanExporter()
     init_observability(
@@ -568,20 +567,25 @@ async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
         _ = [chunk async for chunk in runtime._drive({"query": "inspect task-1"})]
 
         spans = list(exporter.get_finished_spans())
-        assert not [span for span in spans if span.name == "llm.call"]
+        assert not [
+            span for span in spans
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        ]
         summary = next(span for span in spans if span.name == "codex.sdk.summary")
         assert summary.attributes["codex.response.ids"] == (
             "response-1",
             "response-2",
         )
-        assert summary.attributes[GEN_AI_USAGE_PROMPT_TOKENS] == 130
-        assert summary.attributes[GEN_AI_USAGE_COMPLETION_TOKENS] == 15
-        assert summary.attributes[GEN_AI_USAGE_TOTAL_TOKENS] == 145
+        assert not any(key.startswith("gen_ai.usage.") for key in summary.attributes)
         assert "task is pending" in summary.attributes[LANGFUSE_OBSERVATION_OUTPUT]
         reasoning_span = next(span for span in spans if span.name == "llm.reasoning")
         assert reasoning_span.parent.span_id == summary.context.span_id
         assert (
-            next(span for span in spans if span.name == "tool.view_task").parent.span_id
+            next(
+                span for span in spans
+                if span.attributes.get("gen_ai.operation.name") == "execute_tool"
+                and span.attributes.get("gen_ai.tool.name") == "openjiuwen-team.view_task"
+            ).parent.span_id
             == next(span for span in spans if span.name == "agent.developer.codex_turn.1").context.span_id
         )
     finally:
@@ -663,7 +667,10 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing():
         bridge.finish_turn(status="completed")
 
         spans = list(exporter.get_finished_spans())
-        llm_span = next(span for span in spans if span.name == "llm.call")
+        llm_span = next(
+            span for span in spans
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        )
         assert llm_span.start_time == end_ns - 25_000_000
         assert llm_span.end_time == end_ns
         assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
@@ -738,7 +745,10 @@ async def test_codex_native_mode_preserves_exact_unpaired_span():
         )
         bridge.finish_turn(status="completed")
 
-        llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+        llm_span = next(
+            span for span in exporter.get_finished_spans()
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        )
         assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
         assert llm_span.attributes["codex.model.call.observed"] is True
         assert llm_span.attributes["codex.model.call.paired"] is False
@@ -796,7 +806,10 @@ async def test_codex_turn_does_not_infer_llm_call_when_native_export_is_missing(
         bridge.finish_turn(status="failed", error="transport closed")
 
         spans = list(exporter.get_finished_spans())
-        assert not [span for span in spans if span.name == "llm.call"]
+        assert not [
+            span for span in spans
+            if span.attributes.get("gen_ai.operation.name") == "chat"
+        ]
         turn_span = next(span for span in spans if span.name == "agent.developer.codex_turn.1")
         assert turn_span.attributes["codex.native.model_span_count"] == 0
     finally:

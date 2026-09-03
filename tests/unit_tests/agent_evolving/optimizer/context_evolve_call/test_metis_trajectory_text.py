@@ -7,6 +7,7 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.extensions.observability import semconv
+from openjiuwen.agent_evolving.trajectory import legacy_semconv
 
 
 def _trajectory() -> Trajectory:
@@ -36,7 +37,7 @@ def _trajectory() -> Trajectory:
                                                     ],
                                                 }
                                             ],
-                                            semconv.GEN_AI_TOOL_CALLS: [
+                                            legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS: [
                                                 {"id": "call-1", "name": "lookup", "arguments": {"q": "x"}}
                                             ],
                                         }
@@ -52,8 +53,8 @@ def _trajectory() -> Trajectory:
                                     "attributes": attributes_from_map(
                                         {
                                             semconv.GEN_AI_TOOL_NAME: "lookup",
-                                            semconv.GEN_AI_TOOL_INPUT: {"q": "x"},
-                                            semconv.GEN_AI_TOOL_OUTPUT: {"answer": 1},
+                                            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"q": "x"},
+                                            semconv.GEN_AI_TOOL_CALL_RESULT: {"answer": 1},
                                         }
                                     ),
                                     "status": {"code": "STATUS_CODE_ERROR", "message": "temporary failure"},

@@ -14,7 +14,6 @@ from opentelemetry.trace import Span, Tracer
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.schema.context_state import ContextCompressionState
 from openjiuwen.extensions.observability.semconv import (
-    GEN_AI_REQUEST_ID,
     OJ_CONTEXT_OPERATION_ID,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_INFERENCE_ID,
@@ -51,7 +50,7 @@ class ContextCompressionObservabilityBridge:
         span.set_attribute(OJ_REQUEST_PURPOSE, "compaction")
         span.set_attribute(OJ_CONTEXT_OPERATION_ID, operation_id)
         request_ref = {
-            "request_id": str(span.attributes.get(GEN_AI_REQUEST_ID) or ""),
+            "request_id": str(span.attributes.get(OJ_REQUEST_ID) or ""),
             "inference_id": str(span.attributes.get(OJ_INFERENCE_ID) or ""),
         }
         with self._model_requests_lock:

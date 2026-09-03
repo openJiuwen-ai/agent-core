@@ -19,6 +19,7 @@ from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
+    GEN_AI_OPERATION_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
@@ -191,7 +192,11 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
         runtime.shutdown()
         reset_state()
 
-    llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    llm_span = next(
+        span
+        for span in exporter.get_finished_spans()
+        if _attrs(span).get(GEN_AI_OPERATION_NAME) == "chat"
+    )
     instructions = json.loads(_attrs(llm_span)[GEN_AI_SYSTEM_INSTRUCTIONS])
     history = json.loads(_attrs(llm_span)[GEN_AI_INPUT_MESSAGES])
     assert len(instructions) + len(history) == 111

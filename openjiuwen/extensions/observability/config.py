@@ -28,16 +28,14 @@ class ObservabilityConfig(BaseModel):
         max_attributes: Maximum number of attributes per span. Default 200.
             Passed to OTel SDK SpanLimits. OTel's BoundedAttributes uses FIFO
             eviction (oldest first), so attributes written before the prompt
-            loop (gen_ai.system / operation.name / provider.name / request.model)
+            loop (operation.name / provider.name / request.model)
             would be evicted once the prompt attributes fill the budget.
             200 is the span-wide cap including a ~30-attribute reservation for
             non-prompt attrs (top system + request params + team context +
             output-stage completion/usage/finish_reason); only the trailing
             N prompt messages are written so the top attrs survive.
-        backend: Backend type for attribute deduplication. Default "langfuse".
-            When "langfuse", standard gen_ai.prompt/completion attributes are
-            not written (only langfuse.* versions), avoiding duplicate attributes.
-            When other value, both standard and langfuse versions are written.
+        backend: Export backend. It does not alter standard ``gen_ai.*``
+            attributes; every backend receives the same canonical shape.
         export_timeout_ms: Span exporter shutdown timeout.
         traces_dir: Root directory for the ``file`` exporter. One
             append-only ``traces-<YYYY-MM-DD>.jsonl`` file per calendar

@@ -19,7 +19,6 @@ from openjiuwen.core.context_engine.schema.context_state import (
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
-    GEN_AI_REQUEST_ID,
     OJ_AGENT_MODE,
     OJ_CONTEXT_OPERATION_ID,
     OJ_EXECUTION_SUBJECT_ID,
@@ -113,7 +112,7 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
             with tracer.start_as_current_span(
                 "llm.call",
                 attributes={
-                    GEN_AI_REQUEST_ID: "compaction-request-1",
+                    OJ_REQUEST_ID: "compaction-request-1",
                     OJ_INFERENCE_ID: "compaction-inference-1",
                 },
             ) as llm_span:

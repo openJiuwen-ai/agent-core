@@ -14,21 +14,15 @@ Keeping all attribute keys here avoids typo drift between handlers.
 from __future__ import annotations
 
 
-# ---------------------------------------------------------------------------
-# GenAI standard attributes (aligned with observability/semconv.py)
-# ---------------------------------------------------------------------------
-
-GEN_AI_SYSTEM = "gen_ai.system"
-GEN_AI_SYSTEM_VALUE = "openjiuwen"
-GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
-GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
-GEN_AI_PROMPT = "gen_ai.prompt"
-GEN_AI_COMPLETION = "gen_ai.completion"
-
-GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
-GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
-
-GEN_AI_TOOL_NAME = "gen_ai.tool.name"
+# GenAI keys have one authoritative definition for every instrumentation path.
+from openjiuwen.extensions.observability.semconv import (  # noqa: F401
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_REQUEST_MODEL,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_NAME,
+)
 
 
 # ---------------------------------------------------------------------------

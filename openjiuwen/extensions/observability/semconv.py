@@ -1,95 +1,22 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Semantic convention constants for OpenTelemetry attributes.
+"""OpenJiuwen semantic-convention facade for observability attributes.
 
-Standard LLM attributes follow OpenLLMetry / GenAI semantic conventions
-(`gen_ai.*`). Team collaboration attributes use the project-specific
-`agentteam.*` namespace; DeepAgent task-loop attributes use `deepagent.*`.
+Standard GenAI attributes are re-exported from the replaceable generated
+``gen_ai_semconv`` module. Team collaboration attributes use the project-specific
+``agentteam.*`` namespace; DeepAgent task-loop attributes use ``deepagent.*``.
 
 Langfuse-specific attributes (`langfuse.*`) are used for fields that
 Langfuse's OTel ingestion processor maps to its observation model
 (input, output, session_id, trace name, etc.).
 
-Keeping all attribute keys here avoids typo drift between handlers.
+Keeping project-owned attribute keys here avoids typo drift between handlers.
 """
 
 from __future__ import annotations
 
-
-# ---------------------------------------------------------------------------
-# OpenLLMetry / GenAI standard attributes
-# ---------------------------------------------------------------------------
-
-GEN_AI_SYSTEM = "gen_ai.system"
-GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
-GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
-GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
-GEN_AI_AGENT_ID = "gen_ai.agent.id"
-GEN_AI_AGENT_NAME = "gen_ai.agent.name"
-GEN_AI_AGENT_VERSION = "gen_ai.agent.version"
-GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
-GEN_AI_SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
-GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
-GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
-
-# Id of the LLM request this span belongs to, stamped so a trace can be read
-# back against the framework's own correlation key when a span looks wrong.
-GEN_AI_REQUEST_ID = "gen_ai.request.id"
-
-GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
-GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
-GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
-GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
-GEN_AI_REQUEST_MESSAGE_COUNT = "gen_ai.request.message_count"
-GEN_AI_REQUEST_STREAM = "gen_ai.request.stream"
-
-# Per-member prev-message-count stored on the team span to make prompt
-# delta tracking survive across iterations (each iteration opens/closes its
-# own agent span, so a count stored there is lost). Keyed by agent_id
-# (``{team}_{member}``), i.e. ``gen_ai.request.prev_message_count.<agent_id>``.
-# Distinct prefix from the standard ``gen_ai.request.message_count`` to avoid
-# collision with the per-span display count.
-GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX = "gen_ai.request.prev_message_count."
-
-GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
-GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
-GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
-GEN_AI_USAGE_CACHE_TOKENS = "gen_ai.usage.cache_tokens"
-GEN_AI_USAGE_REASONING_TOKENS = "gen_ai.usage.reasoning_tokens"
-GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
-GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
-GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
-GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS = "gen_ai.usage.cache_creation.input_tokens"
-GEN_AI_USAGE_REASONING_OUTPUT_TOKENS = "gen_ai.usage.reasoning.output_tokens"
-GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reason"
-GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
-GEN_AI_RESPONSE_ID = "gen_ai.response.id"
-GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
-GEN_AI_RESPONSE_TTFT_MS = "gen_ai.response.time_to_first_token_ms"
-GEN_AI_RESPONSE_TTFC = "gen_ai.response.time_to_first_chunk"
-GEN_AI_REASONING_DURATION_MS = "gen_ai.reasoning.duration_ms"
-# Why a reasoning span carries no duration. Reasoning time is measured from the
-# stream, so a non-streaming call has none to report — the attribute says so
-# rather than leaving a bare zero-length span to read as instant thinking.
-GEN_AI_REASONING_TIMING = "gen_ai.reasoning.timing"
-REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"
-
-# Standard OpenLLMetry / GenAI keys
-GEN_AI_PROMPT = "gen_ai.prompt"
-GEN_AI_COMPLETION = "gen_ai.completion"
-GEN_AI_TOOL_DEFINITIONS = "gen_ai.tool.definitions"
-
-GEN_AI_TOOL_NAME = "gen_ai.tool.name"
-GEN_AI_TOOL_INPUT = "gen_ai.tool.input"
-GEN_AI_TOOL_OUTPUT = "gen_ai.tool.output"
-GEN_AI_TOOL_ID = "gen_ai.tool.id"
-GEN_AI_TOOL_CALLS = "gen_ai.tool_calls"
-GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
-GEN_AI_TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments"
-GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
-GEN_AI_TOOL_TYPE = "gen_ai.tool.type"
-GEN_AI_TOOL_DESCRIPTION = "gen_ai.tool.description"
+from openjiuwen.extensions.observability.gen_ai_semconv import *  # noqa: F403
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +31,8 @@ OJ_SPAN_FORCED_CLOSE = "openjiuwen.span.forced_close"
 OJ_SPAN_FORCED_CLOSE_REASON = "openjiuwen.span.forced_close.reason"
 OJ_SESSION_ID = "openjiuwen.session.id"
 OJ_REQUEST_ID = "openjiuwen.request.id"
+OJ_REQUEST_MESSAGE_COUNT = "openjiuwen.request.message_count"
+OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX = "openjiuwen.request.previous_message_count."
 OJ_RUN_ID = "openjiuwen.run.id"
 OJ_TURN_ID = "openjiuwen.turn.id"
 OJ_TURN_NUMBER = "openjiuwen.turn.number"
@@ -146,6 +75,9 @@ OJ_GEN_AI_RESPONSE_PARSER_RESULT = "openjiuwen.gen_ai.response.parser_result"
 OJ_GEN_AI_RESPONSE_PROVIDER_METADATA = "openjiuwen.gen_ai.response.provider_metadata"
 OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT = "openjiuwen.gen_ai.response.provider_content"
 OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE = "openjiuwen.gen_ai.input.message_provenance"
+OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
+OJ_GEN_AI_REASONING_TIMING = "openjiuwen.gen_ai.reasoning.timing"
+OJ_GEN_AI_REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"
 OJ_TEAM_ID = "openjiuwen.team.id"
@@ -158,7 +90,7 @@ OJ_STREAM_TOOL_CALL_NAME = "openjiuwen.stream.tool_call.name"
 OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA = "openjiuwen.stream.tool_call.arguments_delta"
 
 OJ_TOOL_RESOURCE_ID = "openjiuwen.tool.resource_id"
-OJ_TOOL_TYPE = "openjiuwen.tool.type"
+OJ_TOOL_PROTOCOL = "openjiuwen.tool.protocol"
 OJ_TOOL_AUTHORITATIVE = "openjiuwen.tool.authoritative"
 
 ERROR_TYPE = "error.type"

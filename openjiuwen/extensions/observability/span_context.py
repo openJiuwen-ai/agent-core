@@ -19,6 +19,7 @@ from opentelemetry.trace import Span
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.call_scope import get_current_llm_call_id
 from openjiuwen.extensions.observability.semconv import (
+    GEN_AI_OPERATION_NAME,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
     OJ_TRACE_FORCED_CLOSE,
@@ -43,17 +44,25 @@ def _is_root_span(span: Span, root_span: Span | None) -> bool:
     return False
 
 
+def _is_llm_call(span: Span) -> bool:
+    return span.attributes.get(GEN_AI_OPERATION_NAME) in {
+        "chat",
+        "generate_content",
+        "text_completion",
+    }
+
+
 def _is_open_llm_call_of(span: Span, parent_id: int) -> bool:
-    """Report whether *span* is a still-open ``llm.call`` span under *parent_id*.
+    """Report whether *span* is a still-open GenAI inference under *parent_id*.
 
     Args:
         span: Candidate span from the tracker's active set.
         parent_id: Span id of the parent the caller is resolving against.
 
     Returns:
-        True when the span is a recording ``llm.call`` whose parent matches.
+        True when the span is a recording inference whose parent matches.
     """
-    if span.name != "llm.call" or not span.is_recording():
+    if not _is_llm_call(span) or not span.is_recording():
         return False
     return span.parent is not None and span.parent.span_id == parent_id
 
@@ -179,7 +188,7 @@ class ActiveSpanTracker(SpanProcessor):
         with self._lock:
             spans = list(self._spans_by_trace.get(trace_id, set()))
         for span in spans:
-            if span.name != "llm.call" or not span.is_recording():
+            if not _is_llm_call(span) or not span.is_recording():
                 continue
             parent = span.parent
             if parent is None or parent.span_id != parent_span_id:

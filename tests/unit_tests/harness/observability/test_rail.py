@@ -39,10 +39,8 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_CALL_RESULT,
-    GEN_AI_TOOL_ID,
-    GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_TOOL_OUTPUT,
+    GEN_AI_TOOL_TYPE,
     LANGFUSE_SESSION_ID,
     AT_SESSION_ID,
     LANGFUSE_OBSERVATION_INPUT,
@@ -63,8 +61,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TOOL_AUTHORITATIVE,
+    OJ_TOOL_PROTOCOL,
     OJ_TOOL_RESOURCE_ID,
-    OJ_TOOL_TYPE,
     OJ_TRACE_ROOT,
     OJ_TRACE_FORCED_CLOSE,
     OJ_TRACE_SCHEMA_VERSION,
@@ -133,6 +131,19 @@ def _iteration_ctx(agent, *, iteration: int = 1, query: str = "do it"):
 
 
 def _finished(exporter: InMemorySpanExporter, name: str):
+    if name == "llm.call":
+        return [
+            span for span in exporter.get_finished_spans()
+            if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
+        ]
+    if name.startswith("tool."):
+        tool_name = name.removeprefix("tool.")
+        semantic = [
+            span for span in exporter.get_finished_spans()
+            if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
+            and span.attributes.get(GEN_AI_TOOL_NAME) == tool_name
+        ]
+        return semantic or [span for span in exporter.get_finished_spans() if span.name == name]
     return [span for span in exporter.get_finished_spans() if span.name == name]
 
 
@@ -575,16 +586,14 @@ async def test_ability_tool_span_is_authoritative_and_carries_old_and_new_fields
     assert span.parent.span_id == step_span.context.span_id
     assert span.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
     assert span.attributes[GEN_AI_TOOL_NAME] == "search"
-    assert span.attributes[GEN_AI_TOOL_ID] == "resource-search"
     assert span.attributes[GEN_AI_TOOL_CALL_ID] == "call-1"
-    assert span.attributes[GEN_AI_TOOL_INPUT] == '{"q":"hello"}'
     assert span.attributes[GEN_AI_TOOL_CALL_ARGUMENTS] == '{"q":"hello"}'
     assert span.attributes[GEN_AI_TOOL_CALL_RESULT] == '{"answer": 42}'
     assert span.attributes[GEN_AI_AGENT_ID] == "agent-solo"
     assert span.attributes[GEN_AI_AGENT_DESCRIPTION] == "solo description"
     assert span.attributes[OJ_TOOL_AUTHORITATIVE] is True
     assert span.attributes[OJ_TOOL_RESOURCE_ID] == "resource-search"
-    assert span.attributes[OJ_TOOL_TYPE] == "tool"
+    assert span.attributes[GEN_AI_TOOL_TYPE] == "extension"
     assert span.attributes[OJ_STEP_ID] == f"{step_span.context.span_id:016x}"
     assert span.attributes[OJ_STEP_NUMBER] == 2
 
@@ -612,7 +621,7 @@ async def test_iteration_and_tool_publish_live_snapshots_before_they_end(
 
     assert [(span.name, kind, recording) for span, kind, recording in published] == [
         ("agent.solo.task_iteration.1", "attributes", True),
-        ("tool.search", "attributes", True),
+            ("execute_tool search", "attributes", True),
     ]
     tool_ctx.inputs.tool_result = "done"
     await rail.after_tool_call(tool_ctx)
@@ -782,7 +791,6 @@ async def test_concrete_tool_global_callbacks_enrich_without_duplicate_span(trac
     spans = _finished(tracing.exporter, "tool.search")
     assert len(spans) == 1
     assert spans[0].attributes[GEN_AI_TOOL_CALL_ID] == "call-global"
-    assert spans[0].attributes[GEN_AI_TOOL_ID] == "resource-search"
 
 
 @pytest.mark.asyncio
@@ -819,7 +827,10 @@ async def test_mcp_raw_lifecycle_name_enriches_model_facing_authoritative_span(t
     await rail.after_tool_call(ctx)
     await rail.after_task_iteration(iteration_ctx)
 
-    assert len(_finished(tracing.exporter, f"tool.{model_name}")) == 1
+    authoritative = _finished(tracing.exporter, f"tool.{model_name}")
+    assert len(authoritative) == 1
+    assert authoritative[0].attributes[GEN_AI_TOOL_TYPE] == "extension"
+    assert authoritative[0].attributes[OJ_TOOL_PROTOCOL] == "mcp"
     assert _finished(tracing.exporter, "tool.browser_navigate") == []
 
 
@@ -877,7 +888,7 @@ async def test_a_raised_tool_call_still_records_the_result_the_model_saw(tracing
     span = _finished(tracing.exporter, "tool.search")[0]
     assert span.status.status_code.name == "ERROR"
     assert span.attributes["error.type"] == "ValueError"
-    assert span.attributes[GEN_AI_TOOL_OUTPUT] == "Ability execution error: bad tool"
+    assert span.attributes[GEN_AI_TOOL_CALL_RESULT] == "Ability execution error: bad tool"
     assert span.attributes[GEN_AI_TOOL_CALL_RESULT] == "Ability execution error: bad tool"
     assert span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "Ability execution error: bad tool"
 
@@ -902,7 +913,7 @@ async def test_a_result_reporting_failure_closes_the_span_as_an_error(tracing):
     assert span.status.status_code.name == "ERROR"
     assert span.status.description == "exit code 1"
     assert span.attributes["error.type"] == TOOL_REPORTED_FAILURE
-    assert "exit code 1" in span.attributes[GEN_AI_TOOL_OUTPUT]
+    assert "exit code 1" in span.attributes[GEN_AI_TOOL_CALL_RESULT]
 
 
 @pytest.mark.asyncio

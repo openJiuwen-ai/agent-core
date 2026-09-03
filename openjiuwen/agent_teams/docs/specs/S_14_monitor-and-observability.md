@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（agent 层 span 在 `openjiuwen/harness/observability/`） |
-| 最近一次修订日期 | 2026-08-17 |
-| 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md |
+| 最近一次修订日期 | 2026-09-03 |
+| 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md、F_110_genai-semconv-canonicalization.md |
 
 ## 范围 / 边界
 
@@ -55,6 +55,7 @@
 13. **`TeamStreamLogger` 是一次性的、与单次 run 绑定**。每次 `run_agent_team_streaming` 调用配一个新实例：`__init__` 用调用方给的 `file_path` 以 append 模式打开文件，`flush()` 在 stream 结束时把所有 source 的尾段写完并 close 文件。`_llm_output_seen` 等去重门控、`_runs` 累积缓冲贯穿整个 run。runner 不构造、不复用——构造责任在调用方（CLI / SDK），runner 只 `feed` / `flush`，类型在 `TYPE_CHECKING` 下引用。
 14. **聚合按 source 独立维护**。`_runs: dict[(member, role), _Run]`——每个 source 有自己的待定累积段；同一 source 切换 category 或遇到该 source 的离散 chunk 时 flush **该 source 的段**，**不同 source 的 chunk 交错不互相打断**。leader 与 teammate 在 inprocess fan-out 下 chunk 必然交错，单一游标模型会把每个 token 切成独立记录、彻底破坏聚合，故须按 source 分桶。
 15. **`hide_dm` 是 monitor 实例级别的对称过滤**。`TeamMonitor(hide_dm=True)` 同时作用于 pull 与 push 两条路径：`get_messages` 把非广播消息（`MessageInfo.broadcast=False`）从结果中剔除——单收件人 DM 视图（带 `to_member_name`）直接返 `[]`，全 team 视图走 `get_team_messages(broadcast=True)` 下推到 DAO；`_on_event` 丢弃 `MonitorEventType.MESSAGE` 事件，`BROADCAST` 不动。两路必须一致：单边过滤会让"流里看不到 DM 但 query 仍能查到"或反之，破坏调用方对"hide_dm = DM 不可见"的语义预期。`hide_dm` 只屏蔽消息维度，team / member / task 事件不受影响。
+16. **GenAI 标准键只有一套写入真相**。所有模型、工具、Codex/Claude bridge、trajectory、RL 与前端投影都使用 OpenTelemetry GenAI semantic conventions 的当前名称；后端类型不得改变字段形状。OpenJiuwen 关联信息只能写入 `openjiuwen.*`。旧 `gen_ai.prompt.*`、`gen_ai.completion.*`、`gen_ai.tool.input/output/id` 等只允许在 `trajectory/legacy_semconv.py` 的历史读取边界出现。
 
 ## 接口契约
 
@@ -248,6 +249,21 @@ flush / close**，**不走 `team_logger`**。
 ### `observability/` 边界
 
 `observability/` 数据通路与 monitor 队列是**两条独立通路**（不变量 11）。Redaction 规则两路共享。
+
+#### GenAI span 契约
+
+- 模型 span 名称为 `chat {model}`，并设置 `gen_ai.operation.name = "chat"`；输入输出分别使用
+  `gen_ai.system_instructions`、`gen_ai.input.messages`、`gen_ai.output.messages` 的结构化 JSON。
+- assistant 发起的工具调用是 `gen_ai.output.messages` 中 `type = "tool_call"` 的 part，不另写
+  顶层 tool-calls 属性；工具结果使用 `type = "tool_call_response"`。
+- 工具 span 名称为 `execute_tool {name}`，属性仅使用 `gen_ai.tool.name`、
+  `gen_ai.tool.call.id`、`gen_ai.tool.call.arguments`、`gen_ai.tool.call.result`。
+- token 使用 `gen_ai.usage.input_tokens`、`output_tokens`、`cache_read.input_tokens`、
+  `cache_write.input_tokens`、`reasoning.output_tokens`；不推导 total，也不按 exporter 扣减。
+- 首包耗时以秒写入 `gen_ai.response.time_to_first_chunk`，结束原因写入数组
+  `gen_ai.response.finish_reasons`。
+- request id、消息计数、reasoning wall-clock 等非标准信息使用 `openjiuwen.*`，不得占用
+  `gen_ai.*` 命名空间。
 
 ## 数据结构
 

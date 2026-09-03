@@ -131,9 +131,9 @@ def _tool_trajectory(*, output="failed parse", status=None):
             "tool-1",
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "bash",
-                semconv.GEN_AI_TOOL_ID: "call-1",
-                semconv.GEN_AI_TOOL_INPUT: {"cmd": "pytest"},
-                semconv.GEN_AI_TOOL_OUTPUT: output,
+                semconv.GEN_AI_TOOL_CALL_ID: "call-1",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"cmd": "pytest"},
+                semconv.GEN_AI_TOOL_CALL_RESULT: output,
             },
             status=status,
         )
@@ -494,7 +494,7 @@ async def test_read_trajectory_spans_projects_llm_and_context_allowlists():
                         }],
                         [{"role": "assistant", "content": "done"}],
                     ),
-                    semconv.GEN_AI_USAGE_TOTAL_TOKENS: 42,
+                    semconv.GEN_AI_USAGE_INPUT_TOKENS: 42,
                     semconv.GEN_AI_REQUEST_TEMPERATURE: 0.8,
                     semconv.LANGFUSE_OBSERVATION_INPUT: "duplicate prompt",
                 },

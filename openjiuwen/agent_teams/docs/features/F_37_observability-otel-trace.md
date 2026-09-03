@@ -1,5 +1,9 @@
 # F_37: Observability OTel Trace
 
+> 当前 GenAI 属性契约已由
+> [F_110_genai-semconv-canonicalization.md](F_110_genai-semconv-canonicalization.md)
+> 取代。本文件保留最初落地时的历史设计背景，其中旧 `gen_ai.*` 名称不再是当前写入契约。
+
 ## 元信息
 
 | 项 | 值 |
