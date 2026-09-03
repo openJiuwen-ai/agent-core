@@ -12,7 +12,7 @@ from typing import Any
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
-from openjiuwen.harness.kv_cache.kv_cache_hooks import is_sticky_subagent_type
+from openjiuwen.harness.kv_cache.kv_cache_subagent_lifecycle import is_sticky_subagent_type
 from openjiuwen.harness.subagent_runtime.activity_events import ActivityEmitter
 from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_DEFAULT,
@@ -142,6 +142,7 @@ class SubagentControl:
             parent_agent,
             self._config,
             self._semaphore,
+            parent_session=parent_session,
             status_change_handler=self._handle_instance_status_changed,
             activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
             transcript_handler=(self._handle_transcript_message if self._config.enable_transcript_stream else None),

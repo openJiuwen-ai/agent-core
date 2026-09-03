@@ -61,8 +61,8 @@ class SubagentInstance:
         on_chunk: Callable[[Any], Awaitable[None]] | None = None,
         turn_timeout_s: float | None = None,
         include_parent_session_id: bool = False,
-        on_turn_start: Callable[[], None] | None = None,
-        on_turn_finished: Callable[[bool], Awaitable[None]] | None = None,
+        on_turn_start: Callable[[Any], Awaitable[None]] | None = None,
+        on_turn_finished: Callable[[Any, bool], Awaitable[None]] | None = None,
         on_status_changed: Callable[[SubagentStatus], Awaitable[None]] | None = None,
         on_turn_stream_start: Callable[[UserInputOp], Awaitable[None]] | None = None,
         on_turn_stream_end: Callable[[UserInputOp, TurnOutputAggregator], Awaitable[None]] | None = None,
@@ -243,7 +243,7 @@ class SubagentInstance:
                     await session.pre_run()
                     await prepare_subagent_task_resources(self._agent)
                     if self._on_turn_start is not None:
-                        self._on_turn_start()
+                        await self._on_turn_start(session)
                     if self._on_turn_stream_start is not None:
                         await self._on_turn_stream_start(op)
                     inputs = self._build_stream_inputs(op)
@@ -329,7 +329,7 @@ class SubagentInstance:
         await cleanup_subagent_task_resources(self._agent)
         await _close_session_quietly(session)
         if self._on_turn_finished is not None:
-            await self._on_turn_finished(succeeded)
+            await self._on_turn_finished(session, succeeded)
 
     async def _handle_shutdown(self, reason: str) -> None:
         if self._closed:

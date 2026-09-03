@@ -9,7 +9,7 @@ Protocol implementations are reduced to two:
 
 ## How legacy `client_provider` values work
 
-You can still set `DeepSeek`, `OpenRouter`, `SiliconFlow`, `DashScope`, `InferenceAffinity`, or `AscendAffinity`. When a client is created, the framework maps those names onto the OpenAI-compatible implementation and attaches the matching `endpoint_profile` / `extensions` (DashScope multimodal, Ascend KV affinity, and so on).
+You can still set `DeepSeek`, `OpenRouter`, `SiliconFlow`, `DashScope`, or `AscendAffinity`. When a client is created, the framework maps those names onto the OpenAI-compatible implementation and attaches the matching `endpoint_profile` / `extensions` (DashScope multimodal, Ascend KV affinity, and so on).
 
 Recommended usage:
 

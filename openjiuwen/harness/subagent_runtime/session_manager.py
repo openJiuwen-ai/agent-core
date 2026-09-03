@@ -9,12 +9,12 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.kv_cache import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
+from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
-from openjiuwen.harness.kv_cache import kv_cache_hooks
-from openjiuwen.harness.kv_cache.kv_cache_hooks import affinity_enabled
 from openjiuwen.harness.execution_subject import current_execution_subject
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
+from openjiuwen.harness.kv_cache.kv_cache_subagent_lifecycle import affinity_enabled
 from openjiuwen.harness.subagent_runtime.activity import ActivityProjector
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.errors import (
@@ -55,6 +55,7 @@ class SubagentSessionManager:
         config: SubagentRuntimeConfig,
         running_semaphore: asyncio.Semaphore,
         *,
+        parent_session: Any | None = None,
         status_change_handler: Callable[[str, SubagentStatus], Awaitable[None]] | None = None,
         activity_handler: Callable[[SubagentActivity], None] | None = None,
         transcript_handler: Callable[[SubagentMessage], Awaitable[None]] | None = None,
@@ -62,6 +63,7 @@ class SubagentSessionManager:
         self._parent_agent = parent_agent
         self._config = config
         self._running_semaphore = running_semaphore
+        self._parent_session = parent_session
         self._status_change_handler = status_change_handler
         self._activity_handler = activity_handler
         self._transcript_handler = transcript_handler
@@ -74,25 +76,24 @@ class SubagentSessionManager:
         subagent_type: str,
         subagent_id: str,
         parent_session_id: str,
-    ) -> tuple[Callable[[], None] | None, Callable[[bool], Awaitable[None]] | None]:
+    ) -> tuple[
+        Callable[[Any], Awaitable[None]] | None,
+        Callable[[Any, bool], Awaitable[None]] | None,
+    ]:
         parent = self._parent_agent
         if not affinity_enabled(parent):
             return None, None
 
-        def on_turn_start() -> None:
-            kv_cache_hooks.prefetch_sticky_subagent(
-                parent,
+        async def on_turn_start(session: Any) -> None:
+            await kv_cache_subagent_lifecycle.prepare_subagent(
+                session,
                 subagent_type=subagent_type,
-                sub_session_id=subagent_id,
-                parent_session_id=parent_session_id,
             )
 
-        async def on_turn_finished(succeeded: bool) -> None:
-            await kv_cache_hooks.finish_subagent(
-                parent,
+        async def on_turn_finished(session: Any, succeeded: bool) -> None:
+            await kv_cache_subagent_lifecycle.finish_subagent(
+                session,
                 subagent_type=subagent_type,
-                sub_session_id=subagent_id,
-                parent_session_id=parent_session_id,
                 succeeded=succeeded,
             )
 
@@ -127,6 +128,12 @@ class SubagentSessionManager:
                 session_id=subagent_id,
                 card=card,
                 envs=envs,
+                parent_session_id=parent_session_id,
+                kv_cache_runtime=(
+                    self._parent_session.get_kv_cache_runtime()
+                    if self._parent_session is not None
+                    else None
+                ),
             )
 
         on_turn_start, on_turn_finished = self._build_turn_hooks(

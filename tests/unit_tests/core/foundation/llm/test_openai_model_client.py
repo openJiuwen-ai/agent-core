@@ -77,6 +77,43 @@ def _stream_chunk(content: str, *, finish_reason: str | None = None) -> _Obj:
     )
 
 
+def test_stream_chunk_reads_tool_calls_from_final_message():
+    client = _make_client()
+    chunk = _Obj(
+        choices=[
+            _Obj(
+                delta=_Obj(content=""),
+                message=_Obj(
+                    content="",
+                    tool_calls=[
+                        _Obj(
+                            id="call-1",
+                            index=0,
+                            function=_Obj(
+                                name="task_tool",
+                                arguments='{"subagent_type":"explore_agent"}',
+                            ),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+                token_ids=None,
+                logprobs=None,
+            )
+        ],
+        usage=None,
+        prompt_token_ids=None,
+    )
+
+    parsed = client._parse_stream_chunk(chunk)
+
+    assert parsed is not None
+    assert parsed.finish_reason == "tool_calls"
+    assert parsed.tool_calls is not None
+    assert parsed.tool_calls[0].id == "call-1"
+    assert parsed.tool_calls[0].name == "task_tool"
+
+
 async def _stream_response(*contents: str):
     for content in contents:
         yield _stream_chunk(content)
@@ -570,35 +607,6 @@ def test_openrouter_profile_adds_prompt_cache_markers_on_openai_client():
 
     assert params["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert params["tools"][0]["cache_control"] == {"type": "ephemeral"}
-
-
-def test_kv_release_fields_move_to_extra_body_for_openai_sdk():
-    client_config = ModelClientConfig(
-        client_provider="OpenAI",
-        api_key="sk-test-key",
-        api_base="https://example.test/v1",
-        extensions={"kv_cache": {"mode": "release"}},
-        verify_ssl=False,
-    )
-    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
-
-    params = client._build_request_params(
-        messages=[{"role": "user", "content": "hello"}],
-        tools=None,
-        temperature=None,
-        top_p=None,
-        model=None,
-        stop=None,
-        max_tokens=None,
-        stream=False,
-        session_id="session-1",
-        enable_cache_sharing=True,
-    )
-    client._move_openai_extra_body_extensions(params)
-
-    assert params["extra_body"]["cache_salt"] == "session-1"
-    assert params["extra_body"]["cache_sharing"] is True
-    assert "cache_salt" not in params
 
 
 def test_kv_affinity_agent_hint_moves_to_extra_body_for_openai_sdk():

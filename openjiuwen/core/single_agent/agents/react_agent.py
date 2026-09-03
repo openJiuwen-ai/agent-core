@@ -58,11 +58,11 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     SystemMessage
 )
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
-    KVCacheAffinityConfig,
 )
-from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.kv_cache import kv_cache_react_model_call_hook
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
@@ -435,12 +435,10 @@ class ReActAgentConfig(BaseModel):
     def configure_kv_cache_affinity(
             self,
             *,
-            enable_kv_cache_release: bool = False,
             enable_kv_cache_affinity: bool = False,
     ) -> 'ReActAgentConfig':
-        """Configure provider-side KV-cache release or Ascend affinity."""
+        """Configure the unified Ascend KV-cache affinity protocol."""
         self.kv_cache_affinity_config = KVCacheAffinityConfig(
-            enable_kv_cache_release=enable_kv_cache_release,
             enable_kv_cache_affinity=enable_kv_cache_affinity,
         )
         return self
@@ -609,7 +607,7 @@ class ReActAgent(BaseAgent):
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
-        self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
+        self._kv_cache_model_call_hook = kv_cache_react_model_call_hook.KVCacheModelCallHook()
         self._context_usage_aggregator = SessionKVCacheAggregator()
         self._context_usage_sequences: dict[str, int] = {}
 
@@ -1616,7 +1614,6 @@ class ReActAgent(BaseAgent):
             session=session,
             session_id=session_id,
             parent_session_id=parent_session_id,
-            context_window=context_window,
         )
 
         if self._config.llm_return_token_ids:
@@ -2520,7 +2517,7 @@ class ReActAgent(BaseAgent):
             ) or getattr(self, "_usage_parent_session_id", None) or current_usage_delegation().get(
                 "parent_session_id"
             )
-            session_kwargs = {}
+            session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
@@ -2941,7 +2938,7 @@ class ReActAgent(BaseAgent):
                 if isinstance(inputs, dict)
                 else None
             )
-            session_kwargs = {}
+            session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,

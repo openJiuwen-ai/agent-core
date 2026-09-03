@@ -56,6 +56,10 @@ from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentRail
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    execution_subject_scope,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
@@ -64,6 +68,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
+    from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -719,17 +724,13 @@ class TeamAgent(BaseAgent):
         group the member's model / tool records into one lane (the leader gets
         ``team_leader``, teammates ``team_member``).
         """
-        from openjiuwen.harness.execution_subject import execution_subject_scope
-
         session_getter = getattr(session, "get_session_id", None)
         session_id = str(session_getter() if callable(session_getter) else (self.session_id or ""))
         with execution_subject_scope(self.observability_execution_subject(session_id)):
             yield
 
-    def observability_execution_subject(self, session_id: str = "") -> "ExecutionSubject":
+    def observability_execution_subject(self, session_id: str = "") -> ExecutionSubject:
         """Return the stable trajectory owner identity for this Team member."""
-        from openjiuwen.harness.execution_subject import ExecutionSubject
-
         team_name = str(self.team_name or "")
         member_name = str(self.member_name or self.card.name or self.card.id)
         display_name = str(getattr(self.runtime_context, "display_name", "") or member_name)

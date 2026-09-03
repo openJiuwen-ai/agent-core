@@ -308,7 +308,7 @@ STRINGS: dict[str, str] = {
     "send_message.error_leader_to_user": "Leader 不能 send_message 给 'user'。请直接用普通回复输出给用户。",
     "send_message.error_content_too_long": (
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"
-        "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"
+        "先用 write_file 把正文写到团队共享产物目录（见团队信息块「团队共享工作空间」的最终产物目录）下的文件，再重发本消息，"
         "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
     ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============

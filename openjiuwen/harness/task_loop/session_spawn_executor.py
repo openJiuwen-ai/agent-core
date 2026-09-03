@@ -26,7 +26,7 @@ from openjiuwen.core.single_agent.rail.base import (
     build_usage_delegation_attribution,
     reset_usage_delegation,
 )
-from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
@@ -73,10 +73,10 @@ class SessionSpawnExecutor(TaskExecutor):
         subagent_type = meta.get("subagent_type", "general-purpose")
         query = meta.get("task_description", "")
         browser_capabilities = meta.get("browser_capabilities")
-        affinity_enabled = kv_cache_hooks.affinity_enabled(self._deep_agent)
+        affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self._deep_agent)
         parent_session_id = meta.get("parent_session_id") or session.get_session_id()
         if affinity_enabled:
-            cid = kv_cache_hooks.resolve_sub_session_id(
+            cid = kv_cache_subagent_lifecycle.resolve_sub_session_id(
                 task_id=task_id,
                 parent_session_id=parent_session_id,
                 metadata=meta,
@@ -90,6 +90,7 @@ class SessionSpawnExecutor(TaskExecutor):
         )
 
         subagent = None
+        child_session = None
         try:
             if subagent_type == "browser_agent":
                 subagent = self._deep_agent.create_subagent(
@@ -105,11 +106,20 @@ class SessionSpawnExecutor(TaskExecutor):
                 "query": query,
                 "conversation_id": cid,
             }
+            invoke_kwargs = {}
             if affinity_enabled:
                 subagent_inputs["parent_session_id"] = parent_session_id
                 subagent_inputs["delegation_id"] = task_id
                 if parent_invocation_id:
                     subagent_inputs["parent_invocation_id"] = parent_invocation_id
+                child_session = kv_cache_subagent_lifecycle.create_subagent_session(
+                    session,
+                    sub_session_id=cid,
+                    parent_cache_id=parent_session_id,
+                    card=subagent.card,
+                )
+                await child_session.pre_run(inputs=subagent_inputs)
+                invoke_kwargs["session"] = child_session
             delegation_token = bind_usage_delegation(
                 build_usage_delegation_attribution(
                     agent_id=getattr(getattr(subagent, "card", None), "id", None),
@@ -120,7 +130,7 @@ class SessionSpawnExecutor(TaskExecutor):
                 )
             )
             try:
-                result = await subagent.invoke(subagent_inputs)
+                result = await subagent.invoke(subagent_inputs, **invoke_kwargs)
             finally:
                 reset_usage_delegation(delegation_token)
             payload = result.get("output", "") if isinstance(result, dict) else str(result)
@@ -150,12 +160,9 @@ class SessionSpawnExecutor(TaskExecutor):
         finally:
             if subagent is not None:
                 await cleanup_subagent_task_resources(subagent)
-            if affinity_enabled:
-                await kv_cache_hooks.evict_subagent(
-                    self._deep_agent,
-                    sub_session_id=cid,
-                    parent_session_id=parent_session_id,
-                )
+            if child_session is not None:
+                await kv_cache_subagent_lifecycle.evict_subagent(child_session)
+                await child_session.post_run()
 
     def _build_error_chunk(
         self, task_id: str, error: str
@@ -195,7 +202,7 @@ class SessionSpawnExecutor(TaskExecutor):
         """
         # already canceled in TaskScheduler
         logger.info(f"[SessionSpawnExecutor] Cancelling task_id={task_id}")
-        if not kv_cache_hooks.affinity_enabled(self._deep_agent):
+        if not kv_cache_subagent_lifecycle.affinity_enabled(self._deep_agent):
             return True
         tasks = await self._task_manager.get_task(TaskFilter(task_id=task_id))
         if not tasks:
@@ -207,16 +214,17 @@ class SessionSpawnExecutor(TaskExecutor):
 
         meta = tasks[0].metadata or {}
         parent_session_id = meta.get("parent_session_id") or session.get_session_id()
-        sub_session_id = kv_cache_hooks.resolve_sub_session_id(
+        sub_session_id = kv_cache_subagent_lifecycle.resolve_sub_session_id(
             task_id=task_id,
             parent_session_id=parent_session_id,
             metadata=meta,
         )
-        await kv_cache_hooks.evict_subagent(
-            self._deep_agent,
+        child_session = kv_cache_subagent_lifecycle.create_subagent_session(
+            session,
             sub_session_id=sub_session_id,
-            parent_session_id=parent_session_id,
+            parent_cache_id=parent_session_id,
         )
+        await kv_cache_subagent_lifecycle.evict_subagent(child_session)
         return True
 
 

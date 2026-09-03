@@ -164,8 +164,26 @@ class SFTTrainingExecutor:
             )
         except subprocess.CalledProcessError as exc:
             if not self._stop_requested:
-                raise RuntimeError("SFT trainer stopped before producing a publishable LoRA") from exc
-            logger.warning("SFT trainer stopped after request; trying to export the latest checkpoint")
+                # Ascend NPU only: verl's sft_trainer completes training and saves a full
+                # valid checkpoint, then crashes during teardown / distributed cleanup with
+                # a glibc heap corruption ("corrupted size vs. prev_size", SIGABRT -6) on
+                # torch_npu + CANN. This is an environment-level bug, NOT a training
+                # failure. On Ascend, if a valid checkpoint exists, downgrade to warning and
+                # continue to export the LoRA (mirrors the verified handling in old/).
+                # On GPU/CUDA this teardown bug does not occur, so any trainer failure
+                # there is a real failure and must be raised as before.
+                if self._is_ascend_env() and self._latest_sft_checkpoint_dir(output_dir) is not None:
+                    checkpoint_dir = self._latest_sft_checkpoint_dir(output_dir)
+                    logger.warning(
+                        "SFT trainer exited with code %s after successful training; "
+                        "continuing with latest checkpoint %s (known Ascend NPU teardown bug)",
+                        exc.returncode,
+                        checkpoint_dir,
+                    )
+                else:
+                    raise RuntimeError("SFT trainer stopped before producing a publishable LoRA") from exc
+            else:
+                logger.warning("SFT trainer stopped after request; trying to export the latest checkpoint")
 
         publish_dir = self._export_sft_lora_adapter(output_dir=output_dir, run_dir=run_dir)
 
@@ -478,6 +496,14 @@ class SFTTrainingExecutor:
     @staticmethod
     def _visible_devices_env_name() -> str:
         return os.getenv("ONLINE_RL_VISIBLE_DEVICES_ENV", "CUDA_VISIBLE_DEVICES").strip() or "CUDA_VISIBLE_DEVICES"
+
+    @staticmethod
+    def _is_ascend_env() -> bool:
+        """Detect the Ascend NPU runtime via explicit knobs (no torch_npu import needed)."""
+        device = os.getenv("SFT_VERL_DEVICE") or os.getenv("VERL_DEVICE") or ""
+        if device.strip().lower() in {"ascend", "npu"}:
+            return True
+        return os.getenv("ONLINE_RL_VISIBLE_DEVICES_ENV", "").strip() == "ASCEND_RT_VISIBLE_DEVICES"
 
     @staticmethod
     def _slug(value: str) -> str:

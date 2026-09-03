@@ -39,11 +39,11 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.foundation.kv_cache import (
-    KVCacheIdentity,
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     context_compressor_cache_identity,
     resolve_session_lineage,
 )
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheIdentity
 from openjiuwen.core.foundation.tool import ToolInfo
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)

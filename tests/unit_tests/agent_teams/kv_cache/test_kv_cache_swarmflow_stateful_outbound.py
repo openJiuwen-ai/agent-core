@@ -11,12 +11,11 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
 from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.foundation.kv_cache import (
-    KVC_SESSION_EVICT_TIMEOUT_SECONDS,
+from openjiuwen.core.kv_cache import (
     KVCacheAffinityConfig,
     KVCacheIdentity,
 )
@@ -28,6 +27,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ProviderType,
 )
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, SystemMessage, UserMessage
+from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
@@ -57,14 +57,8 @@ class _CapturingModel:
         self.prefetch_calls: list[dict[str, Any]] = []
         self.client = _affinity_client()
 
-    def supports_kv_cache_release(self) -> bool:
-        return False
-
     def supports_kv_cache_affinity(self) -> bool:
         return self._supports
-
-    def build_kv_cache_invoke_kwargs(self, **_: Any) -> dict[str, Any]:
-        return {}
 
     def build_kv_cache_affinity_invoke_kwargs(self, **kwargs: Any) -> dict[str, Any]:
         if not self._supports:
@@ -164,8 +158,18 @@ class _PayloadHarness:
         return None
 
     async def start(self, *, team_session: Any = None) -> None:
-        self._session = Session()
-        kv_cache_hooks.on_harness_session_created(self, self._session)
+        self._session = team_session.create_agent_session(
+            agent_id="stateful-payload",
+            share_stream_writer=False,
+        )
+        kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, self._session)
+        runtime = self._session.get_kv_cache_runtime()
+        if (
+            runtime is not None
+            and self.deep_config.kv_cache_affinity_config.enable_kv_cache_affinity
+            and self.model.supports_kv_cache_affinity()
+        ):
+            await runtime.register_binding(self._session.get_cache_identity(), self.model)
         self.events.append("start")
 
     def current_session(self) -> Session | None:
@@ -238,6 +242,7 @@ async def test_stateful_worker_two_turns_final_outbound_payload(
         worker_base_spec=base,
         team_name="team-a",
         session_id="team-session-a",
+        kv_cache_runtime=KVCacheRuntime(),
     )
 
     session_id = await manager.open_session(kind="agent", instructions=None, opts={"label": "advisor"})
@@ -274,7 +279,7 @@ async def test_stateful_worker_two_turns_final_outbound_payload(
                 "target": "session",
                 "session_id": identity.cache_id,
                 "parent_session_id": "team-session-a",
-                "timeout": KVC_SESSION_EVICT_TIMEOUT_SECONDS,
+                "model": None,
             }
         ]
     else:

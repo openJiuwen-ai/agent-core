@@ -38,7 +38,7 @@ from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
-from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
@@ -1399,7 +1399,7 @@ class AbilityManager:
                         tool_args.setdefault("parent_invocation_id", parent_invocation_id)
 
                 stream_writer_manager = self._get_stream_writer_manager(session)
-                child_session_kwargs = kv_cache_hooks.build_child_session_kwargs(
+                child_session_kwargs = kv_cache_child_session.build_child_session_kwargs(
                     agent,
                     session,
                 )

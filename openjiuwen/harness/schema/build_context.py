@@ -60,6 +60,11 @@ class BuildContext:
         member_card_id: Resolved agent card id, used to namespace tool ids.
         project_dir: Resolved project root directory, when members are built
             against a code project (e.g. the ``lsp`` rail roots here).
+        team_outputs_dir: Shared final-deliverables directory for a projectless
+            team (e.g. ``team-workspace/artifacts/<date>/chat-<n>/outputs/``).
+            Platform-filled (``None`` for members bound to a project); surfaced
+            to the team policy rail so the team info body names it only when the
+            member has no project of its own.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
     """
@@ -70,6 +75,7 @@ class BuildContext:
     workspace: Optional["Workspace"] = None
     member_card_id: Optional[str] = None
     project_dir: Optional[str] = None
+    team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
 
     def derive(self, **overrides: Any) -> "BuildContext":
@@ -83,6 +89,26 @@ class BuildContext:
         for key, value in overrides.items():
             setattr(clone, key, value)
         return clone
+
+    def resolve_member_work_dir(self) -> Optional[str]:
+        """Return this member's isolated temporary working directory, if any.
+
+        Base implementation returns ``None`` (no platform work-directory
+        convention). Platforms that allocate a per-member work directory for
+        projectless team members override this; the agent configurator reads
+        it as the shell cwd for members without a project or worktree.
+
+        Returns:
+            The absolute per-member work directory path, or ``None`` when the
+            platform does not allocate one (members bound to a project, or a
+            base ``BuildContext`` with no platform convention).
+        """
+        # A base BuildContext has no platform work-directory convention; only
+        # the platform subclass allocates one. Reference self so static analysis
+        # treats this as an instance method, matching the overridden signature.
+        if self.team_outputs_dir is None:
+            return None
+        return None
 
 
 # Process-wide factory that rebuilds a ``BuildContext`` from a serializable

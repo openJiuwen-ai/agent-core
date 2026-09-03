@@ -137,6 +137,7 @@ from openjiuwen.harness.resources import (
 from openjiuwen.harness.resources.extension_resolver import (
     ExtensionParts,
     ResolvedSkill,
+    ResourceKind,
     resolve_agent_template_parts,
     resolve_plugin_parts,
 )
@@ -584,6 +585,18 @@ class DeepAgent(BaseAgent):
         self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
+    def _extension_bound_tool_names(self) -> set[str]:
+        """Return tool names owned by successful Plugin / AgentTemplate loads."""
+        names: set[str] = set()
+        for record in self._load_records.values():
+            for ref in record.refs:
+                if ref.kind != ResourceKind.TOOL:
+                    continue
+                for name in ref.extra.get("ability_names") or ():
+                    if name:
+                        names.add(str(name))
+        return names
+
     def _hot_reload_tools(
         self,
         config: DeepAgentConfig,
@@ -604,11 +617,17 @@ class DeepAgent(BaseAgent):
         }
 
         # Only remove tools that were previously managed by config.tools.
-        # Rail-registered tools such as task_tool must survive hot reload.
+        # Rail-registered tools such as task_tool, and extension/plugin tools
+        # recorded in ``_load_records``, must survive hot reload.
         managed_tool_names = set(previous_by_name)
         if not managed_tool_names:
             managed_tool_names = set(new_by_name)
-        stale = [name for name in managed_tool_names if name not in new_by_name]
+        extension_tool_names = self._extension_bound_tool_names()
+        stale = [
+            name
+            for name in managed_tool_names
+            if name not in new_by_name and name not in extension_tool_names
+        ]
         if stale:
             for name in stale:
                 card = previous_by_name.get(name)

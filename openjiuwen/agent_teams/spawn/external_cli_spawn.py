@@ -115,11 +115,12 @@ def _build_team_context_tracker(
     """Build the tracker feeding team state into this CLI member's messages.
 
     An external CLI has no rail, so the runtime folds the tracker's output into
-    the next message it sends. Unlike an in-process member, an external CLI has
-    no ``.team/{team}`` mount in its cwd (``setup_agent`` short-circuits before
-    ``mount_into_workspace`` is ever called), so the agent-relative mount string
-    would be a path the member cannot reach. We therefore expose only the
-    shared workspace's absolute path — the member writes there directly.
+    the next message it sends. Unlike an in-process member, an external CLI
+    never has the team workspace mounted into its cwd (``setup_agent``
+    short-circuits before ``mount_into_workspace`` is ever called), so any
+    agent-relative mount string would be a path the member cannot reach. We
+    therefore expose only the shared workspace's absolute path — the member
+    writes there directly.
 
     Args:
         team_backend: The external member's own TeamBackend.
@@ -142,8 +143,8 @@ def _build_team_context_tracker(
         role=ctx.role,
         display_name=ctx.display_name or "",
         member_prompt=ctx.prompt or "",
-        team_workspace_mount=None,
         team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
+        team_outputs_dir=_build_context_team_outputs_dir(spec),
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
     )
@@ -182,6 +183,13 @@ def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
     if build_context is None:
         return None
     return _path_value(getattr(build_context, "project_dir", None))
+
+
+def _build_context_team_outputs_dir(spec: "TeamAgentSpec") -> str | None:
+    build_context = spec.build_context
+    if build_context is None:
+        return None
+    return _path_value(getattr(build_context, "team_outputs_dir", None))
 
 
 def _resolve_external_paths(

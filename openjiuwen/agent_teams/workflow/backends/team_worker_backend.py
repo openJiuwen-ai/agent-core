@@ -39,7 +39,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Sequence
 
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
 from openjiuwen.agent_teams.tools.locales import make_translator
@@ -129,6 +129,11 @@ class TeamWorkerBackend(AgentBackend):
         self._build_context = build_context
         self._messager = messager
         self._session_id = session_id
+        from openjiuwen.core.session import get_current_session
+
+        current_session = get_current_session()
+        get_runtime = getattr(current_session, "get_kv_cache_runtime", None)
+        self._kv_cache_runtime = get_runtime() if callable(get_runtime) else None
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._run_id = run_id
@@ -247,6 +252,7 @@ class TeamWorkerBackend(AgentBackend):
                 workflow_name=self._workflow_name,
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
+                kv_cache_runtime=self._kv_cache_runtime,
             )
         return self._session_mgr
 
@@ -404,12 +410,10 @@ class TeamWorkerBackend(AgentBackend):
             )
             if budget_rail is not None:
                 harness.add_rail(budget_rail)
-            kv_cache_hooks.configure_harness_session_hooks(
+            kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=True,
-                reason="swarmflow-worker-finish",
-                owner_id=member_name,
             )
             if has_schema:
                 # End the round as soon as structured_output is captured, so the
@@ -426,7 +430,14 @@ class TeamWorkerBackend(AgentBackend):
             user_prompt = prompt
             if has_schema:
                 user_prompt = f"{prompt}\n\n{self._t('structured_output', key='reminder')}"
-            result = await harness.run_once(user_prompt)
+            from openjiuwen.core.session.agent_team import Session as TeamSession
+
+            team_session = TeamSession(
+                session_id=self._session_id,
+                team_id=self._team_name,
+                kv_cache_runtime=self._kv_cache_runtime,
+            )
+            result = await harness.run_once(user_prompt, team_session=team_session)
         except Exception as e:
             team_logger.exception("worker harness run_once failed for %s", member_name)
             raise BackendError(f"worker harness run_once failed for {member_name}: {e}") from e
@@ -440,7 +451,7 @@ class TeamWorkerBackend(AgentBackend):
             except Exception:
                 team_logger.debug("worker harness dispose failed for %s", member_name)
             finally:
-                kv_cache_hooks.clear_harness_session_hooks(harness)
+                kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(harness)
         return _text_from_invoke_result(result, member_name=member_name)
 
     # ------------------------------------------------------------------
@@ -458,7 +469,7 @@ class TeamWorkerBackend(AgentBackend):
         ``agent_configurator`` already registers for team cleanup — so the
         worker workspace is removed with the team and needs no per-worker
         cleanup registration. Also mounts the team shared workspace into the
-        worker's tree (``.team/{team_name}/``).
+        worker's tree as an opt-in ``.team/{team_name}/`` symlink.
 
         The workspace is always the worker's own directory. With
         ``agent(options={"isolation": "worktree"})`` only the *cwd* moves into
@@ -487,8 +498,10 @@ class TeamWorkerBackend(AgentBackend):
                 stable_base=True,
             )
 
-        # Mount team workspace into worker workspace so it can access shared
-        # files via .team/{team_name}/ — mirrors agent_configurator.
+        # Mount team workspace into worker workspace as an opt-in .team/
+        # symlink — mirrors agent_configurator. Shared deliverables are
+        # addressed by absolute path under the outputs directory; this
+        # symlink is convenience navigation, not the access path.
         from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
 
         workspace_manager = get_workspace_manager(self._build_context)

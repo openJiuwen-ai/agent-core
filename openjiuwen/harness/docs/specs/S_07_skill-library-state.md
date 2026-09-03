@@ -22,7 +22,7 @@
 不在本规约范围内：
 - Skill rail（`SkillUseRail` / `SkillCreateRail`）—— `S_04`。
 - `SKILLS_STATE_FILENAME` 的写入方（marketplace / install）—— 另一子系统。
-- KVC 亲和钩子（`kv_cache/`）—— `S_16`。
+- KVC 子代理生命周期适配（`kv_cache/`）—— `S_16`。
 
 ## 不变量
 
