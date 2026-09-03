@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -27,6 +28,88 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.tools import BashTool, CodeTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
+
+# Per-task skill name for tool-call attribution.
+# ContextVar is a same-task fast path; session state is the cross-tool source of
+# truth (tool execution contexts often do not inherit the ContextVar binding).
+# Set only after skill_tool succeeds; cleared at end of invoke.
+_current_skill_name: ContextVar[Optional[str]] = ContextVar(
+    "current_skill_name",
+    default=None,
+)
+
+# Top-level AgentSession global_state key (not nested under skill_use baseline).
+_CURRENT_SKILL_SESSION_KEY = "current_skill_name"
+
+
+def _read_session_current_skill_name(session: Any) -> Optional[str]:
+    """Read active skill name from session state, or None when unset/unavailable."""
+    if session is None or not callable(getattr(session, "get_state", None)):
+        return None
+    try:
+        stored = session.get_state(_CURRENT_SKILL_SESSION_KEY)
+    except Exception:
+        logger.debug("read current_skill_name from session failed", exc_info=True)
+        return None
+    if stored is None:
+        return None
+    cleaned = str(stored).strip()
+    return cleaned or None
+
+
+def _write_session_current_skill_name(session: Any, name: Optional[str]) -> None:
+    """Persist or clear active skill name on session state when supported."""
+    if session is None or not callable(getattr(session, "update_state", None)):
+        return
+    cleaned = str(name or "").strip() or None
+    try:
+        session.update_state({_CURRENT_SKILL_SESSION_KEY: cleaned})
+    except Exception:
+        logger.debug("write current_skill_name to session failed", exc_info=True)
+
+
+def get_current_skill_name(session: Any = None) -> Optional[str]:
+    """Return the active skill name, or None when unset.
+
+    When ``session`` is provided, session state is preferred (survives tool
+    execution context switches). ContextVar is used as a same-task fast path
+    when session has no binding or is omitted.
+    """
+    if session is not None:
+        stored = _read_session_current_skill_name(session)
+        if stored is not None:
+            return stored
+    name = _current_skill_name.get()
+    if name is None:
+        return None
+    cleaned = str(name).strip()
+    return cleaned or None
+
+
+def set_current_skill_name(name: str, session: Any = None) -> Token[Optional[str]]:
+    """Bind the active skill name for the current task.
+
+    Always updates the ContextVar. When ``session`` is provided, also persists
+    to session state so later tool rails can resolve ``source_skill``.
+    Returns a ContextVar reset token.
+    """
+    cleaned = str(name or "").strip() or None
+    token = _current_skill_name.set(cleaned)
+    if session is not None:
+        _write_session_current_skill_name(session, cleaned)
+    return token
+
+
+def clear_current_skill_name(session: Any = None) -> Token[Optional[str]]:
+    """Clear the active skill name.
+
+    Always clears the ContextVar. When ``session`` is provided, also clears
+    session state. Returns a ContextVar reset token.
+    """
+    token = _current_skill_name.set(None)
+    if session is not None:
+        _write_session_current_skill_name(session, None)
+    return token
 
 # Lines read when probing a SKILL.md for its YAML front matter. Bodies run to
 # tens of KB while the front matter is a handful of lines; a file whose front
@@ -727,7 +810,8 @@ class SkillUseRail(DeepAgentRail):
         return desc
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        _ = ctx
+        """Drop skill activation at the end of an invoke to avoid cross-turn bleed."""
+        clear_current_skill_name(session=getattr(ctx, "session", None))
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Update system_prompt_builder with current skills before model call.
