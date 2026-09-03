@@ -67,7 +67,6 @@ class FakeBackend:
         self.db = db
         self.messager = messager
         self.org_task_manager = None
-        self.org_transport = None
 
 
 class FakeAgent:

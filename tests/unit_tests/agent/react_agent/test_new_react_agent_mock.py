@@ -587,6 +587,73 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         self.assertIn('9', result['output'])
         self.assertEqual(mock_llm.call_count, 3)
 
+    @patch("openjiuwen.core.runner.Runner.resource_mgr.get_tool")
+    @pytest.mark.asyncio
+    async def test_invoke_refreshes_tools_after_dynamic_registration(self, mock_get_tool):
+        """Tools added mid-invoke are visible on the next ReAct iteration."""
+        mock_context = MagicMock()
+        mock_context.add_messages = AsyncMock()
+        mock_context.get_context_window = AsyncMock(
+            return_value=MagicMock(
+                get_messages=MagicMock(return_value=[]),
+                get_tools=MagicMock(return_value=None),
+            )
+        )
+        mock_context_engine = MagicMock()
+        mock_context_engine.save_contexts = AsyncMock()
+        mock_context_engine.create_context = AsyncMock(return_value=mock_context)
+        mock_session = MagicMock()
+        mock_session.get_state.return_value = None
+        mock_session.write_stream = AsyncMock()
+
+        agent = ReActAgent(card=self.card)
+        agent.configure(self.config.configure_max_iterations(3))
+        agent.ability_manager.add(
+            ToolCard(name="mount_org_tools", description="Mount org task-pool tools")
+        )
+        agent.context_engine = mock_context_engine
+
+        async def mount_invoke(inputs, **kwargs):
+            agent.ability_manager.add(
+                ToolCard(name="org_create_task", description="Create an org task")
+            )
+            return "mounted"
+
+        mount_tool = MagicMock()
+        mount_tool.invoke = AsyncMock(side_effect=mount_invoke)
+        mock_get_tool.side_effect = lambda tool_id=None, **kwargs: mount_tool
+
+        captured_tool_names: list[list[str]] = []
+        model_calls = 0
+
+        async def capture_call_model(self, ctx, context, tools):
+            nonlocal model_calls
+            captured_tool_names.append([tool.name for tool in (tools or [])])
+            from openjiuwen.core.foundation.llm import AssistantMessage
+
+            model_calls += 1
+            if model_calls == 1:
+                return AssistantMessage(
+                    content="",
+                    tool_calls=[
+                        ToolCall(
+                            id="1",
+                            type="function",
+                            name="mount_org_tools",
+                            arguments="{}",
+                        )
+                    ],
+                )
+            return AssistantMessage(content="done")
+
+        with patch.object(ReActAgent, "_call_model", capture_call_model):
+            result = await agent.invoke({"query": "setup org"}, session=mock_session)
+
+        self.assertEqual(result["result_type"], "answer")
+        self.assertEqual(len(captured_tool_names), 2)
+        self.assertNotIn("org_create_task", captured_tool_names[0])
+        self.assertIn("org_create_task", captured_tool_names[1])
+
     @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
     @pytest.mark.asyncio
     async def test_invoke_max_iterations_reached(self, mock_get_tool):

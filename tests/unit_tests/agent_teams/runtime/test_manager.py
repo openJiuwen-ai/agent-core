@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.status import MemberStatus
 
 
@@ -353,12 +354,30 @@ class TestRunOrganizationTurn:
         agent.invoke.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_successful_turn_runs_finalize_and_gate_drain(self):
+    async def test_idle_marker_ends_turn_and_runs_finalize(self):
         from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
         from openjiuwen.agent_teams.runtime.manager import TeamRuntimeActivation
 
         manager, entry, agent = self._paused_entry()
         await manager.pool.add(entry)
+        chunks_consumed = []
+        lifecycle_events = []
+
+        async def stream(*_args, **_kwargs):
+            try:
+                chunks_consumed.append("content")
+                yield TeamOutputSchema(type="llm_output", index=0, payload={"content": "done"})
+                chunks_consumed.append("idle")
+                yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.idle"})
+                chunks_consumed.append("after-idle")
+                yield TeamOutputSchema(type="llm_output", index=1, payload={"content": "unexpected"})
+            finally:
+                lifecycle_events.append("stream_closed")
+
+        async def finalize(**_kwargs):
+            lifecycle_events.append("finalized")
+
+        agent.stream = MagicMock(side_effect=stream)
         session = MagicMock()
         session.post_run = AsyncMock()
         manager.activate = AsyncMock(
@@ -368,7 +387,7 @@ class TestRunOrganizationTurn:
                 action=RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False),
             )
         )
-        manager.finalize = AsyncMock()
+        manager.finalize = AsyncMock(side_effect=finalize)
 
         result = await manager.run_organization_turn(
             team_name="team-a",
@@ -377,7 +396,10 @@ class TestRunOrganizationTurn:
         )
 
         assert result is True
-        agent.invoke.assert_awaited_once()
+        agent.stream.assert_called_once()
+        agent.invoke.assert_not_awaited()
+        assert chunks_consumed == ["content", "idle"]
+        assert lifecycle_events == ["finalized", "stream_closed"]
         manager.finalize.assert_awaited_once_with(team_name="team-a", session_id="session-1")
         entry.interact_gate.close_and_drain.assert_awaited_once()
         session.post_run.assert_awaited_once()

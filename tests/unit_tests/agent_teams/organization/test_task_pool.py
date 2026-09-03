@@ -77,7 +77,7 @@ class FakeBackend:
         self.db = db
         self.messager = messager
         self.org_task_manager = None
-        self.org_transport = None
+        self.org_message_service = None
 
 
 class FakeAgent:
@@ -425,39 +425,21 @@ async def test_completed_event_points_to_db_result(org_manager):
 
 
 @pytest.mark.asyncio
-async def test_leader_message_persists_content_without_publishing(org_manager):
-    manager, messager = org_manager
-    result = await manager.send_leader_message(
-        from_team_id="team-a",
-        from_leader_id="leader-a",
-        to_team_id="team-b",
-        content="Please take the API compatibility slice.",
-    )
-    assert result.ok
-
-    message_events = [m for _, m in messager.published if m.event_type == OrgEvent.LEADER_MESSAGE]
-    assert not message_events
-
-    messages = await manager.list_leader_messages(team_id="team-b")
-    assert messages[0]["content"] == "Please take the API compatibility slice."
-    assert messages[0]["message_id"] == result.data["message_id"]
-
-
-@pytest.mark.asyncio
 async def test_org_send_leader_message_tool_delivers_via_transport(org_manager):
+    from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.tools import OrgSendLeaderMessageTool
-    from openjiuwen.agent_teams.organization.transport_api import TransportAPI
 
     manager, messager = org_manager
+    message_service = OrgMessageService(
+        db=manager.db,
+        organization_id=manager.organization_id,
+        session_id=manager.session_id,
+        messager=messager,
+        db_context=manager.db_context,
+    )
     await manager.register_leader(team_id="team-a", leader_id="leader-a")
     await manager.register_leader(team_id="team-b", leader_id="leader-b")
-    transport = TransportAPI(
-        organization_id=manager.organization_id,
-        session_id="session-test",
-        from_team_id="team-a",
-        messager=messager,
-    )
-    tool = OrgSendLeaderMessageTool(manager, "team-a", "leader-a", transport=transport)
+    tool = OrgSendLeaderMessageTool(manager, "team-a", "leader-a", message_service=message_service)
     output = await tool.invoke(
         {
             "content": "Please take the API compatibility slice.",
@@ -473,7 +455,7 @@ async def test_org_send_leader_message_tool_delivers_via_transport(org_manager):
     assert payload["message_id"] == output.data["message_id"]
     assert "content" not in payload
 
-    messages = await manager.list_leader_messages(team_id="team-b")
+    messages = await message_service.list_leader_messages(team_id="team-b")
     assert messages[0]["content"] == "Please take the API compatibility slice."
 
 
@@ -554,7 +536,13 @@ async def test_leader_message_inbox_event_wakes_target_leader(active_organizatio
     handler = next(
         handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == inbox_topic
     )
-    message_id = "org-msg-wake-test"
+    sent = await agents["team-a"].team_backend.org_message_service.send_leader_message(
+        from_team_id="team-a",
+        from_leader_id="leader-team-a",
+        to_team_id="team-b",
+        content="Please confirm the API contract.",
+    )
+    message_id = sent.data["message_id"]
     await handler(
         OrgEventMessage(
             event_type=OrgEvent.LEADER_MESSAGE,
@@ -572,7 +560,112 @@ async def test_leader_message_inbox_event_wakes_target_leader(active_organizatio
     assert turns[0]["team_name"] == "team-b"
     assert turns[0]["session_id"] == session_id
     assert message_id in turns[0]["inputs"]["query"]
-    assert "org_view_tasks(action='messages')" in turns[0]["inputs"]["query"]
+    assert "org_get_leader_message" in turns[0]["inputs"]["query"]
+    assert "org_ack_leader_message" in turns[0]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
+async def test_failed_leader_message_turn_can_retry_and_ack_stops_wake(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-message-dedup",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-message-dedup",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    turns = []
+    first_turn_started = asyncio.Event()
+    release_first_turn = asyncio.Event()
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        if len(turns) == 1:
+            first_turn_started.set()
+            await release_first_turn.wait()
+            return False
+        return len(turns) > 1
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    sent = await agents["team-a"].team_backend.org_message_service.send_leader_message(
+        from_team_id="team-a",
+        from_leader_id="leader-team-a",
+        to_team_id="team-b",
+        content="deduplicate me",
+    )
+    message_id = sent.data["message_id"]
+    inbox_topic = OrgTopic.TEAM_INBOX.build(session_id, "org-message-dedup", "team-b")
+    handler = next(
+        handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == inbox_topic
+    )
+    event = OrgEventMessage(
+        event_type=OrgEvent.LEADER_MESSAGE,
+        payload={"message_id": message_id, "from_team_id": "team-a", "to_team_id": "team-b"},
+        sender_id="team-a",
+    )
+
+    await handler(event)
+    first_turn = runtime._leader_turn_workers[(session_id, "team-b")]
+    await first_turn_started.wait()
+    await handler(event)
+    assert len(turns) == 1
+
+    release_first_turn.set()
+    await first_turn
+    await handler(event)
+    await runtime._leader_turn_workers[(session_id, "team-b")]
+    assert len(turns) == 2
+
+    await agents["team-b"].team_backend.org_message_service.ack_leader_message(
+        message_id=message_id,
+        team_id="team-b",
+        leader_id="leader-team-b",
+    )
+    await handler(event)
+    await asyncio.sleep(0)
+    assert len(turns) == 2
+
+
+@pytest.mark.asyncio
+async def test_rebind_recovers_unacknowledged_leader_message(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-message-recovery",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-message-recovery",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    sent = await agents["team-a"].team_backend.org_message_service.send_leader_message(
+        from_team_id="team-a",
+        from_leader_id="leader-team-a",
+        to_team_id="team-b",
+        content="recover me",
+    )
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    assert await runtime.ensure_team_binding(
+        team_id="team-b",
+        session_id=session_id,
+        agent=agents["team-b"],
+    )
+    await asyncio.sleep(0)
+
+    assert len(turns) == 1
+    assert sent.data["message_id"] in turns[0]["inputs"]["query"]
 
 
 @pytest.mark.asyncio
@@ -753,6 +846,7 @@ async def test_active_teams_can_create_and_join_organization(active_organization
         {"organization_id": "org-active", "display_name": "Active Organization"}
     )
     assert created.success
+    assert "next model call" in created.data["next_action"]
     assert created.data["owner_team_id"] == "team-a"
     assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-active"
     owner_prompt = agents["team-a"].harness.system_prompt_builder.sections["organization_owner_lifecycle"]
@@ -1348,26 +1442,38 @@ async def test_non_owner_cannot_dissolve_organization_even_without_bindings(acti
 
 
 @pytest.mark.asyncio
-async def test_drain_leader_turns_times_out_when_team_stays_running(active_organization_runtime, monkeypatch):
+async def test_drain_leader_turns_waits_until_running_team_pauses(active_organization_runtime, monkeypatch):
     org_runtime, _agents, session_id = active_organization_runtime
-    monkeypatch.setattr(
-        "openjiuwen.agent_teams.organization.runtime._LEADER_TURN_PAUSE_MAX_RETRIES",
-        3,
-    )
     sleep_calls: list[float] = []
 
     async def record_sleep(seconds: float) -> None:
         sleep_calls.append(seconds)
+        if len(sleep_calls) == 3:
+            entry.state = RuntimeState.PAUSED
 
     monkeypatch.setattr(asyncio, "sleep", record_sleep)
 
     entry = await org_runtime._team_runtime_manager.pool.get("team-a")
     entry.state = RuntimeState.RUNNING
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
 
     key = (session_id, "team-a")
     org_runtime._leader_turn_queues[key] = deque([{"query": "queued turn"}])
     await org_runtime._drain_leader_turns("team-a", session_id)
 
+    assert turns == [
+        {
+            "team_name": "team-a",
+            "session_id": session_id,
+            "inputs": {"query": "queued turn"},
+        }
+    ]
     assert key not in org_runtime._leader_turn_queues
     assert key not in org_runtime._leader_turn_workers
-    assert len(sleep_calls) == 2
+    assert len(sleep_calls) == 3

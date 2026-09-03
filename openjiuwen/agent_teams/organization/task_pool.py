@@ -1,21 +1,24 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""DB-backed organization task pool and leader-message manager."""
+"""DB-backed organization task pool."""
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import delete, or_, select, update
-from sqlmodel import SQLModel
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.organization.db import (
+    OrgDbContext,
+    json_dumps,
+    json_loads,
+)
 from openjiuwen.agent_teams.organization.events import (
     BaseOrgEvent,
     OrgEventMessage,
@@ -35,7 +38,6 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgAssignmentType,
     OrgInfoRecord,
     OrgLeaderHandle,
-    OrgLeaderMessageRecord,
     OrgLeaderRecord,
     OrganizationSpec,
     OrgTask,
@@ -50,25 +52,12 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskSource,
     OrgTaskSourceRecord,
     OrgTaskStatus,
-    org_static_tables,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_org_static_tables(sync_conn) -> None:
-    SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
-
-
-async def _ensure_org_schema(db: TeamDatabase) -> None:
-    await db.initialize()
-    if db.engine is None:
-        return
-    async with db.engine.begin() as conn:
-        await conn.run_sync(_ensure_org_static_tables)
 
 
 @dataclass
@@ -79,19 +68,9 @@ class OrgTaskOpResult:
     data: dict[str, Any] | None = None
 
 
-def _json_dumps(value: Any) -> str | None:
-    if value is None:
-        return None
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _json_loads(value: str | None, default: Any) -> Any:
-    if not value:
-        return default
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return default
+# Local aliases keep call sites stable while sharing helpers with message_service.
+_json_dumps = json_dumps
+_json_loads = json_loads
 
 
 class OrgTaskManager:
@@ -104,21 +83,22 @@ class OrgTaskManager:
         organization_id: str,
         messager: Messager | None = None,
         session_id: str | None = None,
+        db_context: OrgDbContext | None = None,
     ) -> None:
         self.db = db
         self.organization_id = organization_id
         self.messager = messager
         self.session_id = session_id
-        self._sessions: DbSessions | None = None
+        self.db_context = db_context or OrgDbContext(db)
 
     async def initialize(self) -> None:
-        await self.db.initialize()
-        if self.db.session_local is None or self.db.engine is None:
-            raise RuntimeError("TeamDatabase is not initialized")
-        if self._sessions is None:
-            self._sessions = DbSessions(self.db.session_local)
-        async with self.db.engine.begin() as conn:
-            await conn.run_sync(_ensure_org_static_tables)
+        await self.db_context.initialize()
+
+    def _read(self):
+        return self.db_context.sessions.read()
+
+    def _write(self):
+        return self.db_context.sessions.write()
 
     async def ensure_organization(
         self,
@@ -196,10 +176,8 @@ class OrgTaskManager:
         organization binding before its leader tool set is assembled.
         """
 
-        await _ensure_org_schema(db)
-        if db.session_local is None:
-            raise RuntimeError("TeamDatabase is not initialized")
-        sessions = DbSessions(db.session_local)
+        context = OrgDbContext(db)
+        sessions = await context.initialize()
         async with sessions.read() as session:
             stmt = select(OrgLeaderRecord.organization_id).where(OrgLeaderRecord.team_id == team_id)
             return list((await session.execute(stmt)).scalars().all())
@@ -246,12 +224,6 @@ class OrgTaskManager:
                     OrgTaskEventRecord.organization_id == self.organization_id
                 ),
                 "task_events",
-            )
-            await _delete(
-                delete(OrgLeaderMessageRecord).where(
-                    OrgLeaderMessageRecord.organization_id == self.organization_id
-                ),
-                "leader_messages",
             )
             await _delete(
                 delete(OrgTaskRecord).where(OrgTaskRecord.organization_id == self.organization_id),
@@ -876,75 +848,6 @@ class OrgTaskManager:
                 )
             return {"summary_task": self._to_task(summary).model_dump(), "source_tasks": sources}
 
-    async def send_leader_message(
-        self,
-        *,
-        from_team_id: str,
-        from_leader_id: str,
-        content: str,
-        to_team_id: str | None = None,
-        to_leader_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> OrgTaskOpResult:
-        await self.initialize()
-        message_id = f"org-msg-{uuid.uuid4().hex[:12]}"
-        now = get_current_time()
-        async with self._write() as session:
-            row = OrgLeaderMessageRecord(
-                message_id=message_id,
-                organization_id=self.organization_id,
-                from_team_id=from_team_id,
-                from_leader_id=from_leader_id,
-                to_team_id=to_team_id,
-                to_leader_id=to_leader_id,
-                content=content,
-                created_at=now,
-                metadata_json=_json_dumps(metadata or {}),
-            )
-            session.add(row)
-            await session.commit()
-        # Notification is owned by TransportAPI (org_send_leader_message → deliver).
-        return OrgTaskOpResult(ok=True, data=self._message_dict(row))
-
-    async def list_leader_messages(
-        self,
-        *,
-        team_id: str,
-        include_broadcast: bool = True,
-        limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        await self.initialize()
-        stmt = select(OrgLeaderMessageRecord).where(OrgLeaderMessageRecord.organization_id == self.organization_id)
-        if include_broadcast:
-            stmt = stmt.where(
-                (OrgLeaderMessageRecord.to_team_id == team_id) | (OrgLeaderMessageRecord.to_team_id.is_(None))
-            )
-        else:
-            stmt = stmt.where(OrgLeaderMessageRecord.to_team_id == team_id)
-        stmt = stmt.order_by(OrgLeaderMessageRecord.created_at.desc()).limit(limit)
-        async with self._read() as session:
-            rows = (await session.execute(stmt)).scalars().all()
-            return [self._message_dict(row) for row in rows]
-
-    async def _set_assigned_task_status(
-        self,
-        task_id: str,
-        team_id: str,
-        status: OrgTaskStatus,
-    ) -> OrgTaskOpResult:
-        await self.initialize()
-        now = get_current_time()
-        async with self._write() as session:
-            row = await session.get(OrgTaskRecord, task_id)
-            if row is None or row.organization_id != self.organization_id:
-                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
-            if row.assigned_team_id != team_id:
-                return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
-            row.status = status.value
-            row.updated_at = now
-            await session.commit()
-        return OrgTaskOpResult(ok=True, task=self._to_task(row))
-
     async def _publish_task_created(self, task: OrgTask) -> None:
         await self._publish_event(
             OrgTaskCreatedEvent(
@@ -1073,22 +976,7 @@ class OrgTaskManager:
             output_context=OrgTaskOutputContext.model_validate(output_context) if output_context else None,
             output_abstract=row.output_abstract,
             metadata=_json_loads(row.metadata_json, {}),
-        )
-
-    @staticmethod
-    def _message_dict(row: OrgLeaderMessageRecord) -> dict[str, Any]:
-        return {
-            "message_id": row.message_id,
-            "organization_id": row.organization_id,
-            "from_team_id": row.from_team_id,
-            "from_leader_id": row.from_leader_id,
-            "to_team_id": row.to_team_id,
-            "to_leader_id": row.to_leader_id,
-            "content": row.content,
-            "created_at": row.created_at,
-            "read_at": row.read_at,
-            "metadata": _json_loads(row.metadata_json, {}),
-        }
+            )
 
     @staticmethod
     def _to_review(row: OrgTaskReviewRecord) -> OrgTaskReview:
@@ -1138,16 +1026,6 @@ class OrgTaskManager:
         if isinstance(value, OrgTaskOutputContext):
             return value
         return OrgTaskOutputContext.model_validate(value)
-
-    def _read(self):
-        if self._sessions is None:
-            raise RuntimeError("OrgTaskManager is not initialized")
-        return self._sessions.read()
-
-    def _write(self):
-        if self._sessions is None:
-            raise RuntimeError("OrgTaskManager is not initialized")
-        return self._sessions.write()
 
 
 __all__ = ["OrgTaskManager", "OrgTaskOpResult"]

@@ -284,12 +284,27 @@ class TeamRuntimeManager:
 
         activation: TeamRuntimeActivation | None = None
         ran_turn = False
+        finalized = False
         try:
             activation = await self.activate(spec, session_id, inputs)
             if activation.action.kind in _REJECT_KINDS or activation.agent is None:
                 return False
             ran_turn = True
-            await activation.agent.invoke(inputs, session=activation.session)
+            stream = activation.agent.stream(inputs, session=activation.session)
+            try:
+                async for chunk in stream:
+                    payload = getattr(chunk, "payload", None)
+                    if isinstance(payload, dict) and payload.get("event_type") in {
+                        "team.idle",
+                        "team.completed",
+                    }:
+                        finalized = True
+                        await self.finalize(team_name=team_name, session_id=session_id)
+                        break
+            finally:
+                close = getattr(stream, "aclose", None)
+                if callable(close):
+                    await close()
             return True
         except Exception as exc:
             team_logger.warning(
@@ -301,7 +316,8 @@ class TeamRuntimeManager:
             return False
         finally:
             if ran_turn and activation is not None:
-                await self.finalize(team_name=team_name, session_id=session_id)
+                if not finalized:
+                    await self.finalize(team_name=team_name, session_id=session_id)
                 current = await self._resolve_entry(team_name=team_name, session_id=session_id)
                 if current is not None:
                     await current.interact_gate.close_and_drain()
