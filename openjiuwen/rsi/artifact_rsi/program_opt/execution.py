@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import shlex
-import threading
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from openjiuwen.rsi.artifact_rsi.program_opt.logging_config import get_logger
@@ -67,7 +67,7 @@ async def _stage_and_run(
     env: Mapping[str, str],
     timeout: float,
     result_file: Optional[str],
-    prelude: Sequence[Sequence[str]] = (),
+    scratch_root: Optional[Path] = None,
 ) -> ExecutionOutcome:
     """One evaluation inside one sandbox: stage, run, read back.
 
@@ -75,7 +75,10 @@ async def _stage_and_run(
     run, and the one built per evaluation — because what an evaluation *is*
     does not depend on where the container came from.
     """
-    scratch = f"evolve-{uuid.uuid4().hex}"
+    name = f"evolve-{uuid.uuid4().hex}"
+    # Absolute when a root is given, because a relative path resolves against
+    # agent-core's CWD context var and not against wherever the caller meant.
+    scratch = str(scratch_root / name) if scratch_root is not None else name
     fs = sys_operation.fs()
     shell = sys_operation.shell()
 
@@ -99,13 +102,6 @@ async def _stage_and_run(
                 f"could not stage {path} into the sandbox: "
                 f"{getattr(result, 'message', '') or f'error {code}'}"
             )
-
-    # A container built for this evaluation alone starts empty, so whatever the
-    # run was promised has to be put back before the candidate runs. Nothing to
-    # do when the sandbox is shared — it was provisioned once at run start.
-    for step in prelude:
-        await shell.execute_cmd(shlex.join(step), cwd=scratch,
-                                timeout=max(1, int(timeout)), environment={})
 
     completed = await shell.execute_cmd(
         shlex.join(command),
@@ -169,157 +165,62 @@ def execution_from_sys_operation(sys_operation: Any, loop: Any) -> EvaluationExe
     return execute
 
 
-def execution_from_sandbox_card(
-    card: Any,
-    loop: Any,
-    prelude: Sequence[Sequence[str]] = (),
-    per_evaluation: bool = False,
-) -> "SandboxLease":
-    """Sandboxes built from a card by this module, and reclaimed by it.
+def local_execution(workspace: Any, loop: Any) -> EvaluationExecution:
+    """Candidates run on this host, inside one directory, with no container.
 
-    Two lifetimes, and the default is the cheap one. **One per run** builds a
-    container on the first evaluation and hands it back when the run ends —
-    what the shared-instance path gives, except that nothing outside had to
-    create it. **One per evaluation** (`per_evaluation=True`) builds and
-    discards a container each time.
+    agent-core's own ``LOCAL`` SysOperation rather than a bare subprocess: it
+    is the same `fs`/`shell` surface the gateway one has — so the staging, the
+    result file and the timeouts are one implementation — and it still refuses
+    a path outside ``workspace`` and a command matching its dangerous-pattern
+    list. That is a boundary worth having, and it is not isolation. **A
+    candidate is code a model wrote**, and on this path it runs as this
+    process, with this process's reach. The AST gate narrows what a candidate
+    may import; the module that used to provide the boundary is gone.
 
-    The other factory reuses one container for a whole run; this one gives each
-    evaluation a container nothing else has touched. What that buys is the only
-    isolation the scratch directory cannot: a candidate that gets past the AST
-    gate and writes outside its own directory reaches nothing but a container
-    that is about to be thrown away.
+    This is what jiuwenswarm already does on a host without a sandbox service:
+    its card builder falls back to ``OperationMode.LOCAL`` with the shell
+    allowlist switched off entirely.
 
-    What it costs is worth saying plainly, because it is not small. Every
-    evaluation pays for a container, and a fresh container has none of what
-    ``packages`` put in the last one — so a card that declares packages pays
-    for installing them again, per evaluation, and a run is dozens of
-    evaluations. Ship the candidate runtime in the image and leave ``packages``
-    empty and the cost is only the container.
-
-    **Created here, reclaimed here.** Nothing else knows these containers
-    exist — AgentServer registered one card, not the dozens this makes — so
-    leaving one behind is a leak nobody else can find. The release is in a
-    ``finally``, and its own failure is logged rather than raised: a container
-    that outlives its evaluation is a problem for later, while a lost result is
-    a problem now.
+    Scratch directories are **absolute**, under ``workspace``. The relative
+    ones the gateway path used resolve against agent-core's CWD context var,
+    which a caller that never called ``init_cwd`` leaves pointing at the
+    process's own directory — measured here as every write, the command and
+    the read all refused for being outside the sandbox root.
     """
-    if card is None:
-        raise ExecutionUnavailable(
-            "building sandboxes needs a SysOperationCard (mode=sandbox): it carries the "
-            "gateway address, the credentials and the isolation strategy, none of which "
-            "this provider may invent"
-        )
+    from openjiuwen.core.sys_operation import (
+        LocalWorkConfig,
+        OperationMode,
+        SysOperation,
+        SysOperationCard,
+    )
 
-    lease = SandboxLease(card, loop, tuple(prelude), per_evaluation)
-    return lease
-
-
-@dataclass
-class SandboxLease:
-    """What this module built, and what it owes back.
-
-    The pair travels together on purpose: a caller that gets an execution out
-    of a card also gets the one call that returns what the card created. The
-    shared-instance path has no such pair, because there the container is
-    AgentServer's and releasing it here would be reclaiming somebody else's.
-    """
-
-    card: Any
-    loop: Any
-    prelude: Sequence[Sequence[str]]
-    per_evaluation: bool
-    _held: Any = None
-    _held_identity: str = ""
-    _lock: Any = None
-
-    def __post_init__(self) -> None:
-        self._lock = threading.Lock()
-
-    async def _operation(self) -> tuple[Any, str, bool]:
-        """The sandbox this evaluation runs in, and whether it is ours to drop."""
-        from openjiuwen.core.sys_operation import SysOperation
-
-        if self.per_evaluation:
-            fresh, identity = _card_for_one_evaluation(self.card)
-            return SysOperation(fresh), identity, True
-        with self._lock:
-            if self._held is None:
-                fresh, identity = _card_for_one_evaluation(self.card)
-                self._held, self._held_identity = SysOperation(fresh), identity
-            return self._held, self._held_identity, False
-
-    async def release(self) -> None:
-        """Hand back whatever is still held. Safe to call more than once."""
-        with self._lock:
-            held, identity = self._held, self._held_identity
-            self._held, self._held_identity = None, ""
-        if held is not None:
-            await _release(held, identity, self.card)
+    root = Path(workspace).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    operation = SysOperation(SysOperationCard(
+        id=f"rsi-local-{uuid.uuid4().hex[:8]}",
+        mode=OperationMode.LOCAL,
+        work_config=LocalWorkConfig(sandbox_root=[str(root)], restrict_to_sandbox=True),
+    ))
 
     def execute(
-        self,
         files: Mapping[str, str],
         command: Sequence[str],
         env: Mapping[str, str],
         timeout: float,
         result_file: Optional[str],
     ) -> ExecutionOutcome:
-        async def run() -> ExecutionOutcome:
-            operation, identity, ours = await self._operation()
-            try:
-                return await _stage_and_run(
-                    operation, files, command, env, timeout, result_file,
-                    self.prelude if self.per_evaluation else (),
-                )
-            finally:
-                # Only the per-evaluation container is dropped here; the
-                # per-run one is held until `release`, which the caller owes
-                # once the search is over.
-                if ours:
-                    await _release(operation, identity, self.card)
-
-        future = asyncio.run_coroutine_threadsafe(run(), self.loop)
+        future = asyncio.run_coroutine_threadsafe(
+            _stage_and_run(operation, files, command, env, timeout, result_file,
+                           scratch_root=root), loop)
         return future.result(timeout + 120)
 
-
-def _card_for_one_evaluation(card: Any) -> tuple[Any, str]:
-    """The same card, pointed at a container of its own.
-
-    `CUSTOM` scope is what makes the identity ours to choose: the isolation key
-    is then literal — no `{session_id}` to resolve — so the key that creates the
-    container is the key that reclaims it.
-    """
-    from openjiuwen.core.sys_operation.config import ContainerScope
-
-    identity = f"eval-{uuid.uuid4().hex[:16]}"
-    fresh = card.model_copy(deep=True)
-    fresh.id = f"{card.id}-{identity}"
-    isolation = fresh.gateway_config.isolation
-    isolation.container_scope = ContainerScope.CUSTOM
-    isolation.custom_id = identity
-    return fresh, identity
-
-
-async def _release(operation: Any, identity: str, card: Any) -> None:
-    """Hand the container back, by the key it was created under."""
-    from openjiuwen.core.sys_operation.sandbox.gateway.gateway_client import (
-        SandboxGatewayClient,
-    )
-
-    key = operation.isolation_key_template
-    launcher = getattr(card.gateway_config, "launcher_config", None)
-    on_stop = getattr(launcher, "on_stop", "delete") or "delete"
-    try:
-        await SandboxGatewayClient.release(key, on_stop=on_stop)
-    except Exception as error:  # noqa: BLE001 - a leak is for later, a lost result is now
-        log.warning("could not release the per-evaluation sandbox %s (%s): %s",
-                    key, identity, error)
+    return execute
 
 
 __all__ = [
     "EvaluationExecution",
-    "execution_from_sandbox_card",
     "ExecutionOutcome",
     "ExecutionUnavailable",
     "execution_from_sys_operation",
+    "local_execution",
 ]

@@ -44,8 +44,8 @@ from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
 from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
     EvaluationExecution,
     ExecutionUnavailable,
-    execution_from_sandbox_card,
     execution_from_sys_operation,
+    local_execution,
 )
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
     ModelConfigError,
@@ -116,32 +116,14 @@ class PuctProgramArtifactProvider:
         self,
         *,
         sys_operation: Any | None = None,
-        sandbox_card: Any | None = None,
-        sandbox_per_evaluation: bool = False,
         execution: EvaluationExecution | None = None,
     ) -> None:
-        #: agent-core's own sandbox: a `SysOperation` (mode=sandbox) that
-        #: AgentServer registered as a `SysOperationCard` and resolved via
-        #: `Runner.resource_mgr.get_sys_operation(card_id)`. The provider-local
-        #: bwrap/seatbelt isolation is gone — this is the only way a candidate
-        #: is ever executed.
+        #: An operation to run candidates through, when the caller has one —
+        #: `Runner.resource_mgr.get_sys_operation(card_id)`, in whatever mode
+        #: it was registered. Left out, the provider makes a `LOCAL` one rooted
+        #: at the task's own `run_dir`: candidates then run on this host, which
+        #: is what jiuwenswarm already does where no sandbox service exists.
         self._sys_operation = sys_operation
-        #: A `SysOperationCard` (mode=sandbox) to build a **new** sandbox from
-        #: for every evaluation, instead of reusing one for the whole run. It
-        #: wins over `sys_operation` when both are given. What it buys is the
-        #: isolation a scratch directory cannot — a candidate that gets past
-        #: the AST gate reaches only a container about to be discarded — and
-        #: what it costs is a container per evaluation, plus re-provisioning
-        #: `packages` into each one. Containers built this way are released
-        #: here, because nothing else knows they exist.
-        self._sandbox_card = sandbox_card
-        #: Whether each evaluation gets a container of its own rather than the
-        #: run sharing one. Off by default: the isolation it adds is real —
-        #: a candidate past the AST gate reaches only a container about to be
-        #: discarded — but every evaluation then pays for a container and for
-        #: reinstalling whatever `packages` the card declares, and a run is
-        #: dozens of evaluations.
-        self._sandbox_per_evaluation = sandbox_per_evaluation
         #: Test seam: a ready-made execution wins over building one from the
         #: SysOperation, the same way an injected completion factory does.
         self._execution = execution
@@ -472,11 +454,7 @@ class PuctProgramArtifactProvider:
                     "model_refs['optimizer'] via Runner.resource_mgr.get_model"
                 )
             spec = self._spec_for(request, resumed=resumed)
-            release_sandbox = None
-            if self._execution is not None:
-                execute = self._execution
-            else:
-                execute, release_sandbox = self._execution_for(spec, loop)
+            execute = self._execution or self._execution_for(spec, loop)
         except (ModelConfigError, ExecutionUnavailable,
                 FileNotFoundError, ValueError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
@@ -560,15 +538,6 @@ class PuctProgramArtifactProvider:
             with self._lock:
                 self._stopping.pop(request.task_id, None)
                 self._live.pop(request.task_id, None)
-            # What this provider built, it hands back — however the search
-            # ended. Its own failure is logged rather than raised: a container
-            # that outlives its run is a problem for later, while losing the
-            # result the search just produced is a problem now.
-            if release_sandbox is not None:
-                try:
-                    await release_sandbox()
-                except Exception as error:  # noqa: BLE001
-                    logger.warning("could not release the run's sandbox: %s", error)
 
         state.finish()
         await _notify(on_event, EventStatus(status=state.status))
@@ -580,32 +549,16 @@ class PuctProgramArtifactProvider:
             error_message=state.error_message,
         )
 
-    def _execution_for(
-        self, spec: RunSpec, loop: Any,
-    ) -> tuple[EvaluationExecution, Any]:
-        """How a candidate will be run, given what was injected.
+    def _execution_for(self, spec: RunSpec, loop: Any) -> EvaluationExecution:
+        """How a candidate will be run.
 
-        Returns the execution and the one call that hands back whatever it
-        built — `None` when there is nothing to hand back, which is the case
-        for an injected instance: that container is AgentServer's, and
-        releasing it here would be reclaiming somebody else's.
-
-        A card wins over an instance when both are there: a caller that
-        supplied one asked this provider to own the container.
+        An injected operation if there is one — it may be a sandbox, and that
+        is the caller's choice to make. Otherwise a `LOCAL` one under the run's
+        own directory, so a task needs nothing wired to start.
         """
-        if self._sandbox_card is not None:
-            prelude: tuple[list[str], ...] = ()
-            if spec.packages and self._sandbox_per_evaluation:
-                # Each container starts empty, so the promise has to be kept
-                # again in every one of them. With one container for the run,
-                # the pre-flight's own `ensure` installs into it once and this
-                # stays empty.
-                prelude = ([["python", "-m", "pip", "install", "--no-input",
-                             "--disable-pip-version-check", *spec.packages]])
-            lease = execution_from_sandbox_card(
-                self._sandbox_card, loop, prelude, self._sandbox_per_evaluation)
-            return lease.execute, lease.release
-        return execution_from_sys_operation(self._sys_operation, loop), None
+        if self._sys_operation is not None:
+            return execution_from_sys_operation(self._sys_operation, loop)
+        return local_execution(Path(spec.run_dir) / "workspace", loop)
 
     def _spec_for(
         self,
