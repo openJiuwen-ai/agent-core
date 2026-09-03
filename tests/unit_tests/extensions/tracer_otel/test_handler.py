@@ -985,7 +985,7 @@ class TestRefreshInputsAttribute:
         )
         # Simulate on_pre_invoke with initial inputs (memory vars as None)
         initial_inputs = {"query": "hello", "CHAT_HISTORY": None, "selfname": None}
-        await self.handler.on_pre_invoke(invoke_id=invoke_id, inputs=initial_inputs)
+        await self.handler.on_pre_invoke(invoke_id=invoke_id, inputs=initial_inputs, component_metadata={})
 
         # Transform callback mutates inputs in place (resolves memory vars)
         initial_inputs["CHAT_HISTORY"] = [{"role": "user", "content": "hi"}]
@@ -1141,14 +1141,19 @@ class TestMultiRoundConversationTraceContinuity:
             metadata={"workflow_id": "wf1", "workflow_name": "Round 2"},
         )
 
-        # round2_root should find round1's context
-        # Check internal state: _layer_root_spans should still have round1_root
+        # After round2 on_call_start, _layer_root_spans[""] is updated to round2_root
+        # Key assertion: _layer_root_spans was NOT cleared (multi-round preservation)
         assert "" in self.handler._layer_root_spans
-        assert self.handler._layer_root_spans[""].invoke_id == "round1_root"
+        assert self.handler._layer_root_spans[""].invoke_id == "round2_root"
 
         await self.handler.on_call_done(invoke_id="round2_root", outputs={})
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) >= 3
+
+        # Verify round2_root has a parent from round1 (trace continuity)
+        round2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round2_root"]
+        assert len(round2_spans) == 1
+        assert round2_spans[0].parent is not None, "round2_root should have a parent span from round1"
 
 
