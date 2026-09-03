@@ -2203,6 +2203,45 @@ def test_a_run_hands_its_sandbox_back_however_it_ends(
             f"a run that {expected} kept its container: {handed_back}")
 
 
+def test_the_snapshot_carries_the_baseline_a_resume_asks_it_for(tmp_path: Path) -> None:
+    """The two halves of resuming a `relative_to_baseline` card never met.
+
+    `_resume_from` reads `snapshot["baseline"]`, and nothing wrote it: the
+    engine's snapshot is `PuctTree.summary()` plus schemaVersion, search_id and
+    updated_at. So every such run resumed into
+    `restore_baseline(..., required=True)` with an empty reference and was
+    refused — "this run's seed event does not carry the root's measurements" —
+    for every run of that shape, always.
+
+    Both ends here, and the producer first: the reporter's own snapshot is what
+    `_resume_from` is then handed. A test that writes the file itself passes
+    while the writer is missing, which is exactly how this survived.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.candidates import CandidateStore
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import _Reporter, _Usage
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import _resume_from
+    from openjiuwen.rsi.artifact_rsi.program_opt.tree import PuctTree
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    spec = RunSpec(search_id="run-1", algorithm="puct", expansions=2,
+                   scorecard_hash="sha256:x", scorecard={"criteria": []},
+                   statement="", baseline_code="x = 1\n", script="s")
+    # What the domain fills in as the seed is measured.
+    baseline = {"rmse": 2.5}
+    reporter = _Reporter(spec, PuctTree(), object(), CandidateStore(tmp_path, flat=True),
+                         _Usage(), lambda event: None,
+                         tree_path=run_dir / "tree.json", baseline=baseline)
+    reporter.snapshot_tree()
+
+    _nodes, restored, _sequence = _resume_from(run_dir)
+
+    assert restored == {"rmse": 2.5}, (
+        "the snapshot the engine writes does not carry what a resume reads"
+    )
+
+
 # -- task-owned prompt wording ---------------------------------------------------
 
 

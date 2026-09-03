@@ -286,6 +286,7 @@ class PuctEngine:
         reporter = _Reporter(
             spec, tree, domain, store, usage, emit,
             tree_path=store.run_path(spec.search_id, TREE_FILE),
+            baseline=baseline,
         )
 
         complete = self._model_call(spec, usage, reporter, should_stop, tree)
@@ -509,8 +510,15 @@ class _Reporter:
         usage: _Usage,
         emit: Emit,
         tree_path: Optional[Path] = None,
+        baseline: Optional[Dict[str, float]] = None,
     ) -> None:
         self.spec = spec
+        #: The root's raw measurements, which every `relative_to_baseline`
+        #: criterion divides by. The domain fills this in as the seed is
+        #: scored; the snapshot carries it so a resume can put it back rather
+        #: than re-measuring and moving the reference under scores already
+        #: written down.
+        self._baseline = baseline if baseline is not None else {}
         self.tree = tree
         #: Where the tree snapshot lands, or ``None`` when nobody asked for one.
         self._tree_path = tree_path
@@ -597,6 +605,12 @@ class _Reporter:
         summary["schemaVersion"] = TREE_SCHEMA_VERSION
         summary["search_id"] = self.spec.search_id
         summary["updated_at"] = events.utc_now()
+        summary["baseline"] = dict(self._baseline)
+        # Written because `_resume_from` reads it. It did not used to be, and
+        # the two halves never met: a `relative_to_baseline` card resumed into
+        # `restore_baseline(..., required=True)` with an empty reference and
+        # was refused with "this run's seed event does not carry the root's
+        # measurements" — for every such run, always.
         for node in summary.get("tree", []):
             detail = self._detail.get(node.get("index"))
             if detail:
