@@ -3297,3 +3297,61 @@ def test_the_probe_measures_the_program_the_card_actually_describes() -> None:
     assert seen.get("reply_format") == "tagged", (
         f"the probe built its domain from defaults; it passed {sorted(seen)}"
     )
+
+
+def test_a_local_run_does_not_install_packages_onto_this_machine(tmp_path: Path) -> None:
+    """`ensure` installs into "the execution environment", and with the sandbox
+    gone that phrase changed meaning without the code changing.
+
+    Against a container it is the container. Against the default local
+    execution it is the interpreter this process runs in — so a scorecard's
+    `packages`, a list a model wrote, would be pip-installed onto the user's
+    machine by a search nobody watched. Refused with the command to run by
+    hand: the list may well be right, and it is still not this run's call.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import local_execution
+    from openjiuwen.rsi.artifact_rsi.program_opt.provision import ProvisionError, ensure
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        execute = local_execution(tmp_path / "workspace", loop)
+        with pytest.raises(ProvisionError) as raised:
+            ensure(["no_such_distribution_xyz"], execute)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+
+    message = str(raised.value)
+    assert "pip install no_such_distribution_xyz" in message
+    assert "on this machine" in message
+
+
+def test_a_sandboxed_run_still_provisions_what_the_card_asks_for() -> None:
+    """The refusal is about *whose* machine, not about provisioning.
+
+    An execution that is not marked as local — the gateway sandbox the
+    provider is handed when AgentServer injects one — reaches pip exactly as
+    before. Guarding this because a refusal written too broadly would take the
+    feature away from the case it was built for.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import ExecutionOutcome
+    from openjiuwen.rsi.artifact_rsi.program_opt.provision import ensure
+
+    ran: list[list[str]] = []
+
+    def sandboxed(files, command, env, timeout, result_file):  # type: ignore[no-untyped-def]
+        ran.append(list(command))
+        # Missing before the install, importable after it, which is the
+        # sequence `ensure` checks.
+        if command[:2] == ["python", "-c"]:
+            return ExecutionOutcome(exit_code=0 if any("pip" in c for c in sum(ran, []))
+                                    else 1, output="no module", result_text=None)
+        return ExecutionOutcome(exit_code=0, output="", result_text=None)
+
+    installed, note = ensure(["lightgbm"], sandboxed)
+
+    assert installed == ["lightgbm"]
+    assert any("pip" in " ".join(command) for command in ran), ran
+    assert "lightgbm" in note

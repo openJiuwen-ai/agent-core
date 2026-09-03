@@ -22,11 +22,12 @@ says, and this is the half that acts on it.
 first, inside the execution environment: the common case is that everything
 asked for is already importable and pip never runs.
 
-.. warning:: The runtime is whatever the provider injected. Against a gateway
-   sandbox that is a container. Against the default ``LOCAL`` execution it is
-   **this machine's interpreter**, so a card that names packages installs them
-   on the host. That followed from removing the sandbox and is not a decision
-   this module can make on its own.
+.. note:: The runtime is whatever the provider injected. Against a gateway
+   sandbox that is a container, and installing into it is what this module is
+   for. Against the default ``LOCAL`` execution it is **this machine's
+   interpreter**, and installing there is refused: the list was written by a
+   model, the machine belongs to the user, and a search does not get to put
+   packages on it. The refusal names the `pip install` line to run by hand.
 
 **A name is a name.** Anything that could redirect where the package comes from
 — an index URL, an editable path, a VCS reference, an environment marker — is
@@ -134,10 +135,27 @@ def ensure(packages: Sequence[str], execute: "EvaluationExecution") -> Tuple[Lis
     try:
         if probe_imports(names, execute) is None:
             return [], f"already importable: {', '.join(names)}"
+        if getattr(execute, "runs_on_this_machine", False):
+            # Everything below installs into "the execution environment". With
+            # a container that is the container. Without one it is the
+            # interpreter this process is running in — so a card naming a
+            # package would quietly install it on the user's machine, from a
+            # list a model wrote. Nobody asked for that, and it is not
+            # something a search may decide on its own.
+            raise ProvisionError(
+                f"this run's scorecard asks for {', '.join(wanted)}, which the "
+                "execution environment cannot import. Candidates are running on "
+                "this machine (no sandbox was injected), and installing into it "
+                "is not this run's call to make — install them yourself with "
+                f"`pip install {' '.join(wanted)}`, or give the provider a "
+                "sandboxed SysOperation and the run will provision its own"
+            )
         command = ["python", "-m", "pip", "install", "--no-input",
                    "--disable-pip-version-check", *wanted]
         log.info("installing %s inside the execution environment", ", ".join(wanted))
         outcome = execute({}, command, {}, float(TIMEOUT_SECONDS), None)
+    except ProvisionError:
+        raise
     except Exception as error:  # noqa: BLE001 - the seam's failure is run-level
         raise ProvisionError(
             f"installing {', '.join(wanted)} could not be run: {error}") from error

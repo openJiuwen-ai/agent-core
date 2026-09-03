@@ -240,7 +240,15 @@ def local_execution(workspace: Any, loop: Any) -> EvaluationExecution:
         work_config=LocalWorkConfig(sandbox_root=[str(root)], restrict_to_sandbox=True),
     ))
 
-    return _bridge(operation, loop, scratch_root=root)
+    execute = _bridge(operation, loop, scratch_root=root)
+    # Marked, because one caller has to know: `provision.ensure` runs
+    # `pip install` through this seam, and "the execution environment" is a
+    # container in one case and the user's own interpreter in the other. The
+    # seam is otherwise deliberately opaque — where a candidate runs is not
+    # something the search should reason about — so this is the single fact
+    # that leaks, and it leaks to keep a side effect off someone's machine.
+    execute.runs_on_this_machine = True  # type: ignore[attr-defined]
+    return execute
 
 
 __all__ = [
