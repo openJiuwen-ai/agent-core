@@ -42,6 +42,7 @@ from openjiuwen.agent_teams.skill.rail_spec import (
 )
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.llm import ProviderType
 from openjiuwen.core.runner.spawn.agent_config import (
     SpawnAgentConfig,
 )
@@ -967,6 +968,16 @@ class AgentConfigurator:
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
+        current_agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        current_model_config = ctx.member_model or current_agent_spec.model
+        current_model_name = None
+        current_model_provider = None
+        if current_model_config is not None:
+            request_config = current_model_config.model_request_config
+            if request_config is not None:
+                current_model_name = request_config.model_name
+            provider = current_model_config.model_client_config.client_provider
+            current_model_provider = provider.value if isinstance(provider, ProviderType) else provider
         agent_team = TeamBackend(
             team_name=team_name,
             member_name=current_member_name,
@@ -977,6 +988,9 @@ class AgentConfigurator:
             predefined_members=spec.predefined_members or None,
             model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
             leader_allocation=self.leader_allocation if is_leader else None,
+            model_pool_provider=lambda: list(ctx.team_spec.model_pool) if ctx.team_spec is not None else [],
+            current_model_name=current_model_name,
+            current_model_provider=current_model_provider,
             leader_prompt=ctx.prompt if is_leader else "",
             enable_hitt=spec.enable_hitt,
             enable_bridge=spec.enable_bridge,

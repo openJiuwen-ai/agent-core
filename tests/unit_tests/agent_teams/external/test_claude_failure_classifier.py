@@ -30,21 +30,23 @@ def _result(*, is_error: bool, api_error_status=None, errors=None):
 
 def test_classify_assistant_error_maps_known_values():
     assert classify_assistant_error("authentication_failed")[0] == "auth_required"
+    assert classify_assistant_error("invalid_request")[0] == "request_rejected"
     assert classify_assistant_error("billing_error")[0] == "quota_exceeded"
     assert classify_assistant_error("rate_limit")[0] == "rate_limited"
     assert classify_assistant_error("server_error")[0] == "server_unavailable"
 
 
 def test_classify_assistant_error_degrades_unknown_to_sdk_error():
-    category, reason = classify_assistant_error("invalid_request")
+    category, reason = classify_assistant_error("unexpected_error")
     assert category == "sdk_error"
-    assert reason.message == "invalid_request"
+    assert reason.message == "unexpected_error"
 
 
 # --- classify_result_message --------------------------------------------
 
 
 def test_classify_result_message_maps_api_error_status():
+    assert classify_result_message(_result(is_error=True, api_error_status=400))[0] == "request_rejected"
     assert classify_result_message(_result(is_error=True, api_error_status=401))[0] == "auth_required"
     assert classify_result_message(_result(is_error=True, api_error_status=403))[0] == "auth_required"
     assert classify_result_message(_result(is_error=True, api_error_status=429))[0] == "rate_limited"

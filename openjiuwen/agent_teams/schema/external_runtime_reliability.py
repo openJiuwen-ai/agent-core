@@ -9,8 +9,8 @@ auto-retrying) and a finalized failure (a startup or turn has ended). This
 module holds the shared domain vocabulary for both:
 
 * :data:`ExternalRuntimeFailureCategory` — the closed set of failure
-  categories (auth / quota / rate-limit / server / network / process-start /
-  sdk-error / unknown).
+  categories (auth / quota / rate-limit / request / server / network /
+  process-start / sdk-error / unknown).
 * :data:`USER_ACTION_REQUIRED` / :func:`user_action_required` — whether a
   category needs the user or an external system to act.
 * :class:`ExternalRuntimeFailureReason` — structured reason (raw message, SDK
@@ -30,6 +30,7 @@ ExternalRuntimeFailureCategory = Literal[
     "auth_required",
     "quota_exceeded",
     "rate_limited",
+    "request_rejected",
     "server_unavailable",
     "network_timeout",
     "process_start_failed",
@@ -47,6 +48,7 @@ USER_ACTION_REQUIRED: dict[str, bool] = {
     "auth_required": True,
     "quota_exceeded": True,
     "rate_limited": False,
+    "request_rejected": True,
     "server_unavailable": False,
     "network_timeout": False,
     "process_start_failed": True,

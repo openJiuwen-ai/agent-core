@@ -22,6 +22,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.schema.team import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
@@ -111,6 +112,9 @@ class TeamBackend:
         enable_hitt: bool = False,
         enable_bridge: bool = False,
         *,
+        model_pool_provider: Callable[[], list["ModelPoolEntry"]] | None = None,
+        current_model_name: str | None = None,
+        current_model_provider: str | None = None,
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
         enable_fork: bool = False,
@@ -148,6 +152,14 @@ class TeamBackend:
                 ``build_team`` as ``{model_name, model_index}`` so the
                 assignment is auditable and survives full-restart
                 recovery via positional lookup against the live pool.
+            model_pool_provider: Returns the current team model pool for
+                validating external CLI fallback choices. The callback keeps
+                runtime pool updates visible without copying credentials into
+                the backend.
+            current_model_name: Name of the model currently driving this
+                member, used to prioritize an allocatable fallback.
+            current_model_provider: Provider of the current member model,
+                used to derive its model API protocol.
             enable_hitt: Spec-level HITT capability ceiling. When
                 False, every human-agent spawn path returns failure;
                 when True, the runtime instance flag (mutated by
@@ -223,6 +235,9 @@ class TeamBackend:
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
+        self._model_pool_provider = model_pool_provider
+        self.current_model_name = str(current_model_name or "").strip() or None
+        self.current_model_provider = str(current_model_provider or "").strip() or None
         self.leader_allocation = leader_allocation
         # Leader's private prompt (LeaderSpec.prompt via ctx.prompt). Persisted
         # on the leader's DB row at build_team so cold-recovery, which rebuilds
@@ -350,6 +365,12 @@ class TeamBackend:
         self._checkpoint_list_fn: Callable[[], dict] | None = None
 
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
+
+    def get_model_pool(self) -> list["ModelPoolEntry"]:
+        """Return a snapshot of the current team model pool."""
+        if self._model_pool_provider is None:
+            return []
+        return list(self._model_pool_provider())
 
     def register_cleanup_path(self, path: Optional[str]) -> None:
         """Register a filesystem path to remove on ``clean_team``.

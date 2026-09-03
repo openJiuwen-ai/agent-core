@@ -25,12 +25,14 @@ from openjiuwen.agent_teams.schema.external_runtime_reliability import (
 _ASSISTANT_ERROR_MAP: dict[str, ExternalRuntimeFailureCategory] = {
     "authentication_failed": "auth_required",
     "billing_error": "quota_exceeded",
+    "invalid_request": "request_rejected",
     "rate_limit": "rate_limited",
     "server_error": "server_unavailable",
 }
 
 # ``ResultMessage.api_error_status`` → category.
 _API_STATUS_MAP: dict[int, ExternalRuntimeFailureCategory] = {
+    400: "request_rejected",
     401: "auth_required",
     403: "auth_required",
     429: "rate_limited",

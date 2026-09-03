@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
 )
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailureReason
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.logging import team_logger
@@ -36,6 +37,9 @@ class _ClaudeToolMetadata:
 
     tool_name: str = ""
     is_team_tool: bool = False
+
+
+_MAX_FAILURE_DETAIL_CHARS = 8000
 
 
 class _ClaudeStderrTail:
@@ -308,7 +312,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         status = "ok"
         error: BaseException | None = None
         retry_with_fallback = False
-        deferred_auth_chunks: list[OutputSchema] = []
+        deferred_failure_chunks: list[OutputSchema] = []
         try:
             await client.query(text)
             chunk_index = 0
@@ -320,7 +324,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                 # Classify structured failure signals before chunk conversion.
                 # AssistantMessage.error records a pending candidate;
                 # ResultMessage.is_error finalizes it.
-                auth_diagnostic = self._reliability_ctx is not None and self._is_auth_diagnostic_message(message)
+                failure_diagnostic = self._reliability_ctx is not None and self._is_failure_diagnostic_message(message)
                 finalize_payload = self._classify_sdk_message(message)
                 if finalize_payload is not None:
                     category, reason, summary = finalize_payload
@@ -328,12 +332,12 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                         retry_with_fallback = True
                         status = "cancelled"
                         break
-                    for chunk in deferred_auth_chunks:
+                    for chunk in deferred_failure_chunks:
                         team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                         self._span_bridge.record_chunk(chunk)
                         yield chunk
                         chunk_index = chunk.index + 1
-                    deferred_auth_chunks.clear()
+                    deferred_failure_chunks.clear()
                     await self._reliability_ctx.finalize_failure(
                         category=category,
                         reason=reason,
@@ -342,13 +346,13 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     # Turn terminal failure delivered; end the generator cleanly
                     # so _drive_turn maps it onto a failed round.
                     return
-                if deferred_auth_chunks:
-                    for chunk in deferred_auth_chunks:
+                if deferred_failure_chunks:
+                    for chunk in deferred_failure_chunks:
                         team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                         self._span_bridge.record_chunk(chunk)
                         yield chunk
                         chunk_index = chunk.index + 1
-                    deferred_auth_chunks.clear()
+                    deferred_failure_chunks.clear()
                 chunks = _iter_sdk_chunks(
                     message,
                     chunk_index,
@@ -356,8 +360,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     mcp_server_name=self._mcp_server_name,
                     team_tool_names=set(self._sdk_mcp_tool_set.tools) if self._sdk_mcp_tool_set is not None else set(),
                 )
-                if auth_diagnostic:
-                    deferred_auth_chunks.extend(chunks)
+                if failure_diagnostic:
+                    deferred_failure_chunks.extend(chunks)
                     continue
                 for chunk in chunks:
                     team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
@@ -380,12 +384,12 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     retry_with_fallback = True
                     status = "cancelled"
                 else:
-                    for chunk in deferred_auth_chunks:
+                    for chunk in deferred_failure_chunks:
                         team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                         self._span_bridge.record_chunk(chunk)
                         yield chunk
                         chunk_index = chunk.index + 1
-                    deferred_auth_chunks.clear()
+                    deferred_failure_chunks.clear()
                     status = "failed"
                     await self._finalize_turn_failure(exc)
                     raise exc
@@ -395,13 +399,10 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             raise _ClaudeAuthFallbackRequested()
 
     @staticmethod
-    def _is_auth_diagnostic_message(message: Any) -> bool:
-        """Return whether an assistant message carries a structured authentication error."""
+    def _is_failure_diagnostic_message(message: Any) -> bool:
+        """Return whether an assistant message carries a structured failure."""
         sdk = load_claude_sdk()
-        if not isinstance(message, sdk.AssistantMessage) or not message.error:
-            return False
-        category, _ = classify_assistant_error(message.error)
-        return category == "auth_required"
+        return isinstance(message, sdk.AssistantMessage) and bool(message.error)
 
     def _classify_sdk_message(
         self,
@@ -421,6 +422,12 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         if isinstance(message, sdk.AssistantMessage):
             if message.error:
                 category, reason = classify_assistant_error(message.error)
+                detail = _assistant_failure_detail(message)
+                if detail:
+                    reason = ExternalRuntimeFailureReason(
+                        message=detail,
+                        sdk_error_code=str(message.error),
+                    )
                 ctx.record_pending(category=category, reason=reason)
             return None
         if isinstance(message, sdk.ResultMessage) and message.is_error:
@@ -431,6 +438,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             if ctx.has_pending and (reason.http_status is None or category == "sdk_error"):
                 if ctx.pending_category is not None and ctx.pending_category != "sdk_error":
                     category = ctx.pending_category
+            if ctx.pending_reason is not None:
+                reason = _merge_claude_failure_reasons(ctx.pending_reason, reason)
             ctx.record_pending(category=category, reason=reason)
             summary = _claude_failure_summary(message, ctx.pending_reason)
             return category, ctx.pending_reason or reason, summary
@@ -454,10 +463,6 @@ class ClaudeSdkRuntime(CliRuntimeBase):
 
     async def _finalize_startup_failure(self, exc: BaseException) -> None:
         """Finalize and surface a Claude startup failure (member → ERROR)."""
-        from openjiuwen.agent_teams.schema.external_runtime_reliability import (
-            ExternalRuntimeFailureReason,
-        )
-
         ctx = self._reliability_ctx
         if ctx is None or ctx.has_finalized:
             return
@@ -643,13 +648,50 @@ def _claude_failure_summary(result: Any, reason: Any) -> str:
     non-empty handling cue.
     """
     errors = getattr(result, "errors", None) or []
-    if errors:
+    if errors and any(str(error).strip().lower() != "unknown" for error in errors):
         return f"Claude SDK turn failed: {' '.join(str(e) for e in errors)}"
+    api_error_status = getattr(result, "api_error_status", None)
+    if isinstance(api_error_status, int):
+        return f"Claude SDK turn failed: HTTP {api_error_status}"
     if reason is not None:
         message = getattr(reason, "message", "") or ""
         if message:
             return f"Claude SDK turn failed: {message}"
     return "Claude SDK turn failed"
+
+
+def _assistant_failure_detail(message: Any) -> str:
+    """Extract bounded text diagnostics from a failed assistant message."""
+    sdk = load_claude_sdk()
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return ""
+    parts = [block.text for block in content if isinstance(block, sdk.TextBlock) and block.text]
+    detail = "\n".join(parts)
+    if len(detail) <= _MAX_FAILURE_DETAIL_CHARS:
+        return detail
+    return detail[:_MAX_FAILURE_DETAIL_CHARS] + "...[truncated]"
+
+
+def _merge_claude_failure_reasons(
+    pending: ExternalRuntimeFailureReason,
+    terminal: ExternalRuntimeFailureReason,
+) -> ExternalRuntimeFailureReason:
+    """Merge assistant diagnostics with structured terminal failure fields."""
+    pending_message = pending.message.strip()
+    terminal_message = terminal.message.strip()
+    if terminal_message.lower() in {"", "unknown"}:
+        message = pending_message or terminal_message
+    elif pending_message and pending_message != pending.sdk_error_code and pending_message not in terminal_message:
+        message = f"{terminal_message}\n{pending_message}"
+    else:
+        message = terminal_message or pending_message
+    return ExternalRuntimeFailureReason(
+        message=message,
+        sdk_error_type=terminal.sdk_error_type or pending.sdk_error_type,
+        sdk_error_code=terminal.sdk_error_code or pending.sdk_error_code,
+        http_status=terminal.http_status if terminal.http_status is not None else pending.http_status,
+    )
 
 
 def _iter_sdk_chunks(

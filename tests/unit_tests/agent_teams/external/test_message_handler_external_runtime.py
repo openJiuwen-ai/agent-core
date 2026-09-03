@@ -26,10 +26,16 @@ def _failure_payload(**overrides) -> str:
         "member_name": "worker1",
         "agent_kind": "codex",
         "phase": "turn",
-        "category": "auth_required",
+        "category": "request_rejected",
         "user_action_required": True,
-        "summary": "Codex 401",
-        "suggested_action": "re-login",
+        "summary": "Codex 400",
+        "suggested_action": "inspect request configuration",
+        "reason": {
+            "message": "bad request",
+            "sdk_error_type": "SdkError",
+            "sdk_error_code": "badRequest",
+            "http_status": 400,
+        },
         "round_id": 3,
     }
     base.update(overrides)
@@ -57,7 +63,14 @@ def test_renders_external_runtime_failed_as_team_event(_lang):
     assert text is not None
     assert 'kind="external-runtime-failed"' in text
     assert "worker1" in text
-    assert "auth_required" in text
+    assert "request_rejected" in text
+    assert "failure_id=fid-1" in text
+    assert "round_id=3" in text
+    assert "http_status=400" in text
+    assert "sdk_error_type=SdkError" in text
+    assert "sdk_error_code=badRequest" in text
+    assert "CLI 已成功启动" in text
+    assert "不得将其诊断为 CLI 未安装" in text
     logger.info("rendered: %s", text)
 
 
@@ -93,3 +106,5 @@ def test_english_render(_lang):
     assert text is not None
     assert "external-runtime-failed" in text
     assert "worker1" in text
+    assert "http_status=400" in text
+    assert "CLI started successfully" in text

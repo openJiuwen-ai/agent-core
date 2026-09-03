@@ -652,6 +652,11 @@ class MessageHandler(BaseCoordinationHandler):
                 getattr(msg, "message_id", "?"),
             )
             return None
+        phase_key = failure.phase
+        if failure.phase == "turn" and failure.reason.http_status is not None:
+            phase_key = "turn_http"
+        phase_guidance = t(f"reliability.external_runtime_phase.{phase_key}")
+        empty_field = "<none>"
         body = t(
             "reliability.external_runtime_failed",
             member_name=failure.member_name,
@@ -662,5 +667,11 @@ class MessageHandler(BaseCoordinationHandler):
             reason_message=failure.reason.message,
             suggested_action=failure.suggested_action,
             user_action_required=failure.user_action_required,
+            failure_id=failure.failure_id,
+            round_id=failure.round_id if failure.round_id is not None else empty_field,
+            http_status=failure.reason.http_status if failure.reason.http_status is not None else empty_field,
+            sdk_error_type=failure.reason.sdk_error_type or empty_field,
+            sdk_error_code=failure.reason.sdk_error_code or empty_field,
+            phase_guidance=phase_guidance,
         )
         return render_event(kind="external-runtime-failed", body=body)

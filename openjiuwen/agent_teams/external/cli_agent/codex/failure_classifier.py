@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.schema.external_runtime_reliability import (
 _v2 = load_codex_sdk().generated.v2_all
 CodexErrorInfoValue = _v2.CodexErrorInfoValue
 CodexErrorInfo = _v2.CodexErrorInfo
+_MAX_FAILURE_DETAIL_CHARS = 8000
 
 _CODEX_ERROR_INFO_MAP: dict[str, ExternalRuntimeFailureCategory] = {
     CodexErrorInfoValue.unauthorized.value: "auth_required",
@@ -31,7 +32,7 @@ _CODEX_ERROR_INFO_MAP: dict[str, ExternalRuntimeFailureCategory] = {
     CodexErrorInfoValue.server_overloaded.value: "server_unavailable",
     CodexErrorInfoValue.internal_server_error.value: "server_unavailable",
     CodexErrorInfoValue.context_window_exceeded.value: "sdk_error",
-    CodexErrorInfoValue.bad_request.value: "sdk_error",
+    CodexErrorInfoValue.bad_request.value: "request_rejected",
     CodexErrorInfoValue.cyber_policy.value: "sdk_error",
     CodexErrorInfoValue.thread_rollback_failed.value: "sdk_error",
     CodexErrorInfoValue.sandbox_error.value: "sdk_error",
@@ -47,6 +48,7 @@ _STRUCTURED_VARIANT_CATEGORY: dict[type, ExternalRuntimeFailureCategory] = {
 }
 
 _HTTP_STATUS_CATEGORY: dict[int, ExternalRuntimeFailureCategory] = {
+    400: "request_rejected",
     401: "auth_required",
     403: "auth_required",
     429: "rate_limited",
@@ -90,7 +92,7 @@ def classify_turn_error(
     turn_error: Any,
 ) -> Tuple[ExternalRuntimeFailureCategory, ExternalRuntimeFailureReason]:
     """Classify a Codex ``TurnCompletedNotification.turn.error`` (TurnError)."""
-    message = str(getattr(turn_error, "message", "") or "")
+    message = _codex_error_message(turn_error)
     error_info = getattr(turn_error, "codex_error_info", None)
     http_status = _extract_http_status(error_info)
     category, info_value = classify_codex_error_info(error_info, http_status)
@@ -113,7 +115,7 @@ def classify_error_notification(
     """
     error = getattr(payload, "error", None)
     will_retry = bool(getattr(payload, "will_retry", False))
-    message = str(getattr(error, "message", "") or "")
+    message = _codex_error_message(error)
     error_info = getattr(error, "codex_error_info", None)
     http_status = _extract_http_status(error_info)
     category, info_value = classify_codex_error_info(error_info, http_status)
@@ -172,6 +174,17 @@ def classify_codex_exception(
 # ------------------------------------------------------------------
 # Extraction helpers
 # ------------------------------------------------------------------
+
+
+def _codex_error_message(error: Any) -> str:
+    """Combine bounded Codex error summary and additional diagnostics."""
+    message = str(getattr(error, "message", "") or "").strip()
+    additional_details = str(getattr(error, "additional_details", "") or "").strip()
+    if additional_details and additional_details not in message:
+        message = f"{message}\n{additional_details}" if message else additional_details
+    if len(message) <= _MAX_FAILURE_DETAIL_CHARS:
+        return message
+    return message[:_MAX_FAILURE_DETAIL_CHARS] + "...[truncated]"
 
 
 def _normalize_error_info(error_info: Any) -> str:
