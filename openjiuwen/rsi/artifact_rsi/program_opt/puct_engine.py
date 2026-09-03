@@ -910,9 +910,19 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
     from .provision import ProvisionError, ensure, import_name, probe_imports, validate_names
 
     try:
-        format_for(spec.reply_format)
+        shape = format_for(spec.reply_format)
     except ReplyFormatError as error:
         raise _Refusal(str(error)) from error
+    if not shape.multi_file:
+        paths = sorted(files_of(spec.baseline_code, spec.entrypoint))
+        if len(paths) > 1:
+            raise _Refusal(
+                f"the {shape.name!r} reply format carries one file and this program is "
+                f"{len(paths)} ({', '.join(paths)}). It would show the model only "
+                f"{spec.entrypoint} and accept only {spec.entrypoint} back, leaving the rest "
+                "invisible and unchangeable — use the 'files' format for a program that is "
+                "a tree"
+            )
     try:
         wanted = validate_names(spec.packages or [])
     except ProvisionError as error:

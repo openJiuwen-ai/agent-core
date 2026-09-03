@@ -2295,6 +2295,38 @@ def test_the_engine_tells_the_domain_which_protocol_to_render() -> None:
     )
 
 
+def test_a_one_file_protocol_refuses_a_program_that_is_a_tree() -> None:
+    """`tagged` has nowhere to say which file a block belongs to, so it shows
+    the entrypoint and accepts the entrypoint.
+
+    Pairing it with a tree does not fail — it hides every other file from the
+    model, which is then asked to improve a program it can only see part of.
+    Measured: a two-file run whose helper held the bug never showed the helper,
+    and the winner inlined around it, having inferred the fault from an import
+    line and a score. Refused before the budget instead, naming both files.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import _refuse_unrunnable
+
+    tree = bundle({"candidate.py": "from helper import f\n", "helper.py": "def f(): ...\n"})
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=1, scorecard_hash="sha256:x",
+        scorecard={"criteria": [{"id": "score", "normalize": {"kind": "identity"},
+                                 "measure": {"kind": "custom_script"}}]},
+        statement="", baseline_code=tree, script='"""doc"""\n', reply_format="tagged",
+    )
+
+    with pytest.raises(Exception) as refusal:
+        _refuse_unrunnable(spec, _local_execution)
+    said = str(refusal.value)
+    assert "tagged" in said and "helper.py" in said and "candidate.py" in said
+
+    # The same tree under `files` is exactly what that format is for.
+    _refuse_unrunnable(RunSpec(**{**spec.__dict__, "reply_format": "files"}),
+                       _local_execution)
+
+
 def test_an_unknown_placeholder_is_refused_by_name_at_load(tmp_path: Path) -> None:
     """`safe_substitute` would leave `${statment}` in the prompt as literal
     text, and the model would optimise against a prompt with a hole in it for

@@ -65,6 +65,15 @@ def execution_from_sys_operation(sys_operation: Any, loop: Any) -> EvaluationExe
     Each call stages into a fresh directory inside the sandbox instance —
     per-evaluation isolation on the cheap, while the instance itself (and
     whatever ``packages`` were provisioned into it) is reused across the run.
+
+    **The directories are not swept, and that is the platform's call rather
+    than an oversight.** ``fs`` has no delete at all, and the shell refuses
+    ``rm -rf`` outright — "command rejected for safe". Both were tried against
+    a real ``SysOperation``. Deletion is simply not something an operation is
+    given here, and finding a spelling that slips past the filter would be the
+    same kind of bypass this module exists to remove. So scratch accumulates
+    for the length of one run, bounded by it, and the container is the thing
+    that gets reclaimed.
     The async gateway API is bridged the same way the model is: scheduled onto
     the loop that owns the operation and waited on from the worker thread.
     """
@@ -91,10 +100,25 @@ def execution_from_sys_operation(sys_operation: Any, loop: Any) -> EvaluationExe
             # so serial round-trips would multiply per candidate. The gateway's
             # `prepend_newline` defaults to True, which would silently corrupt
             # every staged file's first line.
-            await asyncio.gather(*(
+            written = await asyncio.gather(*(
                 fs.write_file(f"{scratch}/{path}", text, prepend_newline=False)
                 for path, text in files.items()
             ))
+            # Checked, because these do not raise. A denied or failed write
+            # returns a result carrying a non-zero code, and dropping it made
+            # a staging failure arrive three steps later as "the evaluator
+            # wrote neither a result file nor any output" — pointing the reader
+            # at the evaluator for something that happened before it ran.
+            # Measured against a real SysOperation whose sandbox root did not
+            # contain the scratch path: every write, the command and the read
+            # all failed, and the run reported an evaluator that said nothing.
+            for path, result in zip(files, written):
+                code = getattr(result, "code", 0)
+                if code:
+                    raise ExecutionUnavailable(
+                        f"could not stage {path} into the sandbox: "
+                        f"{getattr(result, 'message', '') or f'error {code}'}"
+                    )
             completed = await shell.execute_cmd(
                 shlex.join(command),
                 cwd=scratch,

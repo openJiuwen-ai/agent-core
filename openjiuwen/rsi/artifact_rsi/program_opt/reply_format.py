@@ -77,6 +77,15 @@ class ReplyFormat:
     #: merging nothing onto the parent yields the parent — a valid program that
     #: costs a full evaluation to learn the parent's own score.
     carries_program: Callable[[str], bool]
+    #: Whether this shape can carry a program of more than one file. `tagged`
+    #: cannot: it has nowhere to say which file a block belongs to, so it shows
+    #: the entrypoint and writes the entrypoint. Pairing it with a tree does not
+    #: fail — it silently hides every other file from the model, which is then
+    #: asked to improve a program it can only see part of. Measured: a two-file
+    #: run whose helper was the broken half never showed the helper, and the
+    #: winning candidate inlined around it, having inferred the fault from an
+    #: import line and a score.
+    multi_file: bool = True
 
 
 # --- files: whole files, one fenced block each -------------------------------
@@ -169,6 +178,7 @@ _FORMATS: Dict[str, ReplyFormat] = {
         instructions=_TAGGED_INSTRUCTIONS,
         render=_render_tagged,
         parse=_parse_tagged,
+        multi_file=False,
         carries_program=_tagged_carries_program,
     ),
 }
