@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
     OrgTaskReviewRequestedEvent,
     OrgTopic,
@@ -64,6 +65,12 @@ from openjiuwen.agent_teams.tools.database.engine import get_current_time
 
 
 logger = logging.getLogger(__name__)
+
+_FAILABLE_TASK_STATUSES = frozenset({
+    OrgTaskStatus.CLAIMED.value,
+    OrgTaskStatus.DELEGATED.value,
+    OrgTaskStatus.IN_PROGRESS.value,
+})
 
 
 @dataclass
@@ -628,6 +635,60 @@ class OrgTaskManager:
             await self._publish_event(review_event)
         return OrgTaskOpResult(ok=True, task=task)
 
+    async def fail_task(
+        self,
+        *,
+        task_id: str,
+        team_id: str,
+        failure_code: OrgTaskFailureCode | str,
+        failure_reason: str,
+        output_context: OrgTaskOutputContext | dict[str, Any] | None = None,
+    ) -> OrgTaskOpResult:
+        await self.initialize()
+        reason = (failure_reason or "").strip()
+        if not reason:
+            return OrgTaskOpResult(ok=False, reason="failure_reason is required")
+        try:
+            code = OrgTaskFailureCode(failure_code)
+        except ValueError:
+            return OrgTaskOpResult(ok=False, reason=f"invalid failure_code: {failure_code!r}")
+
+        now = get_current_time()
+        context_model = self._coerce_output_context(output_context)
+        async with self._write() as session:
+            row = await session.get(OrgTaskRecord, task_id)
+            if row is None or row.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+            if row.assigned_team_id != team_id:
+                return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
+            if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
+                return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
+            if row.status not in _FAILABLE_TASK_STATUSES:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"task cannot be failed from status {row.status}: {task_id}",
+                )
+            row.status = OrgTaskStatus.FAILED.value
+            row.failure_code = code.value
+            row.failure_reason = reason
+            row.failed_at = now
+            row.updated_at = now
+            if context_model is not None:
+                row.output_context_json = _json_dumps(context_model.model_dump())
+            await session.commit()
+        task = self._to_task(row)
+        await self._publish_event(
+            OrgTaskFailedEvent(
+                organization_id=self.organization_id,
+                team_id=team_id,
+                leader_id=row.assigned_leader_id,
+                task_id=task_id,
+                failure_code=code.value,
+                failure_reason=reason,
+            )
+        )
+        return OrgTaskOpResult(ok=True, task=task)
+
     async def list_child_tasks(self, *, parent_task_id: str, creator_team_id: str | None = None) -> list[OrgTask]:
         await self.initialize()
         stmt = select(OrgTaskRecord).where(
@@ -937,6 +998,7 @@ class OrgTaskManager:
                     OrgTaskClaimedEvent,
                     OrgTaskDelegatedEvent,
                     OrgTaskCompletedEvent,
+                    OrgTaskFailedEvent,
                     OrgTaskReviewRequestedEvent,
                     OrgTaskReviewedEvent,
                     OrgSummaryTaskCreatedEvent,

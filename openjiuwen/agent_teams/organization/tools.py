@@ -559,12 +559,12 @@ class OrgDelegateTaskTool(_OrgLeaderTool):
 
 
 class OrgUpdateTaskTool(_OrgLeaderTool):
-    """Start or complete an org task assigned to this team."""
+    """Start, complete, or fail an org task assigned to this team."""
 
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
         super().__init__(
             name="org_update_task",
-            description="Start or complete an organization task assigned to this team.",
+            description="Start, complete, or fail an organization task assigned to this team.",
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -572,10 +572,12 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["start", "complete"]},
+                "action": {"type": "string", "enum": ["start", "complete", "failed"]},
                 "task_id": {"type": "string"},
                 "output_context": {"type": "object"},
                 "output_abstract": {"type": "string"},
+                "failure_code": {"type": "string"},
+                "failure_reason": {"type": "string"},
             },
             "required": ["action", "task_id"],
         }
@@ -594,6 +596,16 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
                 if inputs.get("output_context")
                 else None,
                 output_abstract=inputs.get("output_abstract"),
+            )
+        elif action == "failed":
+            result = await self.manager.fail_task(
+                task_id=task_id,
+                team_id=self.team_id,
+                failure_code=inputs.get("failure_code", ""),
+                failure_reason=inputs.get("failure_reason", ""),
+                output_context=OrgTaskOutputContext.model_validate(inputs["output_context"])
+                if inputs.get("output_context")
+                else None,
             )
         else:
             return ToolOutput(success=False, error=f"unsupported action: {action}")

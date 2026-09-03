@@ -34,6 +34,7 @@ class OrgEvent:
     TASK_CLAIMED = "org_task_claimed"
     TASK_DELEGATED = "org_task_delegated"
     TASK_COMPLETED = "org_task_completed"
+    TASK_FAILED = "org_task_failed"
     TASK_REVIEW_REQUESTED = "org_task_review_requested"
     TASK_REVIEWED = "org_task_reviewed"
     SUMMARY_TASK_CREATED = "org_summary_task_created"
@@ -89,6 +90,14 @@ class OrgTaskCompletedEvent(BaseOrgEvent):
     """
 
     task_id: str
+
+
+class OrgTaskFailedEvent(BaseOrgEvent):
+    """Published after a task reaches FAILED."""
+
+    task_id: str
+    failure_code: str
+    failure_reason: str
 
 
 class OrgTaskReviewRequestedEvent(BaseOrgEvent):
@@ -147,6 +156,7 @@ _EVENT_TYPE_MAP: dict[str, type[BaseOrgEvent]] = {
     OrgEvent.TASK_CLAIMED: OrgTaskClaimedEvent,
     OrgEvent.TASK_DELEGATED: OrgTaskDelegatedEvent,
     OrgEvent.TASK_COMPLETED: OrgTaskCompletedEvent,
+    OrgEvent.TASK_FAILED: OrgTaskFailedEvent,
     OrgEvent.TASK_REVIEW_REQUESTED: OrgTaskReviewRequestedEvent,
     OrgEvent.TASK_REVIEWED: OrgTaskReviewedEvent,
     OrgEvent.SUMMARY_TASK_CREATED: OrgSummaryTaskCreatedEvent,
@@ -191,6 +201,7 @@ __all__ = [
     "OrgTaskCompletedEvent",
     "OrgTaskCreatedEvent",
     "OrgTaskDelegatedEvent",
+    "OrgTaskFailedEvent",
     "OrgTaskReviewedEvent",
     "OrgTaskReviewRequestedEvent",
     "OrgSummarySourcesUpdatedEvent",

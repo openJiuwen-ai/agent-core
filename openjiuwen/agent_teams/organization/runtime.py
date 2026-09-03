@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCreatedEvent,
     OrgTaskCompletedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
     OrgTaskReviewRequestedEvent,
     OrgTeamInvitedEvent,
@@ -709,6 +710,22 @@ class OrganizationRuntimeManager:
                     completed_task_id=event.task_id,
                 )
                 return
+            if isinstance(event, OrgTaskFailedEvent):
+                task = await manager.task_pool.get_task(event.task_id)
+                if task is None or not task.parent_task_id:
+                    return
+                if task.created_by.team_id != backend.team_name:
+                    return
+                self._schedule_parent_child_failed_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    child_task_id=event.task_id,
+                    parent_task_id=task.parent_task_id,
+                    organization_id=manager.organization_id,
+                    failure_code=event.failure_code,
+                    failure_reason=event.failure_reason,
+                )
+                return
             if isinstance(event, OrgTaskReviewRequestedEvent):
                 if event.reviewer_team_id != backend.team_name:
                     return
@@ -1013,6 +1030,38 @@ class OrganizationRuntimeManager:
             "and call org_update_task(action='complete') on the parent with the final "
             "output_context and output_abstract. For a root task, put the user-facing delivery "
             "in output_context.description."
+        )
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
+
+    def _schedule_parent_child_failed_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        child_task_id: str,
+        parent_task_id: str,
+        organization_id: str,
+        failure_code: str,
+        failure_reason: str,
+    ) -> None:
+        review_key = (session_id, team_id, f"failed:{child_task_id}")
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
+        prompt = (
+            f"Child organization task {child_task_id} failed in {organization_id} "
+            f"(failure_code={failure_code}, failure_reason={failure_reason}). "
+            f"Parent task {parent_task_id} cannot advance on that child. "
+            "This is not a pending review — do not call org_review_task on the failed child. "
+            "Create at most one focused repair task with org_create_task (include the failure "
+            "report and acceptance criteria) or re-delegate with org_delegate_task. "
+            "Do not leave the parent waiting without a repair/re-delegation decision, and do not "
+            "silently reopen the failed child task."
         )
         self._schedule_leader_turn(
             team_id=team_id,

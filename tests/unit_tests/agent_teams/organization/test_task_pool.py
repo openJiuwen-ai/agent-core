@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
     OrgTaskReviewRequestedEvent,
     OrgTopic,
@@ -33,7 +34,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
-from openjiuwen.agent_teams.organization.tools import OrgCreateTaskTool, OrgReviewTaskTool
+from openjiuwen.agent_teams.organization.tools import OrgCreateTaskTool, OrgReviewTaskTool, OrgUpdateTaskTool
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
@@ -532,6 +533,147 @@ async def test_start_task_status_guards(org_manager):
     assert not restarted.ok
     assert restarted.reason == "task is terminal: start-guard-task"
     assert (await manager.get_task("start-guard-task")).status == OrgTaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_fail_task_sets_failed_with_code_and_reason(org_manager):
+    manager, messager = org_manager
+    created = await manager.create_task(
+        task_id="fail-task-1",
+        title="Fail me",
+        description="Will fail after claim.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client-1",
+            organization_id="org-1",
+        ),
+    )
+    assert created.ok
+    claimed = await manager.claim_task(task_id="fail-task-1", team_id="team-a", leader_id="leader-a")
+    assert claimed.ok
+
+    failed = await manager.fail_task(
+        task_id="fail-task-1",
+        team_id="team-a",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="worker crashed",
+        output_context={"description": "partial notes"},
+    )
+    assert failed.ok
+    assert failed.task.status == OrgTaskStatus.FAILED
+    assert failed.task.failure_code == OrgTaskFailureCode.EXECUTION_FAILED
+    assert failed.task.failure_reason == "worker crashed"
+    assert failed.task.failed_at is not None
+    assert failed.task.output_context.description == "partial notes"
+
+    events = [m for _, m in messager.published if m.event_type == OrgEvent.TASK_FAILED]
+    assert events
+    assert events[-1].payload["task_id"] == "fail-task-1"
+    assert events[-1].payload["failure_code"] == OrgTaskFailureCode.EXECUTION_FAILED.value
+
+    pending = await manager.list_pending_reviews(team_id="team-a")
+    assert pending == []
+
+
+@pytest.mark.asyncio
+async def test_fail_task_rejects_terminal_and_unassigned(org_manager):
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="fail-guard-task",
+        title="Fail guard",
+        description="Validate fail transitions.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client-1",
+            organization_id="org-1",
+        ),
+    )
+    assert created.ok
+
+    open_fail = await manager.fail_task(
+        task_id="fail-guard-task",
+        team_id="team-a",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="too early",
+    )
+    assert not open_fail.ok
+
+    claimed = await manager.claim_task(
+        task_id="fail-guard-task",
+        team_id="team-a",
+        leader_id="leader-a",
+    )
+    assert claimed.ok
+
+    wrong_team = await manager.fail_task(
+        task_id="fail-guard-task",
+        team_id="team-b",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="wrong team",
+    )
+    assert not wrong_team.ok
+
+    missing_reason = await manager.fail_task(
+        task_id="fail-guard-task",
+        team_id="team-a",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="  ",
+    )
+    assert not missing_reason.ok
+
+    failed = await manager.fail_task(
+        task_id="fail-guard-task",
+        team_id="team-a",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="blocked",
+    )
+    assert failed.ok
+
+    again = await manager.fail_task(
+        task_id="fail-guard-task",
+        team_id="team-a",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="again",
+    )
+    assert not again.ok
+    assert again.reason == "task is terminal: fail-guard-task"
+
+
+@pytest.mark.asyncio
+async def test_org_update_task_failed_action(org_manager):
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="tool-fail-1",
+        title="Tool fail",
+        description="Fail via tool.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client-1",
+            organization_id="org-1",
+        ),
+    )
+    assert created.ok
+    claimed = await manager.claim_task(task_id="tool-fail-1", team_id="team-a", leader_id="leader-a")
+    assert claimed.ok
+
+    tool = OrgUpdateTaskTool(manager, team_id="team-a", leader_id="leader-a")
+    result = await tool.invoke(
+        {
+            "action": "failed",
+            "task_id": "tool-fail-1",
+            "failure_code": OrgTaskFailureCode.EXECUTION_FAILED.value,
+            "failure_reason": "blocked by dependency",
+        }
+    )
+    assert result.success
+    assert result.data["status"] == OrgTaskStatus.FAILED
+    assert result.data["failure_code"] == OrgTaskFailureCode.EXECUTION_FAILED
+
+    missing = await tool.invoke({"action": "failed", "task_id": "tool-fail-1"})
+    assert not missing.success
 
 
 @pytest.mark.asyncio
@@ -1548,6 +1690,88 @@ async def test_rejected_review_wakes_parent_for_repair(active_organization_runti
     assert "REJECTED" in prompt
     assert "org_create_task" in prompt
     assert "repair" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_failed_child_wakes_creator_team_for_repair(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-failed-child",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    await runtime.invite_team(
+        organization_id="org-failed-child",
+        inviter_team_id="team-a",
+        target_team_id="team-b",
+        session_id=session_id,
+    )
+    manager = agents["team-a"].team_backend.org_task_manager
+    await manager.create_task(
+        task_id="parent",
+        title="Parent",
+        description="Parent task",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-failed-child",
+        ),
+    )
+    await manager.claim_task(task_id="parent", team_id="team-a", leader_id="leader-team-a")
+    await manager.create_task(
+        task_id="child",
+        parent_task_id="parent",
+        title="Child",
+        description="Child task",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-team-a",
+            organization_id="org-failed-child",
+            team_id="team-a",
+        ),
+    )
+    await manager.claim_task(task_id="child", team_id="team-b", leader_id="leader-team-b")
+    failed = await manager.fail_task(
+        task_id="child",
+        team_id="team-b",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="dependency missing",
+    )
+    assert failed.ok
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    topic_id = OrgTopic.TASK.build(session_id, "org-failed-child")
+    handler = next(
+        handler for topic, handler in agents["team-a"].team_backend.messager.subscriptions if topic == topic_id
+    )
+    await handler(
+        OrgEventMessage.from_event(
+            OrgTaskFailedEvent(
+                organization_id="org-failed-child",
+                team_id="team-b",
+                leader_id="leader-team-b",
+                task_id="child",
+                failure_code=OrgTaskFailureCode.EXECUTION_FAILED.value,
+                failure_reason="dependency missing",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert turns[0]["team_name"] == "team-a"
+    prompt = turns[0]["inputs"]["query"]
+    assert "failed" in prompt.lower()
+    assert "org_create_task" in prompt
+    assert "org_review_task" in prompt
+    assert "EXECUTION_FAILED" in prompt
 
 
 @pytest.mark.asyncio
