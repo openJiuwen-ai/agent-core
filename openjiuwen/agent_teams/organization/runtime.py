@@ -15,6 +15,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCreatedEvent,
     OrgTaskCompletedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskReviewRequestedEvent,
     OrgTeamInvitedEvent,
     OrgTeamJoinedEvent,
     OrgTopic,
@@ -82,6 +83,7 @@ class OrganizationRuntimeManager:
         self._leader_turn_queues: dict[tuple[str, str], deque[object]] = {}
         self._leader_turn_workers: dict[tuple[str, str], asyncio.Task[Any]] = {}
         self._scheduled_leader_messages: set[tuple[str, str, str]] = set()
+        self._scheduled_parent_reviews: set[tuple[str, str, str]] = set()
         self._leader_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._configured_team_provider: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None
         self._team_activator: Callable[[str, str], Awaitable[str | None]] | None = None
@@ -316,6 +318,11 @@ class OrganizationRuntimeManager:
                     message_key
                     for message_key in self._scheduled_leader_messages
                     if message_key[:2] != key
+                }
+                self._scheduled_parent_reviews = {
+                    review_key
+                    for review_key in self._scheduled_parent_reviews
+                    if review_key[:2] != key
                 }
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
@@ -689,29 +696,27 @@ class OrganizationRuntimeManager:
                     organization_id=manager.organization_id,
                 )
                 return
-            if not isinstance(event, OrgTaskCompletedEvent):
+            if isinstance(event, OrgTaskCompletedEvent):
+                # Completion is a second durable opportunity to claim matching
+                # OPEN tasks. Parent-team review wake is driven by
+                # OrgTaskReviewRequestedEvent so it aligns with PENDING review.
+                await self._schedule_matching_open_claims(
+                    manager=manager,
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    capabilities=capabilities,
+                    completed_task_id=event.task_id,
+                )
                 return
-
-            # A Team can deliberately defer a testing/integration task while
-            # its inputs are still being built.  Completion of another task is
-            # therefore a second, durable opportunity to claim every matching
-            # OPEN task instead of leaving it stranded after the first LLM
-            # decision.
-            await self._schedule_matching_open_claims(
-                manager=manager,
+            if not isinstance(event, OrgTaskReviewRequestedEvent):
+                return
+            if event.reviewer_team_id != backend.team_name:
+                return
+            self._schedule_parent_review_turn(
                 team_id=backend.team_name,
                 session_id=session_id,
-                capabilities=capabilities,
-                completed_task_id=event.task_id,
-            )
-            task = await manager.task_pool.get_task(event.task_id)
-            if task is None or not task.parent_task_id or task.created_by.team_id != backend.team_name:
-                return
-            self._schedule_parent_completion_turn(
-                team_id=backend.team_name,
-                session_id=session_id,
-                child_task_id=task.task_id,
-                parent_task_id=task.parent_task_id,
+                child_task_id=event.task_id,
+                parent_task_id=event.parent_task_id,
                 organization_id=manager.organization_id,
             )
 
@@ -894,7 +899,7 @@ class OrganizationRuntimeManager:
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
-    def _schedule_parent_completion_turn(
+    def _schedule_parent_review_turn(
         self,
         *,
         team_id: str,
@@ -903,6 +908,10 @@ class OrganizationRuntimeManager:
         parent_task_id: str,
         organization_id: str,
     ) -> None:
+        review_key = (session_id, team_id, child_task_id)
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
         prompt = (
             f"Child organization task {child_task_id} completed in {organization_id}. "
             f"Inspect its result and pending review with org_review_task, then accept or reject it. "
@@ -915,7 +924,12 @@ class OrganizationRuntimeManager:
             "project structure, startup instructions, API contract, executed test results, and known limitations. "
             "Also provide a concise output_abstract."
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
 
     def _schedule_leader_turn(
         self,
@@ -924,10 +938,17 @@ class OrganizationRuntimeManager:
         session_id: str,
         prompt: str,
         message_key: tuple[str, str, str] | None = None,
+        review_key: tuple[str, str, str] | None = None,
     ) -> None:
         key = (session_id, team_id)
         queue = self._leader_turn_queues.setdefault(key, deque())
-        queue.append({"query": prompt, "_org_message_key": message_key})
+        queue.append(
+            {
+                "query": prompt,
+                "_org_message_key": message_key,
+                "_org_review_key": review_key,
+            }
+        )
         worker = self._leader_turn_workers.get(key)
         if worker is None or worker.done():
             worker = asyncio.create_task(self._drain_leader_turns(team_id, session_id))
@@ -948,16 +969,18 @@ class OrganizationRuntimeManager:
                     await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
                     continue
                 inputs = queue.popleft()
-                message_key = (
-                    inputs.pop("_org_message_key", None)
-                    if isinstance(inputs, dict)
-                    else None
-                )
+                message_key = None
+                review_key = None
+                if isinstance(inputs, dict):
+                    message_key = inputs.pop("_org_message_key", None)
+                    review_key = inputs.pop("_org_review_key", None)
                 try:
                     await self._run_leader_turn(team_id, session_id, inputs)
                 finally:
                     if message_key is not None:
                         self._scheduled_leader_messages.discard(message_key)
+                    if review_key is not None:
+                        self._scheduled_parent_reviews.discard(review_key)
         finally:
             self._leader_turn_workers.pop(key, None)
             self._leader_turn_queues.pop(key, None)
@@ -968,6 +991,9 @@ class OrganizationRuntimeManager:
                 message_key = inputs.get("_org_message_key")
                 if message_key is not None:
                     self._scheduled_leader_messages.discard(message_key)
+                review_key = inputs.get("_org_review_key")
+                if review_key is not None:
+                    self._scheduled_parent_reviews.discard(review_key)
         queue.clear()
 
     async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
