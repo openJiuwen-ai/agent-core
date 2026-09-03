@@ -122,6 +122,9 @@ class ProgramRunState:
     #: same boundary — and differ only here: `terminated` is a terminal status
     #: and `paused` is the one `resume` accepts.
     stopped_status: str = "terminated" 
+    #: The last thing the engine said went wrong, kept for the terminal status
+    #: to explain itself with.
+    _last_error: Optional[str] = None
     _summary: Optional[str] = None
 
     def __post_init__(self) -> None:
@@ -205,6 +208,8 @@ class ProgramRunState:
             self._evaluated(event)
         elif kind == "merged":
             yield from self._merged(event)
+        elif kind == "log":
+            self._logged(event)
         elif kind == "search_finished":
             self._finished(event)
 
@@ -456,11 +461,28 @@ class ProgramRunState:
             baseline=self.baseline,
         )
 
+    def _logged(self, event: dict[str, Any]) -> None:
+        """Keep the last error line, so a refused run can say why.
+
+        The engine states its refusal as `log("error", …)` and then finishes
+        with `search_finished("failed")`. The second sets the status; the first
+        used to go nowhere, so a run refused for a missing candidate source, an
+        unknown normalisation or an empty script all came back as
+        `SEARCH_FAILED` with `error_message: None` — a failure with the reason
+        removed, and the reader left to guess between half a dozen refusals.
+        """
+        if str(event.get("level") or "") != "error":
+            return
+        message = str(event.get("message") or "").strip()
+        if message:
+            self._last_error = message
+
     def _finished(self, event: dict[str, Any]) -> None:
         status = str(event.get("status") or "")
         if status == "failed":
             self.status = "failed"
             self.error_code = self.error_code or "SEARCH_FAILED"
+            self.error_message = self.error_message or self._last_error or None
         elif status == "stopped":
             self.status = self.stopped_status
         else:

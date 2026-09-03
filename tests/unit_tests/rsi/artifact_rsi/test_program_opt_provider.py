@@ -2242,6 +2242,34 @@ def test_the_snapshot_carries_the_baseline_a_resume_asks_it_for(tmp_path: Path) 
     )
 
 
+def test_a_refused_run_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal states itself in a `log` event and then finishes as failed.
+
+    The second half set the status and the first half went nowhere, so every
+    refusal — a missing candidate source, an unknown normalisation, an empty
+    script — arrived as `SEARCH_FAILED` with `error_message: None`. Found while
+    diagnosing a real resume: the reason had to be reproduced in-process
+    because the run itself would not say it.
+
+    Driven through the real engine's own refusal path, so the message under
+    test is the one the engine actually emits.
+    """
+    _no_probe(monkeypatch)
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{"id": "score", "name": "score", "direction": "maximize", "weight": 1.0, "normalize": {"kind": "no_such_normalisation"}, "measure": {"kind": "custom_script", "scriptCas": "sha256:x", "timeoutSeconds": 30, "split": {"gateShards": 4, "rolloutShards": 2, "testShards": 2, "shardRows": 2, "seed": 1, "trainRows": None}}}]})
+
+    result = asyncio.run(provider.run(request))
+
+    assert result.status == "failed"
+    assert result.error_code == "SEARCH_FAILED"
+    assert result.error_message, "a refused run came back with no reason at all"
+    assert "no_such_normalisation" in result.error_message
+    # And it is on the durable record, not just in the return value.
+    assert "no_such_normalisation" in (
+        provider.read_state(request.task_id).error_message or "")
+
+
 # -- task-owned prompt wording ---------------------------------------------------
 
 
