@@ -20,10 +20,11 @@ _REDACTED_PREFIX = "sha256:"
 
 
 def truncate(value: str, max_length: int) -> str:
-    """Hard-cap string length and signal truncation."""
+    """Hard-cap an OTel attribute and identify the truncation layer."""
     if max_length <= 0 or len(value) <= max_length:
         return value
-    return value[:max_length] + f"...<truncated {len(value) - max_length} chars>"
+    omitted = len(value) - max_length
+    return value[:max_length] + f"...<OTel attribute truncated: {omitted} chars omitted>"
 
 
 def _hash(value: str) -> str:

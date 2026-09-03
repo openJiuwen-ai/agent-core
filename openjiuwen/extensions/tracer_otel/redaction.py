@@ -17,14 +17,14 @@ from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 
 
 _REDACTED_PREFIX = "sha256:"
-_TRUNCATED_SUFFIX = "...<truncated>"
 
 
 def truncate(value: str, max_length: int) -> str:
-    """Hard-cap string length and signal truncation."""
+    """Hard-cap an OTel attribute and identify the truncation layer."""
     if max_length <= 0 or len(value) <= max_length:
         return value
-    return value[:max_length] + _TRUNCATED_SUFFIX
+    omitted = len(value) - max_length
+    return value[:max_length] + f"...<OTel attribute truncated: {omitted} chars omitted>"
 
 
 def hash_value(value: str) -> str:

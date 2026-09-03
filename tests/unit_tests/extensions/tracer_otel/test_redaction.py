@@ -5,8 +5,6 @@
 
 import hashlib
 
-import pytest
-
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.redaction import truncate, hash_value, redact, _should_redact
 
@@ -17,7 +15,7 @@ class TestTruncate:
 
     def test_long_value_truncated(self):
         result = truncate("abcdefghij", 5)
-        assert result == "abcde...<truncated>"
+        assert result == "abcde...<OTel attribute truncated: 5 chars omitted>"
 
     def test_exact_length_not_truncated(self):
         assert truncate("abcde", 5) == "abcde"
@@ -51,7 +49,7 @@ class TestRedact:
     def test_redaction_disabled_returns_truncated(self):
         config = OtelTracerConfig(redaction_enabled=False, max_attr_length=10)
         result = redact("hello world longer text", config)
-        assert result == "hello worl...<truncated>"
+        assert result == "hello worl...<OTel attribute truncated: 13 chars omitted>"
 
     def test_redact_none_returns_empty(self):
         config = OtelTracerConfig(redaction_enabled=True)
