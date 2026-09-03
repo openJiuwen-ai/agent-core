@@ -93,6 +93,9 @@ class TodoTool(Tool):
         self.workspace = workspace if workspace else "./"
         self.fs = operation.fs()
         self._lock_manager = lock_manager if lock_manager else TodoLockManager()
+        # 本 invoke 内是否已执行过 todo_create（由 TaskPlanningRail 在
+        # before_invoke 重置，用于"同一 invoke 至多一次整表重建"的 guard）
+        self._created_in_invoke: set = set()
 
     def _get_file_path(self, session_id: str) -> str:
         """Get the file path for a given session_id.
@@ -172,6 +175,17 @@ class TodoTool(Tool):
                     reason="Failed to save todo list, because write_file fail"
                 )
 
+    def reset_invoke_marker(self, session_id: str) -> None:
+        """Mark the start of a new invoke: forget "already created" state.
+
+        由 TaskPlanningRail.before_invoke 调用，配合 guard 实现"同一
+        invoke 内至多一次 todo_create"。本方法仅重置内存标记，不清理
+        任何数据：resume / follow-up / 计划续跑场景的 in-flight 任务
+        不受影响，上一轮中止残留的任务由新请求真正调用 todo_create 时
+        整表覆盖自然清理。
+        """
+        self._created_in_invoke.discard(session_id)
+
     def cleanup_session(self, session_id: str) -> None:
         """Clean up resources for a session (call when session ends).
 
@@ -179,6 +193,7 @@ class TodoTool(Tool):
             session_id: The session ID to clean up.
         """
         self._lock_manager.cleanup_session(session_id)
+        self._created_in_invoke.discard(session_id)
 
 
 class TodoCreateTool(TodoTool):
@@ -265,6 +280,28 @@ class TodoCreateTool(TodoTool):
         result += f"\nNext step: Immediately execute task '{first_task}'"
         return result.strip()
 
+    async def _reject_recreate_within_invoke(self, session_id: str) -> None:
+        """Reject a second todo_create within the same invoke.
+
+        同一 invoke 内重复 todo_create 会整表覆盖并改写全部任务 ID，导致
+        下游任务跟踪错乱（task.start/task.update 事件与已累积的 task-run
+        段失配，前端任务列表乱序），故每 invoke 至多允许一次整表重建。
+        本 invoke 尚未创建过时直接放行：上一轮中止残留的未完成任务会被
+        新任务表整体覆盖而自然清理，新请求不再被残留数据阻塞。
+        """
+        if session_id not in self._created_in_invoke:
+            return
+        raise build_error(
+            StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+            reason=(
+                "todo_create has already rebuilt the task list once in this "
+                "round; rebuilding again would replace all task ids and break "
+                "task tracking. Use todo_modify (action: append/insert_after/"
+                "insert_before) to add tasks, or todo_modify (action: update) "
+                "to update existing tasks instead."
+            ),
+        )
+
     async def _create_from_list(self, session_id: str, tasks_data: List[Dict[str, Any]]) -> str:
         """Create todo items from a JSON array of task objects."""
         if not tasks_data:
@@ -272,6 +309,7 @@ class TodoCreateTool(TodoTool):
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                 reason="Task list cannot be empty"
             )
+        await self._reject_recreate_within_invoke(session_id)
         new_todos = []
         seen_ids: set = set()
         for i, task_data in enumerate(tasks_data):
@@ -306,6 +344,7 @@ class TodoCreateTool(TodoTool):
             )
 
         await self.save_todos(session_id, new_todos)
+        self._created_in_invoke.add(session_id)
         tool_logger.info("Created todo items from JSON array", event_type=LogEventType.TOOL_CALL_END)
         return self._format_create_result(new_todos)
 

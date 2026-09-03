@@ -27,7 +27,7 @@ from openjiuwen.harness.schema.task import (
     TodoItem,
     TodoStatus,
 )
-from openjiuwen.harness.tools import TodoTool
+from openjiuwen.harness.tools import TodoCreateTool, TodoTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 _TODO_PROGRESS_REMINDER_KEY = "todo_progress_reminder"  # also tags advance injects (ent name)
@@ -197,7 +197,6 @@ class TaskPlanningRail(DeepAgentRail):
         """Register todo tools on the agent."""
         from openjiuwen.harness.deep_agent import DeepAgent
         from openjiuwen.harness.tools import (
-            TodoCreateTool,
             TodoListTool,
             TodoModifyTool,
             TodoGetTool,
@@ -331,6 +330,13 @@ class TaskPlanningRail(DeepAgentRail):
             tool_name = ctx.inputs.tool_name
             if tool_name and tool_name.startswith("todo_"):
                 session_id = ctx.session.get_session_id()
+                if tool_name == "todo_create" and ctx.exception is None:
+                    # todo_create 整表覆盖后旧 plan 任务 ID 全部失配，
+                    # _sync_plan_from_todos 会跳过它们；若不取消，外层
+                    # task loop 仍会调度旧任务并把新输入改写为旧任务内容。
+                    # 仅在 todo_create 成功时取消：失败时 todo.json 未被覆盖，
+                    # 旧 plan 仍有效，误取消会导致 in-flight 任务丢失
+                    self._cancel_stale_plan_tasks(ctx)
                 try:
                     todos = await tool.load_todos(session_id)
                     self._todos_cache[session_id] = todos
@@ -378,6 +384,22 @@ class TaskPlanningRail(DeepAgentRail):
         if model_id not in self._usage_records:
             self._usage_records[model_id] = ModelUsageRecord(model_id=model_id)
         self._usage_records[model_id].add(input_tokens, output_tokens)
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """invoke 开始时重置 todo_create 的本轮标记（无数据副作用）。
+
+        与 TodoTool._created_in_invoke 配合实现"同一 invoke 内至多一次
+        todo_create"：此处仅重置内存标记，不清理任何 todo / TaskPlan 数据，
+        因此 resume（InteractiveInput）、follow-up、计划续跑场景下的
+        in-flight 任务不受影响；上一轮中止残留的任务由新请求真正调用
+        todo_create 时整表覆盖自然清理（见 TodoCreateTool 的 guard）。
+        """
+        if ctx.session is None:
+            return
+        tool = self._find_todo_create_tool()
+        if tool is None:
+            return
+        tool.reset_invoke_marker(ctx.session.get_session_id())
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Log token usage summary and clean up caches after agent invoke."""
@@ -554,6 +576,55 @@ class TaskPlanningRail(DeepAgentRail):
             if isinstance(tool, TodoTool):
                 return tool
         return None
+
+    def _find_todo_create_tool(self) -> Optional[TodoCreateTool]:
+        """Return the TodoCreateTool instance in self.tools.
+
+        `reset_invoke_marker` must hit the exact TodoCreateTool instance that
+        sets `_created_in_invoke` in `_create_from_list`; using the first
+        generic TodoTool would silently reset a different instance's marker
+        (e.g. after tool order changes or instance rebuilds), leaving the
+        create guard permanently stuck for the session.
+        """
+        if not self.tools:
+            return None
+        for tool in self.tools:
+            if isinstance(tool, TodoCreateTool):
+                return tool
+        return None
+
+    def _cancel_stale_plan_tasks(self, ctx: AgentCallbackContext) -> None:
+        """同步取消 TaskPlan 中的非终态任务，与 todo.json 保持一致。
+
+        外层 task loop 只读 state.task_plan 不读 todo.json：若仅清理
+        todo.json，旧 plan 的 pending 任务仍会被调度并把用户新输入改写
+        为旧任务内容，与 todo 侧已取消的状态自相矛盾。
+        """
+        load_state = getattr(ctx.agent, "load_state", None)
+        save_state = getattr(ctx.agent, "save_state", None)
+        if not callable(load_state) or not callable(save_state):
+            return
+        try:
+            state = load_state(ctx.session)
+        except Exception:
+            logger.debug("TaskPlanningRail: no agent state to cancel stale plan")
+            return
+        plan = getattr(state, "task_plan", None)
+        if plan is None or not plan.tasks:
+            return
+        cancelled = [
+            task for task in plan.tasks
+            if task.status in (TodoStatus.PENDING, TodoStatus.IN_PROGRESS)
+        ]
+        if not cancelled:
+            return
+        for task in cancelled:
+            task.status = TodoStatus.CANCELLED
+        save_state(ctx.session, state)
+        logger.info(
+            "TaskPlanningRail: cancelled %d stale task(s) in TaskPlan",
+            len(cancelled),
+        )
 
     def _format_task_content(self, todos: List[TodoItem]):
         """Format todos into a readable task content string.

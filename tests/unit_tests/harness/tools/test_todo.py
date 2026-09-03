@@ -241,6 +241,9 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved[0].activeForm, "")
         self.assertEqual(saved[0].description, "")
 
+        # Each invoke is a new round: before_invoke resets the per-invoke
+        # todo_create marker, allowing a fresh rebuild.
+        self.tool.reset_invoke_marker(self.mock_session.get_session_id())
         result = await self.tool.invoke(
             {"tasks": [{"content": "Task 1", "activeForm": "Doing"}]},
             session=self.mock_session,
@@ -249,6 +252,40 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         saved = self.tool.save_todos.call_args[0][1]
         self.assertEqual(saved[0].activeForm, "Doing")
         self.assertEqual(saved[0].description, "")
+
+    async def test_reject_second_create_within_same_invoke(self):
+        """Second todo_create in the same invoke is rejected and todo.json is not overwritten."""
+        await self.tool.invoke(
+            {"tasks": [{"content": "Task 1"}]},
+            session=self.mock_session,
+        )
+        self.tool.save_todos.reset_mock()
+
+        with self.assertRaises(Exception) as cm:
+            await self.tool.invoke(
+                {"tasks": [{"content": "Task 2"}]},
+                session=self.mock_session,
+            )
+        self.assertIn("todo_create has already rebuilt", str(cm.exception))
+        # save_todos must NOT be called on the rejected second attempt
+        self.tool.save_todos.assert_not_awaited()
+
+    async def test_reset_allows_new_create(self):
+        """After reset_invoke_marker, a new todo_create succeeds."""
+        await self.tool.invoke(
+            {"tasks": [{"content": "Task 1"}]},
+            session=self.mock_session,
+        )
+        self.tool.save_todos.reset_mock()
+
+        self.tool.reset_invoke_marker(self.mock_session.get_session_id())
+        result = await self.tool.invoke(
+            {"tasks": [{"content": "Task 2"}]},
+            session=self.mock_session,
+        )
+        self.assertIn("Successfully created 1 task(s)", result["message"])
+        saved = self.tool.save_todos.call_args[0][1]
+        self.assertEqual(saved[0].content, "Task 2")
 
 
 class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
