@@ -133,10 +133,11 @@ class Model:
         # observers can attribute what they receive to this call and not to
         # another one running concurrently. See ``call_scope``.
         with LlmCallScope(unified_completion=True):
+            model_config = getattr(self, "model_config", None)
             runtime_lease = await KVCacheModelHook.begin(
                 self,
                 kwargs,
-                model or getattr(self.model_config, "model_name", None),
+                model or getattr(model_config, "model_name", None),
             )
             succeeded = False
             try:
@@ -202,7 +203,8 @@ class Model:
         # copies the context, so an id bound inside a chunk callback would be
         # gone by the time the next chunk arrives. See ``call_scope``.
         with LlmCallScope(unified_completion=True):
-            effective_model_name = model or getattr(self.model_config, "model_name", None)
+            model_config = getattr(self, "model_config", None)
+            effective_model_name = model or getattr(model_config, "model_name", None)
             runtime_lease = await KVCacheModelHook.begin(self, kwargs, effective_model_name)
             succeeded = False
             accumulated_chunk: AssistantMessageChunk | None = None

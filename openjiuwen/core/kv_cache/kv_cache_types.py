@@ -108,11 +108,14 @@ class InferenceLease:
 class KVCacheRuntimeProtocol(Protocol):
     """Narrow runtime contract used by Session and model-call integration."""
 
-    async def prepare(self, identity: KVCacheIdentity) -> bool: ...
+    async def prepare(self, identity: KVCacheIdentity) -> bool:
+        ...
 
-    async def suspend(self, identity: KVCacheIdentity) -> bool: ...
+    async def suspend(self, identity: KVCacheIdentity) -> bool:
+        ...
 
-    async def release(self, identity: KVCacheIdentity) -> bool: ...
+    async def release(self, identity: KVCacheIdentity) -> bool:
+        ...
 
     async def begin_inference(
         self,
@@ -120,14 +123,16 @@ class KVCacheRuntimeProtocol(Protocol):
         model: Any,
         *,
         model_name: str | None = None,
-    ) -> InferenceLease | None: ...
+    ) -> InferenceLease | None:
+        ...
 
     async def end_inference(
         self,
         lease: InferenceLease | None,
         *,
         succeeded: bool,
-    ) -> None: ...
+    ) -> None:
+        ...
 
 
 __all__ = [

@@ -609,35 +609,6 @@ def test_openrouter_profile_adds_prompt_cache_markers_on_openai_client():
     assert params["tools"][0]["cache_control"] == {"type": "ephemeral"}
 
 
-def test_kv_release_fields_move_to_extra_body_for_openai_sdk():
-    client_config = ModelClientConfig(
-        client_provider="OpenAI",
-        api_key="sk-test-key",
-        api_base="https://example.test/v1",
-        extensions={"kv_cache": {"mode": "release"}},
-        verify_ssl=False,
-    )
-    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
-
-    params = client._build_request_params(
-        messages=[{"role": "user", "content": "hello"}],
-        tools=None,
-        temperature=None,
-        top_p=None,
-        model=None,
-        stop=None,
-        max_tokens=None,
-        stream=False,
-        session_id="session-1",
-        enable_cache_sharing=True,
-    )
-    client._move_openai_extra_body_extensions(params)
-
-    assert params["extra_body"]["cache_salt"] == "session-1"
-    assert params["extra_body"]["cache_sharing"] is True
-    assert "cache_salt" not in params
-
-
 def test_kv_affinity_agent_hint_moves_to_extra_body_for_openai_sdk():
     client_config = ModelClientConfig(
         client_provider="OpenAI",

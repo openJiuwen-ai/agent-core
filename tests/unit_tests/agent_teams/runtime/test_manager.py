@@ -3,6 +3,7 @@
 
 """Unit tests for TeamRuntimeManager.finalize_member."""
 
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from unittest.mock import (
     AsyncMock,
@@ -41,8 +42,14 @@ class FakeTeamAgent:
         self.stop_coordination_calls = 0
         self.pause_coordination_calls = 0
 
-    async def stop_coordination(self) -> None:
+    async def stop_coordination(
+        self,
+        *,
+        on_quiesced: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self.stop_coordination_calls += 1
+        if on_quiesced is not None:
+            await on_quiesced()
 
     async def pause_coordination(self) -> None:
         self.pause_coordination_calls += 1

@@ -79,7 +79,8 @@ class KVCacheRuntime:
                 return None
             fallback_key = BindingKey(identity.parent_cache_id, domain)
             fallback_state = self._bindings.get(fallback_key)
-            if not fallback and fallback_key != binding_key and fallback_state is not None and fallback_state.fallback:
+            has_replaceable_fallback = fallback_state is not None and fallback_state.fallback
+            if not fallback and fallback_key != binding_key and has_replaceable_fallback:
                 self._remove_binding_locked(fallback_key, preserve_root_state=True)
             previous = self._bindings.get(binding_key)
             if previous is not None:
@@ -199,14 +200,14 @@ class KVCacheRuntime:
                     self._condition.notify_all()
                     continue
                 bindings = self._bindings_for_action_locked(key)
+                already_offloaded = bool(bindings) and all(
+                    binding.residency is Residency.OFFLOADED
+                    for binding in bindings
+                )
                 if (
                     state.admission is Admission.BLOCKED
                     and state.pending_action is None
-                    and bindings
-                    and all(
-                        binding.residency is Residency.OFFLOADED
-                        for binding in bindings
-                    )
+                    and already_offloaded
                 ):
                     continue
                 state.admission = Admission.BLOCKED
@@ -343,8 +344,11 @@ class KVCacheRuntime:
             current = asyncio.current_task()
             if current is not None and current.cancelling():
                 raise
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "[KVCacheRuntime] failed to finish pending action: error=%s",
+                exc,
+            )
 
     async def _wait_until_provider_call_started(self, action: PendingAction) -> bool:
         waiter = asyncio.create_task(action.provider_call_started.wait())
@@ -438,8 +442,6 @@ class KVCacheRuntime:
             )
             await self._record_result(key, kind, snapshots, succeeded)
             return succeeded
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             logger.warning(
                 "[KVCacheRuntime] action failed: action=%s cache_id=%s error=%s",
@@ -590,12 +592,10 @@ class KVCacheRuntime:
     async def _forget(self, identity: KVCacheIdentity) -> None:
         async with self._condition:
             if identity.cache_id == identity.parent_cache_id:
-                binding_keys = [
-                    key
-                    for root_key, keys in self._root_index.items()
-                    if root_key.parent_cache_id == identity.parent_cache_id
-                    for key in keys
-                ]
+                binding_keys = []
+                for root_key, indexed_keys in self._root_index.items():
+                    if root_key.parent_cache_id == identity.parent_cache_id:
+                        binding_keys.extend(indexed_keys)
             else:
                 binding_keys = [key for key in self._bindings if key.cache_id == identity.cache_id]
             for binding_key in binding_keys:
