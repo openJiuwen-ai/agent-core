@@ -3324,8 +3324,12 @@ def test_a_local_run_does_not_install_packages_onto_this_machine(tmp_path: Path)
         thread.join(timeout=5)
 
     message = str(raised.value)
-    assert "pip install no_such_distribution_xyz" in message
+    assert "-m pip install no_such_distribution_xyz" in message
     assert "on this machine" in message
+    # The interpreter is named, because it is not the one running this test:
+    # "pip install X" would send the reader to the wrong environment, and the
+    # refusal would then repeat unchanged after they had installed it.
+    assert "python" in message.rsplit("-m pip", 1)[0].splitlines()[-1]
 
 
 def test_a_sandboxed_run_still_provisions_what_the_card_asks_for() -> None:

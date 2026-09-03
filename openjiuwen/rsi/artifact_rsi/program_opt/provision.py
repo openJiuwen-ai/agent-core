@@ -110,6 +110,21 @@ def probe_imports(names: Sequence[str], execute: "EvaluationExecution") -> Optio
     return (outcome.output or "").strip()[-200:] or "(no output)"
 
 
+def _interpreter(execute: "EvaluationExecution") -> str:
+    """The path of the interpreter candidates actually run under, or `python`.
+
+    Asked of the execution rather than of this process, because those are two
+    different interpreters more often than not.
+    """
+    try:
+        outcome = execute(
+            {"_which.py": "import sys\nopen('_which.txt', 'w').write(sys.executable)\n"},
+            ["python", "-I", "_which.py"], {}, 60.0, "_which.txt")
+    except Exception:  # noqa: BLE001 - a best-effort detail in a message
+        return "python"
+    return (outcome.result_text or "").strip() or "python"
+
+
 def ensure(packages: Sequence[str], execute: "EvaluationExecution") -> Tuple[List[str], str]:
     """Install `packages` into the run's execution environment.
 
@@ -142,13 +157,21 @@ def ensure(packages: Sequence[str], execute: "EvaluationExecution") -> Tuple[Lis
             # package would quietly install it on the user's machine, from a
             # list a model wrote. Nobody asked for that, and it is not
             # something a search may decide on its own.
+            # Named rather than left as "pip": the interpreter that runs
+            # candidates is whatever `python` resolves to for the execution,
+            # and it is routinely *not* the virtualenv the provider itself is
+            # installed in. Measured on one machine: the provider on 3.12 in a
+            # project venv, candidates on 3.9 from anaconda. "pip install X"
+            # sends the reader to the wrong one, they install, nothing changes,
+            # and the refusal repeats word for word.
             raise ProvisionError(
                 f"this run's scorecard asks for {', '.join(wanted)}, which the "
                 "execution environment cannot import. Candidates are running on "
                 "this machine (no sandbox was injected), and installing into it "
-                "is not this run's call to make — install them yourself with "
-                f"`pip install {' '.join(wanted)}`, or give the provider a "
-                "sandboxed SysOperation and the run will provision its own"
+                "is not this run's call to make. Install them yourself, into the "
+                f"interpreter that runs them:\n    {_interpreter(execute)} -m pip "
+                f"install {' '.join(wanted)}\nOr give the provider a sandboxed "
+                "SysOperation and the run will provision its own."
             )
         command = ["python", "-m", "pip", "install", "--no-input",
                    "--disable-pip-version-check", *wanted]
