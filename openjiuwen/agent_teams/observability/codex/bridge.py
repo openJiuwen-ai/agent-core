@@ -403,9 +403,10 @@ class CodexSpanBridge:
             AT_SESSION_ID,
             AT_TEAM_ID,
             AT_TEAM_NAME,
-            LANGFUSE_OBSERVATION_INPUT,
-            LANGFUSE_OBSERVATION_TYPE,
-            LANGFUSE_SESSION_ID,
+            GEN_AI_OPERATION_NAME,
+            OJ_SESSION_ID,
+            OJ_SPAN_INPUT,
+            OJ_TRAJECTORY_RECORD_KIND,
         )
 
         self._turn_index += 1
@@ -415,9 +416,10 @@ class CodexSpanBridge:
             kind=SpanKind.INTERNAL,
         )
         safe_prompt = redact_prompt(prompt, config)
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_prompt)
+        span.set_attribute(OJ_SPAN_INPUT, safe_prompt)
         span.set_attribute(AT_AGENT_INPUT, safe_prompt)
+        span.set_attribute(GEN_AI_OPERATION_NAME, "invoke_agent")
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
         span.set_attribute(AT_AGENT_NAME, self._member_name)
         span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
@@ -428,7 +430,7 @@ class CodexSpanBridge:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
             span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(OJ_SESSION_ID, self._session_id)
         if thread_id:
             span.set_attribute("codex.thread.id", thread_id)
 
@@ -637,11 +639,9 @@ class CodexSpanBridge:
             GEN_AI_USAGE_INPUT_TOKENS,
             GEN_AI_USAGE_OUTPUT_TOKENS,
             GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-            LANGFUSE_OBSERVATION_INPUT,
-            LANGFUSE_OBSERVATION_OUTPUT,
-            LANGFUSE_OBSERVATION_TYPE,
-            LANGFUSE_SESSION_ID,
             OJ_REQUEST_MESSAGE_COUNT,
+            OJ_SESSION_ID,
+            OJ_TRAJECTORY_RECORD_KIND,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
 
@@ -657,7 +657,6 @@ class CodexSpanBridge:
             kind=SpanKind.CLIENT,
             start_time=start_ns,
         )
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute(GEN_AI_PROVIDER_NAME, provider)
         span.set_attribute(GEN_AI_REQUEST_MODEL, model)
@@ -689,11 +688,12 @@ class CodexSpanBridge:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
             span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(OJ_SESSION_ID, self._session_id)
 
         # One structured value per attribute: a per-message expansion here
         # would grow with the conversation and evict this span's own identity
-        # attributes. Langfuse's indexed view is derived at export instead.
+        # attributes. Backend-specific indexed views are derived at export
+        # from the structured attributes below instead.
         system_parts: list[dict[str, Any]] = []
         input_messages: list[dict[str, Any]] = []
         for message in messages:
@@ -710,11 +710,6 @@ class CodexSpanBridge:
             span.set_attribute(GEN_AI_SYSTEM_INSTRUCTIONS, _json_text(system_parts))
         if input_messages:
             span.set_attribute(GEN_AI_INPUT_MESSAGES, _json_text(input_messages))
-        input_json = _json_text(messages)
-        span.set_attribute(
-            LANGFUSE_OBSERVATION_INPUT,
-            redact_prompt(input_json, config),
-        )
 
         safe_completion = redact_completion(completion, config)
         output_parts: list[dict[str, Any]] = []
@@ -739,21 +734,6 @@ class CodexSpanBridge:
         span.set_attribute(
             GEN_AI_OUTPUT_MESSAGES,
             _json_text([{"role": "assistant", "parts": output_parts}]),
-        )
-        output_message: dict[str, Any] = {
-            "role": "assistant",
-            "content": completion,
-        }
-        if tool_calls:
-            output_message["tool_calls"] = tool_calls
-        output_object: dict[str, Any] = {
-            "choices": [{"index": 0, "message": output_message}],
-        }
-        if any(usage.values()):
-            output_object["usage"] = usage
-        span.set_attribute(
-            LANGFUSE_OBSERVATION_OUTPUT,
-            redact_completion(_json_text(output_object), config),
         )
         if usage["input_tokens"]:
             span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, usage["input_tokens"])
@@ -780,8 +760,7 @@ class CodexSpanBridge:
                 start_time=end_ns,
             )
             safe_reasoning = redact_completion(reasoning, config)
-            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
-            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_reasoning)
+            reasoning_span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "reasoning")
             reasoning_span.set_attribute(
                 GEN_AI_OUTPUT_MESSAGES,
                 _json_text([{
@@ -927,8 +906,7 @@ class CodexSpanBridge:
             GEN_AI_OPERATION_NAME,
             GEN_AI_PROVIDER_NAME,
             GEN_AI_REQUEST_MODEL,
-            LANGFUSE_OBSERVATION_TYPE,
-            LANGFUSE_SESSION_ID,
+            OJ_SESSION_ID,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
 
@@ -940,7 +918,6 @@ class CodexSpanBridge:
             kind=SpanKind.CLIENT,
             start_time=start_ns,
         )
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
         span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute(GEN_AI_PROVIDER_NAME, "openai")
         span.set_attribute(
@@ -971,7 +948,7 @@ class CodexSpanBridge:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
             span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(OJ_SESSION_ID, self._session_id)
         if self._thread_id:
             span.set_attribute("codex.thread.id", self._thread_id)
 
@@ -1089,10 +1066,10 @@ class CodexSpanBridge:
             GEN_AI_TOOL_CALL_ID,
             GEN_AI_TOOL_NAME,
             GEN_AI_TOOL_CALL_RESULT,
-            LANGFUSE_OBSERVATION_INPUT,
-            LANGFUSE_OBSERVATION_OUTPUT,
-            LANGFUSE_OBSERVATION_TYPE,
-            LANGFUSE_SESSION_ID,
+            OJ_SESSION_ID,
+            OJ_SPAN_INPUT,
+            OJ_SPAN_OUTPUT,
+            OJ_TRAJECTORY_RECORD_KIND,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
 
@@ -1118,10 +1095,10 @@ class CodexSpanBridge:
                 start_time=start_ns,
             )
             safe_input = redact_prompt(_json_text(record.get("tool_args")), config)
-            span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "tool")
-            span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_input)
+            span.set_attribute(OJ_SPAN_INPUT, safe_input)
             span.set_attribute(GEN_AI_TOOL_NAME, observation_tool_name)
             span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
+            span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "tool")
             if observation_tool_name != tool_name:
                 span.set_attribute("codex.tool.logical_name", tool_name)
             span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, safe_input)
@@ -1155,7 +1132,7 @@ class CodexSpanBridge:
                 span.set_attribute(AT_TEAM_NAME, self._team_name)
             if self._session_id:
                 span.set_attribute(AT_SESSION_ID, self._session_id)
-                span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+                span.set_attribute(OJ_SESSION_ID, self._session_id)
 
             error = record.get("error")
             completed = "end_ns" in record
@@ -1165,7 +1142,7 @@ class CodexSpanBridge:
                     config,
                 )
                 span.set_attribute(GEN_AI_TOOL_CALL_RESULT, safe_output)
-                span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_output)
+                span.set_attribute(OJ_SPAN_OUTPUT, safe_output)
             if error is None and completed:
                 span.set_status(Status(StatusCode.OK))
             else:
@@ -1322,9 +1299,10 @@ class CodexSpanBridge:
             redact_prompt,
         )
         from openjiuwen.extensions.observability.semconv import (
-            LANGFUSE_OBSERVATION_INPUT,
-            LANGFUSE_OBSERVATION_OUTPUT,
-            LANGFUSE_OBSERVATION_TYPE,
+            GEN_AI_OUTPUT_MESSAGES,
+            OJ_SPAN_INPUT,
+            OJ_SPAN_OUTPUT,
+            OJ_TRAJECTORY_RECORD_KIND,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
 
@@ -1333,13 +1311,12 @@ class CodexSpanBridge:
             name="codex.sdk.summary",
             context=set_span_in_context(turn_span, otel_context.get_current()),
         )
-        summary.set_attribute(LANGFUSE_OBSERVATION_TYPE, "span")
         summary.set_attribute(
-            LANGFUSE_OBSERVATION_INPUT,
+            OJ_SPAN_INPUT,
             redact_prompt(_json_text(self._inputs), config),
         )
         output = redact_completion("".join(self._output), config)
-        summary.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, output)
+        summary.set_attribute(OJ_SPAN_OUTPUT, output)
         if self._response_ids:
             summary.set_attribute("codex.response.ids", self._response_ids)
         reasoning = redact_completion("".join(self._reasoning), config)
@@ -1348,8 +1325,14 @@ class CodexSpanBridge:
                 name="llm.reasoning",
                 context=set_span_in_context(summary, otel_context.get_current()),
             )
-            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "SDK reasoning summary")
-            reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, reasoning)
+            reasoning_span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "reasoning")
+            reasoning_span.set_attribute(
+                GEN_AI_OUTPUT_MESSAGES,
+                _json_text([{
+                    "role": "assistant",
+                    "parts": [{"type": "reasoning", "content": reasoning}],
+                }]),
+            )
             reasoning_span.set_status(Status(StatusCode.OK))
             reasoning_span.end()
         summary.set_status(Status(StatusCode.OK))
@@ -1365,7 +1348,7 @@ class CodexSpanBridge:
         from openjiuwen.extensions.observability.redaction import redact_completion
         from openjiuwen.extensions.observability.semconv import (
             AT_AGENT_OUTPUT,
-            LANGFUSE_OBSERVATION_OUTPUT,
+            OJ_SPAN_OUTPUT,
         )
 
         for inference_call_id in tuple(self._inferences):
@@ -1379,7 +1362,7 @@ class CodexSpanBridge:
         if self._config is not None and span.is_recording():
             output = redact_completion("".join(self._output), self._config)
             span.set_attribute(AT_AGENT_OUTPUT, output)
-            span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, output)
+            span.set_attribute(OJ_SPAN_OUTPUT, output)
             span.set_attribute("codex.turn.status", status)
             span.set_attribute(
                 "codex.rollout.model_span_count",

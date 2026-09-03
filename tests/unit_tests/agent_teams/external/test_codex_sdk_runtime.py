@@ -392,8 +392,8 @@ async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
     from openjiuwen.extensions.observability.semconv import (
         GEN_AI_TOOL_CALL_ARGUMENTS,
         GEN_AI_TOOL_CALL_RESULT,
-        LANGFUSE_OBSERVATION_INPUT,
-        LANGFUSE_OBSERVATION_OUTPUT,
+        OJ_SPAN_INPUT,
+        OJ_SPAN_OUTPUT,
     )
 
     InMemorySpanExporter = exporter_module.InMemorySpanExporter
@@ -469,8 +469,8 @@ async def test_codex_sdk_runtime_emits_turn_and_tool_spans():
         assert turn_span.parent.span_id == team_span.context.span_id
         assert tool_span.parent is not None
         assert tool_span.parent.span_id == turn_span.context.span_id
-        assert turn_span.attributes[LANGFUSE_OBSERVATION_INPUT] == "claim task-1"
-        assert turn_span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "task claimed"
+        assert turn_span.attributes[OJ_SPAN_INPUT] == "claim task-1"
+        assert turn_span.attributes[OJ_SPAN_OUTPUT] == "task claimed"
         assert '"task_id": "task-1"' in tool_span.attributes[GEN_AI_TOOL_CALL_ARGUMENTS]
         assert '"status": "claimed"' in tool_span.attributes[GEN_AI_TOOL_CALL_RESULT]
     finally:
@@ -486,7 +486,7 @@ async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
         init_observability,
         shutdown_observability,
     )
-    from openjiuwen.extensions.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
+    from openjiuwen.extensions.observability.semconv import OJ_SPAN_OUTPUT
 
     exporter = exporter_module.InMemorySpanExporter()
     init_observability(
@@ -577,7 +577,7 @@ async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
             "response-2",
         )
         assert not any(key.startswith("gen_ai.usage.") for key in summary.attributes)
-        assert "task is pending" in summary.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+        assert "task is pending" in summary.attributes[OJ_SPAN_OUTPUT]
         reasoning_span = next(span for span in spans if span.name == "llm.reasoning")
         assert reasoning_span.parent.span_id == summary.context.span_id
         assert (

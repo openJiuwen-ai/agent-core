@@ -238,10 +238,10 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
     from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
     from openjiuwen.agent_teams.observability import setup
     from openjiuwen.extensions.observability.semconv import (
+        GEN_AI_INPUT_MESSAGES,
         GEN_AI_OPERATION_NAME,
+        GEN_AI_OUTPUT_MESSAGES,
         GEN_AI_TOOL_NAME,
-        LANGFUSE_OBSERVATION_INPUT,
-        LANGFUSE_OBSERVATION_OUTPUT,
     )
 
     exporter = exporter_module.InMemorySpanExporter()
@@ -399,12 +399,12 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
     assert llm_span.attributes["codex.inference.call_id"] == "inference-1"
     assert llm_span.attributes["codex.model.call.paired"] is True
     assert llm_span.attributes["gen_ai.request.model"] == "gpt-rollout"
-    assert "inspect task" in llm_span.attributes[LANGFUSE_OBSERVATION_INPUT]
-    assert "I will inspect it." in llm_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert "inspect task" in llm_span.attributes[GEN_AI_INPUT_MESSAGES]
+    assert "I will inspect it." in llm_span.attributes[GEN_AI_OUTPUT_MESSAGES]
 
     reasoning_span = next(span for span in spans if span.name == "llm.reasoning")
     assert reasoning_span.parent.span_id == llm_span.context.span_id
-    assert "raw reasoning" in reasoning_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert "raw reasoning" in reasoning_span.attributes[GEN_AI_OUTPUT_MESSAGES]
     turn_span = next(span for span in spans if span.name == "agent.codex-test.codex_turn.1")
     tool_span = next(
         span
@@ -441,7 +441,6 @@ def test_rollout_exec_wrapper_keeps_distinct_display_and_logical_names(
     from openjiuwen.extensions.observability.semconv import (
         GEN_AI_OPERATION_NAME,
         GEN_AI_TOOL_NAME,
-        LANGFUSE_OBSERVATION_OUTPUT,
     )
 
     exporter = exporter_module.InMemorySpanExporter()
@@ -604,7 +603,7 @@ def test_rollout_exec_wrapper_keeps_distinct_display_and_logical_names(
     assert tool_span.end_time == 1_750_000_000_500_000_000
     assert tool_span.attributes["codex.tool.source"] == "rollout"
     assert tool_span.attributes["codex.tool.boundary_exact"] is False
-    assert "pending" in tool_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert "pending" in tool_span.attributes["gen_ai.tool.call.result"]
     assert tool_span.attributes["gen_ai.tool.name"] == "codex.exec"
     assert tool_span.attributes["codex.tool.logical_name"] == (
         "openjiuwen_team.view_task"

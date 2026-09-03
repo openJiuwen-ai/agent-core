@@ -3,6 +3,9 @@
 > 当前 GenAI 属性契约已由
 > [F_110_genai-semconv-canonicalization.md](F_110_genai-semconv-canonicalization.md)
 > 取代。本文件保留最初落地时的历史设计背景，其中旧 `gen_ai.*` 名称不再是当前写入契约。
+> 文中出现的 `langfuse.*` / `session.id` 字段同样仅是历史记录：采集层现只写
+> 标准 GenAI 字段与 `openjiuwen.*` / `agentteam.*` 扩展，Langfuse 投影由
+> `openjiuwen/extensions/observability/exporters/langfuse.py` 在导出阶段生成。
 
 ## 元信息
 

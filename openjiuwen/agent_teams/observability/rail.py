@@ -46,7 +46,7 @@ from openjiuwen.extensions.observability.semconv import (
     AT_MEMBER_NAME,
     AT_SESSION_ID,
     AT_TEAM_ID,
-    LANGFUSE_OBSERVATION_OUTPUT,
+    OJ_SPAN_OUTPUT,
 )
 from openjiuwen.harness.observability.rail import (
     AgentObservabilityRail,
@@ -106,7 +106,7 @@ class TeamObservabilityRail(DeepAgentRail):
             config = get_config()
             output_str = str(output)
             redacted = redact_completion(output_str, config) if config else output_str
-            team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+            team_span.set_attribute(OJ_SPAN_OUTPUT, redacted)
         except Exception as exc:
             team_logger.warning("otel team rail after_task_iteration failed: {}", exc)
 

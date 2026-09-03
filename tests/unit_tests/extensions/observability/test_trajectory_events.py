@@ -140,7 +140,7 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
         ObservabilityConfig(
             enabled=True,
             service_name="trajectory-pressure-test",
-            backend="otlp",
+            exporter="otlp_grpc",
             max_attributes=40,
         ),
         span_exporter_override=exporter,
@@ -233,7 +233,7 @@ async def test_core_occurrence_ids_and_request_system_slot_survive_provider_norm
     exporter = InMemorySpanExporter()
     runtime = ObservabilityRuntime()
     runtime.initialize(
-        ObservabilityConfig(enabled=True, service_name="trajectory-identity-test", backend="otlp"),
+        ObservabilityConfig(enabled=True, service_name="trajectory-identity-test", exporter="otlp_grpc"),
         span_exporter_override=exporter,
     )
     framework = Runner.callback_framework

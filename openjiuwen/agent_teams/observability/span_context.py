@@ -65,9 +65,6 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
     from openjiuwen.extensions.observability.semconv import (
         AT_TEAM_NAME,
         GEN_AI_CONVERSATION_ID,
-        LANGFUSE_SESSION_ID,
-        LANGFUSE_TRACE_NAME,
-        LANGFUSE_TRACE_TAGS,
         OJ_AGENT_MODE,
         OJ_SESSION_ID,
         OJ_TEAM_ID,
@@ -86,9 +83,6 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
         span.set_attribute(OJ_TEAM_SESSION_ID, session_id)
         span.set_attribute(OJ_SESSION_ID, session_id)
         span.set_attribute(GEN_AI_CONVERSATION_ID, session_id)
-        span.set_attribute(LANGFUSE_SESSION_ID, session_id)
-    span.set_attribute(LANGFUSE_TRACE_NAME, f"team.{team_name}")
-    span.set_attribute(LANGFUSE_TRACE_TAGS, [team_name])
     set_root_span(span)
     team_logger.info(
         "otel: get_or_create_team_span CREATE new team span team_name={} "

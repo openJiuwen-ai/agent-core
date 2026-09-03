@@ -30,8 +30,9 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
+    OJ_TRAJECTORY_RECORD_KIND,
 )
 from openjiuwen.agent_teams.observability.setup import get_tracer
 from openjiuwen.agent_teams.observability.span_context import (
@@ -104,7 +105,8 @@ def test_claude_bridge_records_turn_output_and_reasoning(in_memory_exporter: InM
     span = turn_spans[0]
     assert _attr(span, AT_AGENT_INPUT) == "make a deck"
     assert _attr(span, AT_AGENT_OUTPUT) == "done"
-    assert _attr(span, LANGFUSE_OBSERVATION_OUTPUT) == "done"
+    assert _attr(span, OJ_SPAN_INPUT) == "make a deck"
+    assert _attr(span, OJ_SPAN_OUTPUT) == "done"
     assert _attr(span, "claude.reasoning") is None
     assert _attr(span, "claude.turn.status") == "ok"
     assert _attr(span, "agentteam.backend") == "claude"
@@ -116,8 +118,7 @@ def test_claude_bridge_records_turn_output_and_reasoning(in_memory_exporter: InM
     assert len(reasoning_spans) == 1
     reasoning_span = reasoning_spans[0]
     assert reasoning_span.parent.span_id == span.context.span_id
-    assert _attr(reasoning_span, LANGFUSE_OBSERVATION_INPUT) == "llm reasoning"
-    assert _attr(reasoning_span, LANGFUSE_OBSERVATION_OUTPUT) == "thinking"
+    assert _attr(reasoning_span, OJ_TRAJECTORY_RECORD_KIND) == "reasoning"
     output_messages = json.loads(_attr(reasoning_span, GEN_AI_OUTPUT_MESSAGES))
     assert output_messages == [{
         "role": "assistant",

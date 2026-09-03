@@ -41,11 +41,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
-    LANGFUSE_SESSION_ID,
     AT_SESSION_ID,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
-    LANGFUSE_OBSERVATION_TYPE,
     OJ_REQUEST_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
@@ -57,6 +53,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
     OJ_INFERENCE_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
@@ -161,7 +159,7 @@ async def test_iteration_span_opens_under_the_run_root_and_carries_generic_attri
     assert len(spans) == 1
     span = spans[0]
     assert span.parent.span_id == tracing.root.context.span_id
-    assert span.attributes[LANGFUSE_OBSERVATION_TYPE] == "agent"
+    assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "agent"
     assert span.attributes[DA_AGENT_NAME] == "solo"
     assert span.attributes[DA_TASK_ITERATION] == 1
     assert span.attributes[GEN_AI_AGENT_NAME] == "solo"
@@ -176,9 +174,8 @@ async def test_iteration_span_opens_under_the_run_root_and_carries_generic_attri
     assert OJ_STEP_ID not in span.attributes
     assert OJ_STEP_NUMBER not in span.attributes
     assert span.attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
-    assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "agent"
-    assert span.attributes[LANGFUSE_OBSERVATION_INPUT] == "do it"
-    assert span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "the answer"
+    assert span.attributes[OJ_SPAN_INPUT] == "do it"
+    assert span.attributes[OJ_SPAN_OUTPUT] == "the answer"
     assert not [key for key in span.attributes if key.startswith("agentteam.")]
 
 
@@ -308,7 +305,7 @@ async def test_single_round_agent_gets_an_invoke_span(tracing):
 
     spans = _finished(tracing.exporter, "agent.explore_agent.invoke")
     assert len(spans) == 1
-    assert spans[0].attributes[LANGFUSE_OBSERVATION_OUTPUT] == "found it"
+    assert spans[0].attributes[OJ_SPAN_OUTPUT] == "found it"
 
 
 @pytest.mark.asyncio
@@ -705,7 +702,6 @@ async def test_subagent_ambient_session_does_not_replace_trajectory_owner(tracin
     span = _finished(tracing.exporter, "llm.child")[0]
     assert span.attributes[OJ_SESSION_ID] == "session"
     assert span.attributes[GEN_AI_CONVERSATION_ID] == "session"
-    assert span.attributes[LANGFUSE_SESSION_ID] == "session"
     assert span.attributes[AT_SESSION_ID] == "session"
     assert span.attributes[OJ_EXECUTION_SUBJECT_SESSION_ID] == "session_sub_explore_1"
 
@@ -889,8 +885,7 @@ async def test_a_raised_tool_call_still_records_the_result_the_model_saw(tracing
     assert span.status.status_code.name == "ERROR"
     assert span.attributes["error.type"] == "ValueError"
     assert span.attributes[GEN_AI_TOOL_CALL_RESULT] == "Ability execution error: bad tool"
-    assert span.attributes[GEN_AI_TOOL_CALL_RESULT] == "Ability execution error: bad tool"
-    assert span.attributes[LANGFUSE_OBSERVATION_OUTPUT] == "Ability execution error: bad tool"
+    assert span.attributes[OJ_SPAN_OUTPUT] == "Ability execution error: bad tool"
 
 
 @pytest.mark.asyncio

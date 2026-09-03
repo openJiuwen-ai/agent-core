@@ -7,9 +7,10 @@ Standard GenAI attributes are re-exported from the replaceable generated
 ``gen_ai_semconv`` module. Team collaboration attributes use the project-specific
 ``agentteam.*`` namespace; DeepAgent task-loop attributes use ``deepagent.*``.
 
-Langfuse-specific attributes (`langfuse.*`) are used for fields that
-Langfuse's OTel ingestion processor maps to its observation model
-(input, output, session_id, trace name, etc.).
+Only standard GenAI/core attributes and ``openjiuwen.*`` / ``agentteam.*``
+project extensions live here. Any backend-specific projection (the Langfuse
+namespace included) belongs exclusively to the exporter adapters under
+``exporters/``.
 
 Keeping project-owned attribute keys here avoids typo drift between handlers.
 """
@@ -29,6 +30,11 @@ OJ_TRACE_COMPLETE = "openjiuwen.trace.complete"
 OJ_TRACE_FORCED_CLOSE = "openjiuwen.trace.forced_close"
 OJ_SPAN_FORCED_CLOSE = "openjiuwen.span.forced_close"
 OJ_SPAN_FORCED_CLOSE_REASON = "openjiuwen.span.forced_close.reason"
+# Backend-neutral span input/output for records that have no dedicated
+# standard carrier (team/task/event/agent-tier spans). Kept as JSON strings
+# and governed by the same redaction and truncation policies as prompts.
+OJ_SPAN_INPUT = "openjiuwen.span.input"
+OJ_SPAN_OUTPUT = "openjiuwen.span.output"
 OJ_SESSION_ID = "openjiuwen.session.id"
 OJ_REQUEST_ID = "openjiuwen.request.id"
 OJ_REQUEST_MESSAGE_COUNT = "openjiuwen.request.message_count"
@@ -145,29 +151,3 @@ DA_TASK_LOOP_EVENT = "deepagent.task.loop_event"
 # own orphan from another agent's span inherited through a ContextVar snapshot,
 # so it must stay independent of the team-only ``agentteam.*`` namespace.
 DA_AGENT_NAME = "deepagent.agent.name"
-
-
-# ---------------------------------------------------------------------------
-# langfuse.* — Langfuse OTel ingestion processor attributes
-# ---------------------------------------------------------------------------
-# These attribute keys are specifically recognized by Langfuse's
-# OTel ingestion processor (both Python SDK and Langfuse backend) to
-# populate trace/observation fields that aren't covered by standard
-# gen_ai.* or custom agentteam.* attrs.
-#
-# CRITICAL: The Python SDK's LangfuseOtelSpanAttributes defines the
-# canonical key names. Some differ from what one might expect:
-#   - "session.id" (NOT "langfuse.session.id")
-#   - "langfuse.trace.tags" ✓
-#   - "langfuse.observation.input" ✓
-#   - "langfuse.observation.output" ✓
-#
-# See: langfuse.LangfuseOtelSpanAttributes for the full list.
-
-LANGFUSE_TRACE_NAME = "langfuse.trace.name"
-LANGFUSE_TRACE_TAGS = "langfuse.trace.tags"
-LANGFUSE_SESSION_ID = "session.id"
-
-LANGFUSE_OBSERVATION_INPUT = "langfuse.observation.input"
-LANGFUSE_OBSERVATION_OUTPUT = "langfuse.observation.output"
-LANGFUSE_OBSERVATION_TYPE = "langfuse.observation.type"

@@ -229,16 +229,20 @@ async def test_leader_single_iteration_trace_via_runner(
     orphans = [s.name for s in all_spans if s.parent is not None and s.parent.span_id not in span_ids]
     assert len(orphans) == 0, f"orphan spans: {orphans}"
 
-    # --- 5. Agent spans have type AGENT ---
+    # --- 5. Agent spans carry a trajectory record kind ---
+    # The agent tier includes iteration/invoke spans (kind=agent) and their
+    # nested ReAct step spans (kind=step) — both are valid record kinds.
     for a in agent_spans:
-        assert _attr(a, "langfuse.observation.type") == "agent", \
-            f"{a.name} must have type=agent"
+        kind = _attr(a, "openjiuwen.trajectory.record.kind")
+        expected_kinds = ("agent", "step") if "react_iteration" in a.name else ("agent",)
+        assert kind in expected_kinds, \
+            f"{a.name} must have record kind in {expected_kinds}, got {kind}"
 
     # --- 6. LLM spans have input/output (if present) ---
     for llm in llm_spans:
         has_io = (_attr(llm, "gen_ai.prompt.0.content")
                   or _attr(llm, "gen_ai.completion.0.content")
-                  or _attr(llm, "langfuse.observation.output"))
+                  or _attr(llm, "gen_ai.output.messages"))
         assert has_io, f"LLM span {llm.name} needs prompt or completion"
 
     # --- 7. Reasoning spans (if present) have content ---
@@ -246,7 +250,7 @@ async def test_leader_single_iteration_trace_via_runner(
     for rs in reasoning_spans:
         assert rs.parent is not None, "reasoning span needs parent"
         has_io = (_attr(rs, "gen_ai.completion.0.content")
-                  or _attr(rs, "langfuse.observation.output"))
+                  or _attr(rs, "gen_ai.output.messages"))
         assert has_io, "reasoning span needs completion or output"
 
 

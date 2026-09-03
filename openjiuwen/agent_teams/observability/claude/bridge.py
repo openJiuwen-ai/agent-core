@@ -38,10 +38,10 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_PROMPT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
-    LANGFUSE_OBSERVATION_TYPE,
-    LANGFUSE_SESSION_ID,
+    OJ_SESSION_ID,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
+    OJ_TRAJECTORY_RECORD_KIND,
 )
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -191,9 +191,10 @@ class ClaudeSpanBridge:
             kind=SpanKind.INTERNAL,
         )
         safe_prompt = redact_prompt(prompt, config)
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_prompt)
+        span.set_attribute(OJ_SPAN_INPUT, safe_prompt)
         span.set_attribute(AT_AGENT_INPUT, safe_prompt)
+        span.set_attribute(GEN_AI_OPERATION_NAME, "invoke_agent")
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
         span.set_attribute(AT_AGENT_NAME, self._member_name)
         span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
@@ -205,7 +206,7 @@ class ClaudeSpanBridge:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
             span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(OJ_SESSION_ID, self._session_id)
 
         self._turn_span = span
         self._turn_started_at_ns = time.time_ns()
@@ -452,7 +453,7 @@ class ClaudeSpanBridge:
             kind=SpanKind.CLIENT,
             start_time=start_ns,
         )
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
+        span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
         span.set_attribute("gen_ai.system", "claude")
         span.set_attribute(GEN_AI_PROVIDER_NAME, "Anthropic")
         span.set_attribute(GEN_AI_REQUEST_MODEL, str(attributes.get("model") or "unknown"))
@@ -495,7 +496,7 @@ class ClaudeSpanBridge:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
             span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(OJ_SESSION_ID, self._session_id)
 
         if int(event.get("status_code") or 0) == 2:
             description = self._redact_diagnostic(
@@ -530,12 +531,12 @@ class ClaudeSpanBridge:
             if span.is_recording():
                 if pending.get("input") is not None and config is not None:
                     span.set_attribute(
-                        LANGFUSE_OBSERVATION_INPUT,
+                        OJ_SPAN_INPUT,
                         redact_prompt(str(pending["input"]), config),
                     )
                 if pending.get("output") is not None and config is not None:
                     span.set_attribute(
-                        LANGFUSE_OBSERVATION_OUTPUT,
+                        OJ_SPAN_OUTPUT,
                         redact_completion(str(pending["output"]), config),
                     )
                 span.end(end_time=pending["end_ns"])
@@ -613,7 +614,7 @@ class ClaudeSpanBridge:
             if output:
                 safe_output = redact_completion(output, config)
                 span.set_attribute(AT_AGENT_OUTPUT, safe_output)
-                span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_output)
+                span.set_attribute(OJ_SPAN_OUTPUT, safe_output)
             if reasoning:
                 self._emit_reasoning_span(reasoning)
 
@@ -682,10 +683,10 @@ class ClaudeSpanBridge:
             kind=SpanKind.INTERNAL,
         )
         safe_input = redact_prompt(_json_text(record.get("tool_args")), config)
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "tool")
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, safe_input)
+        span.set_attribute(OJ_SPAN_INPUT, safe_input)
         span.set_attribute(GEN_AI_TOOL_NAME, tool_name)
         span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "tool")
         span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, safe_input)
         tool_call_id = str(record.get("tool_call_id") or "")
         if tool_call_id:
@@ -697,12 +698,12 @@ class ClaudeSpanBridge:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
             span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(OJ_SESSION_ID, self._session_id)
 
         if record.get("completed"):
             safe_output = redact_completion(_json_text(record.get("tool_result")), config)
             span.set_attribute(GEN_AI_TOOL_CALL_RESULT, safe_output)
-            span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_output)
+            span.set_attribute(OJ_SPAN_OUTPUT, safe_output)
             span.set_status(Status(StatusCode.OK))
         else:
             span.set_status(Status(StatusCode.ERROR, "incomplete tool call"))
@@ -726,8 +727,7 @@ class ClaudeSpanBridge:
             kind=SpanKind.INTERNAL,
         )
         safe_reasoning = redact_completion(reasoning, config)
-        span.set_attribute(LANGFUSE_OBSERVATION_INPUT, "llm reasoning")
-        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_reasoning)
+        span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "reasoning")
         span.set_attribute(
             GEN_AI_OUTPUT_MESSAGES,
             _json_text([{
@@ -735,13 +735,14 @@ class ClaudeSpanBridge:
                 "parts": [{"type": "reasoning", "content": safe_reasoning}],
             }]),
         )
+        span.set_attribute(OJ_SPAN_OUTPUT, safe_reasoning)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
             span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
+            span.set_attribute(OJ_SESSION_ID, self._session_id)
         span.set_status(Status(StatusCode.OK))
         span.end()
 
