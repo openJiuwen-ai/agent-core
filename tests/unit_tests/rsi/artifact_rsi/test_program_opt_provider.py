@@ -3169,3 +3169,84 @@ def test_a_non_python_evaluator_states_its_contract_in_its_leading_comment() -> 
         "Scored on how close that number is to the target."
     )
     assert "1234" not in contract, "the answer key came along with the contract"
+
+
+def test_a_command_the_environment_refuses_says_so(tmp_path: Path) -> None:
+    """A refusal by the execution environment is not a quiet candidate.
+
+    agent-core's LOCAL operation runs an allowlist — `python` and `node` are on
+    it, `sh` is not — and reports its own refusals at the result level: a code
+    and a sentence, with stdout empty and `exit_code` -1. The seam read only
+    the streams, so a card naming a `sh` evaluator got "the evaluator wrote
+    neither a result file nor any output" and a reader sent to look at the
+    evaluator for something that happened before it ran. Found by running the
+    real thing, not by this file.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
+        ExecutionUnavailable,
+        local_execution,
+    )
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    try:
+        execute = local_execution(tmp_path / "work", loop)
+
+        with pytest.raises(ExecutionUnavailable) as raised:
+            execute({"a.sh": "echo hi\n"}, ["sh", "a.sh"], {}, 30, None)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    message = str(raised.value)
+    assert "sh a.sh" in message and "allowlist" in message, message
+
+
+def test_a_candidate_killed_for_taking_too_long_is_still_just_a_candidate(
+    tmp_path: Path,
+) -> None:
+    """The other half of the same rule, and the reason it is not one rule.
+
+    A timeout is reported through the same channel as a refusal — non-zero
+    result code, empty streams — and it is the opposite kind of event: the
+    command ran, and being slow is an ordinary property of a candidate. Raising
+    on it would turn one slow draw into a failed run. The signal in `exit_code`
+    is what tells them apart, and the reason still reaches the diagnosis.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import local_execution
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    try:
+        execute = local_execution(tmp_path / "work", loop)
+
+        outcome = execute({"slow.py": "import time\ntime.sleep(30)\n"},
+                          ["python", "slow.py"], {}, 2, None)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    assert outcome.exit_code not in (0, None), "a killed candidate looked successful"
+    assert outcome.output.strip(), "the kill reached the candidate's diagnosis as nothing"
+
+
+def test_a_command_that_stages_no_files_still_has_somewhere_to_run(tmp_path: Path) -> None:
+    """`write_file` is the only thing in this API that makes a directory.
+
+    So an evaluation that stages nothing — which is exactly what the
+    candidate-runtime probe does, one command and no files — was handed a
+    working directory that had never been created. The probe came back "No
+    such file or directory" and the run was refused for an execution
+    environment missing numpy, on a machine where numpy is installed.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import local_execution
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    try:
+        execute = local_execution(tmp_path / "work", loop)
+
+        outcome = execute({}, ["python", "-c", "print('ran')"], {}, 30, None)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+
+    assert outcome.exit_code == 0, outcome.output
+    assert "ran" in outcome.output

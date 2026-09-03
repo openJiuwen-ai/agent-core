@@ -86,16 +86,23 @@ async def _stage_and_run(
     # serial round-trips would multiply per candidate. The gateway's
     # `prepend_newline` defaults to True, which would silently corrupt every
     # staged file's first line.
+    # `write_file` is the only thing in this API that creates a directory, so a
+    # call that stages nothing would hand the command a `cwd` that does not
+    # exist. That is not hypothetical: `probe_imports` runs one command and
+    # stages no files, and the candidate-runtime probe came back "No such file
+    # or directory" — reported as an execution environment missing numpy, on a
+    # machine where numpy was installed.
+    staged = dict(files) or {".evolve": "one evaluation's scratch directory\n"}
     written = await asyncio.gather(*(
         fs.write_file(f"{scratch}/{path}", text, prepend_newline=False)
-        for path, text in files.items()
+        for path, text in staged.items()
     ))
     # Checked, because these do not raise. A denied or failed write returns a
     # result carrying a non-zero code, and dropping it made a staging failure
     # arrive three steps later as "the evaluator wrote neither a result file
     # nor any output" — pointing the reader at the evaluator for something
     # that happened before it ran.
-    for path, result in zip(files, written):
+    for path, result in zip(staged, written):
         code = getattr(result, "code", 0)
         if code:
             raise ExecutionUnavailable(
@@ -111,6 +118,26 @@ async def _stage_and_run(
     )
     data = getattr(completed, "data", completed)
     output = f"{getattr(data, 'stderr', '')}{getattr(data, 'stdout', '')}"
+    # The gateway reports its *own* refusals at the result level, not through
+    # the program's streams — a `code` and a sentence, with stdout empty. Two
+    # very different things arrive that way and they must not be merged:
+    #
+    #   * the command never ran (rejected by the allowlist, denied a path).
+    #     Every candidate would fail identically, so it is a run-level fault
+    #     and is raised. Measured: a `sh` evaluator under the default LOCAL
+    #     operation, whose allowlist has no `sh`, came back exit=-1 with empty
+    #     output and read as "the evaluator printed nothing".
+    #   * the command ran and was killed — a timeout, which is an ordinary
+    #     property of a candidate and must stay one. It carries the signal in
+    #     `exit_code` (-9), and raising on it would turn a slow candidate into
+    #     a broken run.
+    code = getattr(completed, "code", 0)
+    if code:
+        reason = getattr(completed, "message", "") or f"error {code}"
+        if getattr(data, "exit_code", None) in (None, -1):
+            raise ExecutionUnavailable(
+                f"the execution environment refused `{shlex.join(command)}`: {reason}")
+        output = f"{output}\n{reason}".strip()
     result_text: Optional[str] = None
     if result_file is not None:
         try:
