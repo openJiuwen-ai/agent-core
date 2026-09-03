@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Literal, get_type_hints
 
@@ -1876,6 +1877,104 @@ def test_the_change_sentence_is_found_where_a_one_function_reply_puts_it() -> No
 
     # And a reply that documents nothing still says nothing.
     assert _summary_of("def search(a, b):\n    return None\n") == ""
+
+
+def test_events_from_many_workers_are_folded_one_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With more than one worker the engine emits from N threads at once, and
+    neither the fold nor the delivery is safe under that.
+
+    Mutual exclusion is the property, so it is what is measured — not "no node
+    happened to be lost", which passes by luck: under the GIL a dict write is
+    atomic and the losing interleaving is rare enough that three runs without
+    the lock all came back green. A delivery that takes a known time makes the
+    question arithmetic instead: N of them serialized cannot finish in less
+    than N times that, and unserialized they overlap into roughly one.
+
+    Driven through the provider's real sink; the only stand-in is the search.
+    """
+    NODES, DELAY = 12, 0.02
+
+    class _ManyWorkers:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            emit(events.seeded(0, 0.25, code_hash="sha256:" + "a" * 64))
+            errors: list[BaseException] = []
+            ready = threading.Barrier(NODES)
+
+            def expand(index: int) -> None:
+                try:
+                    ready.wait(timeout=10)          # all of them, at once
+                    emit(events.expanded(index, 0, 1, 0.3 + index / 100, True,
+                                         iteration=index,
+                                         code_hash="sha256:" + f"{index:064x}"))
+                    emit(events.merged(index, False, "measured"))
+                except BaseException as error:  # noqa: BLE001 - reported below
+                    errors.append(error)
+
+            threads = [threading.Thread(target=expand, args=(i,))
+                       for i in range(1, NODES + 1)]
+            started = time.monotonic()
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.elapsed = time.monotonic() - started
+            assert not errors, f"the fold raised under concurrency: {errors[:3]}"
+            emit(events.search_finished("succeeded", 1, NODES))
+
+    engines: list[_ManyWorkers] = []
+
+    def build(**kwargs: object) -> _ManyWorkers:
+        engines.append(_ManyWorkers(**kwargs))
+        return engines[-1]
+
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine", build)
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir))
+
+    async def sink(event: object) -> None:
+        await asyncio.sleep(DELAY)
+
+    result = asyncio.run(provider.run(request, sink))
+
+    assert result.status == "completed"
+    # Each expansion delivers one EventNode, so serialized they cost at least
+    # their own delay each. Overlapping, twelve of them cost about one.
+    assert engines[0].elapsed > NODES * DELAY * 0.6, (
+        f"{NODES} deliveries took {engines[0].elapsed:.3f}s — they overlapped, "
+        "so the fold is not serialized"
+    )
+    # And nothing was lost on the way.
+    persisted = json.loads((Path(request.run_dir) / "nodes.json").read_text(encoding="utf-8"))
+    indices = sorted(int(n["node_id"].rsplit(":", 1)[-1]) for n in persisted["nodes"])
+    assert indices == list(range(NODES + 1)), f"{len(indices)} of {NODES + 1} nodes survived"
+
+
+def test_a_task_may_ask_for_more_than_one_worker(tmp_path: Path) -> None:
+    """Serial was the only safe setting while the fold had no lock; it is a
+    default now, not a ceiling. Bounded, because each worker is a model call
+    and a sandbox evaluation in flight."""
+    provider = PuctProgramArtifactProvider()
+    request = _request(tmp_path)
+
+    _scorecard(Path(request.run_dir))
+    assert provider._spec_for(request, resumed=False).workers == 1
+
+    _scorecard(Path(request.run_dir), workers=4)
+    assert provider._spec_for(request, resumed=False).workers == 4
+
+    _scorecard(Path(request.run_dir), workers=200)
+    assert provider._spec_for(request, resumed=False).workers == 8      # capped
+
+    _scorecard(Path(request.run_dir), workers="lots")
+    assert provider._spec_for(request, resumed=False).workers == 1      # not a number
 
 
 # -- task-owned prompt wording ---------------------------------------------------

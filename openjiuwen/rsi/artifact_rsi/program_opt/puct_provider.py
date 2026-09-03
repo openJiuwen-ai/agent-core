@@ -75,6 +75,10 @@ from openjiuwen.rsi.schema import (
 #: alone took 3, and the wave finished *slower* than running them in sequence.
 DEFAULT_WORKERS = 1
 
+#: The most a task may ask for. Each worker is one model call and one sandbox
+#: evaluation in flight; past a handful the limit stops being this process.
+MAX_WORKERS = 8
+
 
 logger = logging.getLogger(__name__)
 
@@ -469,7 +473,21 @@ class PuctProgramArtifactProvider:
         # Every event the search emits is projected, persisted, then handed to
         # the caller's loop — in that order, because the contract requires a
         # snapshot to be durable before the event announcing it is delivered.
+        #
+        # Held for the whole of that, because with more than one worker the
+        # engine emits from N threads at once and neither half is safe under
+        # that. `ProgramRunState` has no lock of its own: two folds interleaving
+        # would race the node map, and `_persist` walking `sorted(self.nodes)`
+        # while another thread inserts raises outright. Ordering matters too —
+        # the contract's events are a sequence, and two threads delivering at
+        # once is not one.
+        fold = threading.Lock()
+
         def sink(emitted: dict[str, Any]) -> None:
+            with fold:
+                _fold_and_deliver(emitted)
+
+        def _fold_and_deliver(emitted: dict[str, Any]) -> None:
             for event in state.absorb(emitted):
                 if on_event is None:
                     continue
@@ -572,7 +590,7 @@ class PuctProgramArtifactProvider:
             search_id=request.task_id,
             algorithm="puct",
             expansions=int(request.max_iterations),
-            workers=DEFAULT_WORKERS,
+            workers=_workers_from(card.get("workers")),
             scorecard=card.get("scorecard", card),
             scorecard_hash=str(card.get("hash") or "sha256:inline"),
             statement=str(card.get("statement") or ""),
@@ -639,6 +657,23 @@ def _prompt_templates(run_dir: Path) -> dict[str, str]:
         validate_template(f"prompts/{name}.md", text, allowed, required)
         out[name] = text
     return out
+
+
+def _workers_from(value: Any) -> int:
+    """How many expansions may be in flight at once.
+
+    One by default, which is what every task got before this was readable: the
+    engine emits from each worker thread and the fold that receives those
+    events is only now safe under more than one. Bounded rather than trusted —
+    the number costs concurrent model calls and concurrent sandbox
+    evaluations, and a card asking for two hundred would be asking for the
+    provider to melt rather than for a faster search.
+    """
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_WORKERS
+    return max(1, min(workers, MAX_WORKERS))
 
 
 def _seed_files(path: Path) -> dict[str, str]:
