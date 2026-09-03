@@ -39,15 +39,22 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 
 _LEGACY_TRAJECTORY_ID = "openjiuwen.trajectory.id"
 _LEGACY_SESSION_ID = "openjiuwen.session.id"
+_LEGACY_TEAM_SESSION_ID = "agentteam.session.id"
 _LEGACY_TEAM_ID = "openjiuwen.team.id"
 _LEGACY_MEMBER_ID = "openjiuwen.member.id"
+_LEGACY_TEAM_MEMBER_ID = "agentteam.member.id"
 
+# Historical attribute names live here and nowhere else: the live pipeline
+# writes one canonical key per fact, so only this read-only converter knows
+# what the archives used to be called.
 _RESOURCE_ALIASES = {
     _LEGACY_TRAJECTORY_ID: TRAJECTORY_ID,
     "openjiuwen.session_id": SESSION_ID,
     _LEGACY_SESSION_ID: SESSION_ID,
+    _LEGACY_TEAM_SESSION_ID: SESSION_ID,
     _LEGACY_TEAM_ID: TEAM_ID,
     _LEGACY_MEMBER_ID: MEMBER_ID,
+    _LEGACY_TEAM_MEMBER_ID: MEMBER_ID,
     "session.id": SESSION_ID,
     "session_id": SESSION_ID,
     "team_id": TEAM_ID,

@@ -24,7 +24,6 @@ from opentelemetry.trace import (
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.semconv import (
     AT_EVENT_TYPE,
-    AT_MEMBER_ID,
     AT_MEMBER_NAME,
     AT_MEMBER_RESTART_COUNT,
     AT_MEMBER_RESTART_REASON,
@@ -39,12 +38,14 @@ from openjiuwen.extensions.observability.semconv import (
     AT_PLAN_SUBMITTED_BY,
     AT_TASK_ASSIGNEE,
     AT_TASK_ID,
+    AT_TASK_RECOVERED,
     AT_TASK_STATUS,
+    AT_TASK_TAG,
     AT_TEAM_DISPLAY_NAME,
     AT_TEAM_ID,
     AT_TEAM_LEADER,
     AT_TEAM_NAME,
-    OJ_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     OJ_SPAN_INPUT,
     OJ_SPAN_OUTPUT,
 )
@@ -296,7 +297,7 @@ class OtelTeamMonitorHandler:
 
         session_id = payload.get("session_id") or OtelTeamMonitorHandler._get_ctx_session_id()
         if session_id:
-            team_span.set_attribute(OJ_SESSION_ID, str(session_id))
+            team_span.set_attribute(GEN_AI_CONVERSATION_ID, str(session_id))
 
         leader = payload.get("leader_member_name")
         if leader:
@@ -403,7 +404,7 @@ class OtelTeamMonitorHandler:
         if team_name:
             span.set_attribute(AT_TEAM_ID, team_name)
             span.set_attribute(AT_TEAM_NAME, team_name)
-        span.set_attribute("agentteam.task.tag", f"task:{task_id}")
+        span.set_attribute(AT_TASK_TAG, f"task:{task_id}")
         status = payload.get("status")
         if status:
             span.set_attribute(AT_TASK_STATUS, str(status))
@@ -421,7 +422,7 @@ class OtelTeamMonitorHandler:
                                _json.dumps(payload, ensure_ascii=False, default=str))
         sid = self._get_ctx_session_id()
         if sid:
-            span.set_attribute(OJ_SESSION_ID, sid)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, sid)
         self._task_spans[task_id] = span
 
         created_attrs: dict[str, Any] = {
@@ -523,13 +524,13 @@ class OtelTeamMonitorHandler:
         if team_name:
             span.set_attribute(AT_TEAM_ID, team_name)
             span.set_attribute(AT_TEAM_NAME, team_name)
-        span.set_attribute("agentteam.task.tag", f"task:{task_id}")
+        span.set_attribute(AT_TASK_TAG, f"task:{task_id}")
         # Mark as recovered so the trace viewer can distinguish tasks that
         # were created in a prior trace from those created in the current one.
-        span.set_attribute("agentteam.task.recovered", True)
+        span.set_attribute(AT_TASK_RECOVERED, True)
         sid = self._get_ctx_session_id()
         if sid:
-            span.set_attribute(OJ_SESSION_ID, sid)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, sid)
         return span
 
     def _record_task_status_span(self, team_name: str, payload: dict[str, Any], etype: str) -> None:
@@ -646,7 +647,6 @@ class OtelTeamMonitorHandler:
             AT_PLAN_APPROVED: bool(approved),
         }
         if member:
-            attrs[AT_MEMBER_ID] = str(member)
             attrs[AT_MEMBER_NAME] = str(member)
             attrs[AT_PLAN_SUBMITTED_BY] = str(member)
         in_val, out_val = self._event_span_io(TeamEvent.PLAN_APPROVAL, payload)
@@ -667,7 +667,6 @@ class OtelTeamMonitorHandler:
 
         attrs: dict[str, Any] = {
             AT_EVENT_TYPE: etype,
-            AT_MEMBER_ID: member_name,
             AT_MEMBER_NAME: member_name,
         }
         if "old_status" in payload:

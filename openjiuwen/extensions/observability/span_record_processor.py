@@ -18,7 +18,6 @@ from openjiuwen.extensions.observability.otlp_codec import (
     snapshot_readable_span,
 )
 from openjiuwen.extensions.observability.semconv import (
-    AT_SESSION_ID,
     AT_TEAM_ID,
     AT_TEAM_NAME,
     GEN_AI_CONVERSATION_ID,
@@ -30,9 +29,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
-    OJ_TEAM_ID,
-    OJ_TEAM_NAME,
     OJ_TRACE_SCHEMA_VERSION,
 )
 
@@ -185,7 +181,7 @@ def _agent_mode(attributes: Any) -> str | None:
     explicit = _attribute_text(attributes, OJ_AGENT_MODE)
     if explicit is not None:
         return explicit
-    if _attribute_text(attributes, OJ_TEAM_ID, OJ_TEAM_NAME, AT_TEAM_ID, AT_TEAM_NAME) is not None:
+    if _attribute_text(attributes, AT_TEAM_ID, AT_TEAM_NAME) is not None:
         return "team"
     return None
 
@@ -502,12 +498,7 @@ class SpanRecordProcessor(SpanProcessor):
             parent_span_id=parent_span_id,
             start_time_unix_nano=int(start_time),
             end_time_unix_nano=int(end_time),
-            session_id=_attribute_text(
-                attributes,
-                GEN_AI_CONVERSATION_ID,
-                OJ_SESSION_ID,
-                AT_SESSION_ID,
-            ),
+            session_id=_attribute_text(attributes, GEN_AI_CONVERSATION_ID),
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
             agent_mode=_agent_mode(attributes),
@@ -556,12 +547,7 @@ class SpanRecordProcessor(SpanProcessor):
             observed_time_unix_nano=time.time_ns(),
             record_revision=record_revision,
             update_kind=str(update_kind),
-            session_id=_attribute_text(
-                attributes,
-                GEN_AI_CONVERSATION_ID,
-                OJ_SESSION_ID,
-                AT_SESSION_ID,
-            ),
+            session_id=_attribute_text(attributes, GEN_AI_CONVERSATION_ID),
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
             agent_mode=_agent_mode(attributes),

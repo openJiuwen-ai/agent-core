@@ -65,7 +65,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_ID,
     OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_INPUT,
     OJ_STREAM_KIND,
@@ -253,7 +253,7 @@ def test_request_numbers_are_additive_and_subject_local_across_turn_roots() -> N
         root = tracer.start_span(
             "agent.root",
             attributes={
-                OJ_SESSION_ID: session_id,
+                GEN_AI_CONVERSATION_ID: session_id,
                 OJ_EXECUTION_SUBJECT_ID: "main",
             },
         )
@@ -340,7 +340,6 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     runtime.initialize(config, span_exporter_override=exporter)
     root = runtime.get_tracer("stream-contract-test").start_span("agent.root")
     root.set_attribute("gen_ai.conversation.id", "session-1")
-    root.set_attribute("openjiuwen.session.id", "session-1")
     root.set_attribute(OJ_REQUEST_ID, "request-1")
     root.set_attribute(OJ_RUN_ID, "run-1")
     set_root_span(root, session_id="session-1")
@@ -1390,7 +1389,7 @@ def _error_test_runtime(service_name: str):
     )
     runtime.initialize(config, span_exporter_override=exporter)
     root = runtime.get_tracer(service_name).start_span("agent.root")
-    root.set_attribute(OJ_SESSION_ID, f"{service_name}-session")
+    root.set_attribute(GEN_AI_CONVERSATION_ID, f"{service_name}-session")
     set_root_span(root, session_id=f"{service_name}-session")
     return exporter, runtime, root
 

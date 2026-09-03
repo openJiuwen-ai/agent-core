@@ -20,18 +20,16 @@ from openjiuwen.agent_teams.observability import (
 from openjiuwen.agent_teams.observability.claude import ClaudeSpanBridge, NoopClaudeSpanBridge
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.semconv import (
-    AT_AGENT_INPUT,
-    AT_AGENT_OUTPUT,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
     AT_MEMBER_NAME,
-    AT_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     AT_TEAM_NAME,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    OJ_SPAN_INPUT,
-    OJ_SPAN_OUTPUT,
     OJ_TRAJECTORY_RECORD_KIND,
 )
 from openjiuwen.agent_teams.observability.setup import get_tracer
@@ -103,8 +101,8 @@ def test_claude_bridge_records_turn_output_and_reasoning(in_memory_exporter: InM
     turn_spans = _spans_by_name(in_memory_exporter, "agent.ppt-designer.claude_turn.1")
     assert len(turn_spans) == 1
     span = turn_spans[0]
-    assert _attr(span, AT_AGENT_INPUT) == "make a deck"
-    assert _attr(span, AT_AGENT_OUTPUT) == "done"
+    assert _attr(span, OJ_SPAN_INPUT) == "make a deck"
+    assert _attr(span, OJ_SPAN_OUTPUT) == "done"
     assert _attr(span, OJ_SPAN_INPUT) == "make a deck"
     assert _attr(span, OJ_SPAN_OUTPUT) == "done"
     assert _attr(span, "claude.reasoning") is None
@@ -112,7 +110,7 @@ def test_claude_bridge_records_turn_output_and_reasoning(in_memory_exporter: InM
     assert _attr(span, "agentteam.backend") == "claude"
     assert _attr(span, AT_MEMBER_NAME) == "ppt-designer"
     assert _attr(span, AT_TEAM_NAME) == "alpha"
-    assert _attr(span, AT_SESSION_ID) == "sess-1"
+    assert _attr(span, GEN_AI_CONVERSATION_ID) == "sess-1"
 
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
     assert len(reasoning_spans) == 1

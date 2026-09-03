@@ -52,8 +52,6 @@ def _finished_child_span() -> ReadableSpan:
     parent = tracer.start_span("agent.run")
     child = tracer.start_span("llm.call", context=set_span_in_context(parent))
     child.set_attribute("gen_ai.conversation.id", "conversation")
-    child.set_attribute("openjiuwen.session.id", "openjiuwen-session")
-    child.set_attribute("session.id", "legacy-session")
     child.set_attribute("openjiuwen.request.id", "request")
     child.set_attribute("openjiuwen.run.id", "run")
     child.set_attribute("openjiuwen.agent.mode", "agent.plan")

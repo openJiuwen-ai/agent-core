@@ -28,7 +28,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_SYSTEM_INSTRUCTIONS,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TRACE_SCHEMA_VERSION,
@@ -37,7 +37,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_PAYLOAD,
     OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TRAJECTORY_SEQUENCE_EPOCH,
-    OJ_TRAJECTORY_SESSION_ID,
     OJ_TRAJECTORY_SUBJECT_ID,
     OJ_TRAJECTORY_SUBJECT_SEQUENCE,
     OJ_TURN_NUMBER,
@@ -85,7 +84,7 @@ async def test_ask_user_records_requested_and_resolved_events_across_closed_span
         index=0,
     )
     attributes = {
-        OJ_SESSION_ID: "ask-session",
+        GEN_AI_CONVERSATION_ID: "ask-session",
         OJ_EXECUTION_SUBJECT_ID: "ask-subject",
         OJ_EXECUTION_SUBJECT_KIND: "team_leader",
         OJ_TURN_NUMBER: 2,
@@ -149,7 +148,7 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
     root = runtime.get_tracer("trajectory-pressure-test").start_span(
         "agent.root",
         attributes={
-            OJ_SESSION_ID: "pressure-session",
+            GEN_AI_CONVERSATION_ID: "pressure-session",
             OJ_REQUEST_ID: "request-1",
             OJ_RUN_ID: "run-1",
             OJ_TURN_NUMBER: 3,
@@ -212,8 +211,8 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
     assert attrs[OJ_TRAJECTORY_SCHEMA_VERSION] == "2"
     assert attrs[OJ_TRAJECTORY_EVENT_KIND] == "context.window.commit"
     assert len(attrs[OJ_TRAJECTORY_SEQUENCE_EPOCH]) == 32
-    assert attrs[OJ_TRAJECTORY_SESSION_ID] == "pressure-session"
-    assert attrs[OJ_SESSION_ID] == "pressure-session"
+    assert attrs[GEN_AI_CONVERSATION_ID] == "pressure-session"
+    assert attrs[GEN_AI_CONVERSATION_ID] == "pressure-session"
     assert attrs[OJ_REQUEST_ID] == "request-1"
     assert attrs[OJ_RUN_ID] == "run-1"
     assert attrs[OJ_TURN_NUMBER] == 3
@@ -240,7 +239,7 @@ async def test_core_occurrence_ids_and_request_system_slot_survive_provider_norm
     root = runtime.get_tracer("trajectory-identity-test").start_span(
         "agent.root",
         attributes={
-            OJ_SESSION_ID: "identity-session",
+            GEN_AI_CONVERSATION_ID: "identity-session",
             OJ_EXECUTION_SUBJECT_ID: "identity-subject",
         },
     )
@@ -305,7 +304,7 @@ def test_context_window_delta_uses_occurrence_identity_and_preserves_history() -
     parent = tracer.start_span(
         "llm.call",
         attributes={
-            OJ_SESSION_ID: "delta-session",
+            GEN_AI_CONVERSATION_ID: "delta-session",
             OJ_EXECUTION_SUBJECT_ID: "subject-delta",
         },
     )
@@ -365,7 +364,7 @@ def test_context_window_first_commit_after_epoch_rotation_is_a_full_baseline() -
     parent = tracer.start_span(
         "llm.call",
         attributes={
-            OJ_SESSION_ID: "baseline-session",
+            GEN_AI_CONVERSATION_ID: "baseline-session",
             OJ_EXECUTION_SUBJECT_ID: "baseline-subject",
         },
     )
@@ -414,7 +413,7 @@ def test_epoch_baseline_preserves_compaction_correlation_independently() -> None
     parent = tracer.start_span(
         "llm.call",
         attributes={
-            OJ_SESSION_ID: "baseline-compaction-session",
+            GEN_AI_CONVERSATION_ID: "baseline-compaction-session",
             OJ_EXECUTION_SUBJECT_ID: "baseline-compaction-subject",
             OJ_REQUEST_ID: "request-1",
             OJ_STEP_ID: "step-1",
@@ -460,7 +459,7 @@ def test_native_events_share_one_epoch_and_keep_subject_sequences_dense_across_t
         tracer.start_span(
             "agent.root",
             attributes={
-                OJ_SESSION_ID: session_id,
+                GEN_AI_CONVERSATION_ID: session_id,
                 OJ_EXECUTION_SUBJECT_ID: subject_id,
             },
         )
@@ -508,7 +507,7 @@ def test_reset_state_rotates_epoch_and_restarts_subject_sequence() -> None:
     parent = tracer.start_span(
         "agent.root",
         attributes={
-            OJ_SESSION_ID: "reset-session",
+            GEN_AI_CONVERSATION_ID: "reset-session",
             OJ_EXECUTION_SUBJECT_ID: "reset-subject",
         },
     )
@@ -551,7 +550,7 @@ async def test_concurrent_subjects_have_independent_sequence_and_window_state() 
         subject: tracer.start_span(
             "llm.call",
             attributes={
-                OJ_SESSION_ID: "shared-session",
+                GEN_AI_CONVERSATION_ID: "shared-session",
                 OJ_EXECUTION_SUBJECT_ID: subject,
             },
         )

@@ -52,8 +52,8 @@ from openjiuwen.extensions.observability.runtime import (
     resolve_exporter_selection,
 )
 from openjiuwen.extensions.observability.semconv import (
-    AT_AGENT_INPUT,
-    AT_AGENT_OUTPUT,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
@@ -62,9 +62,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
-    OJ_SPAN_INPUT,
-    OJ_SPAN_OUTPUT,
-    OJ_TEAM_NAME,
+    AT_TEAM_NAME,
     OJ_TRAJECTORY_RECORD_KIND,
 )
 
@@ -242,15 +240,14 @@ def test_tool_span_maps_arguments_and_result() -> None:
     assert derived[LANGFUSE_OBSERVATION_OUTPUT] == '{"hits": 3}'
 
 
-def test_agent_span_prefers_agentteam_io_then_span_io() -> None:
+def test_agent_span_maps_span_io() -> None:
+    """Agent spans carry their IO on the one backend-neutral span.input/output."""
     provider = TracerProvider()
     span = _finish_with(provider, "agent.leader.invoke", {
         GEN_AI_OPERATION_NAME: "invoke_agent",
         OJ_TRAJECTORY_RECORD_KIND: "agent",
-        AT_AGENT_INPUT: "plan this",
-        AT_AGENT_OUTPUT: "planned",
-        OJ_SPAN_INPUT: "fallback input",
-        OJ_SPAN_OUTPUT: "fallback output",
+        OJ_SPAN_INPUT: "plan this",
+        OJ_SPAN_OUTPUT: "planned",
     })
 
     derived = project_langfuse_attributes(span)
@@ -262,7 +259,7 @@ def test_agent_span_prefers_agentteam_io_then_span_io() -> None:
 def test_team_root_span_gets_trace_name_tags_and_session() -> None:
     provider = TracerProvider()
     span = _finish_with(provider, "team.alpha", {
-        OJ_TEAM_NAME: "alpha",
+        AT_TEAM_NAME: "alpha",
         "gen_ai.conversation.id": "session-9",
     })
 
@@ -274,7 +271,7 @@ def test_team_root_span_gets_trace_name_tags_and_session() -> None:
 
 def test_task_and_event_spans_map_span_io() -> None:
     provider = TracerProvider()
-    root = _finish_with(provider, "team.alpha", {OJ_TEAM_NAME: "alpha"})
+    root = _finish_with(provider, "team.alpha", {AT_TEAM_NAME: "alpha"})
     task = _finish_with(provider, "task.t1", {
         OJ_SPAN_INPUT: '{"task_id": "t1"}',
         OJ_SPAN_OUTPUT: "completed",

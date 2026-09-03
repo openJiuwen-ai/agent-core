@@ -57,7 +57,6 @@ from openjiuwen.extensions.observability.tool_outcome import (
     tool_result_for_exception,
 )
 from openjiuwen.extensions.observability.semconv import (
-    DA_AGENT_NAME,
     DA_TASK_IS_FOLLOW_UP,
     DA_TASK_ITERATION,
     DA_TASK_LOOP_EVENT,
@@ -76,7 +75,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_TYPE,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
@@ -758,8 +756,7 @@ class AgentObservabilityRail(DeepAgentRail):
 
             agent = ctx.agent
             agent_name = str(
-                scope_parent.attributes.get(DA_AGENT_NAME)
-                or scope_parent.attributes.get(GEN_AI_AGENT_NAME)
+                scope_parent.attributes.get(GEN_AI_AGENT_NAME)
                 or self.resolve_agent_name(agent)
                 or "unknown"
             )
@@ -957,7 +954,6 @@ class AgentObservabilityRail(DeepAgentRail):
             GEN_AI_AGENT_ID,
             GEN_AI_AGENT_NAME,
             GEN_AI_AGENT_VERSION,
-            OJ_SESSION_ID,
             OJ_REQUEST_ID,
             OJ_RUN_ID,
             OJ_TURN_ID,
@@ -1007,7 +1003,7 @@ class AgentObservabilityRail(DeepAgentRail):
             # to nest under — not a leftover, and ending it here would cut the
             # request's span short at its first round.
             return
-        prev_name = prev.attributes.get(DA_AGENT_NAME, "")
+        prev_name = prev.attributes.get(GEN_AI_AGENT_NAME, "")
         prev_trace_id = getattr(getattr(prev, "context", None), "trace_id", None)
         same_run = prev_trace_id == root_span.context.trace_id
         if prev_name == agent_name and same_run:
@@ -1080,7 +1076,6 @@ class AgentObservabilityRail(DeepAgentRail):
         span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
         if agent_name:
-            span.set_attribute(DA_AGENT_NAME, agent_name)
             span.set_attribute(GEN_AI_AGENT_NAME, agent_name)
         card = getattr(agent, "card", None)
         if card is not None:
@@ -1098,7 +1093,6 @@ class AgentObservabilityRail(DeepAgentRail):
         if root_span is not None:
             for key in (
                 GEN_AI_CONVERSATION_ID,
-                OJ_SESSION_ID,
                 OJ_REQUEST_ID,
                 OJ_RUN_ID,
                 OJ_TURN_ID,
@@ -1132,18 +1126,17 @@ class AgentObservabilityRail(DeepAgentRail):
                 )
         # Preserve the root trajectory owner. A subagent's isolated runtime
         # session is already represented by OJ_EXECUTION_SUBJECT_SESSION_ID.
-        # Values already copied from the root are authoritative and are never
-        # overwritten here; the resolved id only fills a missing OJ_SESSION_ID
-        # (the backend-neutral replacement for the former Langfuse session
-        # stamp) so the export adapter can always derive a session.
+        # A value already copied from the root is authoritative and is never
+        # overwritten here; the resolved id only fills a missing
+        # ``gen_ai.conversation.id`` so the export adapter can always derive a
+        # session.
         session_id = str(
-            span.attributes.get(OJ_SESSION_ID)
-            or span.attributes.get(GEN_AI_CONVERSATION_ID)
+            span.attributes.get(GEN_AI_CONVERSATION_ID)
             or current_session_id()
             or ""
         )
-        if session_id and not span.attributes.get(OJ_SESSION_ID):
-            span.set_attribute(OJ_SESSION_ID, session_id)
+        if session_id and not span.attributes.get(GEN_AI_CONVERSATION_ID):
+            span.set_attribute(GEN_AI_CONVERSATION_ID, session_id)
         for key, value in decoration.attributes.items():
             span.set_attribute(key, value)
 

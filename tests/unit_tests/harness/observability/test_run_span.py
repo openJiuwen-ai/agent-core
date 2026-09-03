@@ -27,7 +27,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
     OJ_TRACE_COMPLETE,
@@ -124,7 +123,7 @@ def test_root_routing_attributes_exist_during_processor_on_start(monkeypatch) ->
                 OJ_EXECUTION_SUBJECT_KIND: "main_agent",
                 OJ_EXECUTION_SUBJECT_SESSION_ID: "sess-live",
                 GEN_AI_CONVERSATION_ID: "sess-live",
-                OJ_SESSION_ID: "sess-live",
+                GEN_AI_CONVERSATION_ID: "sess-live",
                 OJ_REQUEST_ID: "request-live",
                 OJ_RUN_ID: "run-live",
                 OJ_TURN_ID: "turn-live",
@@ -176,7 +175,7 @@ def test_close_ends_the_span_stamps_the_output_and_clears_the_root(exporter) -> 
     assert finished[0].attributes[OJ_SPAN_OUTPUT] == "final answer"
     assert finished[0].attributes[GEN_AI_CONVERSATION_ID] == "sess-A"
     assert finished[0].attributes[GEN_AI_OPERATION_NAME] == "invoke_agent"
-    assert finished[0].attributes[OJ_SESSION_ID] == "sess-A"
+    assert finished[0].attributes[GEN_AI_CONVERSATION_ID] == "sess-A"
     assert finished[0].attributes[OJ_REQUEST_ID] == "request-A"
     assert finished[0].attributes[OJ_RUN_ID] == "run-A"
     assert finished[0].attributes[OJ_TURN_ID] == "turn-A"

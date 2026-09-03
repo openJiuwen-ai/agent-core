@@ -237,8 +237,8 @@ class TrajectoryExtractor:
             if tool_info is not None:
                 attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = tool_info
         else:
-            attrs[semconv.AT_AGENT_INPUT] = _extract_inputs(span)
-            attrs[semconv.AT_AGENT_OUTPUT] = _extract_outputs(span)
+            attrs[semconv.OJ_SPAN_INPUT] = _extract_inputs(span)
+            attrs[semconv.OJ_SPAN_OUTPUT] = _extract_outputs(span)
             agent_id = _get(span, "agent_id")
             if agent_id:
                 attrs[semconv.AT_AGENT_ID] = str(agent_id)

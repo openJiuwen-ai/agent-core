@@ -28,7 +28,6 @@ from openjiuwen.extensions.observability import span_context as shared_span_cont
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.semconv import (
-    DA_AGENT_NAME,
     DA_TASK_ITERATION,
     GEN_AI_AGENT_DESCRIPTION,
     GEN_AI_AGENT_ID,
@@ -41,7 +40,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
-    AT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
@@ -50,7 +48,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
     OJ_SPAN_INPUT,
@@ -94,7 +91,6 @@ def tracing():
     shared_span_context.reset_state()
     root = tracer.start_span("run.root")
     root.set_attribute(GEN_AI_CONVERSATION_ID, "conversation")
-    root.set_attribute(OJ_SESSION_ID, "session")
     root.set_attribute(OJ_REQUEST_ID, "request")
     root.set_attribute(OJ_RUN_ID, "run")
     root.set_attribute(OJ_TRACE_ROOT, True)
@@ -160,7 +156,6 @@ async def test_iteration_span_opens_under_the_run_root_and_carries_generic_attri
     span = spans[0]
     assert span.parent.span_id == tracing.root.context.span_id
     assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "agent"
-    assert span.attributes[DA_AGENT_NAME] == "solo"
     assert span.attributes[DA_TASK_ITERATION] == 1
     assert span.attributes[GEN_AI_AGENT_NAME] == "solo"
     assert span.attributes[GEN_AI_AGENT_ID] == "agent-solo"
@@ -168,7 +163,6 @@ async def test_iteration_span_opens_under_the_run_root_and_carries_generic_attri
     assert GEN_AI_AGENT_VERSION not in span.attributes
     assert span.attributes[GEN_AI_CONVERSATION_ID] == "conversation"
     assert span.attributes[GEN_AI_OPERATION_NAME] == "invoke_agent"
-    assert span.attributes[OJ_SESSION_ID] == "session"
     assert span.attributes[OJ_REQUEST_ID] == "request"
     assert span.attributes[OJ_RUN_ID] == "run"
     assert OJ_STEP_ID not in span.attributes
@@ -700,9 +694,7 @@ async def test_subagent_ambient_session_does_not_replace_trajectory_owner(tracin
         await rail.after_invoke(ctx)
 
     span = _finished(tracing.exporter, "llm.child")[0]
-    assert span.attributes[OJ_SESSION_ID] == "session"
-    assert span.attributes[GEN_AI_CONVERSATION_ID] == "session"
-    assert span.attributes[AT_SESSION_ID] == "session"
+    assert span.attributes[GEN_AI_CONVERSATION_ID] == "conversation"
     assert span.attributes[OJ_EXECUTION_SUBJECT_SESSION_ID] == "session_sub_explore_1"
 
 

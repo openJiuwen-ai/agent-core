@@ -14,9 +14,9 @@ from opentelemetry import context as otel_context
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer, set_span_in_context
 
 from openjiuwen.extensions.observability.semconv import (
+    GEN_AI_CONVERSATION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_AGENT_MODE,
@@ -25,14 +25,10 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_PAYLOAD,
     OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO,
     OJ_TRAJECTORY_RECORD_KIND,
-    OJ_TRAJECTORY_REQUEST_ID,
     OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TRAJECTORY_SEQUENCE_EPOCH,
-    OJ_TRAJECTORY_SESSION_ID,
-    OJ_TRAJECTORY_STEP_ID,
     OJ_TRAJECTORY_SUBJECT_ID,
     OJ_TRAJECTORY_SUBJECT_SEQUENCE,
-    OJ_TRAJECTORY_TURN_ID,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
@@ -61,7 +57,7 @@ def emit_native_trajectory_event(
     """Emit one immutable v2 event using the parent's concrete owner."""
     if not parent_span.is_recording():
         return None
-    session_id = str(parent_span.attributes.get(OJ_SESSION_ID) or "")
+    session_id = str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     if subject_sequence is None and sequence_epoch is None:
         resolved_epoch, sequence = next_trajectory_subject_position(
@@ -84,22 +80,15 @@ def emit_native_trajectory_event(
         OJ_TRAJECTORY_SUBJECT_ID: subject_id,
         OJ_TRAJECTORY_SEQUENCE_EPOCH: resolved_epoch,
         OJ_TRAJECTORY_SUBJECT_SEQUENCE: sequence,
-        OJ_TRAJECTORY_SESSION_ID: session_id,
+        GEN_AI_CONVERSATION_ID: session_id,
         OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
         OJ_TRAJECTORY_PAYLOAD: json.dumps(payload, ensure_ascii=False, default=str),
         OJ_TRAJECTORY_RECORD_KIND: "event",
         OJ_TRACE_SCHEMA_VERSION: "2",
     }
-    for source_key, target_key in (
-        (OJ_TURN_ID, OJ_TRAJECTORY_TURN_ID),
-        (OJ_STEP_ID, OJ_TRAJECTORY_STEP_ID),
-        (OJ_REQUEST_ID, OJ_TRAJECTORY_REQUEST_ID),
-    ):
-        value = parent_span.attributes.get(source_key)
-        if value not in (None, ""):
-            attributes[target_key] = str(value)
     for routing_key in (
-        OJ_SESSION_ID,
+        OJ_TURN_ID,
+        OJ_STEP_ID,
         OJ_REQUEST_ID,
         OJ_RUN_ID,
         OJ_AGENT_MODE,
@@ -130,7 +119,7 @@ def record_native_trajectory_log_event(
     """Record one immutable trajectory event on the current short-lived Span."""
     if not parent_span.is_recording():
         return False
-    session_id = str(parent_span.attributes.get(OJ_SESSION_ID) or "")
+    session_id = str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     sequence_epoch, sequence = next_trajectory_subject_position(
         session_id=session_id,
@@ -144,18 +133,14 @@ def record_native_trajectory_log_event(
         OJ_TRAJECTORY_SUBJECT_ID: subject_id,
         OJ_TRAJECTORY_SEQUENCE_EPOCH: sequence_epoch,
         OJ_TRAJECTORY_SUBJECT_SEQUENCE: sequence,
-        OJ_TRAJECTORY_SESSION_ID: session_id,
+        GEN_AI_CONVERSATION_ID: session_id,
         OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
         OJ_TRAJECTORY_PAYLOAD: json.dumps(payload, ensure_ascii=False, default=str),
     }
-    for source_key, target_key in (
-        (OJ_TURN_ID, OJ_TRAJECTORY_TURN_ID),
-        (OJ_STEP_ID, OJ_TRAJECTORY_STEP_ID),
-        (OJ_REQUEST_ID, OJ_TRAJECTORY_REQUEST_ID),
-    ):
-        value = parent_span.attributes.get(source_key)
+    for correlation_key in (OJ_TURN_ID, OJ_STEP_ID, OJ_REQUEST_ID):
+        value = parent_span.attributes.get(correlation_key)
         if value not in (None, ""):
-            attributes[target_key] = str(value)
+            attributes[correlation_key] = str(value)
     parent_span.add_event(event_kind, attributes=attributes, timestamp=recorded_at)
     return True
 
@@ -168,7 +153,7 @@ def emit_context_window_commit(
     request_purpose: str,
 ) -> Span | None:
     """Emit one ended context.window.commit child span."""
-    session_id = str(llm_span.attributes.get(OJ_SESSION_ID) or "")
+    session_id = str(llm_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(llm_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     window_id = uuid.uuid4().hex
     sequence_epoch, sequence, base_window_id, delta, is_epoch_baseline = advance_context_window(

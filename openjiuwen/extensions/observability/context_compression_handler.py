@@ -19,7 +19,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_INFERENCE_ID,
     OJ_REQUEST_ID,
     OJ_REQUEST_PURPOSE,
-    OJ_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     OJ_STEP_ID,
 )
 from openjiuwen.extensions.observability.span_context import (
@@ -91,7 +91,7 @@ class ContextCompressionObservabilityBridge:
             )
             if event is not None:
                 queue_context_window_compaction(
-                    session_id=str(parent_span.attributes.get(OJ_SESSION_ID) or ""),
+                    session_id=str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or ""),
                     subject_id=str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main"),
                     request_id=str(parent_span.attributes.get(OJ_REQUEST_ID) or ""),
                     step_id=str(parent_span.attributes.get(OJ_STEP_ID) or ""),

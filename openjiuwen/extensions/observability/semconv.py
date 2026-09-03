@@ -12,6 +12,17 @@ project extensions live here. Any backend-specific projection (the Langfuse
 namespace included) belongs exclusively to the exporter adapters under
 ``exporters/``.
 
+A project key is defined here only when the standard carries no attribute for
+the same fact. Where a standard key exists it is the single carrier and no
+project mirror is written, so no reader ever needs a fallback chain:
+
+* session / conversation identity → ``gen_ai.conversation.id``
+* agent identity → ``gen_ai.agent.name`` / ``gen_ai.agent.id``
+* tool call identity → ``gen_ai.tool.call.id`` / ``gen_ai.tool.name``
+
+``openjiuwen.gen_ai.*`` is the additive extension namespace for facts the
+standard does not model at all (cost, TPOT, logprobs, provider payloads).
+
 Keeping project-owned attribute keys here avoids typo drift between handlers.
 """
 
@@ -35,7 +46,6 @@ OJ_SPAN_FORCED_CLOSE_REASON = "openjiuwen.span.forced_close.reason"
 # and governed by the same redaction and truncation policies as prompts.
 OJ_SPAN_INPUT = "openjiuwen.span.input"
 OJ_SPAN_OUTPUT = "openjiuwen.span.output"
-OJ_SESSION_ID = "openjiuwen.session.id"
 OJ_REQUEST_ID = "openjiuwen.request.id"
 OJ_REQUEST_MESSAGE_COUNT = "openjiuwen.request.message_count"
 OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX = "openjiuwen.request.previous_message_count."
@@ -55,10 +65,6 @@ OJ_TRAJECTORY_EVENT_KIND = "openjiuwen.trajectory.event_kind"
 OJ_TRAJECTORY_SUBJECT_ID = "openjiuwen.trajectory.subject_id"
 OJ_TRAJECTORY_SEQUENCE_EPOCH = "openjiuwen.trajectory.sequence_epoch"
 OJ_TRAJECTORY_SUBJECT_SEQUENCE = "openjiuwen.trajectory.subject_sequence"
-OJ_TRAJECTORY_SESSION_ID = "openjiuwen.trajectory.session_id"
-OJ_TRAJECTORY_TURN_ID = "openjiuwen.trajectory.turn_id"
-OJ_TRAJECTORY_STEP_ID = "openjiuwen.trajectory.step_id"
-OJ_TRAJECTORY_REQUEST_ID = "openjiuwen.trajectory.request_id"
 OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO = "openjiuwen.trajectory.recorded_at_unix_nano"
 OJ_TRAJECTORY_PAYLOAD = "openjiuwen.trajectory.payload"
 OJ_AGENT_MODE = "openjiuwen.agent.mode"
@@ -86,13 +92,8 @@ OJ_GEN_AI_REASONING_TIMING = "openjiuwen.gen_ai.reasoning.timing"
 OJ_GEN_AI_REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"
-OJ_TEAM_ID = "openjiuwen.team.id"
-OJ_TEAM_NAME = "openjiuwen.team.name"
-OJ_TEAM_SESSION_ID = "openjiuwen.team.session.id"
 OJ_STREAM_KIND = "openjiuwen.stream.kind"
 OJ_STREAM_TEXT = "openjiuwen.stream.text"
-OJ_STREAM_TOOL_CALL_ID = "openjiuwen.stream.tool_call.id"
-OJ_STREAM_TOOL_CALL_NAME = "openjiuwen.stream.tool_call.name"
 OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA = "openjiuwen.stream.tool_call.arguments_delta"
 
 OJ_TOOL_RESOURCE_ID = "openjiuwen.tool.resource_id"
@@ -112,13 +113,8 @@ AT_TEAM_LEADER = "agentteam.team.leader"
 AT_EVENT_TYPE = "agentteam.event_type"
 
 AT_AGENT_ID = "agentteam.agent.id"
-AT_AGENT_NAME = "agentteam.agent.name"
 AT_AGENT_ROLE = "agentteam.agent.role"
-AT_AGENT_INPUT = "agentteam.agent.input"
-AT_AGENT_OUTPUT = "agentteam.agent.output"
-AT_SESSION_ID = "agentteam.session.id"
 
-AT_MEMBER_ID = "agentteam.member.id"
 AT_MEMBER_NAME = "agentteam.member.name"
 AT_MEMBER_STATUS_OLD = "agentteam.member.status.old"
 AT_MEMBER_STATUS_NEW = "agentteam.member.status.new"
@@ -134,6 +130,10 @@ AT_MESSAGE_BROADCAST = "agentteam.message.broadcast"
 AT_TASK_ID = "agentteam.task.id"
 AT_TASK_STATUS = "agentteam.task.status"
 AT_TASK_ASSIGNEE = "agentteam.task.assignee"
+AT_TASK_TAG = "agentteam.task.tag"
+# Marks a task span rebuilt after a pause/resume cycle, so the trace viewer can
+# tell it apart from a task created inside the current trace.
+AT_TASK_RECOVERED = "agentteam.task.recovered"
 
 AT_PLAN_APPROVED = "agentteam.plan.approved"
 AT_PLAN_SUBMITTED_BY = "agentteam.plan.submitted_by"
@@ -145,9 +145,3 @@ AT_PLAN_SUBMITTED_BY = "agentteam.plan.submitted_by"
 DA_TASK_ITERATION = "deepagent.task.iteration"
 DA_TASK_IS_FOLLOW_UP = "deepagent.task.is_follow_up"
 DA_TASK_LOOP_EVENT = "deepagent.task.loop_event"
-
-# Identifies which agent an agent-tier span belongs to, without assuming the
-# agent is a team member. The rail reads it back off a leftover span to tell an
-# own orphan from another agent's span inherited through a ContextVar snapshot,
-# so it must stay independent of the team-only ``agentteam.*`` namespace.
-DA_AGENT_NAME = "deepagent.agent.name"

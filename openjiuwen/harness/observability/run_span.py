@@ -106,7 +106,6 @@ def open_agent_run_span(
             OJ_EXECUTION_SUBJECT_SESSION_ID,
             OJ_REQUEST_ID,
             OJ_RUN_ID,
-            OJ_SESSION_ID,
             OJ_TRACE_ROOT,
             OJ_TRACE_SCHEMA_VERSION,
             OJ_TRAJECTORY_RECORD_KIND,
@@ -147,7 +146,6 @@ def open_agent_run_span(
             base_attributes[OJ_EXECUTION_SUBJECT_PARENT_ID] = subject.parent_subject_id
         if session_id:
             base_attributes[GEN_AI_CONVERSATION_ID] = session_id
-            base_attributes[OJ_SESSION_ID] = session_id
         if request_id:
             base_attributes[OJ_REQUEST_ID] = request_id
         if run_id:

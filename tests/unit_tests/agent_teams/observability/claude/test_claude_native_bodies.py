@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.observability.claude.bridge import ClaudeSpanBridge
+from openjiuwen.extensions.observability.semconv import OJ_SPAN_INPUT, OJ_SPAN_OUTPUT
 
 
 class _RecordingSpan:
@@ -156,7 +157,7 @@ def test_response_body_attaches_by_request_id(monkeypatch: pytest.MonkeyPatch) -
     assert not llm.ended
     b._close_pending_native_calls()
     assert llm.ended
-    assert llm.attributes["langfuse.observation.output"] == '{"content": "hi"}'
+    assert llm.attributes[OJ_SPAN_OUTPUT] == '{"content": "hi"}'
     assert llm.end_ns == 1_700_000_000_250_000_000
 
 
@@ -171,8 +172,8 @@ def test_request_bodies_attach_in_event_order(monkeypatch: pytest.MonkeyPatch) -
     b._on_native_log(_request_body_event('{"messages": [2]}'))
     b._close_pending_native_calls()
 
-    assert first.attributes["langfuse.observation.input"] == '{"messages": [1]}'
-    assert second.attributes["langfuse.observation.input"] == '{"messages": [2]}'
+    assert first.attributes[OJ_SPAN_INPUT] == '{"messages": [1]}'
+    assert second.attributes[OJ_SPAN_INPUT] == '{"messages": [2]}'
 
 
 @pytest.mark.level0
@@ -194,8 +195,8 @@ def test_request_bodies_attach_by_event_time_when_exports_are_reordered(monkeypa
     second = calls[1]["span"]
     b._close_pending_native_calls()
 
-    assert first.attributes["langfuse.observation.input"] == '{"messages": [1]}'
-    assert second.attributes["langfuse.observation.input"] == '{"messages": [2]}'
+    assert first.attributes[OJ_SPAN_INPUT] == '{"messages": [1]}'
+    assert second.attributes[OJ_SPAN_INPUT] == '{"messages": [2]}'
 
 
 @pytest.mark.level0
@@ -207,7 +208,7 @@ def test_response_body_arriving_before_span_is_retained(monkeypatch: pytest.Monk
     llm = _llm_spans(b)[0]
     b._close_pending_native_calls()
 
-    assert llm.attributes["langfuse.observation.output"] == '{"content": "early"}'
+    assert llm.attributes[OJ_SPAN_OUTPUT] == '{"content": "early"}'
 
 
 @pytest.mark.level0
@@ -269,7 +270,7 @@ def test_finish_turn_closes_pending_llm_calls(monkeypatch: pytest.MonkeyPatch) -
     b.finish_turn(status="ok")
 
     assert llm.ended
-    assert llm.attributes["langfuse.observation.output"] == '{"content": "done"}'
+    assert llm.attributes[OJ_SPAN_OUTPUT] == '{"content": "done"}'
     assert turn.ended
 
 

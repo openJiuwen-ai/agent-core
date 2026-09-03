@@ -71,7 +71,7 @@ def _payload(spans, *, trajectory_id="t1"):
                     "attributes": _attrs(
                         {
                             "openjiuwen.trajectory_id": trajectory_id,
-                            semconv.AT_SESSION_ID: "session",
+                            semconv.GEN_AI_CONVERSATION_ID: "session",
                         }
                     )
                 },

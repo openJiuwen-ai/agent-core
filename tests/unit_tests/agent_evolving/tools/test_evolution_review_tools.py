@@ -506,7 +506,7 @@ async def test_read_trajectory_spans_projects_llm_and_context_allowlists():
                 attributes={
                     semconv.AT_AGENT_ID: "worker-a",
                     semconv.AT_AGENT_ROLE: "researcher",
-                    semconv.AT_AGENT_INPUT: "x" * 1300,
+                    semconv.OJ_SPAN_INPUT: "x" * 1300,
                     "unrelated.business.field": "private",
                 },
             ),
@@ -532,7 +532,7 @@ async def test_read_trajectory_spans_projects_llm_and_context_allowlists():
     assert "langfuse" not in str(llm_item).lower()
     assert agent_item["context"][semconv.AT_AGENT_ID] == "worker-a"
     assert agent_item["context"][semconv.AT_AGENT_ROLE] == "researcher"
-    bounded_input = agent_item["context"][semconv.AT_AGENT_INPUT]
+    bounded_input = agent_item["context"][semconv.OJ_SPAN_INPUT]
     assert bounded_input == {"value": "x" * 1200, "truncated": True, "original_chars": 1300}
     assert "unrelated.business.field" not in agent_item["context"]
 

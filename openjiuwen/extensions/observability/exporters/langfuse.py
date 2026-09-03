@@ -38,9 +38,6 @@ from openjiuwen.extensions.observability.exporters.transforming import (
     clone_readable_span,
 )
 from openjiuwen.extensions.observability.semconv import (
-    AT_AGENT_INPUT,
-    AT_AGENT_NAME,
-    AT_AGENT_OUTPUT,
     AT_TEAM_NAME,
     GEN_AI_CONVERSATION_ID,
     GEN_AI_INPUT_MESSAGES,
@@ -49,10 +46,8 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
-    OJ_SESSION_ID,
     OJ_SPAN_INPUT,
     OJ_SPAN_OUTPUT,
-    OJ_TEAM_NAME,
     OJ_TRAJECTORY_RECORD_KIND,
 )
 
@@ -183,11 +178,8 @@ def _observation_input(
             GEN_AI_TOOL_CALL_ARGUMENTS
         ) not in (None, "") else None
     if observation_type == "agent":
-        for key in (AT_AGENT_INPUT, OJ_SPAN_INPUT):
-            value = attributes.get(key)
-            if value not in (None, ""):
-                return _text(value)
-        return None
+        value = attributes.get(OJ_SPAN_INPUT)
+        return _text(value) if value not in (None, "") else None
     if kind == "reasoning":
         # No input placeholder for reasoning spans; the adapter decides this,
         # not the collection layer.
@@ -208,12 +200,6 @@ def _observation_output(
     if observation_type == "tool":
         value = attributes.get(GEN_AI_TOOL_CALL_RESULT)
         return _text(value) if value not in (None, "") else None
-    if observation_type == "agent":
-        for key in (AT_AGENT_OUTPUT, OJ_SPAN_OUTPUT):
-            value = attributes.get(key)
-            if value not in (None, ""):
-                return _text(value)
-        return None
     value = attributes.get(OJ_SPAN_OUTPUT)
     return _text(value) if value not in (None, "") else None
 
@@ -258,7 +244,7 @@ def project_langfuse_attributes(
     attributes = span.attributes or {}
     derived: dict[str, Any] = {}
 
-    session_id = attributes.get(GEN_AI_CONVERSATION_ID) or attributes.get(OJ_SESSION_ID)
+    session_id = attributes.get(GEN_AI_CONVERSATION_ID)
     if session_id not in (None, ""):
         derived[LANGFUSE_SESSION_ID] = str(session_id)
 
@@ -276,7 +262,7 @@ def project_langfuse_attributes(
     # Trace-level attributes are attached to the trace root only.
     if span.parent is None:
         derived[LANGFUSE_TRACE_NAME] = span.name
-        team_name = attributes.get(OJ_TEAM_NAME) or attributes.get(AT_TEAM_NAME)
+        team_name = attributes.get(AT_TEAM_NAME)
         if team_name not in (None, ""):
             derived[LANGFUSE_TRACE_TAGS] = [str(team_name)]
 

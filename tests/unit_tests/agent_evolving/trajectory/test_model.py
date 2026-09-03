@@ -177,8 +177,8 @@ def test_migration_semantic_keys_are_isolated_from_current_conventions() -> None
 def test_schema_team_identity_values_match_observability_without_runtime_dependency() -> None:
     from openjiuwen.extensions.observability import semconv
 
-    assert MEMBER_ID == semconv.AT_MEMBER_ID
-    assert SESSION_ID == semconv.AT_SESSION_ID
+    assert MEMBER_ID == semconv.AT_MEMBER_NAME
+    assert SESSION_ID == semconv.GEN_AI_CONVERSATION_ID
     assert TEAM_ID == semconv.AT_TEAM_ID
 
 

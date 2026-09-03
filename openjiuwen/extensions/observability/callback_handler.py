@@ -44,7 +44,6 @@ from openjiuwen.extensions.observability.trajectory_events import emit_context_w
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_MEMBER_NAME,
-    AT_SESSION_ID,
 
     ERROR_TYPE,
     GEN_AI_AGENT_DESCRIPTION,
@@ -67,6 +66,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_DEFINITIONS,
@@ -104,7 +104,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_NUMBER,
     OJ_REQUEST_PURPOSE,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_SPAN_INPUT,
     OJ_SPAN_OUTPUT,
     OJ_STEP_ID,
@@ -112,8 +111,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_STREAM_KIND,
     OJ_STREAM_TEXT,
     OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA,
-    OJ_STREAM_TOOL_CALL_ID,
-    OJ_STREAM_TOOL_CALL_NAME,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TOOL_AUTHORITATIVE,
@@ -1031,8 +1028,7 @@ class OtelCallbackHandler:
         self._propagate_session_context(span, include_additive=True)
         subject_id = str(span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "")
         session_id = str(
-            span.attributes.get(OJ_SESSION_ID)
-            or span.attributes.get(GEN_AI_CONVERSATION_ID)
+            span.attributes.get(GEN_AI_CONVERSATION_ID)
             or get_current_session_id()
             or ""
         )
@@ -1349,9 +1345,9 @@ class OtelCallbackHandler:
             tool_name = _get_field(tool_call, "name")
             arguments = _get_field(tool_call, "arguments")
             if tool_id:
-                attributes[OJ_STREAM_TOOL_CALL_ID] = str(tool_id)
+                attributes[GEN_AI_TOOL_CALL_ID] = str(tool_id)
             if tool_name:
-                attributes[OJ_STREAM_TOOL_CALL_NAME] = str(tool_name)
+                attributes[GEN_AI_TOOL_NAME] = str(tool_name)
             if arguments not in (None, ""):
                 attributes[OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA] = redact_completion(
                     _coerce_message_content(arguments), self._config
@@ -1917,7 +1913,6 @@ class OtelCallbackHandler:
                     continue
                 for key in (
                     GEN_AI_CONVERSATION_ID,
-                    OJ_SESSION_ID,
                     OJ_REQUEST_ID,
                     OJ_RUN_ID,
                     OJ_TURN_ID,
@@ -1948,15 +1943,10 @@ class OtelCallbackHandler:
             # session while streaming, but that identity belongs in
             # OJ_EXECUTION_SUBJECT_SESSION_ID and must not move child records
             # into a different trajectory partition.
-            owner_session_id = (
-                span.attributes.get(OJ_SESSION_ID)
-                or span.attributes.get(GEN_AI_CONVERSATION_ID)
-            )
+            owner_session_id = span.attributes.get(GEN_AI_CONVERSATION_ID)
             sid = str(owner_session_id or get_current_session_id() or "")
             if sid:
-                span.set_attribute(AT_SESSION_ID, sid)
                 span.set_attribute(GEN_AI_CONVERSATION_ID, sid)
-                span.set_attribute(OJ_SESSION_ID, sid)
         except Exception as exc:
             logger.warning("callback_handler: failed to propagate session context: {}", exc)
 
@@ -1964,13 +1954,11 @@ class OtelCallbackHandler:
     def _copy_correlation_attributes(source: Span, target: Span) -> None:
         """Copy already-resolved correlation from one trajectory span."""
         for key in (
-            AT_SESSION_ID,
             GEN_AI_CONVERSATION_ID,
             GEN_AI_AGENT_DESCRIPTION,
             GEN_AI_AGENT_ID,
             GEN_AI_AGENT_NAME,
             GEN_AI_AGENT_VERSION,
-            OJ_SESSION_ID,
             OJ_INFERENCE_ID,
             OJ_REQUEST_ID,
             OJ_RUN_ID,

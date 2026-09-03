@@ -17,13 +17,12 @@ from opentelemetry.trace import Span, SpanKind, Status, StatusCode, set_span_in_
 from openjiuwen.extensions.observability.redaction import redact_completion, redact_prompt
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
-    AT_AGENT_INPUT,
-    AT_AGENT_NAME,
-    AT_AGENT_OUTPUT,
+    OJ_SPAN_INPUT,
+    GEN_AI_AGENT_NAME,
+    OJ_SPAN_OUTPUT,
     AT_AGENT_ROLE,
-    AT_MEMBER_ID,
     AT_MEMBER_NAME,
-    AT_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     AT_TEAM_ID,
     AT_TEAM_NAME,
     GEN_AI_OPERATION_NAME,
@@ -34,13 +33,9 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_CACHE_TOKENS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_TOTAL_TOKENS,
-    OJ_SESSION_ID,
-    OJ_SPAN_INPUT,
-    OJ_SPAN_OUTPUT,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
     OJ_TRAJECTORY_RECORD_KIND,
 )
 from openjiuwen.core.session.stream.base import OutputSchema
@@ -192,21 +187,18 @@ class ClaudeSpanBridge:
         )
         safe_prompt = redact_prompt(prompt, config)
         span.set_attribute(OJ_SPAN_INPUT, safe_prompt)
-        span.set_attribute(AT_AGENT_INPUT, safe_prompt)
         span.set_attribute(GEN_AI_OPERATION_NAME, "invoke_agent")
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
-        span.set_attribute(AT_AGENT_NAME, self._member_name)
+        span.set_attribute(GEN_AI_AGENT_NAME, self._member_name)
         span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
-        span.set_attribute(AT_MEMBER_ID, self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_ID, self._team_name)
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(OJ_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
         self._turn_span = span
         self._turn_started_at_ns = time.time_ns()
@@ -463,18 +455,16 @@ class ClaudeSpanBridge:
         input_tokens = _int_or_none(attributes.get("input_tokens"))
         output_tokens = _int_or_none(attributes.get("output_tokens"))
         if input_tokens is not None:
-            span.set_attribute(GEN_AI_USAGE_PROMPT_TOKENS, input_tokens)
+            span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, input_tokens)
         if output_tokens is not None:
-            span.set_attribute(GEN_AI_USAGE_COMPLETION_TOKENS, output_tokens)
-        if input_tokens is not None and output_tokens is not None:
-            span.set_attribute(GEN_AI_USAGE_TOTAL_TOKENS, input_tokens + output_tokens)
+            span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, output_tokens)
         cache_read_tokens = _int_or_none(attributes.get("cache_read_tokens"))
         cache_creation_tokens = _int_or_none(attributes.get("cache_creation_tokens"))
-        if cache_read_tokens is not None or cache_creation_tokens is not None:
-            span.set_attribute(
-                GEN_AI_USAGE_CACHE_TOKENS,
-                (cache_read_tokens or 0) + (cache_creation_tokens or 0),
-            )
+        if cache_read_tokens is not None:
+            span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, cache_read_tokens)
+        if cache_creation_tokens is not None:
+            # Cache writes have no standard GenAI key; keep them provider-scoped.
+            span.set_attribute("claude.usage.cache_creation_tokens", cache_creation_tokens)
         # Transparent diagnostics from the native span.
         passthrough_keys = (
             "ttft_ms",
@@ -495,8 +485,7 @@ class ClaudeSpanBridge:
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(OJ_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
         if int(event.get("status_code") or 0) == 2:
             description = self._redact_diagnostic(
@@ -613,7 +602,6 @@ class ClaudeSpanBridge:
             reasoning = "".join(self._reasoning)
             if output:
                 safe_output = redact_completion(output, config)
-                span.set_attribute(AT_AGENT_OUTPUT, safe_output)
                 span.set_attribute(OJ_SPAN_OUTPUT, safe_output)
             if reasoning:
                 self._emit_reasoning_span(reasoning)
@@ -697,8 +685,7 @@ class ClaudeSpanBridge:
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(OJ_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
         if record.get("completed"):
             safe_output = redact_completion(_json_text(record.get("tool_result")), config)
@@ -741,8 +728,7 @@ class ClaudeSpanBridge:
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(OJ_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
         span.set_status(Status(StatusCode.OK))
         span.end()
 

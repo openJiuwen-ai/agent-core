@@ -73,7 +73,7 @@ def span_category(span: Mapping[str, Any]) -> str | None:
         return "event"
     if attrs.get(semconv.AT_TASK_ID) is not None:
         return "task"
-    if attrs.get(semconv.AT_MEMBER_ID) is not None:
+    if attrs.get(semconv.AT_MEMBER_NAME) is not None:
         return "member"
     return None
 
@@ -236,7 +236,7 @@ def flatten_forest(forest: Iterable[Mapping[str, Any]]) -> list[Span]:
 
 def _member_value(span: Mapping[str, Any]) -> str | None:
     attrs = span_attributes(span)
-    for key in (semconv.AT_MEMBER_ID, semconv.AT_AGENT_ID, semconv.AT_MEMBER_NAME):
+    for key in (semconv.AT_MEMBER_NAME, semconv.AT_AGENT_ID, semconv.AT_MEMBER_NAME):
         value = attrs.get(key)
         if value is not None and str(value) != "":
             return str(value)

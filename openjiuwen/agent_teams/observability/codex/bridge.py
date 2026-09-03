@@ -395,17 +395,14 @@ class CodexSpanBridge:
         from openjiuwen.extensions.observability.redaction import redact_prompt
         from openjiuwen.extensions.observability.semconv import (
             AT_AGENT_ID,
-            AT_AGENT_INPUT,
-            AT_AGENT_NAME,
+            OJ_SPAN_INPUT,
+            GEN_AI_AGENT_NAME,
             AT_AGENT_ROLE,
-            AT_MEMBER_ID,
             AT_MEMBER_NAME,
-            AT_SESSION_ID,
+            GEN_AI_CONVERSATION_ID,
             AT_TEAM_ID,
             AT_TEAM_NAME,
             GEN_AI_OPERATION_NAME,
-            OJ_SESSION_ID,
-            OJ_SPAN_INPUT,
             OJ_TRAJECTORY_RECORD_KIND,
         )
 
@@ -417,20 +414,17 @@ class CodexSpanBridge:
         )
         safe_prompt = redact_prompt(prompt, config)
         span.set_attribute(OJ_SPAN_INPUT, safe_prompt)
-        span.set_attribute(AT_AGENT_INPUT, safe_prompt)
         span.set_attribute(GEN_AI_OPERATION_NAME, "invoke_agent")
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
         span.set_attribute(AT_AGENT_ID, self._member_agent_id)
-        span.set_attribute(AT_AGENT_NAME, self._member_name)
+        span.set_attribute(GEN_AI_AGENT_NAME, self._member_name)
         span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
-        span.set_attribute(AT_MEMBER_ID, self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
         if self._team_name:
             span.set_attribute(AT_TEAM_ID, self._team_name)
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(OJ_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
         if thread_id:
             span.set_attribute("codex.thread.id", thread_id)
 
@@ -626,7 +620,7 @@ class CodexSpanBridge:
         )
         from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
-            AT_SESSION_ID,
+            GEN_AI_CONVERSATION_ID,
             AT_TEAM_NAME,
             GEN_AI_INPUT_MESSAGES,
             GEN_AI_OPERATION_NAME,
@@ -640,7 +634,6 @@ class CodexSpanBridge:
             GEN_AI_USAGE_OUTPUT_TOKENS,
             GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
             OJ_REQUEST_MESSAGE_COUNT,
-            OJ_SESSION_ID,
             OJ_TRAJECTORY_RECORD_KIND,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
@@ -687,8 +680,7 @@ class CodexSpanBridge:
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(OJ_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
         # One structured value per attribute: a per-message expansion here
         # would grow with the conversation and evict this span's own identity
@@ -901,12 +893,11 @@ class CodexSpanBridge:
 
         from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
-            AT_SESSION_ID,
+            GEN_AI_CONVERSATION_ID,
             AT_TEAM_NAME,
             GEN_AI_OPERATION_NAME,
             GEN_AI_PROVIDER_NAME,
             GEN_AI_REQUEST_MODEL,
-            OJ_SESSION_ID,
         )
         from openjiuwen.agent_teams.observability.setup import get_tracer
 
@@ -947,8 +938,7 @@ class CodexSpanBridge:
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
-            span.set_attribute(AT_SESSION_ID, self._session_id)
-            span.set_attribute(OJ_SESSION_ID, self._session_id)
+            span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
         if self._thread_id:
             span.set_attribute("codex.thread.id", self._thread_id)
 
@@ -1059,14 +1049,13 @@ class CodexSpanBridge:
         )
         from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
-            AT_SESSION_ID,
+            GEN_AI_CONVERSATION_ID,
             AT_TEAM_NAME,
             GEN_AI_OPERATION_NAME,
             GEN_AI_TOOL_CALL_ARGUMENTS,
             GEN_AI_TOOL_CALL_ID,
             GEN_AI_TOOL_NAME,
             GEN_AI_TOOL_CALL_RESULT,
-            OJ_SESSION_ID,
             OJ_SPAN_INPUT,
             OJ_SPAN_OUTPUT,
             OJ_TRAJECTORY_RECORD_KIND,
@@ -1131,8 +1120,7 @@ class CodexSpanBridge:
             if self._team_name:
                 span.set_attribute(AT_TEAM_NAME, self._team_name)
             if self._session_id:
-                span.set_attribute(AT_SESSION_ID, self._session_id)
-                span.set_attribute(OJ_SESSION_ID, self._session_id)
+                span.set_attribute(GEN_AI_CONVERSATION_ID, self._session_id)
 
             error = record.get("error")
             completed = "end_ns" in record
@@ -1347,7 +1335,6 @@ class CodexSpanBridge:
 
         from openjiuwen.extensions.observability.redaction import redact_completion
         from openjiuwen.extensions.observability.semconv import (
-            AT_AGENT_OUTPUT,
             OJ_SPAN_OUTPUT,
         )
 
@@ -1361,7 +1348,6 @@ class CodexSpanBridge:
         self._emit_tool_spans()
         if self._config is not None and span.is_recording():
             output = redact_completion("".join(self._output), self._config)
-            span.set_attribute(AT_AGENT_OUTPUT, output)
             span.set_attribute(OJ_SPAN_OUTPUT, output)
             span.set_attribute("codex.turn.status", status)
             span.set_attribute(

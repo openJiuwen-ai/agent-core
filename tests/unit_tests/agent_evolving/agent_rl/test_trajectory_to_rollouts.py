@@ -113,7 +113,7 @@ def _trajectory(execution_id: str, span_attributes: dict) -> Trajectory:
                         "attributes": attributes_from_map(
                             {
                                 "openjiuwen.trajectory_id": execution_id,
-                                semconv.AT_SESSION_ID: "session-1",
+                                semconv.GEN_AI_CONVERSATION_ID: "session-1",
                                 "openjiuwen.trajectory.source": "rl_offline",
                             }
                         )

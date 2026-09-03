@@ -97,7 +97,7 @@ def _build_team_member_trajectory(
         semconv.GEN_AI_TOOL_CALL_ARGUMENTS: tool_args,
         semconv.GEN_AI_TOOL_CALL_RESULT: tool_result,
         semconv.AT_TEAM_ID: "team-1",
-        semconv.AT_MEMBER_ID: member_id,
+        semconv.AT_MEMBER_NAME: member_id,
     }
     if meta:
         tool_attrs.update(meta)
@@ -109,9 +109,9 @@ def _build_team_member_trajectory(
                         "attributes": attributes_from_map(
                             {
                                 "openjiuwen.trajectory_id": f"exec-{member_id}",
-                                semconv.AT_SESSION_ID: "session-team",
+                                semconv.GEN_AI_CONVERSATION_ID: "session-team",
                                 semconv.AT_TEAM_ID: "team-1",
-                                semconv.AT_MEMBER_ID: member_id,
+                                semconv.AT_MEMBER_NAME: member_id,
                             }
                         )
                     },

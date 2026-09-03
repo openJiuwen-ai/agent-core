@@ -35,7 +35,7 @@ from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
-    AT_AGENT_OUTPUT,
+    OJ_SPAN_OUTPUT,
     AT_MEMBER_NAME,
     AT_PLAN_APPROVED,
     AT_TASK_STATUS,
@@ -45,7 +45,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX,
     OJ_REQUEST_ID,
     OJ_SPAN_INPUT,
-    OJ_SPAN_OUTPUT,
 )
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
@@ -1879,9 +1878,8 @@ async def test_team_span_uses_agent_team_name(
     # name onto the backend trace name).
     assert team_span.name == f"team.{real_team_name}", \
         f"span name should be 'team.{real_team_name}'"
-    tags = _attr(team_span, "openjiuwen.team.name")
-    assert tags is not None and tags == real_team_name, \
-        "team span should carry openjiuwen.team.name"
+    assert _attr(team_span, "agentteam.team.id") == real_team_name, \
+        "team span should carry agentteam.team.id"
 
     # Cleanup
     from opentelemetry.trace import Status, StatusCode
@@ -2410,7 +2408,7 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
         set_current_agent_span,
     )
     from openjiuwen.agent_teams.observability.setup import get_tracer
-    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_AGENT_NAME
+    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, GEN_AI_AGENT_NAME
     from opentelemetry.trace import SpanKind, set_span_in_context
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 
@@ -2424,7 +2422,7 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
         kind=SpanKind.INTERNAL,
     )
     leader_span.set_attribute(AT_MEMBER_NAME, "leader")
-    leader_span.set_attribute(AT_AGENT_NAME, "leader")
+    leader_span.set_attribute(GEN_AI_AGENT_NAME, "leader")
     set_current_agent_span(leader_span)
 
     # Simulate ObservabilityRail.before_invoke for a subagent (enable_task_loop=False).
@@ -2915,7 +2913,7 @@ async def test_the_pair_puts_the_team_identity_back_on_the_same_span(in_memory_e
     assert span.attributes[AT_AGENT_ID] == "test_team_leader"
     assert span.attributes[AT_MEMBER_NAME] == "leader"
     assert span.attributes[OJ_SPAN_INPUT] == "hello"
-    assert span.attributes[AT_AGENT_OUTPUT] == "done"
+    assert span.attributes[OJ_SPAN_OUTPUT] == "done"
 
 
 def test_both_rails_are_reachable_through_their_declared_element_names(in_memory_exporter):
@@ -3095,10 +3093,9 @@ def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter)
     """The team root span records agent mode and Team identity for routing."""
     from openjiuwen.extensions.observability.semconv import (
         OJ_AGENT_MODE,
-        OJ_TEAM_ID,
-        OJ_TEAM_NAME,
-        OJ_TEAM_SESSION_ID,
-        OJ_SESSION_ID,
+        AT_TEAM_ID,
+        AT_TEAM_NAME,
+        GEN_AI_CONVERSATION_ID,
     )
     from openjiuwen.agent_teams.context import set_session_id, reset_session_id
 
@@ -3116,7 +3113,7 @@ def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter)
     assert len(spans) >= 1
     attrs = dict(spans[-1].attributes)
     assert attrs.get(OJ_AGENT_MODE) == "team"
-    assert attrs.get(OJ_TEAM_ID) == "test_team"
-    assert attrs.get(OJ_TEAM_NAME) == "test_team"
-    assert attrs.get(OJ_TEAM_SESSION_ID) == "session-1"
-    assert attrs.get(OJ_SESSION_ID) == "session-1"
+    assert attrs.get(AT_TEAM_ID) == "test_team"
+    assert attrs.get(AT_TEAM_NAME) == "test_team"
+    assert attrs.get(GEN_AI_CONVERSATION_ID) == "session-1"
+    assert attrs.get(GEN_AI_CONVERSATION_ID) == "session-1"

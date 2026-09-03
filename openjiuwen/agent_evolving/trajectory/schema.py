@@ -10,11 +10,12 @@ evolution/RL projection.
 
 from __future__ import annotations
 
-# These values mirror the Team observability semantic conventions.  Keep the
+# These values mirror the observability semantic conventions.  Keep the
 # data-only trajectory schema independent from the agent_teams runtime import
-# graph; alignment is protected by a focused unit test.
-MEMBER_ID = "agentteam.member.id"
-SESSION_ID = "agentteam.session.id"
+# graph; alignment is protected by a focused unit test.  Session identity is
+# carried by the standard GenAI attribute, not a project mirror.
+MEMBER_ID = "agentteam.member.name"
+SESSION_ID = "gen_ai.conversation.id"
 TEAM_ID = "agentteam.team.id"
 
 # The schema version is intentionally unchanged during the S_004 migration.
