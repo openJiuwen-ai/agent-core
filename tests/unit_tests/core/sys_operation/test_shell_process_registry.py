@@ -88,6 +88,38 @@ def test_terminate_shell_process_windows_falls_back_without_taskkill(
     assert proc.terminate_calls == 1
 
 
+def test_async_handler_windows_kill_uses_taskkill(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openjiuwen.core.sys_operation.local.utils import AsyncProcessHandler
+
+    runs: list[list[str]] = []
+    monkeypatch.setattr("openjiuwen.core.sys_operation.local.utils.os.name", "nt")
+    monkeypatch.setattr("openjiuwen.core.sys_operation.shell_process_registry.os.name", "nt")
+    monkeypatch.setattr(
+        "openjiuwen.core.sys_operation.shell_process_registry.shutil.which",
+        lambda name: r"C:\Windows\System32\taskkill.exe" if name == "taskkill" else None,
+    )
+
+    class _Proc:
+        pid = 25788
+        returncode = 1
+
+        def kill(self) -> None:
+            raise AssertionError("direct kill should not run after taskkill")
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        runs.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(
+        "openjiuwen.core.sys_operation.shell_process_registry.subprocess.run",
+        fake_run,
+    )
+    AsyncProcessHandler(_Proc())._kill_process_tree()  # type: ignore[arg-type]
+    assert runs == [
+        [r"C:\Windows\System32\taskkill.exe", "/PID", "25788", "/T", "/F"],
+    ]
+
+
 @pytest.mark.asyncio
 async def test_kill_tracked_asyncio_process_for_session() -> None:
     token = set_shell_session_id("sess_kill")
