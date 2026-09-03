@@ -50,7 +50,7 @@ _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
 from .retrieval import retrieve_top_k
 from .stores import TTSERecordStore
-from .success import SuccessDetector, TrajectoryErrorSuccessDetector
+from .success import SignalBasedSuccessDetector, SuccessDetector, SuccessOutcome
 from .trajectory_adapter import messages_to_trajectory_text
 
 
@@ -74,7 +74,11 @@ class TTSERail(EvolutionRail):
         self._ttse_config.embedding = resolved
         self._ttse_store = TTSERecordStore(self._ttse_config, embedding=resolved)
         # Pluggable success detector gates the blame/synthesize pass.
-        self._success_detector = success_detector or TrajectoryErrorSuccessDetector(self._ttse_config.success_threshold)
+        self._success_detector = success_detector or SignalBasedSuccessDetector(
+            llm=llm,
+            model=model,
+            config=self._ttse_config,
+        )
         # Per-invoke injection cache (query -> rendered section body).
         self._inj_query: Optional[str] = None
         self._inj_body: Optional[str] = None
@@ -256,19 +260,24 @@ class TTSERail(EvolutionRail):
         # background reflection is spawned per invoke, so two could interleave
         # and clobber each other's dedup view or retire. Serialize the whole
         # read-modify-write so one reflection's bank view is stable end to end.
-        async with self._evolution_lock:
-            result = await self._success_detector.detect(trajectory, messages, ctx=ctx, snapshot=snapshot)
-            outcome = result.outcome
-            logger.info(
-                "[TTSERail] success detect outcome=%s reason=%s score=%s",
-                outcome,
-                result.reason,
-                result.score,
-            )
+        # Detect runs outside the lock: Judge LLM must not hold the bank lock.
+        result = await self._success_detector.detect(trajectory, messages, ctx=ctx, snapshot=snapshot)
+        outcome = result.outcome
+        logger.info(
+            "[TTSERail] success detect outcome=%s reason=%s score=%s",
+            outcome,
+            result.reason,
+            result.score,
+        )
+        if outcome == "skip":
+            logger.info("[TTSERail] induction skipped: detect outcome=skip (%s)", result.reason)
+            return
 
+        async with self._evolution_lock:
             if self._ttse_config.batch_size <= 1:
                 # Per-task mode (reference ``learn``): induce on EVERY task.
                 # success -> tactics; fail -> blame/retire/synthesize -> induce.
+                # partial induces without blame.
                 if outcome == "fail":
                     await self._blame_and_resolve(task_query, traj_text, capabilities)
                 facts, tips = await induce(

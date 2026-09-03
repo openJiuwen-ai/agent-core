@@ -190,3 +190,30 @@ Output exactly one line:
 [TIP] When <condition>: use <capability> to <action>
 If there is no contradiction or duplication, output exactly: NONE
 """
+
+
+def detect_judge_prompt(query: str, final_reply: str) -> str:
+    """One-shot reply-delivery judge: role → decompose goals → judge reply."""
+    return f"""You are an advanced AI system serving as an impartial judge for an agent's text reply.
+Your primary role is to rigorously evaluate whether the final assistant reply satisfies the user query.
+Evaluate objectively, based solely on the evidence in the query and the reply. There is NO file/artifact delivery — only the final assistant reply.
+
+Follow this process strictly:
+1. Positioning: treat yourself as a neutral judge; do not rewrite the reply or invent missing content.
+2. Goal decomposition: break the user query into concrete, checkable goals/requirements (atomic where possible).
+3. Per-goal judgment: for each goal, decide whether the reply meets it, citing brief evidence from the reply (or noting omission).
+4. Aggregate outcome from the per-goal results:
+   - success: every goal is satisfied; reply is not empty, not a refusal, not a stall.
+   - partial: at least one goal is satisfied, but some are unmet or only partly met.
+   - fail: no goal is satisfied, or the reply is empty / a refusal / clearly failed.
+
+User query:
+{query[:1500]}
+
+Final assistant reply:
+{final_reply or "(empty)"}
+
+For each goal use verdict SATISFIED or UNSATISFIED with a concise justification.
+Output ONLY a single JSON object (no markdown fence):
+{{"goals":[{{"goal":"<short goal>","verdict":"SATISFIED|UNSATISFIED","reason":"<brief evidence>"}}],"delivery":"answer","outcome":"success|partial|fail","reason":"<one-sentence overall justification>"}}
+"""

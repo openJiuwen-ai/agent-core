@@ -8,7 +8,7 @@ Public surface:
     TTSERecordStore - Shared FACT/TIP bank with JSON persistence + dedup.
     SuccessDetector / SuccessOutcome / TrajectoryErrorSuccessDetector
     SignalBasedSuccessDetector
-                    - Pluggable success signal gating the blame/synthesize pass.
+                    - Default success gating (failure fast-path + reply Judge).
 """
 
 from .config import TTSEConfig

@@ -12,7 +12,7 @@ passed explicitly to :class:`TTSERail`, keeping the feature off by default.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
@@ -60,6 +60,10 @@ class TTSEConfig:
         batch_traj_budget: Per-task trajectory chars kept in the batch buffer
             (each task's excerpt is capped before the single batch induce call).
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
+        detect_min_tool_calls: Min tool calls before reply-delivery detect runs.
+        detect_max_output_paths: Cap on extracted write paths (artifact gate).
+        detect_final_reply_chars: Max chars of final assistant reply fed to Judge.
+        detect_llm_policy: Short policy for the one-shot reply-delivery Judge.
     """
 
     store_path: str = ".ttse/bank.json"
@@ -79,6 +83,16 @@ class TTSEConfig:
     batch_traj_budget: int = 1100
     consult_max_chars: int = 8000
     consult_max_rules: int = 40
+    detect_min_tool_calls: int = 5
+    detect_max_output_paths: int = 20
+    detect_final_reply_chars: int = 1500
+    detect_llm_policy: LLMInvokePolicy = field(
+        default_factory=lambda: LLMInvokePolicy(
+            attempt_timeout_secs=15.0,
+            total_budget_secs=20.0,
+            max_attempts=1,
+        )
+    )
 
     def is_disk_catalog(self) -> bool:
         """True when FACT/TIP are disclosed via ``ttse_consult``, not P:45.

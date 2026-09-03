@@ -36,7 +36,13 @@ from openjiuwen.harness.rails.evolution.ttse import (
 from openjiuwen.harness.rails.evolution.ttse.catalog import project_catalog
 from openjiuwen.harness.rails.evolution.ttse.classify import parse_assignments
 from openjiuwen.harness.rails.evolution.ttse.consult import render_consult_result
+from openjiuwen.harness.rails.evolution.ttse.prompts import detect_judge_prompt
 from openjiuwen.harness.rails.evolution.ttse.render import DISK_CATALOG_GUIDANCE_CN
+from openjiuwen.harness.rails.evolution.ttse.trajectory_adapter import (
+    count_tool_calls,
+    extract_final_reply,
+    extract_output_paths,
+)
 from openjiuwen.harness.rails.evolution.ttse.induction import (
     blame,
     induce,
@@ -67,12 +73,38 @@ class ScriptedLLM:
         return result
 
 
-def _make_rail(tmp_path, llm, *, cfg=None) -> TTSERail:
+def _make_rail(tmp_path, llm, *, cfg=None, success_detector=None) -> TTSERail:
+    """Induce/blame regression helper: inject TrajectoryErrorSuccessDetector by default.
+
+    Production default is SignalBasedSuccessDetector; existing rail tests rely on
+    ``ttse_score`` / no-error defaults from TrajectoryErrorSuccessDetector.
+    """
     return TTSERail(
         llm=llm,
         model="dummy-model",
         ttse_config=cfg or TTSEConfig(store_path=str(tmp_path / "bank.json")),
+        success_detector=success_detector
+        if success_detector is not None
+        else TrajectoryErrorSuccessDetector(),
     )
+
+
+def _n_tool_messages(n: int, *, write_path: str | None = None) -> list[dict]:
+    """Build ``n`` assistant tool_calls (+ optional write_file and a final reply)."""
+    messages: list[dict] = [{"role": "user", "content": "answer the question"}]
+    for i in range(n):
+        name = "write_file" if write_path and i == 0 else "bash"
+        args = {"file_path": write_path, "content": "x"} if name == "write_file" else {"command": f"echo {i}"}
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": f"tc{i}", "name": name, "arguments": args}],
+            }
+        )
+        messages.append({"role": "tool", "tool_call_id": f"tc{i}", "name": name, "content": "ok"})
+    messages.append({"role": "assistant", "content": "Here is the answer."})
+    return messages
 
 
 # ----------------------------------------------------------------------
@@ -561,7 +593,7 @@ async def test_rail_flush_induces_partial_buffer(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# Signal-based success detector (consumes tool-error signals)
+# SignalBasedSuccessDetector (default production detector)
 # ----------------------------------------------------------------------
 
 
@@ -575,57 +607,242 @@ class _FakeSignalDetector:
         return [SimpleNamespace(signal_type=t) for t in self._types]
 
 
-@pytest.mark.asyncio
-async def test_signal_detector_maps_signals_to_outcomes():
-    fail_det = SignalBasedSuccessDetector(signal_detector=_FakeSignalDetector(["execution_failure"]))
-    assert (await fail_det.detect(None, None, snapshot={})).outcome == "fail"
-
-    # No failure (including a clean script_artifact) defaults to success.
-    ok_det = SignalBasedSuccessDetector(signal_detector=_FakeSignalDetector(["script_artifact"]))
-    out = await ok_det.detect(None, None, snapshot={})
-    assert out.outcome == "success"
-    assert out.reason == "no-failure-default"
-
-    none_det = SignalBasedSuccessDetector(signal_detector=_FakeSignalDetector([]))
-    out = await none_det.detect(None, None, snapshot={})
-    assert out.outcome == "success"
-    assert out.reason == "no-failure-default"
-
-
-@pytest.mark.asyncio
-async def test_signal_detector_explicit_score_wins_over_signals():
-    det = SignalBasedSuccessDetector(signal_detector=_FakeSignalDetector(["execution_failure"]))
-    out = await det.detect(None, None, snapshot={"ttse_score": 1.0})
-    assert out.outcome == "success"
-    assert out.reason == "explicit-score"
-
-
-@pytest.mark.asyncio
-async def test_signal_detector_reads_real_failure_from_messages():
-    """End-to-end: detect_tool_error_signals flags a tool error as fail."""
-    det = SignalBasedSuccessDetector()
-    messages = [
+def test_adapter_count_and_extract_helpers():
+    msgs = _n_tool_messages(3, write_path="out/a.txt")
+    assert count_tool_calls(msgs) == 3
+    assert extract_output_paths(msgs) == ["out/a.txt"]
+    assert extract_final_reply(msgs) == "Here is the answer."
+    # read_file paths are ignored
+    read_only = [
         {
             "role": "assistant",
-            "content": "",
-            "tool_calls": [{"id": "tc1", "name": "bash", "args": {"command": "ls missing"}}],
-        },
-        {"role": "tool", "tool_call_id": "tc1", "name": "bash", "content": "Error: file not found"},
+            "tool_calls": [{"name": "read_file", "arguments": {"file_path": "x.txt"}}],
+        }
     ]
-    out = await det.detect(None, messages, snapshot={})
-    assert out.outcome == "fail"
-    assert out.reason == "signal:execution_failure"
+    assert extract_output_paths(read_only) == []
+
+
+def test_detect_judge_prompt_is_reply_only():
+    text = detect_judge_prompt("what is 2+2?", "4")
+    assert "what is 2+2?" in text
+    assert "4" in text
+    assert "impartial judge" in text
+    assert "Goal decomposition" in text
+    assert "SATISFIED" in text
+    assert "UNSATISFIED" in text
+    assert "output_path" not in text.lower()
+    assert "OBSERVATION" not in text
 
 
 @pytest.mark.asyncio
-async def test_signal_detector_defaults_to_success_without_failure():
-    det = SignalBasedSuccessDetector()
-    messages = [
-        {"role": "tool", "name": "bash", "content": "ok"},
-    ]
-    out = await det.detect(None, messages, snapshot={})
+async def test_signal_detector_gate_skips_below_min_tool_calls(tmp_path):
+    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+    out = await det.detect(None, _n_tool_messages(4), snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "skip"
+    assert out.reason.startswith("gate:")
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_execution_failure_partial_no_judge(tmp_path):
+    llm = ScriptedLLM(lambda p: '{"outcome":"fail","delivery":"answer","goals":[],"reason":"x"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=_FakeSignalDetector(["execution_failure"]),
+    )
+    out = await det.detect(None, _n_tool_messages(5), snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "partial"
+    assert out.reason == "signal:execution_failure"
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_reads_real_failure_from_messages(tmp_path):
+    llm = ScriptedLLM(lambda p: '{"outcome":"fail","delivery":"answer","goals":[],"reason":"x"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+    messages = _n_tool_messages(5)
+    messages[2] = {
+        "role": "tool",
+        "tool_call_id": "tc0",
+        "name": "bash",
+        "content": "Error: file not found",
+    }
+    out = await det.detect(None, messages, snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "partial"
+    assert out.reason == "signal:execution_failure"
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_script_artifact_alone_does_not_fast_path(tmp_path):
+    llm = ScriptedLLM(
+        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
+    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=_FakeSignalDetector(["script_artifact"]),
+    )
+    out = await det.detect(None, _n_tool_messages(5), snapshot={"ttse_task_query": "q"})
     assert out.outcome == "success"
-    assert out.reason == "no-failure-default"
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_artifact_paths_skip(tmp_path):
+    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+    out = await det.detect(
+        None,
+        _n_tool_messages(5, write_path="deck.pptx"),
+        snapshot={"ttse_task_query": "make a ppt"},
+    )
+    assert out.outcome == "skip"
+    assert out.reason.startswith("artifact_paths:")
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_reply_judge_once(tmp_path):
+    llm = ScriptedLLM(
+        lambda p: '{"goals":["answer"],"delivery":"answer","outcome":"success","reason":"complete"}'
+    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+    out = await det.detect(
+        None,
+        _n_tool_messages(5),
+        snapshot={"ttse_task_query": "what is 2+2?"},
+    )
+    assert out.outcome == "success"
+    assert len(llm.calls) == 1
+    assert "what is 2+2?" in llm.calls[0]
+    assert "Here is the answer." in llm.calls[0]
+    assert "OBSERVATION" not in llm.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_honors_ttse_score(tmp_path):
+    llm = ScriptedLLM(
+        lambda p: '{"goals":[],"delivery":"answer","outcome":"partial","reason":"incomplete"}'
+    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+
+    ok = await det.detect(
+        None,
+        _n_tool_messages(2),  # below gate; score must still win
+        snapshot={"ttse_task_query": "q", "ttse_score": 1.0},
+    )
+    assert ok.outcome == "success"
+    assert ok.reason == "explicit-score"
+    assert ok.score == 1.0
+
+    fail = await det.detect(
+        None,
+        _n_tool_messages(5),
+        snapshot={"ttse_task_query": "q", "ttse_score": 0.0},
+    )
+    assert fail.outcome == "fail"
+    assert fail.reason == "explicit-score"
+
+    partial = await det.detect(
+        None,
+        _n_tool_messages(5),
+        snapshot={"ttse_task_query": "q", "ttse_score": 0.5},
+    )
+    assert partial.outcome == "partial"
+    assert partial.reason == "explicit-score"
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_bad_json_skips(tmp_path):
+    llm = ScriptedLLM(lambda p: "not-json")
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+    out = await det.detect(None, _n_tool_messages(5), snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "skip"
+    assert out.reason == "judge_bad_json"
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_does_not_call_user_intent(tmp_path, monkeypatch):
+    calls = {"intent": 0}
+
+    async def _boom(*args, **kwargs):
+        calls["intent"] += 1
+        raise AssertionError("detect_user_intent must not be called")
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_evolving.signal.from_conv.ConversationSignalDetector.detect_user_intent",
+        _boom,
+    )
+    llm = ScriptedLLM(
+        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
+    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+    messages = _n_tool_messages(5)
+    messages.insert(1, {"role": "user", "content": "你做错了，重新来"})
+    out = await det.detect(None, messages, snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "success"
+    assert calls["intent"] == 0
+
+
+@pytest.mark.asyncio
+async def test_rail_skip_does_not_induce(tmp_path):
+    llm = ScriptedLLM(lambda p: "[FACT] should not induce")
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    rail = TTSERail(llm=llm, model="m", ttse_config=cfg)  # default SignalBasedSuccessDetector
+    snap = {
+        "messages": _n_tool_messages(2),
+        "ttse_capabilities": "- grep",
+        "ttse_task_query": "q",
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    assert rail._ttse_store.facts_texts() == []
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_rail_partial_from_failure_induces_without_blame(tmp_path):
+    def handler(p: str) -> str:
+        if "extracting" in p:
+            return "[FACT] lesson from error"
+        if "diagnosing" in p:
+            return "VERDICT: 1\nREASON: should not blame"
+        return "NONE"
+
+    llm = ScriptedLLM(handler)
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    rail = TTSERail(llm=llm, model="m", ttse_config=cfg)
+    await rail._ttse_store.add_fact("existing")
+    messages = _n_tool_messages(5)
+    messages[2] = {
+        "role": "tool",
+        "tool_call_id": "tc0",
+        "name": "bash",
+        "content": "Error: file not found",
+    }
+    snap = {
+        "messages": messages,
+        "ttse_capabilities": "- grep",
+        "ttse_task_query": "q",
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    assert "lesson from error" in rail._ttse_store.facts_texts()
+    assert rail._ttse_store.retired == []
+    assert not any("diagnosing" in c for c in llm.calls)
 
 
 # ----------------------------------------------------------------------
