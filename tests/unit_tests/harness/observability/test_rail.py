@@ -805,6 +805,37 @@ async def test_tool_exception_closes_authoritative_span_with_error(tracing):
 
 
 @pytest.mark.asyncio
+async def test_authoritative_tool_close_counts_into_trace_rollup(tracing):
+    from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    accumulator = get_accumulator()
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+
+    ok_ctx = _tool_ctx(agent, call_id="call-ok")
+    await rail.before_tool_call(ok_ctx)
+    ok_ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ok_ctx)
+
+    err_ctx = _tool_ctx(agent, call_id="call-err")
+    await rail.before_tool_call(err_ctx)
+    err_ctx.exception = ValueError("boom")
+    await rail.on_tool_exception(err_ctx)
+
+    await rail.after_task_iteration(iteration_ctx)
+
+    trace_id = tracing.root.context.trace_id
+    snap = accumulator.snapshot(trace_id)
+    assert snap["tool_calls"] == 2
+    assert snap["tool_errors"] == 1
+    accumulator.clear(trace_id)
+
+
+@pytest.mark.asyncio
 async def test_concrete_tool_global_callbacks_enrich_without_duplicate_span(tracing):
     card = ToolCard(id="resource-search", name="search")
     agent = _agent()

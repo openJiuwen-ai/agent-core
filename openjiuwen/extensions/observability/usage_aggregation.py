@@ -51,3 +51,22 @@ def get_accumulator() -> UsageAccumulator:
         if _ACCUMULATOR is None:
             _ACCUMULATOR = UsageAccumulator()
         return _ACCUMULATOR
+
+
+def drain_rollup(trace_id: int | None) -> dict[str, float]:
+    """Snapshot and clear one trace's rollup, returning the snapshot.
+
+    A single accessor for the finalize paths (single-agent run root and team
+    root) so neither can forget the ``clear`` — an omission would otherwise
+    leak one accumulator entry per trace for the life of the process.
+
+    Returns an empty dict when the trace accumulated nothing (or ``trace_id``
+    is None).
+    """
+    if trace_id is None:
+        return {}
+    accumulator = get_accumulator()
+    snapshot = accumulator.snapshot(trace_id)
+    if snapshot:
+        accumulator.clear(trace_id)
+    return snapshot

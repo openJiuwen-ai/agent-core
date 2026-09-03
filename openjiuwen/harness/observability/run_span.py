@@ -247,6 +247,10 @@ def close_agent_run_span(
 
         from openjiuwen.extensions.observability.semconv import (
             ERROR_TYPE,
+            OJ_RUN_ESTIMATED_COST_USD,
+            OJ_RUN_TOTAL_COMPLETION_TOKENS,
+            OJ_RUN_TOTAL_PROMPT_TOKENS,
+            OJ_RUN_TOTAL_TOOL_CALLS,
             OJ_TRACE_COMPLETE,
             OJ_TRACE_FORCED_CLOSE,
         )
@@ -285,15 +289,14 @@ def close_agent_run_span(
         if forced_close_count:
             handle.set_attribute(OJ_TRACE_FORCED_CLOSE, True)
 
-        from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+        from openjiuwen.extensions.observability.usage_aggregation import drain_rollup
         if trace_id is not None:
-            snapshot = get_accumulator().snapshot(trace_id)
+            snapshot = drain_rollup(trace_id)
             if snapshot:
-                handle.set_attribute("openjiuwen.run.total_prompt_tokens", int(snapshot["prompt_tokens"]))
-                handle.set_attribute("openjiuwen.run.total_completion_tokens", int(snapshot["completion_tokens"]))
-                handle.set_attribute("openjiuwen.run.total_tool_calls", int(snapshot["tool_calls"]))
-                handle.set_attribute("openjiuwen.run.estimated_cost_usd", snapshot["cost"])
-                get_accumulator().clear(trace_id)
+                handle.set_attribute(OJ_RUN_TOTAL_PROMPT_TOKENS, int(snapshot["prompt_tokens"]))
+                handle.set_attribute(OJ_RUN_TOTAL_COMPLETION_TOKENS, int(snapshot["completion_tokens"]))
+                handle.set_attribute(OJ_RUN_TOTAL_TOOL_CALLS, int(snapshot["tool_calls"]))
+                handle.set_attribute(OJ_RUN_ESTIMATED_COST_USD, snapshot["cost"])
 
         if output is not _OUTPUT_UNSET:
             try:

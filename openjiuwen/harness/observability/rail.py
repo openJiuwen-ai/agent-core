@@ -349,6 +349,7 @@ class ToolSpanScope:
         span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
 
         if exception is not None:
+            self._accumulate_tool_usage(span, is_error=True)
             span.record_exception(exception)
             span.set_attribute(ERROR_TYPE, type(exception).__name__)
             span.set_status(Status(StatusCode.ERROR, str(exception)))
@@ -357,11 +358,26 @@ class ToolSpanScope:
 
         failure_reason = tool_failure_reason(output)
         if failure_reason is None:
+            self._accumulate_tool_usage(span, is_error=False)
             span.set_status(Status(StatusCode.OK))
         else:
+            self._accumulate_tool_usage(span, is_error=True)
             span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
             span.set_status(Status(StatusCode.ERROR, failure_reason))
         span.end()
+
+    @staticmethod
+    def _accumulate_tool_usage(span: Span, *, is_error: bool) -> None:
+        """Count one authoritative tool call into the trace rollup."""
+        try:
+            trace_id = getattr(getattr(span, "context", None), "trace_id", None)
+            if trace_id is None:
+                return
+            from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+            get_accumulator().accumulate_tool(trace_id, is_error=is_error)
+        except Exception as exc:
+            logger.warning("[AgentObservability] tool usage accumulation failed: %s", exc)
 
 
 class AgentObservabilityRail(DeepAgentRail):

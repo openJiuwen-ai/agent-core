@@ -3113,3 +3113,45 @@ def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter)
     assert attrs.get(OJ_TEAM_NAME) == "test_team"
     assert attrs.get(OJ_TEAM_SESSION_ID) == "session-1"
     assert attrs.get(OJ_SESSION_ID) == "session-1"
+
+
+def test_finalize_trace_stamps_usage_rollup_and_drains_it(in_memory_exporter):
+    """Team root close stamps agentteam.task.* totals and clears the trace."""
+    from openjiuwen.agent_teams.observability.span_context import finalize_trace
+    from openjiuwen.extensions.observability import usage_aggregation as usage_mod
+    from openjiuwen.extensions.observability.semconv import (
+        AT_TASK_ESTIMATED_COST_USD,
+        AT_TASK_TOTAL_COMPLETION_TOKENS,
+        AT_TASK_TOTAL_PROMPT_TOKENS,
+        AT_TASK_TOTAL_TOOL_CALLS,
+    )
+
+    team_span = _create_team_span("test_team")
+    trace_id = team_span.context.trace_id
+    accumulator = usage_mod.get_accumulator()
+    accumulator.accumulate_llm(trace_id, prompt=1000, completion=500, cost=0.002)
+    accumulator.accumulate_tool(trace_id, is_error=True)
+
+    finalize_trace("test_team")
+
+    spans = _spans_by_name(in_memory_exporter, "team.test_team")
+    assert len(spans) >= 1
+    attrs = dict(spans[-1].attributes)
+    assert attrs.get(AT_TASK_TOTAL_PROMPT_TOKENS) == 1000
+    assert attrs.get(AT_TASK_TOTAL_COMPLETION_TOKENS) == 500
+    assert attrs.get(AT_TASK_TOTAL_TOOL_CALLS) == 1
+    assert attrs.get(AT_TASK_ESTIMATED_COST_USD) == pytest.approx(0.002)
+    assert accumulator.snapshot(trace_id) == {}
+
+
+def test_finalize_trace_without_rollup_does_not_stamp(in_memory_exporter):
+    """A team trace with no usage leaves no agentteam.task.* rollup attributes."""
+    from openjiuwen.agent_teams.observability.span_context import finalize_trace
+    from openjiuwen.extensions.observability.semconv import AT_TASK_TOTAL_PROMPT_TOKENS
+
+    _create_team_span("test_team")
+    finalize_trace("test_team")
+
+    spans = _spans_by_name(in_memory_exporter, "team.test_team")
+    assert len(spans) >= 1
+    assert AT_TASK_TOTAL_PROMPT_TOKENS not in dict(spans[-1].attributes)
