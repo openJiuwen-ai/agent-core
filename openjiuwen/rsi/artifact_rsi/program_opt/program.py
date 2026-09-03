@@ -19,16 +19,18 @@ commit). The task-specific half of that module — the S3E1 data preparation and
 the RMSE evaluator — is deliberately absent: what a candidate is measured on
 comes from the scorecard here, not from a hard-wired benchmark.
 
-.. danger:: The gate is not the security boundary, and must not be read as one.
+.. danger:: The gate is not a security boundary, and must not be read as one.
 
-   This benchmark needs pandas, numpy and scikit-learn — a stack that can read
-   files and spawn processes — so admitting it admits most of what a gate would
-   otherwise stop. What the gate still buys is that the ordinary accidents (a
+   A candidate needs pandas, numpy and scikit-learn — a stack that can read
+   files and spawn processes — so admitting those admits most of what a gate
+   would otherwise stop. What it buys is that the ordinary accidents (a
    candidate that shells out, calls ``open``, or reaches for a dunder) fail
-   in-process with a readable message instead of inside the sandbox.
+   here, with a readable message, instead of at evaluation.
 
-   What actually confines a candidate is the sandbox, which lands with the
-   commit that executes candidates for real.
+   What confines a candidate is whatever ``EvaluationExecution`` the provider
+   was handed. That may be a gateway sandbox; by default it is a ``LOCAL``
+   SysOperation, which keeps paths inside the run directory and refuses a few
+   dangerous commands — a boundary worth having, and not isolation.
 """
 
 from __future__ import annotations
@@ -43,11 +45,6 @@ from importlib.metadata import PackageNotFoundError, packages_distributions, ver
 from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-#: Wide enough for the benchmark, and no wider. Upstream ships no gate at all --
-#: `sandbox.py` is an abstract class that raises -- so every name here is this
-#: port's decision, and the trade is explicit: admitting scikit-learn admits a
-#: package that can spawn processes and read files, which is why the sandbox
-#: profile rather than this set is the actual boundary.
 #: Modules a candidate may never import, whatever is installed.
 #:
 #: A deny list, because the allow list this replaced was a guess and the guess
@@ -58,13 +55,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 #: `catboost`, the gate refused it, and the probe reported that the starting
 #: point would not run.
 #:
-#: The gate is explicitly *not* the isolation boundary — agent-core's gateway
-#: sandbox is. So refusing an import was never
-#: a security decision; it was a claim that the import would not work here, and
-#: for an installed package that claim is simply false. What is left on this
-#: list is the handful that reach outside the process: the sandbox stops them
-#: anyway, and failing early with a readable message is the whole reason this
-#: gate exists.
+#: Refusing an import was never a security decision (see the module docstring);
+#: it was a claim that the import would not work here, and for an installed
+#: package that claim is simply false. What is left is the handful that reach
+#: outside the process, where failing early with a readable message is the
+#: whole reason this gate exists.
 BLOCKED_IMPORTS = {
     "asyncio",
     "ctypes",
@@ -112,7 +107,7 @@ def _import_allowed(module: str, local: Iterable[str] = ()) -> Tuple[bool, str]:
     """
     root = module.split(".")[0]
     if root in BLOCKED_IMPORTS:
-        return False, f"import {module!r} is not allowed: it reaches outside the sandbox"
+        return False, f"import {module!r} is not allowed: it reaches outside the process"
     # A sibling module in the program's own tree. Checked before `find_spec`,
     # which asks a different question ("is it installed") and would answer no.
     if root in local:
@@ -236,14 +231,11 @@ def program_id(code: str) -> str:
 
 def validate_source(source: str, max_length: int = 20_000,
                     local: Iterable[str] = ()) -> Tuple[bool, str]:
-    """Reject what the sandbox should never have to contain in the first place.
+    """Reject a candidate that was never going to run, before it is run.
 
-    Deliberately *not* as strict as upstream's own gate: that one allows
-    six standard-library modules and this one has to allow scikit-learn, so it
-    cannot claim to be the isolation boundary. What it does buy is that the
-    common accidents -- a candidate that shells out, opens a file by hand, or
-    reaches for a dunder -- fail in-process with a readable message instead of
-    dying against a sandbox profile.
+    Deliberately *not* as strict as upstream's own gate: that one allows six
+    standard-library modules and this one has to allow scikit-learn, so it
+    cannot claim to be a boundary — see the module docstring.
     """
     if not source.strip():
         return False, "empty source"
@@ -559,29 +551,6 @@ def _uncomment(line: str) -> Optional[str]:
     return None
 
 
-def _leading_comment(code: str) -> str:
-    """The first comment line of a file we cannot parse.
-
-    The Python path reads the module docstring, which is where the prompt asks
-    for the change summary; a program in another language has no docstring and
-    would leave every node in the tree labelled "changed: candidate.js". Every
-    language has a comment, so the prompt asks for the summary on the first
-    line and this reads it back — the marker differs, the convention does not.
-    """
-    for raw in code.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.startswith("#!"):  # a shebang is not a sentence about the edit
-            continue
-        text = _uncomment(line)
-        if text is None:
-            return ""  # code before any comment: nothing was said
-        if text:
-            return text[:200]
-    return ""
-
-
 def _summary_of(code: str, path: str = "") -> str:
     """The one line the reply says about its own edit.
 
@@ -599,23 +568,23 @@ def _summary_of(code: str, path: str = "") -> str:
     and whose third is ``x=1`` parses as Python perfectly well, and would then
     be searched for a docstring it can never have.
     """
-    if path and not is_python(path):
-        return _leading_comment(code)
-    try:
-        parsed = ast.parse(code)
-    except SyntaxError:
-        # Not Python — or Python that does not compile, in which case there is
-        # no docstring to find either and the first comment is as good a
-        # sentence as anything.
-        return _leading_comment(code)
-    doc = ast.get_docstring(parsed)
-    if not doc:
-        for node in parsed.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                doc = ast.get_docstring(node)
-                if doc:
-                    break
-    return doc.strip().splitlines()[0][:200] if doc else ""
+    if not path or is_python(path):
+        try:
+            parsed: Optional[ast.Module] = ast.parse(code)
+        except SyntaxError:
+            # Python that does not compile has no docstring to find either, so
+            # its first comment is as good a sentence as anything.
+            parsed = None
+        if parsed is not None:
+            doc = ast.get_docstring(parsed)
+            for node in parsed.body if not doc else ():
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    doc = ast.get_docstring(node)
+                    if doc:
+                        break
+            return doc.strip().splitlines()[0][:200] if doc else ""
+    header = leading_comment_block(code).splitlines()
+    return header[0][:200] if header else ""
 
 
 def extract_program(reply: str) -> Tuple[str, str]:

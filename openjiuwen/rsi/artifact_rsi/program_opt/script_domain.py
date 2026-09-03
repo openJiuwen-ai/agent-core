@@ -59,6 +59,7 @@ exactly the shape the probe refuses to start.
 
 from __future__ import annotations
 
+import ast
 import json
 from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence, Tuple
 
@@ -242,7 +243,6 @@ def script_domain(
     def prompt(program: Program, best_score: Optional[float] = None) -> str:
         return mutation_prompt(
             statement=statement,
-            scorecard=scorecard,
             parent_code=program.code,
             entrypoint=entrypoint,
             parent_score=_finite(program.metrics.get(SCORE_KEY)),
@@ -286,8 +286,6 @@ def _contract_of(script: str, evaluator_file: str = EVALUATOR_FILE) -> str:
     Either one missing falls back to the script's head — a wrong contract is a
     zero on every candidate, which is worse than a leaky prompt.
     """
-    import ast
-
     doc = None
     if is_python(evaluator_file):
         try:

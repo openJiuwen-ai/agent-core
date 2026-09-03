@@ -11,13 +11,12 @@ from the provider so the provider reads as the contract and nothing else.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import time
 from typing import Any, Callable, Optional
 
 
-from openjiuwen.rsi.artifact_rsi.program_opt.completion import (
-    CompletionUsage,
-)
+from openjiuwen.rsi.artifact_rsi.program_opt.completion import CompletionUsage
 
 #: Ceiling for one mutation call.
 #:
@@ -51,10 +50,6 @@ def completion_factory_from_model(model: Any, loop: Any) -> Callable[..., Any]:
     coroutine cannot be cancelled from here without racing the client, so the
     answer of a stopped call is dropped and the loop is left to finish it.
     """
-    import concurrent.futures
-
-    from openjiuwen.rsi.artifact_rsi.program_opt.completion import CompletionUsage
-
     def factory(
         spec: Any,
         on_usage: Optional[Callable[[CompletionUsage], None]],

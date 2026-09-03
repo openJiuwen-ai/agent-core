@@ -40,6 +40,7 @@ from .program import (
     extract_files,
     extract_program,
     fence_language,
+    files_of,
     reply_carries_program,
 )
 
@@ -134,8 +135,6 @@ def _tagged_instructions(entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
 
 def _render_tagged(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
     """The parent between the same tags the reply is asked for."""
-    from .program import files_of
-
     files = files_of(code, entrypoint)
     body = files.get(entrypoint) or next(iter(files.values()), "")
     return f"<PROGRAM>\n{body.strip()}\n</PROGRAM>"

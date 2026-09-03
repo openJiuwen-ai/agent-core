@@ -16,9 +16,8 @@
 
 An engine is handed a :class:`RunSpec`, an ``emit`` callback and a
 ``should_stop`` predicate, and is expected to emit the event sequence described
-in ``events.py``. Two implementations: ``stub_engine`` (deterministic, executes
-nothing) and ``puct_engine``; a second search algorithm would land behind the
-later.
+in ``events.py``. One implementation, ``puct_engine``; a second search
+algorithm would land behind this seam.
 
 .. danger:: Parallel expansion uses AgentDescent's ``ThreadExecutor``.
 
@@ -31,7 +30,7 @@ later.
    edit that caused it.
 
    Threads are the right tool regardless: the two slow things are a blocking
-   HTTP call to a model and ``subprocess.run`` for a sandboxed candidate. Both
+   HTTP call to a model and the process that runs a candidate. Both
    release the GIL, and neither has an asyncio-native path in this stack.
 """
 

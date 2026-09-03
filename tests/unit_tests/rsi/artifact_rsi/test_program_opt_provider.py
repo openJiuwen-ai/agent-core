@@ -26,10 +26,6 @@ from openjiuwen.rsi.artifact_rsi.program_opt import state as state_module
 from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import (
     PuctProgramArtifactProvider,
 )
-from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
-    DEFAULT_MAX_TOKENS_PER_CALL,
-    ModelConfigError,
-)
 from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
     ExecutionOutcome,
     ExecutionUnavailable,
@@ -2175,7 +2171,6 @@ def test_the_prompt_never_argues_with_the_tasks_own_contract() -> None:
 
     text = mutation_prompt(
         statement="fit the curve",
-        scorecard={"criteria": []},
         parent_code="def train_and_predict(train, test):\n    return []\n",
         entrypoint="candidate.py",
         parent_score=0.1,
@@ -2381,7 +2376,7 @@ def test_the_prompt_shows_the_parent_in_the_shape_it_asks_for() -> None:
 
     def rendered(name: str) -> str:
         return mutation_prompt(
-            statement="make it better", scorecard={"criteria": []},
+            statement="make it better",
             parent_code="def solve():\n    return 1\n", parent_score=0.4,
             best_score=0.5, recent=(), script_contract="define solve()",
             reply_format=format_for(name), feedback="", template="",
@@ -2655,7 +2650,7 @@ def test_adopted_means_the_current_version_chain_not_merge_history(tmp_path: Pat
     run = _state(tmp_path)
     _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aaaa"))
     _absorb(run, events.expanded(1, 0, 1, 0.4, True, code_hash="sha256:bbbb", iteration=1))
-    emitted_first = _absorb(run, events.merged(1, True, reason="提升"))
+    _absorb(run, events.merged(1, True, reason="提升"))
     # A sibling from the root overtakes: the chain becomes 0 → 2.
     _absorb(run, events.expanded(2, 0, 1, 0.6, True, code_hash="sha256:cccc", iteration=2))
     emitted = _absorb(run, events.merged(2, True, reason="更高"))
@@ -2957,7 +2952,7 @@ def test_a_non_python_program_is_not_told_what_this_interpreter_can_import() -> 
 
     def mutation(entrypoint: str, code: str) -> str:
         return mutation_prompt(
-            statement="make it better", scorecard={"criteria": []}, parent_code=code,
+            statement="make it better", parent_code=code,
             entrypoint=entrypoint, parent_score=0.4, best_score=0.5, recent=(),
             script_contract="define solve()", reply_format=format_for("files"),
             feedback="", template="",
@@ -2989,7 +2984,7 @@ def test_a_non_python_program_is_asked_for_its_summary_where_one_can_be_read() -
     from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import format_for
 
     prompt = mutation_prompt(
-        statement="", scorecard={"criteria": []}, parent_code="fn solve() {}\n",
+        statement="", parent_code="fn solve() {}\n",
         entrypoint="solve.rs", parent_score=None, best_score=None, recent=(),
         script_contract="define solve()", reply_format=format_for("files"),
         feedback="", template="",
@@ -3030,7 +3025,6 @@ def test_a_non_python_run_does_not_have_to_have_python_in_its_sandbox(
     sandbox holding a Rust toolchain and no interpreter could not run a Rust
     task at all.
     """
-    from openjiuwen.rsi.artifact_rsi.program_opt import provision
     from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
     from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
     from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import ScriptError
@@ -3041,7 +3035,10 @@ def test_a_non_python_run_does_not_have_to_have_python_in_its_sandbox(
         probed.append(tuple(names))
         return "no module named numpy"
 
-    monkeypatch.setattr(provision, "probe_imports", recording_probe)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.probe_imports",
+        recording_probe,
+    )
 
     def stop_after_preflight(**kwargs: object) -> object:
         raise ScriptError("preflight is what is under test")

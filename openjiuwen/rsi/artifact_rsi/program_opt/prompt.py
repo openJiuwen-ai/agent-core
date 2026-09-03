@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import string
 from pathlib import PurePosixPath
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from .program import (
     DEFAULT_ENTRYPOINT,
@@ -112,7 +112,7 @@ def _summary_place(entrypoint: str) -> str:
     Python has a module docstring and the search reads it back from there. A
     program in any other language has no such thing, so the sentence is asked
     for as the first line's comment — every language has one — and
-    `program._leading_comment` reads that. The two have to agree: a prompt
+    `program.leading_comment_block` reads that. The two have to agree: a prompt
     asking for a docstring and a reader looking for a comment leaves every node
     in the tree labelled "changed: solve.rs".
     """
@@ -125,10 +125,6 @@ def _summary_rule(entrypoint: str) -> str:
     """The requirement line naming where the change summary goes."""
     place = _summary_place(entrypoint)
     return f"{place[0].upper()}{place[1:]} says in one sentence what changed."
-
-
-def _how_to_change(entrypoint: str) -> str:
-    return _HOW_TO_CHANGE.format(summary_place=_summary_place(entrypoint))
 
 
 def _environment(entrypoint: str) -> str:
@@ -210,7 +206,6 @@ def _default_format():
 def mutation_prompt(
     *,
     statement: str,
-    scorecard: Mapping[str, Any],
     parent_code: str,
     parent_score: Optional[float],
     entrypoint: str = DEFAULT_ENTRYPOINT,
@@ -249,7 +244,7 @@ def mutation_prompt(
             imports=available_imports_text() if is_python(entrypoint) else "",
             environment=_environment(entrypoint),
             summary_rule=_summary_rule(entrypoint),
-            how_to_change=_how_to_change(entrypoint),
+            how_to_change=_HOW_TO_CHANGE.format(summary_place=_summary_place(entrypoint)),
             # The protocol's own sentences, so the prompt and the reader on the
             # other side are never two independent statements of one thing.
             reply_format=_shape.instructions(entrypoint),
@@ -433,21 +428,20 @@ def repair_prompt(code: str, error: str,
         "way. Get it running correctly and leave the rest as it is.\n\n"
         # "Do not change the approach" used to be in the sentence above, and it
         # forbade the one repair available: when the error says `cannot import
-        # name 'cwt'`, the missing thing *is* the approach. In one peak-detection
-        # search three candidates reached for scipy.signal.cwt/ricker (removed in
-        # SciPy 1.15); the repair fired three times and saved none of them.
+        # name 'cwt'`, the missing thing *is* the approach. Three candidates in
+        # one peak-detection search reached for scipy.signal.cwt/ricker (removed
+        # in SciPy 1.15); the repair fired three times and saved none — once for
+        # forbidding the fix, and again for not saying what to fix it with,
+        # which is what the environment section below is for.
         "If the error says something does not exist — a failed import, a missing "
         "attribute, a function that was removed — then replacing that one thing "
         "with an equivalent the current version actually has **is** the minimal "
         "fix. Leave everything else alone.\n\n"
         "## What it reported\n\n"
         f"{error.strip()[:1500] or '(the evaluator gave no reason)'}\n\n"
-        # The environment, because "replace it with an equivalent that exists" is
-        # not actionable without knowing what is there. Three candidates in one
-        # run reached for `scipy.signal.cwt`, removed in SciPy 1.15; the repair
-        # was told to replace it and given no way to know what with. Only for
-        # Python: `available_imports` probes this interpreter, and telling a Go
-        # program what this process can import is worse than saying nothing.
+        # Only for Python: `available_imports` probes this interpreter, and
+        # telling a Go program what this process can import is worse than
+        # saying nothing.
         + _environment(entrypoint)
         + "## Current program\n\n"
         f"{render_tree(code, entrypoint)}\n\n"

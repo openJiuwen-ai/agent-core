@@ -56,7 +56,7 @@ class Domain:
     #: The root node's program and the summary shown for it.
     initial_program: str
     initial_summary: str
-    #: `(code, shards) -> (valid, metrics, error)`, sandboxed.
+    #: `(code, shards) -> (valid, metrics, error)`, through the execution seam.
     evaluate: Callable[[str, Sequence[int]], Tuple[bool, Dict[str, Any], str]]
     #: `metrics -> [0, 1]`, order-preserving with `metrics["score"]`.
     reward: Callable[[Dict[str, Any]], float]

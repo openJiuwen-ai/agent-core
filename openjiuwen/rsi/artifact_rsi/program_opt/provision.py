@@ -18,9 +18,15 @@ The person who types "bring the error down" has no way to know the search wants 
 gradient-boosting library, and no reason to. The drafting agent does know, so it
 says, and this is the half that acts on it.
 
-**Only what is missing, and only into the candidate runtime.** An import
-probe first, inside the execution environment: on a warm sandbox the common
-case is that everything asked for is already importable and pip never runs.
+**Only what is missing, and only into the candidate runtime.** An import probe
+first, inside the execution environment: the common case is that everything
+asked for is already importable and pip never runs.
+
+.. warning:: The runtime is whatever the provider injected. Against a gateway
+   sandbox that is a container. Against the default ``LOCAL`` execution it is
+   **this machine's interpreter**, so a card that names packages installs them
+   on the host. That followed from removing the sandbox and is not a decision
+   this module can make on its own.
 
 **A name is a name.** Anything that could redirect where the package comes from
 — an index URL, an editable path, a VCS reference, an environment marker — is
@@ -107,9 +113,7 @@ def ensure(packages: Sequence[str], execute: "EvaluationExecution") -> Tuple[Lis
     """Install `packages` into the run's execution environment.
 
     Through the injected execution, because that is where candidates actually
-    run: the old version installed into *this* interpreter, which was the
-    truth when the local sandbox reused the host Python and is a lie against a
-    gateway sandbox with its own environment.
+    run — see the module's warning about what that environment is.
 
     An import probe first, and pip only when it fails: pip resolves for
     seconds even when every requirement is already satisfied, and `ensure` is

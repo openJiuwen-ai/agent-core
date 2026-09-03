@@ -60,11 +60,18 @@ from .program import (
 )
 from .prompt import repair_prompt, with_promise_request
 from .execution import EvaluationExecution
-from .provision import CANDIDATE_RUNTIME
+from .provision import (
+    CANDIDATE_RUNTIME,
+    ProvisionError,
+    ensure,
+    import_name,
+    probe_imports,
+    validate_names,
+)
 from .reply_format import ReplyFormatError, format_for
 from .restore import RestoreError, restore_baseline, restore_tree
 from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
-from .script_domain import script_domain
+from .script_domain import ScriptError, script_domain
 from .search import (
     PuctStrategy,
     PuctTreeAggregator,
@@ -173,13 +180,14 @@ class PuctEngine:
                 "through the request's injected Model"
             )
         self._completion_factory = completion_factory
-        # Required for the same reason: the injected execution is the only way
-        # a candidate is ever run, and a default that executed locally was the
-        # bypass the sandbox deletion exists to close.
+        # Required for the same reason as the model: the injected execution is
+        # the only way a candidate is ever run. The engine has no default —
+        # deciding where candidates run is the provider's call, not one this
+        # side may quietly make on its behalf.
         if evaluation_execution is None:
             raise ValueError(
                 "PuctEngine needs an evaluation_execution: every candidate runs "
-                "through the injected SysOperation sandbox"
+                "through the injected SysOperation"
             )
         self._evaluation_execution = evaluation_execution
         # The seam a test substitutes a fake domain through. Defaulted to the
@@ -235,8 +243,6 @@ class PuctEngine:
         # One way to score: the drafting model wrote the evaluator, so anything
         # a task can be scored by fits without a staging pipeline of its own.
         # Other measurement kinds are refused by name in `_refuse_unrunnable`.
-        from .script_domain import ScriptError
-
         try:
             domain = self._domain_factory(
                 scorecard=spec.scorecard,
@@ -911,7 +917,7 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
         # never ported. Refused by name rather than falling through to code
         # that has no domain for them.
         raise _Refusal(
-            f"this engine scores by sandboxed evaluation only; a scorecard measured by "
+            f"this engine scores by running an evaluator only; a scorecard measured by "
             f"{mode!r} cannot run here — write an evaluator script instead"
         )
     if not spec.script.strip():
@@ -920,12 +926,9 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
         # sends the user reading candidates for a fault in the configuration.
         raise _Refusal("this scorecard is scored by an evaluator script but was given none")
     # Asked of the environment candidates actually run in, through the seam —
-    # the host interpreter's answer stopped being the truth when execution
-    # moved behind the gateway. One probe covers the allowlisted runtime and
-    # the promised packages together: on a warm sandbox nothing else runs, and
-    # pip is reached only when something is actually missing.
-    from .provision import ProvisionError, ensure, import_name, probe_imports, validate_names
-
+    # this interpreter's own answer is not that environment's. One probe covers
+    # the candidate runtime and the promised packages together, and pip is
+    # reached only when something is actually missing.
     try:
         shape = format_for(spec.reply_format)
     except ReplyFormatError as error:

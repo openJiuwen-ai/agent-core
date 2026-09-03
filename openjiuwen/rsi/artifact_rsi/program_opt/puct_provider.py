@@ -37,7 +37,13 @@ import logging
 
 from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
 from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
-from openjiuwen.rsi.artifact_rsi.program_opt.program import DEFAULT_ENTRYPOINT, bundle
+from openjiuwen.rsi.artifact_rsi.program_opt.program import (
+    DEFAULT_ENTRYPOINT,
+    bundle,
+    is_python,
+    local_roots,
+    validate_source,
+)
 from agentdescent.filetree import load_tree
 
 from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
@@ -76,7 +82,7 @@ from openjiuwen.rsi.schema import (
 #: alone took 3, and the wave finished *slower* than running them in sequence.
 DEFAULT_WORKERS = 1
 
-#: The most a task may ask for. Each worker is one model call and one sandbox
+#: The most a task may ask for. Each worker is one model call and one
 #: evaluation in flight; past a handful the limit stops being this process.
 MAX_WORKERS = 8
 
@@ -193,31 +199,16 @@ class PuctProgramArtifactProvider:
             return ArtifactValidationResult(valid=not errors, errors=errors)
         source = files[entrypoint]
 
-        # …and only when the entrypoint is Python. The gate is `ast.parse` plus
-        # an import allowlist, which says nothing about a program written in
-        # anything else: a SQL file, a prompt, a Rust source or a piece of prose
-        # would be refused for a syntax error in a language it is not. The gate
-        # was never the isolation boundary — it refuses imports that would fail
-        # or reach outside — so skipping it where it cannot apply removes a
-        # check that had no meaning there, not a protection.
-        #
-        # A shape check on the starting point only. Candidates are *not* put
-        # through this during the search -- the sandbox is what confines them,
-        # and the evaluator's own import is what decides whether one is usable.
-        # What it buys here is that a seed that is not a program at all — bad
-        # syntax, a forbidden import, a dunder — is refused while the user is
-        # still looking at the form. It deliberately does not require any
-        # particular function: only the scorecard knows what the evaluator
-        # calls, and this method never sees the scorecard.
-        from openjiuwen.rsi.artifact_rsi.program_opt.program import (
-            is_python,
-            local_roots,
-            validate_source,
-        )
-
-        # The program's own modules are importable from within it, so the gate
-        # is told what they are. Otherwise `from helpers.scale import factor`
-        # reads as a dependency nobody installed.
+        # A shape check on the starting point only, and only when it is Python:
+        # the gate is `ast.parse` plus an import deny list, so a Rust source or
+        # a piece of prose would be refused for a syntax error in a language it
+        # is not. It was never a boundary (see `program`'s module docstring), so
+        # skipping it where it cannot apply removes a check with no meaning
+        # there, not a protection. What it buys is that a seed that is not a
+        # program at all is refused while the user is still looking at the form.
+        # `local` because the program's own modules are importable from within
+        # it — otherwise `from helpers.scale import factor` reads as a
+        # dependency nobody installed.
         if is_python(entrypoint):
             ok, reason = validate_source(source, local=local_roots(files))
             if not ok:
@@ -446,6 +437,22 @@ class PuctProgramArtifactProvider:
             run_dir=run_dir,
             total_iterations=int(request.max_iterations),
         )
+
+        async def failed(code: str, message: str,
+                         node: str | None = None) -> EngineResult:
+            """Write the failure down, say so, and answer with it.
+
+            One place because the three are not independent: a failure the
+            state never recorded is invisible to `read_state`, and one the
+            caller is never notified of leaves a task the UI shows as running.
+            """
+            state.fail(code, message)
+            await _notify(on_event, EventStatus(status="failed"))
+            return EngineResult(
+                task_id=request.task_id, status="failed", final_node_id=node,
+                error_code=code, error_message=message,
+            )
+
         if resumed:
             # One task, one durable record. A fresh state would truncate
             # `nodes.json` to this attempt's own nodes on its first write —
@@ -468,12 +475,7 @@ class PuctProgramArtifactProvider:
         except (ModelConfigError, ExecutionUnavailable,
                 FileNotFoundError, ValueError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
-            state.fail(code, str(error))
-            await _notify(on_event, EventStatus(status="failed"))
-            return EngineResult(
-                task_id=request.task_id, status="failed", final_node_id=None,
-                error_code=code, error_message=str(error),
-            )
+            return await failed(code, str(error))
 
         stop = threading.Event()
         with self._lock:
@@ -495,22 +497,19 @@ class PuctProgramArtifactProvider:
 
         def sink(emitted: dict[str, Any]) -> None:
             with fold:
-                _fold_and_deliver(emitted)
-
-        def _fold_and_deliver(emitted: dict[str, Any]) -> None:
-            for event in state.absorb(emitted):
-                if on_event is None:
-                    continue
-                future = asyncio.run_coroutine_threadsafe(on_event(event), loop)
-                # Waited on, not fired and forgotten: the contract makes the
-                # provider carry the queue's back-pressure. But waited-on is
-                # not died-of: a callback exception is an observability fault,
-                # and the search it was watching must outlive it.
-                try:
-                    future.result()
-                except Exception as error:  # noqa: BLE001
-                    logger.warning(
-                        "event delivery failed (observability channel): %s", error)
+                for event in state.absorb(emitted):
+                    if on_event is None:
+                        continue
+                    future = asyncio.run_coroutine_threadsafe(on_event(event), loop)
+                    # Waited on, not fired and forgotten: the contract makes the
+                    # provider carry the queue's back-pressure. But waited-on is
+                    # not died-of: a callback exception is an observability
+                    # fault, and the search it was watching must outlive it.
+                    try:
+                        future.result()
+                    except Exception as error:  # noqa: BLE001
+                        logger.warning(
+                            "event delivery failed (observability channel): %s", error)
 
         await _notify(on_event, EventStatus(status="running"))
         state.start()
@@ -525,12 +524,7 @@ class PuctProgramArtifactProvider:
         try:
             await asyncio.to_thread(run_probe, spec, execute)
         except ProbeError as refusal:
-            state.fail("PROBE_REFUSED", str(refusal))
-            await _notify(on_event, EventStatus(status="failed"))
-            return EngineResult(
-                task_id=request.task_id, status="failed", final_node_id=None,
-                error_code="PROBE_REFUSED", error_message=str(refusal),
-            )
+            return await failed("PROBE_REFUSED", str(refusal))
 
         engine = PuctEngine(
             completion_factory=completion_factory_from_model(request.model, loop),
@@ -538,12 +532,7 @@ class PuctProgramArtifactProvider:
         try:
             await asyncio.to_thread(engine.run, spec, sink, stop.is_set)
         except Exception as error:  # noqa: BLE001 - a crash is a failed task, not a crashed server
-            state.fail("ENGINE_ERROR", str(error))
-            await _notify(on_event, EventStatus(status="failed"))
-            return EngineResult(
-                task_id=request.task_id, status="failed", final_node_id=state.best_node_id,
-                error_code="ENGINE_ERROR", error_message=str(error),
-            )
+            return await failed("ENGINE_ERROR", str(error), node=state.best_node_id)
         finally:
             with self._lock:
                 self._stopping.pop(request.task_id, None)

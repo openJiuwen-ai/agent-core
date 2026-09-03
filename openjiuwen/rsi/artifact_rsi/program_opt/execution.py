@@ -126,14 +126,37 @@ async def _stage_and_run(
     )
 
 
+def _bridge(operation: Any, loop: Any,
+            scratch_root: Optional[Path] = None) -> EvaluationExecution:
+    """The seam's synchronous face over an async ``SysOperation``.
+
+    The search runs on worker threads and the gateway API is a coroutine, so
+    every evaluation is scheduled onto the loop that owns the operation and
+    waited on from the worker — the same bridge the model call already crosses
+    in the other direction.
+    """
+
+    def execute(
+        files: Mapping[str, str],
+        command: Sequence[str],
+        env: Mapping[str, str],
+        timeout: float,
+        result_file: Optional[str],
+    ) -> ExecutionOutcome:
+        future = asyncio.run_coroutine_threadsafe(
+            _stage_and_run(operation, files, command, env, timeout, result_file,
+                           scratch_root), loop)
+        return future.result(timeout + 120)
+
+    return execute
+
+
 def execution_from_sys_operation(sys_operation: Any, loop: Any) -> EvaluationExecution:
     """agent-core's own sandbox, one instance for the whole run.
 
     Each call stages into a fresh directory inside it — per-evaluation
     isolation on the cheap, while the instance itself (and whatever
-    ``packages`` were provisioned into it) is reused. The async gateway API is
-    bridged the same way the model is: scheduled onto the loop that owns the
-    operation and waited on from the worker thread.
+    ``packages`` were provisioned into it) is reused.
 
     **The directories are not swept, and that is the platform's call rather
     than an oversight.** ``fs`` has no delete at all, and the shell refuses
@@ -150,19 +173,7 @@ def execution_from_sys_operation(sys_operation: Any, loop: Any) -> EvaluationExe
             "SysOperationCard (mode=sandbox) and hands the provider "
             "Runner.resource_mgr.get_sys_operation(card_id)"
         )
-
-    def execute(
-        files: Mapping[str, str],
-        command: Sequence[str],
-        env: Mapping[str, str],
-        timeout: float,
-        result_file: Optional[str],
-    ) -> ExecutionOutcome:
-        future = asyncio.run_coroutine_threadsafe(
-            _stage_and_run(sys_operation, files, command, env, timeout, result_file), loop)
-        return future.result(timeout + 120)
-
-    return execute
+    return _bridge(sys_operation, loop)
 
 
 def local_execution(workspace: Any, loop: Any) -> EvaluationExecution:
@@ -202,19 +213,7 @@ def local_execution(workspace: Any, loop: Any) -> EvaluationExecution:
         work_config=LocalWorkConfig(sandbox_root=[str(root)], restrict_to_sandbox=True),
     ))
 
-    def execute(
-        files: Mapping[str, str],
-        command: Sequence[str],
-        env: Mapping[str, str],
-        timeout: float,
-        result_file: Optional[str],
-    ) -> ExecutionOutcome:
-        future = asyncio.run_coroutine_threadsafe(
-            _stage_and_run(operation, files, command, env, timeout, result_file,
-                           scratch_root=root), loop)
-        return future.result(timeout + 120)
-
-    return execute
+    return _bridge(operation, loop, scratch_root=root)
 
 
 __all__ = [

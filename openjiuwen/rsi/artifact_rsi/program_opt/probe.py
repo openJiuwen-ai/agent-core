@@ -34,7 +34,9 @@ going to separate two real candidates.
 
 from __future__ import annotations
 
+import ast
 import math
+import re
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from .engine import RunSpec
@@ -166,7 +168,7 @@ def run_probe(spec: RunSpec, execute: "EvaluationExecution") -> Dict[str, Any]:
     # fall-through reached shared code with no domain bound and died as an
     # UnboundLocalError.
     raise ProbeError(
-        f"this engine scores by sandboxed evaluation only; a scorecard measured by "
+        f"this engine scores by running an evaluator only; a scorecard measured by "
         f"{mode!r} cannot run here — write an evaluator script instead"
     )
 
@@ -183,7 +185,7 @@ def _refuse_saturated(spec: RunSpec, baseline: float, worsened: Optional[float] 
     """
     threshold = float(spec.scorecard.get("solvedThreshold") or 0.999)
     if baseline < threshold:
-        _refuse_thin_headroom(spec, baseline, worsened, threshold)
+        _refuse_thin_headroom(baseline, worsened, threshold)
         return
     raise ProbeError(
         f"the starting point already scores {baseline:.4f} against this scoring, past the "
@@ -205,8 +207,6 @@ def _hollow_out(source: str) -> str:
     candidate's entrypoint is called, and "every function still exists and
     every answer is wrong" is the damage that works without knowing.
     """
-    import ast
-
     try:
         tree = ast.parse(source)
     except SyntaxError as error:
@@ -309,7 +309,7 @@ def _refuse_noisy(evaluate, baseline_code: str, shards, baseline: float,
         "random in the scoring (fix the seed, take the median of several passes)"
     )
 
-def _refuse_thin_headroom(spec: RunSpec, baseline: float, worsened: Optional[float],
+def _refuse_thin_headroom(baseline: float, worsened: Optional[float],
                           threshold: float) -> None:
     """Refuse a start with less room above it than the scoring can resolve.
 
@@ -443,8 +443,6 @@ def _refuse_locationless_diagnosis(said: str) -> None:
     trip does not match", "3 of 6 over budget" — has no location to give, and
     demanding one would refuse the evaluators that report best.
     """
-    import re
-
     text = (said or "").strip()
     if not text:
         return
@@ -478,8 +476,6 @@ def _refuse_nameless_diagnosis(said: str) -> None:
     exception class names, and if nothing but punctuation is left then the text
     carried no reason at all.
     """
-    import re
-
     text = (said or "").strip()
     if not text:
         return  # Empty is handled where the process tail is appended.
