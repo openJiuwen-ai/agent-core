@@ -84,6 +84,12 @@ OJ_EXECUTION_SUBJECT_REQUEST_NUMBER = "openjiuwen.execution.subject.request.numb
 OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
 OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
+
+# Trace-level usage rollup stamped on the single-agent run root at close.
+OJ_RUN_TOTAL_PROMPT_TOKENS = "openjiuwen.run.total_prompt_tokens"
+OJ_RUN_TOTAL_COMPLETION_TOKENS = "openjiuwen.run.total_completion_tokens"
+OJ_RUN_TOTAL_TOOL_CALLS = "openjiuwen.run.total_tool_calls"
+OJ_RUN_ESTIMATED_COST_USD = "openjiuwen.run.estimated_cost_usd"
 OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS = "openjiuwen.gen_ai.response.prompt_token_ids"
 OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS = "openjiuwen.gen_ai.response.completion_token_ids"
 OJ_GEN_AI_RESPONSE_LOGPROBS = "openjiuwen.gen_ai.response.logprobs"
@@ -172,6 +178,12 @@ AT_TASK_TAG = "agentteam.task.tag"
 # Marks a task span rebuilt after a pause/resume cycle, so the trace viewer can
 # tell it apart from a task created inside the current trace.
 AT_TASK_RECOVERED = "agentteam.task.recovered"
+
+# Trace-level usage rollup stamped on the team root span at finalize_trace.
+AT_TASK_TOTAL_PROMPT_TOKENS = "agentteam.task.total_prompt_tokens"
+AT_TASK_TOTAL_COMPLETION_TOKENS = "agentteam.task.total_completion_tokens"
+AT_TASK_TOTAL_TOOL_CALLS = "agentteam.task.total_tool_calls"
+AT_TASK_ESTIMATED_COST_USD = "agentteam.task.estimated_cost_usd"
 
 AT_PLAN_APPROVED = "agentteam.plan.approved"
 AT_PLAN_SUBMITTED_BY = "agentteam.plan.submitted_by"
