@@ -93,6 +93,25 @@ async def test_finalize_failure_persists_one_message():
 
 
 @pytest.mark.asyncio
+async def test_request_rejected_requires_configuration_action():
+    """HTTP 400 failures carry an actionable category and suggestion."""
+    ctx = _build_ctx(message_manager=_FakeMessageManager(), messager=_FakeMessager())
+    ctx.begin_attempt(phase="turn", round_id=1)
+
+    failure = await ctx.finalize_failure(
+        category="request_rejected",
+        reason=ExternalRuntimeFailureReason(message="unknown", http_status=400),
+        summary="Claude SDK turn failed: unknown",
+    )
+
+    assert failure is not None
+    assert failure.user_action_required is True
+    assert "HTTP 400" not in failure.suggested_action
+    assert "请求配置" in failure.suggested_action
+    assert "MCP" not in failure.suggested_action
+
+
+@pytest.mark.asyncio
 async def test_finalize_failure_is_exactly_once_per_attempt():
     mm = _FakeMessageManager()
     ctx = _build_ctx(message_manager=mm, messager=_FakeMessager())

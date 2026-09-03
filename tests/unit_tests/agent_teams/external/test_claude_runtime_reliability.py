@@ -258,6 +258,37 @@ async def test_assistant_error_then_result_combines_into_one_failure(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_assistant_api_error_detail_is_preserved_in_failure(monkeypatch):
+    api_error = (
+        'API Error: 400 litellm.BadRequestError: {"error":{"code":"InvalidParameter",'
+        '"message":"json: unknown field \\"user\\" Request id: request-123"}}'
+    )
+    sdk = _install_fake_sdk(
+        monkeypatch,
+        messages_factory=lambda: [
+            sdk.AssistantMessage(content=[sdk.TextBlock(api_error)], error="invalid_request"),
+            sdk.ResultMessage(is_error=True, api_error_status=400, errors=["unknown"]),
+        ],
+    )
+    runtime = _make_runtime(sdk)
+    mm = _FakeMessageManager()
+    runtime._reliability_ctx = _build_ctx(mm, _FakeMessager(), _StatusSink())
+    chunks = []
+
+    async for chunk in runtime._drive({"query": "hi"}):
+        chunks.append(chunk)
+
+    assert [chunk.payload["content"] for chunk in chunks] == [api_error]
+    assert len(mm.sent) == 1
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "request_rejected"
+    assert failure.summary == "Claude SDK turn failed: HTTP 400"
+    assert failure.reason.http_status == 400
+    assert failure.reason.sdk_error_code == "invalid_request"
+    assert failure.reason.message == api_error
+
+
+@pytest.mark.asyncio
 async def test_startup_connect_failure_marks_member_error(monkeypatch):
     # Use the real SDK's CLIConnectionError so classify_claude_exception can
     # match it as a process_start_failed startup failure. The fake SDK re-uses

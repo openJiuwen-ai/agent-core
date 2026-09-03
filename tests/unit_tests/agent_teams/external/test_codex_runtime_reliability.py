@@ -256,7 +256,7 @@ async def test_codex_pending_only_when_no_turn_error():
 
 
 @pytest.mark.asyncio
-async def test_codex_bad_request_is_sdk_error():
+async def test_codex_bad_request_is_request_rejected():
     notifications = [
         _notification(
             "turn/completed",
@@ -271,8 +271,8 @@ async def test_codex_bad_request_is_sdk_error():
     async for _chunk in runtime._drive({"query": "hi"}):
         pass
     failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
-    assert failure.category == "sdk_error"
-    logger.info("badRequest -> sdk_error")
+    assert failure.category == "request_rejected"
+    logger.info("badRequest -> request_rejected")
 
 
 @pytest.mark.asyncio

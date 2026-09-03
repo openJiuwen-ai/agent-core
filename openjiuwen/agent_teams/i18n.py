@@ -86,11 +86,23 @@ STRINGS: dict[str, dict[str, str]] = {
         "reliability.external_runtime_failed": (
             "[三方运行时·失败] 成员 {member_name}（{agent_kind}，阶段 {phase}）最终失败："
             "{category}。{summary} 原始错误：{reason_message} 建议处理：{suggested_action}。"
-            "是否需要用户介入：{user_action_required}。请评估成员状态并决定是否继续调度。"
+            "诊断字段：failure_id={failure_id}，round_id={round_id}，http_status={http_status}，"
+            "sdk_error_type={sdk_error_type}，sdk_error_code={sdk_error_code}。{phase_guidance}"
+            "是否需要用户介入：{user_action_required}。请依据上述结构化诊断评估成员状态并决定是否继续调度。"
         ),
+        "reliability.external_runtime_phase.turn_http": (
+            "该错误在 turn 阶段收到 HTTP 响应，说明 CLI 已成功启动；不得将其诊断为 CLI 未安装。"
+        ),
+        "reliability.external_runtime_phase.turn": (
+            "该错误发生在 turn 阶段；除非存在 process_start_failed 证据，否则不得推断 CLI 未安装。"
+        ),
+        "reliability.external_runtime_phase.startup": "该错误发生在 startup 阶段，请依据错误分类判断启动失败原因。",
         "reliability.suggested_action.auth_required": "请登录 CLI 或配置有效的 API key",
         "reliability.suggested_action.quota_exceeded": "请检查账户额度或更换 API key",
         "reliability.suggested_action.rate_limited": "请稍后重试",
+        "reliability.suggested_action.request_rejected": (
+            "模型服务拒绝了请求，请结合诊断字段和运行日志检查请求配置及服务端错误详情"
+        ),
         "reliability.suggested_action.server_unavailable": "服务端暂时不可用，请稍后重试",
         "reliability.suggested_action.network_timeout": "请检查网络连接和 API 地址是否可达",
         "reliability.suggested_action.process_start_failed": "成员运行时启动失败，请检查配置或重试",
@@ -421,12 +433,28 @@ STRINGS: dict[str, dict[str, str]] = {
         "reliability.external_runtime_failed": (
             "[external runtime failed] Member {member_name} ({agent_kind}, phase {phase}) finally "
             "failed: {category}. {summary} Reason: {reason_message} Suggested action: {suggested_action}. "
-            "User action required: {user_action_required}. Assess the member state and decide whether "
-            "to keep scheduling it."
+            "Diagnostics: failure_id={failure_id}, round_id={round_id}, http_status={http_status}, "
+            "sdk_error_type={sdk_error_type}, sdk_error_code={sdk_error_code}. {phase_guidance}"
+            "User action required: {user_action_required}. Use the structured diagnostics to assess the member "
+            "state and decide whether to keep scheduling it."
+        ),
+        "reliability.external_runtime_phase.turn_http": (
+            "An HTTP response was received during the turn, so the CLI started successfully; do not diagnose "
+            "this as a missing CLI. "
+        ),
+        "reliability.external_runtime_phase.turn": (
+            "This failure occurred during a turn; do not infer a missing CLI without process_start_failed evidence. "
+        ),
+        "reliability.external_runtime_phase.startup": (
+            "This failure occurred during startup; use its category to determine the startup cause. "
         ),
         "reliability.suggested_action.auth_required": "Log in to the CLI or configure a valid API key",
         "reliability.suggested_action.quota_exceeded": "Check account quota or switch to a different API key",
         "reliability.suggested_action.rate_limited": "Please retry later",
+        "reliability.suggested_action.request_rejected": (
+            "The model service rejected the request; inspect diagnostics and runtime logs for request configuration "
+            "and server details"
+        ),
         "reliability.suggested_action.server_unavailable": "Server temporarily unavailable; please retry later",
         "reliability.suggested_action.network_timeout": "Check network connectivity and API endpoint reachability",
         "reliability.suggested_action.process_start_failed": (
