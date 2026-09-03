@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
 
 from openjiuwen.core.single_agent.rail.base import AgentRail

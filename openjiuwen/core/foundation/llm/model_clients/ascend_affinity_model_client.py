@@ -22,7 +22,7 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, Mode
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.kv_cache.kv_cache_config import (
+from openjiuwen.core.kv_cache.kv_cache_config import (
     KVC_MANAGEMENT_MAX_ATTEMPTS,
     resolve_kvc_action_timeout,
 )

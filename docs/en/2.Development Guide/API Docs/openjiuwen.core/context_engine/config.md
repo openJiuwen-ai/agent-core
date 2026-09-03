@@ -91,7 +91,6 @@ config = ContextEngineConfig(
 )
 ```
 
-> **Note**: `enable_kv_cache_release` is no longer part of
-> `ContextEngineConfig`. Enable KV-cache release through the agent-side
-> configuration:
-> `ReActAgentConfig.configure_kv_cache_affinity(enable_kv_cache_release=True)`.
+> **Note**: KV-cache affinity is not part of `ContextEngineConfig`. Enable it
+> through the agent-side configuration:
+> `ReActAgentConfig.configure_kv_cache_affinity(enable_kv_cache_affinity=True)`.
