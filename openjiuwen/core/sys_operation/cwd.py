@@ -18,9 +18,12 @@ Auxiliary workspace locations (not part of the cwd fallback chain):
 
   - workspace: agent workspace root (DeepAgent per-agent artifact dir)
   - team_workspace: shared team workspace root (mounted via .team/)
+  - skill_roots: skill trees this agent loads skills from
 
-Both are optional and return ``None`` when unset -- they record
-related paths used by tools, not where shell commands run.
+All are optional -- they record related paths used by tools, not where
+shell commands run.  ``skill_roots`` is a list because an agent can
+mount several skill trees at once, and because a subagent inherits its
+parent's trees on top of the one in its own workspace.
 
 Implementation note -- mutable container pattern:
 
@@ -40,7 +43,7 @@ Implementation note -- mutable container pattern:
 
 import os
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -57,6 +60,7 @@ class CwdState:
     project_root: str | None = None
     workspace: str | None = None
     team_workspace: str | None = None
+    skill_roots: list[str] = field(default_factory=list)
 
 
 _cwd_state: ContextVar[CwdState | None] = ContextVar("cwd_state", default=None)
@@ -182,6 +186,24 @@ def get_agent_history_root() -> str:
     return str((Path(home) / ".jiuwenswarm").expanduser().resolve())
 
 
+# ---- Skill roots: skill trees mounted for this agent ----------------------
+
+def get_skill_roots() -> list[str]:
+    """Get the skill tree roots mounted for the current agent context.
+
+    These are the directories a ``SkillUseRail`` loads ``SKILL.md`` files
+    from, i.e. the trees whose ``references/``, ``assets/`` and
+    ``scripts/`` an agent is expected to reach while running a skill.
+    Returns an empty list when the agent mounts no skill tree.
+    """
+    return list(_state().skill_roots)
+
+
+def set_skill_roots(paths: list[str]) -> None:
+    """Replace the skill tree roots for the current agent context."""
+    _state().skill_roots = [_resolve(p) for p in paths]
+
+
 # ---- Bulk initialization ---------------------------------------------------
 
 def init_cwd(
@@ -190,6 +212,7 @@ def init_cwd(
     *,
     workspace: str | None = None,
     team_workspace: str | None = None,
+    skill_roots: list[str] | None = None,
 ) -> None:
     """Initialize all CWD layers with a NEW CwdState instance.
 
@@ -206,6 +229,8 @@ def init_cwd(
             agents without a workspace directory.
         team_workspace: Team shared workspace root.  Optional -- only
             set when the agent belongs to a team with a shared workspace.
+        skill_roots: Skill tree roots this agent loads skills from.
+            Optional -- leave unset for agents that mount no skills.
     """
     resolved = _resolve(cwd)
     state = CwdState(
@@ -214,5 +239,6 @@ def init_cwd(
         project_root=_resolve(project_root) if project_root else resolved,
         workspace=_resolve(workspace) if workspace else None,
         team_workspace=_resolve(team_workspace) if team_workspace else None,
+        skill_roots=[_resolve(p) for p in (skill_roots or [])],
     )
     _cwd_state.set(state)

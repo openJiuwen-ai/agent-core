@@ -142,7 +142,7 @@ from openjiuwen.harness.resources.extension_resolver import (
 )
 from openjiuwen.harness.schema.build_context import BuildContext
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec, PluginSpec
-from openjiuwen.harness.workspace.workspace import Workspace
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
 # Events bridged to the inner ReActAgent.
 _BRIDGE_EVENTS = frozenset(
@@ -313,6 +313,7 @@ class DeepAgent(BaseAgent):
         self._active_interaction_round: Optional[ActiveInteractionRound] = None
         self._event_manager = EventManager()
         self._inherited_artifact_root: Optional[str] = None
+        self._inherited_skill_roots: List[str] = []
         self.goal_manager: Optional[GoalManager] = None
         self._interaction_output = OutputLeaseManager()
         self._interaction_supervisor_task: Optional[asyncio.Task[None]] = None
@@ -1210,6 +1211,25 @@ class DeepAgent(BaseAgent):
         )
         schedule_image_support_probe(config.model)
 
+    def _resolve_skill_roots(self) -> List[str]:
+        """Skill trees this agent may read from and execute scripts out of.
+
+        The ``skills`` node of this agent's own workspace, plus every tree
+        inherited from the agent that spawned it.  The inherited entries are
+        what make a delegated skill run possible at all: a subagent is given a
+        fresh workspace under ``sub_agents/<id>`` that contains no skills, so
+        the skill its parent just told it to run lives outside every root the
+        sandbox would otherwise derive for it.
+        """
+        roots: List[str] = []
+        workspace = self._deep_config.workspace if self._deep_config else None
+        if isinstance(workspace, Workspace):
+            skills_node = workspace.get_node_path(WorkspaceNode.SKILLS)
+            if skills_node is not None:
+                roots.append(str(skills_node))
+        roots.extend(self._inherited_skill_roots)
+        return list(dict.fromkeys(roots))
+
     def _apply_inherited_artifact_cwd(self) -> None:
         """Set cwd from ``_inherited_artifact_root`` for a reused subagent.
 
@@ -1227,6 +1247,7 @@ class DeepAgent(BaseAgent):
             self._inherited_artifact_root,
             project_root=self._inherited_artifact_root,
             workspace=init_root,
+            skill_roots=self._resolve_skill_roots(),
         )
 
     async def _ensure_initialized(self) -> None:
@@ -1248,11 +1269,13 @@ class DeepAgent(BaseAgent):
 
             workspace = self._deep_config.workspace
             workspace_root = (workspace.root_path if workspace else None) or os.getcwd()
+            skill_roots = self._resolve_skill_roots()
             if self._inherited_artifact_root:
                 init_cwd(
                     self._inherited_artifact_root,
                     project_root=self._inherited_artifact_root,
                     workspace=workspace_root,
+                    skill_roots=skill_roots,
                 )
             else:
                 # cwd and workspace are separate layers: the workspace holds
@@ -1262,7 +1285,12 @@ class DeepAgent(BaseAgent):
                 # keeping a private workspace).
                 cwd_root = self._deep_config.cwd or workspace_root
                 project_root = self._deep_config.project_root or cwd_root
-                init_cwd(cwd_root, project_root=project_root, workspace=workspace_root)
+                init_cwd(
+                    cwd_root,
+                    project_root=project_root,
+                    workspace=workspace_root,
+                    skill_roots=skill_roots,
+                )
 
         await self._register_pending_mcps()
 
@@ -1376,19 +1404,25 @@ class DeepAgent(BaseAgent):
         """React agent config. For testing only."""
         return self._react_agent.config
 
-    @staticmethod
-    def _bind_inherited_artifact_root(subagent: Any) -> Any:
+    def _bind_inherited_artifact_root(self, subagent: Any) -> Any:
         """Point subagent file writes at the parent's current artifact root.
 
         Prefer ``get_cwd()``: after a sibling subagent runs in the same Task,
         ambient ``get_workspace()`` may point at that sibling's ``sub_agents/``
         tree while cwd remains the shared artifact root.
+
+        The parent's skill trees ride along.  A skill that delegates part of
+        its work names its own absolute paths in the instructions it hands
+        the subagent, and those paths sit outside the subagent's workspace;
+        without the inherited roots every such read or script run is denied
+        by the sandbox and the delegated step silently produces nothing.
         """
         from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 
         artifact_root = get_cwd() or get_workspace()
         try:
             setattr(subagent, "_inherited_artifact_root", artifact_root)
+            setattr(subagent, "_inherited_skill_roots", self._resolve_skill_roots())
         except (AttributeError, TypeError):
             # Test mocks may return bare object(); real DeepAgent always accepts it.
             pass

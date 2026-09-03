@@ -1884,3 +1884,67 @@ async def test_create_subagent_writes_relative_files_to_inherited_artifact_root(
     sub2 = parent.create_subagent("worker", "sub_sess_2")
     assert sub2._inherited_artifact_root == str(artifact_root.resolve())
     assert "sub_agents" not in sub2._inherited_artifact_root
+
+
+@pytest.mark.asyncio
+async def test_create_subagent_inherits_parent_skill_roots(tmp_path: Path) -> None:
+    """A subagent keeps sandbox access to the skill tree its parent mounted.
+
+    A skill that delegates part of its work hands the subagent absolute paths
+    into its own directory.  The subagent's workspace is a fresh directory
+    under ``sub_agents/`` that contains no skills, so unless the parent's
+    skills tree is inherited every read of ``SKILL.md`` and every run of a
+    ``scripts/*.py`` is denied by the sandbox.
+    """
+    from openjiuwen.core.sys_operation.cwd import get_skill_roots, init_cwd
+    from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
+    from openjiuwen.harness.schema.config import SubAgentConfig
+
+    parent_ws = tmp_path / "workspace"
+    artifact_root = parent_ws / "projects"
+    skill_dir = parent_ws / "skills" / "sample-skill"
+    unrelated = tmp_path / "elsewhere"
+    for directory in (artifact_root, skill_dir, unrelated):
+        directory.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# sample", encoding="utf-8")
+
+    init_cwd(str(artifact_root), workspace=str(artifact_root))
+
+    parent = DeepAgent(AgentCard(name="parent", description="test")).configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            workspace=Workspace(root_path=str(parent_ws)),
+            auto_create_workspace=False,
+            enable_task_loop=False,
+            add_general_purpose_agent=False,
+            restrict_to_work_dir=True,
+            subagents=[
+                SubAgentConfig(
+                    agent_card=AgentCard(name="worker", description="worker"),
+                    system_prompt="do work",
+                )
+            ],
+        )
+    )
+    parent.set_react_agent(FakeReactAgent(), initialized=True)
+
+    sub = parent.create_subagent("worker", "sub_sess")
+    assert sub._inherited_skill_roots == [str(parent_ws / "skills")]
+
+    await sub.ensure_initialized()
+    # Own workspace tree first, then the inherited one.
+    assert [Path(p).resolve() for p in get_skill_roots()] == [
+        (parent_ws / "sub_agents" / "sub_sess" / "skills").resolve(),
+        (parent_ws / "skills").resolve(),
+    ]
+
+    # The sandbox now admits the skill tree and still refuses everything else.
+    fs_op = object.__new__(FsOperation)
+    fs_op._run_config = SimpleNamespace(
+        restrict_to_sandbox=True, sandbox_root=None
+    )
+    resolved = fs_op._resolve_path(str(skill_dir / "SKILL.md"))
+    assert resolved == (skill_dir / "SKILL.md").resolve()
+    with pytest.raises(Exception) as excinfo:
+        fs_op._resolve_path(str(unrelated / "secret.txt"))
+    assert "outside sandbox" in str(excinfo.value)
