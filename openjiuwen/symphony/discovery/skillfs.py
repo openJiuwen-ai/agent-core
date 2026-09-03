@@ -438,8 +438,9 @@ class SkillFS:
             for record in self._artifact.items
         }
 
-    def prompt_snapshot(self) -> SkillPromptSnapshot:
-        self._refresh()
+    def prompt_snapshot(self, *, refresh: bool = True) -> SkillPromptSnapshot:
+        if refresh:
+            self._refresh()
         documents = tuple(sorted(self._artifact.items, key=lambda item: (item.worker_id.casefold(), item.worker_id)))
         rendered = "\n".join(f"- {item.worker_id}: {' '.join(item.description.split())}" for item in documents)
         estimated = _estimate_tokens(rendered)
@@ -501,6 +502,7 @@ class SkillFS:
         *,
         case_insensitive: bool,
         fixed_strings: bool,
+        term_mode: bool = False,
     ) -> tuple[str, ...]:
         """Search one live scope using corpus statistics cached by inventory hash."""
 
@@ -517,7 +519,6 @@ class SkillFS:
                                 item.worker_id,
                                 item.name,
                                 item.description,
-                                self.read_body(item),
                             )
                             for item in self._artifact.items
                         )
@@ -528,13 +529,25 @@ class SkillFS:
                 else:
                     _LEXICAL_CACHE.move_to_end(cache_key)
             self._lexical_cache_key = cache_key
-        hits = self._lexical_index.search(
-            query,
-            keys=(record.worker_id for record in records),
-            case_insensitive=case_insensitive,
-            fixed_strings=fixed_strings,
+        keys = tuple(record.worker_id for record in records)
+        hits = (
+            self._lexical_index.search_terms(query, keys=keys)
+            if term_mode
+            else self._lexical_index.search(
+                query,
+                keys=keys,
+                case_insensitive=case_insensitive,
+                fixed_strings=fixed_strings,
+            )
         )
         return tuple(hit.key for hit in hits)
+
+    def missing_content_terms(self, query: str) -> tuple[str, ...]:
+        """Return natural query terms absent from the current metadata index."""
+
+        if self._lexical_index is None:
+            return ()
+        return self._lexical_index.missing_terms(query)
 
     def _refresh(self) -> None:
         inventory = inventory_from_records(self._records_provider())
@@ -574,8 +587,6 @@ class SkillFS:
         selected = [
             item for item in items if item.worker_id.casefold() in preferred or item.name.casefold() in preferred
         ]
-        selected_ids = {item.worker_id for item in selected}
-        selected.extend(item for item in items if item.worker_id not in selected_ids)
         return tuple(selected[: self._settings.max_list_entries])
 
 
