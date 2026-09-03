@@ -1977,18 +1977,12 @@ def test_a_task_may_ask_for_more_than_one_worker(tmp_path: Path) -> None:
     assert provider._spec_for(request, resumed=False).workers == 1      # not a number
 
 
-def test_a_card_builds_one_sandbox_per_evaluation_and_hands_each_back() -> None:
-    """A sandbox of its own for every evaluation, created and reclaimed here.
+def _sandbox_doubles():
+    """A card, a SysOperation and a gateway client, as fakes.
 
-    The isolation a scratch directory cannot give: a candidate that gets past
-    the AST gate and writes outside its own directory reaches only a container
-    about to be discarded. And since nothing else knows these containers exist
-    — AgentServer registered one card, not the dozens this makes — leaving one
-    behind is a leak nobody else can find, so the release is part of the same
-    call.
+    Only the four calls this seam makes are real here; what is under test is
+    how many containers get built and whether each one is handed back.
     """
-    from openjiuwen.rsi.artifact_rsi.program_opt import execution as execution_module
-
     built: list[str] = []
     released: list[tuple[str, str]] = []
 
@@ -2004,14 +1998,6 @@ def test_a_card_builds_one_sandbox_per_evaluation_and_hands_each_back() -> None:
         def model_copy(self, deep: bool = False) -> "_Card":
             return _Card()
 
-    class _Operation:
-        def __init__(self, card: object) -> None:
-            self.isolation_key_template = f"key-{card.gateway_config.isolation.custom_id}"
-            built.append(self.isolation_key_template)
-
-        def fs(self): return _Fs()
-        def shell(self): return _Shell()
-
     class _Fs:
         async def write_file(self, path, text, **kw):
             return type("R", (), {"code": 0, "message": "success"})()
@@ -2024,83 +2010,197 @@ def test_a_card_builds_one_sandbox_per_evaluation_and_hands_each_back() -> None:
             return type("R", (), {"data": type("D", (), {
                 "exit_code": 0, "stdout": "", "stderr": ""})()})()
 
+    class _Operation:
+        def __init__(self, card: object) -> None:
+            self.isolation_key_template = f"key-{card.gateway_config.isolation.custom_id}"
+            built.append(self.isolation_key_template)
+
+        def fs(self): return _Fs()
+        def shell(self): return _Shell()
+
     class _Client:
         @staticmethod
         async def release(key, on_stop="delete"):
             released.append((key, on_stop))
 
     import sys as _sys, types as _types
-    fake_core = _types.ModuleType("openjiuwen.core.sys_operation")
-    fake_core.SysOperation = _Operation
-    fake_config = _types.ModuleType("openjiuwen.core.sys_operation.config")
-    fake_config.ContainerScope = type("CS", (), {"CUSTOM": "custom"})
-    fake_gw = _types.ModuleType(
+    core = _types.ModuleType("openjiuwen.core.sys_operation")
+    core.SysOperation = _Operation
+    config = _types.ModuleType("openjiuwen.core.sys_operation.config")
+    config.ContainerScope = type("CS", (), {"CUSTOM": "custom"})
+    gateway = _types.ModuleType(
         "openjiuwen.core.sys_operation.sandbox.gateway.gateway_client")
-    fake_gw.SandboxGatewayClient = _Client
-    saved = {name: _sys.modules.get(name) for name in
-             (fake_core.__name__, fake_config.__name__, fake_gw.__name__)}
-    _sys.modules.update({fake_core.__name__: fake_core, fake_config.__name__: fake_config,
-                         fake_gw.__name__: fake_gw})
-    try:
-        async def drive() -> None:
-            loop = asyncio.get_running_loop()
-            execute = execution_module.execution_from_sandbox_card(_Card(), loop)
-            for _ in range(3):
-                await asyncio.to_thread(
-                    execute, {"candidate.py": "x = 1\n"}, ["python", "candidate.py"],
-                    {}, 30.0, "result.json")
+    gateway.SandboxGatewayClient = _Client
+    names = (core.__name__, config.__name__, gateway.__name__)
+    saved = {n: _sys.modules.get(n) for n in names}
+    _sys.modules.update(dict(zip(names, (core, config, gateway))))
 
-        asyncio.run(drive())
-    finally:
+    def restore() -> None:
         for name, module in saved.items():
             if module is None:
                 _sys.modules.pop(name, None)
             else:
                 _sys.modules[name] = module
 
-    assert len(built) == 3, f"expected one sandbox per evaluation, built {built}"
-    assert len(set(built)) == 3, f"the three evaluations shared a container: {built}"
-    # Every one of them handed back, under the key it was created with.
-    assert [key for key, _ in released] == built
-    assert {stop for _, stop in released} == {"delete"}
+    return _Card(), built, released, restore
 
 
-def test_a_card_beats_an_instance_and_packages_become_a_prelude(tmp_path: Path) -> None:
-    """A caller that supplied a card asked for the stricter thing, so the card
-    wins. And each of those containers starts empty, so what the run was
-    promised has to be installed into every one of them — with a shared
-    sandbox that happens once at run start and the prelude stays empty."""
+def test_one_sandbox_for_the_run_is_built_once_and_handed_back_once() -> None:
+    """The default: this provider builds the container instead of being handed
+    one, and owes exactly one release for it however the run ends."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import execution_from_sandbox_card
+
+    card, built, released, restore = _sandbox_doubles()
+    try:
+        async def drive() -> None:
+            lease = execution_from_sandbox_card(card, asyncio.get_running_loop())
+            for _ in range(3):
+                await asyncio.to_thread(
+                    lease.execute, {"candidate.py": "x = 1\n"},
+                    ["python", "candidate.py"], {}, 30.0, "result.json")
+            await lease.release()
+            await lease.release()          # idempotent: nothing left to hand back
+
+        asyncio.run(drive())
+    finally:
+        restore()
+
+    assert len(built) == 1, f"three evaluations built {len(built)} containers"
+    assert released == [(built[0], "delete")], released
+
+
+def test_a_sandbox_per_evaluation_is_built_and_dropped_each_time() -> None:
+    """The stricter setting: a candidate that gets past the AST gate and writes
+    outside its own directory reaches only a container about to be discarded."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import execution_from_sandbox_card
+
+    card, built, released, restore = _sandbox_doubles()
+    try:
+        async def drive() -> None:
+            lease = execution_from_sandbox_card(
+                card, asyncio.get_running_loop(), per_evaluation=True)
+            for _ in range(3):
+                await asyncio.to_thread(
+                    lease.execute, {"candidate.py": "x = 1\n"},
+                    ["python", "candidate.py"], {}, 30.0, "result.json")
+            await lease.release()
+
+        asyncio.run(drive())
+    finally:
+        restore()
+
+    assert len(set(built)) == 3, f"the evaluations shared a container: {built}"
+    assert [key for key, _ in released] == built, "one of them was never handed back"
+
+
+def test_a_card_beats_an_instance_and_only_the_strict_setting_reinstalls(
+    tmp_path: Path,
+) -> None:
+    """A caller that supplied a card asked this provider to own the container,
+    so the card wins over an instance.
+
+    Packages become a per-evaluation prelude only when each evaluation gets its
+    own container: with one container for the run, the pre-flight's own
+    `ensure` installs into it once and repeating that per evaluation would pay
+    for the same thing dozens of times.
+    """
     seen: dict[str, object] = {}
 
-    def recording(card, loop, prelude=()):
-        seen["card"], seen["prelude"] = card, prelude
-        return _local_execution
+    class _Lease:
+        execute = staticmethod(_local_execution)
 
-    provider = PuctProgramArtifactProvider(sys_operation=object(), sandbox_card="the-card")
-    request = _request(tmp_path)
-    _scorecard(Path(request.run_dir), packages=["numpy", "scipy==1.18.1"])
-    spec = provider._spec_for(request, resumed=False)
+        async def release(self) -> None:
+            pass
+
+    def recording(card, loop, prelude=(), per_evaluation=False):
+        seen.update(card=card, prelude=list(prelude), per_evaluation=per_evaluation)
+        return _Lease()
 
     from openjiuwen.rsi.artifact_rsi.program_opt import puct_provider as module
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), packages=["numpy", "scipy==1.18.1"])
+
     original = module.execution_from_sandbox_card
     module.execution_from_sandbox_card = recording
     try:
-        provider._execution_for(spec, loop=None)
+        shared = PuctProgramArtifactProvider(sys_operation=object(), sandbox_card="the-card")
+        execute, release = shared._execution_for(
+            shared._spec_for(request, resumed=False), loop=None)
+        assert seen["card"] == "the-card", "the instance was used even though a card was given"
+        assert seen["prelude"] == [], "the shared container reinstalled what ensure already did"
+        assert release is not None, "the provider built a container and owes it back"
+
+        strict = PuctProgramArtifactProvider(sandbox_card="the-card",
+                                             sandbox_per_evaluation=True)
+        strict._execution_for(strict._spec_for(request, resumed=False), loop=None)
+        assert seen["prelude"] == [["python", "-m", "pip", "install", "--no-input",
+                                    "--disable-pip-version-check", "numpy", "scipy==1.18.1"]]
     finally:
         module.execution_from_sandbox_card = original
 
-    assert seen["card"] == "the-card", "the instance was used even though a card was given"
-    assert list(seen["prelude"]) == [["python", "-m", "pip", "install", "--no-input",
-                                      "--disable-pip-version-check", "numpy", "scipy==1.18.1"]]
+    # An injected instance is somebody else's container: nothing to hand back.
+    _execute, release = PuctProgramArtifactProvider(
+        sys_operation=object())._execution_for(
+            PuctProgramArtifactProvider()._spec_for(request, resumed=False), loop=None)
+    assert release is None
 
-    # No packages, nothing to reinstall.
-    _scorecard(Path(request.run_dir))
-    module.execution_from_sandbox_card = recording
-    try:
-        provider._execution_for(provider._spec_for(request, resumed=False), loop=None)
-    finally:
-        module.execution_from_sandbox_card = original
-    assert list(seen["prelude"]) == []
+
+def test_a_run_hands_its_sandbox_back_however_it_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The release belongs to the run, not to the lease's own tests.
+
+    Calling `lease.release()` directly proves the lease can let go; it says
+    nothing about whether `run` ever asks it to. Driven through `provider.run`
+    twice — once finishing, once crashing — because a container held by a
+    search that died is exactly the one nobody comes back for.
+    """
+    handed_back: list[str] = []
+
+    class _Lease:
+        execute = staticmethod(_local_execution)
+
+        async def release(self) -> None:
+            handed_back.append("released")
+
+    def recording(card, loop, prelude=(), per_evaluation=False):
+        return _Lease()
+
+    class _Finishes:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec, emit, should_stop) -> None:
+            emit(events.seeded(0, 0.25, code_hash="sha256:" + "a" * 64))
+            emit(events.search_finished("succeeded", 0, 1))
+
+    class _Crashes:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec, emit, should_stop) -> None:
+            raise RuntimeError("the search died")
+
+    from openjiuwen.rsi.artifact_rsi.program_opt import puct_provider as module
+
+    for engine, expected in ((_Finishes, "completed"), (_Crashes, "failed")):
+        handed_back.clear()
+        _no_probe(monkeypatch)
+        monkeypatch.setattr(
+            "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine", engine)
+        original = module.execution_from_sandbox_card
+        module.execution_from_sandbox_card = recording
+        try:
+            provider = PuctProgramArtifactProvider(sandbox_card="the-card")
+            request = _request(tmp_path)
+            _scorecard(Path(request.run_dir))
+            result = asyncio.run(provider.run(request))
+        finally:
+            module.execution_from_sandbox_card = original
+
+        assert result.status == expected
+        assert handed_back == ["released"], (
+            f"a run that {expected} kept its container: {handed_back}")
 
 
 # -- task-owned prompt wording ---------------------------------------------------

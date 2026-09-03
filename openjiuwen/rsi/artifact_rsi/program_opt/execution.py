@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -169,9 +170,18 @@ def execution_from_sys_operation(sys_operation: Any, loop: Any) -> EvaluationExe
 
 
 def execution_from_sandbox_card(
-    card: Any, loop: Any, prelude: Sequence[Sequence[str]] = (),
-) -> EvaluationExecution:
-    """A sandbox of its own for every evaluation, built and reclaimed here.
+    card: Any,
+    loop: Any,
+    prelude: Sequence[Sequence[str]] = (),
+    per_evaluation: bool = False,
+) -> "SandboxLease":
+    """Sandboxes built from a card by this module, and reclaimed by it.
+
+    Two lifetimes, and the default is the cheap one. **One per run** builds a
+    container on the first evaluation and hands it back when the run ends —
+    what the shared-instance path gives, except that nothing outside had to
+    create it. **One per evaluation** (`per_evaluation=True`) builds and
+    discards a container each time.
 
     The other factory reuses one container for a whole run; this one gives each
     evaluation a container nothing else has touched. What that buys is the only
@@ -195,12 +205,59 @@ def execution_from_sandbox_card(
     """
     if card is None:
         raise ExecutionUnavailable(
-            "per-evaluation sandboxes need a SysOperationCard (mode=sandbox) to build "
-            "them from: it carries the gateway address, the credentials and the "
-            "isolation strategy, none of which this provider may invent"
+            "building sandboxes needs a SysOperationCard (mode=sandbox): it carries the "
+            "gateway address, the credentials and the isolation strategy, none of which "
+            "this provider may invent"
         )
 
+    lease = SandboxLease(card, loop, tuple(prelude), per_evaluation)
+    return lease
+
+
+@dataclass
+class SandboxLease:
+    """What this module built, and what it owes back.
+
+    The pair travels together on purpose: a caller that gets an execution out
+    of a card also gets the one call that returns what the card created. The
+    shared-instance path has no such pair, because there the container is
+    AgentServer's and releasing it here would be reclaiming somebody else's.
+    """
+
+    card: Any
+    loop: Any
+    prelude: Sequence[Sequence[str]]
+    per_evaluation: bool
+    _held: Any = None
+    _held_identity: str = ""
+    _lock: Any = None
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+
+    async def _operation(self) -> tuple[Any, str, bool]:
+        """The sandbox this evaluation runs in, and whether it is ours to drop."""
+        from openjiuwen.core.sys_operation import SysOperation
+
+        if self.per_evaluation:
+            fresh, identity = _card_for_one_evaluation(self.card)
+            return SysOperation(fresh), identity, True
+        with self._lock:
+            if self._held is None:
+                fresh, identity = _card_for_one_evaluation(self.card)
+                self._held, self._held_identity = SysOperation(fresh), identity
+            return self._held, self._held_identity, False
+
+    async def release(self) -> None:
+        """Hand back whatever is still held. Safe to call more than once."""
+        with self._lock:
+            held, identity = self._held, self._held_identity
+            self._held, self._held_identity = None, ""
+        if held is not None:
+            await _release(held, identity, self.card)
+
     def execute(
+        self,
         files: Mapping[str, str],
         command: Sequence[str],
         env: Mapping[str, str],
@@ -208,20 +265,21 @@ def execution_from_sandbox_card(
         result_file: Optional[str],
     ) -> ExecutionOutcome:
         async def run() -> ExecutionOutcome:
-            from openjiuwen.core.sys_operation import SysOperation
-
-            fresh, key = _card_for_one_evaluation(card)
-            operation = SysOperation(fresh)
+            operation, identity, ours = await self._operation()
             try:
                 return await _stage_and_run(
-                    operation, files, command, env, timeout, result_file, prelude)
+                    operation, files, command, env, timeout, result_file,
+                    self.prelude if self.per_evaluation else (),
+                )
             finally:
-                await _release(operation, key, card)
+                # Only the per-evaluation container is dropped here; the
+                # per-run one is held until `release`, which the caller owes
+                # once the search is over.
+                if ours:
+                    await _release(operation, identity, self.card)
 
-        future = asyncio.run_coroutine_threadsafe(run(), loop)
+        future = asyncio.run_coroutine_threadsafe(run(), self.loop)
         return future.result(timeout + 120)
-
-    return execute
 
 
 def _card_for_one_evaluation(card: Any) -> tuple[Any, str]:
