@@ -199,7 +199,7 @@ def script_domain(
     # than a run whose every reply is unreadable.
     from .reply_format import format_for
 
-    _reply_instructions = format_for(reply_format or None).instructions
+    _reply_shape = format_for(reply_format or None)
 
     def prompt(program: Program, best_score: Optional[float] = None) -> str:
         return mutation_prompt(
@@ -211,7 +211,7 @@ def script_domain(
             best_score=best_score,
             recent=(),
             script_contract=contract,
-            reply_format=_reply_instructions,
+            reply_format=_reply_shape,
             feedback=program.error,
             template=mutation_template,
         )

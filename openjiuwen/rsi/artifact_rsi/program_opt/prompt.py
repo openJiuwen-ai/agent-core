@@ -149,10 +149,11 @@ def _render(template: str, slots: dict) -> str:
     return string.Template(template).safe_substitute(slots)
 
 
-def _format_instructions_default() -> str:
+def _default_format():
+    """The `files` protocol, for callers that did not name one."""
     from .reply_format import format_for
 
-    return format_for(None).instructions
+    return format_for(None)
 
 
 def mutation_prompt(
@@ -165,7 +166,7 @@ def mutation_prompt(
     best_score: Optional[float],
     recent: Sequence[str] = (),
     script_contract: str = "",
-    reply_format: str = "",
+    reply_format: Any = None,
     feedback: str = "",
     template: str = "",
 ) -> str:
@@ -178,13 +179,17 @@ def mutation_prompt(
     program is rendered, what the environment offers. A task changes the
     prose around the facts, not the facts.
     """
+    _shape = reply_format if reply_format is not None else _default_format()
     if script_contract:
         # A scripted search's contract is whatever its evaluator calls, and the
         # evaluator is the only place that knows.
         slots = dict(
             statement=statement.strip() or "Make the evaluator report a higher score.",
             contract=script_contract.strip(),
-            parent_code=render_tree(parent_code, entrypoint),
+            # Rendered by the protocol that will read the answer: the
+            # instructions say "like the listing above", so showing one shape
+            # and asking for another is two instructions in conflict.
+            parent_code=_shape.render(parent_code, entrypoint),
             parent_score=_score(parent_score),
             best_score=_score(best_score),
             feedback=_feedback(feedback),
@@ -193,7 +198,7 @@ def mutation_prompt(
             how_to_change=_HOW_TO_CHANGE,
             # The protocol's own sentences, so the prompt and the reader on the
             # other side are never two independent statements of one thing.
-            reply_format=reply_format or _format_instructions_default(),
+            reply_format=_shape.instructions,
         )
         if template.strip():
             return _render(template, slots)

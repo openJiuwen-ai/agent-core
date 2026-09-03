@@ -2221,6 +2221,80 @@ class PuctTreeStub:
     candidate_limit = None
 
 
+def test_the_prompt_shows_the_parent_in_the_shape_it_asks_for() -> None:
+    """The listing is part of the protocol, not decoration.
+
+    The instructions say to answer "exactly like the listing above", so a
+    prompt that renders the parent as a labelled fence while asking for
+    `<PROGRAM>` tags is two instructions in conflict — and the demonstration
+    wins. Measured on a real `tagged` run before this: eight replies in a row
+    came back as labelled fences, the tagged reader saw none of them, and
+    every expansion was recorded as an empty draw with the run finishing on
+    its seed.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import mutation_prompt
+    from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import format_for
+
+    def rendered(name: str) -> str:
+        return mutation_prompt(
+            statement="make it better", scorecard={"criteria": []},
+            parent_code="def solve():\n    return 1\n", parent_score=0.4,
+            best_score=0.5, recent=(), script_contract="define solve()",
+            reply_format=format_for(name), feedback="", template="",
+        )
+
+    files_prompt, tagged_prompt = rendered("files"), rendered("tagged")
+
+    assert "```python name=candidate.py" in files_prompt
+    assert "<PROGRAM>" not in files_prompt
+
+    assert "<PROGRAM>\ndef solve():" in tagged_prompt
+    assert "name=candidate.py" not in tagged_prompt
+
+
+def test_the_engine_tells_the_domain_which_protocol_to_render() -> None:
+    """`mutation_prompt` honouring the protocol is half the wire; the domain
+    that builds the prompt has to be told which one, by the engine.
+
+    It was not. `script_domain` grew the parameter and the engine never passed
+    it, so a `tagged` run still rendered its parent as a labelled fence and the
+    model still answered in fences — eight expansions, all read as empty. A
+    test that calls `script_domain` itself passes either way; this one records
+    what the engine hands its domain factory, which is the thing that was
+    wrong.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import ScriptError
+
+    seen: dict[str, object] = {}
+
+    def recording_factory(**kwargs: object) -> object:
+        seen.update(kwargs)
+        # The engine turns this into a refusal and returns; the arguments it
+        # was called with are the whole of what is under test.
+        raise ScriptError("stop here")
+
+    engine = PuctEngine(completion_factory=lambda *a, **k: (lambda p, **kw: ""),
+                        evaluation_execution=_local_execution,
+                        domain_factory=recording_factory)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=1,
+        scorecard_hash="sha256:x",
+        scorecard={"criteria": [{"id": "score", "normalize": {"kind": "identity"},
+                                 "measure": {"kind": "custom_script"}}]},
+        statement="", baseline_code="x = 1\n", script='"""doc"""\n',
+        reply_format="tagged",
+    )
+
+    engine.run(spec, lambda event: None, lambda: False)
+
+    assert seen.get("reply_format") == "tagged", (
+        "the engine built its domain without saying which protocol the reply "
+        f"will be read with; it passed {sorted(seen)}"
+    )
+
+
 def test_an_unknown_placeholder_is_refused_by_name_at_load(tmp_path: Path) -> None:
     """`safe_substitute` would leave `${statment}` in the prompt as literal
     text, and the model would optimise against a prompt with a hole in it for

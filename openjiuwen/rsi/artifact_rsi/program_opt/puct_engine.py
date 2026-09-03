@@ -245,6 +245,10 @@ class PuctEngine:
                 baseline_code=spec.baseline_code,
                 entrypoint=spec.entrypoint,
                 candidate_timeout=spec.candidate_timeout_seconds,
+                reply_format=spec.reply_format,
+                # The domain builds the mutation prompt, so it needs the
+                # protocol the reply will be read with — the prompt has to show
+                # the parent in the shape it is asking for.
                 baseline=baseline,
                 mutation_template=spec.mutation_template,
             )

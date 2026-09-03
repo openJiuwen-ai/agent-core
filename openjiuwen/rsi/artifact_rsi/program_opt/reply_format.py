@@ -52,13 +52,26 @@ Parse = Callable[[str, Mapping[str, str], str], Tuple[Dict[str, str], str]]
 
 @dataclass(frozen=True)
 class ReplyFormat:
-    """One output protocol: what the prompt asks for, and what reads it back."""
+    """One output protocol: what the prompt asks for, what shows it, and what
+    reads it back.
+
+    The listing is part of the protocol, not decoration. The instructions say
+    to answer like the program above, so a prompt that displays the parent in
+    one shape while asking for another is two instructions in conflict — and
+    the demonstration wins. Measured: a `tagged` run whose parent was still
+    rendered as a labelled fence got eight replies in a row as labelled
+    fences, none of which the tagged reader could see, and every expansion was
+    recorded as an empty draw.
+    """
 
     name: str
     #: The prompt section that states the protocol. Rendered into the mutation
     #: prompt through the ``${reply_format}`` slot — the template's only way to
     #: tell the model how to answer, and therefore a required slot.
     instructions: str
+    #: ``(code, entrypoint) -> str``: the parent program, in this protocol's
+    #: own shape, for the ``${parent_code}`` slot.
+    render: Callable[[str, str], str]
     parse: Parse
     #: Whether a reply proposed anything at all. Separate from `parse` because
     #: merging nothing onto the parent yields the parent — a valid program that
@@ -98,6 +111,15 @@ _TAGGED_INSTRUCTIONS = """Return the complete program between tags, and one sent
    patch or a fragment."""
 
 
+def _render_tagged(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
+    """The parent between the same tags the reply is asked for."""
+    from .program import files_of
+
+    files = files_of(code, entrypoint)
+    body = files.get(entrypoint) or next(iter(files.values()), "")
+    return f"<PROGRAM>\n{body.strip()}\n</PROGRAM>"
+
+
 def _parse_tagged(
     reply: str, parent: Mapping[str, str], entrypoint: str = DEFAULT_ENTRYPOINT,
 ) -> Tuple[Dict[str, str], str]:
@@ -127,16 +149,25 @@ def _tagged_carries_program(reply: str) -> bool:
     return bool(match and match.group(1).strip())
 
 
+def _render_files(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
+    """Every file in its own labelled block — the shape the reply is asked for."""
+    from .prompt import render_tree
+
+    return render_tree(code, entrypoint)
+
+
 _FORMATS: Dict[str, ReplyFormat] = {
     "files": ReplyFormat(
         name="files",
         instructions=_FILES_INSTRUCTIONS,
+        render=_render_files,
         parse=extract_files,
         carries_program=reply_carries_program,
     ),
     "tagged": ReplyFormat(
         name="tagged",
         instructions=_TAGGED_INSTRUCTIONS,
+        render=_render_tagged,
         parse=_parse_tagged,
         carries_program=_tagged_carries_program,
     ),
