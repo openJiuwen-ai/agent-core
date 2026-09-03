@@ -40,6 +40,7 @@ import math
 import re
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, packages_distributions, version
+from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 #: Wide enough for the benchmark, and no wider. Upstream ships no gate at all --
@@ -415,7 +416,7 @@ def _summary_for(
         return ""
     ordered = sorted(changed, key=lambda path: (path != entrypoint, path))
     for path in ordered:
-        summary = _summary_of(files.get(path, ""))
+        summary = _summary_of(files.get(path, ""), path)
         if summary:
             return summary
     return "changed: " + ", ".join(ordered[:5]) + (", …" if len(ordered) > 5 else "")
@@ -481,7 +482,107 @@ def _path_above(reply: str, start: int) -> str:
     return match.group(1) if match else ""
 
 
-def _summary_of(code: str) -> str:
+#: What a fenced block is labelled with, per suffix. Only for the prompt's
+#: benefit — the parser reads the `name=` path and ignores the label entirely
+#: (`_FENCE_PATH`) — but the listing is the worked example the reply is asked
+#: to copy, and a JavaScript program shown as ```python is the prompt telling
+#: the model two different things about what it is working on.
+_FENCE_LANGUAGES = {
+    ".py": "python", ".js": "javascript", ".mjs": "javascript", ".jsx": "javascript",
+    ".ts": "typescript", ".tsx": "typescript", ".sh": "bash", ".bash": "bash",
+    ".rb": "ruby", ".pl": "perl", ".lua": "lua", ".r": "r", ".jl": "julia",
+    ".m": "matlab", ".go": "go", ".rs": "rust", ".java": "java", ".kt": "kotlin",
+    ".scala": "scala", ".swift": "swift", ".c": "c", ".h": "c", ".cc": "cpp",
+    ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".cs": "csharp", ".f": "fortran",
+    ".f90": "fortran", ".sql": "sql", ".json": "json", ".yaml": "yaml",
+    ".yml": "yaml", ".toml": "toml", ".md": "markdown", ".txt": "text",
+    ".html": "html", ".css": "css",
+}
+
+
+def fence_language(path: str) -> str:
+    """The markdown label for this file's blocks, or "" for one we do not know.
+
+    An empty label is a valid fence, which is the right answer for an unknown
+    suffix: guessing wrong states something false about the program, and
+    stating nothing costs the model only the hint.
+    """
+    return _FENCE_LANGUAGES.get(PurePosixPath(path).suffix.lower(), "")
+
+
+def is_python(path: str) -> bool:
+    """Whether this file is the one language this side can reason about.
+
+    The AST gate, the import list, the candidate-runtime probe and the shim
+    are all Python facts, and each of them was once applied to every program
+    regardless. One spelling of the question, so they cannot drift apart.
+    """
+    return PurePosixPath(path).suffix.lower() == ".py"
+
+
+#: How a one-line comment starts, across the languages a candidate or an
+#: evaluator might be written in. Where the docstring's two jobs go when there
+#: is no docstring: the sentence naming an edit, and an evaluator's statement
+#: of what a candidate must provide.
+_COMMENT_MARKERS = ("###", "//", "--", "#", "%", ";;", ";", "!", "/*", "*")
+
+
+def leading_comment_block(code: str) -> str:
+    """The whole comment block a file opens with, markers stripped.
+
+    The Python side reads a module docstring for two things: the sentence
+    naming an edit, and the evaluator's statement of what a candidate must
+    provide. A file in another language has neither, and the leading comment is
+    where both are written by convention in every language that has one.
+    """
+    lines: list[str] = []
+    for raw in code.splitlines():
+        line = raw.strip()
+        if line.startswith("#!"):
+            continue
+        if not line:
+            if lines:
+                break  # a blank line ends the header; the code below is not it
+            continue
+        text = _uncomment(line)
+        if text is None:
+            break
+        lines.append(text)
+    return "\n".join(lines).strip()
+
+
+def _uncomment(line: str) -> Optional[str]:
+    """One comment line without its marker, or None if it is not a comment."""
+    for marker in _COMMENT_MARKERS:
+        if line.startswith(marker):
+            return line[len(marker):].strip(" \t*/-=#").strip()
+    return None
+
+
+def _leading_comment(code: str) -> str:
+    """The first comment line of a file we cannot parse.
+
+    The Python path reads the module docstring, which is where the prompt asks
+    for the change summary; a program in another language has no docstring and
+    would leave every node in the tree labelled "changed: candidate.js". Every
+    language has a comment, so the prompt asks for the summary on the first
+    line and this reads it back — the marker differs, the convention does not.
+    """
+    for raw in code.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#!"):  # a shebang is not a sentence about the edit
+            continue
+        text = _uncomment(line)
+        if text is None:
+            return ""  # code before any comment: nothing was said
+        if text:
+            return text[:200]
+    return ""
+
+
+def _summary_of(code: str, path: str = "") -> str:
     """The one line the reply says about its own edit.
 
     The module docstring is where the prompt asks for it, and where most
@@ -491,11 +592,22 @@ def _summary_of(code: str) -> str:
     leaving the contract's `changes[].summary` as "changed: candidate.py".
     So the first definition's docstring is read as a fallback: it is the same
     sentence, one indentation level down.
+
+    A program in another language has neither, and is asked for the sentence as
+    its first comment instead. Decided by the path rather than by whether the
+    text happens to compile: a shell script whose first two lines are comments
+    and whose third is ``x=1`` parses as Python perfectly well, and would then
+    be searched for a docstring it can never have.
     """
+    if path and not is_python(path):
+        return _leading_comment(code)
     try:
         parsed = ast.parse(code)
     except SyntaxError:
-        return ""
+        # Not Python — or Python that does not compile, in which case there is
+        # no docstring to find either and the first comment is as good a
+        # sentence as anything.
+        return _leading_comment(code)
     doc = ast.get_docstring(parsed)
     if not doc:
         for node in parsed.body:

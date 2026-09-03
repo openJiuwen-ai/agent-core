@@ -79,6 +79,11 @@ class RunSpec:
     #: drafting model. Frozen with the goal: a search that could rewrite what
     #: measures it would learn to do that instead of getting better.
     script: str = ""
+    #: What that evaluator is written as, and how it is run. Empty command means
+    #: the Python default, which is the only one this side knows how to stage a
+    #: shim for; a card whose evaluator is another language names both.
+    evaluator_file: str = "evaluate.py"
+    evaluator_command: tuple[str, ...] = ()
     #: Packages the candidates need that this runtime does not have. Worked out
     #: by the drafting agent from the task and installed before anything runs —
     #: the person who typed "bring the error down" has no way to know a boosting library

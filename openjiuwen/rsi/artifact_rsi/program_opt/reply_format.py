@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Callable, Dict, Mapping, Tuple
 
 from .program import (
     DEFAULT_ENTRYPOINT,
     extract_files,
     extract_program,
+    fence_language,
     reply_carries_program,
 )
 
@@ -65,10 +67,14 @@ class ReplyFormat:
     """
 
     name: str
-    #: The prompt section that states the protocol. Rendered into the mutation
-    #: prompt through the ``${reply_format}`` slot — the template's only way to
-    #: tell the model how to answer, and therefore a required slot.
-    instructions: str
+    #: ``(entrypoint) -> str``: the prompt section that states the protocol.
+    #: Rendered into the mutation prompt through the ``${reply_format}`` slot —
+    #: the template's only way to tell the model how to answer, and therefore a
+    #: required slot. A function of the entrypoint because the worked example
+    #: in it has to be in the program's own language: an instruction that shows
+    #: ```python to a program written in Rust is the prompt contradicting the
+    #: listing it just told the model to copy.
+    instructions: Callable[[str], str]
     #: ``(code, entrypoint) -> str``: the parent program, in this protocol's
     #: own shape, for the ``${parent_code}`` slot.
     render: Callable[[str, str], str]
@@ -90,17 +96,20 @@ class ReplyFormat:
 
 # --- files: whole files, one fenced block each -------------------------------
 
-_FILES_INSTRUCTIONS = """Output **only the files you changed**, each as its own fenced block labelled
+def _files_instructions(entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
+    """The `files` protocol, with its example in the program's own language."""
+    example = f"path/to/file{PurePosixPath(entrypoint).suffix}"
+    return f"""Output **only the files you changed**, each as its own fenced block labelled
 with its path, exactly like the listing above:
 
-   ```python name=path/to/file.py
+   ```{fence_language(entrypoint)} name={example}
    ...the complete new contents of that file...
    ```
 
    A file you do not output is kept as it is. Every block you do output replaces
    that whole file, so give complete contents — never a patch or a fragment.
    A path that is not in the listing creates a new file. To remove one, put
-   `DELETE path/to/file.py` on a line of its own."""
+   `DELETE {example}` on a line of its own."""
 
 
 # --- tagged: one program between tags, summary beside it ---------------------
@@ -108,11 +117,14 @@ with its path, exactly like the listing above:
 _PROGRAM_TAG = re.compile(r"<PROGRAM>(.*?)</PROGRAM>", re.DOTALL | re.IGNORECASE)
 _SUMMARY_TAG = re.compile(r"<CHANGE_SUMMARY>(.*?)</CHANGE_SUMMARY>", re.DOTALL | re.IGNORECASE)
 
-_TAGGED_INSTRUCTIONS = """Return the complete program between tags, and one sentence about what you
+def _tagged_instructions(entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
+    """The `tagged` protocol. Upstream's wording, with the one word that named
+    a language replaced by the file it actually writes."""
+    return f"""Return the complete program between tags, and one sentence about what you
    changed beside it:
 
    <PROGRAM>
-   ...the complete Python source...
+   ...the complete source of {entrypoint}...
    </PROGRAM>
    <CHANGE_SUMMARY>one concise sentence</CHANGE_SUMMARY>
 
@@ -168,14 +180,14 @@ def _render_files(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
 _FORMATS: Dict[str, ReplyFormat] = {
     "files": ReplyFormat(
         name="files",
-        instructions=_FILES_INSTRUCTIONS,
+        instructions=_files_instructions,
         render=_render_files,
         parse=extract_files,
         carries_program=reply_carries_program,
     ),
     "tagged": ReplyFormat(
         name="tagged",
-        instructions=_TAGGED_INSTRUCTIONS,
+        instructions=_tagged_instructions,
         render=_render_tagged,
         parse=_parse_tagged,
         multi_file=False,

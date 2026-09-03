@@ -55,6 +55,7 @@ from .program import (
     bundle,
     edits_an_existing_file,
     files_of,
+    is_python,
     read_promise,
 )
 from .prompt import repair_prompt, with_promise_request
@@ -245,6 +246,8 @@ class PuctEngine:
                 baseline_code=spec.baseline_code,
                 entrypoint=spec.entrypoint,
                 candidate_timeout=spec.candidate_timeout_seconds,
+                evaluator_file=spec.evaluator_file,
+                evaluator_command=spec.evaluator_command,
                 reply_format=spec.reply_format,
                 # The domain builds the mutation prompt, so it needs the
                 # protocol the reply will be read with — the prompt has to show
@@ -941,8 +944,15 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
         wanted = validate_names(spec.packages or [])
     except ProvisionError as error:
         raise _Refusal(str(error)) from error
-    names = sorted({*CANDIDATE_RUNTIME, *(import_name(package) for package in wanted)})
-    if probe_imports(names, execute) is not None:
+    # The runtime is a Python fact: `CANDIDATE_RUNTIME` is what the AST gate
+    # lets a *Python* candidate import, and probing it means running an
+    # interpreter in the execution environment. A run whose program is Rust
+    # neither needs numpy nor has any reason to require that Python exists
+    # there at all — this probe refusing such a run was the last thing pinning
+    # the search to one language.
+    runtime = CANDIDATE_RUNTIME if is_python(spec.entrypoint) else ()
+    names = sorted({*runtime, *(import_name(package) for package in wanted)})
+    if names and probe_imports(names, execute) is not None:
         if wanted:
             # Refused rather than warned about: a run whose candidates were
             # promised a library and did not get it fails every expansion with
@@ -953,11 +963,11 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
                 raise _Refusal(str(error)) from error
             if installed:
                 log.info("run %s provisioned %s", spec.search_id, ", ".join(installed))
-        failure = probe_imports(CANDIDATE_RUNTIME, execute)
+        failure = probe_imports(runtime, execute) if runtime else None
         if failure is not None:
             raise _Refusal(
                 f"the execution environment is missing part of the candidate runtime "
-                f"({', '.join(CANDIDATE_RUNTIME)}): {failure}. The AST gate lets "
+                f"({', '.join(runtime)}): {failure}. The AST gate lets "
                 "candidates import these, so without them every candidate fails"
             )
 

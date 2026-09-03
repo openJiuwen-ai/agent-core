@@ -66,7 +66,7 @@ from typing import Any, Dict, Mapping, MutableMapping, Optional, Sequence, Tuple
 from .domain import Domain
 from .events import finite as _finite
 from .logging_config import get_logger
-from .program import Program, files_of
+from .program import Program, files_of, is_python, leading_comment_block
 from .prompt import mutation_prompt
 from .execution import EvaluationExecution
 from .scorecard import SCORE_KEY, evaluate_constraints, score_candidate
@@ -89,6 +89,11 @@ CANDIDATE_FILE = "candidate.py"
 EVALUATOR_FILE = "evaluate.py"
 _SHIM_FILE = "_entry.py"
 
+#: How the evaluator is run when the task does not say. The shim exists for the
+#: reason below; a task whose evaluator is not Python names its own command and
+#: no shim is staged.
+DEFAULT_EVALUATOR_COMMAND = ("python", "-I", "_entry.py")
+
 #: Why there is a shim at all: the sandbox runs the interpreter with ``-I``,
 #: which since 3.11 implies ``-P`` — the script's own directory is *not* put on
 #: ``sys.path``. So the most natural line an evaluator can contain,
@@ -105,6 +110,35 @@ class ScriptError(RuntimeError):
     """The evaluator could not be run at all, which is a run-level fault."""
 
 
+def _evaluator_run(
+    evaluator_file: str, evaluator_command: Sequence[str],
+) -> Tuple[str, Tuple[str, ...]]:
+    """Settle what the evaluator is called and how it is run, or refuse now.
+
+    Refusing here rather than at the first evaluation is the whole point: the
+    two failures this catches — an evaluator name that escapes the scratch
+    directory, and a non-Python evaluator with no command to run it by — are
+    both properties of the card, knowable before a single candidate is drawn.
+    The second one, left to run, reaches the sandbox as the Python shim calling
+    `runpy` on a file no Python can read, which reads as a broken evaluator
+    rather than as a card that forgot a line.
+    """
+    from agentdescent.filetree import TreeError, safe_relpath
+
+    try:
+        name = safe_relpath(evaluator_file or EVALUATOR_FILE)
+    except TreeError as error:
+        raise ScriptError(f"the evaluator's filename is not usable: {error}") from error
+    command = tuple(str(part) for part in evaluator_command if str(part))
+    if not command and not is_python(name):
+        raise ScriptError(
+            f"this scorecard's evaluator is {name!r}, which is not Python, and it does "
+            "not say how to run it: add \"evaluator_command\" to the scorecard, e.g. "
+            f'["node", "{name}"]'
+        )
+    return name, command
+
+
 def script_domain(
     *,
     scorecard: Mapping[str, Any],
@@ -114,6 +148,8 @@ def script_domain(
     baseline_code: str = "",
     entrypoint: str = CANDIDATE_FILE,
     candidate_timeout: float = 120.0,
+    evaluator_file: str = EVALUATOR_FILE,
+    evaluator_command: Sequence[str] = (),
     reply_format: str = "",
     baseline: Optional[MutableMapping[str, float]] = None,
     mutation_template: str = "",
@@ -133,13 +169,15 @@ def script_domain(
     _seed = int(_split.get("seed") or 0)
     if not script.strip():
         raise ScriptError("this scorecard says it is scored by an evaluator script, but the script is empty")
+    evaluator_file, evaluator_command = _evaluator_run(evaluator_file, evaluator_command)
 
     def evaluate(code: str, shards: Sequence[int]) -> Tuple[bool, Dict[str, Any], str]:
         try:
             payload = _run_evaluator(
                 code, script, cases_for(shards, _total, _seed),
                 execute=execute, timeout=candidate_timeout,
-                entrypoint=entrypoint,
+                entrypoint=entrypoint, evaluator_file=evaluator_file,
+                evaluator_command=tuple(evaluator_command),
             )
         except ScriptError:
             # A broken evaluator is not a bad candidate. Raised so the run
@@ -194,7 +232,7 @@ def script_domain(
             return 0.0
         return max(0.0, min(1.0, float(value)))
 
-    contract = _contract_of(script)
+    contract = _contract_of(script, evaluator_file)
     # Resolved once, and by name: an unknown protocol is a refusal here rather
     # than a run whose every reply is unreadable.
     from .reply_format import format_for
@@ -232,7 +270,7 @@ def script_domain(
     )
 
 
-def _contract_of(script: str) -> str:
+def _contract_of(script: str, evaluator_file: str = EVALUATOR_FILE) -> str:
     """What the evaluator requires of a candidate, in the evaluator's words.
 
     The module docstring, because that is where the drafting guidance tells the
@@ -241,15 +279,23 @@ def _contract_of(script: str) -> str:
     that has read the answer key optimises for reciting it; the docstring shows
     the contract and keeps the answers out of the prompt.
 
-    A script with no docstring falls back to its head — a wrong contract is a
+    An evaluator in another language has no docstring and states the same thing
+    in the comment block it opens with, which is read instead — same convention,
+    same reason to prefer it to the whole file.
+
+    Either one missing falls back to the script's head — a wrong contract is a
     zero on every candidate, which is worse than a leaky prompt.
     """
     import ast
 
-    try:
-        doc = ast.get_docstring(ast.parse(script))
-    except SyntaxError:
-        doc = None
+    doc = None
+    if is_python(evaluator_file):
+        try:
+            doc = ast.get_docstring(ast.parse(script))
+        except SyntaxError:
+            doc = None
+    else:
+        doc = leading_comment_block(script)
     if doc and doc.strip():
         return doc.strip()
     return "\n".join(script.splitlines()[:40])
@@ -263,6 +309,8 @@ def _run_evaluator(
     execute: EvaluationExecution,
     timeout: float,
     entrypoint: str = CANDIDATE_FILE,
+    evaluator_file: str = EVALUATOR_FILE,
+    evaluator_command: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Materialise both programs in a throwaway directory and read the result.
 
@@ -276,8 +324,15 @@ def _run_evaluator(
     # scratch directory exists is the execution's business — agent-core's own
     # sandbox stages it behind the gateway.
     files = dict(files_of(code, entrypoint))
-    files[EVALUATOR_FILE] = script
-    files[_SHIM_FILE] = _SHIM.format(evaluator=EVALUATOR_FILE)
+    files[evaluator_file] = script
+    command = tuple(evaluator_command) or DEFAULT_EVALUATOR_COMMAND
+    if command == DEFAULT_EVALUATOR_COMMAND:
+        # The shim is staged for exactly one reason: the default command runs
+        # it. A card that named its own command gets that command run in a
+        # directory holding its two programs and nothing else of ours — the
+        # evaluator is whatever its interpreter understands, and this side has
+        # no business slipping a Python file into someone else's language.
+        files[_SHIM_FILE] = _SHIM.format(evaluator=evaluator_file)
 
     result_file = "result.json"
     env = {
@@ -288,7 +343,7 @@ def _run_evaluator(
         SHARDS_ENV: ",".join(str(int(shard)) for shard in shards),
     }
     try:
-        outcome = execute(files, ["python", "-I", _SHIM_FILE], env, timeout, result_file)
+        outcome = execute(files, list(command), env, timeout, result_file)
     except Exception as error:  # noqa: BLE001 - the seam's own failure is run-level
         raise ScriptError(f"the evaluator could not be executed: {error}") from error
 

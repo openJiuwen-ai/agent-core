@@ -2751,3 +2751,424 @@ def test_a_raising_callback_does_not_fail_the_search(
     assert result.error_code is None
     # And the durable snapshots survived the broken telescope.
     assert provider.read_state(request.task_id).status == "completed"
+
+
+# -- an evaluator that is not Python --------------------------------------------
+
+
+def test_an_evaluator_that_is_not_python_runs_under_the_cards_own_command() -> None:
+    """The evaluator was pinned to Python by three lines nobody chose: it was
+    always staged as `evaluate.py`, always run by `python -I _entry.py`, and a
+    Python shim was always written beside it.
+
+    A task whose scoring is a shell script, a Node program or a compiled binary
+    is not exotic — the candidate's language does not have to be the
+    evaluator's either — and none of it could run. The card now says both, and
+    the shim (which exists only to serve the Python default) is not smuggled
+    into a directory that is not Python's.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import script_domain
+
+    evaluator = (
+        "#!/bin/sh\n"
+        # Reports whether our Python shim was staged next to it, which is the
+        # part that used to be unconditional.
+        'shim=0\n'
+        'if [ -f _entry.py ]; then shim=1; fi\n'
+        'printf \'{"valid": true, "metrics": {"score": 0.5, "shim": %s}}\' "$shim" '
+        '> "$SCIENCE_AGENT_RESULT"\n'
+    )
+    domain = script_domain(
+        scorecard={"criteria": [{
+            "id": "score", "name": "score", "direction": "maximize",
+            "weight": 1.0, "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "timeoutSeconds": 60},
+        }]},
+        script=evaluator,
+        evaluator_file="evaluate.sh",
+        evaluator_command=["sh", "evaluate.sh"],
+        execute=_local_execution,
+        baseline_code="x = 1\n",
+    )
+
+    ok, metrics, diagnosis = domain.evaluate("x = 2\n", [0])
+
+    assert ok is True, f"the shell evaluator did not score the candidate: {diagnosis}"
+    assert metrics["score"] == pytest.approx(0.5)
+    assert metrics["shim"] == pytest.approx(0.0), (
+        "a Python shim was staged beside an evaluator that is not Python"
+    )
+
+
+def test_a_non_python_evaluator_with_no_command_is_refused_before_the_run() -> None:
+    """The one card mistake this arrangement makes easy, caught while it is
+    still a card mistake.
+
+    Naming `evaluate.js` and forgetting the command leaves the Python default
+    running `runpy` over JavaScript. That surfaces as a SyntaxError from the
+    evaluator on every candidate — the run reads as "the evaluator is broken"
+    for as long as the budget lasts, when the truth is that the card is one
+    line short and knowable before a single candidate is drawn.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import (
+        ScriptError,
+        script_domain,
+    )
+
+    with pytest.raises(ScriptError) as raised:
+        script_domain(
+            scorecard={"criteria": [{"id": "score", "normalize": {"kind": "identity"},
+                                     "measure": {"kind": "custom_script"}}]},
+            script="console.log('hi')\n",
+            evaluator_file="evaluate.js",
+            execute=_local_execution,
+        )
+
+    message = str(raised.value)
+    assert "evaluate.js" in message and "evaluator_command" in message, message
+
+
+def test_the_engine_tells_the_domain_how_to_run_the_evaluator() -> None:
+    """Same wire as the protocol one above, same reason for testing it here.
+
+    `script_domain` growing two parameters proves nothing while the engine
+    keeps calling it without them: every run would go on using the Python
+    default and the card's `evaluator_command` would be a field that reads
+    correctly and does nothing.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import ScriptError
+
+    seen: dict[str, object] = {}
+
+    def recording_factory(**kwargs: object) -> object:
+        seen.update(kwargs)
+        raise ScriptError("stop here")
+
+    engine = PuctEngine(completion_factory=lambda *a, **k: (lambda p, **kw: ""),
+                        evaluation_execution=_local_execution,
+                        domain_factory=recording_factory)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=1,
+        scorecard_hash="sha256:x",
+        scorecard={"criteria": [{"id": "score", "normalize": {"kind": "identity"},
+                                 "measure": {"kind": "custom_script"}}]},
+        baseline_code="x = 1\n", script="echo hi\n",
+        evaluator_file="evaluate.sh", evaluator_command=("sh", "evaluate.sh"),
+    )
+
+    engine.run(spec, lambda event: None, lambda: False)
+
+    assert seen.get("evaluator_file") == "evaluate.sh"
+    assert tuple(seen.get("evaluator_command") or ()) == ("sh", "evaluate.sh"), (
+        "the engine built its domain without the card's evaluator command; "
+        f"it passed {sorted(seen)}"
+    )
+
+
+def test_the_provider_reads_the_evaluator_command_from_the_scorecard(tmp_path: Path) -> None:
+    """And the card is where it comes from — the two fields are only reachable
+    if the provider lifts them off `scorecard.json`."""
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), evaluator_file="evaluate.sh",
+               evaluator_command=["sh", "evaluate.sh"])
+
+    spec = provider._spec_for(request, resumed=False)
+
+    assert spec.evaluator_file == "evaluate.sh"
+    assert spec.evaluator_command == ("sh", "evaluate.sh")
+
+
+def test_an_evaluator_command_written_as_a_shell_line_is_refused(tmp_path: Path) -> None:
+    """argv, not a shell line. `"sh evaluate.sh"` as a string is the obvious
+    thing to write and the seam would quote it as a single word — an executable
+    named `sh evaluate.sh`, which does not exist. Refused with the shape it
+    wants rather than run into a confusing not-found."""
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), evaluator_command="sh evaluate.sh")
+
+    with pytest.raises(ValueError) as raised:
+        provider._spec_for(request, resumed=False)
+
+    assert "list of arguments" in str(raised.value)
+
+
+# -- a program that is not Python -----------------------------------------------
+
+
+def test_the_listing_labels_each_block_with_its_own_language() -> None:
+    """The listing is the worked example the reply is told to copy, and it said
+    `python` about every file in every program.
+
+    Harmless to the parser — it reads the `name=` path and ignores the label —
+    and not harmless to the model, which is shown a Rust program in a Python
+    block and asked to answer "exactly like the listing above". The label is
+    the only thing in the prompt that names the language, so when it is wrong
+    it is the prompt disagreeing with the code directly under it.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import render_tree
+
+    one = render_tree("fn main() {}\n", "solve.rs")
+    tree = render_tree(bundle({"solve.rs": "fn main() {}\n", "build.sh": "cargo b\n"}),
+                       "solve.rs")
+
+    assert one.startswith("```rust name=solve.rs")
+    assert "```rust name=solve.rs" in tree and "```bash name=build.sh" in tree
+    assert "```python" not in tree
+
+
+def test_an_unknown_suffix_labels_the_block_with_nothing() -> None:
+    """No guess. A label this side invented would state something false about
+    the program; an empty one is a valid fence and costs only the hint."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import render_tree
+
+    assert render_tree("whatever\n", "solve.zzz").startswith("``` name=solve.zzz")
+
+
+def test_the_output_protocol_shows_its_example_in_the_programs_language() -> None:
+    """And so does the instruction that describes it — otherwise the prompt
+    demonstrates one language in the listing and another two paragraphs later,
+    which is the same conflict, one section further down."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import format_for
+
+    files = format_for("files").instructions("solve.rs")
+    tagged = format_for("tagged").instructions("solve.rs")
+
+    assert "```rust name=path/to/file.rs" in files
+    assert "DELETE path/to/file.rs" in files
+    assert "python" not in files.lower()
+    assert "solve.rs" in tagged and "Python" not in tagged
+
+
+def test_a_non_python_program_is_not_told_what_this_interpreter_can_import() -> None:
+    """`available_imports` probes *this* process's packages, and the prompt
+    printed the answer to every candidate whatever it was written in.
+
+    To a Rust program that section is not noise: it is a list of things the
+    program cannot use, presented as the only things it may use. The candidate
+    is asked to obey it and there is no way to.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import mutation_prompt, repair_prompt
+    from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import format_for
+
+    def mutation(entrypoint: str, code: str) -> str:
+        return mutation_prompt(
+            statement="make it better", scorecard={"criteria": []}, parent_code=code,
+            entrypoint=entrypoint, parent_score=0.4, best_score=0.5, recent=(),
+            script_contract="define solve()", reply_format=format_for("files"),
+            feedback="", template="",
+        )
+
+    rust = mutation("solve.rs", "fn solve() {}\n")
+    python = mutation("candidate.py", "def solve():\n    return 1\n")
+
+    assert "You may import only" not in rust
+    assert "numpy" not in rust
+    # Still there for the language it is true of — the section is conditional,
+    # not deleted.
+    assert "You may import only" in python and "numpy" in python
+    assert "You may import only" not in repair_prompt("fn main() {}\n", "boom", "solve.rs")
+    assert "You may import only" in repair_prompt("x = 1\n", "boom", "candidate.py")
+
+
+def test_a_non_python_program_is_asked_for_its_summary_where_one_can_be_read() -> None:
+    """The change summary is what names a node in the tree, and the prompt asked
+    for it in a module docstring — which only Python has.
+
+    Both halves move together or neither works: the prompt asks a Rust program
+    for a leading comment, and the reader that labels the node reads a leading
+    comment back. Asking for a docstring and reading a comment leaves every
+    node in the search labelled "changed: solve.rs".
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import _summary_for
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import mutation_prompt
+    from openjiuwen.rsi.artifact_rsi.program_opt.reply_format import format_for
+
+    prompt = mutation_prompt(
+        statement="", scorecard={"criteria": []}, parent_code="fn solve() {}\n",
+        entrypoint="solve.rs", parent_score=None, best_score=None, recent=(),
+        script_contract="define solve()", reply_format=format_for("files"),
+        feedback="", template="",
+    )
+
+    assert "module docstring" not in prompt
+    assert "first comment line" in prompt
+
+    summary = _summary_for({"solve.rs": "// switched to a sieve\nfn solve() {}\n"},
+                           {"solve.rs": "fn solve() {}\n"}, "solve.rs")
+
+    assert summary == "switched to a sieve"
+
+
+def test_a_shell_script_that_happens_to_parse_as_python_is_read_as_a_shell_script() -> None:
+    """Why the summary is decided by the path and not by whether it compiles.
+
+    `# comment` then `x=1` is a valid Python module with no docstring, so the
+    Python reader returns nothing for it and the fallback never fires. The file
+    is called `run.sh`; that is the fact that settles it.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import _summary_of
+
+    code = "#!/bin/sh\n# switched to a sieve\nx=1\n"
+
+    assert _summary_of(code, "run.sh") == "switched to a sieve"
+
+
+def test_a_non_python_run_does_not_have_to_have_python_in_its_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last thing pinning the search to one language.
+
+    Before every run the engine probes numpy/pandas/scipy/sklearn in the
+    execution environment, because the AST gate lets a *Python* candidate
+    import them. For a program that is not Python the probe asks a question
+    about the wrong language — and refuses the run when the answer is no, so a
+    sandbox holding a Rust toolchain and no interpreter could not run a Rust
+    task at all.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import provision
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import ScriptError
+
+    probed: list[tuple[str, ...]] = []
+
+    def recording_probe(names, execute):  # type: ignore[no-untyped-def]
+        probed.append(tuple(names))
+        return "no module named numpy"
+
+    monkeypatch.setattr(provision, "probe_imports", recording_probe)
+
+    def stop_after_preflight(**kwargs: object) -> object:
+        raise ScriptError("preflight is what is under test")
+
+    engine = PuctEngine(completion_factory=lambda *a, **k: (lambda p, **kw: ""),
+                        evaluation_execution=_local_execution,
+                        domain_factory=stop_after_preflight)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=1,
+        scorecard_hash="sha256:x",
+        scorecard={"criteria": [{"id": "score", "normalize": {"kind": "identity"},
+                                 "measure": {"kind": "custom_script"}}]},
+        baseline_code="fn solve() {}\n", entrypoint="solve.rs",
+        script='"""doc"""\n',
+    )
+
+    events: list[object] = []
+    engine.run(spec, events.append, lambda: False)
+
+    assert probed == [], (
+        "a Rust run probed the Python candidate runtime; it would be refused "
+        "in any sandbox without an interpreter"
+    )
+    # And the Python case still asks, because there the question is real.
+    from dataclasses import replace
+
+    engine.run(replace(spec, baseline_code="x = 1\n", entrypoint="candidate.py"),
+               events.append, lambda: False)
+
+    assert probed and "numpy" in probed[0]
+
+
+def test_a_search_over_a_shell_program_scored_by_a_shell_evaluator(
+    tmp_path: Path,
+) -> None:
+    """One whole search with no Python anywhere in it, through the real engine.
+
+    Every other test here pins one link of the chain. This one is the chain: a
+    shell seed, a shell evaluator run by the card's own command, a reply in
+    fenced blocks, the merge, the staging and the score. The Python-only pieces
+    that used to sit in each of those links — the `.py` rename, the AST gate,
+    the shim, `python -I`, the runtime probe, the docstring the summary is read
+    from — each looked local and defensible where it stood, and together they
+    meant a program in any other language could not be searched at all.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    seed = "# starts at three\necho 3\n"
+    # Runs the candidate, and scores it by what it printed.
+    evaluator = (
+        "#!/bin/sh\n"
+        'got=$(sh "$SCIENCE_AGENT_CANDIDATE")\n'
+        'printf \'{"valid": true, "metrics": {"score": %s}}\' "$got" '
+        '> "$SCIENCE_AGENT_RESULT"\n'
+    )
+    reply = "```bash name=solve.sh\n# counts up to nine instead\necho 9\n```\n"
+
+    engine = PuctEngine(
+        completion_factory=lambda *a, **k: (lambda prompt, *rest, **kw: reply),
+        evaluation_execution=_local_execution,
+    )
+    spec = RunSpec(
+        search_id="run-sh", algorithm="puct", expansions=1,
+        scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "clamp", "lo": 0.0, "hi": 10.0},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60},
+        }]},
+        statement="make the number larger",
+        baseline_code=seed, entrypoint="solve.sh",
+        script=evaluator, evaluator_file="evaluate.sh",
+        evaluator_command=("sh", "evaluate.sh"),
+        run_dir=str(tmp_path),
+    )
+
+    events: list[dict] = []
+    engine.run(spec, events.append, lambda: False)
+
+    kinds = [event.get("type") for event in events]
+    assert "search_finished" in kinds, [e for e in events if e.get("type") == "logged"]
+    seeded = next(e for e in events if e["type"] == "seeded")
+    assert seeded["baselineScore"] == pytest.approx(0.3), (
+        "the shell seed was never measured; the run scored nothing to improve on"
+    )
+    scored = [e for e in events if e["type"] == "evaluated"]
+    assert scored and scored[0]["reward"] == pytest.approx(0.9), (
+        f"the shell candidate did not score 9/10: {scored}"
+    )
+    expanded = next(e for e in events if e["type"] == "expanded")
+    assert expanded["valid"] is True and expanded["score"] == pytest.approx(0.9)
+    assert expanded.get("changeSummary") == "counts up to nine instead", (
+        "the leading comment was not read back as the node's change summary: "
+        f"{expanded}"
+    )
+    finished = next(e for e in events if e["type"] == "search_finished")
+    assert finished["status"] == "succeeded" and finished["bestNodeIndex"] == 1
+
+
+def test_a_non_python_evaluator_states_its_contract_in_its_leading_comment() -> None:
+    """The contract is the one thing every mutation prompt must carry, and it
+    was read out of the evaluator's module docstring.
+
+    A shell or Node evaluator has none, so the fallback fired and pasted the
+    evaluator's first forty lines into every prompt — which is how the sample
+    list reaches the model, and a candidate that can see the answers optimises
+    for reciting them. Every language has a leading comment, and that is where
+    an evaluator in it states the same thing.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import _contract_of
+
+    evaluator = (
+        "#!/bin/sh\n"
+        "# Runs the candidate with one argument and reads a number back.\n"
+        "# Scored on how close that number is to the target.\n"
+        "\n"
+        'TARGETS="17 42 99 1234"\n'
+    )
+
+    contract = _contract_of(evaluator, "evaluate.sh")
+
+    assert contract == (
+        "Runs the candidate with one argument and reads a number back.\n"
+        "Scored on how close that number is to the target."
+    )
+    assert "1234" not in contract, "the answer key came along with the contract"

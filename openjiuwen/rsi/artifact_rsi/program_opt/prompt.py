@@ -53,10 +53,16 @@ Everything in it earns its place by preventing a specific failure:
 from __future__ import annotations
 
 import string
-
+from pathlib import PurePosixPath
 from typing import Any, Mapping, Optional, Sequence
 
-from .program import DEFAULT_ENTRYPOINT, available_imports_text, files_of
+from .program import (
+    DEFAULT_ENTRYPOINT,
+    available_imports_text,
+    fence_language,
+    files_of,
+    is_python,
+)
 
 #: The closing instruction every code-shaped template ends on.
 #:
@@ -91,13 +97,52 @@ thing from nothing in a single reply usually does not run, and that scores
 nothing. If a part genuinely has to be replaced, replace that one part and let
 the code around it keep running unchanged.
 
-"Leave it as it is" has one exception: **the first line of the module docstring
-must be rewritten every time**, saying in one sentence what changed. Copy the
-previous version's first line and every node in the search tree ends up with the
-same name, and nobody reading the graph can tell them apart.
+"Leave it as it is" has one exception: **{summary_place} must be rewritten
+every time**, saying in one sentence what changed. Copy the previous version's
+first line and every node in the search tree ends up with the same name, and
+nobody reading the graph can tell them apart.
 
 Work out which part of the current version is weakest against the scoring, then
 change that part."""
+
+
+def _summary_place(entrypoint: str) -> str:
+    """Where the sentence about this edit goes, in this program's language.
+
+    Python has a module docstring and the search reads it back from there. A
+    program in any other language has no such thing, so the sentence is asked
+    for as the first line's comment — every language has one — and
+    `program._leading_comment` reads that. The two have to agree: a prompt
+    asking for a docstring and a reader looking for a comment leaves every node
+    in the tree labelled "changed: solve.rs".
+    """
+    if is_python(entrypoint):
+        return "the first line of the module docstring of a file you changed"
+    return "the first comment line of a file you changed"
+
+
+def _summary_rule(entrypoint: str) -> str:
+    """The requirement line naming where the change summary goes."""
+    place = _summary_place(entrypoint)
+    return f"{place[0].upper()}{place[1:]} says in one sentence what changed."
+
+
+def _how_to_change(entrypoint: str) -> str:
+    return _HOW_TO_CHANGE.format(summary_place=_summary_place(entrypoint))
+
+
+def _environment(entrypoint: str) -> str:
+    """What the runtime offers, for the one language this side can ask.
+
+    `available_imports` probes *this* interpreter's packages, which says
+    nothing whatsoever about what a Rust or JavaScript candidate may use.
+    Shown to one, it is not merely noise: it is a list of things the program
+    cannot have, presented as the things it may have.
+    """
+    if not is_python(entrypoint):
+        return ""
+    return f"## What this environment has\n\nYou may import only: {available_imports_text()}.\n\n"
+
 
 #: The placeholder vocabulary a task's own template may draw on, per prompt.
 #: `${name}` syntax (`string.Template`), not `str.format`: a task's template
@@ -105,6 +150,12 @@ change that part."""
 MUTATION_SLOTS = frozenset({
     "statement", "contract", "parent_code", "parent_score", "best_score",
     "feedback", "history", "imports", "how_to_change", "reply_format",
+    # Facts about the program's language rather than about the search. Each is
+    # empty or reworded for a program that is not Python: `imports` lists this
+    # interpreter's packages, `summary_rule` names where the change summary is
+    # read back from, and `environment` is the whole section `imports` sits in
+    # so that a template can drop it as a unit.
+    "entrypoint", "environment", "summary_rule",
 })
 
 #: Slots a task's template cannot leave out. `reply_format` states the output
@@ -194,11 +245,14 @@ def mutation_prompt(
             best_score=_score(best_score),
             feedback=_feedback(feedback),
             history=_history(recent),
-            imports=available_imports_text(),
-            how_to_change=_HOW_TO_CHANGE,
+            entrypoint=entrypoint,
+            imports=available_imports_text() if is_python(entrypoint) else "",
+            environment=_environment(entrypoint),
+            summary_rule=_summary_rule(entrypoint),
+            how_to_change=_how_to_change(entrypoint),
             # The protocol's own sentences, so the prompt and the reader on the
             # other side are never two independent statements of one thing.
-            reply_format=_shape.instructions,
+            reply_format=_shape.instructions(entrypoint),
         )
         if template.strip():
             return _render(template, slots)
@@ -227,7 +281,7 @@ _SCRIPT_TEMPLATE = """You are rewriting a program that is scored by a **fixed ev
 
 {contract}
 
-The evaluator does `import candidate` and calls it through the interface above.
+The evaluator loads `{entrypoint}` and calls it through the interface above.
 **An interface that does not match scores zero.** Write exactly the names the
 contract above asks for — inventing a different one, or adding an entry point
 it never mentioned, is not this run's contract.
@@ -238,14 +292,12 @@ Its score: {parent_score}. Best so far: {best_score}.
 {feedback}
 {parent_code}
 
-{history}## Requirements
+{environment}{history}## Requirements
 
 1. Write to the interface the evaluator requires — every function name and
    argument exactly as it expects them.
-2. You may import only: {imports}.
-3. {reply_format}
-4. The first line of the module docstring of a file you changed says in one
-   sentence what changed.
+2. {reply_format}
+3. {summary_rule}
 
 {how_to_change}
 """
@@ -319,6 +371,11 @@ def with_promise_request(prompt: str, template: str = "") -> str:
     return prompt.rstrip("\n") + PROMISE_REQUEST + "\n"
 
 
+def _block(path: str, body: str) -> str:
+    """One file as the labelled block the reply is asked to copy."""
+    return f"```{fence_language(path)} name={path}\n{body.strip()}\n```"
+
+
 def render_tree(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
     """Every file in the program, each in its own labelled block.
 
@@ -337,8 +394,8 @@ def render_tree(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
         # Measured: eight expansions in a row wrote `search.py` beside an
         # untouched `candidate.py`, every one merged clean, scored exactly the
         # parent, and was recorded as a valid candidate that did not improve.
-        return f"```python name={order[0]}\n{files[order[0]].strip()}\n```"
-    blocks = [f"```python name={path}\n{files[path].strip()}\n```" for path in order]
+        return _block(order[0], files[order[0]])
+    blocks = [_block(path, files[path]) for path in order]
     listing = ", ".join(order)
     return f"The program is {len(order)} files: {listing}.\n\n" + "\n\n".join(blocks)
 
@@ -363,7 +420,7 @@ def repair_prompt(code: str, error: str,
         return _render(template, dict(
             code=render_tree(code, entrypoint),
             error=error.strip()[:1500] or "(the evaluator gave no reason)",
-            imports=available_imports_text(),
+            imports=available_imports_text() if is_python(entrypoint) else "",
         ))
     return (
         # Not "it does not run": it may well run. A candidate reaches here
@@ -388,16 +445,19 @@ def repair_prompt(code: str, error: str,
         # The environment, because "replace it with an equivalent that exists" is
         # not actionable without knowing what is there. Three candidates in one
         # run reached for `scipy.signal.cwt`, removed in SciPy 1.15; the repair
-        # was told to replace it and given no way to know what with.
-        "## What this environment has\n\n"
-        f"You may import only: {available_imports_text()}\n\n"
-        "## Current program\n\n"
+        # was told to replace it and given no way to know what with. Only for
+        # Python: `available_imports` probes this interpreter, and telling a Go
+        # program what this process can import is worse than saying nothing.
+        + _environment(entrypoint)
+        + "## Current program\n\n"
         f"{render_tree(code, entrypoint)}\n\n"
         + (
-            "Output only the fixed complete program, in a single ```python block.\n"
+            f"Output only the fixed complete program, in a single "
+            f"```{fence_language(entrypoint)} block.\n"
             if len(files_of(code, entrypoint)) == 1 else
             "Output only the files you had to change, each as its own fenced block "
-            "labelled with its path (```python name=path/to/file.py). A file you do "
+            f"labelled with its path (```{fence_language(entrypoint)} "
+            f"name=path/to/file{PurePosixPath(entrypoint).suffix}). A file you do "
             "not output is kept as it is.\n"
         )
     )

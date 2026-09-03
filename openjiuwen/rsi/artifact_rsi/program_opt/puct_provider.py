@@ -210,6 +210,7 @@ class PuctProgramArtifactProvider:
         # particular function: only the scorecard knows what the evaluator
         # calls, and this method never sees the scorecard.
         from openjiuwen.rsi.artifact_rsi.program_opt.program import (
+            is_python,
             local_roots,
             validate_source,
         )
@@ -217,7 +218,7 @@ class PuctProgramArtifactProvider:
         # The program's own modules are importable from within it, so the gate
         # is told what they are. Otherwise `from helpers.scale import factor`
         # reads as a dependency nobody installed.
-        if entrypoint.endswith(".py"):
+        if is_python(entrypoint):
             ok, reason = validate_source(source, local=local_roots(files))
             if not ok:
                 errors.append({"code": "ARTIFACT_REJECTED_BY_GATE", "message": reason})
@@ -615,6 +616,8 @@ class PuctProgramArtifactProvider:
             scorecard_hash=str(card.get("hash") or "sha256:inline"),
             statement=str(card.get("statement") or ""),
             script=str(card.get("script") or ""),
+            evaluator_file=str(card.get("evaluator_file") or "") or RunSpec.evaluator_file,
+            evaluator_command=_command_from(card.get("evaluator_command")),
             packages=_packages_from(card.get("packages")),
             mutation_template=templates["mutation"],
             repair_template=templates["repair"],
@@ -773,6 +776,30 @@ def _packages_from(raw: Any) -> tuple[str, ...]:
             )
         names.append(name)
     return tuple(names)
+
+
+def _command_from(raw: Any) -> tuple[str, ...]:
+    """How the card says to run its evaluator, as argv.
+
+    A list, never a shell line — the execution seam takes argv and quotes it,
+    so a string here would be quoted as one word or, worse, iterated into
+    characters. There is no allowlist of executables and there should not be:
+    the card already carries the evaluator's entire source, so a card that
+    could name a command it should not could equally have written that code
+    into the evaluator. What this refuses is the shape, which is the part a
+    card author gets wrong by accident.
+    """
+    if not raw:
+        return ()
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            "scorecard evaluator_command must be a list of arguments, "
+            'e.g. ["node", "evaluate.js"]'
+        )
+    parts = tuple(str(entry) for entry in raw if str(entry).strip())
+    if not parts:
+        raise ValueError("scorecard evaluator_command is empty")
+    return parts
 
 
 def _resume_from(run_dir: Path) -> tuple[tuple[dict[str, Any], ...], dict[str, float], int]:
