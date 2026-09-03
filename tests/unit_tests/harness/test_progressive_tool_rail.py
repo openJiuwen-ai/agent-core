@@ -235,6 +235,53 @@ async def test_deferred_catalog_delta_reports_updates_and_removals():
 
 
 @pytest.mark.asyncio
+async def test_deferred_catalog_delta_reports_parameter_schema_changes():
+    config = DeepAgentConfig(progressive_tool_enabled=True, language="cn")
+    rail = ProgressiveToolRail(config)
+    original = _deferred_card("cron_create", "创建定时任务")
+    registry = _ToolRegistry([original])
+    manager = PromptAttachmentManager(language="cn")
+    builder = SystemPromptBuilder(language="cn")
+    agent = SimpleNamespace(
+        system_prompt_builder=builder,
+        ability_manager=registry,
+        prompt_attachment_manager=manager,
+    )
+    session = _AttachmentSession()
+    context = SessionModelContext(
+        "ctx-schema-change",
+        session.session_id,
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(tools=[]),
+        session=session,
+        context=context,
+    )
+
+    await rail.before_model_call(ctx)
+    await manager.add_section(
+        session_id=session.session_id,
+        section="runtime",
+        kind="runtime",
+        source="test.runtime",
+        content="runtime state",
+    )
+    await manager.sync_to_context(context, session.session_id)
+
+    original.input_params["properties"]["starts_at"] = {"type": "string"}
+    await rail.before_model_call(ctx)
+    delta = await manager.sync_to_context(context, session.session_id)
+
+    assert delta is not None
+    assert "cron_create" in delta.content
+    assert "修改" in delta.content
+
+
+@pytest.mark.asyncio
 async def test_deferred_catalog_does_not_repeat_after_session_state_reset():
     """The materialized attachment remains the diff baseline after a reload."""
 
