@@ -2078,6 +2078,49 @@ def test_an_injected_operation_wins_over_the_local_default(tmp_path: Path,
     assert used == ["injected"]
 
 
+def test_a_program_that_is_not_python_is_not_judged_as_python(tmp_path: Path) -> None:
+    """The gate is `ast.parse` plus an import allowlist, and a program need not
+    be Python.
+
+    `custom_script` says only that an evaluator scores the candidate — it may
+    compile it, feed it to something, or read it as prose. Running the Python
+    gate over a SQL file refuses it for a syntax error in a language it is not.
+    The gate was never the isolation boundary, so skipping it where it cannot
+    apply removes a check that had no meaning there.
+    """
+    provider = PuctProgramArtifactProvider()
+
+    sql = tmp_path / "query.sql"
+    sql.write_text("SELECT name, count(*) FROM events GROUP BY name;\n", encoding="utf-8")
+    assert provider.validate_input(str(sql)).valid, "a one-file program was refused"
+    # It keeps its own name, so nothing downstream reads it as Python.
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_provider import _seed_files
+    assert list(_seed_files(sql)) == ["query.sql"]
+
+    prose = tmp_path / "brief.md"
+    prose.write_text("# Brief\n\nRewrite this so it reads better.\n", encoding="utf-8")
+    assert provider.validate_input(str(prose)).valid
+
+    # Python still goes through the gate, and still fails it where it should.
+    reaching_out = tmp_path / "candidate.py"
+    reaching_out.write_text("import socket\n\n\ndef solve():\n    return 1\n", encoding="utf-8")
+    result = provider.validate_input(str(reaching_out))
+    assert not result.valid
+    assert result.errors[0]["code"] == "ARTIFACT_REJECTED_BY_GATE"
+
+    # And a tree of several files still has to say which one is the program,
+    # whatever they are written in. (`.md` rather than `.sql` because the
+    # directory reader has its own include list, and a suffix outside it is
+    # not part of the artifact at all — a different refusal from this one.)
+    tree = tmp_path / "many"
+    tree.mkdir()
+    (tree / "a.md").write_text("first\n", encoding="utf-8")
+    (tree / "b.md").write_text("second\n", encoding="utf-8")
+    unclear = provider.validate_input(str(tree))
+    assert not unclear.valid
+    assert unclear.errors[0]["code"] == "ARTIFACT_ENTRYPOINT_UNCLEAR"
+
+
 # -- task-owned prompt wording ---------------------------------------------------
 
 

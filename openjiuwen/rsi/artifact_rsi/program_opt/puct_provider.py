@@ -193,6 +193,14 @@ class PuctProgramArtifactProvider:
             return ArtifactValidationResult(valid=not errors, errors=errors)
         source = files[entrypoint]
 
+        # …and only when the entrypoint is Python. The gate is `ast.parse` plus
+        # an import allowlist, which says nothing about a program written in
+        # anything else: a SQL file, a prompt, a Rust source or a piece of prose
+        # would be refused for a syntax error in a language it is not. The gate
+        # was never the isolation boundary — it refuses imports that would fail
+        # or reach outside — so skipping it where it cannot apply removes a
+        # check that had no meaning there, not a protection.
+        #
         # A shape check on the starting point only. Candidates are *not* put
         # through this during the search -- the sandbox is what confines them,
         # and the evaluator's own import is what decides whether one is usable.
@@ -209,9 +217,10 @@ class PuctProgramArtifactProvider:
         # The program's own modules are importable from within it, so the gate
         # is told what they are. Otherwise `from helpers.scale import factor`
         # reads as a dependency nobody installed.
-        ok, reason = validate_source(source, local=local_roots(files))
-        if not ok:
-            errors.append({"code": "ARTIFACT_REJECTED_BY_GATE", "message": reason})
+        if entrypoint.endswith(".py"):
+            ok, reason = validate_source(source, local=local_roots(files))
+            if not ok:
+                errors.append({"code": "ARTIFACT_REJECTED_BY_GATE", "message": reason})
 
         return ArtifactValidationResult(valid=not errors, errors=errors)
 
@@ -697,7 +706,15 @@ def _seed_files(path: Path) -> dict[str, str]:
     """
     if path.is_dir():
         return load_tree(str(path))
-    return {DEFAULT_ENTRYPOINT: path.read_text(encoding="utf-8")}
+    # A Python file is placed at the default entrypoint, which is what lets an
+    # evaluator say `import candidate` without the drafting model having to
+    # invent a convention. Anything else keeps the name it arrived with:
+    # renaming a `.sql` file to `candidate.py` claims it is Python — to the
+    # gate, to the prompt's fence label, and to a reader — and nothing about it
+    # is. The evaluator is told the real path through SCIENCE_AGENT_CANDIDATE
+    # either way.
+    name = DEFAULT_ENTRYPOINT if path.suffix == ".py" else path.name
+    return {name: path.read_text(encoding="utf-8")}
 
 
 def _entrypoint_of(files: Mapping[str, str]) -> str | None:
@@ -715,7 +732,13 @@ def _entrypoint_of(files: Mapping[str, str]) -> str | None:
         if name in files:
             return name
     python = [path for path in files if path.endswith(".py")]
-    return python[0] if len(python) == 1 else None
+    if len(python) == 1:
+        return python[0]
+    # A program need not be Python. `custom_script` says only that an evaluator
+    # scores it, and the evaluator may compile it, feed it to something, or read
+    # it as prose. One file is one program whatever it is written in; several
+    # still have to be told apart, and only the scorecard knows how.
+    return next(iter(files)) if len(files) == 1 else None
 
 
 #: A distribution name, optionally pinned. Nothing else.
