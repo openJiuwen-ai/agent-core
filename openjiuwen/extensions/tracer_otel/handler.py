@@ -31,7 +31,7 @@ from openjiuwen.core.session.tracer.handler import (
 )
 from openjiuwen.core.session.tracer.span import TraceAgentSpan
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
-from openjiuwen.extensions.tracer_otel.redaction import redact
+from openjiuwen.extensions.tracer_otel.redaction import redact, redact_system_prompt
 from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
@@ -176,7 +176,13 @@ def _standard_messages(value: Any, *, default_role: str) -> tuple[list[dict[str,
     return instructions, messages
 
 
-def _redacted_json(value: Any, config: OtelTracerConfig, *, field: str) -> str:
+def _redacted_json(
+    value: Any,
+    config: OtelTracerConfig,
+    *,
+    field: str,
+    system_prompt: bool = False,
+) -> str:
     def redact_parts(item: Any) -> Any:
         if isinstance(item, list):
             return [redact_parts(value) for value in item]
@@ -185,7 +191,10 @@ def _redacted_json(value: Any, config: OtelTracerConfig, *, field: str) -> str:
         result: dict[str, Any] = {}
         for key, nested in item.items():
             if key in {"content", "arguments", "response"}:
-                result[key] = redact(nested, config, field=field)
+                if system_prompt:
+                    result[key] = redact_system_prompt(nested, config)
+                else:
+                    result[key] = redact(nested, config, field=field)
             else:
                 result[key] = redact_parts(nested)
         return result
@@ -343,7 +352,12 @@ class OtelAgentHandler(TraceExtAgentHandler):
                 if instructions:
                     state.span.set_attribute(
                         GEN_AI_SYSTEM_INSTRUCTIONS,
-                        _redacted_json(instructions, self._config, field="prompts"),
+                        _redacted_json(
+                            instructions,
+                            self._config,
+                            field="prompts",
+                            system_prompt=True,
+                        ),
                     )
                 if messages:
                     state.span.set_attribute(

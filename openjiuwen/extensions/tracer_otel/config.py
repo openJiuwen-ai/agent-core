@@ -32,7 +32,7 @@ class OtelTracerConfig:
     redaction_enabled: bool = True  # SHA-256 hash when True (backward compat; see redact_prompts / redact_completions)
     redact_prompts: bool | None = None  # None → fallback to redaction_enabled; True/False overrides
     redact_completions: bool | None = None  # None → fallback to redaction_enabled; True/False overrides
-    max_attr_length: int = 4096  # truncation cap for attribute values
+    max_attr_length: int = 4096  # general cap; canonical system instructions are exempt
 
     def __post_init__(self):
         if not (_SAMPLE_RATE_RANGE[0] <= self.sample_rate <= _SAMPLE_RATE_RANGE[1]):

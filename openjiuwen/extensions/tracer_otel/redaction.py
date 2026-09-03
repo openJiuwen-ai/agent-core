@@ -69,3 +69,11 @@ def redact(value: object, config: OtelTracerConfig, field: str | None = None) ->
     if _should_redact(config, field):
         return hash_value(text)
     return truncate(text, config.max_attr_length)
+
+
+def redact_system_prompt(value: object, config: OtelTracerConfig) -> str:
+    """Protect system instructions while retaining their complete identity."""
+    text = "" if value is None else str(value)
+    if _should_redact(config, "prompts"):
+        return hash_value(text)
+    return text

@@ -312,6 +312,34 @@ class TestOtelAgentHandler:
         assert "SystemMessage" not in prompt_attr
         assert "UserMessage" not in prompt_attr
 
+    async def test_agent_llm_system_instructions_bypass_attribute_length_cap(self):
+        config = OtelTracerConfig(redaction_enabled=False, max_attr_length=8)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        system_prompt = "stable-system-prompt-" * 20
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={
+                "inputs": [
+                    SystemMessage(role="system", content=system_prompt),
+                    UserMessage(role="user", content="long-user-message"),
+                ]
+            },
+            instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs="done")
+
+        finished = _EXPORTER.get_finished_spans()
+        instructions = json.loads(
+            finished[0].attributes[GEN_AI_SYSTEM_INSTRUCTIONS]
+        )
+        messages = json.loads(finished[0].attributes[GEN_AI_INPUT_MESSAGES])
+        assert instructions[0]["content"] == system_prompt
+        assert "OTel attribute truncated" not in instructions[0]["content"]
+        assert "OTel attribute truncated" in messages[0]["parts"][0]["content"]
+
     async def test_agent_llm_outputs_normalized_to_dict(self):
         """AssistantMessage outputs are converted to plain dicts via model_dump()."""
         config = OtelTracerConfig(redaction_enabled=False)

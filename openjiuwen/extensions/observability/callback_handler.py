@@ -33,6 +33,7 @@ from opentelemetry.trace import (
 from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_prompt,
+    redact_system_prompt,
     truncate,
 )
 from openjiuwen.extensions.observability.config import ObservabilityConfig
@@ -1424,14 +1425,21 @@ class OtelCallbackHandler:
                 occurrence_ids.append(uuid.uuid4().hex)
         return tuple(occurrence_ids)
 
-    def _trajectory_value(self, value: Any) -> Any:
+    def _trajectory_value(self, value: Any, *, system_prompt: bool = False) -> Any:
         normalized = _json_compatible(value)
         if isinstance(normalized, str):
-            return redact_prompt(normalized, self._config)
+            protect = redact_system_prompt if system_prompt else redact_prompt
+            return protect(normalized, self._config)
         if isinstance(normalized, list):
-            return [self._trajectory_value(item) for item in normalized]
+            return [
+                self._trajectory_value(item, system_prompt=system_prompt)
+                for item in normalized
+            ]
         if isinstance(normalized, dict):
-            return {key: self._trajectory_value(item) for key, item in normalized.items()}
+            return {
+                key: self._trajectory_value(item, system_prompt=system_prompt)
+                for key, item in normalized.items()
+            }
         return normalized
 
     def _trajectory_messages(
@@ -1447,6 +1455,11 @@ class OtelCallbackHandler:
             ids = self._message_occurrence_ids(normalized)
         result: list[dict[str, Any]] = []
         for index, message in enumerate(normalized):
+            role = _message_role(message)
+            is_system_prompt = (
+                role == "system"
+                and not self._is_prompt_attachment_history(message)
+            )
             source_message_metadata = (
                 source_metadata[index]
                 if index < len(source_metadata)
@@ -1454,8 +1467,11 @@ class OtelCallbackHandler:
             )
             item: dict[str, Any] = {
                 "message_id": ids[index],
-                "role": _message_role(message),
-                "content": self._trajectory_value(_message_content(message)),
+                "role": role,
+                "content": self._trajectory_value(
+                    _message_content(message),
+                    system_prompt=is_system_prompt,
+                ),
                 **_trajectory_message_origin(message, source_message_metadata),
             }
             for key in ("tool_calls", "tool_call_id", "name"):
@@ -1506,7 +1522,7 @@ class OtelCallbackHandler:
                 system_parts.extend(
                     self._structured_content_parts(
                         _message_content(message),
-                        redact_prompt,
+                        redact_system_prompt,
                     )
                 )
                 continue

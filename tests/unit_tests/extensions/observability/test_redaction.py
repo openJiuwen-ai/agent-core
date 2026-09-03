@@ -4,7 +4,11 @@
 """Unit tests for observability attribute redaction utilities."""
 
 from openjiuwen.extensions.observability.config import ObservabilityConfig
-from openjiuwen.extensions.observability.redaction import redact_completion, truncate
+from openjiuwen.extensions.observability.redaction import (
+    redact_completion,
+    redact_system_prompt,
+    truncate,
+)
 
 
 def test_truncate_identifies_otel_attribute_layer():
@@ -24,3 +28,22 @@ def test_short_tool_owned_marker_passes_through_unchanged():
     value = "preview...[tool output truncated: 8 chars omitted]"
 
     assert truncate(value, len(value)) == value
+
+
+def test_system_prompt_bypasses_attribute_length_cap():
+    config = ObservabilityConfig(
+        redact_prompts=False,
+        attribute_value_max_length=5,
+    )
+    value = "complete-system-prompt"
+
+    assert redact_system_prompt(value, config) == value
+
+
+def test_system_prompt_still_respects_explicit_redaction():
+    config = ObservabilityConfig(
+        redact_prompts=True,
+        attribute_value_max_length=5,
+    )
+
+    assert redact_system_prompt("secret-system-prompt", config).startswith("sha256:")

@@ -48,6 +48,20 @@ def redact_prompt(value: object, config: ObservabilityConfig) -> str:
     return truncate(text, config.attribute_value_max_length)
 
 
+def redact_system_prompt(value: object, config: ObservabilityConfig) -> str:
+    """Protect a system prompt without applying the attribute length cap.
+
+    System instructions are the canonical input for trajectory comparison.
+    Truncating them makes the truncation suffix part of their identity and can
+    produce false prompt diffs. Explicit privacy redaction still takes
+    precedence; otherwise the complete value is retained.
+    """
+    text = "" if value is None else str(value)
+    if config.redact_prompts:
+        return _hash(text)
+    return text
+
+
 def redact_completion(value: object, config: ObservabilityConfig) -> str:
     """Apply redaction policy to a completion fragment.
 

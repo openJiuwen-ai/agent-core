@@ -23,8 +23,10 @@ class ObservabilityConfig(BaseModel):
         sample_rate: Parent-based ratio sampler rate (0.0 - 1.0).
         redact_prompts: When True, hash/truncate prompt contents.
         redact_completions: When True, hash/truncate completion contents.
-        attribute_value_max_length: Hard cap on string attribute length.
-            Default 40960 (langfuse recommendation).
+        attribute_value_max_length: General cap on string attribute length.
+            Canonical system instructions are exempt so trajectory comparison
+            always receives their complete value. Default 40960 (langfuse
+            recommendation).
         max_attributes: Maximum number of attributes per span. Default 200.
             Passed to OTel SDK SpanLimits. OTel's BoundedAttributes uses FIFO
             eviction (oldest first), so attributes written before the prompt

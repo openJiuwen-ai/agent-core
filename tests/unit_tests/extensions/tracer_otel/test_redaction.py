@@ -6,7 +6,13 @@
 import hashlib
 
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
-from openjiuwen.extensions.tracer_otel.redaction import truncate, hash_value, redact, _should_redact
+from openjiuwen.extensions.tracer_otel.redaction import (
+    _should_redact,
+    hash_value,
+    redact,
+    redact_system_prompt,
+    truncate,
+)
 
 
 class TestTruncate:
@@ -139,3 +145,20 @@ class TestRedactWithField:
         result = redact("data", config, field=None)
         assert not result.startswith("sha256:")
         assert result == "data"
+
+
+class TestRedactSystemPrompt:
+    def test_complete_value_bypasses_length_cap(self):
+        config = OtelTracerConfig(redaction_enabled=False, max_attr_length=5)
+        value = "complete-system-prompt"
+
+        assert redact_system_prompt(value, config) == value
+
+    def test_explicit_prompt_redaction_still_hashes(self):
+        config = OtelTracerConfig(
+            redaction_enabled=False,
+            redact_prompts=True,
+            max_attr_length=5,
+        )
+
+        assert redact_system_prompt("secret-system-prompt", config).startswith("sha256:")
