@@ -23,6 +23,28 @@ from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseM
 from openjiuwen.core.runner.callback import trigger
 
 
+async def _wait_for_no_await(coro, timeout):
+    """wait 但超时后不 await 被取消的任务（替代 asyncio.wait_for）。
+
+    asyncio.wait_for 超时后 await task——若任务的 finally 卡住
+    （openai __stream__ 的 aclose 卡在僵死 TCP 连接上），wait_for
+    永不返回，TimeoutError 永不抛，LLM 调用挂起无任何日志。
+    """
+    task = asyncio.ensure_future(coro)
+    done, _pending = await asyncio.wait({task}, timeout=timeout)
+    if task in done:
+        return task.result()
+    task.cancel()
+    # 短暂收尾窗口：让可取消的 async generator 真正停止（否则调用方
+    # 随后 aclose() 会撞上 "asynchronous generator is already running"）。
+    # 用 asyncio.wait 的 timeout 特性——卡死任务不阻塞，窗口后照常抛超时。
+    try:
+        await asyncio.wait({task}, timeout=0.1)
+    except asyncio.CancelledError:
+        pass
+    raise asyncio.TimeoutError()
+
+
 class Model:
     """Unified LLM invocation entry point
 
@@ -217,7 +239,8 @@ class Model:
                     if next_timeout is None:
                         chunk = await stream_iterator.__anext__()
                     else:
-                        chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
+                        chunk = await _wait_for_no_await(
+                        stream_iterator.__anext__(), timeout=next_timeout)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError as exc:
