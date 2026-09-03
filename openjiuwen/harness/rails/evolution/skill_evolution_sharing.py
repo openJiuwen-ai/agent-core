@@ -242,6 +242,25 @@ class SkillEvolutionSharingMixin:
                     # enterprise-dev: suggest/auto write evolutions.json only
                     update_skill_md=False,
                 )
+                if getattr(record, "review_status", None) == "suggest":
+                    try:
+                        from openjiuwen.agent_evolving.checkpointing.evolution_suggestions_ledger import (
+                            record_generated_suggestion,
+                        )
+
+                        record_generated_suggestion(
+                            skill_name,
+                            record,
+                            skills_dirs=self._resolve_skills_dirs_for_self_evolution(),
+                        )
+                    except Exception as ledger_exc:
+                        logger.warning(
+                            "[SkillEvolutionRail] suggestions ledger write failed "
+                            "skill=%s id=%s err=%s",
+                            skill_name,
+                            getattr(record, "id", None),
+                            ledger_exc,
+                        )
             logger.info(
                 "[SkillEvolutionRail] persisted %d shared record(s) for skill=%s",
                 len(shared_records),

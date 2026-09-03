@@ -90,6 +90,7 @@ async def commit_pending_change(
     applied_count = 0
     remaining_records = list(records)
 
+    skills_dirs = getattr(store, "base_dirs", None)
     for index, record in enumerate(records):
         try:
             # enterprise-dev: suggest/auto persist evolutions.json only (no SKILL.md).
@@ -100,6 +101,25 @@ async def commit_pending_change(
                 subject_kind=pending.subject_kind,
                 update_skill_md=update_skill_md,
             )
+            if getattr(record, "review_status", None) == "suggest":
+                try:
+                    from openjiuwen.agent_evolving.checkpointing.evolution_suggestions_ledger import (
+                        record_generated_suggestion,
+                    )
+
+                    record_generated_suggestion(
+                        pending.skill_name,
+                        record,
+                        skills_dirs=skills_dirs,
+                    )
+                except Exception as ledger_exc:
+                    logger.warning(
+                        "[commit_pending_change] suggestions ledger write failed "
+                        "skill=%s id=%s err=%s",
+                        pending.skill_name,
+                        getattr(record, "id", None),
+                        ledger_exc,
+                    )
         except Exception as exc:
             errors.append(str(exc))
             remaining_records = list(records[index:])
