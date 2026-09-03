@@ -239,8 +239,8 @@ class GraphArtifactStore:
         return current
 
 
-def load_graph_artifacts(root: str | Path) -> GraphArtifacts:
-    payload = GraphArtifactStore(root).read()
+def load_graph_artifacts(root: str | Path, version: str | None = None) -> GraphArtifacts:
+    payload = GraphArtifactStore(root).read(version)
     capabilities = []
     for item in payload.get("capabilities", []):
         capability = dict(item)

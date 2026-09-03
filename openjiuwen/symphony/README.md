@@ -342,7 +342,9 @@ plan = await engine.plan(
     language="cn",
     progress=on_progress,
     disabled_capability_ids=None,
-    dynamic_overlay=None,
+    graph_scope_id="default",
+    merged_revision=None,
+    task_cluster_id=None,
     mode=None,
 )
 ```
@@ -372,7 +374,7 @@ plan = await engine.plan(
   }
   ```
 
-  `metadata.reason` 和 `metadata.missing_inputs` 仅在非空时出现；`needs_input` 与 `no_plan` 也会返回这个合法图结构，节点和边可为空。
+  `metadata.reason` 和 `metadata.missing_inputs` 仅在非空时出现；`needs_input` 与 `no_plan` 也会返回这个合法图结构，节点和边可为空。通过 `SymphonyGraphEngine.plan()` 规划时，`planned_graph.graph_snapshot` 还会固定本次任务使用的静态图与 observation revision；Fast 和 Beam 读取同一 merged snapshot，传入 `merged_revision` 可让重试继续使用原快照。
 - `progress` 接收 `OrchestrationProgress`；该类型保持字典兼容。旧参数名 `progress_callback` 仍可使用。
 - `graph.resolve.progress` 保留当前匹配窗口的 `current/total`，并通过 `completed_candidate_count`、`total_candidate_count` 和 `reused_candidate_count` 提供跨窗口的全局候选关系进度；缓存复用的候选关系计入已完成数量。
 - `model=None` 时仍可查询状态和读取已发布图；构建或规划会明确报错。
@@ -466,7 +468,31 @@ service = OrchestrationService(
 - 分析缺失输入并生成稳定的计划图；
 - 通过进度回调报告构建、关系匹配和规划阶段事件。
 
-动态 overlay 默认关闭。只有 `OrchestrationConfig(dynamic_graph_enabled=True)` 时，传给 `plan(dynamic_overlay=...)` 的运行时边权覆盖才会参与 Fast 规划；overlay 不改写离线图产物。
+动态 observation 默认关闭。启用 `OrchestrationConfig(dynamic_graph_enabled=True)` 后，
+`SymphonyGraphEngine` 自动把当前 merged snapshot 交给 Fast 或 Beam，不要求业务调用方读取或传递
+overlay 文件。运行证据只生成独立 observation revision，不改写静态 `graph.json`。
+
+上游 Trace 适配层需要将 canonical `Trajectory` 和 evaluator/业务终态转换成
+`GraphEvolutionInput`，再调用 `engine.submit_observation(...)`。GraphEngine 不解析 Session JSON，
+也不会在缺少边级证据时猜测失败边。只有强验证成功，或带明确 evidence reference 且归因于
+`orchestration` 的边级失败，才更新权重；弱证据、外部服务错误、权限错误、网络错误和截断轨迹仅留作审计。
+
+```python
+receipt = engine.submit_observation(graph_evolution_input)
+engine.flush_observations(timeout=30)
+snapshot = engine.get_snapshot(graph_scope_id="default")
+plan = await engine.plan(
+    query,
+    candidate_ids,
+    graph_scope_id="default",
+    merged_revision=snapshot.merged_revision,
+    task_cluster_id=task_cluster_id,
+)
+```
+
+请求线程只完成 evidence append；单 worker 在后台增量聚合并原子发布不可变 observation/merged
+revision，通常由下一次规划读取。`flush_observations()` 只用于测试、管理命令或要求 read-after-write
+的流程，不应放在普通在线规划热路径。
 
 ## 最终 Runtime 与统一接口蓝图（部分尚未接入）
 
@@ -637,7 +663,13 @@ graph_artifact_root/
 ├── cache/relation_matches.json
 ├── current.json
 ├── versions/<version>/graph.json
-└── .build_runs/
+├── .build_runs/
+└── evolution/
+    ├── evidence.sqlite3
+    └── scopes/<scope-hash>/
+        ├── current.json
+        ├── observations/<observation-revision>/overlay.json
+        └── merged/<merged-revision>/manifest.json
 
 experience_kb/
 ├── meta.json
@@ -646,15 +678,14 @@ experience_kb/
     ├── faiss_index.bin
     └── embeddings.npy
 
-<session-parent>/trace_store/
-├── processed_index.json
-└── records.jsonl
 ```
 
 - `fingerprint.json` 当前保存标准化能力指纹、质量结果、诊断和 source snapshot。
 - `tree.json` 最终保存能力树索引、能力资产清单快照和版本信息。
 - `graph.json` 当前已保存能力节点、关系边、在线规划 lookup 和版本信息。
-- `experience_kb` 是当前独立经验库的调用方指定目录；`trace_store` 位于调用方传入的 session 目录同级。
+- `evolution/evidence.sqlite3` 是 append-only 规范证据日志；`observations` 与 `merged` 保存不可变派生版本。
+- `experience_kb` 是当前独立经验库的调用方指定目录；canonical Trajectory 的归档仍由 Harness 管理，
+  GraphEngine 只持久化脱敏后的规范边证据。
 - 机器读写产物使用 JSON；YAML 用于配置、prompt 或人工维护的说明文件。
 
 ## 开发与验证

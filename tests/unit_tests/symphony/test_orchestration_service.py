@@ -395,6 +395,118 @@ async def test_dynamic_graph_enabled_reports_config_without_overlay(
     assert result["planned_graph"]["graph"]["metadata"] == {"status": "no_plan"}
 
 
+@pytest.mark.asyncio
+async def test_beam_planner_receives_same_dynamic_overlay_as_fast(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict] = []
+
+    class _Planner:
+        def __init__(self, *args, dynamic_overlay=None, **kwargs):
+            del args, kwargs
+            captured.append(dynamic_overlay)
+
+        async def plan(self, query):
+            del query
+            return {
+                "plans": [],
+                "recommended_plans": [],
+                "dynamic_overlay_used": True,
+            }
+
+    monkeypatch.setattr("openjiuwen.symphony.orchestration.service.BidirectionalBeamPlanner", _Planner)
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+        config=OrchestrationConfig(dynamic_graph_enabled=True),
+    )
+    await service.build()
+    overlay = {"edges": {"edge-1": {"runtime_weight": 1.2}}}
+
+    await service.plan("query", dynamic_overlay=overlay, mode="beam")
+
+    assert captured == [overlay]
+
+
+@pytest.mark.asyncio
+async def test_graph_engine_plan_pins_merged_snapshot(tmp_path: Path) -> None:
+    runtime = SymphonyRuntime(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=True),
+    )
+    await runtime.graph_engine.build()
+
+    snapshot = runtime.graph_engine.get_snapshot()
+    result = await runtime.graph_engine.plan("query", merged_revision=snapshot.merged_revision)
+
+    graph_snapshot = result["planned_graph"]["graph_snapshot"]
+    assert graph_snapshot["static_revision"] == snapshot.static_revision
+    assert graph_snapshot["observation_revision"] == snapshot.observation_revision
+    assert graph_snapshot["merged_revision"] == snapshot.merged_revision
+    assert set(result) == {"planned_graph"}
+    runtime.graph_engine.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_engine_does_not_materialize_observation_snapshot_when_disabled(tmp_path: Path) -> None:
+    runtime = SymphonyRuntime(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=False),
+    )
+    await runtime.graph_engine.build()
+
+    result = await runtime.graph_engine.plan("query")
+
+    assert "graph_snapshot" not in result["planned_graph"]
+    assert not (tmp_path / "evolution").exists()
+    runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_engine_falls_back_to_static_graph_when_current_observation_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = SymphonyRuntime(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=True),
+    )
+    await runtime.graph_engine.build()
+
+    def fail_snapshot(*args, **kwargs):
+        del args, kwargs
+        raise OSError("observation store unavailable")
+
+    monkeypatch.setattr(runtime.graph_engine._observation_service, "get_snapshot", fail_snapshot)
+    result = await runtime.graph_engine.plan("query")
+
+    assert "graph_snapshot" not in result["planned_graph"]
+    runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_engine_does_not_fallback_when_a_pinned_revision_is_missing(tmp_path: Path) -> None:
+    runtime = SymphonyRuntime(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+        orchestration_config=OrchestrationConfig(dynamic_graph_enabled=True),
+    )
+    await runtime.graph_engine.build()
+
+    with pytest.raises(FileNotFoundError, match="Unknown Symphony merged revision"):
+        await runtime.graph_engine.plan("query", merged_revision="merged-missing")
+    runtime.close()
+
+
 class _MixedPlanLLM:
     async def invoke(self, messages, **kwargs):
         del kwargs
