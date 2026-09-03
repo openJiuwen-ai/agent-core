@@ -55,6 +55,7 @@ from openjiuwen.rsi.harness_rsi.single_harness import (
     IterativeSingleHarnessRequest,
     IterativeSingleHarnessResult,
     SingleHarnessIterativeOptimizationOrchestrator,
+    load_cases,
 )
 
 __all__ = [
@@ -96,4 +97,5 @@ __all__ = [
     "build_git_auth_env",
     "create_auto_harness_orchestrator",
     "load_auto_harness_config",
+    "load_cases",
 ]

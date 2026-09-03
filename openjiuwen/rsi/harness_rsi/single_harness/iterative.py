@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.rsi.events import OnEvent, emit
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
 from openjiuwen.rsi.harness_rsi.data_loader import DataLoader
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
@@ -58,6 +59,11 @@ from openjiuwen.rsi.harness_rsi.single_harness.candidate_feedback import (
     canonical_candidate_fingerprint,
     rank_candidate_proposals,
 )
+from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
+    node_event,
+    parent_node_id,
+    progress_event,
+)
 
 _ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail"]
 _ALLOWED_PROMPT_SURFACES = ["prompt_section"]
@@ -74,6 +80,7 @@ class IterativeSingleHarnessRequest:
     resume: bool = False
     baseline_eval_ref_path: str = ""
     auto_full_baseline: bool = False
+    task_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +146,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
     async def run(
         self,
         request: IterativeSingleHarnessRequest,
+        *,
+        on_event: OnEvent | None = None,
     ) -> IterativeSingleHarnessResult:
         output_dir = Path(request.output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -154,6 +163,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             sibling_candidate_count=self.config.member_optimizer.sibling_candidate_count,
             improver_policy_digest=self.improver_policy.canonical_digest,
         )
+        resuming_existing_state = bool(request.resume and state_path.is_file())
         state = _load_or_create_state(
             state_path=state_path,
             resume=request.resume,
@@ -161,6 +171,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             source_harness_refs_path=source_refs,
             dataset=dataset,
         )
+        stored_task_id = str(state.get("task_id", "") or "")
+        if request.resume and stored_task_id and request.task_id and stored_task_id != request.task_id:
+            raise ValueError("resume task_id does not match single-harness state")
+        state["task_id"] = request.task_id or stored_task_id
         state["improver_policy"] = {
             "version_id": self.improver_policy.version_id,
             "policy_digest": self.improver_policy.canonical_digest,
@@ -173,8 +187,19 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             _write_yaml_atomic(report_path, _build_report(state, dataset))
             return _result_from_state(state, state_path, report_path)
 
-        all_cases = _load_cases(dataset.dataset_files)
+        all_cases = load_cases(dataset.dataset_files)
+        total_iterations = _maximum_candidate_iterations(
+            case_count=len(all_cases),
+            max_epochs=int(self.config.max_epochs),
+            batch_size=int(self.config.data_loader.batch_size),
+            max_issue_attempts=(
+                int(self.config.member_optimizer.max_issue_attempts_per_batch)
+                or int(self.config.evaluation_result_analyzer.max_issues)
+            ),
+            sibling_candidate_count=int(self.config.member_optimizer.sibling_candidate_count),
+        )
         all_case_ids = {str(case.get("case_id", "") or "") for case in all_cases if str(case.get("case_id", "") or "")}
+        baseline_before = str(state.get("baseline_eval_ref_path", "") or "")
         _initialize_frozen_baseline(
             state,
             baseline_eval_ref_path=request.baseline_eval_ref_path,
@@ -195,6 +220,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 expected_case_ids=all_case_ids,
             )
         _write_yaml_atomic(state_path, state)
+        baseline_after = str(state.get("baseline_eval_ref_path", "") or "")
+        if baseline_after and (not resuming_existing_state or baseline_after != baseline_before):
+            await emit(on_event, progress_event(state, total_iterations=total_iterations))
         current_refs = str(state["best_harness_refs_path"])
         max_epochs = int(self.config.max_epochs)
         for epoch in range(1, max_epochs + 1):
@@ -515,6 +543,14 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                 gate,
                             )
                             state["candidate_gates"].append(gate)
+                            if on_event is not None:
+                                _write_yaml_atomic(state_path, state)
+                                await _emit_candidate_snapshot(
+                                    on_event,
+                                    state=state,
+                                    candidate=gate,
+                                    total_iterations=total_iterations,
+                                )
                             attempt_record = {
                                 "attempt_index": attempt_index,
                                 "candidate_index": int(gate.get("candidate_index", 0) or 0),
@@ -963,6 +999,15 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             state["working_harness_refs_path"] = str(state["best_harness_refs_path"])
             _refresh_optimization_experience(state, output_dir)
             _write_yaml_atomic(state_path, state)
+            for gate in epoch_provisional_gates:
+                await _emit_candidate_snapshot(
+                    on_event,
+                    state=state,
+                    candidate=gate,
+                    total_iterations=total_iterations,
+                    include_progress=False,
+                )
+            await emit(on_event, progress_event(state, total_iterations=total_iterations))
 
         _refresh_optimization_experience(state, output_dir)
         _ensure_final_publication(state=state, output_dir=output_dir)
@@ -1678,11 +1723,65 @@ def _dataset_artifact(request: IterativeSingleHarnessRequest) -> DatasetArtifact
         dataset_id=request.dataset_id,
         dataset_dir=next(iter(dirs)),
         dataset_files=files,
-        cases=len(_load_cases(files)),
+        cases=len(load_cases(files)),
     )
 
 
-def _load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
+async def _emit_candidate_snapshot(
+    on_event: OnEvent | None,
+    *,
+    state: dict[str, Any],
+    candidate: dict[str, Any],
+    total_iterations: int,
+    include_progress: bool = True,
+) -> None:
+    if on_event is None:
+        return
+    persisted_candidates = [item for item in state.get("candidate_gates", []) if isinstance(item, dict)]
+    iteration = next(
+        (index for index, item in enumerate(persisted_candidates, start=1) if item is candidate),
+        0,
+    )
+    if not iteration:
+        candidate_id = str(candidate.get("candidate_id", "") or "")
+        iteration = next(
+            (
+                index
+                for index, item in enumerate(persisted_candidates, start=1)
+                if candidate_id and str(item.get("candidate_id", "") or "") == candidate_id
+            ),
+            len(persisted_candidates) + 1,
+        )
+    await emit(
+        on_event,
+        node_event(
+            candidate,
+            iteration=iteration,
+            parent_id=parent_node_id(candidate, persisted_candidates[: max(0, iteration - 1)]),
+        ),
+    )
+    if include_progress:
+        await emit(on_event, progress_event(state, total_iterations=total_iterations))
+
+
+def _maximum_candidate_iterations(
+    *,
+    case_count: int,
+    max_epochs: int,
+    batch_size: int,
+    max_issue_attempts: int,
+    sibling_candidate_count: int,
+) -> int:
+    """Return the configured upper bound for candidate-node creation."""
+
+    safe_batch_size = max(1, batch_size)
+    planned_groups = (max(0, case_count) + safe_batch_size - 1) // safe_batch_size
+    return max(1, max_epochs) * planned_groups * max(1, max_issue_attempts) * max(1, sibling_candidate_count)
+
+
+def load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
+    """Load and validate the dataset cases accepted by this engine."""
+
     cases: list[dict[str, Any]] = []
     for dataset_file in dataset_files:
         path = Path(dataset_file).expanduser().resolve()
@@ -1712,6 +1811,12 @@ def _load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
     if duplicates:
         raise ValueError(f"single-harness dataset contains duplicate case ids: {sorted(duplicates)}")
     return cases
+
+
+def _load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
+    """Compatibility alias for integrations that used the private helper."""
+
+    return load_cases(dataset_files)
 
 
 def _validate_and_filter_planned_batches(
@@ -4463,6 +4568,7 @@ def _skill_names_match(planned: str, invoked: str) -> bool:
 def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, Any]:
     accepted = [gate for gate in state["candidate_gates"] if gate.get("accepted") and gate.get("status") == "accepted"]
     return {
+        "task_id": state.get("task_id", ""),
         "mode": "single_harness_benchmark",
         "status": state["status"],
         "dataset_id": dataset.dataset_id,
@@ -4626,4 +4732,5 @@ __all__ = [
     "IterativeSingleHarnessRequest",
     "IterativeSingleHarnessResult",
     "SingleHarnessIterativeOptimizationOrchestrator",
+    "load_cases",
 ]
