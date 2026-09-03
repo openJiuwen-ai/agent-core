@@ -496,7 +496,11 @@ async def test_read_trajectory_spans_projects_llm_and_context_allowlists():
                     ),
                     semconv.GEN_AI_USAGE_INPUT_TOKENS: 42,
                     semconv.GEN_AI_REQUEST_TEMPERATURE: 0.8,
-                    semconv.LANGFUSE_OBSERVATION_INPUT: "duplicate prompt",
+                    # A redundant foreign mirror of the prompt must be ignored:
+                    # evolution reads LLM messages only from gen_ai.input.messages.
+                    # The key is spelled literally because it belongs to the
+                    # Langfuse exporter's private projection, not to semconv.
+                    "langfuse.observation.input": "duplicate prompt",
                 },
             ),
             _span(

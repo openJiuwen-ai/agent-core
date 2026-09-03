@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import signal
 import subprocess
 import sys
@@ -335,7 +336,10 @@ def test_local_program_rollout_uses_current_python_env(tmp_path, monkeypatch):
 
     command_text = spec.command[-1]
     assert "conda activate wrong-env" not in command_text
-    assert f"export PATH={Path(sys.executable).resolve().parent}:$PATH" in command_text
+    # The producer shlex-quotes the bin dir (uv-managed Pythons live under
+    # "Library/Application Support", which contains a space), so compare against
+    # the quoted form rather than a raw path interpolation.
+    assert f"export PATH={shlex.quote(str(Path(sys.executable).resolve().parent))}:$PATH" in command_text
     assert spec.env["SFT_TASK_LIGHT_CONFIG"] == "1"
 
 
