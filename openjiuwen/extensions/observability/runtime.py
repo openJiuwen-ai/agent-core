@@ -140,6 +140,7 @@ class ObservabilityRuntime:
                 # metrics: independent of the trace provider; build lazily if requested
                 if config.metrics_enabled and self._metrics_recorder is None:
                     from openjiuwen.extensions.observability import metrics as metrics_module
+
                     self._metrics_recorder = metrics_module.MetricsRecorder(config)
                     metrics_module.set_metrics_recorder(self._metrics_recorder)
                 return
@@ -176,6 +177,7 @@ class ObservabilityRuntime:
                 self._additional_processors.extend(additional_processors)
 
                 from openjiuwen.extensions.observability import metrics as metrics_module
+
                 if config.metrics_enabled:
                     self._metrics_recorder = metrics_module.MetricsRecorder(config)
                 metrics_module.set_metrics_recorder(self._metrics_recorder)
@@ -206,6 +208,7 @@ class ObservabilityRuntime:
                         logger.warning("otel: metrics rollback shutdown failed - {}", exc)
                 self._metrics_recorder = None
                 from openjiuwen.extensions.observability import metrics as metrics_module
+
                 metrics_module.set_metrics_recorder(None)
                 if provider is not None:
                     try:
@@ -280,6 +283,7 @@ class ObservabilityRuntime:
                         logger.warning("otel: provider shutdown failed - {}", exc)
             finally:
                 from openjiuwen.extensions.observability import metrics as metrics_module
+
                 if self._metrics_recorder is not None:
                     try:
                         self._metrics_recorder.shutdown()
