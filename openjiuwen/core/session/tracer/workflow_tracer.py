@@ -26,9 +26,10 @@ class TracerWorkflowUtils:
     def _get_component_metadata(session) -> dict:
         executable_id = session.executable_id()
         state = session.state()
+        _node_name = session.node_name()
         component_metadata = {
             "component_id": session.node_id(),
-            "component_name": session.node_id(),
+            "component_name": _node_name or session.node_id(),
             "component_type": session.node_type(),
             "workflow_id": session.workflow_id()
         }

@@ -42,8 +42,11 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_SYSTEM_VALUE,
     GEN_AI_OPERATION_NAME,
     GEN_AI_REQUEST_MODEL,
+    OJ_WORKFLOW_COMPONENT_ID,
+    OJ_WORKFLOW_COMPONENT_NAME,
     OJ_WORKFLOW_COMPONENT_TYPE,
     OJ_WORKFLOW_ID,
+    OJ_TRACE_ID,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -456,3 +459,155 @@ class TestE2EWorkflowWithSubWorkflowAndLLM:
         llm_spans = [s for s in finished if "sub_llm" in s.name]
         assert len(llm_spans) >= 1
         assert llm_spans[0].attributes.get(GEN_AI_SYSTEM) == GEN_AI_SYSTEM_VALUE
+
+
+# ---------------------------------------------------------------------------
+# E2E: component_name propagation through add_workflow_comp(name=...)
+# ---------------------------------------------------------------------------
+
+
+class TestE2EComponentNamePropagation:
+    """Validate that ``name`` passed to ``add_workflow_comp`` / ``set_start_comp``
+    / ``set_end_comp`` flows through NodeSpec → NodeSession → tracer metadata →
+    OTel span attribute ``openjiuwen.workflow.component.name``.
+
+    - When ``name`` is set, the span's component.name attribute equals it.
+    - When ``name`` is unset (None), the attribute falls back to the comp_id
+      (preserves prior behavior).
+    """
+
+    async def test_explicit_name_reaches_span_attribute(self):
+        _register_otel_handlers()
+
+        wf = Workflow()
+        wf.set_start_comp("start", Start(), inputs_schema={"value": "${value}"}, name="开始节点")
+        wf.add_workflow_comp("add_one", AddOneNode("add_one"),
+                             inputs_schema={"value": "${start.value}"}, name="加一节点")
+        wf.set_end_comp("end", End(),
+                        inputs_schema={"result": "${add_one.value}"}, name="结束节点")
+        wf.add_connection("start", "add_one")
+        wf.add_connection("add_one", "end")
+
+        session = create_workflow_session()
+        await wf.invoke({"value": 10}, session)
+
+        finished = _EXPORTER.get_finished_spans()
+        comp_spans = [s for s in finished if s.name.startswith("component.")]
+
+        names_by_id = {
+            s.attributes.get(OJ_WORKFLOW_COMPONENT_ID): s.attributes.get(OJ_WORKFLOW_COMPONENT_NAME)
+            for s in comp_spans
+        }
+        assert names_by_id.get("start") == "开始节点"
+        assert names_by_id.get("add_one") == "加一节点"
+        assert names_by_id.get("end") == "结束节点"
+
+    async def test_unset_name_falls_back_to_comp_id(self):
+        _register_otel_handlers()
+
+        wf = Workflow()
+        wf.set_start_comp("start", Start(), inputs_schema={"value": "${value}"})
+        wf.add_workflow_comp("add_one", AddOneNode("add_one"),
+                             inputs_schema={"value": "${start.value}"})
+        wf.set_end_comp("end", End(), inputs_schema={"result": "${add_one.value}"})
+        wf.add_connection("start", "add_one")
+        wf.add_connection("add_one", "end")
+
+        session = create_workflow_session()
+        await wf.invoke({"value": 10}, session)
+
+        finished = _EXPORTER.get_finished_spans()
+        comp_spans = [s for s in finished if s.name.startswith("component.")]
+        for s in comp_spans:
+            comp_id = s.attributes.get(OJ_WORKFLOW_COMPONENT_ID)
+            comp_name = s.attributes.get(OJ_WORKFLOW_COMPONENT_NAME)
+            # Fallback preserves prior behavior: name == id when name not set
+            assert comp_name == comp_id, (
+                f"expected component.name to fall back to component.id, "
+                f"got id={comp_id!r} name={comp_name!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# E2E: Custom trace_id propagation through create_workflow_session
+# ---------------------------------------------------------------------------
+
+
+class TestE2ECustomTraceIdPropagation:
+    """Validate that a user-supplied ``trace_id`` flows from
+    ``create_workflow_session(trace_id=...)`` → Session → Tracer → OTel span
+    attribute ``openjiuwen.trace.id``.
+
+    - When set, every emitted span carries the same trace_id.
+    - When unset (None), the tracer falls back to a random uuid4 (prior behavior).
+    """
+
+    async def test_custom_trace_id_reaches_spans(self):
+        _register_otel_handlers()
+
+        wf = Workflow()
+        wf.set_start_comp("start", Start(), inputs_schema={"value": "${value}"})
+        wf.add_workflow_comp("add_one", AddOneNode("add_one"),
+                             inputs_schema={"value": "${start.value}"})
+        wf.set_end_comp("end", End(),
+                        inputs_schema={"result": "${add_one.value}"})
+        wf.add_connection("start", "add_one")
+        wf.add_connection("add_one", "end")
+
+        session = create_workflow_session(trace_id="my-trace-123")
+        await wf.invoke({"value": 10}, session)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) > 0
+        for s in finished:
+            assert s.attributes.get(OJ_TRACE_ID) == "my-trace-123"
+
+    async def test_default_trace_id_is_uuid_when_not_supplied(self):
+        _register_otel_handlers()
+
+        wf = Workflow()
+        wf.set_start_comp("start", Start(), inputs_schema={"value": "${value}"})
+        wf.add_workflow_comp("add_one", AddOneNode("add_one"),
+                             inputs_schema={"value": "${start.value}"})
+        wf.set_end_comp("end", End(),
+                        inputs_schema={"result": "${add_one.value}"})
+        wf.add_connection("start", "add_one")
+        wf.add_connection("add_one", "end")
+
+        session = create_workflow_session()
+        await wf.invoke({"value": 10}, session)
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) > 0
+        trace_ids = {s.attributes.get(OJ_TRACE_ID) for s in finished}
+        # All spans share one tracer-generated trace_id (uuid4 format).
+        assert len(trace_ids) == 1
+        only_id = trace_ids.pop()
+        assert only_id is not None
+        # uuid4 string format: 36 chars with 4 hyphens.
+        assert len(only_id) == 36 and only_id.count("-") == 4
+
+# ---------------------------------------------------------------------------
+# E2E: Agent team trace_id propagation
+# ---------------------------------------------------------------------------
+
+
+class TestE2EAgentTeamTraceId:
+    """Validate that trace_id flows through create_agent_team_session."""
+
+    async def test_agent_team_custom_trace_id(self):
+        from openjiuwen.core.session.agent_team import create_agent_team_session
+        from openjiuwen.core.session.tracer.tracer import TracerHandlerRegistry
+        from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler
+
+        config = OtelTracerConfig()
+        _register_otel_handlers()
+
+        session = create_agent_team_session(
+            session_id="team-test-1",
+            trace_id="team-trace-abc",
+        )
+        # Access internal tracer to verify trace_id propagated
+        inner = session._inner
+        assert inner._tracer._trace_id == "team-trace-abc"
+
