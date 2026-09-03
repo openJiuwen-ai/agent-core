@@ -90,6 +90,8 @@ def _project_continuity(
     spans.sort(key=span_sort_key)
     by_identity = {span_identity(span): span for span in spans}
     parents = {identity: _parent_identity(span, by_identity) for identity, span in by_identity.items()}
+    if _has_parent_cycle(parents):
+        return []
     children: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
     for identity, parent in parents.items():
         if parent is not None:
@@ -179,6 +181,24 @@ def _parent_identity(
         return None
     parent = (identity[0], parent_span_id)
     return parent if parent in by_identity else None
+
+
+def _has_parent_cycle(
+    parents: Mapping[tuple[str, str], tuple[str, str] | None],
+) -> bool:
+    """Detect malformed parent loops in linear time before any ancestry walk."""
+
+    finished: set[tuple[str, str]] = set()
+    for identity in parents:
+        path: set[tuple[str, str]] = set()
+        current: tuple[str, str] | None = identity
+        while current is not None and current not in finished:
+            if current in path:
+                return True
+            path.add(current)
+            current = parents.get(current)
+        finished.update(path)
+    return False
 
 
 def _branch_identities(

@@ -550,3 +550,28 @@ def test_team_member_projection_selects_a_root_within_each_trace() -> None:
         (f"{10:032x}", f"{10:016x}"),
         (f"{20:032x}", f"{20:016x}"),
     }
+
+
+def test_parent_cycle_fails_closed_without_blocking_other_continuities() -> None:
+    cyclic = _trajectory(
+        _span("agent.a", 1, parent_span_id=2),
+        _span(
+            "tool.b",
+            2,
+            parent_span_id=1,
+            attributes={semconv.GEN_AI_TOOL_NAME: "b"},
+        ),
+    )
+    valid = _trajectory(
+        _span("agent.main", 10),
+        _span(
+            "tool.lookup",
+            11,
+            parent_span_id=10,
+            attributes={semconv.GEN_AI_TOOL_NAME: "lookup"},
+        ),
+    )
+
+    fragments = project_symphony_execution_fragments(((0, cyclic), (1, valid)))
+
+    assert [(fragment.continuity_index, fragment.capability_name) for fragment in fragments] == [(1, "lookup")]
