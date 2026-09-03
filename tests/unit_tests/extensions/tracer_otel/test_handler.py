@@ -970,7 +970,7 @@ class TestRefreshInputsAttribute:
     @pytest.fixture(autouse=True)
     def _setup(self):
         _EXPORTER.clear()
-        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
+        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig(redaction_enabled=False))
 
     async def test_refresh_inputs_after_mutation(self):
         """Inputs mutated after on_pre_invoke should appear in span attributes."""
@@ -1133,7 +1133,8 @@ class TestMultiRoundConversationTraceContinuity:
             parent_node_id="",
         )
         await self.handler.on_call_done(invoke_id="round1_comp", outputs={})
-        # Note: on_call_done does NOT clear _layer_root_spans (key fix)
+        # End round1_root so its span is exported (preserved in _layer_root_spans)
+        await self.handler.on_call_done(invoke_id="round1_root", outputs={})
 
         # Round 2: same workflow_id, new conversation round
         await self.handler.on_call_start(
@@ -1149,7 +1150,7 @@ class TestMultiRoundConversationTraceContinuity:
         await self.handler.on_call_done(invoke_id="round2_root", outputs={})
 
         finished = _EXPORTER.get_finished_spans()
-        assert len(finished) >= 3
+        assert len(finished) == 3
 
         # Verify round2_root has a parent from round1 (trace continuity)
         round2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round2_root"]
