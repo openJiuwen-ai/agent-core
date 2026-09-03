@@ -342,3 +342,33 @@ async def test_pull_push_history_noop_when_version_control_disabled(monkeypatch,
     assert await manager.push() is True
     assert await manager.get_history("artifacts/code/a.py") == []
     assert recorder.calls == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="残留失效 junction 是 Windows 场景（junction 无特权要求）")
+@pytest.mark.level0
+def test_mount_into_workspace_replaces_broken_link(tmp_path):
+    """残留失效挂载（目标已删除的 junction）必须自愈重建，不能撞 WinError 183。
+
+    os.path.exists 跟随链接、对失效 junction 返回 False，os.path.islink 对
+    junction 恒为 False——旧实现（exists + islink）把残留失效挂载误判为
+    "不存在"，随后 os.symlink 撞已占用路径（WinError 183 / EEXIST）。
+    改为 lexists 后失效挂载进入"已存在"分支：备份改名 + 重新挂载。
+    """
+    manager = _make_manager(tmp_path)
+    workspace_root = tmp_path / "agent-workspace"
+    workspace_root.mkdir()
+    link_path = workspace_root / ".team" / "team-alpha"
+    link_path.parent.mkdir(parents=True)
+    # 造一个目标已被删除的失效 junction（模拟换数据目录/team-workspace 被删后的残留挂载）
+    stale_target = tmp_path / "gone"
+    stale_target.mkdir()
+    TeamWorkspaceManager._create_windows_junction(str(stale_target), str(link_path))
+    os.rmdir(str(stale_target))
+    assert not os.path.exists(link_path)  # 失效 junction：跟随链接不可见
+    assert os.path.lexists(link_path)
+
+    manager.mount_into_workspace(str(workspace_root))
+
+    assert os.path.realpath(link_path) == os.path.realpath(manager.workspace_path)
+    backups = list(link_path.parent.glob("team-alpha.stale-*"))
+    assert len(backups) == 1

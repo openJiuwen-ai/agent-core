@@ -281,7 +281,11 @@ class TeamWorkspaceManager:
 
     def _prepare_mount_path(self, link_path: str) -> bool:
         """Return True when a mount should be created at ``link_path``."""
-        if not os.path.exists(link_path) and not os.path.islink(link_path):
+        # lexists（lstat 语义）：目标已失效的 junction/断链也必须算"已存在"——
+        # exists() 跟随链接会对断链返回 False，islink() 对 Windows junction 恒 False，
+        # 两者合力会把残留失效挂载误判为"不存在"，随后 os.symlink 撞已占用路径
+        # （WinError 183 / EEXIST）。走"已存在"分支可经备份改名自愈重建。
+        if not os.path.lexists(link_path):
             return True
         if self._is_mounted_to_workspace(link_path):
             return False
