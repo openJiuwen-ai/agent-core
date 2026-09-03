@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -36,6 +37,7 @@ from openjiuwen.extensions.observability import demand as demand_module
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
+    ERROR_TYPE,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
@@ -51,8 +53,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_TYPE,
     OJ_EVENT_SEQUENCE,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
@@ -67,6 +67,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_RUN_ID,
     OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
+    OJ_SPAN_INPUT,
     OJ_STREAM_KIND,
     OJ_TRACE_COMPLETE,
     OJ_TRACE_FORCED_CLOSE,
@@ -333,7 +334,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         enabled=True,
         service_name="stream-contract-test",
         sample_rate=1.0,
-        backend="langfuse",
+        exporter="langfuse",
     )
     framework = Runner.callback_framework
     runtime.initialize(config, span_exporter_override=exporter)
@@ -684,8 +685,8 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
         "preserved tail",
     ]
     assert all("metadata" not in message for message in structured)
-    langfuse_input = json.loads(span.attributes[LANGFUSE_OBSERVATION_INPUT])
-    assert [message["content"] for message in langfuse_input] == [
+    span_input = json.loads(span.attributes[OJ_SPAN_INPUT])
+    assert [message["content"] for message in span_input] == [
         repeated_content,
         repeated_content,
         "preserved tail",
@@ -794,7 +795,7 @@ async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> Non
             enabled=True,
             service_name="semantic-identity-pressure-test",
             sample_rate=1.0,
-            backend="langfuse",
+            exporter="langfuse",
             max_attributes=80,
         ),
         span_exporter_override=exporter,
@@ -856,7 +857,6 @@ async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> Non
     assert span.attributes[GEN_AI_OPERATION_NAME] == "chat"
     assert span.attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
     assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "inference"
-    assert span.attributes[LANGFUSE_OBSERVATION_TYPE] == "generation"
     assert span.attributes[GEN_AI_REQUEST_STREAM] is False
     assert GEN_AI_OUTPUT_MESSAGES in span.attributes
 
@@ -1378,3 +1378,269 @@ def test_request_numbers_are_allocated_without_a_root_span() -> None:
         reset_state()
 
     assert allocated == [1, 2, 3]
+
+
+def _error_test_runtime(service_name: str):
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    config = ObservabilityConfig(
+        enabled=True,
+        service_name=service_name,
+        sample_rate=1.0,
+    )
+    runtime.initialize(config, span_exporter_override=exporter)
+    root = runtime.get_tracer(service_name).start_span("agent.root")
+    root.set_attribute(OJ_SESSION_ID, f"{service_name}-session")
+    set_root_span(root, session_id=f"{service_name}-session")
+    return exporter, runtime, root
+
+
+def _execute_tool_spans(exporter: InMemorySpanExporter) -> list[Any]:
+    return [
+        span for span in exporter.get_finished_spans()
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
+    ]
+
+
+def _exception_events(span: Any) -> list[Any]:
+    return [event for event in span.events if event.name == "exception"]
+
+
+@pytest.mark.asyncio
+async def test_llm_timeout_error_message_reaches_the_span() -> None:
+    """A bare TimeoutError with an explicit error_message records the detail."""
+    exporter, runtime, root = _error_test_runtime("llm-error-detail")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        reason = (
+            "LLM stream timeout: stage=idle_chunk, timeout=60.0s, "
+            "chunk_count=368, idle_elapsed=60.00s, total_elapsed=91.15s, "
+            "model=GLM-5.3"
+        )
+        # Raised, not constructed, so the exception carries a real traceback
+        # exactly like the streaming timeout path does.
+        try:
+            raise asyncio.TimeoutError()
+        except asyncio.TimeoutError as timeout_error:
+            error = timeout_error
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=error,
+            error_message=reason,
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-detail-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == reason
+    assert span.attributes[ERROR_TYPE] == "TimeoutError"
+    events = _exception_events(span)
+    assert len(events) == 1
+    assert events[0].attributes["exception.message"] == reason
+    assert events[0].attributes["exception.type"] == "TimeoutError"
+    assert "Traceback" in events[0].attributes["exception.stacktrace"]
+
+
+@pytest.mark.asyncio
+async def test_llm_error_with_plain_exception_keeps_legacy_display() -> None:
+    """A normal str(exc) error keeps showing str(exc) — backward compatible."""
+    exporter, runtime, root = _error_test_runtime("llm-error-plain")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=RuntimeError("provider down"),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-plain-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == "provider down"
+    assert span.attributes[ERROR_TYPE] == "RuntimeError"
+    events = _exception_events(span)
+    assert events[0].attributes["exception.message"] == "provider down"
+
+
+@pytest.mark.asyncio
+async def test_llm_error_with_blank_error_falls_back_to_type_name() -> None:
+    exporter, runtime, root = _error_test_runtime("llm-error-blank")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=asyncio.TimeoutError(),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-blank-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == "TimeoutError"
+    assert span.attributes[ERROR_TYPE] == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_llm_error_summary_masks_secrets_and_is_single_line() -> None:
+    reason = (
+        "call failed: Authorization: Bearer sk-secret123456, "
+        "api_key=sk-abcdef123456\nretrying"
+    )
+    exporter, runtime, root = _error_test_runtime("llm-error-secrets")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=RuntimeError(reason),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-secrets-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    description = span.status.description
+    assert "sk-secret123456" not in description
+    assert "sk-abcdef123456" not in description
+    assert "Authorization: ***" in description
+    assert "api_key=***" in description
+    assert "\n" not in description
+    assert "retrying" in description
+
+
+@pytest.mark.asyncio
+async def test_llm_error_summary_is_truncated() -> None:
+    reason = "x" * 10_000
+    exporter, runtime, root = _error_test_runtime("llm-error-long")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=RuntimeError(reason),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-long-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert len(span.status.description) < len(reason)
+    assert "truncated" in span.status.description
+
+
+@pytest.mark.asyncio
+async def test_tool_error_records_redacted_reason_and_keeps_result() -> None:
+    exporter, runtime, root = _error_test_runtime("tool-error")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_STARTED,
+            tool_name="bash",
+            tool_id="t-1",
+            inputs=((), {}),
+        )
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_ERROR,
+            tool_name="bash",
+            tool_id="t-1",
+            error=RuntimeError("exec failed: password=hunter2"),
+            error_message="Ability execution error: exec failed: password=hunter2",
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="tool-error-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    spans = _execute_tool_spans(exporter)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == (
+        "Ability execution error: exec failed: password=***"
+    )
+    assert span.attributes[ERROR_TYPE] == "RuntimeError"
+    # The recorded result mirrors what the model actually received (the
+    # conversation content), so it is not masked like the status summary.
+    assert span.attributes["gen_ai.tool.call.result"] == (
+        "Ability execution error: exec failed: password=hunter2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_reported_failure_masks_reason_in_status() -> None:
+    exporter, runtime, root = _error_test_runtime("tool-failure")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_STARTED,
+            tool_name="bash",
+            tool_id="t-2",
+            inputs=((), {}),
+        )
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_FINISHED,
+            tool_name="bash",
+            tool_id="t-2",
+            result={"success": False, "error": "auth failed: access_token=eyAbCdEf123"},
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="tool-failure-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    spans = _execute_tool_spans(exporter)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes[ERROR_TYPE] == "ToolReportedFailure"
+    assert span.status.description == "auth failed: access_token=***"
+    assert "eyAbCdEf123" not in span.status.description

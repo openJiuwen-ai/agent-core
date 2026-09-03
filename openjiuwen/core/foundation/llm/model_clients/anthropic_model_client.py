@@ -1054,6 +1054,9 @@ class AnthropicModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
                 error=e,
+                error_message=(
+                    f"{type(e).__name__}: {e}" if not str(e).strip() else None
+                ),
             )
             llm_logger.error(
                 "Anthropic API async invoke error.",
@@ -1196,6 +1199,9 @@ class AnthropicModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
                 error=e,
+                error_message=(
+                    f"{type(e).__name__}: {e}" if not str(e).strip() else None
+                ),
             )
             llm_logger.error(
                 "Anthropic API async stream error.",

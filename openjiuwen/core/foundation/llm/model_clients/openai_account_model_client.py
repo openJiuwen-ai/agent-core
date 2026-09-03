@@ -552,6 +552,9 @@ class OpenAIAccountModelClient(BaseModelClient):
             model_provider=self.model_client_config.client_provider,
             is_stream=is_stream,
             error=error,
+            error_message=(
+                f"{type(error).__name__}: {error}" if not str(error).strip() else None
+            ),
         )
         llm_logger.error(
             "OpenAI account API call error.",

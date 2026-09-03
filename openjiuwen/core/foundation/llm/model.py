@@ -261,7 +261,10 @@ class Model:
                             model_name=effective_model_name,
                             model_provider=model_provider,
                             is_stream=True,
-                            error=exc)
+                            error=exc,
+                            # The bare TimeoutError renders as an empty string;
+                            # carry the already-built diagnostic into the span.
+                            error_message=f"LLM stream timeout: {error_detail}")
                         llm_logger.error(
                             "LLM stream timeout.",
                             event_type=LogEventType.LLM_CALL_ERROR,

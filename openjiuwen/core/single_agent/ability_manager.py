@@ -1172,6 +1172,7 @@ class AbilityManager:
                         tool_name=tc.name,
                         tool_id=tc.id,
                         error=result,
+                        error_message=error_msg,
                     )
                 except Exception as e:
                     logger.warning(f"Failed to trigger TOOL_CALL_ERROR event: {e}")

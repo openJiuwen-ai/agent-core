@@ -46,9 +46,11 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.extensions.observability.redaction import (
     redact_completion,
+    redact_error_summary,
     redact_prompt,
 )
 from openjiuwen.extensions.observability.demand import publish_span_snapshot
+from openjiuwen.extensions.observability.error_reporting import record_span_error
 from openjiuwen.extensions.observability.tool_outcome import (
     TOOL_REPORTED_FAILURE,
     tool_failure_reason,
@@ -72,10 +74,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_DESCRIPTION,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
-    LANGFUSE_OBSERVATION_TYPE,
-    LANGFUSE_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
@@ -84,6 +82,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TOOL_AUTHORITATIVE,
@@ -251,7 +251,7 @@ class AgentSpanScope:
         if output is not None:
             output_str = str(output)
             redacted = redact_completion(output_str, self._config) if self._config else output_str
-            span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+            span.set_attribute(OJ_SPAN_OUTPUT, redacted)
             for key in self._output_attribute_keys:
                 span.set_attribute(key, redacted)
 
@@ -259,12 +259,10 @@ class AgentSpanScope:
             cascade_close_children()
 
         if exception is not None:
-            span.record_exception(exception)
-            span.set_attribute(ERROR_TYPE, type(exception).__name__)
-            span.set_status(Status(StatusCode.ERROR, str(exception)))
+            record_span_error(span, exception=exception, config=self._config)
         else:
             span.set_status(Status(StatusCode.OK))
-        span.end()
+            span.end()
 
         # Restore the parent agent span (None when there was none) so the
         # parent's subsequent llm/tool spans resume nesting correctly.
@@ -332,13 +330,10 @@ class ToolSpanScope:
             else raw_call_result
         )
         span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted_call_result)
-        span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted_call_result)
+        span.set_attribute(OJ_SPAN_OUTPUT, redacted_call_result)
 
         if exception is not None:
-            span.record_exception(exception)
-            span.set_attribute(ERROR_TYPE, type(exception).__name__)
-            span.set_status(Status(StatusCode.ERROR, str(exception)))
-            span.end()
+            record_span_error(span, exception=exception, config=self._config)
             return
 
         failure_reason = tool_failure_reason(output)
@@ -346,7 +341,10 @@ class ToolSpanScope:
             span.set_status(Status(StatusCode.OK))
         else:
             span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
-            span.set_status(Status(StatusCode.ERROR, failure_reason))
+            span.set_status(Status(
+                StatusCode.ERROR,
+                redact_error_summary(failure_reason, self._config),
+            ))
         span.end()
 
 
@@ -485,7 +483,7 @@ class AgentObservabilityRail(DeepAgentRail):
             query = getattr(inputs, "query", "") or ""
             if query:
                 redacted_query = redact_prompt(query, config) if config else str(query)
-                span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_query)
+                span.set_attribute(OJ_SPAN_INPUT, redacted_query)
                 for key in decoration.input_attribute_keys:
                     span.set_attribute(key, redacted_query)
             loop_event = getattr(inputs, "loop_event", None)
@@ -660,7 +658,7 @@ class AgentObservabilityRail(DeepAgentRail):
             query = getattr(inputs, "query", "") or ""
             if query:
                 redacted_query = redact_prompt(query, config) if config else str(query)
-                span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_query)
+                span.set_attribute(OJ_SPAN_INPUT, redacted_query)
                 for key in decoration.input_attribute_keys:
                     span.set_attribute(key, redacted_query)
 
@@ -812,12 +810,10 @@ class AgentObservabilityRail(DeepAgentRail):
         if span.is_recording():
             cascade_close_children()
             if exception is not None:
-                span.record_exception(exception)
-                span.set_attribute(ERROR_TYPE, type(exception).__name__)
-                span.set_status(Status(StatusCode.ERROR, str(exception)))
+                record_span_error(span, exception=exception, config=self._config())
             else:
                 span.set_status(Status(StatusCode.OK))
-            span.end()
+                span.end()
         set_current_agent_span(
             parent if parent is not None and parent.is_recording() else None
         )
@@ -859,7 +855,6 @@ class AgentObservabilityRail(DeepAgentRail):
                 context=parent_ctx,
                 kind=SpanKind.INTERNAL,
             )
-            span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "tool")
             span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
             span.set_attribute(GEN_AI_TOOL_NAME, tool_name)
             span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
@@ -894,7 +889,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 redact_prompt(raw_arguments, config) if config else raw_arguments
             )
             span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_arguments)
-            span.set_attribute(LANGFUSE_OBSERVATION_INPUT, redacted_arguments)
+            span.set_attribute(OJ_SPAN_INPUT, redacted_arguments)
             self._copy_parent_correlation(parent, span)
 
             push_tool_span(tool_name, span)
@@ -957,7 +952,6 @@ class AgentObservabilityRail(DeepAgentRail):
     @staticmethod
     def _copy_parent_correlation(parent: Span, span: Span) -> None:
         for key in (
-            LANGFUSE_SESSION_ID,
             GEN_AI_CONVERSATION_ID,
             GEN_AI_AGENT_DESCRIPTION,
             GEN_AI_AGENT_ID,
@@ -1082,7 +1076,6 @@ class AgentObservabilityRail(DeepAgentRail):
         root_span: Span | None,
     ) -> None:
         """Apply the attributes shared by iteration and invoke spans."""
-        span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "agent")
         span.set_attribute(GEN_AI_OPERATION_NAME, "invoke_agent")
         span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
@@ -1139,14 +1132,18 @@ class AgentObservabilityRail(DeepAgentRail):
                 )
         # Preserve the root trajectory owner. A subagent's isolated runtime
         # session is already represented by OJ_EXECUTION_SUBJECT_SESSION_ID.
+        # Values already copied from the root are authoritative and are never
+        # overwritten here; the resolved id only fills a missing OJ_SESSION_ID
+        # (the backend-neutral replacement for the former Langfuse session
+        # stamp) so the export adapter can always derive a session.
         session_id = str(
             span.attributes.get(OJ_SESSION_ID)
             or span.attributes.get(GEN_AI_CONVERSATION_ID)
             or current_session_id()
             or ""
         )
-        if session_id:
-            span.set_attribute(LANGFUSE_SESSION_ID, session_id)
+        if session_id and not span.attributes.get(OJ_SESSION_ID):
+            span.set_attribute(OJ_SESSION_ID, session_id)
         for key, value in decoration.attributes.items():
             span.set_attribute(key, value)
 
