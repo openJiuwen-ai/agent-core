@@ -1977,6 +1977,132 @@ def test_a_task_may_ask_for_more_than_one_worker(tmp_path: Path) -> None:
     assert provider._spec_for(request, resumed=False).workers == 1      # not a number
 
 
+def test_a_card_builds_one_sandbox_per_evaluation_and_hands_each_back() -> None:
+    """A sandbox of its own for every evaluation, created and reclaimed here.
+
+    The isolation a scratch directory cannot give: a candidate that gets past
+    the AST gate and writes outside its own directory reaches only a container
+    about to be discarded. And since nothing else knows these containers exist
+    — AgentServer registered one card, not the dozens this makes — leaving one
+    behind is a leak nobody else can find, so the release is part of the same
+    call.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import execution as execution_module
+
+    built: list[str] = []
+    released: list[tuple[str, str]] = []
+
+    class _Card:
+        id = "rsi-card"
+
+        def __init__(self) -> None:
+            self.gateway_config = type("G", (), {
+                "isolation": type("I", (), {"container_scope": None, "custom_id": None})(),
+                "launcher_config": type("L", (), {"on_stop": "delete"})(),
+            })()
+
+        def model_copy(self, deep: bool = False) -> "_Card":
+            return _Card()
+
+    class _Operation:
+        def __init__(self, card: object) -> None:
+            self.isolation_key_template = f"key-{card.gateway_config.isolation.custom_id}"
+            built.append(self.isolation_key_template)
+
+        def fs(self): return _Fs()
+        def shell(self): return _Shell()
+
+    class _Fs:
+        async def write_file(self, path, text, **kw):
+            return type("R", (), {"code": 0, "message": "success"})()
+
+        async def read_file(self, path):
+            return type("R", (), {"data": type("D", (), {"content": "{}"})()})()
+
+    class _Shell:
+        async def execute_cmd(self, command, **kw):
+            return type("R", (), {"data": type("D", (), {
+                "exit_code": 0, "stdout": "", "stderr": ""})()})()
+
+    class _Client:
+        @staticmethod
+        async def release(key, on_stop="delete"):
+            released.append((key, on_stop))
+
+    import sys as _sys, types as _types
+    fake_core = _types.ModuleType("openjiuwen.core.sys_operation")
+    fake_core.SysOperation = _Operation
+    fake_config = _types.ModuleType("openjiuwen.core.sys_operation.config")
+    fake_config.ContainerScope = type("CS", (), {"CUSTOM": "custom"})
+    fake_gw = _types.ModuleType(
+        "openjiuwen.core.sys_operation.sandbox.gateway.gateway_client")
+    fake_gw.SandboxGatewayClient = _Client
+    saved = {name: _sys.modules.get(name) for name in
+             (fake_core.__name__, fake_config.__name__, fake_gw.__name__)}
+    _sys.modules.update({fake_core.__name__: fake_core, fake_config.__name__: fake_config,
+                         fake_gw.__name__: fake_gw})
+    try:
+        async def drive() -> None:
+            loop = asyncio.get_running_loop()
+            execute = execution_module.execution_from_sandbox_card(_Card(), loop)
+            for _ in range(3):
+                await asyncio.to_thread(
+                    execute, {"candidate.py": "x = 1\n"}, ["python", "candidate.py"],
+                    {}, 30.0, "result.json")
+
+        asyncio.run(drive())
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                _sys.modules.pop(name, None)
+            else:
+                _sys.modules[name] = module
+
+    assert len(built) == 3, f"expected one sandbox per evaluation, built {built}"
+    assert len(set(built)) == 3, f"the three evaluations shared a container: {built}"
+    # Every one of them handed back, under the key it was created with.
+    assert [key for key, _ in released] == built
+    assert {stop for _, stop in released} == {"delete"}
+
+
+def test_a_card_beats_an_instance_and_packages_become_a_prelude(tmp_path: Path) -> None:
+    """A caller that supplied a card asked for the stricter thing, so the card
+    wins. And each of those containers starts empty, so what the run was
+    promised has to be installed into every one of them — with a shared
+    sandbox that happens once at run start and the prelude stays empty."""
+    seen: dict[str, object] = {}
+
+    def recording(card, loop, prelude=()):
+        seen["card"], seen["prelude"] = card, prelude
+        return _local_execution
+
+    provider = PuctProgramArtifactProvider(sys_operation=object(), sandbox_card="the-card")
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), packages=["numpy", "scipy==1.18.1"])
+    spec = provider._spec_for(request, resumed=False)
+
+    from openjiuwen.rsi.artifact_rsi.program_opt import puct_provider as module
+    original = module.execution_from_sandbox_card
+    module.execution_from_sandbox_card = recording
+    try:
+        provider._execution_for(spec, loop=None)
+    finally:
+        module.execution_from_sandbox_card = original
+
+    assert seen["card"] == "the-card", "the instance was used even though a card was given"
+    assert list(seen["prelude"]) == [["python", "-m", "pip", "install", "--no-input",
+                                      "--disable-pip-version-check", "numpy", "scipy==1.18.1"]]
+
+    # No packages, nothing to reinstall.
+    _scorecard(Path(request.run_dir))
+    module.execution_from_sandbox_card = recording
+    try:
+        provider._execution_for(provider._spec_for(request, resumed=False), loop=None)
+    finally:
+        module.execution_from_sandbox_card = original
+    assert list(seen["prelude"]) == []
+
+
 # -- task-owned prompt wording ---------------------------------------------------
 
 

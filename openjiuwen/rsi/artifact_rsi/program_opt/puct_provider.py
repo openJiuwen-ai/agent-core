@@ -44,6 +44,7 @@ from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
 from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
     EvaluationExecution,
     ExecutionUnavailable,
+    execution_from_sandbox_card,
     execution_from_sys_operation,
 )
 from openjiuwen.rsi.artifact_rsi.program_opt.runtime import (
@@ -115,6 +116,7 @@ class PuctProgramArtifactProvider:
         self,
         *,
         sys_operation: Any | None = None,
+        sandbox_card: Any | None = None,
         execution: EvaluationExecution | None = None,
     ) -> None:
         #: agent-core's own sandbox: a `SysOperation` (mode=sandbox) that
@@ -123,6 +125,15 @@ class PuctProgramArtifactProvider:
         #: bwrap/seatbelt isolation is gone — this is the only way a candidate
         #: is ever executed.
         self._sys_operation = sys_operation
+        #: A `SysOperationCard` (mode=sandbox) to build a **new** sandbox from
+        #: for every evaluation, instead of reusing one for the whole run. It
+        #: wins over `sys_operation` when both are given. What it buys is the
+        #: isolation a scratch directory cannot — a candidate that gets past
+        #: the AST gate reaches only a container about to be discarded — and
+        #: what it costs is a container per evaluation, plus re-provisioning
+        #: `packages` into each one. Containers built this way are released
+        #: here, because nothing else knows they exist.
+        self._sandbox_card = sandbox_card
         #: Test seam: a ready-made execution wins over building one from the
         #: SysOperation, the same way an injected completion factory does.
         self._execution = execution
@@ -452,9 +463,8 @@ class PuctProgramArtifactProvider:
                     "an initialized Model instance is required: AgentServer resolves "
                     "model_refs['optimizer'] via Runner.resource_mgr.get_model"
                 )
-            execute = self._execution or execution_from_sys_operation(
-                self._sys_operation, loop)
             spec = self._spec_for(request, resumed=resumed)
+            execute = self._execution or self._execution_for(spec, loop)
         except (ModelConfigError, ExecutionUnavailable,
                 FileNotFoundError, ValueError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
@@ -548,6 +558,23 @@ class PuctProgramArtifactProvider:
             error_code=state.error_code,
             error_message=state.error_message,
         )
+
+    def _execution_for(self, spec: RunSpec, loop: Any) -> EvaluationExecution:
+        """How a candidate will be run, given what was injected.
+
+        A card means a sandbox per evaluation and is preferred when both are
+        there: a caller that supplied one asked for the stricter thing. The
+        packages the run was promised become a prelude, because each of those
+        containers starts without them — with one shared sandbox they are
+        installed once at run start and this list stays empty.
+        """
+        if self._sandbox_card is not None:
+            prelude: tuple[list[str], ...] = ()
+            if spec.packages:
+                prelude = ([["python", "-m", "pip", "install", "--no-input",
+                             "--disable-pip-version-check", *spec.packages]])
+            return execution_from_sandbox_card(self._sandbox_card, loop, prelude)
+        return execution_from_sys_operation(self._sys_operation, loop)
 
     def _spec_for(
         self,
