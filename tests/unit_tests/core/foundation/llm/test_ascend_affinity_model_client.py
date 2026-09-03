@@ -17,10 +17,9 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache import (
     KVC_MANAGEMENT_MAX_ATTEMPTS,
     KVC_SESSION_OFFLOAD_PREFETCH_TIMEOUT_SECONDS,
-    KV_CACHE_EPHEMERAL_TAIL_METADATA,
 )
 from openjiuwen.core.foundation.llm import UserMessage
 
@@ -52,13 +51,13 @@ def test_factory_creates_ascend_affinity_client():
     assert client.supports_kv_cache_affinity() is True
 
 
-def test_request_without_affinity_hint_does_not_serialize_internal_attachment_metadata():
+def test_request_without_affinity_hint_does_not_serialize_internal_message_metadata():
     params = _client()._build_request_params(
         messages=[
             UserMessage(content="hello"),
             UserMessage(
                 content="<system-reminder>attachment</system-reminder>",
-                metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
+                metadata={"internal_test_metadata": True},
             ),
         ],
         tools=None,
@@ -619,9 +618,6 @@ def test_model_reports_affinity_support_and_builds_invoke_kwargs():
             return "sess-a"
 
     assert model.supports_kv_cache_affinity() is True
-    # The generic legacy wrapper must not enable AscendAffinity. New callers use
-    # the affinity-specific name below so release and affinity remain separate.
-    assert model.build_kv_cache_invoke_kwargs(session=Session()) == {}
     assert model.build_kv_cache_affinity_invoke_kwargs(session=Session()) == {}
     assert model.build_kv_cache_affinity_invoke_kwargs(session=Session(), enable_kv_cache_affinity=True) == {
         "session_id": "sess-a",
