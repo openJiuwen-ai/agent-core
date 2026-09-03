@@ -1974,16 +1974,12 @@ class ReActAgent(BaseAgent):
             self,
             session: Optional[Session]
     ) -> ModelContext:
-        if self._config.context_processors:
-            context = await self.context_engine.create_context(
-                session=session,
-                processors=self._config.context_processors,
-            )
-        else:
-            context = await self.context_engine.create_context(
-                session=session
-            )
-        return context
+        # Pass None (not []) when unset so a pool hit does not look like an
+        # intentional empty processor list.
+        return await self.context_engine.create_context(
+            session=session,
+            processors=self._config.context_processors or None,
+        )
 
     async def invoke(
             self,
