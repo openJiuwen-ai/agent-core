@@ -9,15 +9,48 @@ import asyncio
 import json
 from typing import Any
 
+from sqlalchemy import inspect
 from sqlmodel import SQLModel
 
-from openjiuwen.agent_teams.organization.schema import org_static_tables
+from openjiuwen.agent_teams.organization.schema import (
+    ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
+    OrgTaskStatus,
+    org_static_tables,
+)
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import DbSessions
+
+_ORG_TASK_NEW_COLUMNS = (
+    ("aggregation_json", "TEXT"),
+    ("failure_code", "TEXT"),
+    ("failure_reason", "TEXT"),
+    ("failed_at", "INTEGER"),
+)
 
 
 def ensure_org_static_tables(sync_conn) -> None:
     SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
+    _ensure_org_task_columns(sync_conn)
+
+
+def _ensure_org_task_columns(sync_conn) -> None:
+    """Backfill org_task columns and normalize legacy terminal statuses."""
+
+    inspector = inspect(sync_conn)
+    if "org_task" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("org_task")}
+    for name, col_type in _ORG_TASK_NEW_COLUMNS:
+        if name not in columns:
+            sync_conn.exec_driver_sql(f"ALTER TABLE org_task ADD COLUMN {name} {col_type}")
+    failed_status = OrgTaskStatus.FAILED.value
+    for legacy_status, failure_code in ORG_TASK_LEGACY_STATUS_FAILURE_CODES.items():
+        sync_conn.exec_driver_sql(
+            f"UPDATE org_task SET status = '{failed_status}', "
+            f"failure_code = '{failure_code.value}', "
+            "failed_at = COALESCE(failed_at, updated_at) "
+            f"WHERE status = '{legacy_status}' AND failure_code IS NULL"
+        )
 
 
 class OrgDbContext:

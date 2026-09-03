@@ -32,8 +32,33 @@ class OrgTaskStatus(StrEnum):
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+ORG_TASK_TERMINAL_STATUS_VALUES = (
+    OrgTaskStatus.COMPLETED.value,
+    OrgTaskStatus.FAILED.value,
+)
+
+
+class OrgTaskFailureCode(StrEnum):
+    EXECUTION_FAILED = "EXECUTION_FAILED"
+    SOURCE_FAILED = "SOURCE_FAILED"
+    SUMMARY_PROVISION_FAILED = "SUMMARY_PROVISION_FAILED"
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
+
+
+# Legacy terminal statuses persisted before FAILED + failure_code. Shared by DB
+# migration and read-path projection so both stay on one mapping.
+ORG_TASK_LEGACY_STATUS_FAILURE_CODES: dict[str, OrgTaskFailureCode] = {
+    "CANCELLED": OrgTaskFailureCode.CANCELLED,
+    "EXPIRED": OrgTaskFailureCode.EXPIRED,
+}
+
+
+class OrgTaskAggregationMode(StrEnum):
+    HIERARCHICAL = "HIERARCHICAL"
+    SUMMARY_TEAM = "SUMMARY_TEAM"
 
 
 class OrgAssignmentType(StrEnum):
@@ -83,6 +108,13 @@ class OrgTaskOutputContext(BaseModel):
     description: str | None = None
 
 
+class OrgTaskAggregationConfig(BaseModel):
+    mode: OrgTaskAggregationMode = OrgTaskAggregationMode.HIERARCHICAL
+    summary_task_id: str | None = None
+    summary_team_id: str | None = None
+    final_output_task_id: str | None = None
+
+
 class OrgTask(BaseModel):
     task_id: str
     parent_task_id: str | None = None
@@ -96,13 +128,17 @@ class OrgTask(BaseModel):
     task_type: str | None = None
     required_capabilities: list[str] = Field(default_factory=list)
     assignment: OrgAssignment = Field(default_factory=OrgAssignment)
+    aggregation: OrgTaskAggregationConfig | None = None
     output_spec: OrgTaskOutputSpec | None = None
     output_context: OrgTaskOutputContext | None = None
     output_abstract: str | None = None
+    failure_code: OrgTaskFailureCode | None = None
+    failure_reason: str | None = None
+    failed_at: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def brief(self) -> dict[str, Any]:
-        return {
+        payload = {
             "task_id": self.task_id,
             "parent_task_id": self.parent_task_id,
             "root_task_id": self.root_task_id,
@@ -113,6 +149,11 @@ class OrgTask(BaseModel):
             "assignment": self.assignment.model_dump(),
             "updated_at": self.updated_at,
         }
+        if self.aggregation is not None:
+            payload["aggregation_mode"] = self.aggregation.mode
+        if self.failure_code is not None:
+            payload["failure_code"] = self.failure_code
+        return payload
 
 
 class OrgTaskReview(BaseModel):
@@ -197,9 +238,13 @@ class OrgTaskRecord(SQLModel, table=True):
     assigned_leader_id: str | None = None
     assigned_by_team_id: str | None = None
     assigned_at: int | None = None
+    aggregation_json: str | None = None
     output_spec_json: str | None = None
     output_context_json: str | None = None
     output_abstract: str | None = None
+    failure_code: str | None = None
+    failure_reason: str | None = None
+    failed_at: int | None = None
     metadata_json: str | None = None
 
 
@@ -265,6 +310,15 @@ class OrgTaskSourceRecord(SQLModel, table=True):
     created_at: int
 
 
+def default_root_aggregation(task_id: str) -> OrgTaskAggregationConfig:
+    """Return the default HIERARCHICAL aggregation config for a root task."""
+
+    return OrgTaskAggregationConfig(
+        mode=OrgTaskAggregationMode.HIERARCHICAL,
+        final_output_task_id=task_id,
+    )
+
+
 def org_static_tables() -> list[Table]:
     """Return organization static tables from the global SQLModel registry."""
     return [
@@ -276,6 +330,8 @@ def org_static_tables() -> list[Table]:
 
 __all__ = [
     "ORG_STATIC_TABLE_NAMES",
+    "ORG_TASK_LEGACY_STATUS_FAILURE_CODES",
+    "ORG_TASK_TERMINAL_STATUS_VALUES",
     "OrgAssignment",
     "OrgAssignmentType",
     "OrgCreatorType",
@@ -286,8 +342,11 @@ __all__ = [
     "OrgLeaderRecord",
     "OrganizationSpec",
     "OrgTask",
+    "OrgTaskAggregationConfig",
+    "OrgTaskAggregationMode",
     "OrgTaskCreator",
     "OrgTaskEventRecord",
+    "OrgTaskFailureCode",
     "OrgTaskOutputContext",
     "OrgTaskOutputSpec",
     "OrgTaskRecord",
@@ -297,5 +356,6 @@ __all__ = [
     "OrgTaskSource",
     "OrgTaskSourceRecord",
     "OrgTaskStatus",
+    "default_root_aggregation",
     "org_static_tables",
 ]

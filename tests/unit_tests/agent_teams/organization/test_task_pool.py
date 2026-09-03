@@ -20,9 +20,13 @@ from openjiuwen.agent_teams.organization.events import (
 from openjiuwen.agent_teams.organization.pool import clear_process_org_managers
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.schema import (
+    ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
     OrgAssignmentType,
+    OrgTaskAggregationMode,
     OrgTaskEventRecord,
     OrgTaskCreator,
+    OrgTaskFailureCode,
+    OrgTaskRecord,
     OrgTaskReviewStatus,
     OrgTaskStatus,
 )
@@ -243,6 +247,78 @@ async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
 
 
 @pytest.mark.asyncio
+async def test_create_task_rejects_conflicting_root_task_id(org_manager):
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="client",
+        creator_id="client-1",
+        organization_id="org-1",
+    )
+    assert (
+        await manager.create_task(
+            task_id="root-1",
+            title="Root",
+            description="Root task.",
+            required_capabilities=["analysis"],
+            created_by=creator,
+        )
+    ).ok
+
+    bad_root = await manager.create_task(
+        task_id="root-2",
+        root_task_id="not-root-2",
+        title="Bad root",
+        description="Caller passed a mismatched root_task_id.",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert not bad_root.ok
+    assert "root task root_task_id must equal task_id" in bad_root.reason
+    assert await manager.get_task("root-2") is None
+
+    assert (
+        await manager.create_task(
+            task_id="child-1",
+            parent_task_id="root-1",
+            title="Child",
+            description="Child task.",
+            required_capabilities=["analysis"],
+            created_by=creator,
+        )
+    ).ok
+
+    bad_child = await manager.create_task(
+        task_id="child-2",
+        parent_task_id="root-1",
+        root_task_id="other-root",
+        title="Bad child",
+        description="Caller passed a mismatched root_task_id.",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert not bad_child.ok
+    assert "root_task_id must match parent.root_task_id" in bad_child.reason
+    assert await manager.get_task("child-2") is None
+
+    matching = await manager.create_task(
+        task_id="child-3",
+        parent_task_id="root-1",
+        root_task_id="root-1",
+        title="Matching child",
+        description="Explicit root_task_id matches parent.",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert matching.ok
+    assert matching.task.root_task_id == "root-1"
+
+    root = await manager.get_task("root-1")
+    assert root is not None
+    assert root.aggregation is not None
+    assert root.aggregation.final_output_task_id == "root-1"
+
+
+@pytest.mark.asyncio
 async def test_create_task_rejects_invalid_parent(org_manager):
     manager, _ = org_manager
     creator = OrgTaskCreator(
@@ -291,6 +367,126 @@ async def test_create_task_rejects_invalid_parent(org_manager):
     )
     assert not cross_org.ok
     assert cross_org.reason == "parent task not found: other-org-parent"
+
+
+@pytest.mark.asyncio
+async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
+    root = await manager.create_task(
+        task_id="root-task-1",
+        title="Root",
+        description="Root task",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    child = await manager.create_task(
+        task_id="child-task-1",
+        parent_task_id="root-task-1",
+        title="Child",
+        description="Child task",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert root.ok and root.task is not None
+    assert child.ok and child.task is not None
+    assert root.task.aggregation is not None
+    assert root.task.aggregation.mode == OrgTaskAggregationMode.HIERARCHICAL
+    assert root.task.aggregation.final_output_task_id == "root-task-1"
+    assert child.task.aggregation is None
+
+
+@pytest.mark.asyncio
+async def test_create_task_rejects_summary_team_aggregation(org_manager):
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="root-summary-rejected",
+        title="Root with summary team",
+        description="SUMMARY_TEAM is not supported yet.",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    assert not created.ok
+    assert "SUMMARY_TEAM aggregation is not supported yet" in created.reason
+    assert await manager.get_task("root-summary-rejected") is None
+
+
+def test_to_task_normalizes_legacy_terminal_statuses():
+    for legacy_status, failure_code in ORG_TASK_LEGACY_STATUS_FAILURE_CODES.items():
+        row = OrgTaskRecord(
+            task_id=f"task-{legacy_status.lower()}",
+            organization_id="org-1",
+            parent_task_id=None,
+            root_task_id=f"task-{legacy_status.lower()}",
+            creator_type="team_leader",
+            creator_id="leader-a",
+            creator_team_id="team-a",
+            status=legacy_status,
+            created_at=1,
+            updated_at=2,
+            title=legacy_status,
+            description="Legacy row",
+            assignment_type=OrgAssignmentType.UNASSIGNED.value,
+        )
+        task = OrgTaskManager._to_task(row)
+        assert task.status == OrgTaskStatus.FAILED
+        assert task.failure_code == failure_code
+
+
+def test_to_task_tolerates_unknown_failure_code_and_status():
+    unknown_code_row = OrgTaskRecord(
+        task_id="task-unknown-code",
+        organization_id="org-1",
+        parent_task_id=None,
+        root_task_id="task-unknown-code",
+        creator_type="team_leader",
+        creator_id="leader-a",
+        creator_team_id="team-a",
+        status=OrgTaskStatus.FAILED.value,
+        created_at=1,
+        updated_at=2,
+        title="Failed",
+        description="Unknown failure code",
+        assignment_type=OrgAssignmentType.UNASSIGNED.value,
+        failure_code="NOT_A_REAL_CODE",
+        failure_reason="legacy writer",
+        failed_at=3,
+    )
+    unknown_code_task = OrgTaskManager._to_task(unknown_code_row)
+    assert unknown_code_task.status == OrgTaskStatus.FAILED
+    assert unknown_code_task.failure_code is None
+    assert unknown_code_task.failure_reason == "legacy writer"
+
+    unknown_status_row = OrgTaskRecord(
+        task_id="task-unknown-status",
+        organization_id="org-1",
+        parent_task_id=None,
+        root_task_id="task-unknown-status",
+        creator_type="team_leader",
+        creator_id="leader-a",
+        creator_team_id="team-a",
+        status="WEIRD",
+        created_at=1,
+        updated_at=2,
+        title="Weird",
+        description="Unknown status",
+        assignment_type=OrgAssignmentType.UNASSIGNED.value,
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED.value,
+    )
+    unknown_status_task = OrgTaskManager._to_task(unknown_status_row)
+    assert unknown_status_task.status == OrgTaskStatus.FAILED
+    assert unknown_status_task.failure_code == OrgTaskFailureCode.EXECUTION_FAILED
 
 
 @pytest.mark.asyncio
@@ -387,6 +583,39 @@ async def test_org_tasks_require_non_empty_capabilities(org_manager):
     )
     assert not rejected.success
     assert "required_capabilities" in rejected.error
+
+
+@pytest.mark.asyncio
+async def test_org_create_task_tool_exposes_hierarchical_aggregation_and_rejects_summary_team(org_manager):
+    manager, _ = org_manager
+    tool = OrgCreateTaskTool(manager, team_id="team-a", leader_id="leader-a")
+    params = tool.card.input_params["properties"]["aggregation_mode"]
+    assert params["enum"] == [OrgTaskAggregationMode.HIERARCHICAL.value]
+
+    created = await tool.invoke(
+        {
+            "task_id": "tool-root-agg",
+            "title": "Root via tool",
+            "description": "Defaults to hierarchical aggregation.",
+            "required_capabilities": ["analysis"],
+            "aggregation_mode": OrgTaskAggregationMode.HIERARCHICAL.value,
+        }
+    )
+    assert created.success
+    assert created.data["aggregation_mode"] == OrgTaskAggregationMode.HIERARCHICAL
+
+    rejected = await tool.invoke(
+        {
+            "task_id": "tool-root-summary",
+            "title": "Root summary",
+            "description": "Must be rejected.",
+            "required_capabilities": ["analysis"],
+            "aggregation_mode": OrgTaskAggregationMode.SUMMARY_TEAM.value,
+        }
+    )
+    assert not rejected.success
+    assert "SUMMARY_TEAM aggregation is not supported yet" in rejected.error
+    assert await manager.get_task("tool-root-summary") is None
 
 
 @pytest.mark.asyncio

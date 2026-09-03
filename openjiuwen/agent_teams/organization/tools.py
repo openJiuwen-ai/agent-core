@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.organization.schema import (
+    OrgTaskAggregationMode,
     OrgTaskCreator,
     OrgTaskOutputContext,
     OrgTaskOutputSpec,
@@ -418,7 +419,7 @@ class OrgCreateTaskTool(_OrgLeaderTool):
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
         super().__init__(
             name="org_create_task",
-            description="Create an organization task. Use parent_task_id/root_task_id for child tasks.",
+            description="Create an organization task. Use parent_task_id for child tasks; root_task_id is derived.",
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -428,7 +429,13 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             "properties": {
                 "task_id": {"type": "string"},
                 "parent_task_id": {"type": "string"},
-                "root_task_id": {"type": "string"},
+                "root_task_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Derived by Task Pool: roots must equal task_id; "
+                        "children must equal parent.root_task_id. Conflicting values are rejected."
+                    ),
+                },
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "task_type": {"type": "string"},
@@ -437,6 +444,14 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 "metadata": {"type": "object"},
                 "delegated_to_team_id": {"type": "string"},
                 "delegated_to_leader_id": {"type": "string"},
+                "aggregation_mode": {
+                    "type": "string",
+                    "enum": [OrgTaskAggregationMode.HIERARCHICAL.value],
+                    "description": (
+                        "Root-task aggregation mode. Only HIERARCHICAL is supported; "
+                        "SUMMARY_TEAM is rejected until SummaryTeamFactory lands."
+                    ),
+                },
             },
             "required": ["title", "description", "required_capabilities"],
         }
@@ -473,6 +488,7 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             ),
             delegated_to_team_id=inputs.get("delegated_to_team_id"),
             delegated_to_leader_id=inputs.get("delegated_to_leader_id"),
+            aggregation_mode=inputs.get("aggregation_mode"),
         )
         if not result.ok or result.task is None:
             return ToolOutput(success=False, error=result.reason)
