@@ -298,7 +298,8 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         '  "evidence": "Basis for the judgment; for complete/blocked must be a detailed user-facing report",\n'
         '  "remaining_work": "Gaps to fill when status=continue, else empty string",\n'
         '  "next_instruction": "Most specific actionable step for status=continue, else empty string",\n'
-        '  "blocking_same_as_previous": "Only when status=blocked: true/false, whether the current blocker shares the same root cause as the <blocking_history> entries"\n'
+        '  "blocking_same_as_previous": "Only when status=blocked: true/false, whether the '
+        'current blocker shares the same root cause as the <blocking_history> entries"\n'
         "}\n\n"
         "Assessment rules:\n"
         "1. Extract deliverables, acceptance criteria, and verifiable results "
