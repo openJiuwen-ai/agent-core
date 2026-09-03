@@ -964,6 +964,14 @@ class StatusCode(Enum):
         "guardrail blocked: risk_type='{risk_type}', risk_level='{risk_level}', event='{event}'")
 
     # =========================
+    # Session - Trajectory 191100 - 191199
+    # =========================
+
+    SESSION_TRAJECTORY_EXECUTION_ERROR = (
+        191100,
+        "session trajectory error, error='{reason}'")
+
+    # =========================
     # SysOperation 199000–199999
     # =========================
 

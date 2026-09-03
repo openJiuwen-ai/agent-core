@@ -68,6 +68,7 @@ from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.session.tracer import decorate_model_with_trace
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
 from openjiuwen.core.single_agent.interrupt.state import (
@@ -1594,6 +1595,10 @@ class ReActAgent(BaseAgent):
         # --- End context window finalization ---
 
         session = ctx.session
+        # Route the actual LLM call through the session tracer so observers
+        # (trajectory, otel) see llm start/end spans and their usage metadata.
+        # Returns `llm` unchanged when no agent handler is registered.
+        traced_llm = decorate_model_with_trace(llm, session) if isinstance(session, Session) else llm
         session_id, parent_session_id = self._kv_cache_model_call_hook.resolve_lineage(
             kv_runtime,
             session,
@@ -1628,7 +1633,7 @@ class ReActAgent(BaseAgent):
 
         if not ctx.extra.get("_streaming"):
             try:
-                ai_message = await llm.invoke(
+                ai_message = await traced_llm.invoke(
                     model=self._config.model_name,
                     messages=ctx.inputs.messages,
                     tools=ctx.inputs.tools or None,
@@ -1663,7 +1668,7 @@ class ReActAgent(BaseAgent):
         call_chunk_count = 0
         ctx.extra["_stream_chunks_emitted"] = 0
         try:
-            async for chunk in llm.stream(
+            async for chunk in traced_llm.stream(
                     model=self._config.model_name,
                     messages=ctx.inputs.messages,
                     tools=ctx.inputs.tools or None,

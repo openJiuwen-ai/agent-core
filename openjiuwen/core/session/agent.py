@@ -236,6 +236,9 @@ class Session:
         if self._close_stream_on_post_run:
             await self.close_stream()
         await self.commit()
+        tracer = self._inner.tracer()
+        if tracer is not None:
+            await tracer.close()
         self._post_run_done = True
         return self
 
