@@ -39,7 +39,8 @@ class PaperArtifactProviderImpl:
     """artifact_type = "paper". Single-process implementation: one active
     `PaperTreeOrchestrator` per `task_id`, held for this process's
     lifetime. A multi-worker-process AgentServer deployment needs an
-    out-of-process task registry instead — out of scope here."""
+    out-of-process task registry instead — out of scope here.
+    """
 
     artifact_type = "paper"
 
@@ -47,7 +48,8 @@ class PaperArtifactProviderImpl:
         self._orchestrators: dict[str, PaperTreeOrchestrator] = {}
         self._run_dirs: dict[str, str] = {}
 
-    def validate_input(self, artifact_path: str | None) -> ArtifactValidationResult:
+    @staticmethod
+    def validate_input(artifact_path: str | None) -> ArtifactValidationResult:
         if artifact_path is None:
             return ArtifactValidationResult(valid=True, errors=[])
         if not os.path.exists(artifact_path):

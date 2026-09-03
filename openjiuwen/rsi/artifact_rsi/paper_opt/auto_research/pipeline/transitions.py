@@ -576,7 +576,8 @@ def sync_host_requirements(state: PersistedManagerState) -> None:
 def validate_decision(state: PersistedManagerState, decision: ManagerDecision) -> None:
     validate_state_changes(state.task_state, state.reports, decision.state_changes)
     if decision.signal == "EXECUTE":
-        assert decision.contract is not None
+        if decision.contract is None:
+            raise DecisionValidationError("signal=EXECUTE requires a contract")
         unknown = [
             rid
             for rid in decision.contract.related_report_ids

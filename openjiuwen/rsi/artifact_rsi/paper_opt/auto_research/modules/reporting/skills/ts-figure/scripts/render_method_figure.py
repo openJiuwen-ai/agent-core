@@ -22,6 +22,7 @@ signal to shorten labels or trim nodes, not something to silently absorb.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import textwrap
 from pathlib import Path
@@ -256,21 +257,22 @@ def render(spec: dict, output_base: Path) -> dict:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     if len(sys.argv) != 3:
-        print(json.dumps({"error": "usage: render_method_figure.py <spec.json> <output_basepath>"}))
+        logging.info(json.dumps({"error": "usage: render_method_figure.py <spec.json> <output_basepath>"}))
         raise SystemExit(1)
     spec_path = Path(sys.argv[1])
     output_base = Path(sys.argv[2])
     try:
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        print(json.dumps({"error": f"cannot read spec: {exc}"}))
-        raise SystemExit(1)
+        logging.info(json.dumps({"error": f"cannot read spec: {exc}"}))
+        raise SystemExit(1) from exc
     if not spec.get("nodes") or not spec.get("edges"):
-        print(json.dumps({"error": "spec has no nodes/edges -- refusing to render an empty figure"}))
+        logging.info(json.dumps({"error": "spec has no nodes/edges -- refusing to render an empty figure"}))
         raise SystemExit(1)
     result = render(spec, output_base)
-    print(json.dumps(result))
+    logging.info(json.dumps(result))
 
 
 if __name__ == "__main__":

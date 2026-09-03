@@ -6,6 +6,7 @@ The downloader writes raw PDF/HTML only to the host-selected survey directory.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -16,7 +17,9 @@ from openjiuwen.harness.tools.web import (
     is_paid_search_enabled,
 )
 
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.download_survey_source import DownloadSurveySourceTool
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.download_survey_source import (
+    DownloadSurveySourceTool,
+)
 
 # ``free_search`` is always registered: it does not require a provider API key.
 # ``paid_search`` is optional and only appears when both requested and configured.

@@ -61,7 +61,8 @@ class PaperNodeExtra(BaseModel):
     docs/autoresearch_endpoint.md §3.7's ``PaperNodeExtra`` table exactly,
     plus one internal-only field (``node_run_id``) — harmless extra key,
     the same way ``extra`` itself is meant to carry scenario-specific data
-    consumers already have to tolerate."""
+    consumers already have to tolerate.
+    """
 
     logical_kind: NodeLogicalKind
     report_id: str | None = None
@@ -188,7 +189,8 @@ class NodeStageEvent(BaseModel):
     """A subprocess-stage transition for an *existing* tree node — does not
     create a node, just updates its in-progress stage description. Added
     2026-09-02 per docs/autoresearch_module-endpoint.md's updated event
-    contract (mirrors ``openjiuwen.rsi.events.NodeStageEvent``)."""
+    contract (mirrors ``openjiuwen.rsi.events.NodeStageEvent``).
+    """
 
     event_type: Literal["node.stage"] = "node.stage"
     node_ref: str
@@ -203,7 +205,8 @@ OnEvent = Callable[[EngineEvent], Awaitable[None]]
 class PaperTaskState(BaseModel):
     """Internal, task-level state — one per tree (one `task_id`). Persisted
     as this package's own `state.json`, distinct from any node's own
-    ManagerRuntime `PersistedManagerState`."""
+    ManagerRuntime `PersistedManagerState`.
+    """
 
     task_id: str
     run_dir: str

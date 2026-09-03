@@ -23,6 +23,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     paper_figures_dir,
     paper_output_path,
@@ -44,9 +45,17 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting import bibliography, figures, lint
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.bibliography import Bibliography
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex import escape_latex, render_results_table
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.schemas import ReportingInput, ReportingOutput
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex import (
+    escape_latex,
+    render_results_table,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.schemas import (
+    ReportingInput,
+    ReportingOutput,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import DOCUMENT_ORDER, SECTIONS
+
+_LOGGER = get_logger(__name__)
 
 _SKILLS_DIR = Path(__file__).parent / "skills"
 _ALL_SKILL_NAMES = ("ts-plan", "ts-write", "ts-figure", "ts-review", "ts-latex")
@@ -236,8 +245,8 @@ class ReportingAgent:
 
     # -- evidence blocks: one per section, host-built ------------------------
 
+    @staticmethod
     def _build_evidence_blocks(
-        self,
         inputs: ReportingInput,
         design_context: dict[str, str | None],
         background: str | None,
@@ -250,14 +259,12 @@ class ReportingAgent:
             or "(no sources recovered)"
         )
 
-        metric_names = sorted(
-            {
-                name
-                for variant in result.variants
-                for name, value in variant.metrics.items()
-                if isinstance(value, (int, float)) and not isinstance(value, bool)
-            }
-        )
+        metric_name_set: set[str] = set()
+        for variant in result.variants:
+            for name, value in variant.metrics.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    metric_name_set.add(name)
+        metric_names = sorted(metric_name_set)
         rows = [
             (
                 escape_latex(variant.name),
@@ -377,7 +384,9 @@ class ReportingAgent:
         from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
         from openjiuwen.harness.schema.config import SubAgentConfig
 
-        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import with_observability
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
+            with_observability,
+        )
 
         # A real agentic session turn carries a lot of accumulated context
         # (evidence blocks, prior tool results, read-back section files) and
@@ -544,8 +553,8 @@ class ReportingAgent:
         finally:
             try:
                 await session.post_run()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 -- best-effort cleanup, must not mask the result above
+                _LOGGER.exception("reporting agent session.post_run() cleanup failed")
         if isinstance(result, dict) and result.get("error"):
             return f"reporting agent session reported an error: {result['error']}"
         return None
@@ -558,9 +567,8 @@ class ReportingAgent:
     # how a lingering lint violation or missing section is already reported
     # rather than fixed post-hoc. -----------------------------------------
 
-    def _verify_figures(
-        self, *, workspace: Path, method_text: str, result: Any
-    ) -> tuple[list[str], list[str]]:
+    @staticmethod
+    def _verify_figures(*, workspace: Path, method_text: str, result: Any) -> tuple[list[str], list[str]]:
         notes: list[str] = []
         extra_paths: list[str] = []
 

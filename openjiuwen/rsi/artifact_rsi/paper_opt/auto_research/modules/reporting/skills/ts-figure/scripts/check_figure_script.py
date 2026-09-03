@@ -19,6 +19,7 @@ Usage: python check_figure_script.py <workspace> <script_relative_path> <expecte
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -30,8 +31,10 @@ _TIMEOUT_SECONDS = 60
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     if len(sys.argv) != 4:
-        print(json.dumps({"error": "usage: check_figure_script.py <workspace> <script_relative_path> <expected_output_relative_path>"}))
+        usage = "usage: check_figure_script.py <workspace> <script_relative_path> <expected_output_relative_path>"
+        logging.info(json.dumps({"error": usage}))
         raise SystemExit(1)
     workspace = Path(sys.argv[1]).resolve()
     script_rel = sys.argv[2]
@@ -39,12 +42,12 @@ def main() -> None:
 
     script_path = workspace / script_rel
     if not script_path.is_file():
-        print(json.dumps({"error": f"script not found: {script_path}"}))
+        logging.info(json.dumps({"error": f"script not found: {script_path}"}))
         raise SystemExit(1)
 
     results_path = workspace / "results.json"
     if not results_path.is_file():
-        print(json.dumps({"error": f"results.json not found under {workspace}"}))
+        logging.info(json.dumps({"error": f"results.json not found under {workspace}"}))
         raise SystemExit(1)
 
     result = ExperimentResult.model_validate_json(results_path.read_text(encoding="utf-8"))
@@ -73,7 +76,7 @@ def main() -> None:
 
     output_exists = output_path.is_file() and output_path.stat().st_size > 0
 
-    print(
+    logging.info(
         json.dumps(
             {
                 "fabricated_numbers": fabricated,

@@ -6,7 +6,9 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import CodeImplementationManifest
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
+    CodeImplementationManifest,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import ExperimentPlan
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentResult
 
@@ -20,6 +22,11 @@ class ReflectionInput(BaseModel):
     # absent (e.g. a hand-built plan/result with no real code_implementation
     # run behind it), just with a narrower "whole story" to reason from.
     implementation: CodeImplementationManifest | None = None
+    # Prepended to the rendered task prompt -- lets a caller (e.g. the manager
+    # pipeline's ReflectionAdapter) inject host-side context such as the
+    # manager subtask contract, without reaching into the agent's protected
+    # _build_task_prompt.
+    extra_host_instructions: str = ""
 
 
 class Reflection(BaseModel):

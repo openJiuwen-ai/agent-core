@@ -14,6 +14,7 @@ Usage: python insert_method_figure.py <workspace> <relative_figure_path> <captio
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 from pathlib import Path
@@ -36,7 +37,8 @@ def find_insertion_point(text: str) -> int:
     the next \\subsection, or end of string if it's the last one). Falls
     back to right after the first \\subsection{} found if Problem
     Formulation isn't there, or the very end of the section if there are
-    no subsections at all — never fails to find *some* insertion point."""
+    no subsections at all — never fails to find *some* insertion point.
+    """
     m = _PROBLEM_FORMULATION_RE.search(text)
     if m is None:
         m = _SUBSECTION_RE.search(text)
@@ -47,8 +49,10 @@ def find_insertion_point(text: str) -> int:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     if len(sys.argv) != 4:
-        print(json.dumps({"error": "usage: insert_method_figure.py <workspace> <relative_figure_path> <caption>"}))
+        usage = "usage: insert_method_figure.py <workspace> <relative_figure_path> <caption>"
+        logging.info(json.dumps({"error": usage}))
         raise SystemExit(1)
     workspace = Path(sys.argv[1]).resolve()
     figure_rel_path = sys.argv[2].replace("\\", "/")
@@ -56,12 +60,13 @@ def main() -> None:
 
     method_path = workspace / "sections" / "method.tex"
     if not method_path.is_file():
-        print(json.dumps({"error": f"method.tex not found under {workspace}"}))
+        logging.info(json.dumps({"error": f"method.tex not found under {workspace}"}))
         raise SystemExit(1)
 
     text = method_path.read_text(encoding="utf-8")
     if "method_figure" in text and r"\includegraphics" in text:
-        print(json.dumps({"error": "method.tex already contains a method_figure includegraphics — not inserting twice"}))
+        already_present = "method.tex already contains a method_figure includegraphics — not inserting twice"
+        logging.info(json.dumps({"error": already_present}))
         raise SystemExit(1)
 
     figure_block = (
@@ -75,7 +80,7 @@ def main() -> None:
     idx = find_insertion_point(text)
     new_text = text[:idx].rstrip() + figure_block + text[idx:].lstrip("\n")
     method_path.write_text(new_text, encoding="utf-8")
-    print(json.dumps({"inserted_at_char": idx, "figure_path": figure_rel_path}))
+    logging.info(json.dumps({"inserted_at_char": idx, "figure_path": figure_rel_path}))
 
 
 if __name__ == "__main__":

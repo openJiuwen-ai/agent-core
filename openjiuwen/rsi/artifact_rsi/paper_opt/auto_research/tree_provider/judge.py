@@ -48,7 +48,8 @@ async def score_paper(
 ) -> PaperScore:
     """Score one compiled paper. Raises on any scoring failure — the caller
     decides what that means for the node (see orchestrator.py's
-    `scoring_error` handling)."""
+    `scoring_error` handling).
+    """
     scorer = PaperScorer(config, model=model)
     output = await scorer.arun(tex_path=tex_path, output_dir=output_dir)
     sheet = output.scoresheet

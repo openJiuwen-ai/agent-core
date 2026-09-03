@@ -31,7 +31,8 @@ def numeric_metric_names(result: ExperimentResult) -> list[str]:
 def build_results_figure(result: ExperimentResult, output_path: Path) -> Path | None:
     """Grouped bar chart of every numeric metric across every variant.
     Returns ``None`` (writes nothing) if there's no numeric data to plot —
-    never fabricates a chart from missing data."""
+    never fabricates a chart from missing data.
+    """
     metric_names = numeric_metric_names(result)
     if not metric_names or not result.variants:
         return None

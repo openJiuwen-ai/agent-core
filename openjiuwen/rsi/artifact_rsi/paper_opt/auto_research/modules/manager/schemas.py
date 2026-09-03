@@ -8,7 +8,9 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.ids import new_run_id
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import CodeImplementationManifest
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
+    CodeImplementationManifest,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import (
     EvaluationFeedback,
     ExperimentPlan,
@@ -248,7 +250,8 @@ class SurveyHandoff(BaseModel):
     key_findings: list[str] = Field(default_factory=list)
     open_problems: list[str] = Field(default_factory=list)
     coverage_assessment: str = ""
-    evidence_gaps: list[str] = Field(default_factory=list) # TODO: right now not used? could be potentially useful in 2nd round onwards
+    # Not read by any current consumer; kept for a potential 2nd-round-onwards use.
+    evidence_gaps: list[str] = Field(default_factory=list)
     suggested_followup_queries: list[str] = Field(default_factory=list)
     source_count: int = 0
     research_summary_path: str = ""
@@ -503,7 +506,8 @@ def report_requirement() -> RequirementRecord:
     "reporting" actually being enabled (see build_initial_state) — unlike
     the requirements above, it would otherwise be permanently unsatisfiable
     whenever reporting is disabled, since default_requirements() has no way
-    to know which modules are enabled."""
+    to know which modules are enabled.
+    """
     return RequirementRecord(
         id="req-report",
         description="Produce the final report from the completed run",

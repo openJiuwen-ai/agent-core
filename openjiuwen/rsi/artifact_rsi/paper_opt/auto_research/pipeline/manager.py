@@ -8,7 +8,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.ids import new_run_id
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import configure_run_logging, get_logger, log_context
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import (
+    configure_run_logging,
+    get_logger,
+    log_context,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     find_harness_run_dirs,
     module_attempt_dir,
@@ -250,7 +254,9 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
         task.phase = "code"
         if report.outcome != "succeeded":
             issue = f"code implementation failed: {report.summary}"
-            task.unresolved_issues = [item for item in task.unresolved_issues if not item.startswith("code implementation")]
+            task.unresolved_issues = [
+                item for item in task.unresolved_issues if not item.startswith("code implementation")
+            ]
             task.unresolved_issues.append(issue)
         else:
             task.unresolved_issues = [
@@ -400,7 +406,8 @@ class ManagerRuntime:
         self.manager = manager or ManagerAgent(config)
         self._enabled = enabled
 
-    def _routing_hint(self, state: PersistedManagerState) -> RoutingHint:
+    @staticmethod
+    def _routing_hint(state: PersistedManagerState) -> RoutingHint:
         task = state.task_state
         known = [item.id for item in (*task.requirements, *task.artifacts, *task.facts)]
         latest_metrics: dict[str, Any] = {}
@@ -775,7 +782,10 @@ class ManagerRuntime:
                 )
 
             contract = decision.contract
-            assert contract is not None
+            if contract is None:
+                raise DecisionValidationError(
+                    f"manager decision signal={decision.signal!r} has no contract to execute"
+                )
             state.task_state.last_contract = contract
             state.task_state.pending_contract = contract
             state.task_state.counters.rounds_used = round_index

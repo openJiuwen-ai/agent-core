@@ -35,7 +35,8 @@ _LATEX_SPECIAL_RE = re.compile("|".join(re.escape(ch) for ch in _LATEX_SPECIAL_C
 def escape_latex(text: str) -> str:
     """Escape LaTeX special characters in plain text (variant/metric names,
     titles, etc.) — see docs/paper_writing_design.md §5. Not meant for text
-    that already contains LaTeX markup (section bodies the model writes)."""
+    that already contains LaTeX markup (section bodies the model writes).
+    """
     return _LATEX_SPECIAL_RE.sub(lambda m: _LATEX_SPECIAL_CHARS[m.group(0)], text)
 
 
@@ -87,7 +88,8 @@ def sanitize_for_pdflatex(text: str) -> str:
     """Replace runs of characters pdflatex can't render with a placeholder.
     Safe to run over an already-assembled document: all LaTeX syntax
     (``\\``, ``{``, ``}``, ``%``, ``$``, ...) is ASCII, so this only ever
-    touches literal prose/quoted content, never commands."""
+    touches literal prose/quoted content, never commands.
+    """
     out: list[str] = []
     run = False
     for ch in text:
@@ -159,7 +161,8 @@ def merge_adjacent_cites(latex: str) -> str:
 def move_table_captions_above(latex: str) -> str:
     """Place table captions ABOVE the tabular (NeurIPS/most venue
     convention — figure captions stay below, this only touches ``table``/
-    ``table*`` floats and inline ``minipage`` tables)."""
+    ``table*`` floats and inline ``minipage`` tables).
+    """
 
     def fix_float(m: re.Match[str]) -> str:
         begin, ttype, content = m.group(1), m.group(2), m.group(3)
@@ -170,7 +173,7 @@ def move_table_captions_above(latex: str) -> str:
         ce = _brace_end(content, cb)
         if ce == -1:
             return m.group(0)
-        cap = content[cm.start() : ce]
+        cap = content[cm.start(): ce]
         lab = re.search(r"\\label\{[^}]*\}", content)
         lab_t = lab.group(0) if lab else ""
         body = content[: cm.start()] + content[ce:]
@@ -344,7 +347,8 @@ _ERROR_LINE_RE = re.compile(r"^! (.+)$", re.MULTILINE)
 
 def extract_compile_errors(log_text: str, max_errors: int = 5) -> list[str]:
     """Pull LaTeX's own ``! <error>`` lines out of a compiler log — the
-    span fed back to the model for a targeted repair (docs/paper_writing_design.md §8)."""
+    span fed back to the model for a targeted repair (docs/paper_writing_design.md §8).
+    """
     return _ERROR_LINE_RE.findall(log_text)[:max_errors]
 
 
@@ -361,7 +365,8 @@ def compile_document(tex_path: Path, *, timeout_seconds: int = 300) -> CompileRe
     """Run latexmk (falling back to pdflatex) as a bounded, host-controlled
     subprocess. Never raises for a missing toolchain or a compile error —
     both are reported in ``CompileResult`` for the caller's bounded repair
-    loop (docs/paper_writing_design.md §8) to act on."""
+    loop (docs/paper_writing_design.md §8) to act on.
+    """
     workdir = tex_path.parent
     toolchain_missing = True
     for command in _COMPILE_COMMANDS:

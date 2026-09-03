@@ -8,13 +8,25 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import project_root, set_project_root, to_project_relative
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    project_root,
+    set_project_root,
+    to_project_relative,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import with_observability
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.topic_survey_tools import TopicSurveyToolsRail
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.submit_topic_survey import SubmitTopicSurveyTool
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.submit_topic_survey import (
+    SubmitTopicSurveyTool,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import ResearchBrief
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.artifacts import survey_directory, write_survey_artifacts
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.artifacts import (
+    survey_directory,
+    write_survey_artifacts,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import TopicSurveyInput
+
+_LOGGER = get_logger(__name__)
 
 AGENT_CARD_ID = "topic-survey-agent"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "system.md"
@@ -154,8 +166,8 @@ class TopicSurveyAgent:
         finally:
             try:
                 await session.post_run()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 -- best-effort cleanup, must not mask the result above
+                _LOGGER.exception("topic survey agent session.post_run() cleanup failed")
         try:
             draft = submit_tool.require_submission(request_id=request_id)
         except RuntimeError as exc:

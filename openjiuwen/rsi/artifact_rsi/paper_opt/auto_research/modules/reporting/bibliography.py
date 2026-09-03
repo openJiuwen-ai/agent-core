@@ -66,7 +66,8 @@ def parse_survey_sources(summary_path: Path) -> list[ParsedSource]:
     file is missing or doesn't match the expected shape — a paper with no
     recoverable bibliography still gets built, just with an empty
     ``refs.bib``, same "degrade, don't crash" stance every other module in
-    this pipeline takes for missing optional input."""
+    this pipeline takes for missing optional input.
+    """
     try:
         text = summary_path.read_text(encoding="utf-8")
     except OSError:
@@ -264,7 +265,8 @@ def try_enrich_from_network(url: str, *, timeout: float = 5.0) -> _EnrichedMetad
     exactly as before this existed. This resolves an identifier the source
     already has, it never searches for a new one — see the module
     docstring for why that distinction keeps this out of the
-    citation-hallucination risk live search would reopen."""
+    citation-hallucination risk live search would reopen.
+    """
     arxiv_match = _ARXIV_URL_RE.search(url)
     doi_match = None if arxiv_match else _DOI_URL_RE.search(url)
     if not arxiv_match and not doi_match:

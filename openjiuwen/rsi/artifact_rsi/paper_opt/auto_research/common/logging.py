@@ -188,16 +188,16 @@ def logging_settings_from_config(config: dict[str, Any] | None) -> LoggingSettin
     )
 
 
+def _context_matches_attempt(ctx: RunLogContext | None, run_id: str) -> bool:
+    if ctx is None or ctx.run_id != run_id or not ctx.module:
+        return False
+    return ctx.round_index is not None and ctx.attempt is not None
+
+
 def active_artifact_dir(run_id: str, fallback: Path) -> Path:
     """Attempt-scoped folder when a manager subagent is running; else ``fallback``."""
     ctx = current_context()
-    if (
-        ctx is not None
-        and ctx.run_id == run_id
-        and ctx.module
-        and ctx.round_index is not None
-        and ctx.attempt is not None
-    ):
+    if _context_matches_attempt(ctx, run_id):
         return ensure_module_attempt_dir(run_id, ctx.module, ctx.round_index, ctx.attempt)
     fallback.mkdir(parents=True, exist_ok=True)
     return fallback

@@ -11,6 +11,7 @@ Usage: python check_method_figure_spec.py <workspace> <spec_relative_path>
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -21,30 +22,31 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.schem
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     if len(sys.argv) != 3:
-        print(json.dumps({"error": "usage: check_method_figure_spec.py <workspace> <spec_relative_path>"}))
+        logging.info(json.dumps({"error": "usage: check_method_figure_spec.py <workspace> <spec_relative_path>"}))
         raise SystemExit(1)
     workspace = Path(sys.argv[1]).resolve()
     spec_path = workspace / sys.argv[2]
 
     if not spec_path.is_file():
-        print(json.dumps({"error": f"spec not found: {spec_path}"}))
+        logging.info(json.dumps({"error": f"spec not found: {spec_path}"}))
         raise SystemExit(1)
     method_path = workspace / "sections" / "method.tex"
     if not method_path.is_file():
-        print(json.dumps({"error": f"method.tex not found under {workspace} — run ts-write first."}))
+        logging.info(json.dumps({"error": f"method.tex not found under {workspace} — run ts-write first."}))
         raise SystemExit(1)
 
     try:
         spec = MethodFigureSpec.model_validate_json(spec_path.read_text(encoding="utf-8"))
     except ValidationError as exc:
-        print(json.dumps({"error": "spec failed schema validation", "details": str(exc)}))
-        raise SystemExit(1)
+        logging.info(json.dumps({"error": "spec failed schema validation", "details": str(exc)}))
+        raise SystemExit(1) from exc
 
     headings = lint.extract_subsection_headings(method_path.read_text(encoding="utf-8"))
     bad_labels = lint.check_method_figure_headings([n.label for n in spec.nodes], headings)
 
-    print(
+    logging.info(
         json.dumps(
             {
                 "headings": headings,

@@ -9,24 +9,27 @@ Usage: python promote_figure.py <workspace> <candidate_relative_path> <final_rel
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sys
 from pathlib import Path
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     if len(sys.argv) != 4:
-        print(json.dumps({"error": "usage: promote_figure.py <workspace> <candidate_relative_path> <final_relative_path>"}))
+        usage = "usage: promote_figure.py <workspace> <candidate_relative_path> <final_relative_path>"
+        logging.info(json.dumps({"error": usage}))
         raise SystemExit(1)
     workspace = Path(sys.argv[1]).resolve()
     candidate = workspace / sys.argv[2]
     final = workspace / sys.argv[3]
     if not candidate.is_file():
-        print(json.dumps({"error": f"candidate not found: {candidate}"}))
+        logging.info(json.dumps({"error": f"candidate not found: {candidate}"}))
         raise SystemExit(1)
     final.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(candidate, final)
-    print(json.dumps({"promoted": str(final)}))
+    logging.info(json.dumps({"promoted": str(final)}))
 
 
 if __name__ == "__main__":

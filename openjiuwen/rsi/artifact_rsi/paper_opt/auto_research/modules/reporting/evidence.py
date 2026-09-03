@@ -16,7 +16,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentResult, VariantResult
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
+    ExperimentResult,
+    VariantResult,
+)
 
 EvidenceSource = Literal["prior_paper", "current_run"]
 
@@ -53,15 +56,16 @@ _NO_CI_DELTA_THRESHOLD = 0.02
 _AUXILIARY_KEYS = {"ci95_lower", "ci95_upper"}
 
 
+def _is_reportable_numeric(name: str, value: object) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    if name in _AUXILIARY_KEYS:
+        return False
+    return not name.endswith("_std")
+
+
 def _cell_numeric_items(cell: dict) -> dict[str, float]:
-    return {
-        name: value
-        for name, value in cell.items()
-        if isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and name not in _AUXILIARY_KEYS
-        and not name.endswith("_std")
-    }
+    return {name: value for name, value in cell.items() if _is_reportable_numeric(name, value)}
 
 
 def normalize_current_run_evidence(result: ExperimentResult) -> list[Evidence]:
@@ -72,7 +76,8 @@ def normalize_current_run_evidence(result: ExperimentResult) -> list[Evidence]:
     e.g. a factorial or ablation study reported as one ``VariantResult``
     covering several cells) -- the real numbers for the latter live one
     level down, same distinction ``agent.py``'s table-building logic has to
-    make for the same reason."""
+    make for the same reason.
+    """
     evidence: list[Evidence] = []
     for variant in result.variants:
         evidence.extend(_variant_evidence(variant))
@@ -170,8 +175,8 @@ def classify_numeric_status(old: Evidence, new: Evidence) -> ClaimStatus:
         and new.ci_upper is not None
     )
     if has_ci:
-        assert old.ci_upper is not None and new.ci_lower is not None  # narrows for mypy/pyright
-        assert new.ci_upper is not None and old.ci_lower is not None
+        if old.ci_upper is None or new.ci_lower is None or new.ci_upper is None or old.ci_lower is None:
+            raise ValueError("has_ci is True but a confidence-interval bound is unexpectedly None")
         if new.ci_lower > old.ci_upper:
             return "strengthened"
         if new.ci_upper < old.ci_lower:

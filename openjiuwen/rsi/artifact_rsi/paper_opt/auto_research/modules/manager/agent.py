@@ -10,7 +10,9 @@ from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import project_root, set_project_root
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.manager_capability_rail import ManagerCapabilityRail
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.manager_capability_rail import (
+    ManagerCapabilityRail,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import with_observability
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.submit_manager_decision import (
     SubmitManagerDecisionTool,

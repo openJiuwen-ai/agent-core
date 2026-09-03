@@ -103,7 +103,8 @@ def _node_score(node: RsiTreeNode | None) -> PaperScore | None:
 
 class PaperTreeOrchestrator:
     """Owns one task's tree of paper-improvement attempts. One instance per
-    active `task_id`. See docs/paper_tree_orchestrator_design.md."""
+    active `task_id`. See docs/paper_tree_orchestrator_design.md.
+    """
 
     def __init__(
         self,
@@ -220,7 +221,8 @@ class PaperTreeOrchestrator:
     # -- main loop ----------------------------------------------------------
     async def _run_loop(self) -> None:
         state = self.storage.load_task_state()
-        assert state is not None
+        if state is None:
+            raise RuntimeError("_run_loop started with no persisted task state")
         try:
             while state.node_count < self.max_iterations and not self._cancelled:
                 await self._run_one_node(state)
@@ -228,8 +230,6 @@ class PaperTreeOrchestrator:
                 state.status = "completed"
                 self.storage.save_task_state(state)
                 await self._emit(EventStatus(status="completed"))
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001 -- must not crash the loop silently
             for node in self._finalize_pending_nodes(
                 reason=f"task crashed: {exc}",

@@ -5,12 +5,22 @@ from __future__ import annotations
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import CodeImplementationAgent
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import CodeImplementationInput
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
+    CodeImplementationAgent,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
+    CodeImplementationInput,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.agent import ExperimentDesignAgent
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import ExperimentDesignInput
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.agent import ExperimentExecutionAgent
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentExecutionInput
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import (
+    ExperimentDesignInput,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.agent import (
+    ExperimentExecutionAgent,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
+    ExperimentExecutionInput,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.agent import ReflectionAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.schemas import ReflectionInput
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.agent import ReportingAgent

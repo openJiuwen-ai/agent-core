@@ -33,7 +33,8 @@ class NodeSeed:
 def build_node_run_id(task_id: str, round_index: int) -> str:
     """Filesystem-safe — no colons, matching
     `common/workspace.py::module_attempt_dirname`'s existing convention of
-    never embedding characters Windows paths reject."""
+    never embedding characters Windows paths reject.
+    """
     safe_task_id = task_id.replace(":", "-").replace("/", "-").replace("\\", "-")
     return f"{safe_task_id}-r{round_index}"
 
@@ -43,7 +44,8 @@ def build_prior_paper_prompt(parent_run_id: str | None) -> str | None:
     improvement prompt via paper_preprocess. Returns `None` if there's no
     parent paper, or the parent's paper doesn't validate as a
     self-contained LaTeX paper — the next round then falls back to a plain
-    from-scratch seed rather than crashing the tree loop."""
+    from-scratch seed rather than crashing the tree loop.
+    """
     if parent_run_id is None:
         return None
     paper_dir = paper_workspace_dir(parent_run_id)

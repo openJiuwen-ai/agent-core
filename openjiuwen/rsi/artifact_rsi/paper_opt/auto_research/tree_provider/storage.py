@@ -79,7 +79,8 @@ class TaskStorage:
         ``node_id`` in place. Upsert semantics let a node be persisted as an
         in-flight placeholder (so a ``NodeStageEvent``'s ``node_ref`` always
         resolves to something in ``tree.json``) and later overwritten with
-        its final result under the same ``node_id``."""
+        its final result under the same ``node_id``.
+        """
         nodes = self.load_tree()
         for index, existing in enumerate(nodes):
             if existing.node_id == node.node_id:

@@ -24,6 +24,7 @@ impossible to repeat: there is no path here for it to "helpfully" hardcode.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import sys
@@ -44,6 +45,7 @@ _NEURIPS_STY = Path(__file__).parent.parent / "assets" / "neurips_2025.sty"
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     latex_bin_dir = os.environ.get("LATEX_BIN_DIR", "").strip()
     if latex_bin_dir and os.path.isdir(latex_bin_dir):
         os.environ["PATH"] = latex_bin_dir + os.pathsep + os.environ.get("PATH", "")
@@ -60,7 +62,7 @@ def main() -> None:
     workspace = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     title_path = workspace / "title.txt"
     if not title_path.is_file():
-        print(json.dumps({"success": False, "error": "title.txt not found — run ts-plan first."}))
+        logging.info(json.dumps({"success": False, "error": "title.txt not found — run ts-plan first."}))
         raise SystemExit(1)
     title = title_path.read_text(encoding="utf-8").strip()
 
@@ -95,7 +97,7 @@ def main() -> None:
     )
 
     result = compile_document(tex_path)
-    print(
+    logging.info(
         json.dumps(
             {
                 "success": result.success,

@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import validate_metrics_contract, validate_smoke_live_path
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
+    validate_metrics_contract,
+    validate_smoke_live_path,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     agent_workspace_dir,
     design_dir,
@@ -153,14 +156,16 @@ def _hash_staged_deliverable(root: Path) -> str:
     digest = hashlib.sha256()
     if not root.exists():
         return digest.hexdigest()[:16]
-    files = sorted(
-        path
-        for path in root.rglob("*")
-        if path.is_file()
-        and ".git" not in path.parts
-        and "__pycache__" not in path.parts
-        and path.suffix != ".pyc"
-    )
+    files = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if ".git" in path.parts or "__pycache__" in path.parts:
+            continue
+        if path.suffix == ".pyc":
+            continue
+        files.append(path)
+    files.sort()
     for path in files:
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(b"\0")
@@ -303,7 +308,7 @@ class CodeImplementationAgent:
         # populated plan.baselines still works as a fallback if discovery
         # can't run at all).
         variant_names = [*plan.baselines, "proposed"]
-        task_prompt = self._build_task_prompt(plan, design_context)
+        task_prompt = inputs.extra_host_instructions + self._build_task_prompt(plan, design_context)
         max_cycles = self._max_validation_cycles()
         conversation_id = f"code_implementation-{plan.run_id}"
         smoke_root = active_artifact_dir(plan.run_id, smoke_test_dir(plan.run_id).resolve())
@@ -429,8 +434,8 @@ class CodeImplementationAgent:
             try:
                 os.chmod(target, stat.S_IWRITE)
                 func(target)
-            except OSError:
-                raise error
+            except OSError as retry_exc:
+                raise error from retry_exc
 
         if sys.version_info >= (3, 12):
             shutil.rmtree(path, onexc=_unlock_and_retry)
@@ -673,7 +678,9 @@ class CodeImplementationAgent:
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.guarded_sys_operation_rail import (
             GuardedSysOperationRail,
         )
-        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import with_observability
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
+            with_observability,
+        )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.openjiuwen_reference_rail import (
             OpenJiuwenReferenceRail,
         )
@@ -755,7 +762,8 @@ class CodeImplementationAgent:
             )
         return value
 
-    def _render_system_prompt(self) -> str:
+    @staticmethod
+    def _render_system_prompt() -> str:
         template = _PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
         conventions = (
             _CONVENTIONS_PATH.read_text(encoding="utf-8") if _CONVENTIONS_PATH.exists() else ""
@@ -1247,7 +1255,8 @@ class CodeImplementationAgent:
         )
         return validation.ok, validation.variants, validation.failures
 
-    def _build_validation_repair_prompt(self, validation: CandidateValidation | None) -> str:
+    @staticmethod
+    def _build_validation_repair_prompt(validation: CandidateValidation | None) -> str:
         if validation is None:
             return (
                 "Host validation failed before a structured result was recorded. "
@@ -1288,8 +1297,8 @@ class CodeImplementationAgent:
             f"Per-variant failures:\n{failures}\n"
         )
 
+    @staticmethod
     def _promotion_failure_output(
-        self,
         plan: ExperimentPlan,
         code_dir: Path,
         validation: CandidateValidation,
@@ -1359,11 +1368,12 @@ class CodeImplementationAgent:
                 f"--- {name} ---\n{detail}" for name, detail in failures.items()
             )
             error_block = "\n".join(f"- {item}" for item in validation.errors)
+            log_dir = validation.log_dir or active_artifact_dir(plan.run_id, smoke_test_dir(plan.run_id))
             notes = (
                 f"{validation.summary()}\n"
                 f"{error_block}\n\n"
                 f"{failure_blocks}\n\n"
-                f"Full logs under {validation.log_dir or active_artifact_dir(plan.run_id, smoke_test_dir(plan.run_id))}. "
+                f"Full logs under {log_dir}. "
                 f"Agent's final message: {agent_message}"
             )
         manifest = CodeImplementationManifest(

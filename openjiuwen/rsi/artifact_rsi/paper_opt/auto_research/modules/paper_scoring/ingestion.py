@@ -204,7 +204,7 @@ def _expand_tex(path: Path, *, root: Path, stack: tuple[Path, ...] = ()) -> list
             continue
         cursor = 0
         for match in _INPUT_RE.finditer(line):
-            prefix = line[cursor : match.start()]
+            prefix = line[cursor: match.start()]
             if prefix.strip():
                 records.append(LineRecord(relative, line_no, prefix.rstrip()))
             included = _resolve_include(root, resolved.parent, match.group(1))
@@ -258,7 +258,7 @@ def _unwrap_text_macros(text: str) -> str:
         changed = False
         for match in _TEXT_MACRO_RE.finditer(text):
             close = _brace_end(text, match.end() - 1)
-            inner = text[match.end() : close - 1]
+            inner = text[match.end(): close - 1]
             text = text[: match.start()] + inner + text[close:]
             changed = True
             break
@@ -318,7 +318,7 @@ def _tabular_to_markdown(tabular: str) -> str:
     inner = tabular
     begin = re.search(r"\\begin\{tabular\}(?:\s*\[[^\]]*\])?\s*\{[^}]*\}", inner)
     if begin:
-        inner = inner[begin.end() :]
+        inner = inner[begin.end():]
     end_tab = re.search(r"\\end\{tabular\}", inner)
     if end_tab:
         inner = inner[: end_tab.start()]
@@ -348,7 +348,7 @@ def _extract_caption(block: str) -> str:
     if not match:
         return ""
     close = _brace_end(block, match.end() - 1)
-    return _normalize_prose(block[match.end() : close - 1])
+    return _normalize_prose(block[match.end(): close - 1])
 
 
 def _extract_label(block: str) -> str | None:
@@ -406,7 +406,7 @@ def _parse_bib_file(path: Path) -> list[BibliographyEntry]:
     for match in re.finditer(r"@\w+\s*\{([^,]+),", text):
         key = match.group(1).strip()
         close = text.find("\n}", match.end())
-        block = text[match.start() : close if close >= 0 else match.end() + 400]
+        block = text[match.start(): close if close >= 0 else match.end() + 400]
         title_m = re.search(r"title\s*=\s*[{\"](.+?)[}\"]", block, re.IGNORECASE | re.DOTALL)
         author_m = re.search(r"author\s*=\s*[{\"](.+?)[}\"]", block, re.IGNORECASE | re.DOTALL)
         year_m = re.search(r"year\s*=\s*[{\"]?(\d{4})", block, re.IGNORECASE)
@@ -424,21 +424,21 @@ def _parse_bib_file(path: Path) -> list[BibliographyEntry]:
 def _load_image_png(path: Path, *, max_side: int) -> tuple[bytes, int, int]:
     from PIL import Image
 
-    image = Image.open(path)
-    image.load()
-    if image.mode not in {"RGB", "RGBA"}:
-        image = image.convert("RGB")
-    width, height = image.size
-    longest = max(width, height)
-    if longest > max_side:
-        scale = max_side / longest
-        image = image.resize(
-            (max(1, int(width * scale)), max(1, int(height * scale))),
-            Image.Resampling.LANCZOS,
-        )
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue(), image.width, image.height
+    with Image.open(path) as image:
+        image.load()
+        if image.mode not in {"RGB", "RGBA"}:
+            image = image.convert("RGB")
+        width, height = image.size
+        longest = max(width, height)
+        if longest > max_side:
+            scale = max_side / longest
+            image = image.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue(), image.width, image.height
 
 
 def _rasterize_pdf_png(path: Path, *, max_side: int) -> tuple[bytes, int, int]:
@@ -570,7 +570,7 @@ def _rewrite_and_extract(
             close = re.search(r"\\end\{abstract\}", text[pos:])
             if not close:
                 raise LatexIngestError("unclosed abstract environment")
-            inner = text[pos + abstract.end() : pos + close.start()]
+            inner = text[pos + abstract.end(): pos + close.start()]
             sections.append(
                 PaperSection(
                     section_id=f"sec-{section_index:03d}",
@@ -595,7 +595,7 @@ def _rewrite_and_extract(
         if section_match:
             brace_at = pos + section_match.end() - 1
             close = _brace_end(text, brace_at)
-            title = _normalize_prose(text[brace_at + 1 : close - 1])
+            title = _normalize_prose(text[brace_at + 1: close - 1])
             end_record = _record_at(pos)
             _flush(name=current_name, canonical=current_canonical, end_record=end_record)
             command = section_match.group(1)
@@ -683,7 +683,8 @@ def _rewrite_and_extract(
                     continue
                 spec = include_match.group(1).strip()
             else:
-                assert include is not None
+                if include is None:
+                    raise LatexIngestError("unreachable: neither figure_span nor include matched")
                 start, end = pos, pos + include.end()
                 spec = include.group(1).strip()
                 caption = ""
@@ -830,7 +831,8 @@ def ingest_latex(
         )
 
     full_text = "\n\n".join(
-        f"## {section.name} [id={section.section_id} source={section.source_path}:{section.line_start}-{section.line_end}]\n"
+        f"## {section.name} "
+        f"[id={section.section_id} source={section.source_path}:{section.line_start}-{section.line_end}]\n"
         f"{section.text}"
         for section in sections
         if section.text

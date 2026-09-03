@@ -80,7 +80,8 @@ def check_structure(section_id: str, text: str) -> list[str]:
     fence). Their real script reads these target counts from a
     `template.json` per venue; this project has one fixed template
     (sections.py), so the targets are inlined directly rather than
-    threading a template file through for a single fixed shape."""
+    threading a template file through for a single fixed shape.
+    """
     violations: list[str] = []
     if section_id == "introduction":
         n = len(_ITEM_RE.findall(text))
@@ -132,7 +133,8 @@ def known_numbers(result: ExperimentResult) -> set[float]:
     rejected before this fix). Deliberately stops at 4 significant
     rounding levels rather than also adding ``round(value, 0)`` — rounding
     a fraction metric to a bare integer (0 or 1) would make the check
-    accept almost anything in range and defeat its purpose."""
+    accept almost anything in range and defeat its purpose.
+    """
     numbers: set[float] = set()
     for variant in result.variants:
         for value in variant.metrics.values():
@@ -151,7 +153,7 @@ def _extract_unmatched_numbers(text: str, known: set[float]) -> list[float]:
     doesn't match a real metric value."""
     values: list[float] = []
     for match in _NUMBER_RE.finditer(text):
-        if _HYPERPARAM_CUE_RE.search(text[max(0, match.start() - 30) : match.start()]):
+        if _HYPERPARAM_CUE_RE.search(text[max(0, match.start() - 30): match.start()]):
             continue
         raw = match.group(0).removesuffix("%")
         try:
@@ -167,7 +169,8 @@ def lint_section(text: str, spec: SectionSpec, result: ExperimentResult) -> list
     """Returns human-readable violations, empty if the section passes.
     Never raises — a lint failure is something for the bounded repair
     completion (docs/paper_writing_design.md §8's sibling mechanism for the
-    compile loop, applied here to prose) to fix, not a reason to crash."""
+    compile loop, applied here to prose) to fix, not a reason to crash.
+    """
     violations: list[str] = []
 
     word_count = len(text.split())
@@ -210,7 +213,8 @@ def check_citations(tex_text: str, known_keys: set[str]) -> list[str]:
     the hallucinated keys, empty if none — a fabricated citation is a
     deterministic content bug, not noise, so unlike the soft numeric
     warning in ``reporting``, any hit here should block the module
-    (see agent.py)."""
+    (see agent.py).
+    """
     return sorted(cited_keys(tex_text) - known_keys)
 
 
@@ -227,7 +231,8 @@ def check_zero_citation_sections(
     some sections, so this is surfaced as a note for a human to judge, not
     a block. Returns `[]` immediately if there's nothing to cite at all
     (`known_keys` empty) — that's a bibliography gap, not a per-section
-    coverage gap, and already visible from an empty refs.bib."""
+    coverage gap, and already visible from an empty refs.bib.
+    """
     if not known_keys:
         return []
     return [
@@ -246,7 +251,8 @@ def extract_subsection_headings(tex_text: str) -> list[str]:
     method-figure node labels (ts-figure/scripts/extract_headings.py) —
     the figure is derived from what ts-write actually committed to, never
     authored ahead of the prose, so there is no separate vocabulary for
-    the two to drift apart from."""
+    the two to drift apart from.
+    """
     return [" ".join(m.group(1).split()) for m in _HEADING_TEXT_RE.finditer(tex_text)]
 
 
@@ -257,7 +263,8 @@ def check_method_figure_headings(node_labels: list[str], headings: list[str]) ->
     instruction, this can be exact because the labels are supposed to be
     *copied* from the headings, not independently reworded — a mismatch
     here means ts-figure ignored its own instructions, not that the model
-    paraphrased legitimately."""
+    paraphrased legitimately.
+    """
     heading_set = {" ".join(h.split()) for h in headings}
     return [
         label
@@ -272,7 +279,8 @@ _METHOD_FIGURE_INCLUDE_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{[^}]*
 def check_method_figure_included(method_text: str) -> bool:
     """True if method.tex already references the spliced-in method
     figure. Used by agent.py's post-session verification to require one
-    when a MethodFigureSpec was actually authored for this run."""
+    when a MethodFigureSpec was actually authored for this run.
+    """
     return bool(_METHOD_FIGURE_INCLUDE_RE.search(method_text))
 
 
@@ -310,7 +318,8 @@ def scan_script_for_fabrication(source: str, known: set[float]) -> list[float]:
     conceivable way to launder one (e.g. a value computed from an
     unrelated hardcoded constant a few lines earlier would still slip
     through). Meant to be paired with an independent re-run of the
-    script, never used alone."""
+    script, never used alone.
+    """
     values: list[float] = []
     for line in source.splitlines():
         code = line.split("#", 1)[0]
@@ -347,7 +356,8 @@ def check_completeness(tex_text: str, result: ExperimentResult, metrics: list[st
     """Variant/metric name-mention check, same idea as
     ``reporting._verify_and_annotate``'s completeness check, adapted for
     LaTeX escaping (docs/paper_writing_design.md §5) — compares against
-    both the escaped and raw form, since either could legitimately appear."""
+    both the escaped and raw form, since either could legitimately appear.
+    """
     missing: list[str] = []
     for variant in result.variants:
         if escape_latex(variant.name) not in tex_text and variant.name not in tex_text:

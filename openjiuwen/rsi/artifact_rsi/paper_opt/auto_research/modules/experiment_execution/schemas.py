@@ -4,7 +4,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import CodeImplementationManifest
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
+    CodeImplementationManifest,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import ExperimentPlan
 
 

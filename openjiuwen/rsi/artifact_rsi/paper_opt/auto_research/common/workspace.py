@@ -41,14 +41,16 @@ def design_dir(run_id: str) -> Path:
 
 def design_report_path(run_id: str) -> Path:
     """The experiment design report `experiment_design` must persist, and
-    `code_implementation` reads, at experiments/<run_id>/design/report.md."""
+    `code_implementation` reads, at experiments/<run_id>/design/report.md.
+    """
     return design_dir(run_id) / "report.md"
 
 
 def agent_workspace_dir(run_id: str) -> Path:
     """Scratch space for the coding DeepAgent itself (harness bookkeeping,
     intermediate drafts) — distinct from generated_code_dir, which holds only
-    the curated, execution-ready deliverable the agent promotes into it."""
+    the curated, execution-ready deliverable the agent promotes into it.
+    """
     return workspace_dir(run_id) / "agent_workspace"
 
 
@@ -58,13 +60,15 @@ def generated_code_dir(run_id: str) -> Path:
 
 def logs_dir(run_id: str) -> Path:
     """Canonical latest logs: experiments/<run_id>/logs/. Manager runs also keep
-    per-attempt copies under modules/experiment_execution/."""
+    per-attempt copies under modules/experiment_execution/.
+    """
     return workspace_dir(run_id) / "logs"
 
 
 def results_dir(run_id: str) -> Path:
     """Canonical latest metrics: experiments/<run_id>/results/. Manager runs also
-    keep per-attempt copies under modules/experiment_execution/."""
+    keep per-attempt copies under modules/experiment_execution/.
+    """
     return workspace_dir(run_id) / "results"
 
 
@@ -138,7 +142,8 @@ def paper_workspace_dir(run_id: str) -> Path:
     """Scratch + output space for the optional paper_writing module —
     sections/, figures/, refs.bib, and the compiled main.pdf all live here.
     Each invocation overwrites this directory fully rather than resuming a
-    partial prior draft — see docs/paper_writing_design.md §9."""
+    partial prior draft — see docs/paper_writing_design.md §9.
+    """
     return workspace_dir(run_id) / "paper"
 
 
@@ -166,7 +171,8 @@ def paper_scoring_dir(run_id: str) -> Path:
     """Where auto_research.modules.paper_scoring.PaperScorer writes its own
     ingestion.json/rubric.*.json/audit.json/scoresheet.json for this run's
     paper — distinct from paper_workspace_dir, which holds the paper
-    itself, not its evaluation artifacts."""
+    itself, not its evaluation artifacts.
+    """
     return workspace_dir(run_id) / "paper_scoring"
 
 
@@ -174,7 +180,8 @@ def smoke_test_dir(run_id: str) -> Path:
     """code_implementation's own acceptance-gate artifacts (per-variant smoke
     test stdout/stderr + whatever metrics.json got written) — kept on disk
     for debugging/reflection, distinct from logs_dir/results_dir, which are
-    experiment_execution's real-run outputs."""
+    experiment_execution's real-run outputs.
+    """
     return workspace_dir(run_id) / "smoke_test"
 
 

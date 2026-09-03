@@ -113,7 +113,7 @@ def label_to_slot(label: str) -> str:
             if value == label:
                 return slot
     if label.startswith("Metric "):
-        return metric_claim_slot(label[len("Metric ") :])
+        return metric_claim_slot(label[len("Metric "):])
     raise ValueError(f"unknown claim label: {label!r}")
 
 
@@ -172,7 +172,7 @@ def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     meta = yaml.safe_load(match.group(1)) or {}
     if not isinstance(meta, dict):
         raise TypeError("frontmatter must be a YAML mapping")
-    body = text[match.end() :]
+    body = text[match.end():]
     return meta, body.lstrip("\n") if body.startswith("\n") else body
 
 
@@ -204,7 +204,7 @@ def parse_design_document(text: str) -> ParsedDesignDocument:
     log_idx = body.find(LOG_HEADING)
     if log_idx < 0:
         raise ValueError("design document missing Evaluation and Revision Log")
-    log = body[log_idx + len(LOG_HEADING) :].lstrip("\n")
+    log = body[log_idx + len(LOG_HEADING):].lstrip("\n")
     return ParsedDesignDocument(frontmatter=frontmatter, body=body, revision_log=log)
 
 
@@ -342,7 +342,7 @@ def ensure_claim_block(body: str, slot: str) -> str:
         )
         body = body[:idx] + insertion + body[idx:]
     start, end = _section_bounds(body, DECISION_METRICS_HEADING)
-    inner = body[start + len(DECISION_METRICS_HEADING) : end].rstrip() + "\n\n"
+    inner = body[start + len(DECISION_METRICS_HEADING): end].rstrip() + "\n\n"
     inner += render_claim_list(slot, [])
     return (
         body[: start + len(DECISION_METRICS_HEADING)]
@@ -438,7 +438,7 @@ def replace_section_body(body: str, heading: str, new_inner: str) -> str:
 
 def read_section_inner(body: str, heading: str) -> str:
     start, end = _section_bounds(body, heading)
-    return body[start + len(heading) : end].strip("\n")
+    return body[start + len(heading): end].strip("\n")
 
 
 def _demote_experiment_h2(text: str) -> str:

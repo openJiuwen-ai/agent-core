@@ -79,7 +79,7 @@ def _sections(text: str) -> list[PaperSection]:
     output: list[PaperSection] = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        content = _clean_tex(text[match.end() : end])
+        content = _clean_tex(text[match.end(): end])
         if content:
             output.append(PaperSection(title=_clean_tex(match.group(1)), content=content))
     return output
@@ -113,7 +113,10 @@ def _local_assets(files: list[Path], root: Path, errors: list[str]) -> tuple[lis
                     errors.append(f"missing bibliography: {raw.strip()}")
                 elif candidate not in bibliographies:
                     bibliographies.append(candidate)
-        citations.update(key.strip() for group in _CITE_RE.findall(text) for key in group.split(",") if key.strip())
+        for group in _CITE_RE.findall(text):
+            for key in group.split(","):
+                if key.strip():
+                    citations.add(key.strip())
     return figures, bibliographies, citations
 
 

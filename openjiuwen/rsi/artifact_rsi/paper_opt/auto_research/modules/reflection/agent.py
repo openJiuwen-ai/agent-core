@@ -29,7 +29,9 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     to_project_relative,
     workspace_dir,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import CodeImplementationManifest
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
+    CodeImplementationManifest,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.artifacts import (
     current_claim_text,
     parse_design_document,
@@ -75,7 +77,7 @@ class ReflectionAgent:
         # Path relative to the (now wider) workspace root — mirrors
         # reflection_path's own reflection_dir(run_id)/revision-N.md shape.
         target_filename = f"reflection/revision-{plan.revision}.md"
-        task_prompt = self._build_task_prompt(
+        task_prompt = inputs.extra_host_instructions + self._build_task_prompt(
             inputs, hypothesis_text, objective_text, design_context, target_filename
         )
 
@@ -137,8 +139,12 @@ class ReflectionAgent:
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness import create_deep_agent
 
-        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import with_observability
-        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.reflection_tools_rail import ReflectionToolsRail
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
+            with_observability,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.reflection_tools_rail import (
+            ReflectionToolsRail,
+        )
 
         model = init_model(
             provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),

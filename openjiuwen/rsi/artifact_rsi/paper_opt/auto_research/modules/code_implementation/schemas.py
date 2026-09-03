@@ -9,11 +9,17 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
 
 class CodeImplementationInput(BaseModel):
     plan: ExperimentPlan
+    # Prepended to the rendered task prompt -- lets a caller (e.g. the manager
+    # pipeline's CodeImplementationAdapter) inject host-side context such as a
+    # prior attempt's failure summary, without reaching into the agent's
+    # protected _build_task_prompt.
+    extra_host_instructions: str = ""
 
 
 class ImplementedVariant(BaseModel):
     """One runnable variant (a baseline, or "proposed") sharing the same entry
-    point and metric computation as every other variant in the run."""
+    point and metric computation as every other variant in the run.
+    """
 
     name: str
     invocation: list[str]

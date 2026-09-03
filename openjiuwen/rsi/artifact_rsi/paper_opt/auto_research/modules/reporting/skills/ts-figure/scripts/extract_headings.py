@@ -13,6 +13,7 @@ omitted, for direct/manual invocation only.)
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -20,17 +21,18 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting impor
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     workspace = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     method_path = workspace / "sections" / "method.tex"
     if not method_path.is_file():
-        print(json.dumps({"error": f"method.tex not found under {workspace} — run ts-write first."}))
+        logging.info(json.dumps({"error": f"method.tex not found under {workspace} — run ts-write first."}))
         raise SystemExit(1)
     text = method_path.read_text(encoding="utf-8")
     headings = lint.extract_subsection_headings(text)
     if not headings:
-        print(json.dumps({"error": "no \\subsection{} headings found in method.tex", "headings": []}))
+        logging.info(json.dumps({"error": "no \\subsection{} headings found in method.tex", "headings": []}))
         raise SystemExit(1)
-    print(json.dumps({"headings": headings}))
+    logging.info(json.dumps({"headings": headings}))
 
 
 if __name__ == "__main__":

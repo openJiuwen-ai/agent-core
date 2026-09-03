@@ -30,8 +30,10 @@ Usage: python attempt_drawio.py
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -64,10 +66,11 @@ def find_skill_dir() -> str | None:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     drawio_bin = find_drawio_binary()
     skill_dir = find_skill_dir()
     available = drawio_bin is not None and skill_dir is not None
-    print(
+    logging.info(
         json.dumps(
             {
                 "available": available,

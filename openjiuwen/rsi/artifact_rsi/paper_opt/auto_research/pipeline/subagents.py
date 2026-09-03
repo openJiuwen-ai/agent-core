@@ -30,12 +30,16 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     smoke_test_dir,
     to_project_relative,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import CodeImplementationAgent
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
+    CodeImplementationAgent,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
     CodeImplementationInput,
     CodeImplementationOutput,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.agent import ExperimentDesignAgent
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.agent import (
+    ExperimentDesignAgent,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import (
     EvaluationFeedback,
     ExperimentDesignFeedbackInput,
@@ -45,7 +49,9 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
     ResearchBrief,
     utc_now,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.agent import ExperimentExecutionAgent
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.agent import (
+    ExperimentExecutionAgent,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
     ExperimentExecutionInput,
     ExperimentExecutionOutput,
@@ -116,7 +122,7 @@ def _file_excerpt(path: str | Path, limit: int) -> str:
     cleaned = text.strip()
     if len(cleaned) <= limit:
         return cleaned
-    return "[truncated head]\n" + cleaned[-(limit - 18) :]
+    return "[truncated head]\n" + cleaned[-(limit - 18):]
 
 
 def _contract_brief(contract: SubtaskContract) -> str:
@@ -295,7 +301,7 @@ def _read_log_for_repair(path: str, limit: int) -> str:
         return ""
     if len(text) <= limit:
         return text
-    return "[truncated head]\n" + text[-(limit - 18) :]
+    return "[truncated head]\n" + text[-(limit - 18):]
 
 
 def _is_sdk_noise_line(line: str) -> bool:
@@ -330,7 +336,7 @@ def _diagnostic_log_excerpt(path: str, limit: int) -> str:
     text = "\n".join(kept)
     if len(text) <= limit:
         return text
-    return "[truncated head]\n" + text[-(limit - 18) :]
+    return "[truncated head]\n" + text[-(limit - 18):]
 
 
 def _variant_repair_lines(handoff: Any) -> list[str]:
@@ -482,15 +488,13 @@ def _execution_repair_block(contract: SubtaskContract, state: PersistedManagerSt
     ]
     log_paths = [path for path in log_paths if path]
     if not log_paths:
-        log_paths = [
-            rel
-            for rel in (
-                _safe_rel(item.log_path)
-                for item in list(getattr(handoff, "variants", []) or [])
-                if getattr(item, "log_path", "")
-            )
-            if rel
-        ]
+        log_paths = []
+        for item in list(getattr(handoff, "variants", []) or []):
+            if not getattr(item, "log_path", ""):
+                continue
+            rel = _safe_rel(item.log_path)
+            if rel:
+                log_paths.append(rel)
     sidecar_paths = [
         _safe_rel(path)
         for path in list(getattr(handoff, "diagnostic_paths", []) or [])
@@ -917,7 +921,9 @@ def _task_baseline_texts(state: PersistedManagerState) -> list[str]:
 def _plan_with_inferred_baselines(plan, state: PersistedManagerState):
     if plan is None:
         return None
-    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.artifacts import merge_plan_baselines
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.artifacts import (
+        merge_plan_baselines,
+    )
 
     return merge_plan_baselines(
         plan,
@@ -939,7 +945,9 @@ def _design_claims(plan) -> tuple[str, str]:
         return setup, hypothesis
     if not path.is_file():
         return setup, hypothesis
-    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.artifacts import extract_claim_entries
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.artifacts import (
+        extract_claim_entries,
+    )
 
     body = path.read_text(encoding="utf-8")
     objective_entries = extract_claim_entries(body, "objective")
@@ -1052,18 +1060,13 @@ class CodeImplementationAdapter:
         if plan is not None:
             state.task_state.latest_plan = plan
         extra = _code_host_instructions(contract, state)
-        original_prompt = self.agent._build_task_prompt
-
-        def _prompt_with_host(plan, design_context):
-            return extra + original_prompt(plan, design_context)
 
         started = time.monotonic()
         run_id = state.task_state.run_id
         excerpt_limit = state.task_state.limits.excerpt_chars
         try:
-            self.agent._build_task_prompt = _prompt_with_host  # type: ignore[method-assign]
             output: CodeImplementationOutput = await self.agent.arun(
-                CodeImplementationInput(plan=state.task_state.latest_plan)
+                CodeImplementationInput(plan=state.task_state.latest_plan, extra_host_instructions=extra)
             )
         except Exception as exc:  # noqa: BLE001
             log_paths, _excerpts = _code_log_artifacts(
@@ -1090,8 +1093,6 @@ class CodeImplementationAdapter:
                     log_paths=log_paths,
                 ),
             )
-        finally:
-            self.agent._build_task_prompt = original_prompt  # type: ignore[method-assign]
         impl = output.implementation
         state.latest_implementation = impl
         smoke_dir = module_attempt_dir(impl.run_id, "code_implementation", round_index, attempt)
@@ -1237,7 +1238,7 @@ class ExperimentExecutionAdapter:
             )
             detail = str(diagnostic.get("detail") or compact.get("detail") or "")
             error_code = str(diagnostic.get("error_code") or compact.get("error_code") or "")
-            if stage or substage or detail or error_code:
+            if any((stage, substage, detail, error_code)):
                 banner = f"Harness failed at {stage}/{substage}"
                 if error_code:
                     banner += f": {error_code}"
@@ -1321,7 +1322,7 @@ class ExperimentExecutionAdapter:
             )
         )
         if diagnostic.get("detail"):
-            failure_excerpts.append(str(diagnostic["detail"]))
+            failure_excerpts.append(str(diagnostic.get("detail")))
         failure_excerpts = [item for item in _unique_paths(failure_excerpts) if item][:8]
         goal_note = bounded_text(contract.goal, 200)
         summary_bits = [
@@ -1331,7 +1332,8 @@ class ExperimentExecutionAdapter:
         if failure_kind:
             summary_bits.append(f"failure_kind={failure_kind}")
         if failure_stage:
-            summary_bits.append(f"stage={failure_stage}/{failure_substage}" if failure_substage else f"stage={failure_stage}")
+            stage_bit = f"stage={failure_stage}/{failure_substage}" if failure_substage else f"stage={failure_stage}"
+            summary_bits.append(stage_bit)
         events = diagnostic.get("event_counts") if isinstance(diagnostic, dict) else None
         if isinstance(events, dict) and events:
             top = next(iter(events.items()))
@@ -1433,21 +1435,13 @@ class ReflectionAdapter:
             "## Manager subtask contract\n\n"
             f"{_contract_brief(contract)}\n\n"
         )
-        original_prompt = getattr(self.agent, "_build_task_prompt", None)
-
-        def _prompt_with_contract(
-            inputs, hypothesis_text, objective_text, design_context, target_filename
-        ):
-            return extra + original_prompt(
-                inputs, hypothesis_text, objective_text, design_context, target_filename
-            )
-
         try:
-            if original_prompt is not None:
-                self.agent._build_task_prompt = _prompt_with_contract  # type: ignore[method-assign]
             output = await self.agent.arun(
                 ReflectionInput(
-                    plan=plan, result=result, implementation=state.latest_implementation
+                    plan=plan,
+                    result=result,
+                    implementation=state.latest_implementation,
+                    extra_host_instructions=extra,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -1463,9 +1457,6 @@ class ReflectionAdapter:
                 runtime_failure=_normalize_failure(exc),
                 related_report_ids=contract.related_report_ids,
             )
-        finally:
-            if original_prompt is not None:
-                self.agent._build_task_prompt = original_prompt  # type: ignore[method-assign]
         reflection = output.reflection
         verdict = _reflection_verdict(reflection.content)
         summary = bounded_text(reflection.content, state.task_state.limits.excerpt_chars)

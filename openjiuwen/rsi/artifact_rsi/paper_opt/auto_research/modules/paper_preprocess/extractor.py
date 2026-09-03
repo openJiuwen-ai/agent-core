@@ -19,7 +19,11 @@ def _short(text: str, limit: int = 900) -> str:
 
 
 def _by_heading(document: LatexPaperDocument, *keywords: str) -> list[tuple[str, str]]:
-    return [(item.title, item.content) for item in document.sections if any(key in item.title.lower() for key in keywords)]
+    return [
+        (item.title, item.content)
+        for item in document.sections
+        if any(key in item.title.lower() for key in keywords)
+    ]
 
 
 def _sentences(
@@ -58,7 +62,9 @@ def extract_paper_evidence(document: LatexPaperDocument) -> PaperEvidence:
     return PaperEvidence(
         research_question=question[0][1], method_summary=method[0][1],
         experiment_setup=[item[1] for item in setup],
-        key_results=[ResultClaim(claim=text, evidence=text, source_section=heading) for heading, text in result_sentences],
+        key_results=[
+            ResultClaim(claim=text, evidence=text, source_section=heading) for heading, text in result_sentences
+        ],
         conclusions=[item[1] for item in conclusion_sentences],
         limitations=[item[1] for item in limitation_sentences],
         improvement_opportunities=[item[1] for item in limitation_sentences[:3]]

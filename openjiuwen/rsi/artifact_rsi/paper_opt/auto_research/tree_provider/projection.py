@@ -21,7 +21,8 @@ def tree_depth(nodes: list[RsiTreeNode]) -> int:
     """Root has depth 0; every other node is its parent's depth + 1.
     Assumes parents always appear before or alongside children in `nodes`
     (true by construction — a node's parent always exists before the node
-    itself is created)."""
+    itself is created).
+    """
     depth_by_id: dict[str, int] = {}
     for node in nodes:
         if node.parent_id is None:

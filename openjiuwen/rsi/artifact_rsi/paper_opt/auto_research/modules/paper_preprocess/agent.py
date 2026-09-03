@@ -14,8 +14,9 @@ class PaperPreprocessAgent:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = config or {}
 
+    @staticmethod
     def run(
-        self, inputs: PaperPreprocessInput, *, document: LatexPaperDocument | None = None
+        inputs: PaperPreprocessInput, *, document: LatexPaperDocument | None = None
     ) -> PaperPreprocessOutput:
         document = document or validate_latex_paper(inputs.paper_dir)
         evidence = extract_paper_evidence(document)

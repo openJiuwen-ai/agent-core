@@ -76,7 +76,12 @@ class DownloadSurveySourceTool(Tool):
             label = anchor.get_text(" ", strip=True)
             if not _is_http_url(absolute):
                 continue
-            if not (absolute.lower().split("?", 1)[0].endswith(".pdf") or "/pdf/" in absolute.lower() or _PDF_LINK_TEXT.search(label)):
+            is_pdf_link = (
+                absolute.lower().split("?", 1)[0].endswith(".pdf")
+                or "/pdf/" in absolute.lower()
+                or _PDF_LINK_TEXT.search(label)
+            )
+            if not is_pdf_link:
                 continue
             if absolute not in seen:
                 seen.add(absolute)

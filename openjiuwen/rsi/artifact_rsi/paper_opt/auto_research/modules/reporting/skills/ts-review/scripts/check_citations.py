@@ -14,6 +14,7 @@ invocation only.)
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting impor
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     # workspace as an explicit argument, not Path.cwd() — see compile.py's
     # comment on why: the shell's tracked cwd can drift from an earlier
     # `cd` and silently redirect every relative path for the rest of the
@@ -29,7 +31,7 @@ def main() -> None:
     workspace = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     keys_path = workspace / "known_citation_keys.json"
     if not keys_path.is_file():
-        print(json.dumps({"error": f"known_citation_keys.json not found under {workspace}"}))
+        logging.info(json.dumps({"error": f"known_citation_keys.json not found under {workspace}"}))
         raise SystemExit(1)
 
     known_keys = set(json.loads(keys_path.read_text(encoding="utf-8")))
@@ -38,7 +40,7 @@ def main() -> None:
         path.read_text(encoding="utf-8") for path in sorted(sections_dir.glob("*.tex"))
     )
     hallucinated = lint.check_citations(combined, known_keys)
-    print(json.dumps({"hallucinated_keys": hallucinated}))
+    logging.info(json.dumps({"hallucinated_keys": hallucinated}))
 
 
 if __name__ == "__main__":

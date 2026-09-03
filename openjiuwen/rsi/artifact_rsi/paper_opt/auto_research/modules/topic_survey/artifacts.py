@@ -6,8 +6,15 @@ import hashlib
 import re
 from pathlib import Path
 
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import project_root, resolve_project_reference, to_project_relative
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import TopicSurveyDraft, TopicSurveyOutput
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    project_root,
+    resolve_project_reference,
+    to_project_relative,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
+    TopicSurveyDraft,
+    TopicSurveyOutput,
+)
 
 
 def survey_directory(topic: str) -> Path:

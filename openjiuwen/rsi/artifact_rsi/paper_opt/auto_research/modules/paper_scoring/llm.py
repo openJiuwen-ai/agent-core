@@ -12,7 +12,7 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_scoring.schemas import (
@@ -270,9 +270,7 @@ class StructuredCompleter:
                 )
                 self.calls.append(meta)
                 return schema.model_validate(payload)
-            except VisionModelError:
-                raise
-            except (ValidationError, json.JSONDecodeError, StructuredCompletionError, ValueError) as exc:
+            except (StructuredCompletionError, ValueError) as exc:
                 last_error = exc
                 if attempt + 1 >= attempts:
                     raise StructuredCompletionError(

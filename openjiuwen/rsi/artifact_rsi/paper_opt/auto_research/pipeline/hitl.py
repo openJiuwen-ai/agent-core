@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,10 +14,44 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     EXPERIMENTS_ROOT,
     manager_user_followup_path,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.artifacts import append_event, save_state, write_pause_notes
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import OperatorFollowup, PersistedManagerState
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.artifacts import (
+    append_event,
+    save_state,
+    write_pause_notes,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import (
+    OperatorFollowup,
+    PersistedManagerState,
+)
 
 PAUSE_EXIT_CODE = 130
+
+# Dedicated stderr logger for the Ctrl+C pause message: it must reach the
+# operator's terminal immediately regardless of whatever run-scoped logging
+# configuration (console=False, file-only handlers) is active for this run
+# via common.logging.get_logger — unlike that logger, this one is never
+# silenced by _silence_logger_tree("auto_research").
+_interrupt_logger = logging.getLogger(f"{__name__}.interrupt")
+_interrupt_logger.propagate = False
+if not _interrupt_logger.handlers:
+    _interrupt_handler = logging.StreamHandler(sys.stderr)
+    _interrupt_handler.setFormatter(logging.Formatter("%(message)s"))
+    _interrupt_logger.addHandler(_interrupt_handler)
+    _interrupt_logger.setLevel(logging.ERROR)
+
+
+class RunPaused(Exception):
+    """Raised by run_asyncio when the coroutine is interrupted.
+
+    Carries the intended process exit code. SystemExit belongs only at the
+    true process entry point (e.g. scripts/run_manager.py's
+    ``if __name__ == "__main__":`` block), not inside this reusable helper —
+    the caller is expected to catch this and call ``sys.exit(exc.exit_code)``.
+    """
+
+    def __init__(self, exit_code: int = PAUSE_EXIT_CODE) -> None:
+        super().__init__(exit_code)
+        self.exit_code = exit_code
 
 
 def last_finished_round_index(state: PersistedManagerState) -> int:
@@ -170,14 +205,12 @@ def pause_hint(run_id: str) -> str:
 
 
 def run_asyncio(coro, *, run_id: str | None = None):
-    """Run a manager coroutine; map Ctrl+C to a pause hint and exit 130."""
+    """Run a manager coroutine; map Ctrl+C to a pause hint and RunPaused."""
     try:
         return asyncio.run(coro)
-    except (KeyboardInterrupt, asyncio.CancelledError):
+    except (KeyboardInterrupt, asyncio.CancelledError) as exc:
         if run_id:
-            sys.stderr.write(pause_hint(run_id))
+            _interrupt_logger.error(pause_hint(run_id).rstrip("\n"))
         else:
-            sys.stderr.write(
-                "Paused. See experiments/<run_id>/manager/PAUSE.md for resume instructions.\n"
-            )
-        raise SystemExit(PAUSE_EXIT_CODE) from None
+            _interrupt_logger.error("Paused. See experiments/<run_id>/manager/PAUSE.md for resume instructions.")
+        raise RunPaused(PAUSE_EXIT_CODE) from exc

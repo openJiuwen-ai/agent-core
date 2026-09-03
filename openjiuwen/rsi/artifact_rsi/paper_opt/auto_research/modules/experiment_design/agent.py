@@ -199,16 +199,16 @@ def expand_resource_paths(paths: list[str], *, root: Path) -> list[str]:
             continue
         if not abs_path.is_dir():
             raise FileNotFoundError(f"referenced path is not a file or directory: {path}")
-        matches = sorted(
-            (
-                candidate
-                for candidate in abs_path.rglob("*")
-                if candidate.is_file()
-                and candidate.suffix.lower() in _RESOURCE_SUFFIXES
-                and not _is_hidden(candidate.relative_to(abs_path))
-            ),
-            key=lambda p: p.as_posix().lower(),
-        )
+        candidates = []
+        for candidate in abs_path.rglob("*"):
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in _RESOURCE_SUFFIXES:
+                continue
+            if _is_hidden(candidate.relative_to(abs_path)):
+                continue
+            candidates.append(candidate)
+        matches = sorted(candidates, key=lambda p: p.as_posix().lower())
         if not matches:
             raise FileNotFoundError(
                 f"directory has no .md/.txt/.json/.pdf resources: {path}"

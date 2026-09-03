@@ -1,7 +1,8 @@
 """Pydantic contracts for the Reporting Agent. See docs/paper_writing_design.md
 (the design doc keeps its original filename; the module itself replaced the
 old lightweight-markdown reporting stage — see auto_research/modules/
-reporting_legacy for that prior implementation, kept unreferenced)."""
+reporting_legacy for that prior implementation, kept unreferenced).
+"""
 
 from __future__ import annotations
 
@@ -26,7 +27,8 @@ class ResearchContext(BaseModel):
     keeps the two from silently drifting apart. Minimal shape for Phase 1 of
     that design — just enough to type ReportingInput.previous_context
     correctly ahead of Preprocessing (Phase 3) and Claim Management
-    (Phase 2/4) actually existing."""
+    (Phase 2/4) actually existing.
+    """
 
     problem: str = ""
     method: str = ""
@@ -82,7 +84,8 @@ class FigureNode(BaseModel):
     must be one of the real ``\\subsection{}`` headings ts-write already
     committed to in method.tex (see ts-figure/scripts/extract_headings.py)
     — the figure is derived from the written Method section, not authored
-    ahead of it, so there is nothing for its terminology to drift from."""
+    ahead of it, so there is nothing for its terminology to drift from.
+    """
 
     id: str = Field(min_length=1)
     label: str = Field(min_length=1, max_length=60)
@@ -104,7 +107,8 @@ class MethodFigureSpec(BaseModel):
     """Structured contract for the method-figure renderer(s) — see
     ts-figure/scripts/render_method_figure.py (matplotlib fallback) and
     ts-figure/scripts/build_drawio_figure.py (Draw.io path, tried first
-    when a ``drawio`` binary is available)."""
+    when a ``drawio`` binary is available).
+    """
 
     claim: str = Field(min_length=1, max_length=240)
     five_second_takeaway: str = Field(min_length=1, max_length=90)
