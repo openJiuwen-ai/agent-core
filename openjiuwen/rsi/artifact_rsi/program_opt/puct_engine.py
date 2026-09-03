@@ -53,6 +53,7 @@ from .events import Emit
 from .logging_config import get_logger
 from .program import (
     bundle,
+    edits_an_existing_file,
     files_of,
     read_promise,
 )
@@ -442,9 +443,21 @@ class PuctEngine:
             # Merged onto the parent's tree: the reply carries only the
             # files it changed, so the candidate is the parent's program
             # with those files replaced.
-            files, summary = reply_format.parse(
-                reply, files_of(parent_code, spec.entrypoint), spec.entrypoint,
-            )
+            parent_files = files_of(parent_code, spec.entrypoint)
+            files, summary = reply_format.parse(reply, parent_files, spec.entrypoint)
+            if files and not edits_an_existing_file(parent_files, files):
+                # Everything it wrote landed in new paths nothing imports, so
+                # the program that runs is still the parent's. Said here, with
+                # the paths named, because the alternative is a candidate that
+                # scores exactly the parent and is recorded as a valid one.
+                written = ", ".join(sorted(set(files) - set(parent_files))) or "nothing"
+                reporter.note_failure(
+                    iteration,
+                    f"the reply wrote {written} and left every existing file alone, so the "
+                    f"program that runs is unchanged — the evaluator imports "
+                    f"{spec.entrypoint}, which was not among the files it returned",
+                )
+                return "", "", None
             # A reply that proposed nothing merges to the parent, which
             # would be a valid program costing a full evaluation to learn
             # the parent's own score. Empty is what it is, and what the rest

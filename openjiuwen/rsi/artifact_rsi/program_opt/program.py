@@ -421,6 +421,23 @@ def _summary_for(
     return "changed: " + ", ".join(ordered[:5]) + (", …" if len(ordered) > 5 else "")
 
 
+def edits_an_existing_file(parent: Mapping[str, str], files: Mapping[str, str]) -> bool:
+    """Whether the reply changed any file the program already had.
+
+    A reply that only *adds* files has changed nothing that runs: the evaluator
+    imports the entrypoint, the entrypoint is untouched, and nothing in the
+    parent references the new paths — so the candidate is the parent with dead
+    code beside it, and it scores exactly the parent. It merges clean and reads
+    as a valid candidate that found no improvement, which is the most expensive
+    way to say nothing: a whole budget of expansions can go this way with every
+    one of them reported as a success.
+
+    Editing a helper *is* legitimate and stays legitimate — this asks whether
+    any existing path's content moved, not whether the entrypoint's did.
+    """
+    return any(path in parent and files[path] != parent[path] for path in files)
+
+
 def reply_carries_program(reply: str) -> bool:
     """Whether a reply proposed anything at all.
 
@@ -465,10 +482,27 @@ def _path_above(reply: str, start: int) -> str:
 
 
 def _summary_of(code: str) -> str:
+    """The one line the reply says about its own edit.
+
+    The module docstring is where the prompt asks for it, and where most
+    replies put it. A reply whose whole program is one function usually
+    documents *the function* instead — a reasonable thing to do, and a run
+    measured here lost the sentence on six of eight expansions that way,
+    leaving the contract's `changes[].summary` as "changed: candidate.py".
+    So the first definition's docstring is read as a fallback: it is the same
+    sentence, one indentation level down.
+    """
     try:
-        doc = ast.get_docstring(ast.parse(code))
+        parsed = ast.parse(code)
     except SyntaxError:
         return ""
+    doc = ast.get_docstring(parsed)
+    if not doc:
+        for node in parsed.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                doc = ast.get_docstring(node)
+                if doc:
+                    break
     return doc.strip().splitlines()[0][:200] if doc else ""
 
 
@@ -493,12 +527,4 @@ def extract_program(reply: str) -> Tuple[str, str]:
         if code.rstrip().endswith("```"):
             code = code.rstrip()[: -3].rstrip()
         code = code.strip()
-    summary = ""
-    try:
-        parsed = ast.parse(code)
-    except SyntaxError:
-        return code, summary
-    doc = ast.get_docstring(parsed)
-    if doc:
-        summary = doc.strip().splitlines()[0][:200]
-    return code, summary
+    return code, _summary_of(code)

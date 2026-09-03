@@ -1366,10 +1366,17 @@ def test_every_file_is_listed_in_the_prompt() -> None:
     assert rendered.index("name=candidate.py") < rendered.index("name=helpers/scale.py")
 
 
-def test_a_one_file_program_is_still_shown_the_way_it_always_was() -> None:
+def test_a_one_file_program_is_shown_with_its_path() -> None:
+    """This test used to assert the opposite, and the opposite was wrong.
+
+    A one-file listing was deliberately left unlabelled so the common case
+    would not look more complicated than it is. What that cost is in
+    `test_a_one_file_listing_still_shows_its_path`: the model had no path to
+    copy and invented one, and a whole run's expansions scored the parent.
+    """
     from openjiuwen.rsi.artifact_rsi.program_opt.prompt import render_tree
 
-    assert render_tree("def f(): pass") == "```python\ndef f(): pass\n```"
+    assert render_tree("def f(): pass") == "```python name=candidate.py\ndef f(): pass\n```"
 
 
 def test_a_package_candidate_runs_through_the_execution_seam(tmp_path: Path) -> None:
@@ -1772,6 +1779,103 @@ def test_the_call_and_the_wait_agree_on_one_budget() -> None:
 
     asyncio.run(drive_custom())
     assert seen.get("timeout") == 42.0
+
+
+def test_a_one_file_listing_still_shows_its_path() -> None:
+    """The output instructions say to answer "exactly like the listing above",
+    so the listing has to have a path in it.
+
+    It did not, for the one-file case, on the reasoning that labelling a single
+    file made the common case look more complicated. Measured against that:
+    eight expansions in a row named the file after the function they were
+    writing — `search.py` beside an untouched `candidate.py` — every reply
+    merged clean, scored exactly the parent, and was recorded as a valid
+    candidate that found no improvement.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import render_tree
+
+    listing = render_tree("def solve():\n    return 1\n", "candidate.py")
+
+    assert listing.startswith("```python name=candidate.py")
+
+
+def test_a_reply_that_only_adds_files_proposed_nothing() -> None:
+    """A candidate whose every edit landed in a new path is the parent.
+
+    The evaluator imports the entrypoint; nothing in the parent references the
+    new files; so the program that runs is unchanged and the candidate scores
+    exactly the parent — merging clean and reading as a valid candidate. A
+    whole budget can go this way with every expansion reported as a success.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import edits_an_existing_file
+
+    parent = {"candidate.py": "x = 1\n"}
+
+    # What the run actually did: wrote its program to a file of its own.
+    assert edits_an_existing_file(parent, {"candidate.py": "x = 1\n",
+                                           "search.py": "def search(): ...\n"}) is False
+    # An ordinary edit of the entrypoint.
+    assert edits_an_existing_file(parent, {"candidate.py": "x = 2\n"}) is True
+    # And a helper edited beside a new file stays legitimate — the question is
+    # whether anything existing moved, not whether the entrypoint did.
+    grown = {"candidate.py": "x = 1\n", "helpers.py": "y = 1\n"}
+    assert edits_an_existing_file(grown, {"candidate.py": "x = 1\n",
+                                          "helpers.py": "y = 2\n"}) is True
+
+
+def test_the_engine_refuses_to_call_an_untouched_program_a_candidate() -> None:
+    """The same rule at the place that decides, driven through `_model_call`."""
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine, _Usage
+
+    def factory(spec, sink, should_stop):
+        # A reply in the shape the run actually produced.
+        return lambda prompt, on_usage=None, on_failure=None: (
+            "```python name=search.py\ndef search():\n    return 2\n```"
+        )
+
+    said: list[str] = []
+
+    class _Reporter:
+        def note_empty(self, iteration): pass
+        def note_failure(self, iteration, reason): said.append(reason)
+
+    engine = PuctEngine(completion_factory=factory, evaluation_execution=_local_execution)
+    spec = RunSpec(search_id="run-1", algorithm="puct", expansions=1,
+                   scorecard_hash="sha256:x", scorecard={"criteria": []},
+                   statement="", baseline_code="x = 1\n", script="s")
+
+    call = engine._model_call(spec, _Usage(), _Reporter(), lambda: False, PuctTreeStub())
+    code, _summary, _promise = call("prompt", 1, "x = 1\n")
+
+    assert code == "", "an untouched program was accepted as a candidate"
+    assert said and "candidate.py" in said[0] and "search.py" in said[0]
+
+
+def test_the_change_sentence_is_found_where_a_one_function_reply_puts_it() -> None:
+    """The prompt asks for the module docstring; a one-function program gets
+    documented on the function.
+
+    Both are the same sentence one indentation apart, and reading only the
+    module's lost it on six of eight expansions in a measured run — the
+    contract's `changes[].summary` degraded to "changed: candidate.py" while
+    the model had written "Changed budget allocation: reduce initial random
+    sampling to 40%…" two lines lower.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import _summary_of
+
+    on_the_function = ('def search(objective, budget):\n'
+                       '    """Reduced initial sampling to 40% of the budget."""\n'
+                       '    return None\n')
+    assert _summary_of(on_the_function) == "Reduced initial sampling to 40% of the budget."
+
+    # The module's still wins when both are there — that is where the prompt
+    # asks for it, and it is the one about the edit rather than about the code.
+    both = ('"""Switched to Latin hypercube sampling."""\n' + on_the_function)
+    assert _summary_of(both) == "Switched to Latin hypercube sampling."
+
+    # And a reply that documents nothing still says nothing.
+    assert _summary_of("def search(a, b):\n    return None\n") == ""
 
 
 # -- task-owned prompt wording ---------------------------------------------------

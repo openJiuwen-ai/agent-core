@@ -323,12 +323,16 @@ def render_tree(code: str, entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
     reader needs to see before any of the others make sense.
     """
     files = files_of(code, entrypoint)
-    if len(files) == 1 and entrypoint in files:
-        # A one-file program is shown the way it always was. Labelling a listing
-        # of one file would teach the format at the cost of making the common
-        # case look more complicated than it is.
-        return f"```python\n{files[entrypoint].strip()}\n```"
     order = sorted(files, key=lambda path: (path != entrypoint, path))
+    if len(order) == 1:
+        # Labelled even when there is only one. The unlabelled version read as
+        # the simpler thing to show, and the output instructions say to answer
+        # "exactly like the listing above" — so with no path in the listing the
+        # model had nothing to copy and named the file after its own function.
+        # Measured: eight expansions in a row wrote `search.py` beside an
+        # untouched `candidate.py`, every one merged clean, scored exactly the
+        # parent, and was recorded as a valid candidate that did not improve.
+        return f"```python name={order[0]}\n{files[order[0]].strip()}\n```"
     blocks = [f"```python name={path}\n{files[path].strip()}\n```" for path in order]
     listing = ", ".join(order)
     return f"The program is {len(order)} files: {listing}.\n\n" + "\n\n".join(blocks)
