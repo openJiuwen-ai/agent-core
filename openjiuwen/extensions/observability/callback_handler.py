@@ -1331,11 +1331,7 @@ class OtelCallbackHandler:
     @staticmethod
     def _metrics_model(span: Span) -> str:
         attributes = getattr(span, "attributes", None) or {}
-        return str(
-            attributes.get(GEN_AI_RESPONSE_MODEL)
-            or attributes.get(GEN_AI_REQUEST_MODEL)
-            or "unknown"
-        )
+        return str(attributes.get(GEN_AI_RESPONSE_MODEL) or attributes.get(GEN_AI_REQUEST_MODEL) or "unknown")
 
     def _emit_llm_metrics(self, state: LlmSpanState) -> None:
         rec = _metrics.get_metrics_recorder()
@@ -1350,11 +1346,7 @@ class OtelCallbackHandler:
         agent_id = self._metrics_agent_id(state.span)
         model = self._metrics_model(state.span)
         start_time = getattr(state.span, "start_time", None)
-        duration_ms = (
-            (time.time_ns() - start_time) / 1_000_000.0
-            if start_time is not None
-            else 0.0
-        )
+        duration_ms = (time.time_ns() - start_time) / 1_000_000.0 if start_time is not None else 0.0
         rec.record_llm_usage(agent_id, model, prompt, completion)
         rec.record_llm_duration(agent_id, model, duration_ms)
 
@@ -1365,7 +1357,8 @@ class OtelCallbackHandler:
             return 0.0
         return (time.time_ns() - start_time) / 1_000_000.0
 
-    def _emit_tool_metrics(self, tool_name: str, agent_id: str, duration_ms: float, is_error: bool) -> None:
+    @staticmethod
+    def _emit_tool_metrics(tool_name: str, agent_id: str, duration_ms: float, is_error: bool) -> None:
         rec = _metrics.get_metrics_recorder()
         if rec is None:
             return
