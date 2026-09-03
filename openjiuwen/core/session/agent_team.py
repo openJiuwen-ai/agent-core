@@ -29,6 +29,8 @@ class Session:
             envs: dict[str, Any] = None,
             team_id: str = "agent_team",
             source_metadata_enabled: bool = True,
+            *,
+            trace_id: str = None,
     ):
         if session_id is None:
             session_id = str(uuid.uuid4())
@@ -38,7 +40,7 @@ class Session:
         config = Config()
         if envs is not None:
             config.set_envs(envs)
-        self._inner = AgentTeamSession(session_id=session_id, team_id=team_id, config=config)
+        self._inner = AgentTeamSession(session_id=session_id, team_id=team_id, config=config, trace_id=trace_id)
         self._pre_run_done = False
         self._post_run_done = False
 
@@ -172,6 +174,8 @@ def create_agent_team_session(
         envs: dict[str, Any] = None,
         team_id: str = "agent_team",
         source_metadata_enabled: bool = True,
+        *,
+        trace_id: str = None,
 ) -> Session:
     """Create AgentTeam Session"""
     return Session(
@@ -179,4 +183,5 @@ def create_agent_team_session(
         envs=envs,
         team_id=team_id,
         source_metadata_enabled=source_metadata_enabled,
+        trace_id=trace_id,
     )

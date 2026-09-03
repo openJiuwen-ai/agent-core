@@ -90,6 +90,7 @@ def _get_parent_context(state: OtelSpanState | None) -> otel_context.Context | N
     return trace.set_span_in_context(state.span)
 
 
+
 # Workflow component_type (set by TracerWorkflowUtils._get_component_metadata as
 # type(executor).__name__) substring matches for LLM-related components:
 #   - "LLM"             covers LLMComponent and any future LLM-named variants
@@ -541,16 +542,39 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         is_workflow_root = metadata and "workflow_id" in metadata and "component_id" not in metadata
 
         if parent_node_id == "" and is_workflow_root:
-            # Root workflow root — no parent (top-level)
-            return None
+            # Check if there is already a root workflow
+            existing_root = self._layer_root_spans.get("")
+            if existing_root is None:
+                # This is the true root workflow - no parent
+                return None
+            # Isolate different workflows: clean stale context from another workflow
+            current_workflow_id = metadata.get("workflow_id") if metadata else None
+            if current_workflow_id and existing_root.workflow_id != current_workflow_id:
+                self._layer_root_spans.clear()
+                self._component_spans.clear()
+                return None
+            else:
+                # This is a sub-workflow triggered in a new conversation round
+                # Find the last component span as parent
+                if self._component_spans:
+                    last_comp = list(self._component_spans.values())[-1]
+                    return _get_parent_context(last_comp)
+                # Fallback to the existing root
+                return _get_parent_context(existing_root)
         if parent_node_id == "" and not is_workflow_root:
             # Component in root workflow → parent = root workflow root
             return _get_parent_context(self._layer_root_spans.get(""))
         if parent_node_id != "" and is_workflow_root:
-            # Sub-workflow root → parent = host component span
-            return _get_parent_context(self._component_spans.get(parent_node_id))
-        # Component in sub-workflow → parent = host component span
-        return _get_parent_context(self._component_spans.get(parent_node_id))
+            # Sub-workflow root — parent = host component span (check both mappings)
+            parent_state = self._component_spans.get(parent_node_id)
+            if parent_state is None:
+                parent_state = self._layer_root_spans.get(parent_node_id)
+            return _get_parent_context(parent_state)
+        # Component in sub-workflow — parent = host component span (check both mappings)
+        parent_state = self._component_spans.get(parent_node_id)
+        if parent_state is None:
+            parent_state = self._layer_root_spans.get(parent_node_id)
+        return _get_parent_context(parent_state)
 
     # --- helper: set workflow / component attributes on an OTel span ---
 
@@ -592,6 +616,20 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         stream_outputs = self._span_manager.get_stream_outputs(invoke_id)
         if stream_outputs:
             state.span.set_attribute(OJ_STREAM_OUTPUTS, _serialize(stream_outputs))
+
+    def _refresh_inputs_attribute(self, invoke_id: str) -> None:
+        """Re-serialize OJ_WORKFLOW_INPUTS after transform callbacks mutated inputs.
+
+        resolve_global_vars_transform (and other COMPONENT_BATCH_INPUT transform
+        callbacks) mutate the inputs dict in place after on_pre_invoke. This method
+        re-reads the cached inputs reference and overwrites the OTel attribute so
+        the span reflects the post-transform values (e.g. ${global.xxx} resolved
+        to actual values, instead of None / the literal ref string).
+        """
+        state = self._span_manager.get(invoke_id)
+        if state is None or state.inputs is None:
+            return
+        state.span.set_attribute(OJ_WORKFLOW_INPUTS, redact(state.inputs, self._config))
 
     # --- helper: set end-time attributes before closing a workflow span ---
 
@@ -670,6 +708,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
             state = OtelSpanState(
                 span=otel_span, context_token=None, invoke_id=invoke_id, start_time=start_time,
+                workflow_id=metadata.get("workflow_id") if metadata else None,
             )
             self._span_manager.push(invoke_id, state)
 
@@ -681,14 +720,13 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 # and the node_id of the host component for sub-workflows.
                 self._layer_root_spans[invoke_id] = state
             else:
-                component_id = metadata.get("component_id", "")
-                if component_id:
-                    self._component_spans[component_id] = state
+                self._component_spans[invoke_id] = state
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_call_start failed: %s", exc)
 
     async def on_call_done(self, invoke_id: str, outputs: Any = None, **kwargs):
         try:
+            self._refresh_inputs_attribute(invoke_id)
             self._flush_buffered_data(invoke_id)
 
             state = self._span_manager.pop(invoke_id)
@@ -703,12 +741,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             state.span.set_status(Status(StatusCode.OK))
             state.span.end()
 
-            # Clean up layer / component mappings
-            # Remove from _layer_root_spans if this invoke_id is a root
-            # Remove from _component_spans if this invoke_id was registered as a component
-            for key, val in list(self._layer_root_spans.items()):
-                if val.invoke_id == invoke_id:
-                    self._layer_root_spans.pop(key, None)
+            # Clean up component mappings only (preserve _layer_root_spans for multi-round)
             for key, val in list(self._component_spans.items()):
                 if val.invoke_id == invoke_id:
                     self._component_spans.pop(key, None)
@@ -732,6 +765,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             if state is None:
                 return
             if inputs is not None:
+                # Store reference for on_invoke / on_call_done to re-serialize
+                # after transform callbacks mutate inputs in place.
+                state.inputs = inputs
                 state.span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
             self._set_workflow_attrs(state.span, component_metadata, invoke_id)
         except Exception as exc:
@@ -789,15 +825,14 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                     if on_invoke_data and isinstance(on_invoke_data, dict) and "inner_error" in on_invoke_data:
                         state.span.set_attribute(OJ_INNER_ERROR, _serialize(on_invoke_data["inner_error"]))
 
+                self._refresh_inputs_attribute(invoke_id)
                 self._flush_buffered_data(invoke_id)
 
                 pop_state = self._span_manager.pop(invoke_id)
                 if pop_state is not None:
                     self._set_workflow_end_attrs(pop_state)
                     pop_state.span.end()
-                    for key, val in list(self._layer_root_spans.items()):
-                        if val.invoke_id == invoke_id:
-                            self._layer_root_spans.pop(key, None)
+                    # Preserve _layer_root_spans for multi-round context
                     for key, val in list(self._component_spans.items()):
                         if val.invoke_id == invoke_id:
                             self._component_spans.pop(key, None)
@@ -806,6 +841,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             # Non-exception: buffer on_invoke_data
             if on_invoke_data is not None:
                 self._span_manager.append_on_invoke_data(invoke_id, on_invoke_data)
+            self._refresh_inputs_attribute(invoke_id)
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_invoke failed: %s", exc)
 
