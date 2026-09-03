@@ -3250,3 +3250,50 @@ def test_a_command_that_stages_no_files_still_has_somewhere_to_run(tmp_path: Pat
 
     assert outcome.exit_code == 0, outcome.output
     assert "ran" in outcome.output
+
+
+def test_the_probe_measures_the_program_the_card_actually_describes() -> None:
+    """The pre-flight probe built its domain out of defaults.
+
+    Not the card's entrypoint, not its evaluator, not its command — so it
+    measured `candidate.py` scored by `python -I _entry.py` no matter what the
+    run was. For an ordinary Python task the defaults are the truth, which is
+    how this survived eighteen real runs; the two that were not Python both
+    died in the probe, and neither message pointed anywhere near the cause.
+    One said the scoring rewards programs that fail to load (the evaluator was
+    being handed a filename that does not exist), the other showed a Python
+    traceback from the shim (the evaluator was JavaScript).
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import script_domain as script_domain_module
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
+
+    seen: dict[str, object] = {}
+
+    def recording(**kwargs: object) -> object:
+        seen.update(kwargs)
+        raise script_domain_module.ScriptError("stop here")
+
+    original = script_domain_module.script_domain
+    script_domain_module.script_domain = recording
+    try:
+        spec = RunSpec(
+            search_id="run-1", algorithm="puct", expansions=1,
+            scorecard_hash="sha256:x",
+            scorecard={"criteria": [{"id": "score", "normalize": {"kind": "identity"},
+                                     "measure": {"kind": "custom_script"}}]},
+            baseline_code="echo 3\n", entrypoint="solve.sh", script="#!/bin/sh\n",
+            evaluator_file="evaluate.sh", evaluator_command=("sh", "evaluate.sh"),
+            reply_format="tagged",
+        )
+        with pytest.raises(ProbeError):
+            run_probe(spec, _local_execution)
+    finally:
+        script_domain_module.script_domain = original
+
+    assert seen.get("entrypoint") == "solve.sh"
+    assert seen.get("evaluator_file") == "evaluate.sh"
+    assert tuple(seen.get("evaluator_command") or ()) == ("sh", "evaluate.sh")
+    assert seen.get("reply_format") == "tagged", (
+        f"the probe built its domain from defaults; it passed {sorted(seen)}"
+    )

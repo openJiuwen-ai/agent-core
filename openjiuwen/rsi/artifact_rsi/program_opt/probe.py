@@ -91,9 +91,23 @@ def run_probe(spec: RunSpec, execute: "EvaluationExecution") -> Dict[str, Any]:
         from .script_domain import ScriptError, script_domain
 
         try:
+            # Every one of these addresses something, and the probe used none
+            # of them: it built a domain that told the evaluator the candidate
+            # was `candidate.py` and ran the evaluator as Python, whatever the
+            # card said. For a conventional Python task the defaults happen to
+            # be the truth, which is why this survived. For a task whose
+            # program is `solve.sh`, the evaluator was pointed at a file that
+            # does not exist — so the starting point and a deliberately broken
+            # copy both scored 0.0000, and the run was refused for "the scoring
+            # rewards programs that do not load". A card with a `node`
+            # evaluator got a Python traceback from the shim instead.
             domain = script_domain(
                 scorecard=spec.scorecard, script=spec.script, execute=execute,
                 baseline_code=spec.baseline_code,
+                entrypoint=spec.entrypoint,
+                evaluator_file=spec.evaluator_file,
+                evaluator_command=spec.evaluator_command,
+                reply_format=spec.reply_format,
                 candidate_timeout=spec.candidate_timeout_seconds,
             )
         except ScriptError as error:
