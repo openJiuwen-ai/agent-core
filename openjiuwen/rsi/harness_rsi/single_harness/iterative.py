@@ -172,8 +172,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
         )
         stored_task_id = str(state.get("task_id", "") or "")
-        if request.resume and stored_task_id and request.task_id and stored_task_id != request.task_id:
-            raise ValueError("resume task_id does not match single-harness state")
+        if request.resume and stored_task_id and request.task_id:
+            if stored_task_id != request.task_id:
+                raise ValueError("resume task_id does not match single-harness state")
         state["task_id"] = request.task_id or stored_task_id
         state["improver_policy"] = {
             "version_id": self.improver_policy.version_id,
