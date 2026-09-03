@@ -62,20 +62,22 @@ from openjiuwen.rsi.harness_rsi.single_harness import (
     IterativeSingleHarnessRequest,
     IterativeSingleHarnessResult,
     SingleHarnessIterativeOptimizationOrchestrator,
+    load_cases,
 )
 
 __all__ = [
-    "# Downstream-facing AutoHarness exports (JiuwenSwarm and other integrators).",
+    "EXTENDED_EVOLVE_PIPELINE",
+    "META_EVOLVE_PIPELINE",
     "ActionDefinition",
     "ArtifactProvider",
     "AutoCoordinatingHarnessConfig",
+    # Downstream-facing AutoHarness exports (JiuwenSwarm and other integrators).
     "AutoHarnessConfig",
     "AutoHarnessOrchestrator",
     "CaseMapping",
     "DataLoader",
     "DataLoaderConfig",
     "DatasetArtifact",
-    "EXTENDED_EVOLVE_PIPELINE",
     "EvaluationCaseTraceRef",
     "EvaluationResultAnalysisArtifact",
     "EvaluationResultAnalysisInvocation",
@@ -88,7 +90,6 @@ __all__ = [
     "ExtensionTaskPipeline",
     "IterativeSingleHarnessRequest",
     "IterativeSingleHarnessResult",
-    "META_EVOLVE_PIPELINE",
     "MemberOptimizer",
     "MemberOptimizerConfig",
     "ModelConfigs",
@@ -107,5 +108,6 @@ __all__ = [
     "build_request",
     "create_auto_harness_orchestrator",
     "load_auto_harness_config",
+    "load_cases",
     "validate_artifact_task_request",
 ]

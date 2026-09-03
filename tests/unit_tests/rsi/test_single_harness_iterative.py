@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
+from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
@@ -28,6 +29,7 @@ from openjiuwen.rsi.harness_rsi.improver_evolution.policy import (
 from openjiuwen.rsi.harness_rsi.single_harness import (
     IterativeSingleHarnessRequest,
     SingleHarnessIterativeOptimizationOrchestrator,
+    load_cases,
 )
 from openjiuwen.rsi.harness_rsi.single_harness import (
     iterative as iterative_module,
@@ -580,6 +582,13 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
         analyzer=_Analyzer(),
         member_optimizer=_MemberOptimizer(),
     )
+    events: list[EngineEvent] = []
+
+    async def record_event(event: EngineEvent) -> None:
+        persisted = yaml.safe_load((tmp_path / "run" / "single_harness_state.yaml").read_text(encoding="utf-8"))
+        if isinstance(event, EventNode):
+            assert any(gate.get("candidate_id") == event.node.node_id for gate in persisted["candidate_gates"])
+        events.append(event)
 
     result = asyncio.run(
         orchestrator.run(
@@ -587,7 +596,9 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
                 dataset_files=[str(dataset_path)],
                 harness_refs_path=str(harness_refs),
                 output_dir=str(tmp_path / "run"),
-            )
+                task_id="task-001",
+            ),
+            on_event=record_event,
         )
     )
 
@@ -609,6 +620,7 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
     report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
     assert report["mode"] == "single_harness_benchmark"
     assert report["accepted_candidate_count"] == 1
+    assert report["task_id"] == "task-001"
     assert report["best_score"] == 1.0
     assert "baseline_checkpoint" not in report
     assert "frozen_holdout_case_ids" not in report
@@ -626,8 +638,14 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
     assert (published_harness / "harness.yaml").read_text(encoding="utf-8") == "name: candidate\n"
     assert report["published_harness_refs_path"] == str(published_refs_path)
     assert all(call["team_skill_ref_path"] == "" for call in evaluator.calls)
+    node_events = [event for event in events if isinstance(event, EventNode)]
+    assert [event.node.type for event in node_events] == ["PROVISIONAL", "ADOPTED"]
+    assert node_events[0].node.node_id == node_events[1].node.node_id
+    assert node_events[1].node.adopted is True
+    assert any(isinstance(event, EventProgress) and event.score == 1.0 for event in events)
 
     call_count = len(evaluator.calls)
+    event_count = len(events)
     published_refs_path.unlink()
     shutil.rmtree(published_harness)
     resumed = asyncio.run(
@@ -637,14 +655,39 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
                 harness_refs_path=str(harness_refs),
                 output_dir=str(tmp_path / "run"),
                 resume=True,
-            )
+                task_id="task-001",
+            ),
+            on_event=record_event,
         )
     )
     assert resumed.report_path == result.report_path
     assert len(evaluator.calls) == call_count
+    assert len(events) == event_count
     assert Path(resumed.published_harness_refs_path).is_file()
     repaired_refs = yaml.safe_load(Path(resumed.published_harness_refs_path).read_text(encoding="utf-8"))
     assert Path(repaired_refs["harness_refs"]["solver"]).is_dir()
+
+    with pytest.raises(ValueError, match="resume task_id"):
+        asyncio.run(
+            orchestrator.run(
+                IterativeSingleHarnessRequest(
+                    dataset_files=[str(dataset_path)],
+                    harness_refs_path=str(harness_refs),
+                    output_dir=str(tmp_path / "run"),
+                    resume=True,
+                    task_id="another-task",
+                )
+            )
+        )
+
+
+def test_load_cases_is_a_public_validating_entry_point(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "cases.json"
+    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001"}]}), encoding="utf-8")
+
+    cases = load_cases([str(dataset_path)])
+
+    assert cases == [{"case_id": "case_001", "case_path": str(dataset_path), "case_index": 1}]
 
 
 def test_frozen_baseline_keeps_epoch_optimization_batch_sequential(tmp_path: Path) -> None:
