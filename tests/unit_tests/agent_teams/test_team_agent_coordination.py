@@ -985,14 +985,18 @@ async def test_resume_interrupt_dropped_when_stale():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_concurrent_resume_interrupts_serialize_under_lock():
-    """A delivered-branch send holds the lock; a concurrent approval cannot
-    touch the queue until that send resolves.
+    """A delivered-branch send no longer holds ``_interrupt_lock``; a concurrent
+    approval can queue while the delivered send is still in flight.
 
-    The lock's purpose is to serialize the delivered branch's ``harness.send``
-    (run under the lock) against concurrent queue mutation. Make ``a``'s send
-    block on an event so it parks while holding the lock; ``b`` must then be
-    blocked out of the critical section — it cannot queue until ``a``'s send
-    completes and the lock is released.
+    ``resume_interrupt`` releases the lock before ``harness.send`` so the
+    supervisor's ``_on_idle_settled`` (which takes the same lock) is not
+    blocked — no hold-and-wait deadlock. The trade-off is that check-then-send
+    is no longer atomic under the lock, so ``b`` (invalid → must queue) CAN
+    enter the critical section and queue while ``a``'s send is parked. The
+    double-send-for-same-slot invariant the lock used to enforce is now
+    guaranteed downstream: the supervisor drops a stale InteractiveInput
+    follow-up in ``_on_round_done`` whose interrupt slot was already consumed
+    (see ``NativeHarness._interrupt_resume_still_pending``).
     """
     agent = _make_leader()
     harness = _wire_harness(agent)
@@ -1008,16 +1012,17 @@ async def test_concurrent_resume_interrupts_serialize_under_lock():
         await released.wait()
 
     harness.send = AsyncMock(side_effect=blocking_send)
-    # ``a`` is valid → delivered branch (holds the lock during the send);
-    # ``b`` is invalid → must queue (but only once it can acquire the lock).
+    # ``a`` is valid → delivered branch (send runs outside the lock);
+    # ``b`` is invalid → queues. Because the lock is no longer held during the
+    # send, ``b`` can acquire the lock and queue while ``a``'s send is parked.
     sc.is_valid_interrupt_resume = MagicMock(side_effect=lambda x: x is a)
     sc.has_in_flight_round = MagicMock(return_value=True)
 
     task_a = asyncio.create_task(agent.resume_interrupt(a))
-    await asyncio.wait_for(parked.wait(), timeout=1.0)  # a is inside its send, holding the lock
+    await asyncio.wait_for(parked.wait(), timeout=1.0)  # a is inside its send (lock released)
     task_b = asyncio.create_task(agent.resume_interrupt(b))
-    await asyncio.sleep(0)  # let b try (and fail) to acquire the lock
-    assert sc._pending_interrupt_resumes == []  # b could not enter the critical section
+    await asyncio.sleep(0)  # let b acquire the lock and queue
+    assert sc._pending_interrupt_resumes == [b]  # b queued while a's send is in flight
 
     released.set()
     await asyncio.gather(task_a, task_b)

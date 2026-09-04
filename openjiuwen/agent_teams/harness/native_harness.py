@@ -54,6 +54,7 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -990,6 +991,34 @@ class NativeHarness(DeepAgent):
         await self._emit_round("started", active.round_id)
         self._ack(cmd.ack, None)
 
+    def _interrupt_resume_still_pending(
+        self, content: Any, session: Any,
+    ) -> bool:
+        """Return True if ``content`` still matches a pending interrupt slot.
+
+        Mirrors ``TeamHarness.is_pending_interrupt_resume_valid`` so the
+        supervisor (sole writer of round state) can drop a stale duplicate
+        InteractiveInput follow-up whose interrupt slot was already consumed.
+        Reads the same session the round mutates (``self._session``), where
+        ``react_agent`` publishes/clears ``INTERRUPTION_KEY``.
+        """
+        if not isinstance(content, InteractiveInput):
+            return False
+        if session is None:
+            return False
+        state = session.get_state(INTERRUPTION_KEY)
+        if state is None:
+            return False
+        interrupted = getattr(state, "interrupted_tools", {}) or {}
+        pending_ids: set = set()
+        for entry in interrupted.values():
+            requests = getattr(entry, "interrupt_requests", {}) or {}
+            pending_ids.update(requests.keys())
+        if not pending_ids:
+            return False
+        resume_ids = set(content.user_inputs.keys())
+        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+
     async def _on_round_done(self, cmd: _CmdRoundFinished) -> None:
         """Settle a finished round, always resolving a deferred pause ack.
 
@@ -1023,8 +1052,10 @@ class NativeHarness(DeepAgent):
 
         Mirrors the per-round tail of ``DeepAgent._run_task_loop``: advance the
         coordinator, persist its stop-condition state, then decide the next
-        action with the same priority — cooperative pause, else interrupt/abort
-        stop, else follow-up, else remaining task-plan tasks, else IDLE.
+        action with the same priority — cooperative pause, else abort stop,
+        else follow-up (external immediate=False sends, incl. interrupt
+        approvals parked while RUNNING), else interrupt stop, else remaining
+        task-plan tasks, else IDLE.
         """
         was_graceful = active.graceful_abort
         is_resume = isinstance(active.original_query, InteractiveInput)
@@ -1116,13 +1147,53 @@ class NativeHarness(DeepAgent):
             return
 
         result_type = (cmd.result or {}).get("result_type")
-        if result_type == "interrupt" or coordinator.is_aborted:
+        # Abort is terminal: no drain, no continuation. Checked before the
+        # interrupt fall-through below — a kill path may surface an
+        # interrupt-shaped result with is_aborted set as a side effect, and
+        # abort must win.
+        if coordinator.is_aborted:
             await self._transition(HarnessState.IDLE)
             return
 
-        # Decision priority (matches _run_task_loop):
-        #   follow-up (external immediate=False sends) > remaining task-plan task.
+        # Decision priority (matches _run_task_loop, updated):
+        #   follow-up (external immediate=False sends, incl. approvals parked
+        #   while RUNNING) > interrupt stop > remaining task-plan task.
+        # An interrupt-ended round reaches the same drain as a normal
+        # completion: inputs queued while it ran (the 2nd..Nth approvals,
+        # texts) start the next round here instead of stranding behind the
+        # interrupt stop.
         follow_ups = self._drain_pending_follow_ups(session)
+        # Idempotency: drop InteractiveInput follow-ups whose interrupt slot was
+        # already consumed by the prior resume round. ``resume_interrupt``
+        # releases ``_interrupt_lock`` before ``harness.send`` (to break the
+        # hold-and-wait deadlock with ``_on_idle_settled``), so check-then-send
+        # is no longer atomic under the lock — a double-delivered approval can
+        # reach the supervisor as a second ``_CmdSend`` that parks as a follow-up
+        # while the first resume round runs. Running this filter at settle time
+        # (after the slot is definitively cleared or not) is free of the
+        # ack-before-consume TOCTOU. A follow-up whose slot is still pending
+        # (prior round failed before consuming) is kept — that is a legitimate
+        # retry, not a duplicate.
+        if follow_ups is not None:
+            kept = []
+            for f in follow_ups:
+                if isinstance(f, InteractiveInput) and not self._interrupt_resume_still_pending(
+                    f, session
+                ):
+                    continue
+                kept.append(f)
+            follow_ups = kept or None
+        # InteractiveInput must go through _start_round directly (structured
+        # resume); the batch text pipeline (from_user_input(list)) would
+        # str() it into a text frame, breaking the resume.
+        if follow_ups is not None and any(isinstance(f, InteractiveInput) for f in follow_ups):
+            interactive = next(f for f in follow_ups if isinstance(f, InteractiveInput))
+            nxt = self._start_round(interactive, is_follow_up=True)
+            await self._emit_round("started", nxt.round_id)
+            for f in follow_ups:
+                if f is not interactive:
+                    self.loop_controller.enqueue_follow_up(f)
+            return
         if follow_ups is not None:
             nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
@@ -1130,9 +1201,12 @@ class NativeHarness(DeepAgent):
 
         # A resume round has single-round semantics: it must not continue the
         # task plan using its InteractiveInput query (that would re-resume an
-        # already-cleared interrupt). Settle to IDLE; any follow-up queued above
-        # still ran first.
-        if is_resume:
+        # already-cleared interrupt). An interrupt-ended round likewise settles
+        # to IDLE awaiting the external resume — it must not auto-continue the
+        # task plan past an unanswered permission ask. Both settle here, only
+        # after the drain above had its chance to start the queued follow-up
+        # round.
+        if is_resume or result_type == "interrupt":
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1198,6 +1272,27 @@ class NativeHarness(DeepAgent):
                 ``query`` is only kept as ``original_query`` so a task-plan
                 continuation can still reuse it.
         """
+        # Invariant: an InteractiveInput is a single-round resume payload and
+        # must never ride the text batch pipeline — ``InputEvent.from_user_input(list)``
+        # str-ifies list items, which would corrupt the structured approval
+        # into its repr. ``_settle_round_done`` splits InteractiveInput
+        # follow-ups out of the batch before reaching here; this defensive
+        # split normalizes any producer that skips that step instead of
+        # mangling the resume or raising (a raise here would be terminal for
+        # the supervisor): the InteractiveInput starts as its own
+        # single-object round, the remaining items re-queue for the next
+        # settle drain (FIFO preserved).
+        if isinstance(query, list) and any(isinstance(q, InteractiveInput) for q in query):
+            interactive = next(q for q in query if isinstance(q, InteractiveInput))
+            logger.error(
+                "[NativeHarness] list round query contained an InteractiveInput; "
+                "splitting it into a single-object resume round (remaining "
+                "items re-queue for the next settle drain)",
+            )
+            for q in query:
+                if q is not interactive:
+                    self.loop_controller.enqueue_follow_up(q)
+            return self._start_round(interactive, is_follow_up=is_follow_up)
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
         pre_round = capture_snapshot(self, self._session, index=0)
