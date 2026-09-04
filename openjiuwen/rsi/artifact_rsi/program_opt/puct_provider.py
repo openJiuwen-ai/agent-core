@@ -621,6 +621,12 @@ class PuctProgramArtifactProvider:
             run_dir=str(run_dir),
             options=dict(card.get("options") or {}),
             reply_format=str(card.get("reply_format") or "").strip() or "files",
+            # The card's per-candidate ceiling. It was documented, written on
+            # every card, and never read: every run took `RunSpec`'s 60 s
+            # default. Measured on AlgoTune's `lu_factorization` with three
+            # workers evaluating at once — a card saying 300 s, evaluations
+            # killed at 60, the loop dead before its first model call.
+            candidate_timeout_seconds=_candidate_timeout(card, RunSpec.candidate_timeout_seconds),
             # From the scorecard when it says, else `RunSpec`'s default. The
             # model's own request config is opaque here — the contract hands
             # over an initialized instance, not its settings — so the per-run
@@ -778,6 +784,16 @@ def _packages_from(raw: Any) -> tuple[str, ...]:
             )
         names.append(name)
     return tuple(names)
+
+
+def _candidate_timeout(card: Mapping[str, Any], default: float) -> float:
+    """`measure.timeoutSeconds` of the first criterion, else the default."""
+    scorecard = card.get("scorecard", card) or {}
+    for criterion in scorecard.get("criteria") or []:
+        value = (criterion.get("measure") or {}).get("timeoutSeconds")
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    return default
 
 
 def _command_from(raw: Any) -> tuple[str, ...]:

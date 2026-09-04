@@ -569,6 +569,7 @@ class _Reporter:
         # never does — a stop, a crash — and an absent reason has to be
         # distinguishable from a reason the framework declined to give.
         self._stop_reason = ""
+        self._framework_error = ""
         self._planned = spec.expansions
         self.attempted = 0
         self.scored = 0
@@ -841,9 +842,13 @@ class _Reporter:
         done = len(self.tree.nodes) - 1  # the seed is not an expansion
         self._stop_reason = reason
         self._planned = planned
-
-        if error:
-            self.emit(events.log("warn", f"the search was ended by an error: {error[:300]}"))
+        # Kept, because `finish` has to know. Logged at "warn" and forgotten,
+        # the framework's own error left a run that made zero model calls
+        # reporting `completed` with no error message — measured on AlgoTune's
+        # `lu_factorization`: 508 seconds, one node, "stopped because error",
+        # status completed. The reader had a success and nothing to read.
+        self._framework_error = error or ("the search loop stopped on an error it did not describe"
+                                          if reason == "error" else "")
         if retired:
             self.emit(events.log(
                 "warn",
@@ -892,6 +897,13 @@ class _Reporter:
                 "candidates do not implement the interface the evaluator calls, or the "
                 "scoring only looks at a part none of them touched.",
             ))
+        if status == "succeeded" and self._framework_error:
+            # The loop died. Whatever the tree holds was made before that, and
+            # a run that ended this way did not finish its search — "succeeded"
+            # would be the framework's crash wearing the user's result.
+            status = "failed"
+            self.emit(events.log(
+                "error", f"the search was ended by an error: {self._framework_error[:500]}"))
         if status == "succeeded" and self.attempted and not self.scored:
             # Not "the search found nothing": nothing ever ran. Reporting that as
             # success sends the user looking at their scorecard for a fault that
@@ -904,6 +916,12 @@ class _Reporter:
                 f"the most common reason was: {common}",
             ))
 
+        if not self.tree.nodes:
+            # The loop died before it seeded. There is no best node to name
+            # and nothing to hold out — only the failure to report.
+            self.emit(events.search_finished(
+                "failed", None, 0, stop_reason=self._stop_reason, expansions_planned=self._planned))
+            return
         best = self.tree.best()
         test_score: Optional[float] = None
         if status != "failed" and best.program.valid and self.domain.test_shards:

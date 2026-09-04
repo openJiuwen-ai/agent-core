@@ -3783,3 +3783,73 @@ def test_the_evaluators_report_is_not_cut_where_the_profile_starts() -> None:
     rendered = _feedback(report)
 
     assert rendered.rstrip().endswith("line 79"), "the profile's tail was cut"
+
+
+def test_a_search_loop_that_died_is_a_failed_run_with_the_error_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The framework's own error was logged at "warn" and then forgotten.
+
+    Measured on AlgoTune's `lu_factorization`: the loop stopped on an error
+    before its first model call, the report said "planned 45 expansions, made
+    1; it stopped because error", and the run reported `completed` with no
+    error message at all — 508 seconds, one node, nothing to read. A loop
+    that died did not finish its search: failed, with the error where
+    `read_state` shows it.
+    """
+    import agentdescent.evolution as evolution
+    from types import SimpleNamespace
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    _no_runtime_probe(monkeypatch)
+    monkeypatch.setattr(evolution, "evolve", lambda *a, **k: SimpleNamespace(
+        stop_reason="error", error="TypeError: unhashable type: 'list'", retired_workers=0))
+
+    engine = PuctEngine(completion_factory=lambda *a, **k: (lambda p, *r, **kw: ""),
+                        evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=3, scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60}}]},
+        baseline_code='"""seed"""\nVALUE = 1\n',
+        script=('"""define VALUE"""\nimport importlib, json, os\n'
+                'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
+                'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
+                '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+        run_dir=str(tmp_path),
+    )
+
+    events: list[dict] = []
+    engine.run(spec, events.append, lambda: False)
+
+    finished = next(e for e in events if e.get("type") == "search_finished")
+    assert finished["status"] == "failed", finished
+    said = " ".join(e["message"] for e in events if e.get("type") == "log" and e.get("level") == "error")
+    assert "unhashable type" in said, said
+
+
+def test_the_cards_timeout_is_the_candidates_timeout(tmp_path: Path) -> None:
+    """`measure.timeoutSeconds` was on every card and read by nothing.
+
+    Every run took `RunSpec`'s 60 s default. On AlgoTune's `lu_factorization`
+    a card said 300 s, three workers evaluated at once, the evaluations were
+    killed at 60, and the search loop died before its first model call.
+    """
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), scorecard={
+        "aggregate": "weighted_sum", "constraints": [],
+        "criteria": [{"id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+                      "normalize": {"kind": "identity"},
+                      "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                                  "timeoutSeconds": 300}}]})
+
+    spec = provider._spec_for(request, resumed=False)
+
+    assert spec.candidate_timeout_seconds == 300.0
