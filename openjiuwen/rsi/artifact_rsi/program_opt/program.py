@@ -270,12 +270,14 @@ def validate_source(source: str, max_length: int = 20_000,
     # a `try`. The handler's type is not inspected — a bare `except` or
     # `except Exception` catches ImportError too, and AlgoTune's own guards
     # are written both ways.
-    guarded_imports = {
-        id(inner)
-        for node in ast.walk(tree) if isinstance(node, ast.Try)
-        for stmt in node.body
-        for inner in ast.walk(stmt) if isinstance(inner, (ast.Import, ast.ImportFrom))
-    }
+    guarded_imports: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        for stmt in node.body:
+            for inner in ast.walk(stmt):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    guarded_imports.add(id(inner))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
