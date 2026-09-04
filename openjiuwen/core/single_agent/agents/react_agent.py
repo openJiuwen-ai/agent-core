@@ -110,6 +110,17 @@ _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
 # few hundred milliseconds; the bar sits above that so an INFO line means a
 # genuine stall. Kept in step with ``SLOW_RAIL_CHAIN_SECONDS``.
 SLOW_INVOKE_PREP_SECONDS = 1.0
+# Written in place of the tool result when a pending confirmation is withdrawn
+# because the caller cannot answer it. It has to read as a refusal the model can
+# act on rather than as a transient failure, or the next iteration repeats the
+# call and suspends again on the same unanswerable request.
+_WITHDRAWN_INTERRUPT_TOOL_RESULT = (
+    "[Not executed] This tool call was waiting on an interactive confirmation that was "
+    "never answered, and the request has been withdrawn because the user sent an ordinary "
+    "message instead. Treat the call as declined: do not repeat it unless the user asks "
+    "for it again, and say that it is still waiting on their confirmation if that matters "
+    "to what they just asked."
+)
 _IMAGE_INPUT_UNSUPPORTED_ERROR_CODES = (
     "invalid_image_input",
     "image_input_unsupported",
@@ -2405,6 +2416,71 @@ class ReActAgent(BaseAgent):
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
 
+    @staticmethod
+    def _is_interrupt_answer(user_input: Any) -> bool:
+        """Whether a resume input is an answer to the pending interrupt.
+
+        Interrupt answers address the pending requests by id, so they arrive as
+        an InteractiveInput or the bare mapping behind one. Anything else -- a
+        plain chat message above all -- is the caller talking rather than
+        answering, which also says the transport it arrived over has no way to
+        answer an interrupt at all.
+        """
+        from openjiuwen.core.session import InteractiveInput
+        return isinstance(user_input, (InteractiveInput, dict))
+
+    async def _withdraw_unanswerable_interrupt(
+            self,
+            state: 'ToolInterruptionState',
+            user_input: Any,
+            ctx: AgentCallbackContext,
+            context: ModelContext,
+            session: Optional[Session],
+            *,
+            invoke_inputs: InvokeInputs,
+    ) -> int:
+        """Drop a pending interrupt the caller has shown it cannot answer.
+
+        A resume that raises the same interrupt again has made no progress, and
+        when the input was not an interrupt answer no later message can make any
+        either: each one is consumed by the same suspend, so the round ends
+        without reaching the model and returns neither output nor error. Left
+        alone the session stays that way until its state is discarded.
+
+        Close the interrupted calls off with a result the model can act on,
+        admit the message as an ordinary turn and hand the loop an iteration to
+        resume from, so the round answers instead of stalling in silence.
+
+        Returns:
+            The iteration the ReAct loop should resume from.
+        """
+        pending = state.interrupted_tools
+        logger.warning(
+            "Withdrawing a pending interrupt over %d tool call(s): the resume input is not "
+            "an interrupt answer, so waiting longer cannot resolve it. Continuing the round "
+            "as an ordinary message.",
+            len(pending),
+        )
+        self._hitl_handler.clear(session)
+        for entry in pending.values():
+            await context.add_messages(ToolMessage(
+                tool_call_id=entry.tool_call.id,
+                content=_WITHDRAWN_INTERRUPT_TOOL_RESULT,
+            ))
+
+        invoke_inputs.result = None
+        ctx.extra.pop(RESUME_START_ITERATION_KEY, None)
+        user_text = self._extract_user_text(user_input)
+        # The round is an ordinary turn again, so the message driving it is the
+        # one to remember, not the query the withdrawn interrupt came out of.
+        ctx.extra["_original_query"] = user_text
+        await self._admit_user_message(ctx, context, [user_text], source="resume")
+
+        # The interrupt was raised during ``state.iteration``, whose tool calls
+        # are now all answered. Resuming past the budget would leave the loop
+        # empty, which is the same silent round by another route.
+        return min(state.iteration + 1, max(self._config.max_iterations - 1, 0))
+
     def _extract_user_text(self, user_input: Any) -> str:
         """Extract plain text from user_input (supports InteractiveInput or str)."""
         from openjiuwen.core.session import InteractiveInput
@@ -2691,10 +2767,20 @@ class ReActAgent(BaseAgent):
 
                     if is_tool_interruption:
                         # Tool Interrupt: not write UserMessage, recovery input is passed to Rail via ctx.extra
-                        await self._handle_resume(
+                        resume_result = await self._handle_resume(
                             interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
                         )
-                        start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
+                        if resume_result is not None and not self._is_interrupt_answer(user_input):
+                            start_iteration = await self._withdraw_unanswerable_interrupt(
+                                interruption_state,
+                                user_input,
+                                ctx,
+                                context,
+                                session,
+                                invoke_inputs=invoke_inputs,
+                            )
+                        else:
+                            start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                     else:
                         # Workflow Interrupt
                         await self._admit_user_message(
