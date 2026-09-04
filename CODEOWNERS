@@ -1,0 +1,44 @@
+# 指定文件/目录的Code Owner
+/openjiuwen/core/ @renquanjia
+/openjiuwen/harness/ @liubuyu1
+/openjiuwen/extensions/ @liubuyu1
+
+
+/openjiuwen/core/context_engine/ @renquanjia
+/openjiuwen/harness/agent_ras/ @KevinLLLove
+/openjiuwen/harness/rails/ @liubuyu1
+/openjiuwen/harness/tools/ @liubuyu1
+
+
+/openjiuwen/harness/rails/interrupt/ @KevinLLLove
+/openjiuwen/harness/rails/subagent/ @KevinLLLove
+/openjiuwen/harness/tools/subagent/ @KevinLLLove
+/openjiuwen/harness/tools/tool_discovery/ @liubuyu1
+/openjiuwen/harness/tools/browser_move/ @liubuyu1
+/openjiuwen/harness/tools/multimodal/ @liubuyu1
+/openjiuwen/harness/tools/web/ @liubuyu1
+/openjiuwen/harness/rails/context_engineer/ @renquanjia
+/openjiuwen/harness/rails/skills/ @CodehubTTG
+/openjiuwen/harness/tools/skills/ @CodehubTTG
+
+
+/openjiuwen/harness/tools/ask_user.py @KevinLLLove
+/openjiuwen/harness/rails/llm_retry_rail.py @KevinLLLove
+/openjiuwen/harness/rails/llm_stability_rail.py @KevinLLLove
+/openjiuwen/harness/rails/agent_ras_rail.py @KevinLLLove
+/openjiuwen/harness/subagents/browser_agent.py @KevinLLLove
+/openjiuwen/harness/subagents/plan_agent.py @KevinLLLove
+/openjiuwen/harness/rails/task_planning_rail.py @KevinLLLove
+/openjiuwen/harness/rails/task_completion_rail.py @KevinLLLove
+/openjiuwen/harness/rails/agent_mode_rail.py @KevinLLLove
+/openjiuwen/harness/tools/todo.py @KevinLLLove
+/openjiuwen/harness/tools/goal.py @KevinLLLove
+/openjiuwen/harness/tools/agent_mode_tools.py @KevinLLLove
+/openjiuwen/harness/rails/progressive_tool_rail.py @liubuyu1
+/openjiuwen/harness/rails/tool_call_resilience_rail.py @liubuyu1
+/openjiuwen/harness/rails/mcp_rail.py @liubuyu1
+/openjiuwen/harness/tools/compression_recall.py @renquanjia
+/openjiuwen/harness/prompts/builder.py @renquanjia
+/openjiuwen/harness/prompts/report.py @renquanjia
+/openjiuwen/harness/prompts/prompt_attachment_manager.py @renquanjia
+/openjiuwen/harness/prompts/sanitize.py @renquanjia
