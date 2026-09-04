@@ -7,6 +7,8 @@ import asyncio
 from collections import defaultdict
 from typing import Dict, Optional, Union, Callable, Any, Coroutine, List, TYPE_CHECKING
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.pregel.base import TriggerMessage, PregelNode, Channel, Interrupt, GraphInterrupt
 from openjiuwen.core.graph.pregel.channels import ChannelManager
@@ -78,7 +80,16 @@ class PregelLoop:
                     }
                 )
             await self._save_state_on_error(e)
-            raise e
+            # GraphInterrupt is control flow; BaseError is already typed;
+            # RecursionError is caught by name at the workflow layer.
+            if isinstance(e, (GraphInterrupt, BaseError, RecursionError)):
+                raise
+            raise build_error(
+                StatusCode.PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR,
+                cause=e,
+                step=self.step,
+                reason=str(e),
+            ) from e
 
     @staticmethod
     def _is_resume(state: GraphState) -> bool:
@@ -143,8 +154,6 @@ class PregelLoop:
         except asyncio.CancelledError:
             await self.executor.cancel_all()
             raise
-        except Exception as e:
-            raise e
 
         # 3. Summarize results
         for msg in self.executor.succeed_messages:
