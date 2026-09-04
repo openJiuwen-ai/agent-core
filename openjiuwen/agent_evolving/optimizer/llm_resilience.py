@@ -123,20 +123,49 @@ async def invoke_text_with_retry_and_prompt(
                         exc,
                     )
                     remaining_after = policy.total_budget_secs - (time.monotonic() - started_at)
-                    has_retry_budget = remaining_after > 0 and attempt < policy.max_attempts
-                    if has_retry_budget and retry_prompt is not None and _is_timeout_like(exc):
-                        use_retry_prompt = True
-                        logger.info(
-                            "[llm_resilience] attempt %d/%d timed out; retrying with shorter prompt",
+                    can_retry = attempt < policy.max_attempts and remaining_after > 1.0
+                    if can_retry and _is_timeout_like(exc):
+                        if retry_prompt is not None:
+                            use_retry_prompt = True
+                            logger.warning(
+                                "[llm_resilience] attempt %d/%d timed out; "
+                                "retrying with shorter prompt (remaining_budget=%.1fs)",
+                                attempt,
+                                policy.max_attempts,
+                                remaining_after,
+                            )
+                        else:
+                            logger.warning(
+                                "[llm_resilience] attempt %d/%d timed out; "
+                                "will retry (%d attempts left, remaining_budget=%.1fs)",
+                                attempt,
+                                policy.max_attempts,
+                                policy.max_attempts - attempt,
+                                remaining_after,
+                            )
+                        await _sleep_before_retry(policy, started_at, attempt)
+                        continue
+                    if can_retry:
+                        # Transient non-timeout failures also retry up to max_attempts.
+                        logger.warning(
+                            "[llm_resilience] attempt %d/%d failed; "
+                            "will retry (%d attempts left, remaining_budget=%.1fs) error=%s",
                             attempt,
                             policy.max_attempts,
+                            policy.max_attempts - attempt,
+                            remaining_after,
+                            exc,
                         )
                         await _sleep_before_retry(policy, started_at, attempt)
                         continue
-                    if _is_timeout_like(exc) and remaining_after <= 0:
+                    if _is_timeout_like(exc):
                         _raise_llm_resilience_error(
                             StatusCode.TOOLCHAIN_EVOLVING_TOOL_CALL_LLM_CALL_EXECUTION_ERROR,
-                            reason="total_budget_exceeded",
+                            reason=(
+                                "total_budget_exceeded"
+                                if remaining_after <= 1.0
+                                else "timeout_retries_exhausted"
+                            ),
                             attempts=attempt,
                             last_error=exc,
                             last_response=last_response,

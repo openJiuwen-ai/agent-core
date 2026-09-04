@@ -1,0 +1,27 @@
+[
+  {
+    "id": "exact_match",
+    "prediction": "Thought process...\n<answer>Abraham Lincoln</answer>",
+    "gold": ["Abraham Lincoln", "Lincoln"]
+  },
+  {
+    "id": "f1_partial",
+    "prediction": "<answer>the united states president lincoln</answer>",
+    "gold": ["Abraham Lincoln"]
+  },
+  {
+    "id": "wrong_answer",
+    "prediction": "<answer>George Washington</answer>",
+    "gold": ["Abraham Lincoln"]
+  },
+  {
+    "id": "empty_gold_match",
+    "prediction": "<answer></answer>",
+    "gold": [""]
+  },
+  {
+    "id": "last_line_fallback",
+    "prediction": "Some reasoning without tags\nParis",
+    "gold": ["Paris"]
+  }
+]
