@@ -281,6 +281,14 @@ def validate_source(source: str, max_length: int = 20_000,
         ast.ClassDef,
         ast.Assign,
         ast.AnnAssign,
+        # `try: from x import y / except ImportError: y = None` — how an
+        # optional dependency is bound, and how AlgoTune's own task files bind
+        # theirs (`threadpoolctl`, in `polynomial_real` among others). Refusing
+        # it keeps nothing out: the import deny list, the dunder check and the
+        # forbidden-name check all walk the whole tree, so a statement inside
+        # the block is gated exactly as one outside it. What refusing it did
+        # was reject upstream's own reference implementation as a seed.
+        ast.Try,
     )
     for node in tree.body:
         if not isinstance(node, allowed_top_level):

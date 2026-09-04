@@ -3573,3 +3573,34 @@ def test_a_timeout_and_a_refusal_arrive_with_the_same_exit_code() -> None:
 
     with pytest.raises(ExecutionUnavailable):
         asyncio.run(run(_Rejected()))
+
+
+def test_a_seed_that_guards_an_optional_import_passes_the_gate() -> None:
+    """`try: from x import y / except ImportError: y = None` at module level.
+
+    That is how an optional dependency is bound, and how AlgoTune's own task
+    files bind theirs — `polynomial_real` guards `threadpoolctl` exactly so.
+    The gate refused any top-level `try`, which kept nothing out (every check
+    that matters walks the whole tree) and rejected upstream's own reference
+    as a starting point. The block's *contents* are still gated: a forbidden
+    import inside it is refused the same as outside.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import validate_source
+
+    guarded = (
+        "import numpy as np\n"
+        "try:\n"
+        "    from threadpoolctl import threadpool_limits\n"
+        "except Exception:\n"
+        "    threadpool_limits = None\n"
+        "\n"
+        "def solve(problem):\n"
+        "    return np.roots(problem).tolist()\n"
+    )
+    ok, reason = validate_source(guarded)
+    assert ok, reason
+
+    smuggled = guarded.replace("from threadpoolctl import threadpool_limits",
+                               "import subprocess")
+    ok, reason = validate_source(smuggled)
+    assert not ok and "subprocess" in reason, "a try block hid a forbidden import"
