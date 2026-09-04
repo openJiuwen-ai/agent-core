@@ -3587,12 +3587,15 @@ def test_a_seed_that_guards_an_optional_import_passes_the_gate() -> None:
     """
     from openjiuwen.rsi.artifact_rsi.program_opt.program import validate_source
 
+    # A name that is installed nowhere, on purpose: the gate machine has no
+    # `threadpoolctl`, and a test that only passed where the optional package
+    # happened to be present was testing the machine, not the gate.
     guarded = (
         "import numpy as np\n"
         "try:\n"
-        "    from threadpoolctl import threadpool_limits\n"
+        "    from no_such_optional_dep_xyz987 import limits\n"
         "except Exception:\n"
-        "    threadpool_limits = None\n"
+        "    limits = None\n"
         "\n"
         "def solve(problem):\n"
         "    return np.roots(problem).tolist()\n"
@@ -3600,7 +3603,17 @@ def test_a_seed_that_guards_an_optional_import_passes_the_gate() -> None:
     ok, reason = validate_source(guarded)
     assert ok, reason
 
-    smuggled = guarded.replace("from threadpoolctl import threadpool_limits",
+    # The guard is what makes the difference: the same import, unguarded, is
+    # still refused for not being installed.
+    bare = guarded.replace("try:\n    from no_such_optional_dep_xyz987 import limits\n"
+                           "except Exception:\n    limits = None\n",
+                           "from no_such_optional_dep_xyz987 import limits\n")
+    ok, reason = validate_source(bare)
+    assert not ok and "not installed" in reason, reason
+
+    # And a guard says the import may fail, not that it may reach outside the
+    # process: the deny list applies inside the block exactly as outside.
+    smuggled = guarded.replace("from no_such_optional_dep_xyz987 import limits",
                                "import subprocess")
     ok, reason = validate_source(smuggled)
     assert not ok and "subprocess" in reason, "a try block hid a forbidden import"
