@@ -69,8 +69,8 @@ class TTSEConfig:
     store_path: str = ".ttse/bank.json"
     embedding: Optional[EmbeddingProvider] = None
     dedup_threshold: float = 0.88
-    max_facts: int = 40
-    max_tips: int = 40
+    max_facts: int = 400
+    max_tips: int = 400
     top_k_facts: int = 10
     top_k_tips: int = 10
     traj_char_budget: int = 9000
@@ -88,8 +88,8 @@ class TTSEConfig:
     detect_final_reply_chars: int = 1500
     detect_llm_policy: LLMInvokePolicy = field(
         default_factory=lambda: LLMInvokePolicy(
-            attempt_timeout_secs=15.0,
-            total_budget_secs=20.0,
+            attempt_timeout_secs=30.0,
+            total_budget_secs=35.0,
             max_attempts=1,
         )
     )
