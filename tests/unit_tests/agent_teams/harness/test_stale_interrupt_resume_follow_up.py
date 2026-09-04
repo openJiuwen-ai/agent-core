@@ -17,6 +17,7 @@ legitimate retry and must be kept, not dropped.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,7 @@ from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptEntry,
     ToolInterruptionState,
 )
+from openjiuwen.harness.schema.task import TaskPlan, TodoItem
 from tests.unit_tests.agent_teams.harness.fixtures import (
     answer_outputs,
     drain_outputs,
@@ -38,6 +40,28 @@ from tests.unit_tests.agent_teams.harness.fixtures import (
     start_harness,
     wait_for_state,
 )
+
+
+def script_first_round_interrupt(fake: Any, harness: Any, observed_phases: list) -> None:
+    """Make exactly the first round settle with ``result_type="interrupt"``.
+
+    ``FakeReactAgent.invoke`` hardcodes ``result_type="answer"``; this wrapper
+    swaps the first round's result for an interrupt payload — the shape a real
+    permission-gated round returns (``ToolInterruptHandler.build_interrupt_result``).
+    After each round's inner work it records ``harness.state``, so assertions
+    can pin the phase a follow-up round runs under: the settle-time drain must
+    start it while still RUNNING — never after an IDLE bounce.
+    """
+    base_invoke = fake.invoke
+
+    async def invoke(inputs: Any, session: Any, **kwargs: Any) -> dict:
+        result = await base_invoke(inputs, session, **kwargs)
+        observed_phases.append(harness.state)
+        if len(fake.invocations) == 1:
+            return {"output": "", "result_type": "interrupt"}
+        return result
+
+    fake.invoke = invoke
 
 
 @pytest.mark.asyncio
@@ -290,4 +314,217 @@ async def test_start_round_splits_interactive_input_out_of_list_batch() -> None:
         assert answer_outputs(collected) == ["done", "done"]
     finally:
         await harness.stop()
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_interrupt_settle_drains_queued_approval_follow_up() -> None:
+    """An interrupt-ended round must still drain the follow-up queue.
+
+    The 2nd-of-N approval path: the resume round for tool 1 is RUNNING when
+    the user approves tool 2. That approval is valid (its ask is already
+    committed), so ``resume_interrupt`` delivers it straight to the harness,
+    where RUNNING parks it as a follow-up. The resume round then legitimately
+    re-interrupts on tool 2 — and THAT settle must consume the queued approval
+    as a structured resume round, not strand it behind the interrupt stop.
+    This is the gap the ``result_type == "interrupt"`` early return left open.
+
+    Phase contract: the follow-up round starts while the harness is still
+    RUNNING (follow-up chains never bounce through IDLE), and IDLE appears
+    exactly once, at the end of the chain.
+    """
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+
+        # Tool 2's ask is committed — the exact shape the real interrupt rail
+        # leaves behind, and what makes the queued approval a legitimate
+        # retry for the settle-time filter.
+        session = harness._session
+        session.update_state(
+            {
+                INTERRUPTION_KEY: ToolInterruptionState(
+                    ai_message=AssistantMessage(content="requesting approval"),
+                    iteration=1,
+                    interrupted_tools={
+                        "call-2": ToolInterruptEntry(
+                            tool_call=ToolCall(
+                                id="call-2",
+                                type="function",
+                                name="needs_approval",
+                                arguments="{}",
+                            ),
+                            interrupt_requests={
+                                "call-2": InterruptRequest(message="approve?")
+                            },
+                        ),
+                    },
+                )
+            }
+        )
+
+        # The approval arrived while the round was RUNNING and parked as a
+        # follow-up (the ``_on_send(RUNNING)`` path).
+        approval = InteractiveInput()
+        approval.update("call-2", {"approved": True, "feedback": "", "auto_confirm": False})
+        harness.loop_controller.enqueue_follow_up(approval)
+
+        states: list = []
+
+        async def record_state(new: HarnessState) -> None:
+            states.append(new)
+
+        await harness.subscribe(on_state=record_state)
+
+        observed_phases: list = []
+        script_first_round_interrupt(fake, harness, observed_phases)
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("start work")
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while (
+                asyncio.get_running_loop().time() < deadline
+                and len(fake.invocations) < 2
+            ):
+                await asyncio.sleep(0.01)
+            assert len(fake.invocations) == 2  # the queued approval ran, not stranded
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        queries = [inv.get("query") for inv in fake.invocations]
+        assert queries[0] == "start work"
+        # The approval resumed as a structured InteractiveInput round.
+        assert isinstance(queries[1], InteractiveInput)
+        assert set(queries[1].user_inputs.keys()) == {"call-2"}
+        # Phase contract: no IDLE bounce inside the chain; IDLE exactly once.
+        # stop() appends TERMINATED after the lifecycle events; filter it so
+        # the trace assertion reads the lifecycle transitions only.
+        assert [s for s in states if s is not HarnessState.TERMINATED] == [
+            HarnessState.RUNNING,
+            HarnessState.IDLE,
+        ]
+        assert observed_phases == [HarnessState.RUNNING, HarnessState.RUNNING]
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_interrupt_settle_drains_text_follow_ups_as_batch_round() -> None:
+    """An interrupt-ended round must also drain queued TEXT follow-ups.
+
+    Not just approvals: any input parked while the interrupted round ran
+    (user text, rail follow-ups, async-tool completions) rides the same
+    settle-time drain and starts the batch text round. Without the fix the
+    interrupt stop strands those too.
+    """
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+
+        states: list = []
+
+        async def record_state(new: HarnessState) -> None:
+            states.append(new)
+
+        await harness.subscribe(on_state=record_state)
+
+        observed_phases: list = []
+        script_first_round_interrupt(fake, harness, observed_phases)
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            harness.loop_controller.enqueue_follow_up("a text follow-up during interrupt")
+            await harness.send("start work")
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while (
+                asyncio.get_running_loop().time() < deadline
+                and len(fake.invocations) < 2
+            ):
+                await asyncio.sleep(0.01)
+            assert len(fake.invocations) == 2  # the queued text ran, not stranded
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            await harness.stop()
+            await consumer
+
+        queries = [inv.get("query") for inv in fake.invocations]
+        assert queries == ["start work", "a text follow-up during interrupt"]
+        # Phase contract: no IDLE bounce inside the chain; IDLE exactly once.
+        assert [s for s in states if s is not HarnessState.TERMINATED] == [
+            HarnessState.RUNNING,
+            HarnessState.IDLE,
+        ]
+        assert observed_phases == [HarnessState.RUNNING, HarnessState.RUNNING]
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_interrupt_settle_without_follow_ups_still_settles_idle() -> None:
+    """An interrupt with nothing queued still settles IDLE — and never
+    auto-continues the task plan.
+
+    Guards the merged terminal condition: the interrupt round reaches the
+    drain (nothing to start), then must settle IDLE *before* the
+    remaining-tasks branch, even though the seeded task plan still has a
+    pending task. An interrupt awaits the external resume; continuing the
+    plan would re-drive the round past an unanswered permission ask.
+    """
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+
+        # A pending task plan: if the interrupt term ever drops out of the
+        # merged terminal condition, the settle falls into the remaining-tasks
+        # continuation and this test catches it (second invocation).
+        session = harness._session
+        st = harness.load_state(session)
+        st.task_plan = TaskPlan(
+            goal="finish the work",
+            tasks=[TodoItem(id="t1", content="remaining task")],  # status defaults to PENDING
+        )
+        harness.save_state(session, st)
+
+        states: list = []
+
+        async def record_state(new: HarnessState) -> None:
+            states.append(new)
+
+        await harness.subscribe(on_state=record_state)
+
+        observed_phases: list = []
+        script_first_round_interrupt(fake, harness, observed_phases)
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("start work")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            # Let any unintended task-plan continuation round surface before
+            # counting invocations.
+            await asyncio.sleep(0.1)
+        finally:
+            await harness.stop()
+            await consumer
+
+        queries = [inv.get("query") for inv in fake.invocations]
+        assert queries == ["start work"]  # no auto-continuation round
+        # IDLE exactly once: RUNNING on send, IDLE at the interrupt settle.
+        assert [s for s in states if s is not HarnessState.TERMINATED] == [
+            HarnessState.RUNNING,
+            HarnessState.IDLE,
+        ]
+        assert observed_phases == [HarnessState.RUNNING]
+    finally:
         await Runner.stop()

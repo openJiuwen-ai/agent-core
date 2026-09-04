@@ -1052,8 +1052,10 @@ class NativeHarness(DeepAgent):
 
         Mirrors the per-round tail of ``DeepAgent._run_task_loop``: advance the
         coordinator, persist its stop-condition state, then decide the next
-        action with the same priority — cooperative pause, else interrupt/abort
-        stop, else follow-up, else remaining task-plan tasks, else IDLE.
+        action with the same priority — cooperative pause, else abort stop,
+        else follow-up (external immediate=False sends, incl. interrupt
+        approvals parked while RUNNING), else interrupt stop, else remaining
+        task-plan tasks, else IDLE.
         """
         was_graceful = active.graceful_abort
         is_resume = isinstance(active.original_query, InteractiveInput)
@@ -1145,12 +1147,21 @@ class NativeHarness(DeepAgent):
             return
 
         result_type = (cmd.result or {}).get("result_type")
-        if result_type == "interrupt" or coordinator.is_aborted:
+        # Abort is terminal: no drain, no continuation. Checked before the
+        # interrupt fall-through below — a kill path may surface an
+        # interrupt-shaped result with is_aborted set as a side effect, and
+        # abort must win.
+        if coordinator.is_aborted:
             await self._transition(HarnessState.IDLE)
             return
 
-        # Decision priority (matches _run_task_loop):
-        #   follow-up (external immediate=False sends) > remaining task-plan task.
+        # Decision priority (matches _run_task_loop, updated):
+        #   follow-up (external immediate=False sends, incl. approvals parked
+        #   while RUNNING) > interrupt stop > remaining task-plan task.
+        # An interrupt-ended round reaches the same drain as a normal
+        # completion: inputs queued while it ran (the 2nd..Nth approvals,
+        # texts) start the next round here instead of stranding behind the
+        # interrupt stop.
         follow_ups = self._drain_pending_follow_ups(session)
         # Idempotency: drop InteractiveInput follow-ups whose interrupt slot was
         # already consumed by the prior resume round. ``resume_interrupt``
@@ -1190,9 +1201,12 @@ class NativeHarness(DeepAgent):
 
         # A resume round has single-round semantics: it must not continue the
         # task plan using its InteractiveInput query (that would re-resume an
-        # already-cleared interrupt). Settle to IDLE; any follow-up queued above
-        # still ran first.
-        if is_resume:
+        # already-cleared interrupt). An interrupt-ended round likewise settles
+        # to IDLE awaiting the external resume — it must not auto-continue the
+        # task plan past an unanswered permission ask. Both settle here, only
+        # after the drain above had its chance to start the queued follow-up
+        # round.
+        if is_resume or result_type == "interrupt":
             await self._transition(HarnessState.IDLE)
             return
 
