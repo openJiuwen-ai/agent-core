@@ -3604,3 +3604,24 @@ def test_a_seed_that_guards_an_optional_import_passes_the_gate() -> None:
                                "import subprocess")
     ok, reason = validate_source(smuggled)
     assert not ok and "subprocess" in reason, "a try block hid a forbidden import"
+
+
+def test_a_one_file_seed_takes_the_name_the_card_gives_it(tmp_path: Path) -> None:
+    """A contract can be about the filename.
+
+    AlgoTune's harness imports `solver.py`, so its card says
+    `entrypoint: solver.py`. A single-file seed was always renamed to
+    `candidate.py` on the way in — and then refused, in the same breath, for
+    "the program does not contain solver.py", with the file right there. The
+    card's name wins when it gives one; the default stays for a card that
+    says nothing, which is every one-file run written before this.
+    """
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), entrypoint="solver.py")
+
+    spec = provider._spec_for(request, resumed=False)
+
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import files_of
+    assert spec.entrypoint == "solver.py"
+    assert list(files_of(spec.baseline_code, "solver.py")) == ["solver.py"]

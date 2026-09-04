@@ -591,7 +591,8 @@ class PuctProgramArtifactProvider:
 
         files: dict[str, str] = {}
         if request.artifact_path:
-            files = _seed_files(Path(request.artifact_path).expanduser())
+            files = _seed_files(Path(request.artifact_path).expanduser(),
+                                entrypoint=str(card.get("entrypoint") or "") or None)
         entrypoint = str(card.get("entrypoint") or "") or _entrypoint_of(files) or DEFAULT_ENTRYPOINT
         if files and entrypoint not in files:
             raise ValueError(
@@ -692,16 +693,24 @@ def _workers_from(value: Any) -> int:
     return max(1, min(workers, MAX_WORKERS))
 
 
-def _seed_files(path: Path) -> dict[str, str]:
+def _seed_files(path: Path, entrypoint: str | None = None) -> dict[str, str]:
     """The starting program as `{relpath: text}`, from a file or a directory.
 
-    A single file is placed at the default entrypoint, which is how every
-    one-file run has always worked. A directory keeps its own layout, so a seed
-    that is already a package is not renamed into this provider's conventions
-    just to be optimized.
+    A single file is placed at the entrypoint the card names, or at the default
+    one when the card says nothing — which is how every one-file run has always
+    worked. A directory keeps its own layout, so a seed that is already a
+    package is not renamed into this provider's conventions just to be
+    optimized.
+
+    The card's name wins because a contract can be about the filename: AlgoTune
+    calls `solver.py`, and a one-file seed that was always renamed to
+    `candidate.py` could never satisfy a card saying so — the run was refused
+    for "the program does not contain solver.py" with the file right there.
     """
     if path.is_dir():
         return load_tree(str(path))
+    if entrypoint:
+        return {entrypoint: path.read_text(encoding="utf-8")}
     # A Python file is placed at the default entrypoint, which is what lets an
     # evaluator say `import candidate` without the drafting model having to
     # invent a convention. Anything else keeps the name it arrived with:
