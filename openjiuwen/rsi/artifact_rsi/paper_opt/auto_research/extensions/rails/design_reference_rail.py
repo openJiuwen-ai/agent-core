@@ -11,13 +11,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
     SysOperation,
     SysOperationCard,
 )
-from openjiuwen.harness.prompts.tools import register_tool_provider
+from openjiuwen.harness.prompts.tools import (
+    ToolCardBuildOptions,
+    build_tool_card,
+    register_tool_provider,
+)
 from openjiuwen.harness.prompts.tools.base import ToolMetadataProvider
 from openjiuwen.harness.prompts.tools.filesystem import (
     READ_FILE_DESCRIPTION,
@@ -139,14 +144,18 @@ class _DesignReadFileTool(ReadFileTool):
         agent_id: str | None,
         design_root: Path,
     ):
-        super().__init__(
-            operation,
-            language,
-            agent_id,
-            enable_image_multimodal=False,
-            tool_name=_READ_NAME,
-            tool_id="DesignReadFileTool",
+        Tool.__init__(
+            self,
+            build_tool_card(
+                _READ_NAME,
+                "DesignReadFileTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            ),
         )
+        self.operation = operation
+        self.enable_image_multimodal = False
         self._design_root = design_root
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:

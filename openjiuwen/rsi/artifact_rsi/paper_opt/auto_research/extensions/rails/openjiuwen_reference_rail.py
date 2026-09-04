@@ -14,17 +14,15 @@ Why a whole new rail instead of reusing SysOperationRail(read_only=True):
    openjiuwen/harness/deep_agent.py — set_sys_operation() then init_rail()).
    A second, differently-scoped SysOperation has to be built and held by this
    rail itself; it can't rely on what the framework hands it.
-2. ReadFileTool/GlobTool/ListDirTool default to the built-in tool-card name
+2. ReadFileTool/GlobTool/ListDirTool hardcode their tool-card name
    ("read_file", "glob", "list_files"). Reusing them unmodified alongside
    GuardedSysOperationRail's identically-named tools would collide in
    ability_manager — one set silently overwrites the other (same
    f"{name}_{agent_id}" id, registered with refresh semantics). So every tool
-   here is a thin subclass that calls super().__init__(..., tool_name=...,
-   tool_id=...) — the keyword-only override those base classes expose — to
-   register its ToolCard under a distinct "openjiuwen_ref_*" name via the
-   SDK's own documented runtime-registration hook, register_tool_provider()
-   (openjiuwen/harness/prompts/tools/__init__.py), instead of the built-in
-   names.
+   here is a thin subclass that builds its ToolCard under a distinct
+   "openjiuwen_ref_*" name via the SDK's own documented runtime-registration
+   hook, register_tool_provider() (openjiuwen/harness/prompts/tools/__init__.py),
+   instead of the built-in names.
 
 A bare, unregistered SysOperation is fully self-contained — SysOperation.__init__
 only reads its own SysOperationCard, no dependency on Runner.resource_mgr —
@@ -54,13 +52,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
     SysOperation,
     SysOperationCard,
 )
-from openjiuwen.harness.prompts.tools import register_tool_provider
+from openjiuwen.harness.prompts.tools import (
+    ToolCardBuildOptions,
+    build_tool_card,
+    register_tool_provider,
+)
 from openjiuwen.harness.prompts.tools.base import ToolMetadataProvider
 from openjiuwen.harness.prompts.tools.filesystem import (
     GLOB_DESCRIPTION,
@@ -264,14 +267,21 @@ class _RefReadFileTool(_ReferencePathMixin, ReadFileTool):
         agent_id: str | None,
         assets_root: Path,
     ):
-        super().__init__(
-            operation,
-            language,
-            agent_id,
-            enable_image_multimodal=False,
-            tool_name=_READ_NAME,
-            tool_id="OpenJiuwenRefReadFileTool",
+        # Deliberately calls Tool.__init__ directly, skipping ReadFileTool's
+        # own __init__ (which hardcodes build_tool_card("read_file", ...)) —
+        # see module docstring for why the name has to differ.
+        Tool.__init__(
+            self,
+            build_tool_card(
+                _READ_NAME,
+                "OpenJiuwenRefReadFileTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            ),
         )
+        self.operation = operation
+        self.enable_image_multimodal = False
         self._assets_root = assets_root
 
 
@@ -287,13 +297,17 @@ class _RefGlobTool(_ReferencePathMixin, GlobTool):
         agent_id: str | None,
         assets_root: Path,
     ):
-        super().__init__(
-            operation,
-            language,
-            agent_id,
-            tool_name=_GLOB_NAME,
-            tool_id="OpenJiuwenRefGlobTool",
+        Tool.__init__(
+            self,
+            build_tool_card(
+                _GLOB_NAME,
+                "OpenJiuwenRefGlobTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            ),
         )
+        self.operation = operation
         self._assets_root = assets_root
 
 
@@ -308,13 +322,17 @@ class _RefListDirTool(_ReferencePathMixin, ListDirTool):
         agent_id: str | None,
         assets_root: Path,
     ):
-        super().__init__(
-            operation,
-            language,
-            agent_id,
-            tool_name=_LIST_NAME,
-            tool_id="OpenJiuwenRefListDirTool",
+        Tool.__init__(
+            self,
+            build_tool_card(
+                _LIST_NAME,
+                "OpenJiuwenRefListDirTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            ),
         )
+        self.operation = operation
         self._assets_root = assets_root
 
 

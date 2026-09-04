@@ -175,7 +175,8 @@ def classify_numeric_status(old: Evidence, new: Evidence) -> ClaimStatus:
         and new.ci_upper is not None
     )
     if has_ci:
-        if old.ci_upper is None or new.ci_lower is None or new.ci_upper is None or old.ci_lower is None:
+        bounds = (old.ci_upper, new.ci_lower, new.ci_upper, old.ci_lower)
+        if any(bound is None for bound in bounds):
             raise ValueError("has_ci is True but a confidence-interval bound is unexpectedly None")
         if new.ci_lower > old.ci_upper:
             return "strengthened"
