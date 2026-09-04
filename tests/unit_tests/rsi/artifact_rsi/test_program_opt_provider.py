@@ -3393,3 +3393,86 @@ def test_a_state_file_that_carries_usage_round_trips_through_the_reader(
     assert restored.usage.tokens.cache_hit == 7
     assert restored.usage.call_count == 4
     assert restored.usage.cost_estimate == pytest.approx(1.5)
+
+
+def test_the_run_reports_what_it_spent_on_the_model(tmp_path: Path) -> None:
+    """`RsiUsage` carries a measured number now, not a permanent `None`.
+
+    The engine already knew what every call cost — it reads `CompletionUsage`
+    to tell "the model had nothing to say" from "the model never got to the
+    saying part" — and threw the totals away. Driven through the real engine
+    with a model whose replies are scripted, so what is under test is the whole
+    path: the call's usage, the running total, the event, the fold, the file.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import state as state_module
+    from openjiuwen.rsi.artifact_rsi.program_opt.completion import CompletionUsage
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    reply = '```python name=candidate.py\n"""better"""\nVALUE = 2\n```\n'
+
+    def factory(spec, on_usage, should_stop):  # type: ignore[no-untyped-def]
+        def complete(prompt, sink=None, on_failure=None):  # type: ignore[no-untyped-def]
+            if sink is not None:
+                sink(CompletionUsage(total=1000, completion=400, capped=False))
+            return reply
+        return complete
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    state_module.register_run_dir("task-001", run_dir)
+    run = state_module.ProgramRunState(
+        task_id="task-001", run_dir=run_dir, total_iterations=2)
+
+    engine = PuctEngine(completion_factory=factory,
+                        evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="task-001", algorithm="puct", expansions=2,
+        scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60},
+        }]},
+        baseline_code='"""seed"""\nVALUE = 1\n',
+        script=('"""define VALUE"""\n'
+                "import importlib, json, os\n"
+                'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
+                'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
+                '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+        run_dir=str(run_dir),
+    )
+
+    engine.run(spec, lambda event: list(run.absorb(event)), lambda: False)
+
+    assert run.usage is not None, "the run finished without reporting any usage"
+    assert run.usage.call_count == 2, f"two expansions, two calls: {run.usage}"
+    assert run.usage.tokens.output == 800          # 400 per call
+    assert run.usage.tokens.input == 1200          # (1000 - 400) per call
+    # And it survives the trip through the file the contract is read from.
+    restored = state_module.read_state_file("task-001").to_engine_state()
+    assert restored.usage is not None
+    assert restored.usage.call_count == 2
+    assert restored.usage.tokens.output == 800
+
+
+def test_an_expansion_that_had_to_be_repaired_is_billed_for_both_calls() -> None:
+    """The per-expansion record keeps the last call; the bill keeps every one.
+
+    They are different questions and were once the same field. `note_empty`
+    wants the call it is explaining, so that map is overwritten per expansion —
+    summing it afterwards would quietly forget that a repaired expansion cost
+    two calls.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.completion import CompletionUsage
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import _Usage
+
+    usage = _Usage()
+    usage.add(1, CompletionUsage(total=900, completion=300, capped=True))
+    usage.add(1, CompletionUsage(total=500, completion=100, capped=False))
+
+    assert usage.totals() == (2, 1000, 400)
+    assert usage.of(1).capped is False, "the per-expansion record kept the wrong call"

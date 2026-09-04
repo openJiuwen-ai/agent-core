@@ -235,5 +235,25 @@ def search_finished(
     return event
 
 
+def usage(input_tokens: int, output_tokens: int, calls: int) -> dict[str, Any]:
+    """What the run has spent on the model so far, cumulative.
+
+    Cumulative rather than per-call because that is the shape the contract's
+    `RsiUsage` wants and because a run is resumed from its state file, not from
+    a replayed event log — a reader that had to add up deltas would get a
+    different answer after a restart than before one.
+
+    The predecessor of this event carried tokens only, and the field it fed had
+    a `call_count` beside them; the count was then made up elsewhere. Counting
+    where the calls happen is the reason this one carries all three.
+    """
+    return {
+        "calls": int(calls),
+        "inputTokens": int(input_tokens),
+        "outputTokens": int(output_tokens),
+        "type": "usage",
+    }
+
+
 def log(level: str, message: str) -> dict[str, Any]:
     return {"level": level, "message": message, "type": "log"}

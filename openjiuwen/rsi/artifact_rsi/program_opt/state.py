@@ -115,11 +115,8 @@ class ProgramRunState:
     best_node_id: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
-    #: The contract's cumulative usage record. Kept in the shape upstream
-    #: defines and left as `None`: this engine emits no usage event (the `cost`
-    #: one was retired), so a number here would be invented. It is read back
-    #: from a state.json that has one, so a run written by something that does
-    #: report usage round-trips through this reader unchanged.
+    #: The contract's cumulative usage record, folded from the engine's
+    #: `usage` events and `None` until the first model call returns.
     usage: Optional[RsiUsage] = None
     #: `node index -> the node as the contract wants it`. Held whole because a
     #: node arrives in three parts and only the last one completes it.
@@ -216,6 +213,8 @@ class ProgramRunState:
             self._evaluated(event)
         elif kind == "merged":
             yield from self._merged(event)
+        elif kind == "usage":
+            self._usage(event)
         elif kind == "log":
             self._logged(event)
         elif kind == "search_finished":
@@ -469,6 +468,31 @@ class ProgramRunState:
             baseline=self.baseline,
             usage=self.usage,
         )
+
+    def _usage(self, event: dict[str, Any]) -> None:
+        """The run's model bill, as the contract's record.
+
+        Folded silently: it changes what the *next* event reports rather than
+        producing one of its own. The alternative — an `EventProgress` per
+        usage event — doubles the progress stream to say something no reader
+        asked for at that moment, and the per-node one already carries this.
+
+        `cache_hit` stays 0 and `cost_estimate` stays 0.0 because neither is
+        measured: the engine sees a total and a completion count, and it has no
+        price table. The contract's fields are not optional, so zero is what
+        "not measured" has to look like — and inventing either would be worse
+        than a zero a reader can recognise.
+        """
+        self.usage = RsiUsage(
+            tokens=RsiUsageTokens(
+                input=int(event.get("inputTokens") or 0),
+                output=int(event.get("outputTokens") or 0),
+                cache_hit=0,
+            ),
+            cost_estimate=0.0,
+            call_count=int(event.get("calls") or 0),
+        )
+        self._persist()
 
     def _logged(self, event: dict[str, Any]) -> None:
         """Keep the last error line, so a refused run can say why.

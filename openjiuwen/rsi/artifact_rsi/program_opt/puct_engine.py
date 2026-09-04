@@ -138,21 +138,44 @@ class _Refusal(RuntimeError):
 class _Usage:
     """Which expansion a model call belonged to.
 
-    Running totals used to live here too, for a `cost` event; that event was
-    folded by nobody and its `tokens` input was never written to the snapshot
-    it claimed to resume from, so both went. What is left is the part the
-    engine actually reads: with three calls in flight there is no such thing as
-    "the last call", and blaming expansion 3's empty reply on expansion 5's
-    token count is worse than not explaining it at all.
+    Two different questions, kept apart on purpose. *Which* expansion a call
+    belongs to is what `note_empty` needs — with three calls in flight there is
+    no such thing as "the last call", and blaming expansion 3's empty reply on
+    expansion 5's token count is worse than not explaining it at all. *How much
+    the run has spent* is a single running total, and it counts every call
+    rather than the last one per expansion.
+
+    The totals used to feed a `cost` event that nobody folded, carrying tokens
+    with no call count beside them; the count was then invented in the provider
+    by wrapping the factory. Both are gone. This one is folded into the
+    contract's `RsiUsage` and carries all three numbers from where they happen.
     """
 
     def __init__(self) -> None:
         self._per_expansion: Dict[int, CompletionUsage] = {}
+        self._totals = (0, 0, 0)          # calls, input tokens, output tokens
         self._lock = threading.Lock()
 
     def add(self, iteration: int, usage: CompletionUsage) -> None:
         with self._lock:
+            # Per expansion, the *last* call: with a repair loop an expansion
+            # can call twice, and what `note_empty` needs is why the call it is
+            # explaining came back empty.
             self._per_expansion[iteration] = usage
+            # The totals take every call, for the same reason: an expansion
+            # that was repaired cost two calls and the bill says two. Summing
+            # `_per_expansion` afterwards would quietly drop the first.
+            calls, prompt, completion = self._totals
+            self._totals = (
+                calls + 1,
+                prompt + max(0, usage.total - usage.completion),
+                completion + usage.completion,
+            )
+
+    def totals(self) -> tuple[int, int, int]:
+        """`(calls, input tokens, output tokens)` for the run so far."""
+        with self._lock:
+            return self._totals
 
     def of(self, iteration: int) -> Optional[CompletionUsage]:
         with self._lock:
@@ -734,6 +757,18 @@ class _Reporter:
                 rollout_score=float(metrics[SCORE_KEY]),
             ))
         self._sweep.append((node, metrics))
+        self._report_usage()
+
+    def _report_usage(self) -> None:
+        """The run's model bill so far, as an event.
+
+        Emitted from the aggregator's own thread, like every other event here —
+        the natural place would be the usage sink, but that is called from N
+        worker threads and the event stream is a sequence.
+        """
+        calls, prompt, completion = self.usage.totals()
+        if calls:
+            self.emit(events.usage(prompt, completion, calls))
 
     def _swept(self, payload: Dict[str, Any]) -> None:
         best: Node = payload["best"]
@@ -821,6 +856,9 @@ class _Reporter:
         # Last, and on every path: a run that died mid-sweep still leaves a tree
         # worth reading, and this is the only write a crashed search gets.
         self.snapshot_tree()
+        # And the final bill, including calls that never became a node — a run
+        # whose every expansion timed out still spent the tokens.
+        self._report_usage()
         if status == "succeeded" and len(self._distinct_scores) == 1 and len(self.tree.nodes) > 3:
             # Succeeded is a claim that the search searched. When every valid
             # candidate landed on the same number as the seed — watched a
