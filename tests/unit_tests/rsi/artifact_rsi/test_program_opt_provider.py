@@ -3359,3 +3359,37 @@ def test_a_sandboxed_run_still_provisions_what_the_card_asks_for() -> None:
     assert installed == ["lightgbm"]
     assert any("pip" in " ".join(command) for command in ran), ran
     assert "lightgbm" in note
+
+
+def test_a_state_file_that_carries_usage_round_trips_through_the_reader(
+    tmp_path: Path,
+) -> None:
+    """`RsiUsage` is the contract's shape, kept whether or not this engine fills it.
+
+    It was deleted here once, on the reasoning that nothing in this provider
+    reports usage. Upstream still defines it, so the deletion silently put this
+    branch out of step with the contract it targets — visible only when the
+    merge dropped `usage=None` from a call site upstream had written, and three
+    unrelated harness tests went red on a missing argument. The field stays,
+    and a state.json that has one is read back rather than dropped on the floor.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import state as state_module
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(json.dumps({
+        "task_id": "task-001", "status": "completed", "iteration": 3,
+        "total_iterations": 3, "score": 0.9, "baseline": 0.5,
+        "best_node_id": "artifact:task-001:node:2", "updated_at": "",
+        "usage": {"tokens": {"input": 120, "output": 4300, "cache_hit": 7},
+                  "cost_estimate": 1.5, "call_count": 4},
+    }), encoding="utf-8")
+    state_module.register_run_dir("task-001", run_dir)
+
+    restored = state_module.read_state_file("task-001").to_engine_state()
+
+    assert restored.usage is not None
+    assert restored.usage.tokens.output == 4300
+    assert restored.usage.tokens.cache_hit == 7
+    assert restored.usage.call_count == 4
+    assert restored.usage.cost_estimate == pytest.approx(1.5)

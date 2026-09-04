@@ -53,6 +53,24 @@ class ArtifactValidationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RsiUsageTokens:
+    """Cumulative token counters for one optimization task."""
+
+    input: int
+    output: int
+    cache_hit: int
+
+
+@dataclass(frozen=True, slots=True)
+class RsiUsage:
+    """Cumulative model and optimization-engine usage."""
+
+    tokens: RsiUsageTokens
+    cost_estimate: float
+    call_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class RsiChange:
     """Intent-level summary of changes represented by one tree node."""
 
@@ -112,6 +130,7 @@ class EngineState:
     best_node_id: str | None
     score: float | None
     baseline: float | None
+    usage: RsiUsage | None
     updated_at: str
     error_code: str | None
     error_message: str | None
@@ -137,6 +156,7 @@ class EngineReport:
     task_id: str
     status: RsiStatus
     best_node_id: str | None
+    usage: RsiUsage | None
     artifact_index: list[ArtifactRef]
     summary: str | None
 
@@ -154,5 +174,7 @@ __all__ = [
     "RsiTaskCreateRequest",
     "RsiTaskEnvelope",
     "RsiTreeNode",
+    "RsiUsage",
+    "RsiUsageTokens",
     "TreeResponse",
 ]

@@ -27,6 +27,8 @@ from openjiuwen.rsi.schema import (
     RsiChange,
     RsiStatus,
     RsiTreeNode,
+    RsiUsage,
+    RsiUsageTokens,
     TreeResponse,
 )
 
@@ -113,6 +115,12 @@ class ProgramRunState:
     best_node_id: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    #: The contract's cumulative usage record. Kept in the shape upstream
+    #: defines and left as `None`: this engine emits no usage event (the `cost`
+    #: one was retired), so a number here would be invented. It is read back
+    #: from a state.json that has one, so a run written by something that does
+    #: report usage round-trips through this reader unchanged.
+    usage: Optional[RsiUsage] = None
     #: `node index -> the node as the contract wants it`. Held whole because a
     #: node arrives in three parts and only the last one completes it.
     nodes: dict[int, RsiTreeNode] = field(default_factory=dict)
@@ -459,6 +467,7 @@ class ProgramRunState:
             total_iterations=self.total_iterations,
             score=self.score,
             baseline=self.baseline,
+            usage=self.usage,
         )
 
     def _logged(self, event: dict[str, Any]) -> None:
@@ -544,6 +553,7 @@ class ProgramRunState:
             updated_at=_utc_now(),
             error_code=self.error_code,
             error_message=self.error_message,
+            usage=self.usage,
         )
 
     def to_report(self) -> EngineReport:
@@ -553,6 +563,7 @@ class ProgramRunState:
             best_node_id=self.best_node_id,
             artifact_index=list(self.artifacts.values()),
             summary=self._summary,
+            usage=self.usage,
         )
 
     def _persist(self) -> None:
@@ -645,6 +656,7 @@ def read_report_file(task_id: str) -> Optional[EngineReport]:
                         (_artifact_ref_from(raw) for raw in payload.get("artifact_index") or [])
                         if ref is not None],
         summary=payload.get("summary"),
+        usage=_usage_from(payload.get("usage")),
     )
 
 
@@ -691,6 +703,21 @@ def _depth_of(nodes: list[RsiTreeNode], by_id: dict[str, RsiTreeNode]) -> int:
             depth += 1
         deepest = max(deepest, depth)
     return deepest
+
+
+def _usage_from(raw: Any) -> Optional[RsiUsage]:
+    if not isinstance(raw, dict):
+        return None
+    tokens = raw.get("tokens") or {}
+    return RsiUsage(
+        tokens=RsiUsageTokens(
+            input=int(tokens.get("input") or 0),
+            output=int(tokens.get("output") or 0),
+            cache_hit=int(tokens.get("cache_hit") or 0),
+        ),
+        cost_estimate=float(raw.get("cost_estimate") or 0.0),
+        call_count=int(raw.get("call_count") or 0),
+    )
 
 
 def _node_from(raw: dict[str, Any]) -> Optional[RsiTreeNode]:
@@ -776,6 +803,7 @@ class _StoredState:
             updated_at=str(self._payload.get("updated_at") or ""),
             error_code=self._payload.get("error_code"),
             error_message=self._payload.get("error_message"),
+            usage=_usage_from(self._payload.get("usage")),
         )
 
 

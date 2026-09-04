@@ -36,6 +36,8 @@ from openjiuwen.rsi.schema import (
     RsiTaskCreateRequest,
     RsiTaskEnvelope,
     RsiTreeNode,
+    RsiUsage,
+    RsiUsageTokens,
     TreeResponse,
 )
 
@@ -224,6 +226,11 @@ def test_build_request_rejects_envelope_config_type_mismatch() -> None:
 
 
 def test_event_types_are_fixed_and_nodes_use_common_shape() -> None:
+    usage = RsiUsage(
+        tokens=RsiUsageTokens(input=10, output=5, cache_hit=2),
+        cost_estimate=0.1,
+        call_count=1,
+    )
     node = RsiTreeNode(
         node_id="node-001",
         iteration=1,
@@ -245,6 +252,7 @@ def test_event_types_are_fixed_and_nodes_use_common_shape() -> None:
         total_iterations=3,
         score=0.5,
         baseline=0.4,
+        usage=usage,
     )
     node_event = EventNode(node=node)
     stage_event = NodeStageEvent(

@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
-from openjiuwen.rsi.schema import RsiStatus, RsiTreeNode
+from openjiuwen.rsi.schema import RsiStatus, RsiTreeNode, RsiUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,7 @@ class EventProgress:
     total_iterations: int
     score: float | None
     baseline: float | None
+    usage: RsiUsage | None
     event_type: Literal["progress"] = field(default="progress", init=False)
 
 

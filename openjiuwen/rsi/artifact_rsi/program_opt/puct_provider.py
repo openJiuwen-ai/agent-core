@@ -347,7 +347,7 @@ class PuctProgramArtifactProvider:
         if state is None:
             return EngineState(
                 task_id=task_id, status="created", iteration=0, total_iterations=0,
-                best_node_id=None, score=None, baseline=None, updated_at="",
+                best_node_id=None, score=None, baseline=None, usage=None, updated_at="",
                 error_code="TASK_NOT_FOUND", error_message="no state for this task",
             )
         return state.to_engine_state()
@@ -357,7 +357,7 @@ class PuctProgramArtifactProvider:
         report = read_report_file(task_id)
         if report is None:
             return EngineReport(
-                task_id=task_id, status="created", best_node_id=None,
+                task_id=task_id, status="created", best_node_id=None, usage=None,
                 artifact_index=[], summary="no report for this task",
             )
         return report

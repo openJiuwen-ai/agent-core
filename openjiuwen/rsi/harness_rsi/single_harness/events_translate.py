@@ -27,6 +27,7 @@ def progress_event(
         total_iterations=max(0, int(total_iterations)),
         score=_number(state.get("best_score")),
         baseline=_number(state.get("baseline_score")),
+        usage=None,
     )
 
 
