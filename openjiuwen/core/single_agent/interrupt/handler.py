@@ -92,9 +92,9 @@ class ToolInterruptHandler:
             tool_result = result
 
         return (
-                isinstance(tool_result, dict)
-                and tool_result.get("result_type") == "interrupt"
-                and "interrupt_ids" in tool_result
+            isinstance(tool_result, dict)
+            and tool_result.get("result_type") == "interrupt"
+            and "interrupt_ids" in tool_result
         )
 
     @staticmethod

@@ -1017,6 +1017,7 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         tool.invoke.assert_awaited_once_with(
             {"todos": [{"step_id": 1, "status": "done"}]},
             session=None,
+            tool_call_id="call_repair",
         )
         self.assertEqual(
             json.loads(tool_call.arguments),
@@ -1043,7 +1044,11 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(tool_call.arguments, arguments)
-        tool.invoke.assert_awaited_once_with({"query": "hello"}, session=None)
+        tool.invoke.assert_awaited_once_with(
+            {"query": "hello"},
+            session=None,
+            tool_call_id="call_valid",
+        )
 
     async def test_execute_rejects_unrepairable_tool_call_arguments(self):
         self.ability_manager.add(ToolCard(id="bad_tool", name="bad_tool", description="bad"))

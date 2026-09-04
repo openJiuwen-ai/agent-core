@@ -60,9 +60,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     Auto-confirm is stored in session state (INTERRUPT_AUTO_CONFIRM_KEY).
     Supports fine-grained auto-confirm keys for bash commands (e.g., bash_dir, bash_rm).
+
+    ``inherit_to_subagents`` is False: factory injects general-purpose by
+    copying parent rails **by reference**. Sharing this rail lets a child
+    tool ASK bubble through ``task_tool`` as nested HITL, and child's
+    ``init`` can rebind the shared instance. Parent permission checks stay
+    on the parent agent; the child simply does not run this rail.
     """
 
     priority: int = 90
+    inherit_to_subagents = False
 
     def __init__(
         self,

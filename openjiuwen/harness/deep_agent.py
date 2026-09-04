@@ -1251,6 +1251,9 @@ class DeepAgent(BaseAgent):
             "parallel_tool_calls": spec.parallel_tool_calls,
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
             "agent_ras": getattr(self, "_agent_ras_setting", None),
+            # 子代理需要充足时间完成多轮工具调用（如 PPT 生成、深度搜索等），
+            # 默认 600s 偏短，提升至 1800s（30 分钟）。
+            "completion_timeout": 1800.0,
         }
 
         # Inherit the parent's image-modality decision only when the child

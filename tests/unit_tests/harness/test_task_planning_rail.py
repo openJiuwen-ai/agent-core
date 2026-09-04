@@ -848,6 +848,116 @@ async def test_after_tool_call_skips_when_disabled() -> None:
     assert "test-session-id" not in rail._pending_progress_reminder
 
 
+# ================================================================
+# before_invoke reset_invoke_marker tests
+# ================================================================
+@pytest.mark.asyncio
+async def test_before_invoke_resets_create_marker() -> None:
+    """before_invoke resets the per-invoke todo_create marker via _find_todo_create_tool."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+
+    create_tool = rail._find_todo_create_tool()
+    assert create_tool is not None
+    create_tool._created_in_invoke.add("test-session-id")
+    assert "test-session-id" in create_tool._created_in_invoke
+
+    await rail.before_invoke(ctx)
+
+    assert "test-session-id" not in create_tool._created_in_invoke
+
+
+@pytest.mark.asyncio
+async def test_before_invoke_safe_without_session() -> None:
+    """before_invoke returns early when ctx.session is None."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    ctx = _make_ctx()
+    ctx.session = None
+
+    await rail.before_invoke(ctx)  # must not raise
+
+
+# ================================================================
+# after_tool_call todo_create failure guard tests
+# ================================================================
+@pytest.mark.asyncio
+async def test_after_tool_call_skips_cancel_on_create_failure() -> None:
+    """_cancel_stale_plan_tasks is NOT called when todo_create raised an exception."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    plan_tasks = _make_todos([
+        ("stale-task-a", TodoStatus.PENDING),
+        ("stale-task-b", TodoStatus.IN_PROGRESS),
+    ])
+    plan = TaskPlan(goal="old", tasks=plan_tasks)
+    state = DeepAgentState(iteration=1, task_plan=plan)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+    ctx.exception = Exception("validation error")
+    ctx.agent.load_state.return_value = state
+    ctx.agent.save_state = MagicMock()
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=[])
+
+    # Spy on _cancel_stale_plan_tasks — should NOT be called
+    rail._cancel_stale_plan_tasks = MagicMock()
+
+    await rail.after_tool_call(ctx)
+
+    rail._cancel_stale_plan_tasks.assert_not_called()
+    # Plan tasks should remain unchanged
+    assert plan_tasks[0].status == TodoStatus.PENDING
+    assert plan_tasks[1].status == TodoStatus.IN_PROGRESS
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_cancels_stale_on_create_success() -> None:
+    """_cancel_stale_plan_tasks IS called when todo_create succeeded (no exception)."""
+    rail = _make_rail()
+    agent = _make_agent(workspace="/tmp/ws")
+    rail.init(agent)
+
+    plan_tasks = _make_todos([
+        ("stale-task-a", TodoStatus.PENDING),
+        ("stale-task-b", TodoStatus.IN_PROGRESS),
+    ])
+    plan = TaskPlan(goal="old", tasks=plan_tasks)
+    state = DeepAgentState(iteration=1, task_plan=plan)
+
+    ctx = _make_ctx()
+    ctx.inputs = ToolCallInputs(tool_name="todo_create")
+    ctx.session = MagicMock()
+    ctx.session.get_session_id.return_value = "test-session-id"
+    ctx.exception = None
+    ctx.agent.load_state.return_value = state
+    ctx.agent.save_state = MagicMock()
+
+    tool = rail._find_todo_tool()
+    assert tool is not None
+    tool.load_todos = AsyncMock(return_value=[])
+
+    rail._cancel_stale_plan_tasks = MagicMock()
+
+    await rail.after_tool_call(ctx)
+
+    rail._cancel_stale_plan_tasks.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_after_invoke_safe_without_session() -> None:
     """after_invoke is safe when ctx.session is None."""
