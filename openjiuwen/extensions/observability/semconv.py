@@ -78,8 +78,6 @@ OJ_EXECUTION_SUBJECT_REQUEST_NUMBER = "openjiuwen.execution.subject.request.numb
 OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
 OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
-OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
-OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
 OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS = "openjiuwen.gen_ai.response.prompt_token_ids"
 OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS = "openjiuwen.gen_ai.response.completion_token_ids"
 OJ_GEN_AI_RESPONSE_LOGPROBS = "openjiuwen.gen_ai.response.logprobs"
@@ -87,9 +85,23 @@ OJ_GEN_AI_RESPONSE_PARSER_RESULT = "openjiuwen.gen_ai.response.parser_result"
 OJ_GEN_AI_RESPONSE_PROVIDER_METADATA = "openjiuwen.gen_ai.response.provider_metadata"
 OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT = "openjiuwen.gen_ai.response.provider_content"
 OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE = "openjiuwen.gen_ai.input.message_provenance"
-OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 OJ_GEN_AI_REASONING_TIMING = "openjiuwen.gen_ai.reasoning.timing"
-OJ_GEN_AI_REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"
+
+# Durations, in milliseconds. The GenAI standard states durations in seconds:
+# ``gen_ai.response.time_to_first_chunk`` is the only duration attribute in the
+# pinned registry and the handler writes it in seconds. These three stay in
+# milliseconds on purpose, and the ``_ms`` suffix is load-bearing -- it is the
+# only thing telling a reader the unit differs from the standard's.
+#
+# No standard *attribute* means the same thing as any of these, so none is a
+# duplicate. The nearest relative is ``total_latency_ms``: it measures the whole
+# call, which is what the standard's ``gen_ai.client.operation.duration`` metric
+# measures in seconds -- same fact, different unit and a metric rather than a
+# span attribute. Should any of these later gain a same-meaning standard key,
+# drop the project key rather than writing both.
+OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
+OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
+OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"
 OJ_STREAM_KIND = "openjiuwen.stream.kind"
@@ -145,3 +157,12 @@ AT_PLAN_SUBMITTED_BY = "agentteam.plan.submitted_by"
 DA_TASK_ITERATION = "deepagent.task.iteration"
 DA_TASK_IS_FOLLOW_UP = "deepagent.task.is_follow_up"
 DA_TASK_LOOP_EVENT = "deepagent.task.loop_event"
+
+# ---------------------------------------------------------------------------
+# Attribute values — everything above this line is an attribute key
+# ---------------------------------------------------------------------------
+
+# Recorded as the value of ``OJ_GEN_AI_REASONING_TIMING`` when no reasoning
+# duration could be measured. A zero would itself be a measurement, so the
+# reason is recorded in place of a duration.
+OJ_GEN_AI_REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"

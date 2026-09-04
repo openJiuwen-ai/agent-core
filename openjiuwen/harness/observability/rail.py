@@ -774,8 +774,9 @@ class AgentObservabilityRail(DeepAgentRail):
                 root_span=root_span,
             )
             span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "step")
-            span.set_attribute(DA_TASK_ITERATION, iteration)
             span.set_attribute(OJ_STEP_ID, f"{span.context.span_id:016x}")
+            # The ReAct counter is the step number. ``deepagent.task.iteration``
+            # counts the outer task loop and belongs on the task span only.
             span.set_attribute(OJ_STEP_NUMBER, iteration)
 
             self._open_react_step_span = span
