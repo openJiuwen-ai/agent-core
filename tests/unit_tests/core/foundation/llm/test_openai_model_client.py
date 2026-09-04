@@ -114,6 +114,59 @@ def test_stream_chunk_reads_tool_calls_from_final_message():
     assert parsed.tool_calls[0].name == "task_tool"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_reason", ["stop", None])
+async def test_chat_finish_reason_uses_tool_calls_for_normal_stop(provider_reason):
+    response = _Obj(
+        choices=[
+            _Obj(
+                message=_Obj(
+                    content="",
+                    tool_calls=[
+                        _Obj(
+                            id="call-1",
+                            index=0,
+                            function=_Obj(name="task_tool", arguments="{}"),
+                        )
+                    ],
+                ),
+                finish_reason=provider_reason,
+            )
+        ],
+        usage=None,
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.finish_reason == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_chat_finish_reason_preserves_truncation_with_tool_calls():
+    response = _Obj(
+        choices=[
+            _Obj(
+                message=_Obj(
+                    content="",
+                    tool_calls=[
+                        _Obj(
+                            id="call-1",
+                            index=0,
+                            function=_Obj(name="task_tool", arguments="{}"),
+                        )
+                    ],
+                ),
+                finish_reason="length",
+            )
+        ],
+        usage=None,
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.finish_reason == "length"
+
+
 async def _stream_response(*contents: str):
     for content in contents:
         yield _stream_chunk(content)
