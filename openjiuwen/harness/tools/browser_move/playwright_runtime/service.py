@@ -815,6 +815,30 @@ class BrowserService:
             self._locks[sid] = asyncio.Lock()
         return sid
 
+    def _validate_mcp_command(self) -> str:
+        command = str(self.mcp_cfg.params.get("command") or "").strip()
+        if not command:
+            raise RuntimeError(
+                "Playwright MCP command is empty. Configure PLAYWRIGHT_MCP_COMMAND "
+                "or restore the bundled runtime settings."
+            )
+        command_path = Path(command).expanduser()
+        if command_path.is_absolute():
+            resolved = str(command_path)
+        else:
+            resolved = shutil.which(command)
+        if resolved is None:
+            raise RuntimeError(
+                f"Playwright MCP command '{command}' was not found in PATH. "
+                "Install Node.js 20+ or configure an absolute executable path."
+            )
+        resolved_path = Path(os.path.abspath(resolved))
+        if not resolved_path.is_file() or not os.access(resolved_path, os.X_OK):
+            raise RuntimeError(
+                f"Playwright MCP command is not an executable file: {resolved_path}"
+            )
+        return str(resolved_path)
+
     async def ensure_runtime_ready(self) -> None:
         if self._task_binding_ref_count <= 0:
             # Standalone BrowserAgentRuntime usage has no outer TaskTool hook.
@@ -828,8 +852,7 @@ class BrowserService:
                 self._browser_agent = None
             return
 
-        if shutil.which("npx") is None:
-            raise RuntimeError("npx not found in PATH. Install Node.js first.")
+        self.mcp_cfg.params["command"] = self._validate_mcp_command()
 
         from .browser_tools import ensure_browser_runtime_client_patch
 

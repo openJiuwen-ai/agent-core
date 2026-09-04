@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
     BrowserRunGuardrails,
@@ -40,6 +42,39 @@ def _make_service(*, retry_once: bool = False, runtime_cwd: str | None = None) -
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+async def _capture_initial_mcp_registration(service: BrowserService) -> dict:
+    registered_params: list[dict] = []
+
+    async def fake_add_mcp_server(config, *, tag: str):
+        assert tag == "browser.service"
+        registered_params.append(dict(config.params))
+        return None
+
+    with patch.object(service, "_acquire_registry_lease"), patch.object(
+        service,
+        "_ensure_managed_driver_started",
+        AsyncMock(return_value=False),
+    ), patch.object(service, "_ensure_screenshots_dir"), patch(
+        "openjiuwen.harness.tools.browser_move.playwright_runtime.browser_tools."
+        "ensure_browser_runtime_client_patch"
+    ), patch(
+        "openjiuwen.harness.tools.browser_move.playwright_runtime.service.Runner.start",
+        new=AsyncMock(),
+    ), patch(
+        "openjiuwen.harness.tools.browser_move.playwright_runtime.service."
+        "Runner.resource_mgr.add_mcp_server",
+        new=AsyncMock(side_effect=fake_add_mcp_server),
+    ), patch(
+        "openjiuwen.harness.tools.browser_move.playwright_runtime.service."
+        "BROWSER_SERVICE_REGISTRY.activate_binding",
+        return_value=False,
+    ):
+        await service.ensure_runtime_ready()
+
+    assert len(registered_params) == 1
+    return registered_params[0]
 
 
 def test_failure_summary_is_reused_then_cleared() -> None:
@@ -570,6 +605,83 @@ def test_profile_store_defaults_to_runtime_workspace() -> None:
     service = _make_service(runtime_cwd=str(expected_root))
     expected = expected_root / ".browser" / "profiles.json"
     assert getattr(service, "_profile_store").path.resolve() == expected
+
+
+def test_validate_mcp_command_accepts_absolute_node_without_npx(tmp_path: Path) -> None:
+    node = tmp_path / "Node Runtime" / ("node.exe" if os.name == "nt" else "node")
+    node.parent.mkdir()
+    node.write_text("test", encoding="utf-8")
+    node.chmod(0o755)
+    service = _make_service()
+    service.mcp_cfg.params["command"] = str(node.resolve())
+
+    with patch(
+        "openjiuwen.harness.tools.browser_move.playwright_runtime.service.shutil.which",
+        return_value=None,
+    ):
+        assert service._validate_mcp_command() == str(node.resolve())
+
+
+def test_validate_mcp_command_reports_missing_configured_command() -> None:
+    service = _make_service()
+    service.mcp_cfg.params["command"] = "missing-playwright-command"
+
+    with patch(
+        "openjiuwen.harness.tools.browser_move.playwright_runtime.service.shutil.which",
+        return_value=None,
+    ), pytest.raises(RuntimeError, match="missing-playwright-command.*not found in PATH"):
+        service._validate_mcp_command()
+
+
+def test_ensure_runtime_ready_registers_expanded_tilde_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home_dir = tmp_path / "home"
+    node = home_dir / "bin" / ("node.exe" if os.name == "nt" else "node")
+    node.parent.mkdir(parents=True)
+    node.write_text("test", encoding="utf-8")
+    node.chmod(0o755)
+    mcp_cwd = tmp_path / "mcp-cwd"
+    mcp_cwd.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+
+    service = _make_service(runtime_cwd=str(mcp_cwd))
+    service.mcp_cfg.params["command"] = f"~/bin/{node.name}"
+
+    registered_params = _run(_capture_initial_mcp_registration(service))
+
+    expected_command = os.path.abspath(node)
+    assert registered_params["command"] == expected_command
+    assert service.mcp_cfg.params["command"] == expected_command
+    assert registered_params["cwd"] == str(mcp_cwd)
+
+
+def test_ensure_runtime_ready_registers_resolved_relative_command_with_custom_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookup_cwd = tmp_path / "lookup-cwd"
+    node = lookup_cwd / "bin" / ("node.exe" if os.name == "nt" else "node")
+    node.parent.mkdir(parents=True)
+    node.write_text("test", encoding="utf-8")
+    node.chmod(0o755)
+    mcp_cwd = tmp_path / "mcp-cwd"
+    mcp_cwd.mkdir()
+    monkeypatch.chdir(lookup_cwd)
+
+    service = _make_service(runtime_cwd=str(mcp_cwd))
+    relative_command = str(Path("bin") / node.name)
+    service.mcp_cfg.params["command"] = relative_command
+
+    registered_params = _run(_capture_initial_mcp_registration(service))
+
+    expected_command = os.path.abspath(relative_command)
+    assert registered_params["command"] == expected_command
+    assert service.mcp_cfg.params["command"] == expected_command
+    assert registered_params["cwd"] == str(mcp_cwd)
+    assert Path(expected_command).parent != mcp_cwd
 
 
 def test_build_managed_profile_defaults_user_data_dir_to_runtime_workspace() -> None:
