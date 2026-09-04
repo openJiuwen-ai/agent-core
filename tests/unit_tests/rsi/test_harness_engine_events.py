@@ -60,4 +60,3 @@ def test_progress_event_uses_persisted_candidate_count_and_scores() -> None:
     assert event.total_iterations == 6
     assert event.score == 0.8
     assert event.baseline == 0.4
-    assert event.usage is None

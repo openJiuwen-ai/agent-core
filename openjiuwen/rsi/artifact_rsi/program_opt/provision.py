@@ -1,0 +1,202 @@
+# Copyright (C) 2026-2026 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Putting the packages a search needs into the runtime its candidates use.
+
+The person who types "bring the error down" has no way to know the search wants a
+gradient-boosting library, and no reason to. The drafting agent does know, so it
+says, and this is the half that acts on it.
+
+**Only what is missing, and only into the candidate runtime.** An import probe
+first, inside the execution environment: the common case is that everything
+asked for is already importable and pip never runs.
+
+.. note:: The runtime is whatever the provider injected. Against a gateway
+   sandbox that is a container, and installing into it is what this module is
+   for. Against the default ``LOCAL`` execution it is **this machine's
+   interpreter**, and installing there is refused: the list was written by a
+   model, the machine belongs to the user, and a search does not get to put
+   packages on it. The refusal names the `pip install` line to run by hand.
+
+**A name is a name.** Anything that could redirect where the package comes from
+— an index URL, an editable path, a VCS reference, an environment marker — is
+refused rather than passed through, because the whole value of the list is that
+a reader can see what it says. `lightgbm` is legible; `-i http://…/simple` is a
+different supply chain wearing the same field.
+
+**Failure is a refusal, not a warning.** A run whose candidates were promised
+`xgboost` and did not get it fails every expansion with `ModuleNotFoundError`
+and reads as a model that cannot write code — the same failure the engine's
+pre-flight probe of `CANDIDATE_RUNTIME` exists to prevent at the other end.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
+
+from .logging_config import get_logger
+
+log = get_logger("provision")
+
+if TYPE_CHECKING:
+    from .execution import EvaluationExecution
+
+#: A bare distribution name, optionally with a version pin. Deliberately narrow:
+#: everything pip would read as an option, a path or a URL falls outside it.
+_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9._-]{0,63}(==[A-Za-z0-9][A-Za-z0-9.*+!-]{0,31})?$")
+
+#: How long one install may take before it is abandoned. A wheel for a boosting
+#: library is tens of megabytes; a source build is not something to wait out
+#: while a user watches a wizard.
+TIMEOUT_SECONDS = 600.0
+
+#: The import name for distributions that do not share one with their package.
+_IMPORT_NAME = {
+    "scikit-learn": "sklearn",
+    "opencv-python": "cv2",
+    "pillow": "PIL",
+    "pyyaml": "yaml",
+}
+
+
+class ProvisionError(RuntimeError):
+    """The runtime could not be made to match what the run was promised."""
+
+
+def import_name(package: str) -> str:
+    """What `import` would spell this distribution."""
+    base = package.split("==")[0].strip().lower()
+    return _IMPORT_NAME.get(base, base.replace("-", "_"))
+
+
+def validate_names(packages: Sequence[str]) -> List[str]:
+    """The stripped entries, after refusing anything that is not a bare name.
+
+    Split out of `ensure` so a caller can compose an import probe from these
+    names without first paying for an install attempt — splicing an
+    *unvalidated* entry into ``python -c "import …"`` would let a pip option
+    ride into a command line.
+    """
+    wanted = [package.strip() for package in packages if package.strip()]
+    for package in wanted:
+        if not _NAME.match(package):
+            raise ProvisionError(
+                f"{package!r} is not a package name. Only names are accepted here "
+                "(optionally with ==version); not paths, URLs, index addresses or pip options"
+            )
+    return wanted
+
+
+def probe_imports(names: Sequence[str], execute: "EvaluationExecution") -> Optional[str]:
+    """``None`` when every module imports inside the execution environment.
+
+    Otherwise the probe's output tail. Only vetted names go in — they are
+    spliced into a command line.
+    """
+    joined = ", ".join(names)
+    outcome = execute({}, ["python", "-c", f"import {joined}"], {}, 120.0, None)
+    if outcome.exit_code == 0:
+        return None
+    return (outcome.output or "").strip()[-200:] or "(no output)"
+
+
+def _interpreter(execute: "EvaluationExecution") -> str:
+    """The path of the interpreter candidates actually run under, or `python`.
+
+    Asked of the execution rather than of this process, because those are two
+    different interpreters more often than not.
+    """
+    try:
+        outcome = execute(
+            {"_which.py": "import sys\nopen('_which.txt', 'w').write(sys.executable)\n"},
+            ["python", "-I", "_which.py"], {}, 60.0, "_which.txt")
+    except Exception:  # noqa: BLE001 - a best-effort detail in a message
+        return "python"
+    return (outcome.result_text or "").strip() or "python"
+
+
+def ensure(packages: Sequence[str], execute: "EvaluationExecution") -> Tuple[List[str], str]:
+    """Install `packages` into the run's execution environment.
+
+    Through the injected execution, because that is where candidates actually
+    run — see the module's warning about what that environment is.
+
+    An import probe first, and pip only when it fails: pip resolves for
+    seconds even when every requirement is already satisfied, and `ensure` is
+    reached more than once per run. A ``==version`` pin is treated as
+    satisfied by importability alone, exactly as the old host-side
+    `find_spec` fast path treated it.
+
+    Raises :class:`ProvisionError` when a name is not a name, or when pip
+    refuses: both are things the user has to see before a run starts, and both
+    are invisible afterwards — the run would just report that every candidate
+    failed to import something.
+    """
+    wanted = validate_names(packages)
+    if not wanted:
+        return [], ""
+    names = sorted({import_name(package) for package in wanted})
+
+    try:
+        if probe_imports(names, execute) is None:
+            return [], f"already importable: {', '.join(names)}"
+        if getattr(execute, "runs_on_this_machine", False):
+            # Everything below installs into "the execution environment". With
+            # a container that is the container. Without one it is the
+            # interpreter this process is running in — so a card naming a
+            # package would quietly install it on the user's machine, from a
+            # list a model wrote. Nobody asked for that, and it is not
+            # something a search may decide on its own.
+            # Named rather than left as "pip": the interpreter that runs
+            # candidates is whatever `python` resolves to for the execution,
+            # and it is routinely *not* the virtualenv the provider itself is
+            # installed in. Measured on one machine: the provider on 3.12 in a
+            # project venv, candidates on 3.9 from anaconda. "pip install X"
+            # sends the reader to the wrong one, they install, nothing changes,
+            # and the refusal repeats word for word.
+            raise ProvisionError(
+                f"this run's scorecard asks for {', '.join(wanted)}, which the "
+                "execution environment cannot import. Candidates are running on "
+                "this machine (no sandbox was injected), and installing into it "
+                "is not this run's call to make. Install them yourself, into the "
+                f"interpreter that runs them:\n    {_interpreter(execute)} -m pip "
+                f"install {' '.join(wanted)}\nOr give the provider a sandboxed "
+                "SysOperation and the run will provision its own."
+            )
+        command = ["python", "-m", "pip", "install", "--no-input",
+                   "--disable-pip-version-check", *wanted]
+        log.info("installing %s inside the execution environment", ", ".join(wanted))
+        outcome = execute({}, command, {}, float(TIMEOUT_SECONDS), None)
+    except ProvisionError:
+        raise
+    except Exception as error:  # noqa: BLE001 - the seam's failure is run-level
+        raise ProvisionError(
+            f"installing {', '.join(wanted)} could not be run: {error}") from error
+    if outcome.exit_code != 0:
+        tail = (outcome.output or "").strip()[-400:]
+        raise ProvisionError(f"installing {', '.join(wanted)} failed: {tail or '(no output)'}")
+
+    # Verified where it matters: the same probe, after the install.
+    failure = probe_imports(names, execute)
+    if failure is not None:
+        raise ProvisionError(
+            f"pip reported success and yet importing {', '.join(names)} still fails: {failure}"
+        )
+    return wanted, f"installed {', '.join(names)}"
+
+
+#: Allowlisted modules a candidate may import; probed at run start through the
+#: injected execution, because that is the environment candidates run in.
+CANDIDATE_RUNTIME = ("numpy", "pandas", "scipy", "sklearn")
