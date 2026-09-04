@@ -21,6 +21,7 @@ from openjiuwen.core.foundation.llm.schema.message import (
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.llm.utils.finish_reason import normalize_finish_reason
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
@@ -279,9 +280,10 @@ def message_from_stream_chunk(chunk: Optional[AssistantMessageChunk]) -> Assista
     if chunk is None:
         return AssistantMessage(content="", finish_reason="stop")
 
-    finish_reason = "tool_calls" if chunk.tool_calls else chunk.finish_reason
-    if finish_reason == "null":
-        finish_reason = "stop"
+    finish_reason = normalize_finish_reason(
+        chunk.finish_reason,
+        has_tool_calls=bool(chunk.tool_calls),
+    )
 
     return AssistantMessage(
         content=chunk.content,
@@ -607,11 +609,8 @@ def _response_provider_metadata(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _finish_reason(payload: dict[str, Any], *, has_tool_calls: bool) -> str:
-    if has_tool_calls:
-        return "tool_calls"
-    if str(payload.get("status") or "") == "incomplete":
-        return "length"
-    return "stop"
+    raw_reason = "length" if str(payload.get("status") or "") == "incomplete" else None
+    return normalize_finish_reason(raw_reason, has_tool_calls=has_tool_calls)
 
 
 def _http_error_message(response: httpx.Response) -> Optional[str]:
