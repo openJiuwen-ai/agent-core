@@ -749,6 +749,48 @@ class OrgTaskManager:
             rows = (await session.execute(stmt)).scalars().all()
             return [self._to_task(row) for row in rows]
 
+    async def list_child_task_views(
+        self,
+        *,
+        parent_task_id: str,
+        creator_team_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Direct children with brief + latest review summary (for org_view_child_tasks)."""
+        await self.initialize()
+        stmt = select(OrgTaskRecord).where(
+            OrgTaskRecord.organization_id == self.organization_id,
+            OrgTaskRecord.parent_task_id == parent_task_id,
+        )
+        if creator_team_id:
+            stmt = stmt.where(OrgTaskRecord.creator_team_id == creator_team_id)
+        stmt = stmt.order_by(OrgTaskRecord.created_at.asc())
+        async with self._read() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            views: list[dict[str, Any]] = []
+            for row in rows:
+                task = self._to_task(row)
+                payload = task.brief()
+                review_row = await self._get_latest_review_row(session, row.task_id)
+                if review_row is None:
+                    payload["review"] = None
+                else:
+                    review = self._to_review(review_row)
+                    verdict = review.verdict
+                    if isinstance(verdict, str) and len(verdict) > 200:
+                        verdict = verdict[:200]
+                    payload["review"] = {
+                        "review_id": review.review_id,
+                        "review_status": review.review_status.value,
+                        "verdict": verdict,
+                        "required_changes": list(review.required_changes or [])[:10],
+                        "updated_at": review.updated_at,
+                    }
+                repairs_target = task.metadata.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+                if isinstance(repairs_target, str) and repairs_target.strip():
+                    payload["repairs_task_id"] = repairs_target.strip()
+                views.append(payload)
+            return views
+
     async def list_pending_reviews(self, *, team_id: str, limit: int = 50) -> list[dict[str, Any]]:
         await self.initialize()
         stmt = (
