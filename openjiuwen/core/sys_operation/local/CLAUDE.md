@@ -27,7 +27,7 @@ Supported languages (extensible via `_SUPPORT_LANGUAGE_CONFIG_DICT`):
 
 | Language | CLI Wrapper | File Suffix | Special Setup |
 |----------|-------------|-------------|---------------|
-| Python | `python -u -c` | `.py` | `PYTHONIOENCODING=utf-8`, `PYTHONUTF8=1` |
+| Python | `{resolved_python} -u -c` | `.py` | `PYTHONIOENCODING=utf-8`, `PYTHONUTF8=1`; interpreter is `CLAW_PYTHON_EXE` then `CLAW_PYTHON_BASE_EXE` if the path is a readable file, else `sys.executable`. Spawning a different exe drops inherited `PYTHONHOME`/`PYTHONPATH` unless the caller passed them in `environment`. Non-zero subprocess `exit_code` is an execution error (stderr in `data`). |
 | JavaScript | `node -e` | `.js` | `NODE_DISABLE_COLORS=1` |
 
 Environment variables are merged with user-supplied `environment` dict before subprocess creation.
