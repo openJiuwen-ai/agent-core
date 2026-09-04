@@ -136,7 +136,7 @@ On macOS/Linux, shell commands may be wrapped to force unbuffered output:
 
 ### stdin Policy
 
-Non-background subprocesses use `stdin=DEVNULL`. Never set `stdin=None` (which inherits parent stdin) — in non-interactive agent contexts, programs waiting for stdin will hang indefinitely.
+`execute_cmd` and `execute_code` / `execute_code_stream` use `stdin=DEVNULL`. Never omit stdin (inherits parent) — in non-interactive agent contexts, programs waiting for stdin (including CLIs spawned from `python -c`) will hang indefinitely.
 
 ## CWD Architecture
 

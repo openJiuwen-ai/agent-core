@@ -240,6 +240,22 @@ print(os.getenv('COUNT'))
         assert result.data.exit_code != 0
 
     @pytest.mark.asyncio
+    async def test_execute_code_stdin_is_closed(self, sys_op: SysOperation):
+        """Inherited parent stdin would hang on read; DEVNULL must EOF immediately."""
+        code = "import sys; data = sys.stdin.read(); print('eof-ok', len(data))"
+
+        result: ExecuteCodeResult = await sys_op.code().execute_code(
+            code=code,
+            language="python",
+            timeout=3,
+        )
+
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data is not None
+        assert result.data.exit_code == 0
+        assert "eof-ok 0" in result.data.stdout
+
+    @pytest.mark.asyncio
     async def test_execute_long_running_valid_code(self, sys_op: SysOperation):
         """Test execution of long-running but non-timeout code"""
         # Sleep 2s, timeout 3s - should complete successfully
@@ -596,6 +612,21 @@ print(os.getenv("TEST_ENV_VALUE"))
             for res in results
         )
         assert has_timeout_error
+
+    @pytest.mark.asyncio
+    async def test_execute_code_stream_stdin_is_closed(self, sys_op: SysOperation):
+        """Streaming execute_code must also close stdin so reads EOF instead of hanging."""
+        results = await self.collect_stream_results(
+            sys_op.code().execute_code_stream(
+                code="import sys; data = sys.stdin.read(); print('eof-ok', len(data))",
+                language="python",
+                timeout=3,
+            )
+        )
+        stdout_text = "".join(
+            [res.data.text for res in results if res.data and res.data.text]
+        )
+        assert "eof-ok 0" in stdout_text
 
     @pytest.mark.asyncio
     async def test_execute_code_stream_default_params(self, sys_op: SysOperation):

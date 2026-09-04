@@ -154,6 +154,7 @@ class CodeOperation(BaseCodeOperation):
                 env["PYTHONUTF8"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
@@ -297,6 +298,7 @@ class CodeOperation(BaseCodeOperation):
                 env["PYTHONUTF8"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
