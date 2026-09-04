@@ -128,13 +128,21 @@ async def _stage_and_run(
     #     operation, whose allowlist has no `sh`, came back exit=-1 with empty
     #     output and read as "the evaluator printed nothing".
     #   * the command ran and was killed — a timeout, which is an ordinary
-    #     property of a candidate and must stay one. It carries the signal in
-    #     `exit_code` (-9), and raising on it would turn a slow candidate into
-    #     a broken run.
+    #     property of a candidate and must stay one. Raising on it would turn a
+    #     slow candidate into a broken run.
+    #
+    # Told apart by the platform's own wording, because `exit_code` cannot do
+    # it: `_create_exec_cmd_err` rewrites a `None` exit code to -1, and whether
+    # a killed process leaves -9 or nothing at all is the host's business. This
+    # branch keyed on -1 and passed here (SIGKILL → -9) while the gate's image
+    # reported the same timeout as -1, where it read as a refusal and failed
+    # the run. Anything at this code that is *not* a timeout stays a run-level
+    # fault: a new kind of platform error is better raised loudly than folded
+    # into "every candidate is bad".
     code = getattr(completed, "code", 0)
     if code:
         reason = getattr(completed, "message", "") or f"error {code}"
-        if getattr(data, "exit_code", None) in (None, -1):
+        if "timeout" not in reason.lower():
             raise ExecutionUnavailable(
                 f"the execution environment refused `{shlex.join(command)}`: {reason}")
         output = f"{output}\n{reason}".strip()

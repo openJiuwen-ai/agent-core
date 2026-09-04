@@ -882,6 +882,22 @@ class _CannedEngine:
         self.saw_stop = bool(should_stop())  # type: ignore[operator]
 
 
+def _no_runtime_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a test that drives the real engine past the candidate-runtime probe.
+
+    The probe asks the *execution environment* whether numpy/pandas/scipy/
+    sklearn import, and refuses the run when they do not. That is right in
+    production and wrong as a precondition for a unit test: the gate's image
+    has no scipy, so four tests about prompts, protocols and token accounting
+    were refused before reaching anything they assert — each failing with a
+    message about the runtime, none of them about the runtime.
+    """
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.probe_imports",
+        lambda names, execute: None,
+    )
+
+
 def _no_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let a search past the pre-flight without a scorecard that can rank.
 
@@ -2391,7 +2407,9 @@ def test_the_prompt_shows_the_parent_in_the_shape_it_asks_for() -> None:
     assert "name=candidate.py" not in tagged_prompt
 
 
-def test_the_engine_tells_the_domain_which_protocol_to_render() -> None:
+def test_the_engine_tells_the_domain_which_protocol_to_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`mutation_prompt` honouring the protocol is half the wire; the domain
     that builds the prompt has to be told which one, by the engine.
 
@@ -2406,6 +2424,7 @@ def test_the_engine_tells_the_domain_which_protocol_to_render() -> None:
     from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
     from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import ScriptError
 
+    _no_runtime_probe(monkeypatch)
     seen: dict[str, object] = {}
 
     def recording_factory(**kwargs: object) -> object:
@@ -2434,7 +2453,9 @@ def test_the_engine_tells_the_domain_which_protocol_to_render() -> None:
     )
 
 
-def test_a_one_file_protocol_refuses_a_program_that_is_a_tree() -> None:
+def test_a_one_file_protocol_refuses_a_program_that_is_a_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`tagged` has nowhere to say which file a block belongs to, so it shows
     the entrypoint and accepts the entrypoint.
 
@@ -2447,6 +2468,8 @@ def test_a_one_file_protocol_refuses_a_program_that_is_a_tree() -> None:
     from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
     from openjiuwen.rsi.artifact_rsi.program_opt.program import bundle
     from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import _refuse_unrunnable
+
+    _no_runtime_probe(monkeypatch)
 
     tree = bundle({"candidate.py": "from helper import f\n", "helper.py": "def f(): ...\n"})
     spec = RunSpec(
@@ -2823,7 +2846,9 @@ def test_a_non_python_evaluator_with_no_command_is_refused_before_the_run() -> N
     assert "evaluate.js" in message and "evaluator_command" in message, message
 
 
-def test_the_engine_tells_the_domain_how_to_run_the_evaluator() -> None:
+def test_the_engine_tells_the_domain_how_to_run_the_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Same wire as the protocol one above, same reason for testing it here.
 
     `script_domain` growing two parameters proves nothing while the engine
@@ -2835,6 +2860,7 @@ def test_the_engine_tells_the_domain_how_to_run_the_evaluator() -> None:
     from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
     from openjiuwen.rsi.artifact_rsi.program_opt.script_domain import ScriptError
 
+    _no_runtime_probe(monkeypatch)
     seen: dict[str, object] = {}
 
     def recording_factory(**kwargs: object) -> object:
@@ -3395,7 +3421,9 @@ def test_a_state_file_that_carries_usage_round_trips_through_the_reader(
     assert restored.usage.cost_estimate == pytest.approx(1.5)
 
 
-def test_the_run_reports_what_it_spent_on_the_model(tmp_path: Path) -> None:
+def test_the_run_reports_what_it_spent_on_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`RsiUsage` carries a measured number now, not a permanent `None`.
 
     The engine already knew what every call cost — it reads `CompletionUsage`
@@ -3409,6 +3437,7 @@ def test_the_run_reports_what_it_spent_on_the_model(tmp_path: Path) -> None:
     from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
     from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
 
+    _no_runtime_probe(monkeypatch)
     reply = '```python name=candidate.py\n"""better"""\nVALUE = 2\n```\n'
 
     def factory(spec, on_usage, should_stop):  # type: ignore[no-untyped-def]
@@ -3476,3 +3505,69 @@ def test_an_expansion_that_had_to_be_repaired_is_billed_for_both_calls() -> None
 
     assert usage.totals() == (2, 1000, 400)
     assert usage.of(1).capped is False, "the per-expansion record kept the wrong call"
+
+
+def test_a_timeout_and_a_refusal_arrive_with_the_same_exit_code() -> None:
+    """Which is why `exit_code` cannot be what tells them apart.
+
+    Both come back from the gateway as a non-zero result code with empty
+    streams. This branch keyed on `exit_code`, on the reading that a killed
+    process leaves -9 and a rejected one leaves -1 — true on the machine it was
+    written on. `_create_exec_cmd_err` rewrites a `None` exit code to -1, and
+    the gate's image reported its timeouts exactly that way: a slow candidate
+    read as a refused command and failed the whole run.
+
+    The platform's own wording is the only thing that separates them, so that
+    is what is read. Polarity on purpose: anything at this code that is not a
+    timeout stays a run-level fault, because a new kind of platform error is
+    better raised loudly than folded into "every candidate is bad".
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
+        ExecutionUnavailable,
+        _stage_and_run,
+    )
+
+    class _Data:
+        exit_code, stdout, stderr = -1, "", ""
+
+    class _Result:
+        code, data = 199004, _Data()
+        message = ("shell operation execution error, execution: execute_cmd, "
+                   "reason: execution timeout after 2 seconds")
+
+    class _Rejected(_Result):
+        message = ("shell operation execution error, execution: execute_cmd, "
+                   "reason: command rejected for safety: rm")
+
+    class _Operation:
+        def __init__(self, result: object) -> None:
+            self._result = result
+
+        def fs(self) -> object:
+            class _Fs:
+                async def write_file(self, *a: object, **k: object) -> object:
+                    return type("R", (), {"code": 0})()
+
+                async def read_file(self, *a: object, **k: object) -> object:
+                    raise FileNotFoundError
+            return _Fs()
+
+        def shell(self) -> object:
+            result = self._result
+
+            class _Shell:
+                async def execute_cmd(self, *a: object, **k: object) -> object:
+                    return result
+            return _Shell()
+
+    async def run(result: object) -> object:
+        return await _stage_and_run(
+            _Operation(result), {"x.py": "1\n"}, ["python", "x.py"], {}, 2, None)
+
+    outcome = asyncio.run(run(_Result()))
+
+    assert outcome.exit_code == -1, "the fixture no longer reproduces the gate's shape"
+    assert outcome.output.strip(), "the kill reached the candidate's diagnosis as nothing"
+
+    with pytest.raises(ExecutionUnavailable):
+        asyncio.run(run(_Rejected()))
