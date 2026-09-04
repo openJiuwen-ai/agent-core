@@ -478,6 +478,11 @@ class AutoHarnessConfig:
     fix_phase1_max_retries: int = 10
     fix_phase2_max_retries: int = 9
 
+    # ---- Best of N ----
+    best_of_n_enabled: bool = False
+    best_of_n_attempts: int = 3
+    best_of_n_timeout_per_attempt: float = 600.0
+
     # ---- 安全 ----
     immutable_files: List[str] = field(default_factory=list)
     high_impact_prefixes: List[str] = field(
@@ -745,6 +750,18 @@ class AutoHarnessConfig:
                 cfg.fix_phase1_max_retries = int(fl["phase1_max_retries"])
             if "phase2_max_retries" in fl:
                 cfg.fix_phase2_max_retries = int(fl["phase2_max_retries"])
+
+        # best_of_n section
+        bn = data.get("best_of_n", {})
+        if isinstance(bn, dict):
+            if "enabled" in bn:
+                cfg.best_of_n_enabled = bool(bn["enabled"])
+            if "attempts" in bn:
+                cfg.best_of_n_attempts = int(bn["attempts"])
+            if "timeout_per_attempt" in bn:
+                cfg.best_of_n_timeout_per_attempt = float(
+                    bn["timeout_per_attempt"]
+                )
 
         agent_cfg = data.get("agent", {})
         if isinstance(agent_cfg, dict):
