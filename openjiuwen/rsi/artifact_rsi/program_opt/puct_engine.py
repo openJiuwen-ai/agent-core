@@ -73,6 +73,7 @@ from .restore import RestoreError, restore_baseline, restore_tree
 from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
 from .script_domain import ScriptError, script_domain
 from .search import (
+    REPAIR_ATTEMPTS,
     PuctStrategy,
     PuctTreeAggregator,
     make_propose,
@@ -369,6 +370,12 @@ class PuctEngine:
                 # asked for back.
                 repair_prompt=lambda code, error: repair_prompt(
                     code, error, spec.entrypoint, template=spec.repair_template),
+                # From the card, because the right number is the task's: on a
+                # benchmark whose winning direction usually fails to compile on
+                # its first draft (AlgoTune, numba), two attempts abandon the
+                # direction and four reach it — upstream's 540x run on
+                # `polynomial_real` repaired its way there with four.
+                repair_attempts=int(spec.options.get("repair_attempts", REPAIR_ATTEMPTS)),
             ),
             "repo_path": str(repo),
             "run": make_run(domain),

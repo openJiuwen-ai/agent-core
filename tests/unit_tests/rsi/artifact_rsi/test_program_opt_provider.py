@@ -3717,3 +3717,68 @@ def test_a_refused_model_call_is_reported_as_the_refusal_not_as_an_empty_edit(
     said = " ".join(e["message"] for e in events if e.get("type") == "log" and e.get("level") == "error")
     assert "429" in said, said
     assert "wrote nothing" not in said, said
+
+
+def test_the_card_can_say_how_many_repair_attempts_a_direction_gets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`options.repair_attempts` reaches the fix-it loop.
+
+    The right number is the task's. On AlgoTune the direction that wins is
+    numba, and a numba draft usually fails to compile the first time: two
+    attempts abandon the direction, four reach it — upstream's 540x run on
+    `polynomial_real` got there with four. The engine's default stays two.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import puct_engine
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    _no_runtime_probe(monkeypatch)
+    seen: dict[str, object] = {}
+    real = puct_engine.make_propose
+
+    def recording(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(puct_engine, "make_propose", recording)
+    engine = PuctEngine(completion_factory=lambda *a, **k: (lambda p, *r, **kw: ""),
+                        evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=1, scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60}}]},
+        baseline_code='"""seed"""\nVALUE = 1\n',
+        script=('"""define VALUE"""\nimport importlib, json, os\n'
+                'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
+                'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
+                '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+        options={"repair_attempts": 4},
+    )
+
+    engine.run(spec, lambda event: None, lambda: False)
+
+    assert seen.get("repair_attempts") == 4, f"the fix-it loop was built with {seen.get('repair_attempts')!r}"
+
+
+def test_the_evaluators_report_is_not_cut_where_the_profile_starts() -> None:
+    """The feedback cap has to hold a report, not a sentence.
+
+    AlgoTune's harness answers every evaluation with its eval block, the
+    invalid examples and a line-level profile of the parent — about 3 000
+    characters — and the profile is the part that steers. At 500 the prompt
+    kept the headline and lost the profile every time.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import _feedback
+
+    report = "Speedup: 1.0x\n" + "\n".join(f"  {i:>4}  {1:>4}  {0.5:>10.3f}  line {i}" for i in range(80))
+    assert 2500 < len(report) < 4000, len(report)
+
+    rendered = _feedback(report)
+
+    assert rendered.rstrip().endswith("line 79"), "the profile's tail was cut"
