@@ -567,7 +567,14 @@ async def agent(
     async with gate.acquire():
         rt.spawn_count += 1
         call_result = await _call_backend(
-            rt, prompt, opts, json_schema, model_cls
+            rt,
+            _BackendCallSpec(
+                prompt=prompt,
+                opts=opts,
+                json_schema=json_schema,
+                model=model_cls,
+                agent_id=ks,
+            ),
         )
 
     if not call_result.succeeded:
@@ -607,11 +614,36 @@ async def agent(
     return call_result.result
 
 
-async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallResult:
-    """Run the single-shot ``agent()`` call (``backend.run``) with retries."""
+@dataclass
+class _BackendCallSpec:
+    """Everything ``_call_backend`` needs to run one single-shot ``agent()`` call.
+
+    Bundles the correlated per-call arguments (prompt / opts / json_schema /
+    model / agent_id) into one named value instead of a long positional list,
+    mirroring ``_BackendCallResult`` / ``_JournalRecordInput``.
+    """
+
+    prompt: str
+    opts: dict
+    json_schema: dict | None
+    model: Any
+    agent_id: str | None = None
+
+
+async def _call_backend(rt, spec: _BackendCallSpec) -> _BackendCallResult:
+    """Run the single-shot ``agent()`` call (``backend.run``) with retries.
+
+    ``spec.agent_id`` is the deterministic call-path key computed in ``agent()``
+    and used for the started/completed events. It is injected into a *copy* of
+    ``spec.opts`` (never the journaled original) so the backend can tag live
+    activity events with the same id its worker node was created under.
+    """
+    opts = spec.opts
+    if spec.agent_id:
+        opts = {**opts, "agent_id": spec.agent_id}
     return await _attempt_calls(
-        rt, opts, json_schema, model,
-        lambda: rt.backend.run(prompt, opts, json_schema),
+        rt, opts, spec.json_schema, spec.model,
+        lambda: rt.backend.run(spec.prompt, opts, spec.json_schema),
     )
 
 
