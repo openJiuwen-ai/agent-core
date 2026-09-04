@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/team_workspace/` |
-| 最近一次修订日期 | 2026-08-20 |
-| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` · `F_79_team-scoped-skill-library-and-visibility.md` · `F_85_block-c-member-directory-linker.md` |
+| 最近一次修订日期 | 2026-09-01 |
+| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` · `F_79_team-scoped-skill-library-and-visibility.md` · `F_85_block-c-member-directory-linker.md` · `F_89_team-shared-deliverables-outputs.md` |
 
 ## 范围 / 边界
 
@@ -36,6 +36,13 @@
 1. **Workspace 与 worktree 路径不相交**。Workspace 路径由 `paths.team_home(team_name) / "team-workspace"` 派生（或 config 显式指定 `root_path`）；worktree 路径由 `WorktreeManager.config` 决定。两者不能互相覆盖也不能互为子目录。`.team` 符号链接挂在**成员 workspace** 里（`mount_into_workspace`）——worktree 隔离只移动 cwd、不移动 workspace（[[F_69]]），所以挂载点跟着 workspace 走。`mount_into_worktree` 目前无调用方。
 2. **`paths.py` 是路径布局唯一真相源**。Workspace 的默认根、artifact 子目录、挂载点都从 `team_home(team_name)` 推出；`agent_configurator.create_workspace_manager` 不绕开 `team_home`。Config 的 `root_path` 是用户覆盖入口，不是新增散落硬编码的理由。
 3. **挂载点统一为 `.team/{team_name}/`，且它保留**。成员 workspace 通过 `mount_into_workspace(workspace_root)` 在 `workspace_root/.team/{team_name}` 上建符号链接。`TeamWorkspaceRail` 与 prompts 中宣告的挂载路径必须严格一致；rail 解析 `.team/` 前缀时既兼容 hub 布局（`.team/{team_name}/...`）也兼容 legacy 布局（`.team/...`），但**新代码只生成 hub 布局**。**挂载点服务的是团队产物协同，不服务 Skill**——[[F_79]] 拆掉的是 `skills/` 视图目录，不是这个挂载点；不要因为"团队不再分发 Skill"就把 `.team` 一起删掉。同理 `_mount_directory` 的 symlink → junction → copytree 三级降级保留：受限运行时下**产物**仍必须到达 agent。
+
+> **2026-09-01 修订（[[F_89]] / [[S_26]]）**：`.team/` 挂载点**不再作为产物访问路径**。
+> 团队最终产物改为按绝对路径写入 `team-workspace/artifacts/<YYYY-MM-DD>/chat-<n>/outputs/`
+> （无 project_dir 的成员），`TeamWorkspaceRail` 改拦 outputs 绝对前缀，提示词与
+> 工具描述的 `.team/` 相对路径全部改为指向团队信息块的「最终产物目录」绝对路径。
+> `mount_into_workspace` / `mount_worktree` 保留为可选 symlink 便利（worktree 代码型 team 遗留），
+> 模型不再引用 `.team`。详情见 [[F_89]]、[[S_26]]。
 4. **Windows 兜底用 junction，不静默忽略**。`os.symlink` 在 Windows 因权限失败时退到 `mklink /J`；junction 创建失败抛 `OSError`，不允许 catch-all 当成功处理。
 5. **文件锁是单一权威，按文件路径粒度**。LOCAL 模式：`TeamWorkspaceManager._locks` 是唯一权威。DISTRIBUTED 模式：leader 节点是唯一权威，远端通过 `WorkspaceLockRequestEvent` 走 messager 请求 leader 决议。同一文件不存在两个并发持锁人。
 6. **过期锁自动回收，可重入刷新**。`WorkspaceFileLock.is_expired()` 由 `acquired_at + timeout_seconds` 与当前时间判定。`acquire_lock` 遇到他人过期锁直接覆盖；遇到自己持的锁刷新时间，不算冲突。
@@ -234,7 +241,7 @@ Skill 实体不在上面这棵树里，它在 `paths.global_skills_dir()`（默�
 ## 与其它 spec 的关系
 
 - **S_01 public-api-and-spec-flow**：`TeamWorkspaceConfig` 通过 `TeamAgentSpec.workspace` 进入装配蓝图，遵循 Spec → build → Runtime 单向流；workspace 不回写 spec。
-- **S_02 team-agent-architecture**：`TeamWorkspaceManager` 落在 `agent/infra.py` 的 `TeamInfra` 上（per-process 共享）；`TeamWorkspaceRail` 由 `agent/agent_configurator.py` 装到 DeepAgent；prompts/sections 通过 `team_workspace_mount` / `team_workspace_path` 把挂载点注入 system prompt——agent 侧不重复声明挂载格式。
+- **S_02 team-agent-architecture**：`TeamWorkspaceManager` 落在 `agent/infra.py` 的 `TeamInfra` 上（per-process 共享）；`TeamWorkspaceRail` 由 `agent/agent_configurator.py` 装到 DeepAgent；prompts/sections 通过 `team_workspace_path` / `team_outputs_dir` 把工作空间路径与最终产物目录注入 system prompt（`.team` 挂载点已废止，见 [[F_89]] / [[S_26]]）——agent 侧不重复声明路径格式。
 - **S_06 runtime-pool-dispatch**：workspace 的物理目录创建发生在 manager `activate` 路径（spec → blueprint → `create_workspace_manager`）；pool entry 复活时复用既有目录，不重新 init。
 - **S_08 team-tools-contract**：`WorkspaceMetaTool` 是团队工具的一员，ToolCard id `team.workspace_meta` 遵循 `team.{name}` 前缀约定；其描述文本走 `tools/locales/descs/<lang>/workspace/workspace_meta.md`，不在代码里写长文案。
 - **Worktree 子系统（`harness.tools.worktree`）**：路径不相交是不变量 1。`mount_into_worktree` 是 worktree → workspace 的单向挂载入口，不存在反向 mount；worktree 改动不通过 workspace 的 git 历史走，二者各自独立。

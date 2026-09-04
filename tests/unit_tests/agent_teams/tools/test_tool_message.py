@@ -118,7 +118,7 @@ async def test_rejection_tells_the_caller_how_to_fix_it(db):
 
     assert not result.success
     assert "write_file" in result.error
-    assert ".team/" in result.error
+    assert "产物目录" in result.error
     assert str(MAX_CONTENT_CHARS) in result.error
     assert str(len(OVERSIZE)) in result.error
     # map_result is what actually reaches the model.

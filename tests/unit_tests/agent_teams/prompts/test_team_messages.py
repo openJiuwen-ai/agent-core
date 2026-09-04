@@ -188,16 +188,20 @@ def test_team_info_empty_returns_none():
 
 
 @pytest.mark.level0
-def test_team_info_keeps_workspace_mount_and_absolute_path():
+def test_team_info_renders_workspace_path_and_outputs():
     body = build_team_info_text(
         team_info={"team_name": "demo", "display_name": "Demo", "desc": "Ship it"},
-        team_workspace_mount=".team/demo/",
         team_workspace_path="/tmp/demo-workspace",
+        team_outputs_dir="/tmp/demo-workspace/artifacts/2026-09-01/chat-1/outputs",
         language="en",
     )
     assert body is not None
-    assert "`.team/demo/`" in body
-    assert "Absolute path: `/tmp/demo-workspace`" in body
+    assert "Team Shared Workspace: `/tmp/demo-workspace`" in body
+    assert "do not create a `.team` sub-directory" in body
+    assert (
+        "Final deliverables directory: `/tmp/demo-workspace/artifacts/2026-09-01/chat-1/outputs`"
+        in body
+    )
 
 
 @pytest.mark.level0
@@ -208,9 +212,10 @@ def test_team_info_supports_path_only_workspace():
         language="en",
     )
     assert body is not None
-    # Path-only workspace (third-party CLI members, no ``.team/{team}/`` mount
-    # in their cwd): the absolute path is rendered.
+    # Path-only workspace (no projectless outputs configured for this member):
+    # the absolute path is rendered and no deliverables bullet appears.
     assert "Team Shared Workspace: `/tmp/demo-workspace`" in body
+    assert "Final deliverables directory" not in body
 
 
 # ---------------------------------------------------------------------------

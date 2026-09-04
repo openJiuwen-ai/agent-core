@@ -484,12 +484,29 @@ class AgentConfigurator:
 
         # cwd is a separate layer from the workspace. The workspace stays the
         # member's private artifact directory (memory, Skill visibility
-        # declaration, .team mount); cwd is where shell runs and relative paths
-        # resolve. Team isolation moves cwd into the worktree without dragging
-        # the workspace along -- otherwise the member's artifacts and its Skill
-        # grants would live inside an ephemeral checkout and vanish with it.
-        member_cwd = ctx.worktree_path or agent_spec.cwd or None
-        member_project_root = agent_spec.project_root or agent_spec.cwd or None
+        # declaration); cwd is where shell runs and relative paths resolve. Team
+        # isolation moves cwd into the worktree without dragging the workspace
+        # along -- otherwise the member's artifacts and its Skill grants would
+        # live inside an ephemeral checkout and vanish with it. A projectless
+        # team member (no project, no worktree) instead runs in its own
+        # isolated ``work/<member>/`` under the shared artifact root, so its
+        # intermediate files stay per-member instead of piling up together.
+        worktree_path = ctx.worktree_path
+        project_root_or_cwd = agent_spec.project_root or agent_spec.cwd or None
+        if worktree_path:
+            member_cwd = worktree_path
+        elif project_root_or_cwd:
+            member_cwd = project_root_or_cwd
+        elif spec.build_context is not None:
+            # No project and no worktree: the platform may allocate a per-member
+            # work directory. Derive a member view (so the per-team root and the
+            # member name combine) and ask the platform for the work dir.
+            member_cwd = spec.build_context.derive(
+                member_name=ctx.member_name,
+            ).resolve_member_work_dir()
+        else:
+            member_cwd = None
+        member_project_root = project_root_or_cwd
 
         workspace_root_path = ws_spec.root_path if ws_spec is not None else None
         # The workspace is now always the member's own directory (never the
@@ -497,9 +514,6 @@ class AgentConfigurator:
         # clean up.
         if workspace_root_path and self.team_backend is not None:
             self.team_backend.register_cleanup_path(workspace_root_path)
-
-        if self.workspace_manager and ws_spec and ws_spec.root_path:
-            self.workspace_manager.mount_into_workspace(ws_spec.root_path)
 
         model_config = ctx.member_model or agent_spec.model
 
@@ -539,11 +553,18 @@ class AgentConfigurator:
         resolved_team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or spec.team_name
         teammate_mode = str(spec.teammate_mode)
 
-        team_workspace_mount: str | None = None
         team_workspace_path: str | None = None
         if self.workspace_manager:
-            team_workspace_mount = f".team/{resolved_team_name}/"
             team_workspace_path = self.workspace_manager.workspace_path
+        # The team's shared final-deliverables directory travels on the build
+        # context (platform-filled for projectless members, None for members
+        # bound to a project). Surfaced to the team info body by the policy
+        # rail only when set, so members with a project keep the bullet off.
+        team_outputs_dir: str | None = (
+            spec.build_context.team_outputs_dir
+            if spec.build_context is not None
+            else None
+        )
 
         # Decide which team rails this member gets, as declarative RailSpecs.
         # Live handles ride on the build context's extras (injected below); only
@@ -611,8 +632,8 @@ class AgentConfigurator:
                     "team_mode": _resolve_team_mode(spec),
                     "dispatch_mode": spec.dispatch_mode,
                     "base_prompt": agent_spec.system_prompt,
-                    "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
+                    "team_outputs_dir": team_outputs_dir,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,
                     "steer_batch_size": spec.steer_batch_size,
                     "fork_source": ctx.fork_source or "",
