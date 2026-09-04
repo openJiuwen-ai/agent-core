@@ -1,0 +1,25 @@
+{
+  "device": "mps",
+  "best_epoch": 83,
+  "best_train_loss": 1.3171286582946777,
+  "best_validation_loss": 1.8401435613632202,
+  "training_seconds": 1.3046364590991288,
+  "checkpoint": "/Users/IDLE_And_R/Downloads/Huawei/agent-core/examples/adaptive_multi_agent_collab/artifacts/mock/checkpoints/weighting.pt",
+  "configuration": {
+    "query_dim": 96,
+    "history_dim": 96,
+    "agent_embedding_dim": 12,
+    "hidden_dim": 48,
+    "dropout": 0.05,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "epochs": 200,
+    "patience": 25,
+    "batch_size": 8,
+    "seed": 42
+  },
+  "train_examples": 2,
+  "validation_examples": 1,
+  "selection": "minimum validation cross-entropy; held-out test unused",
+  "data_status": "SYNTHETIC OFFLINE MOCK OUTPUTS - NOT EXPERIMENTAL EVIDENCE"
+}

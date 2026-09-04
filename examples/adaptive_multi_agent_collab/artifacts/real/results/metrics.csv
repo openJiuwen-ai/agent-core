@@ -1,0 +1,5 @@
+method,accuracy,average_cached_tokens,average_calls,average_input_tokens,average_latency,average_output_tokens,average_provider_latency,average_total_cost,average_total_tokens,average_wall_latency,bootstrap_95_ci,correct,evaluated,failed,parse_failure_rate,parse_fallback_rate,tie_rate
+single_agent,0.85,0.0,1.0,126.7,18.834322183346377,359.25,,,485.95,18.834322183346377,"[0.7, 1.0]",17,20,0,0.0,0.0,0.0
+independent_majority,0.95,0.0,3.0,387.1,61.69431094790343,1235.15,,,1622.25,61.69431094790343,"[0.85, 1.0]",19,20,0,0.0,0.0,0.0
+collaboration_uniform,0.9,0.0,6.35,1125.9,125.3342270980007,3547.3,,,4673.2,125.3342270980007,"[0.75, 1.0]",18,20,0,0.0,0.0,0.0
+collaboration_learned,0.9,0.0,6.35,1125.9,125.3342270980007,3547.3,,,4673.2,125.3342270980007,"[0.75, 1.0]",18,20,0,0.0,0.0,0.0
