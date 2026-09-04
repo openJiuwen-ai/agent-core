@@ -993,3 +993,130 @@ async def test_the_global_tool_callbacks_also_read_failure_from_the_result(traci
     assert span.status.status_code.name == "ERROR"
     assert span.status.description == "exit code 1"
     assert span.attributes["error.type"] == TOOL_REPORTED_FAILURE
+
+
+class _StateSession:
+    """Session exposing just the state API the rail persists Step identity in."""
+
+    def __init__(self, state=None):
+        self._state = dict(state or {})
+
+    def get_session_id(self):
+        """Return this session's id."""
+        return "session"
+
+    def update_state(self, data):
+        """Merge *data* into the session state."""
+        self._state.update(data)
+
+    def get_state(self, key=None):
+        """Return the value stored under *key*."""
+        return self._state.get(key)
+
+
+def _resume_tool_ctx(
+    agent,
+    *,
+    call_id: str,
+    react_iteration: int,
+    session=None,
+    tool_name: str = "search",
+):
+    """A tool call carrying the step number its interrupted iteration had."""
+    return AgentCallbackContext(
+        agent=agent,
+        inputs=ToolCallInputs(
+            tool_call=ToolCall(
+                id=call_id,
+                type="function",
+                name=tool_name,
+                arguments='{"q":"hello"}',
+            ),
+            tool_name=tool_name,
+            tool_args='{"q":"hello"}',
+            react_iteration=react_iteration,
+        ),
+        session=session,
+        extra={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_replayed_tool_keeps_the_step_the_interrupt_paused(tracing):
+    """A HITL resume finishes its step's tools before any step span reopens.
+
+    The resume runs as its own request, so the only parent available is the run
+    root, which carries no step number. Falling back to the iteration the tool
+    call carries is what keeps the replayed work in the step it belongs to
+    instead of reading as the turn's first step.
+    """
+    card = ToolCard(id="resource-search", name="search", description="Search documents")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+
+    session = _StateSession({
+        rail_module.OPEN_STEP_STATE_KEY: {"step_id": "step-paused", "step_number": 4},
+    })
+
+    ctx = _resume_tool_ctx(agent, call_id="call-resume", react_iteration=4, session=session)
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.parent.span_id == tracing.root.context.span_id
+    assert span.attributes[OJ_STEP_NUMBER] == 4
+    assert span.attributes[OJ_STEP_ID] == "step-paused"
+
+
+@pytest.mark.asyncio
+async def test_an_open_step_still_owns_the_number_its_tools_report(tracing):
+    """The fallback must not override a real step span's number."""
+    card = ToolCard(id="resource-search", name="search", description="Search documents")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    model_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(react_iteration=2),
+        extra=iteration_ctx.extra,
+    )
+    await rail.before_model_call(model_ctx)
+
+    # A stale iteration on the tool call must lose to the open step span.
+    ctx = _resume_tool_ctx(agent, call_id="call-open", react_iteration=99)
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ctx)
+    await rail.after_task_iteration(iteration_ctx)
+
+    span = _finished(tracing.exporter, "tool.search")[0]
+    assert span.attributes[OJ_STEP_NUMBER] == 2
+
+
+@pytest.mark.asyncio
+async def test_opening_a_step_publishes_the_identity_a_resume_reads(tracing):
+    """The Step span states its identity; the session carries it to the resume."""
+    agent = _agent()
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    session = _StateSession()
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+    model_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(react_iteration=4),
+        session=session,
+        extra=iteration_ctx.extra,
+    )
+    await rail.before_model_call(model_ctx)
+    step_span = shared_span_context.get_current_agent_span()
+    await rail.after_task_iteration(iteration_ctx)
+
+    published = session.get_state(rail_module.OPEN_STEP_STATE_KEY)
+    assert published == {
+        "step_id": f"{step_span.context.span_id:016x}",
+        "step_number": 4,
+    }

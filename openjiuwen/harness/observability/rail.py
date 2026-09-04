@@ -114,6 +114,11 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 _TRACER_NAME = "openjiuwen.harness.observability.rail"
 _ORPHAN_AGENT_FORCED_CLOSE_REASON = "missing_agent_terminal_callback"
 
+# Session-state key holding the open Step's identity. A HITL resume finishes
+# that Step in a request of its own, with no Step span left to inherit from;
+# this is what lets the replayed work name the Step it belongs to.
+OPEN_STEP_STATE_KEY = "_observability_open_step"
+
 
 def serialize_ability_value(value: Any) -> str:
     """Render a tool argument or result as the text recorded on a span.
@@ -389,6 +394,58 @@ class AgentObservabilityRail(DeepAgentRail):
         from openjiuwen.extensions.observability.setup import get_config
 
         return get_config()
+
+    @staticmethod
+    def _publish_open_step(ctx: AgentCallbackContext, step_id: str, step_number: int) -> None:
+        """Record the open Step's identity so a resume can rejoin it.
+
+        A HITL resume finishes the interrupted Step's tools in a request of its
+        own, where no Step span is open to inherit from and the original span id
+        is long gone. Persisting the identity keeps ``openjiuwen.step.id`` a fact
+        the replayed work can carry, rather than something a consumer has to
+        infer from step numbers.
+
+        Args:
+            ctx: Callback context whose session holds the identity.
+            step_id: The open Step's id.
+            step_number: The open Step's 1-based number.
+        """
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return
+        try:
+            session.update_state({
+                OPEN_STEP_STATE_KEY: {"step_id": step_id, "step_number": step_number},
+            })
+        except Exception as exc:
+            logger.debug("[AgentObservability] open step publish failed: %s", exc)
+
+    @staticmethod
+    def _resolve_persisted_step(ctx: AgentCallbackContext) -> tuple[str, int] | None:
+        """Read back the Step identity a resume is continuing.
+
+        Args:
+            ctx: Callback context whose session holds the identity.
+
+        Returns:
+            The persisted ``(step_id, step_number)``, or None when absent or
+            unusable — an unreadable snapshot must not fail the tool call.
+        """
+        session = getattr(ctx, "session", None)
+        if session is None:
+            return None
+        try:
+            stored = session.get_state(OPEN_STEP_STATE_KEY)
+        except Exception as exc:
+            logger.debug("[AgentObservability] open step read failed: %s", exc)
+            return None
+        if not isinstance(stored, dict):
+            return None
+        step_id = str(stored.get("step_id") or "")
+        step_number = stored.get("step_number")
+        if not step_id or not isinstance(step_number, int) or step_number <= 0:
+            return None
+        return step_id, step_number
 
     @staticmethod
     def _root_span_for(ctx: AgentCallbackContext) -> Span | None:
@@ -774,10 +831,12 @@ class AgentObservabilityRail(DeepAgentRail):
                 root_span=root_span,
             )
             span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "step")
-            span.set_attribute(OJ_STEP_ID, f"{span.context.span_id:016x}")
+            step_id = f"{span.context.span_id:016x}"
+            span.set_attribute(OJ_STEP_ID, step_id)
             # The ReAct counter is the step number. ``deepagent.task.iteration``
             # counts the outer task loop and belongs on the task span only.
             span.set_attribute(OJ_STEP_NUMBER, iteration)
+            self._publish_open_step(ctx, step_id, iteration)
 
             self._open_react_step_span = span
             self._open_react_step_parent = scope_parent
@@ -889,6 +948,19 @@ class AgentObservabilityRail(DeepAgentRail):
             span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_arguments)
             span.set_attribute(OJ_SPAN_INPUT, redacted_arguments)
             self._copy_parent_correlation(parent, span)
+            # A resume replays the interrupted Step's tools before the loop
+            # reopens a Step span, so the parent here is the run root and has no
+            # Step identity to inherit. Recover it from the session instead, so
+            # the replayed work states which Step it belongs to rather than
+            # leaving a consumer to infer it.
+            if parent.attributes.get(OJ_STEP_ID) is None:
+                persisted = self._resolve_persisted_step(ctx)
+                react_iteration = int(getattr(inputs, "react_iteration", 0) or 0)
+                if persisted is not None and persisted[1] == react_iteration:
+                    span.set_attribute(OJ_STEP_ID, persisted[0])
+                    span.set_attribute(OJ_STEP_NUMBER, persisted[1])
+                elif react_iteration > 0:
+                    span.set_attribute(OJ_STEP_NUMBER, react_iteration)
 
             push_tool_span(tool_name, span)
             ToolSpanScope(span=span, tool_name=tool_name, config=config).attach(ctx)
