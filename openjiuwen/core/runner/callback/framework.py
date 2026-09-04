@@ -48,7 +48,6 @@ from openjiuwen.core.runner.callback.decorator import (
     WrapHandler,
 )
 from openjiuwen.core.runner.callback.enums import (
-    ChainAction,
     FilterAction,
     HookType,
 )
@@ -59,6 +58,7 @@ from openjiuwen.core.runner.callback.filters import (
 )
 from openjiuwen.core.common.logging import runner_logger
 from openjiuwen.core.runner.callback.models import (
+    CallbackCallShape,
     CallbackInfo,
     CallbackMetrics,
     ChainContext,
@@ -176,6 +176,90 @@ def _narrow_call(
             if p.kind not in skip_kinds:
                 accepted.add(name)
         narrowed_kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+
+    return narrowed_args, narrowed_kwargs
+
+
+def _build_call_shape(callback: Callable) -> CallbackCallShape:
+    """Analyze callback arguments once during registration."""
+    try:
+        sig = inspect.signature(callback)
+    except (ValueError, TypeError):
+        sig = None
+
+    if sig is None:
+        return CallbackCallShape(
+            callback=callback,
+            custom_signature=getattr(callback, "__signature__", None),
+            positional_limit=None,
+            accepted_keywords=None,
+            needs_session=False,
+        )
+
+    has_var_positional = False
+    has_var_keyword = False
+    positional_count = 0
+    accepted_keywords: set[str] = set()
+
+    for name, param in sig.parameters.items():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            has_var_positional = True
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            has_var_keyword = True
+        else:
+            accepted_keywords.add(name)
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                positional_count += 1
+
+    return CallbackCallShape(
+        callback=callback,
+        custom_signature=getattr(callback, "__signature__", None),
+        positional_limit=None if has_var_positional else positional_count,
+        accepted_keywords=None if has_var_keyword else frozenset(accepted_keywords),
+        needs_session="session" in sig.parameters or has_var_keyword,
+    )
+
+
+def _prepare_call(
+    callback_info: CallbackInfo,
+    args: tuple,
+    kwargs: dict[str, Any],
+) -> tuple[tuple, dict[str, Any]]:
+    """Apply cached argument rules and inject the current session."""
+    callback = callback_info.callback
+    call_shape = callback_info.call_shape
+    if call_shape is None:
+        narrowed_args, narrowed_kwargs = _narrow_call(callback, args, kwargs)
+        _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs)
+        return narrowed_args, narrowed_kwargs
+
+    if (
+        call_shape.callback is not callback
+        or call_shape.custom_signature is not getattr(callback, "__signature__", None)
+    ):
+        call_shape = _build_call_shape(callback)
+        callback_info.call_shape = call_shape
+
+    if call_shape.positional_limit is None:
+        narrowed_args = args
+    else:
+        narrowed_args = args[:call_shape.positional_limit]
+
+    if call_shape.accepted_keywords is None:
+        narrowed_kwargs = kwargs
+    else:
+        narrowed_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key in call_shape.accepted_keywords
+        }
+
+    if call_shape.needs_session and not narrowed_kwargs.get("session"):
+        from openjiuwen.core.session import get_current_session
+        narrowed_kwargs["session"] = get_current_session()
 
     return narrowed_args, narrowed_kwargs
 
@@ -453,6 +537,7 @@ class AsyncCallbackFramework:
             retry_delay=retry_delay,
             timeout=timeout,
             callback_type=callback_type,
+            call_shape=_build_call_shape(callback),
         )
 
         self._callbacks[event].append(callback_info)
@@ -847,8 +932,11 @@ class AsyncCallbackFramework:
             return _TRANSFORM_NOOP
         result: Any = _TRANSFORM_NOOP
         for info in callbacks:
-            narrowed_args, narrowed_kwargs = _narrow_call(info.callback, args, kwargs)
-            _inject_session_if_needed(info.callback, narrowed_args, narrowed_kwargs)
+            narrowed_args, narrowed_kwargs = _prepare_call(
+                info,
+                args,
+                kwargs,
+            )
             result = await info.callback(*narrowed_args, **narrowed_kwargs)
         return result
 
@@ -1096,8 +1184,11 @@ class AsyncCallbackFramework:
                 start_time = time.time()
 
                 # Call callback (might return coroutine or async generator)
-                narrowed_args, narrowed_kwargs = _narrow_call(callback, final_args, final_kwargs)
-                _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs)
+                narrowed_args, narrowed_kwargs = _prepare_call(
+                    callback_info,
+                    final_args,
+                    final_kwargs,
+                )
                 callback_result = callback(*narrowed_args, **narrowed_kwargs)
 
                 # Check if it's an async generator
