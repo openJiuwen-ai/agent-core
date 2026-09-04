@@ -131,6 +131,50 @@ class Trainer:
             )
             return list(tqdm(predicts, desc="forward", total=cases.size()))
 
+    def search_prompt_candidates(
+        self,
+        agent: BaseAgent,
+        param_name: str,
+        case_loader: CaseLoader,
+    ) -> Optional[Tuple[float, str, List[EvaluatedCase]]]:
+        """Search every candidate prompt a multi-candidate optimizer generated.
+
+        A multi-candidate optimizer (e.g. ``PromptSearchOptimizer``) records
+        every prompt it tried for ``param_name`` on
+        ``TextualParameter.candidates``, not just the single best one
+        ``optimizer.update()`` applies. This evaluates each of those
+        candidates against ``case_loader``, leaves ``agent`` updated to
+        whichever scores best (including the prompt already applied), and
+        returns ``(best_score, best_prompt, best_evaluated_cases)``.
+
+        Returns ``None`` when the bound optimizer has no candidates recorded
+        for ``param_name`` (e.g. a single-candidate optimizer like
+        ``InstructionOptimizer``) — existing optimizers are unaffected.
+        """
+        param = self._optimizer.parameters().get(param_name)
+        candidates = param.get_candidates("system_prompt") if param else []
+        if not candidates:
+            return None
+        llm_call = agent.get_llm_calls().get(param_name)
+        if llm_call is None:
+            return None
+
+        original_prompt = TuneUtils.get_content_string_from_template(llm_call.get_system_prompt())
+        best_score, best_cases = self.evaluate(agent, case_loader)
+        best_prompt = original_prompt
+
+        for candidate_prompt in candidates:
+            if candidate_prompt == original_prompt:
+                continue
+            llm_call.update_system_prompt(candidate_prompt)
+            score, evaluated_cases = self.evaluate(agent, case_loader)
+            logger.info(f"search_prompt_candidates[{param_name}]: candidate scored {score}")
+            if score > best_score:
+                best_score, best_prompt, best_cases = score, candidate_prompt, evaluated_cases
+
+        llm_call.update_system_prompt(best_prompt)
+        return best_score, best_prompt, best_cases
+
     def set_callbacks(self, callbacks: Callbacks):
         if not isinstance(callbacks, Callbacks):
             logger.warning(f"callbacks should be a Callbacks object, got {type(callbacks)}")

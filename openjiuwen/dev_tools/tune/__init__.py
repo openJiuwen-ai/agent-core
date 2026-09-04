@@ -10,6 +10,13 @@ from openjiuwen.dev_tools.tune.dataset.case_loader import CaseLoader
 from openjiuwen.dev_tools.tune.optimizer.instruction_optimizer import InstructionOptimizer
 from openjiuwen.dev_tools.tune.optimizer.example_optimizer import ExampleOptimizer
 from openjiuwen.dev_tools.tune.optimizer.joint_optimizer import JointOptimizer
+from openjiuwen.dev_tools.tune.optimizer.prompt_search import (
+    PromptSearchOptimizer,
+    PromptTaskCase,
+    PromptTaskSpec,
+    OptimizationResult as PromptSearchResult,
+    optimize_prompt,
+)
 from openjiuwen.dev_tools.tune.chat_agent.chat_agent import (
     ChatAgent,
     ChatAgentConfig,
@@ -31,7 +38,16 @@ _CASE_LOADER_CLASSES = [
 _OPTIMIZER_CLASSES = [
     "InstructionOptimizer",
     "ExampleOptimizer",
-    "JointOptimizer"
+    "JointOptimizer",
+    "PromptSearchOptimizer",
+]
+
+
+_PROMPT_SEARCH_CLASSES_AND_METHODS = [
+    "PromptTaskCase",
+    "PromptTaskSpec",
+    "PromptSearchResult",
+    "optimize_prompt",
 ]
 
 
@@ -56,6 +72,7 @@ _CHAT_AGENT_CLASSES_AND_METHODS = [
 __all__ = (
     _CASE_LOADER_CLASSES +
     _OPTIMIZER_CLASSES +
+    _PROMPT_SEARCH_CLASSES_AND_METHODS +
     _CHAT_AGENT_CLASSES_AND_METHODS +
     _EVALUATOR_CLASSES +
     _TRAINER_CLASSES
