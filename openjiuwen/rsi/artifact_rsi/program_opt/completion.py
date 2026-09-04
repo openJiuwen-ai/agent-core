@@ -19,19 +19,16 @@ initialized ``Model`` into every request, ``completion_factory_from_model``
 (`runtime.py`) adapts it to the engine's seam, and a provider that built its
 own client from config was the one path that could bypass the injection.
 
-What remains is the seam's vocabulary: ``CompletionUsage`` is what a call cost
-and whether it ran out of room, and ``CompletionUnavailable`` is what a factory
-raises to say this run was given no model — the engine turns it into a refusal.
+What remains is one word of the seam's vocabulary: ``CompletionUsage``, what a
+call cost and whether it ran out of room. It lives here rather than beside
+either user because both need it — `runtime` builds one per call, `puct_engine`
+collects them per expansion — and an engine that imported its own adapter to
+name a return type would have the dependency backwards.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-
-
-class CompletionUnavailable(RuntimeError):
-    """No model access was configured for this run."""
 
 
 @dataclass(frozen=True)

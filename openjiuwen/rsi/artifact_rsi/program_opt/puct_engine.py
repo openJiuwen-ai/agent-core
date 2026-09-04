@@ -47,7 +47,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import events
 from .candidates import TREE_FILE, TREE_SCHEMA_VERSION, CandidateStore, write_tree_snapshot
-from .completion import CompletionUnavailable, CompletionUsage
+from .completion import CompletionUsage
 from .engine import RunSpec
 from .events import Emit
 from .logging_config import get_logger
@@ -423,13 +423,10 @@ class PuctEngine:
         Owned here rather than handed to the framework as an `Agent` so a stop, a
         token count and an empty reply each mean something to this engine.
         """
-        try:
-            # No client-level sink: every call supplies its own, because with N
-            # expansions in flight a shared one cannot say which expansion a
-            # token count belongs to.
-            complete = self._completion_factory(spec, None, should_stop)
-        except CompletionUnavailable as error:
-            raise _Refusal(f"this search has no access to a model: {error}") from error
+        # No client-level sink: every call supplies its own, because with N
+        # expansions in flight a shared one cannot say which expansion a token
+        # count belongs to.
+        complete = self._completion_factory(spec, None, should_stop)
 
         # The prompt asked for this shape; this is the reader that understands
         # it. Resolved once per search, from the same name.
