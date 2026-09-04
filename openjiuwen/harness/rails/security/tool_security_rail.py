@@ -13,6 +13,7 @@ from copy import deepcopy
 
 from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -177,6 +178,62 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return True
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Decide this tool call, rejecting it when no decision can be reached.
+
+        A rail stops a tool call only by raising ``AbortError`` or by setting
+        ``_skip_tool``; every other exception is logged and swallowed by
+        ``AsyncCallbackFramework.trigger``, which then runs the remaining
+        callbacks and lets the call proceed. An exception escaping this method
+        would therefore leave the gate with no decision at all and the call
+        would run as if it had been approved. A gate that cannot decide must
+        not be the reason a call runs, so an escape is turned into a rejection
+        here rather than being allowed to reach the framework.
+        """
+        try:
+            await self._decide_tool_call(ctx)
+        except AbortError:
+            # An ASK is delivered as AbortError carrying ToolInterruptException;
+            # that is a decision this rail made, not a fault, and the framework
+            # is what turns it into a pause. It must pass through untouched.
+            raise
+        except Exception as exc:
+            self._reject_undecided(ctx, exc)
+
+    def _reject_undecided(self, ctx: AgentCallbackContext, exc: Exception) -> None:
+        """Reject a tool call whose permission decision could not be reached.
+
+        The rejection carries only the exception type, since the tool result is
+        fed back to the model; the failure itself is logged in full for the
+        operator.
+        """
+        try:
+            inputs = getattr(ctx, "inputs", None)
+            tool_name = getattr(inputs, "tool_name", "") or ""
+            tool_call = getattr(inputs, "tool_call", None)
+            logger.error(
+                "[PermissionEngine] permission.rail.undecided tool=%s error=%s",
+                tool_name,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            message = (
+                "[PERMISSION_DENIED] The permission check for this tool call could "
+                f"not be completed ({type(exc).__name__}), so the call was not "
+                "approved."
+            )
+            self._apply_decision(
+                ctx, tool_call, tool_name, self.reject(tool_result=message)
+            )
+        except Exception as reject_exc:
+            # Rejecting needs a readable ``ctx``, which is exactly what a
+            # failure this early may have taken away. Aborting the chain is then
+            # the only way left to keep the call from running, and ``AbortError``
+            # is the one exception the framework does not swallow.
+            raise AbortError(
+                reason="Permission decision could not be reached, nor the call rejected",
+            ) from reject_exc
+
+    async def _decide_tool_call(self, ctx: AgentCallbackContext) -> None:
         tool_name = ctx.inputs.tool_name
         tool_call = ctx.inputs.tool_call
         normalized_name = self._normalize_tool_name(tool_name)
