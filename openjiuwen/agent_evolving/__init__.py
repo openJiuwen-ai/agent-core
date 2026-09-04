@@ -45,6 +45,7 @@ from openjiuwen.agent_evolving.optimizer import (
     InstructionOptimizer,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
+from openjiuwen.agent_evolving.skill_train import SkillReflACTTrainer, SkillTrainConfig, get_env_adapter
 
 # trainer
 from openjiuwen.agent_evolving.trainer import Trainer, Progress, Callbacks
@@ -98,6 +99,9 @@ __all__ = [
     "TextualParameter",
     "InstructionOptimizer",
     "SkillExperienceOptimizer",
+    "SkillReflACTTrainer",
+    "SkillTrainConfig",
+    "get_env_adapter",
     "Trainer",
     "Progress",
     "Callbacks",
