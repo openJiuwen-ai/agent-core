@@ -655,6 +655,7 @@ class TestResolvePythonExecutable:
     def test_prefers_readable_claw_python_exe(self, tmp_path, monkeypatch):
         preferred = tmp_path / "managed-python.exe"
         preferred.write_bytes(b"")
+        preferred.chmod(0o755)
         monkeypatch.setenv("CLAW_PYTHON_EXE", str(preferred))
         monkeypatch.setenv("CLAW_PYTHON_BASE_EXE", sys.executable)
         assert CodeOperation.resolve_python_executable() == str(preferred)
@@ -662,6 +663,7 @@ class TestResolvePythonExecutable:
     def test_falls_back_to_base_when_primary_missing(self, tmp_path, monkeypatch):
         base = tmp_path / "base-python.exe"
         base.write_bytes(b"")
+        base.chmod(0o755)
         monkeypatch.setenv("CLAW_PYTHON_EXE", str(tmp_path / "missing.exe"))
         monkeypatch.setenv("CLAW_PYTHON_BASE_EXE", str(base))
         assert CodeOperation.resolve_python_executable() == str(base)
