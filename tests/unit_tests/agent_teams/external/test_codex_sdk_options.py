@@ -81,6 +81,11 @@ def test_build_codex_config_uses_sdk_config_and_mcp_overrides():
     assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' in config.kwargs["config_overrides"]
     assert 'mcp_servers.openjiuwen_team.args=["--stdio"]' in config.kwargs["config_overrides"]
     assert 'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"' in config.kwargs["config_overrides"]
+    # Without an external model config the member targets the official
+    # endpoint; codex's own compression decision must stay untouched.
+    assert not any(
+        item.startswith("features.enable_request_compression=") for item in config.kwargs["config_overrides"]
+    )
 
 
 def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_argv():
@@ -221,6 +226,8 @@ def test_build_codex_config_maps_external_model_config():
     assert 'model_providers.my-provider.name="my-provider"' in config.kwargs["config_overrides"]
     assert 'model_providers.my-provider.base_url="https://gateway.example/v1"' in config.kwargs["config_overrides"]
     assert 'model_providers.my-provider.env_key="OPENJIUWEN_CODEX_API_KEY"' in config.kwargs["config_overrides"]
+    # External endpoints cannot decode codex's zstd-compressed request bodies.
+    assert "features.enable_request_compression=false" in config.kwargs["config_overrides"]
 
 
 def test_build_codex_config_quotes_non_bare_provider_key():
@@ -250,6 +257,7 @@ def test_build_codex_config_quotes_non_bare_provider_key():
     assert 'model_providers."my provider".name="my provider"' in overrides
     assert 'model_providers."my provider".base_url="https://gateway.example/v1"' in overrides
     assert 'model_providers."my provider".env_key="OPENJIUWEN_CODEX_API_KEY"' in overrides
+    assert "features.enable_request_compression=false" in overrides
 
 
 def test_build_codex_config_keeps_model_trace_and_mcp_overrides_together():
@@ -278,6 +286,7 @@ def test_build_codex_config_keeps_model_trace_and_mcp_overrides_together():
     assert 'model_providers.my-provider.name="my-provider"' in overrides
     assert any(item.startswith("otel.trace_exporter=") for item in overrides)
     assert 'mcp_servers.team.command="team-mcp"' in overrides
+    assert "features.enable_request_compression=false" in overrides
     assert not any(item.startswith("review_model=") for item in overrides)
 
 
