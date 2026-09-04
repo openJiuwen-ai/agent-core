@@ -2367,6 +2367,18 @@ class OpenAIModelClient(BaseModelClient):
                 return value
         return None
 
+    @staticmethod
+    def _extract_tool_call_extra_content(tool_call: Any) -> Optional[dict[str, Any]]:
+        """Extract opaque provider metadata attached to an OpenAI-compatible tool call."""
+        extra_content = getattr(tool_call, 'extra_content', None)
+        if extra_content is None:
+            model_extra = getattr(tool_call, 'model_extra', None)
+            if isinstance(model_extra, dict):
+                extra_content = model_extra.get('extra_content')
+        if hasattr(extra_content, 'model_dump'):
+            extra_content = extra_content.model_dump()
+        return dict(extra_content) if isinstance(extra_content, dict) else None
+
     async def _parse_response(
             self,
             response: Any,
@@ -2402,7 +2414,8 @@ class OpenAIModelClient(BaseModelClient):
                     type="function",
                     name=function_name,
                     arguments=function_arguments,
-                    index=getattr(tc, 'index', idx)
+                    index=getattr(tc, 'index', idx),
+                    extra_content=self._extract_tool_call_extra_content(tc),
                 )
                 tool_calls.append(tool_call)
 
@@ -2608,7 +2621,8 @@ class OpenAIModelClient(BaseModelClient):
                         type="function",
                         name=function_name,
                         arguments=function_arguments,
-                        index=index
+                        index=index,
+                        extra_content=self._extract_tool_call_extra_content(tc_delta),
                     )
                     tool_calls.append(tool_call)
 
