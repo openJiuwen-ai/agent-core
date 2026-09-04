@@ -122,12 +122,6 @@ online-rl = [
     "omegaconf>=2.3.0",
 ]
 
-# `program-opt` used to carry agentdescent as an optional extra; it moved into
-# the main dependencies (this project is deployed as an application, so the
-# exact pin burdens no third-party resolver). Kept as an empty extra so
-# `pip install 'openjiuwen[program-opt]'` in existing scripts stays valid.
-program-opt = []
-
 all-mq = ["openjiuwen[pulsar]"]
 all-storage = ["openjiuwen[sqlite,postgres,mysql,gaussdb,redis,elasticsearch,obs]"]
 all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
