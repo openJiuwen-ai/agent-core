@@ -8,12 +8,12 @@ so it can be driven by the core TaskScheduler.
 from __future__ import annotations
 
 from typing import (
+    TYPE_CHECKING,
     Any,
     AsyncIterator,
     Callable,
     Dict,
     Tuple,
-    TYPE_CHECKING,
 )
 
 from openjiuwen.core.common.logging import logger
@@ -239,6 +239,13 @@ class TaskLoopEventExecutor(TaskExecutor):
                 AgentCallbackEvent
                 .AFTER_TASK_ITERATION
             )
+
+            # AFTER_TASK_ITERATION is a valid force-finish boundary.  Consume
+            # the request before publishing the completion event so a rail can
+            # replace the inner agent result at the outer task boundary.
+            finish = ctx.consume_force_finish()
+            if finish is not None:
+                result = finish.result
 
             # increment_iteration is called in
             # DeepAgent._run_task_loop after yield.
