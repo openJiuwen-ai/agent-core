@@ -1,0 +1,11 @@
+model_client_config:
+  client_provider: OpenAI
+  api_key: ${RSI_EVALUATION_API_KEY}
+  api_base: ${RSI_EVALUATION_API_BASE}
+  timeout: 240
+  max_retries: 20
+model_request_config:
+  model: deepseek-v4-flash
+  temperature: 0.2
+  top_p: 0.8
+  max_tokens: 16384
