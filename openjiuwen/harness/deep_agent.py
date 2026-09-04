@@ -1531,7 +1531,42 @@ class DeepAgent(BaseAgent):
             "enable_plan_mode": spec.enable_plan_mode,
             "parallel_tool_calls": spec.parallel_tool_calls,
             "restrict_to_work_dir": spec.restrict_to_work_dir or self._deep_config.restrict_to_work_dir,
+            # A sub-agent acts on this agent's behalf, over the same files and
+            # the same shell, so the same policy gates it. Without these two
+            # keys its config carries no permissions dict,
+            # ``_queue_pending_rails`` builds no PermissionInterruptRail for
+            # it, and every tool call it makes runs ungated however strict this
+            # agent's policy is.
+            #
+            # The host travels with the policy because it is where the product
+            # decides how the policy is enforced, not only whether: the channel
+            # an ASK is put to a user over, whether checks run at all, and
+            # where an "always allow" is written. A sub-agent holding the
+            # policy alone falls back to the built-in confirm-interrupt flow
+            # and answers from a policy that no longer tracks the product's.
+            #
+            # Both are passed by reference -- the rail deep-copies the policy
+            # at construction and the host keeps no per-agent state, so one
+            # instance serves both agents.
+            "permissions": self._deep_config.permissions,
+            "permission_host": self._deep_config.permission_host,
         }
+
+        # ``spec.factory_kwargs`` is splatted into the same call as
+        # ``create_kwargs``, and ``create_deep_agent`` takes both keys above
+        # through ``**config_kwargs`` rather than as named parameters, so an
+        # operator may already have set either one there.  A key in both dicts
+        # is a duplicate keyword argument, not an override, and would raise
+        # TypeError on a configuration that worked before these two were
+        # inherited here.  The operator's entry is a deliberate choice about
+        # this one sub-agent, so it wins, and inheritance fills in only what
+        # they left unset -- the silent gap this forwarding exists to close.
+        # Dropping the keys by name rather than merging the two dicts keeps a
+        # collision on any other key the loud TypeError it has always been.
+        spec_factory_kwargs = spec.factory_kwargs or {}
+        for inherited_key in ("permissions", "permission_host"):
+            if inherited_key in spec_factory_kwargs:
+                create_kwargs.pop(inherited_key, None)
 
         if spec.factory_name:
             normalized_factory = (spec.factory_name or "").strip().lower()
