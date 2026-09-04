@@ -28,16 +28,18 @@ class ConditionalRouter(IRouter):
 
     def __init__(self, selector: SelectorProtocol):
         self.selector = selector
+        self._accepts_state = "state" in inspect.signature(selector).parameters
+        self._is_async = asyncio.iscoroutinefunction(selector) or asyncio.iscoroutinefunction(
+            getattr(selector, "__call__", None)
+        )
 
     async def dispatch(self, source_node: str) -> List[Message]:
-        sig = inspect.signature(self.selector)
         kwargs = {}
 
-        if 'state' in sig.parameters:
+        if self._accepts_state:
             kwargs['state'] = None
 
-        if asyncio.iscoroutinefunction(self.selector) or asyncio.iscoroutinefunction(
-                getattr(self.selector, "__call__", None)):
+        if self._is_async:
             targets = await self.selector(**kwargs)
         else:
             targets = self.selector(**kwargs)

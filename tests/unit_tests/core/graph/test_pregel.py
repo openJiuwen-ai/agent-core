@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import asyncio
+import inspect
+from unittest.mock import patch
 
 import pytest
 
@@ -29,6 +31,38 @@ from openjiuwen.core.graph.pregel.router import (
     StaticRouter,
 )
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
+
+
+@pytest.mark.asyncio
+async def test_conditional_router_analyzes_selector_once():
+    def selector(state):
+        assert state is None
+        return "target"
+
+    with patch(
+        "openjiuwen.core.graph.pregel.router.inspect.signature",
+        wraps=inspect.signature,
+    ) as mock_signature:
+        router = ConditionalRouter(selector)
+        first = await router.dispatch("source")
+        second = await router.dispatch("source")
+
+    assert mock_signature.call_count == 1
+    assert [message.target for message in first] == ["target"]
+    assert [message.target for message in second] == ["target"]
+
+
+@pytest.mark.asyncio
+async def test_conditional_router_supports_async_callable_object():
+    class AsyncSelector:
+        async def __call__(self):
+            return ["first", "second"]
+
+    router = ConditionalRouter(AsyncSelector())
+
+    messages = await router.dispatch("source")
+
+    assert [message.target for message in messages] == ["first", "second"]
 
 
 @pytest.fixture
