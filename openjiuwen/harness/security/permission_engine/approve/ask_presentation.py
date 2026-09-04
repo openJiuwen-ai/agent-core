@@ -4,6 +4,11 @@
 
 User-visible text is title + summary (+ remember hint). Internal rule ids stay
 out of the message body.
+
+The wording itself comes from a :class:`PermissionPromptTexts`, which the host
+supplies through ``ToolPermissionHost.prompt_texts``; the defaults reproduce the
+wording this module used to inline. Only the categorization and the composition
+live here.
 """
 
 from __future__ import annotations
@@ -12,6 +17,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen.harness.security.permission_engine.models import PermissionResult
+from openjiuwen.harness.security.permission_engine.prompt_texts import (
+    DEFAULT_PERMISSION_PROMPT_TEXTS,
+    PermissionPromptTexts,
+)
 
 _SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal", "powershell"})
 _FETCH_TOOLS = frozenset({"mcp_fetch_webpage", "fetch_webpage", "web_fetch_webpage"})
@@ -44,13 +53,6 @@ _PATH_ARG_KEYS = (
     "dir",
 )
 
-_FINDING_LABELS = {
-    "download_and_execute": "下载并执行",
-    "dynamic_or_encoded_execution": "动态或编码执行",
-    "shell_risky_structure": "含重定向或命令替换等结构",
-    "shell_too_complex": "命令结构过复杂",
-}
-
 _ESCALATING = frozenset({"MEDIUM", "HIGH", "CRITICAL"})
 
 
@@ -66,28 +68,31 @@ def build_permission_ask_presentation(
     tool_name: str,
     tool_args: dict[str, Any] | None,
     result: PermissionResult,
+    *,
+    texts: PermissionPromptTexts | None = None,
 ) -> PermissionAskPresentation:
+    copy = texts or DEFAULT_PERMISSION_PROMPT_TEXTS
     args = tool_args if isinstance(tool_args, dict) else {}
     name = (tool_name or "").strip() or "tool"
     category = _resolve_category(name, args, result)
 
     if category == "path":
-        title = "检测到受保护的文件路径访问"
+        title = copy.title_path
         summary = _path_summary(name, args, result)
     elif category == "network":
-        title = "检测到需确认的网络访问"
+        title = copy.title_network
         summary = _network_summary(args) or name
     elif category == "finding":
-        title = "检测到风险命令结构"
-        summary = _finding_summary(name, args, result)
+        title = copy.title_finding
+        summary = _finding_summary(name, args, result, copy)
     elif category == "shell":
-        title = "检测到需确认的命令执行"
+        title = copy.title_shell
         summary = _shell_summary(name, args)
     elif category == "tool":
-        title = "工具需要授权后才能使用"
-        summary = f"{name}（当前模式默认需确认）"
+        title = copy.title_tool
+        summary = copy.summary_tool.format(tool_name=name)
     else:
-        title = "操作需要授权"
+        title = copy.title_generic
         summary = name
 
     return PermissionAskPresentation(
@@ -209,14 +214,28 @@ def _shell_summary(tool_name: str, tool_args: dict[str, Any]) -> str:
     return tool_name
 
 
-def _finding_summary(tool_name: str, tool_args: dict[str, Any], result: PermissionResult) -> str:
-    label = "风险命令行为"
+def _finding_label(texts: PermissionPromptTexts, reason: str) -> str:
+    return {
+        "download_and_execute": texts.finding_download_and_execute,
+        "dynamic_or_encoded_execution": texts.finding_dynamic_or_encoded_execution,
+        "shell_risky_structure": texts.finding_shell_risky_structure,
+        "shell_too_complex": texts.finding_shell_too_complex,
+    }.get(reason, texts.finding_other)
+
+
+def _finding_summary(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    result: PermissionResult,
+    texts: PermissionPromptTexts,
+) -> str:
+    label = texts.finding_other
     for item in getattr(result, "findings", None) or []:
         sev = str(getattr(item, "severity", "") or "").strip().upper()
         if sev not in _ESCALATING:
             continue
         reason = str(getattr(item, "reason", "") or "").strip()
-        label = _FINDING_LABELS.get(reason, label)
+        label = _finding_label(texts, reason)
         break
     cmd = _command_text(tool_args)
     if cmd:

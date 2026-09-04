@@ -66,6 +66,44 @@ See **`openjiuwen.harness.security.host.ToolPermissionHost`**.
 | **`permission_yaml_path`** | Agent **config YAML** path; **`persist_*`** writes the **`permissions:`** subtree. File may not exist yet if the **parent directory** exists; first write can bootstrap from the global engine config. |
 | **`tool_permission_checks_active`** | `Callable[[], bool]`. If it returns **False**, tool permission checks are **skipped** (allow). If **unset**, checks always run. The host decides what “active” means (e.g. product-specific entry routing). |
 | **`permission_scene_hook`** | Optional async hook before tiered evaluation; product-specific (e.g. digital-avatar flows in a host repo). |
+| **`prompt_texts`** | `PermissionPromptTexts`: wording for the built-in **ASK** confirmation. See section 3.1. |
+
+### 3.1 Confirmation wording (`prompt_texts`)
+
+When **ASK** reaches the built-in Confirm interrupt, the text a person reads comes from two places: `build_permission_ask_presentation` produces the category title and the summary, and `PermissionInterruptRail` appends the "remember" hint. Both take their wording from `ToolPermissionHost.prompt_texts` — a frozen `PermissionPromptTexts` of `str.format` templates in `openjiuwen.harness.security.permission_engine.prompt_texts`.
+
+The title does not appear in the interrupt body; it reaches the host as `ask_title` in the interrupt metadata, alongside `ask_category` and `ask_summary`. Overriding `prompt_texts` changes both.
+
+openjiuwen does **not** choose a language here. `AGENT_PROMPT_LANGUAGE` and `resolve_language()` govern the **system prompt sent to the model**, not text a person reads; the two need not agree, and only the host knows what language its users are served in. Every default but two reproduces the built-in Chinese wording, so a host that injects nothing keeps its current output unchanged; `remember_tool` and `path_scope` are corrected rather than reproduced (below).
+
+```python
+from openjiuwen.harness.security import (
+    ENGLISH_PERMISSION_PROMPT_TEXTS,
+    PermissionPromptTexts,
+    ToolPermissionHost,
+)
+
+# the bundled English wording
+host = ToolPermissionHost(prompt_texts=ENGLISH_PERMISSION_PROMPT_TEXTS)
+
+# or wording of the host's own, in any language, overriding only what it needs
+host = ToolPermissionHost(
+    prompt_texts=PermissionPromptTexts(
+        title_tool="This tool needs your approval",
+        summary_tool="{tool_name} (confirmation required)",
+    ),
+)
+```
+
+The "remember" hint describes a **whole-tool** allow, and `path_scope` says so rather than implying a path limit. Neither remember is keyed on the path: the session key comes from `PermissionInterruptRail._get_auto_confirm_key`, which appends a subcommand only for shell tools and returns the bare tool name for every other tool, so the session entry is the tool name and matches that tool's every later ASK; and the permanent rule goes through `merge_permission_allow_rule_into_permissions`, which drops `path` suggestions (paths are written to file_guard instead) and, with nothing else to write for a non-shell tool, sets `permissions.tools[<tool>] = "allow"`. The previous wording described the allow as limited to the path shown; a host overriding these two fields should not reintroduce that reading.
+
+Not every string in the ASK body is a template. The summary of a `path`, `network` or `shell` confirmation is a path, a URL or the command itself; only the `tool` summary and the risk name that prefixes a `finding` summary are prose, and those are the ones `prompt_texts` covers.
+
+Each field documents the placeholders it accepts, and constructing a `PermissionPromptTexts` renders every field once against **its own** set — not the union of all of them, which would let `title_tool="{tool_name}"` through even though a title is rendered with no placeholders at all. A misspelt placeholder, a placeholder belonging to another field, a malformed format string, or a non-string value raises `DEEPAGENT_CONFIG_PARAM_ERROR` naming the field and what was wrong with it. A literal brace must be doubled (`{{`, `}}`).
+
+Validating at construction rather than at render is what makes a typo safe to make. A rail's `before_tool_call` stops a tool call only by raising `AbortError` or by marking the call skipped; any other exception is caught per callback by the callback framework, logged, and the chain continues. An error raised while rendering an ASK body would therefore leave the rail with no decision and let that one call through unconfirmed. Raising where the host builds its texts turns the same typo into a startup failure at the integration point.
+
+A host whose `request_permission_confirmation` returns anything other than `"interrupt"` renders its own confirmation UI and never reaches these templates.
 
 ---
 
@@ -98,6 +136,8 @@ For the built-in YAML writer, **`_resolve_agent_config_yaml_path`** uses **only*
 | `openjiuwen/harness/security/host.py` | `ToolPermissionHost` |
 | `openjiuwen/harness/security/factory.py` | `build_permission_interrupt_rail` |
 | `openjiuwen/harness/rails/security/tool_security_rail.py` | `PermissionInterruptRail` |
+| `openjiuwen/harness/security/permission_engine/prompt_texts.py` | `PermissionPromptTexts`, `ENGLISH_PERMISSION_PROMPT_TEXTS` |
+| `openjiuwen/harness/security/permission_engine/approve/ask_presentation.py` | ASK category, title and summary |
 | `openjiuwen/harness/security/patterns.py` | Matching + YAML **`persist_*`** |
 | `openjiuwen/harness/deep_agent.py` | Queues permission rail when enabled |
 | `examples/permissions/permission_demo.py` | Demo script |
