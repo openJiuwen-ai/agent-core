@@ -259,30 +259,66 @@ class SignalBasedSuccessDetector(SuccessDetector):
         ctx: Any = None,
         snapshot: Optional[dict] = None,
     ) -> SuccessOutcome:
+        logger.info("[TTSERail] detect start detector=SignalBasedSuccessDetector")
         score = _explicit_score(ctx, snapshot)
         if score is not None:
+            logger.info(
+                "[TTSERail] detect branch=explicit_score score=%s threshold=%s outcome=%s",
+                score,
+                self._config.success_threshold,
+                (
+                    "success"
+                    if score >= self._config.success_threshold
+                    else "partial"
+                    if score > 0
+                    else "fail"
+                ),
+            )
             return _outcome_from_explicit_score(score, self._config.success_threshold)
 
         msgs: List[Any] = list(messages or [])
         n_calls = count_tool_calls(msgs)
+        logger.info(
+            "[TTSERail] detect tool_calls=%s min=%s gate=%s",
+            n_calls,
+            self._config.detect_min_tool_calls,
+            "pass" if n_calls >= self._config.detect_min_tool_calls else "fail",
+        )
         if n_calls < self._config.detect_min_tool_calls:
+            logger.info(
+                "[TTSERail] detect branch=skip_tool_calls tool_calls=%s min=%s",
+                n_calls,
+                self._config.detect_min_tool_calls,
+            )
             return SuccessOutcome(
                 "skip",
                 0.0,
                 f"gate:tool_calls={n_calls}<{self._config.detect_min_tool_calls}",
             )
 
+        logger.info("[TTSERail] detect checking execution_failure signals")
         if _has_execution_failure(trajectory, msgs, signal_detector=self._signal_detector):
+            logger.info("[TTSERail] detect branch=partial_execution_failure")
             return SuccessOutcome("partial", 0.5, "signal:execution_failure")
 
         paths = extract_output_paths(msgs, max_paths=self._config.detect_max_output_paths)
         if paths:
+            logger.info(
+                "[TTSERail] detect branch=skip_artifact_paths n_paths=%s",
+                len(paths),
+            )
             return SuccessOutcome("skip", 0.0, f"artifact_paths:{len(paths)}")
 
+        logger.info("[TTSERail] detect no artifact paths; proceed to Judge")
         query = _task_query(ctx, snapshot, msgs)
         final_reply = extract_final_reply(
             msgs,
             max_chars=self._config.detect_final_reply_chars,
+        )
+        logger.info(
+            "[TTSERail] detect branch=judge_llm query_len=%s reply_len=%s",
+            len(query or ""),
+            len(final_reply or ""),
         )
         prompt = detect_judge_prompt(query, final_reply)
         try:
@@ -305,6 +341,11 @@ class SignalBasedSuccessDetector(SuccessDetector):
         if parsed is None:
             logger.warning("[TTSERail] detect Judge outcome invalid: %s", data.get("outcome"))
             return SuccessOutcome("skip", 0.0, "judge_bad_outcome")
+        logger.info(
+            "[TTSERail] detect branch=judge outcome=%s reason=%s",
+            parsed.outcome,
+            parsed.reason,
+        )
         return parsed
 
 
