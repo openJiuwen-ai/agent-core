@@ -69,12 +69,30 @@ def get_observability_runtime() -> ObservabilityRuntime:
     return _runtime
 
 
+def get_metrics_recorder() -> Any:
+    """Return the shared metrics recorder, or None when metrics are disabled."""
+
+    from openjiuwen.extensions.observability.metrics import get_metrics_recorder as _get
+
+    return _get()
+
+
+def is_metrics_enabled() -> bool:
+    """Return whether the shared runtime owns an active metrics recorder."""
+
+    from openjiuwen.extensions.observability.metrics import is_metrics_enabled as _is
+
+    return _is()
+
+
 __all__ = [
     "force_flush_provider",
     "get_config",
+    "get_metrics_recorder",
     "get_observability_runtime",
     "get_tracer",
     "init_observability",
     "is_initialized",
+    "is_metrics_enabled",
     "shutdown_observability",
 ]

@@ -18,6 +18,19 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 
 
+@pytest.fixture
+def reset_observability_runtime():
+    from openjiuwen.extensions.observability import metrics as _metrics
+    from openjiuwen.extensions.observability.demand import reset_observability_demands
+    from openjiuwen.extensions.observability.setup import shutdown_observability
+    shutdown_observability()
+    _metrics.set_metrics_recorder(None)
+    reset_observability_demands()
+    yield
+    shutdown_observability()
+    _metrics.set_metrics_recorder(None)
+
+
 class _RecordingProcessor(SpanProcessor):
     def __init__(self, events: list[str] | None = None) -> None:
         self.spans: list[ReadableSpan] = []
@@ -182,3 +195,50 @@ def test_initialization_failure_clears_runtime_state(monkeypatch: Any) -> None:
 
     assert not runtime.is_initialized()
     assert runtime.get_config() is None
+
+
+def test_metrics_initialized_when_enabled(reset_observability_runtime):
+    from openjiuwen.extensions.observability.setup import (
+        get_metrics_recorder,
+        init_observability,
+        is_metrics_enabled,
+        shutdown_observability,
+    )
+    cfg = ObservabilityConfig(metrics_enabled=True, metrics_exporter="console")
+    init_observability(cfg)
+    try:
+        assert is_metrics_enabled()
+        assert get_metrics_recorder() is not None
+    finally:
+        shutdown_observability()
+    assert not is_metrics_enabled()
+
+
+def test_metrics_not_initialized_by_default(reset_observability_runtime):
+    from openjiuwen.extensions.observability.setup import (
+        init_observability,
+        is_metrics_enabled,
+        shutdown_observability,
+    )
+    init_observability(ObservabilityConfig())
+    try:
+        assert not is_metrics_enabled()
+    finally:
+        shutdown_observability()
+
+
+def test_metrics_initialized_on_second_runtime_when_enabled(reset_observability_runtime):
+    from openjiuwen.extensions.observability.setup import (
+        get_metrics_recorder,
+        init_observability,
+        is_metrics_enabled,
+        shutdown_observability,
+    )
+    init_observability(ObservabilityConfig())  # first init: tracing only
+    assert not is_metrics_enabled()
+    init_observability(ObservabilityConfig(metrics_enabled=True, metrics_exporter="console"))
+    try:
+        assert is_metrics_enabled()
+        assert get_metrics_recorder() is not None
+    finally:
+        shutdown_observability()

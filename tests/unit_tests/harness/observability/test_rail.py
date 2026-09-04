@@ -246,6 +246,56 @@ async def test_no_agent_span_without_a_run_root(tracing):
     assert _finished(tracing.exporter, "agent.solo.task_iteration.1") == []
 
 
+class _FakeMetricsRecorder:
+    def __init__(self) -> None:
+        self.iteration_duration_calls: list[tuple] = []
+        self.iteration_error_calls: list[tuple] = []
+
+    def record_iteration_duration(self, agent_id, team_id, duration_ms) -> None:
+        self.iteration_duration_calls.append((agent_id, team_id, duration_ms))
+
+    def record_iteration_error(self, agent_id, team_id) -> None:
+        self.iteration_error_calls.append((agent_id, team_id))
+
+
+@pytest.mark.asyncio
+async def test_iteration_close_emits_iteration_metrics(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = "the answer"
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    agent_id, team_id, _duration = rec.iteration_duration_calls[0]
+    assert agent_id == "solo"
+    assert team_id == ""
+    assert rec.iteration_error_calls == []
+
+
+@pytest.mark.asyncio
+async def test_iteration_error_emits_error_metric(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+    ctx.exception = RuntimeError("boom")
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = None
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    assert ("solo", "") in rec.iteration_error_calls
+
+
 @pytest.mark.asyncio
 async def test_a_contributed_decoration_is_applied_on_open_and_at_close(tracing):
     """This is how a layer extends the span without subclassing or re-opening it."""

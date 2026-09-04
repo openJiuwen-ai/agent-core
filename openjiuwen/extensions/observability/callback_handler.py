@@ -42,7 +42,7 @@ from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_MEMBER_NAME,
     AT_SESSION_ID,
-
+    DA_AGENT_NAME,
     ERROR_TYPE,
     GEN_AI_AGENT_DESCRIPTION,
     GEN_AI_AGENT_ID,
@@ -167,6 +167,8 @@ from openjiuwen.core.foundation.llm.call_scope import (
     get_current_llm_call_id,
     is_llm_observation_suppressed,
 )
+
+from openjiuwen.extensions.observability import metrics as _metrics
 
 
 _TRACER_NAME = "openjiuwen.extensions.observability"
@@ -797,6 +799,12 @@ class OtelCallbackHandler:
             else:
                 span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
                 span.set_status(Status(StatusCode.ERROR, failure_reason))
+            self._emit_tool_metrics(
+                tool_name,
+                self._metrics_agent_id(span),
+                self._tool_duration_ms(span),
+                is_error=failure_reason is not None,
+            )
             span.end()
         except Exception as exc:
             import traceback
@@ -838,6 +846,12 @@ class OtelCallbackHandler:
                     span.set_status(Status(StatusCode.ERROR, str(exc)))
                 else:
                     span.set_status(Status(StatusCode.ERROR, "tool call error"))
+                self._emit_tool_metrics(
+                    tool_name,
+                    self._metrics_agent_id(span),
+                    self._tool_duration_ms(span),
+                    is_error=True,
+                )
                 span.end()
         except Exception as exc:
             logger.exception("otel: on_tool_call_error failed: {}", exc)
@@ -1130,6 +1144,8 @@ class OtelCallbackHandler:
 
             self._maybe_record_response_attrs(state, response)
 
+            self._emit_llm_metrics(state)
+
             self._finalize_llm_span_output(
                 state, completion_text, reasoning_text,
                 tc_json=tc_json, response=response,
@@ -1301,6 +1317,54 @@ class OtelCallbackHandler:
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "inference")
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
         span.set_attribute(GEN_AI_REQUEST_STREAM, state.is_streaming)
+
+    @staticmethod
+    def _metrics_agent_id(span: Span) -> str:
+        attributes = getattr(span, "attributes", None) or {}
+        return str(
+            attributes.get(GEN_AI_AGENT_NAME)
+            or attributes.get(DA_AGENT_NAME)
+            or attributes.get(GEN_AI_AGENT_ID)
+            or "unknown"
+        )
+
+    @staticmethod
+    def _metrics_model(span: Span) -> str:
+        attributes = getattr(span, "attributes", None) or {}
+        return str(attributes.get(GEN_AI_RESPONSE_MODEL) or attributes.get(GEN_AI_REQUEST_MODEL) or "unknown")
+
+    def _emit_llm_metrics(self, state: LlmSpanState) -> None:
+        rec = _metrics.get_metrics_recorder()
+        if rec is None or not state.span.is_recording():
+            return
+        usage = getattr(state.span, "attributes", None) or {}
+        prompt = int(usage.get(GEN_AI_USAGE_INPUT_TOKENS, 0) or 0)
+        completion = int(usage.get(GEN_AI_USAGE_OUTPUT_TOKENS, 0) or 0)
+        if not prompt and not completion:
+            prompt = int(usage.get(GEN_AI_USAGE_PROMPT_TOKENS, 0) or 0)
+            completion = int(usage.get(GEN_AI_USAGE_COMPLETION_TOKENS, 0) or 0)
+        agent_id = self._metrics_agent_id(state.span)
+        model = self._metrics_model(state.span)
+        start_time = getattr(state.span, "start_time", None)
+        duration_ms = (time.time_ns() - start_time) / 1_000_000.0 if start_time is not None else 0.0
+        rec.record_llm_usage(agent_id, model, prompt, completion)
+        rec.record_llm_duration(agent_id, model, duration_ms)
+
+    @staticmethod
+    def _tool_duration_ms(span: Span) -> float:
+        start_time = getattr(span, "start_time", None)
+        if start_time is None:
+            return 0.0
+        return (time.time_ns() - start_time) / 1_000_000.0
+
+    @staticmethod
+    def _emit_tool_metrics(tool_name: str, agent_id: str, duration_ms: float, is_error: bool) -> None:
+        rec = _metrics.get_metrics_recorder()
+        if rec is None:
+            return
+        rec.record_tool_duration(tool_name, agent_id, duration_ms)
+        if is_error:
+            rec.record_tool_error(tool_name, agent_id)
 
     def _record_usage_attrs(self, state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
         """Record usage attributes (tokens, model_name) from usage_metadata.
