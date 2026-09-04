@@ -28,6 +28,7 @@ from openjiuwen.harness.tools.web._common import (
     _FETCH_WEBPAGE_MAX_BYTES_ENV,
     _FETCH_WEBPAGE_MAX_CHARS_ENV,
     _FETCH_WEBPAGE_MAX_TIMEOUT_ENV,
+    _JINA_READER_HEADERS,
     _REQUEST_HEADERS,
     _decode_ddg_redirect,
     _parse_html,
@@ -92,7 +93,7 @@ class WebFetchWebpageTool(Tool):
             session,
             "GET",
             reader_url,
-            headers=_REQUEST_HEADERS,
+            headers=_JINA_READER_HEADERS,
             timeout_seconds=timeout_seconds,
             max_bytes=byte_cap,
         )

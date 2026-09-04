@@ -758,3 +758,210 @@ async def test_request_extracts_inline_proxy_auth(monkeypatch):
     await _request(session, "GET", "https://target.example.com", timeout_seconds=5)
     assert session.last_kwargs["proxy"] == "http://gw.example.com:8080"
     assert session.last_kwargs["proxy_auth"] == aiohttp.BasicAuth("puser", "ppass")
+
+
+# --------------------------------------------------------------------------- #
+# Anti-bot challenge detection and per-host request headers
+# --------------------------------------------------------------------------- #
+# Bing serves its CAPTCHA interstitial with HTTP 200, so nothing upstream of the
+# parser rejects it and the b_algo extraction simply finds nothing. Detection has
+# to key on the interstitial's own markup, and must not key on the bare words
+# "captcha" or "challenge": a genuine result page carries those whenever the
+# query is about them, and a false positive would turn working searches into
+# reported engine failures.
+_BING_CHALLENGE_HTML = """
+<html><head><title>Bing</title></head>
+<body>
+  <div id="captchaHolder">
+    <div class="captcha">
+      <div class="captcha_header">Please verify you are a human</div>
+      <form action="/challenge/verify?u=abc123" method="POST">
+        <input type="hidden" name="token" value="abc123"/>
+      </form>
+    </div>
+  </div>
+</body></html>
+"""
+
+# A result page for a query that is *about* captchas: the words appear in the
+# title, in result titles, snippets, hostnames and an aria-label, in the same
+# places a live SERP puts them. What it must not contain is the interstitial's
+# markup.
+_BING_RESULTS_ABOUT_CAPTCHAS_HTML = """
+<html><head><title>captcha challenge - Search</title></head>
+<body><main aria-label="Search Results"><ol id="b_results">
+  <li class="b_algo">
+    <div class="b_tpcn"><a class="tilk" aria-label="captcha.net"></a></div>
+    <h2><a href="https://www.captcha.net/">CAPTCHA: Telling Humans and Computers Apart</a></h2>
+    <div class="b_caption"><p>A CAPTCHA is a challenge test used to tell humans and computers apart.</p></div>
+  </li>
+  <li class="b_algo">
+    <h2><a href="https://example.org/how-captcha-challenge-works">How a captcha challenge works</a></h2>
+    <div class="b_caption"><p>Every captcha challenge asks the visitor to verify that they are human.</p></div>
+  </li>
+</ol></main></body></html>
+"""
+
+
+def test_bing_challenge_detection_ignores_the_bare_words():
+    """The words alone must not trip detection, however often they appear."""
+    html = _BING_RESULTS_ABOUT_CAPTCHAS_HTML
+    assert html.lower().count("captcha") >= 5
+    assert html.lower().count("challenge") >= 3
+
+    assert WebFreeSearchTool._is_bing_challenge_page(200, html) is False
+    assert WebFreeSearchTool._is_bing_challenge_page(200, _BING_CHALLENGE_HTML) is True
+
+
+@pytest.mark.asyncio
+async def test_bing_challenge_page_is_reported_as_a_block_not_as_no_results(monkeypatch):
+    """A blocked request must not be indistinguishable from a query with no hits."""
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+    _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(200, _BING_CHALLENGE_HTML.encode("utf-8")),
+    )
+
+    tool = WebFreeSearchTool(language="cn")
+    result = await tool.invoke({"query": "test query", "max_results": 5})
+
+    assert "anti-bot challenge page returned" in result
+    assert "low-quality or empty result" not in result
+
+
+@pytest.mark.asyncio
+async def test_bing_results_about_captchas_are_returned_not_reported_as_a_block(monkeypatch):
+    """The direction that costs users: a genuine page must survive detection."""
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+    _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(200, _BING_RESULTS_ABOUT_CAPTCHAS_HTML.encode("utf-8")),
+    )
+
+    tool = WebFreeSearchTool(language="cn")
+    result = await tool.invoke({"query": "captcha challenge", "max_results": 5})
+
+    assert "Free search results (Bing)" in result
+    assert "https://www.captcha.net/" in result
+    assert "[ERROR]" not in result
+
+
+def _user_agent_for(recorder, host: str) -> str:
+    """Return the User-Agent sent to the first recorded request against ``host``."""
+    for call in recorder.calls:
+        if host in call["url"]:
+            return (call["headers"] or {}).get("User-Agent", "")
+    raise AssertionError(f"no request was recorded against {host}; urls={[c['url'] for c in recorder.calls]}")
+
+
+@pytest.mark.asyncio
+async def test_jina_reader_is_not_sent_the_browser_user_agent(monkeypatch):
+    """r.jina.ai sits behind Cloudflare, which answers a browser UA from a
+    non-browser client with 403 -- so the reader fallback would fail exactly
+    when it is needed. The origin server still gets the browser UA.
+    """
+    def handler(method, url, body):
+        if "r.jina.ai" in url:
+            return _resp(200, b"Readable article text, long enough to be kept as content.")
+        return _resp(403, b"forbidden")
+
+    recorder = _patch_request(monkeypatch, handler)
+    tool = WebFetchWebpageTool(language="cn")
+    result = await tool.invoke({"url": "https://example.com/article"})
+
+    assert "Readable article text" in result
+    assert "Chrome" not in _user_agent_for(recorder, "r.jina.ai")
+    assert "Chrome" in _user_agent_for(recorder, "example.com/article")
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_via_jina_is_not_sent_the_browser_user_agent(monkeypatch):
+    """Same host, same reason: the jina proxy wants a plain client."""
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+    markdown = "[Example Title](https://example.com/page1)\n[Another](https://example.org/page2)\n"
+
+    def handler(method, url, body):
+        if "r.jina.ai" in url:
+            return _resp(200, markdown.encode("utf-8"))
+        return _resp(500, b"")
+
+    recorder = _patch_request(monkeypatch, handler)
+    tool = WebFreeSearchTool(language="cn")
+    await tool.invoke({"query": "example", "max_results": 5})
+
+    assert "Chrome" not in _user_agent_for(recorder, "r.jina.ai")
+
+
+@pytest.mark.asyncio
+async def test_search_engines_still_get_the_browser_user_agent(monkeypatch):
+    """The engines' own endpoints want the browser UA; only the proxy differs."""
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "true")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+
+    def handler(method, url, body):
+        if "bing.com" in url:
+            return _resp(200, _BING_RESULTS_ABOUT_CAPTCHAS_HTML.encode("utf-8"))
+        return _resp(500, b"")
+
+    recorder = _patch_request(monkeypatch, handler)
+    tool = WebFreeSearchTool(language="cn")
+    await tool.invoke({"query": "captcha challenge", "max_results": 5})
+
+    assert "Chrome" in _user_agent_for(recorder, "duckduckgo.com/html")
+    assert "Chrome" in _user_agent_for(recorder, "bing.com")
+
+
+@pytest.mark.asyncio
+async def test_bing_challenge_page_is_still_captured_for_debugging(monkeypatch, tmp_path):
+    """A blocked page is the response debugging exists for; raising must not discard it."""
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+    monkeypatch.setenv("FREE_SEARCH_DEBUG", "true")
+    monkeypatch.setenv("FREE_SEARCH_DEBUG_DIR", str(tmp_path / "debug"))
+    _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(200, _BING_CHALLENGE_HTML.encode("utf-8")),
+    )
+
+    tool = WebFreeSearchTool(language="cn")
+    result = await tool.invoke({"query": "test query", "max_results": 5})
+
+    assert "anti-bot challenge page returned" in result
+    dumps = list((tmp_path / "debug").glob("*_bing_raw.json"))
+    assert dumps, "the blocked response was not captured"
+    payload = json.loads(dumps[0].read_text(encoding="utf-8"))
+    assert 'class="captcha"' in payload["raw_html"]
+    assert payload["html_sections"]["counts"]["b_algo"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_reason"),
+    [
+        (202, "anti-bot challenge page returned"),
+        (429, "HTTP 429"),
+        (503, "HTTP 503"),
+    ],
+)
+async def test_bing_non_ok_statuses_are_attributed(monkeypatch, status, expected_reason):
+    """Pins which check owns which status.
+
+    ``_is_bing_challenge_page`` also treats 202/418/429/503 as a block, but
+    ``_search_bing`` calls ``raise_for_status_with_body`` first, so everything at
+    or above 400 is reported by status before the detector ever sees it. Only
+    202 reaches the detector. Both routes raise the same engine error, so the
+    caller cannot confuse either with an empty result -- this test exists so a
+    later reordering has to be a deliberate choice.
+    """
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "true")
+    _patch_request(monkeypatch, lambda method, url, body: _resp(status, b"<html>blocked</html>"))
+
+    tool = WebFreeSearchTool(language="cn")
+    result = await tool.invoke({"query": "test query", "max_results": 5})
+
+    assert expected_reason in result
+    assert "low-quality or empty result" not in result
