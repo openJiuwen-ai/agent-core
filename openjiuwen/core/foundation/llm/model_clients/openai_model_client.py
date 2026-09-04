@@ -2479,9 +2479,17 @@ class OpenAIModelClient(BaseModelClient):
         prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
         completion_token_ids = getattr(choice, 'token_ids', None) or None
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
-        finish_reason = getattr(choice, 'finish_reason', None) or None
-        if not finish_reason:
+
+        # Preserve the provider's real finish_reason (e.g. "length", "stop",
+        # "tool_calls") so downstream callers can distinguish a token-budget
+        # truncation from a natural stop. Fall back to the legacy hard-coded
+        # values only when the provider omits it or returns a non-string.
+        raw_finish_reason = getattr(choice, 'finish_reason', None)
+        if isinstance(raw_finish_reason, str) and raw_finish_reason:
+            finish_reason = raw_finish_reason
+        else:
             finish_reason = "tool_calls" if tool_calls else "stop"
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
