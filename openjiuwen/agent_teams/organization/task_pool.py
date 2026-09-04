@@ -36,6 +36,9 @@ from openjiuwen.agent_teams.organization.events import (
 )
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
+    ORG_TASK_REPAIRS_TASK_ID_KEY,
+    ORG_TASK_RETRY_COUNT_KEY,
+    ORG_TASK_RETRY_LIMIT_KEY,
     ORG_TASK_TERMINAL_STATUS_VALUES,
     OrgAssignment,
     OrgAssignmentType,
@@ -70,6 +73,12 @@ _FAILABLE_TASK_STATUSES = frozenset({
     OrgTaskStatus.CLAIMED.value,
     OrgTaskStatus.DELEGATED.value,
     OrgTaskStatus.IN_PROGRESS.value,
+})
+
+# Rejected / needs-revision children may be superseded by an accepted repair sibling.
+_SUPERSEDEABLE_REVIEW_STATUSES = frozenset({
+    OrgTaskReviewStatus.REJECTED.value,
+    OrgTaskReviewStatus.NEEDS_REVISION.value,
 })
 
 
@@ -306,6 +315,7 @@ class OrgTaskManager:
         required_capabilities: list[str] | None = None,
         output_spec: OrgTaskOutputSpec | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        repairs_task_id: str | None = None,
         delegated_to_team_id: str | None = None,
         delegated_to_leader_id: str | None = None,
         aggregation_mode: OrgTaskAggregationMode | str | None = None,
@@ -323,6 +333,22 @@ class OrgTaskManager:
         capabilities = list(dict.fromkeys(capability.strip() for capability in capabilities))
         task_id = task_id or f"org-task-{uuid.uuid4().hex[:12]}"
         now = get_current_time()
+        task_metadata = dict(metadata or {})
+        # Single entry: only the repairs_task_id param establishes the link.
+        task_metadata.pop(ORG_TASK_REPAIRS_TASK_ID_KEY, None)
+        repairs_target: str | None = None
+        if repairs_task_id is not None:
+            if not isinstance(repairs_task_id, str) or not repairs_task_id.strip():
+                return OrgTaskOpResult(ok=False, reason="repairs_task_id must be a non-empty string")
+            repairs_target = repairs_task_id.strip()
+            if not parent_task_id:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason="repairs_task_id requires parent_task_id (repair must be a sibling child)",
+                )
+            if repairs_target == task_id:
+                return OrgTaskOpResult(ok=False, reason="repairs_task_id cannot reference the new task itself")
+            task_metadata[ORG_TASK_REPAIRS_TASK_ID_KEY] = repairs_target
         if parent_task_id and aggregation_mode is not None:
             return OrgTaskOpResult(ok=False, reason="aggregation_mode is only allowed on root tasks")
         if aggregation_mode is not None:
@@ -362,6 +388,30 @@ class OrgTaskManager:
                         reason=f"root task root_task_id must equal task_id ({task_id!r}); got {root_task_id!r}",
                     )
                 root_task_id = task_id
+            if repairs_target is not None:
+                repaired = await session.get(OrgTaskRecord, repairs_target)
+                if repaired is None or repaired.organization_id != self.organization_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=f"repairs_task_id target not found: {repairs_target}",
+                    )
+                if repaired.parent_task_id != parent_task_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "repairs_task_id target must share the same parent_task_id "
+                            f"({parent_task_id!r}); got {repaired.parent_task_id!r}"
+                        ),
+                    )
+                retry_gate = await self._apply_repair_retry_budget(
+                    session,
+                    repaired=repaired,
+                    parent_task_id=parent_task_id,
+                    repairs_target=repairs_target,
+                    now=now,
+                )
+                if retry_gate is not None:
+                    return retry_gate
             if await session.get(OrgTaskRecord, task_id) is not None:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
             aggregation_json = None
@@ -389,7 +439,7 @@ class OrgTaskManager:
                 assigned_at=now if delegated_to_team_id else None,
                 aggregation_json=aggregation_json,
                 output_spec_json=_json_dumps(spec_model.model_dump() if spec_model else None),
-                metadata_json=_json_dumps(metadata or {}),
+                metadata_json=_json_dumps(task_metadata),
             )
             session.add(row)
             await session.commit()
@@ -585,12 +635,9 @@ class OrgTaskManager:
                 OrgTaskRecord.creator_team_id == team_id,
             )
             child_rows = (await session.execute(child_stmt)).scalars().all()
-            for child in child_rows:
-                if child.status != OrgTaskStatus.COMPLETED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"child task is not completed: {child.task_id}")
-                child_review = await self._get_latest_review_row(session, child.task_id)
-                if child_review is None or child_review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"child task review is not accepted: {child.task_id}")
+            blocked_reason = await self._parent_complete_blocked_reason(session, child_rows)
+            if blocked_reason is not None:
+                return OrgTaskOpResult(ok=False, reason=blocked_reason)
             row.status = OrgTaskStatus.COMPLETED.value
             if context_model is not None:
                 row.output_context_json = _json_dumps(context_model.model_dump())
@@ -798,13 +845,111 @@ class OrgTaskManager:
                 OrgTaskRecord.creator_team_id == team_id,
             )
             child_rows = (await session.execute(stmt)).scalars().all()
-            for child in child_rows:
-                if child.status != OrgTaskStatus.COMPLETED.value:
-                    return False
-                review = await self._get_latest_review_row(session, child.task_id)
-                if review is None or review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
-                    return False
-            return True
+            return await self._parent_complete_blocked_reason(session, child_rows) is None
+
+    async def _parent_complete_blocked_reason(
+        self,
+        session: Any,
+        child_rows: list[OrgTaskRecord],
+    ) -> str | None:
+        """Return a block reason, or None when every direct child is accepted or one-level superseded."""
+        if not child_rows:
+            return None
+
+        reviews: dict[str, OrgTaskReviewRecord | None] = {}
+        for child in child_rows:
+            reviews[child.task_id] = await self._get_latest_review_row(session, child.task_id)
+
+        repairs_of: dict[str, list[OrgTaskRecord]] = {}
+        for child in child_rows:
+            meta = _json_loads(child.metadata_json, {})
+            target = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+            if isinstance(target, str) and target.strip():
+                repairs_of.setdefault(target.strip(), []).append(child)
+
+        def _is_accepted(child: OrgTaskRecord) -> bool:
+            if child.status != OrgTaskStatus.COMPLETED.value:
+                return False
+            review = reviews.get(child.task_id)
+            return review is not None and review.review_status == OrgTaskReviewStatus.ACCEPTED.value
+
+        def _is_supersedable(child: OrgTaskRecord) -> bool:
+            if child.status == OrgTaskStatus.FAILED.value:
+                return True
+            if child.status != OrgTaskStatus.COMPLETED.value:
+                return False
+            review = reviews.get(child.task_id)
+            return review is not None and review.review_status in _SUPERSEDEABLE_REVIEW_STATUSES
+
+        for child in child_rows:
+            if _is_accepted(child):
+                continue
+            if _is_supersedable(child) and any(
+                _is_accepted(repair) for repair in repairs_of.get(child.task_id, ())
+            ):
+                continue
+            if _is_supersedable(child):
+                return f"child task is not superseded by an accepted repair: {child.task_id}"
+            if child.status != OrgTaskStatus.COMPLETED.value:
+                return f"child task is not completed: {child.task_id}"
+            return f"child task review is not accepted: {child.task_id}"
+        return None
+
+    async def _apply_repair_retry_budget(
+        self,
+        session: Any,
+        *,
+        repaired: OrgTaskRecord,
+        parent_task_id: str,
+        repairs_target: str,
+        now: int,
+    ) -> OrgTaskOpResult | None:
+        """Enforce optional retry_limit on the repaired task; bump retry_count. None = ok."""
+        repaired_meta = _json_loads(repaired.metadata_json, {})
+        raw_limit = repaired_meta.get(ORG_TASK_RETRY_LIMIT_KEY)
+        retry_limit: int | None = None
+        if raw_limit is not None:
+            try:
+                retry_limit = int(raw_limit)
+            except (TypeError, ValueError):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"invalid retry_limit on repaired task {repairs_target!r}: {raw_limit!r}",
+                )
+            if retry_limit < 0:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"invalid retry_limit on repaired task {repairs_target!r}: {raw_limit!r}",
+                )
+
+        sibling_rows = (
+            await session.execute(
+                select(OrgTaskRecord).where(
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.parent_task_id == parent_task_id,
+                )
+            )
+        ).scalars().all()
+        existing = 0
+        for sibling in sibling_rows:
+            meta = _json_loads(sibling.metadata_json, {})
+            target = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+            if isinstance(target, str) and target.strip() == repairs_target:
+                existing += 1
+
+        if retry_limit is not None and existing >= retry_limit:
+            return OrgTaskOpResult(
+                ok=False,
+                reason=(
+                    f"retry_limit reached for repaired task {repairs_target}: "
+                    f"{existing}/{retry_limit}"
+                ),
+            )
+
+        repaired_meta[ORG_TASK_RETRY_COUNT_KEY] = existing + 1
+        repaired.metadata_json = _json_dumps(repaired_meta)
+        repaired.updated_at = now
+        return None
 
     async def create_summary_task(
         self,

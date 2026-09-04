@@ -1000,7 +1000,8 @@ class OrganizationRuntimeManager:
             f"Child organization task {child_task_id} was reviewed as {review_status} "
             f"in {organization_id}. Parent task {parent_task_id} cannot advance on that child. "
             "Read the child result and review verdict/required_changes, then either create at most "
-            "one focused repair task with org_create_task (include defect report and acceptance "
+            "one focused repair task with org_create_task "
+            f"(set repairs_task_id={child_task_id}; include defect report and acceptance "
             "criteria; prefer capabilities that match the defect) or re-delegate with "
             "org_delegate_task. Do not leave the parent waiting without a repair/re-delegation "
             "decision, and do not silently reopen the rejected child task."
@@ -1026,10 +1027,10 @@ class OrganizationRuntimeManager:
         self._scheduled_parent_reviews.add(review_key)
         prompt = (
             f"All direct child tasks for parent organization task {parent_task_id} "
-            f"in {organization_id} are completed and accepted. Integrate the child outputs "
-            "and call org_update_task(action='complete') on the parent with the final "
-            "output_context and output_abstract. For a root task, put the user-facing delivery "
-            "in output_context.description."
+            f"in {organization_id} are accepted or superseded by an accepted repair. "
+            "Integrate the child outputs and call org_update_task(action='complete') on the "
+            "parent with the final output_context and output_abstract. For a root task, put the "
+            "user-facing delivery in output_context.description."
         )
         self._schedule_leader_turn(
             team_id=team_id,
@@ -1058,7 +1059,8 @@ class OrganizationRuntimeManager:
             f"(failure_code={failure_code}, failure_reason={failure_reason}). "
             f"Parent task {parent_task_id} cannot advance on that child. "
             "This is not a pending review — do not call org_review_task on the failed child. "
-            "Create at most one focused repair task with org_create_task (include the failure "
+            "Create at most one focused repair task with org_create_task "
+            f"(set repairs_task_id={child_task_id}; include the failure "
             "report and acceptance criteria) or re-delegate with org_delegate_task. "
             "Do not leave the parent waiting without a repair/re-delegation decision, and do not "
             "silently reopen the failed child task."
