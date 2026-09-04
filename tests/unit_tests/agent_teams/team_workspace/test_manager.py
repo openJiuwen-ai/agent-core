@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -112,15 +114,8 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
         error.winerror = ERROR_PRIVILEGE_NOT_HELD
         raise error
 
-    def fake_run(command, capture_output, text, check, shell=False):
-        junction_calls.append(
-            {
-                "command": command,
-                "capture_output": capture_output,
-                "text": text,
-                "check": check,
-            }
-        )
+    def fake_run(command, **kwargs):
+        junction_calls.append({"command": command, **kwargs})
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(os, "symlink", fake_symlink)
@@ -135,6 +130,11 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
     assert junction_calls[0]["capture_output"] is True
     assert junction_calls[0]["text"] is True
     assert junction_calls[0]["check"] is False
+    # cmd.exe writes in the OEM code page; decoding it as whatever
+    # locale.getpreferredencoding(False) happens to be raises UnicodeDecodeError
+    # in subprocess's reader thread and masks the real failure.
+    assert junction_calls[0]["encoding"] == "oem"
+    assert junction_calls[0]["errors"] == "replace"
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
 @pytest.mark.level0
@@ -346,3 +346,48 @@ async def test_pull_push_history_noop_when_version_control_disabled(monkeypatch,
     assert await manager.push() is True
     assert await manager.get_history("artifacts/code/a.py") == []
     assert recorder.calls == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Junction creation only happens on Windows")
+def test_junction_decodes_oem_output_without_crashing():
+    """A localized cmd.exe failure must not be decoded as UTF-8.
+
+    ``cmd.exe`` writes its messages in the OEM code page. When
+    ``locale.getpreferredencoding(False)`` resolves to UTF-8 -- which happens
+    under Windows 11's "Use Unicode UTF-8 worldwide language support" and under
+    Python UTF-8 mode -- a bare ``text=True`` decodes those bytes as UTF-8 and
+    raises ``UnicodeDecodeError`` inside subprocess's reader thread, masking the
+    real failure. Reproduce the byte sequence and pin the decoding contract.
+    """
+    payload = b"\xb4\xed\xce\xf3"          # OEM (cp936) bytes; invalid UTF-8
+    script = "import sys; sys.stdout.buffer.write(%r); raise SystemExit(1)" % payload
+
+    with pytest.raises(UnicodeDecodeError):
+        payload.decode("utf-8")
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="oem",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 1
+    assert isinstance(result.stdout, str)
+    assert result.stdout != ""
+
+
+def test_junction_failure_surfaces_as_oserror(monkeypatch, tmp_path):
+    """Whatever the message decodes to, a failed mklink must raise OSError."""
+    from openjiuwen.agent_teams.team_workspace import manager as manager_module
+
+    def fake_run(command, **kwargs):
+        assert kwargs.get("errors") == "replace"
+        return SimpleNamespace(returncode=1, stdout="", stderr="privilege not held")
+
+    monkeypatch.setattr(manager_module.subprocess, "run", fake_run)
+    with pytest.raises(OSError) as excinfo:
+        manager_module.TeamWorkspaceManager._create_windows_junction(
+            str(tmp_path / "target"), str(tmp_path / "link"))
+    assert "privilege not held" in str(excinfo.value)
