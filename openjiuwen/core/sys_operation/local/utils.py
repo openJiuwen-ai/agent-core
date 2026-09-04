@@ -28,6 +28,7 @@ from openjiuwen.core.sys_operation.local.output_encoding import (
     IncrementalCommandDecoder,
     decode_command_output,
 )
+from openjiuwen.core.sys_operation.shell_process_registry import _kill_windows_process_tree
 
 
 class StreamEventType(str, Enum):
@@ -95,11 +96,12 @@ class AsyncProcessHandler:
         self._is_executed = False
 
     def _kill_process_tree(self) -> None:
-        """Kill the subprocess and all its children using process group.
+        """Kill the subprocess and descendants.
 
-        Requires ``start_new_session=True`` when creating the subprocess
-        for full process-tree coverage.  Falls back to ``process.kill()``
-        when the process group is not available (e.g. Windows).
+        POSIX uses ``killpg`` (spawn sets ``start_new_session``). Windows has
+        no process-group equivalent, so ``taskkill /T /F`` is required;
+        ``process.kill()`` only terminates the tracked shell and leaves
+        python/node grandchildren running.
         """
         pid = self._process.pid
         if pid is None:
@@ -108,7 +110,13 @@ class AsyncProcessHandler:
             if os.name != "nt":
                 os.killpg(pid, signal.SIGKILL)
             else:
-                self._process.kill()
+                if not _kill_windows_process_tree(pid):
+                    self._process.kill()
+                elif self._process.returncode is None:
+                    try:
+                        self._process.kill()
+                    except ProcessLookupError:
+                        pass
         except OSError:
             try:
                 self._process.kill()

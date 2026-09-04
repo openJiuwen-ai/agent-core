@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -151,6 +152,34 @@ def consume_shell_session_cancelled(session_id: str) -> bool:
     return SHELL_PROCESS_REGISTRY.consume_cancelled(session_id)
 
 
+_TASKKILL_TIMEOUT_S = 10
+
+
+def _kill_windows_process_tree(pid: int) -> bool:
+    """Kill *pid* and descendants via ``taskkill /T /F``.
+
+    Returns True when taskkill was invoked (even if the pid was already gone).
+    Returns False when taskkill is missing so the caller can fall back to
+    ``terminate()`` / ``kill()`` on the direct handle only.
+    """
+    taskkill = shutil.which("taskkill")
+    if taskkill is None:
+        return False
+    try:
+        subprocess.run(
+            [taskkill, "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=_TASKKILL_TIMEOUT_S,
+        )
+        return True
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        sys_operation_logger.warning(f"taskkill /T failed for pid {pid}: {exc}")
+        return False
+
+
 def terminate_shell_process(proc: ProcessHandle) -> bool:
     if isinstance(proc, asyncio.subprocess.Process):
         if proc.returncode is not None:
@@ -162,7 +191,13 @@ def terminate_shell_process(proc: ProcessHandle) -> bool:
             if os.name != "nt":
                 os.killpg(pid, signal.SIGKILL)
             else:
-                proc.kill()
+                if not _kill_windows_process_tree(pid):
+                    proc.kill()
+                elif proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
         except OSError:
             try:
                 proc.kill()
@@ -176,7 +211,10 @@ def terminate_shell_process(proc: ProcessHandle) -> bool:
         if os.name != "nt":
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         else:
-            proc.terminate()
+            if not _kill_windows_process_tree(proc.pid):
+                proc.terminate()
+            elif proc.poll() is None:
+                proc.kill()
     except OSError:
         return False
     try:
