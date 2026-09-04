@@ -137,6 +137,12 @@ OJ_EXECUTION_SUBJECT_REQUEST_NUMBER = "openjiuwen.execution.subject.request.numb
 OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
 OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
+
+# Trace-level usage rollup stamped on the single-agent run root at close.
+OJ_RUN_TOTAL_PROMPT_TOKENS = "openjiuwen.run.total_prompt_tokens"
+OJ_RUN_TOTAL_COMPLETION_TOKENS = "openjiuwen.run.total_completion_tokens"
+OJ_RUN_TOTAL_TOOL_CALLS = "openjiuwen.run.total_tool_calls"
+OJ_RUN_ESTIMATED_COST_USD = "openjiuwen.run.estimated_cost_usd"
 OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
 OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
 OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS = "openjiuwen.gen_ai.response.prompt_token_ids"
@@ -196,6 +202,12 @@ AT_MESSAGE_BROADCAST = "agentteam.message.broadcast"
 AT_TASK_ID = "agentteam.task.id"
 AT_TASK_STATUS = "agentteam.task.status"
 AT_TASK_ASSIGNEE = "agentteam.task.assignee"
+
+# Trace-level usage rollup stamped on the team root span at finalize_trace.
+AT_TASK_TOTAL_PROMPT_TOKENS = "agentteam.task.total_prompt_tokens"
+AT_TASK_TOTAL_COMPLETION_TOKENS = "agentteam.task.total_completion_tokens"
+AT_TASK_TOTAL_TOOL_CALLS = "agentteam.task.total_tool_calls"
+AT_TASK_ESTIMATED_COST_USD = "agentteam.task.estimated_cost_usd"
 
 AT_PLAN_APPROVED = "agentteam.plan.approved"
 AT_PLAN_SUBMITTED_BY = "agentteam.plan.submitted_by"

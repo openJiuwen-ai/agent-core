@@ -68,6 +68,16 @@ def exporter(monkeypatch) -> InMemorySpanExporter:
     agent_span_context.reset_run_root_spans()
 
 
+@pytest.fixture(autouse=True)
+def _reset_usage_accumulator():
+    from openjiuwen.extensions.observability import usage_aggregation as usage_mod
+
+    saved = usage_mod._ACCUMULATOR
+    usage_mod._ACCUMULATOR = None
+    yield
+    usage_mod._ACCUMULATOR = saved
+
+
 def test_span_name_carries_the_mode_hierarchy_and_degrades_gracefully() -> None:
     assert build_run_span_name(mode="code.normal", session_id="s1") == "agent.code.normal.s1"
     assert build_run_span_name(mode="agent.plan", session_id="") == "agent.agent.plan.run"
@@ -315,3 +325,35 @@ def test_cascade_forced_tool_is_unset_and_marks_root_before_root_ends(exporter) 
     )
     assert root_record.attributes[OJ_TRACE_FORCED_CLOSE] is True
     assert root_record.attributes[OJ_TRACE_COMPLETE] is True
+
+
+def test_close_stamps_the_usage_rollup_onto_the_run_root_and_clears_it(exporter) -> None:
+    """Root close flushes the trace-keyed rollup as openjiuwen.run.* attributes."""
+    from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+    handle = open_agent_run_span(session_id="sess-A", mode="agent.fast")
+    accumulator = get_accumulator()
+    trace_id = handle.context.trace_id
+    accumulator.accumulate_llm(trace_id, prompt=1000, completion=500, cost=0.002)
+    accumulator.accumulate_llm(trace_id, prompt=100, completion=50, cost=0.0002)
+    accumulator.accumulate_tool(trace_id, is_error=False)
+    accumulator.accumulate_tool(trace_id, is_error=True)
+
+    close_agent_run_span(handle, session_id="sess-A")
+
+    root_record = exporter.get_finished_spans()[0]
+    assert root_record.attributes["openjiuwen.run.total_prompt_tokens"] == 1100
+    assert root_record.attributes["openjiuwen.run.total_completion_tokens"] == 550
+    assert root_record.attributes["openjiuwen.run.total_tool_calls"] == 2
+    assert root_record.attributes["openjiuwen.run.estimated_cost_usd"] == pytest.approx(0.0022)
+    assert accumulator.snapshot(trace_id) == {}
+
+
+def test_close_without_rollup_does_not_stamp_usage_attributes(exporter) -> None:
+    handle = open_agent_run_span(session_id="sess-A", mode="agent.fast")
+
+    close_agent_run_span(handle, session_id="sess-A")
+
+    root_record = exporter.get_finished_spans()[0]
+    assert "openjiuwen.run.total_prompt_tokens" not in root_record.attributes
+    assert "openjiuwen.run.estimated_cost_usd" not in root_record.attributes

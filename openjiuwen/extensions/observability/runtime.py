@@ -103,6 +103,7 @@ class ObservabilityRuntime:
         self._tracker: ActiveSpanTracker | None = None
         self._callback_handler: OtelCallbackHandler | None = None
         self._context_compression_handler: ContextCompressionObservabilityBridge | None = None
+        self._metrics_recorder: Any | None = None
         self._registered_callbacks: list[tuple[str, Any]] = []
         self._callback_framework: Any | None = None
         self._callback_namespace = "extensions.observability"
@@ -129,6 +130,11 @@ class ObservabilityRuntime:
                 if span_exporter_override is not None:
                     self._provider.add_span_processor(SimpleSpanProcessor(span_exporter_override))
                 self.add_span_processors(additional_span_processors)
+                # metrics: independent of the trace provider; build lazily if requested
+                if config.metrics_enabled and self._metrics_recorder is None:
+                    from openjiuwen.extensions.observability import metrics as metrics_module
+                    self._metrics_recorder = metrics_module.MetricsRecorder(config)
+                    metrics_module.set_metrics_recorder(self._metrics_recorder)
                 return
             if self._initializing:
                 raise RuntimeError("observability initialization is already in progress")
@@ -165,6 +171,11 @@ class ObservabilityRuntime:
                 set_active_span_tracker(tracker)
                 self._additional_processors.extend(additional_processors)
 
+                from openjiuwen.extensions.observability import metrics as metrics_module
+                if config.metrics_enabled:
+                    self._metrics_recorder = metrics_module.MetricsRecorder(config)
+                metrics_module.set_metrics_recorder(self._metrics_recorder)
+
                 callback_handler = OtelCallbackHandler(
                     config,
                     tracer=provider.get_tracer("openjiuwen.extensions.observability"),
@@ -183,6 +194,14 @@ class ObservabilityRuntime:
                     logger.warning("otel: set_tracer_provider failed - {}", exc)
             except Exception:
                 self._unregister_callbacks()
+                if self._metrics_recorder is not None:
+                    try:
+                        self._metrics_recorder.shutdown()
+                    except Exception as exc:
+                        logger.warning("otel: metrics rollback shutdown failed - {}", exc)
+                self._metrics_recorder = None
+                from openjiuwen.extensions.observability import metrics as metrics_module
+                metrics_module.set_metrics_recorder(None)
                 if provider is not None:
                     try:
                         provider.shutdown()
@@ -255,6 +274,14 @@ class ObservabilityRuntime:
                     except Exception as exc:
                         logger.warning("otel: provider shutdown failed - {}", exc)
             finally:
+                from openjiuwen.extensions.observability import metrics as metrics_module
+                if self._metrics_recorder is not None:
+                    try:
+                        self._metrics_recorder.shutdown()
+                    except Exception as exc:
+                        logger.warning("otel: metrics shutdown failed - {}", exc)
+                self._metrics_recorder = None
+                metrics_module.set_metrics_recorder(None)
                 self._provider = None
                 self._config = None
                 self._tracker = None

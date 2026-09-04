@@ -246,6 +246,56 @@ async def test_no_agent_span_without_a_run_root(tracing):
     assert _finished(tracing.exporter, "agent.solo.task_iteration.1") == []
 
 
+class _FakeMetricsRecorder:
+    def __init__(self) -> None:
+        self.iteration_duration_calls: list[tuple] = []
+        self.iteration_error_calls: list[tuple] = []
+
+    def record_iteration_duration(self, agent_id, team_id, duration_ms) -> None:
+        self.iteration_duration_calls.append((agent_id, team_id, duration_ms))
+
+    def record_iteration_error(self, agent_id, team_id) -> None:
+        self.iteration_error_calls.append((agent_id, team_id))
+
+
+@pytest.mark.asyncio
+async def test_iteration_close_emits_iteration_metrics(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = "the answer"
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    agent_id, team_id, _duration = rec.iteration_duration_calls[0]
+    assert agent_id == "solo"
+    assert team_id == ""
+    assert rec.iteration_error_calls == []
+
+
+@pytest.mark.asyncio
+async def test_iteration_error_emits_error_metric(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+    ctx.exception = RuntimeError("boom")
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = None
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    assert ("solo", "") in rec.iteration_error_calls
+
+
 @pytest.mark.asyncio
 async def test_a_contributed_decoration_is_applied_on_open_and_at_close(tracing):
     """This is how a layer extends the span without subclassing or re-opening it."""
@@ -752,6 +802,37 @@ async def test_tool_exception_closes_authoritative_span_with_error(tracing):
     span = _finished(tracing.exporter, "tool.search")[0]
     assert span.status.status_code.name == "ERROR"
     assert span.attributes["error.type"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_authoritative_tool_close_counts_into_trace_rollup(tracing):
+    from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    accumulator = get_accumulator()
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+
+    ok_ctx = _tool_ctx(agent, call_id="call-ok")
+    await rail.before_tool_call(ok_ctx)
+    ok_ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ok_ctx)
+
+    err_ctx = _tool_ctx(agent, call_id="call-err")
+    await rail.before_tool_call(err_ctx)
+    err_ctx.exception = ValueError("boom")
+    await rail.on_tool_exception(err_ctx)
+
+    await rail.after_task_iteration(iteration_ctx)
+
+    trace_id = tracing.root.context.trace_id
+    snap = accumulator.snapshot(trace_id)
+    assert snap["tool_calls"] == 2
+    assert snap["tool_errors"] == 1
+    accumulator.clear(trace_id)
 
 
 @pytest.mark.asyncio

@@ -247,6 +247,10 @@ def close_agent_run_span(
 
         from openjiuwen.extensions.observability.semconv import (
             ERROR_TYPE,
+            OJ_RUN_ESTIMATED_COST_USD,
+            OJ_RUN_TOTAL_COMPLETION_TOKENS,
+            OJ_RUN_TOTAL_PROMPT_TOKENS,
+            OJ_RUN_TOTAL_TOOL_CALLS,
             OJ_TRACE_COMPLETE,
             OJ_TRACE_FORCED_CLOSE,
         )
@@ -284,6 +288,15 @@ def close_agent_run_span(
             logger.debug("[AgentObservability] flush_child_spans failed: %s", exc)
         if forced_close_count:
             handle.set_attribute(OJ_TRACE_FORCED_CLOSE, True)
+
+        from openjiuwen.extensions.observability.usage_aggregation import drain_rollup
+        if trace_id is not None:
+            snapshot = drain_rollup(trace_id)
+            if snapshot:
+                handle.set_attribute(OJ_RUN_TOTAL_PROMPT_TOKENS, int(snapshot["prompt_tokens"]))
+                handle.set_attribute(OJ_RUN_TOTAL_COMPLETION_TOKENS, int(snapshot["completion_tokens"]))
+                handle.set_attribute(OJ_RUN_TOTAL_TOOL_CALLS, int(snapshot["tool_calls"]))
+                handle.set_attribute(OJ_RUN_ESTIMATED_COST_USD, snapshot["cost"])
 
         if output is not _OUTPUT_UNSET:
             try:
