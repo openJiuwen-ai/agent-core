@@ -800,7 +800,10 @@ class OrgViewChildTasksTool(_OrgLeaderTool):
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
         super().__init__(
             name="org_view_child_tasks",
-            description="View direct child tasks for a parent organization task.",
+            description=(
+                "View direct child tasks for a parent organization task, including "
+                "status, assignment, and the latest review summary."
+            ),
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -819,11 +822,11 @@ class OrgViewChildTasksTool(_OrgLeaderTool):
         parent_task_id = inputs.get("parent_task_id")
         if not parent_task_id:
             return ToolOutput(success=False, error="'parent_task_id' is required")
-        tasks = await self.manager.list_child_tasks(
+        tasks = await self.manager.list_child_task_views(
             parent_task_id=parent_task_id,
             creator_team_id=self.team_id if inputs.get("only_mine", True) else None,
         )
-        return ToolOutput(success=True, data={"tasks": [task.brief() for task in tasks]})
+        return ToolOutput(success=True, data={"tasks": tasks})
 
 
 class OrgViewPendingReviewsTool(_OrgLeaderTool):

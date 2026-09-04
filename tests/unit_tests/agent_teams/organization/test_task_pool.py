@@ -34,7 +34,12 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
-from openjiuwen.agent_teams.organization.tools import OrgCreateTaskTool, OrgReviewTaskTool, OrgUpdateTaskTool
+from openjiuwen.agent_teams.organization.tools import (
+    OrgCreateTaskTool,
+    OrgReviewTaskTool,
+    OrgUpdateTaskTool,
+    OrgViewChildTasksTool,
+)
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
@@ -1148,6 +1153,84 @@ async def test_child_task_completion_creates_pending_review(org_manager):
     reviewed_events = [m for _, m in messager.published if m.event_type == OrgEvent.TASK_REVIEWED]
     assert requested_events[-1].payload["task_id"] == "child-1"
     assert reviewed_events[-1].payload["review_status"] == OrgTaskReviewStatus.ACCEPTED.value
+
+
+@pytest.mark.asyncio
+async def test_view_child_tasks_includes_latest_review_summary(org_manager):
+    manager, _ = org_manager
+    parent_creator = OrgTaskCreator(
+        creator_type="client",
+        creator_id="client-1",
+        organization_id="org-1",
+    )
+    leader_creator = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
+    await manager.create_task(
+        task_id="parent-view",
+        title="Parent",
+        description="Parent",
+        required_capabilities=["coordination"],
+        created_by=parent_creator,
+    )
+    await manager.claim_task(task_id="parent-view", team_id="team-a", leader_id="leader-a")
+    await manager.create_task(
+        task_id="child-open",
+        parent_task_id="parent-view",
+        title="Still open",
+        description="No review yet",
+        required_capabilities=["analysis"],
+        created_by=leader_creator,
+    )
+    await manager.create_task(
+        task_id="child-done",
+        parent_task_id="parent-view",
+        title="Completed child",
+        description="Will be reviewed",
+        required_capabilities=["analysis"],
+        created_by=leader_creator,
+    )
+    await manager.claim_task(task_id="child-done", team_id="team-b", leader_id="leader-b")
+    assert (await manager.complete_task(task_id="child-done", team_id="team-b")).ok
+
+    views = await manager.list_child_task_views(parent_task_id="parent-view", creator_team_id="team-a")
+    by_id = {item["task_id"]: item for item in views}
+    assert by_id["child-open"]["review"] is None
+    assert by_id["child-done"]["review"]["review_status"] == OrgTaskReviewStatus.PENDING.value
+    assert "assignment" in by_id["child-done"]
+
+    assert (
+        await manager.review_task(
+            task_id="child-done",
+            reviewer_team_id="team-a",
+            review_status=OrgTaskReviewStatus.REJECTED,
+            verdict="Needs more evidence for the risk claim.",
+            required_changes=["Add citations"],
+        )
+    ).ok
+
+    await manager.create_task(
+        task_id="child-fix",
+        parent_task_id="parent-view",
+        title="Repair",
+        description="Repair rejected child",
+        required_capabilities=["analysis"],
+        repairs_task_id="child-done",
+        created_by=leader_creator,
+    )
+
+    tool = OrgViewChildTasksTool(manager, team_id="team-a", leader_id="leader-a")
+    result = await tool.invoke({"parent_task_id": "parent-view"})
+    assert result.success
+    by_id = {item["task_id"]: item for item in result.data["tasks"]}
+    assert by_id["child-done"]["review"]["review_status"] == OrgTaskReviewStatus.REJECTED.value
+    assert by_id["child-done"]["review"]["verdict"].startswith("Needs more evidence")
+    assert by_id["child-done"]["review"]["required_changes"] == ["Add citations"]
+    assert by_id["child-fix"]["review"] is None
+    assert by_id["child-fix"]["repairs_task_id"] == "child-done"
 
 
 @pytest.mark.asyncio
