@@ -150,8 +150,28 @@ class _RunnerImpl(_TeamRunnerMixin):
             ready.set()
 
     async def _ensure_root_task_group(self) -> None:
-        if self._root_task_group is not None and self._root_task_group_owner is not None:
-            return
+        owner = self._root_task_group_owner
+        if self._root_task_group is not None and owner is not None:
+            # Detect a stale owner task bound to a closed/foreign event loop.
+            # GLOBAL_RUNNER is a process-wide singleton; when multiple apps (or
+            # TestClients) drive the same Runner from different asyncio loops,
+            # blindly reusing an owner created on a now-closed loop makes the
+            # subsequent stop() await an owner attached to a different loop,
+            # raising RuntimeError and leaving the task group un-closed.
+            try:
+                owner_loop = owner.get_loop()
+            except RuntimeError:
+                owner_loop = None
+            current_loop = asyncio.get_running_loop()
+            if owner_loop is not None and not owner_loop.is_closed() and owner_loop is current_loop:
+                return  # owner alive on the current live loop → safe to reuse
+            # owner's loop is closed or foreign (or undeterminable) → rebuild below
+        # Rebuild on the current (live) loop. Null stale fields first so a
+        # rebuild failure does not leave a half-cleaned state.
+        self._root_task_group = None
+        self._root_task_group_owner = None
+        self._root_task_group_ready = None
+        self._root_task_group_stop = None
         # Import the manager so lower layers can schedule via manager.create_task().
         from openjiuwen.core.common.task_manager.manager import get_task_manager
 
