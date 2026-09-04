@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
@@ -144,18 +143,22 @@ class _DesignReadFileTool(ReadFileTool):
         agent_id: str | None,
         design_root: Path,
     ):
-        Tool.__init__(
-            self,
-            build_tool_card(
-                _READ_NAME,
-                "DesignReadFileTool",
-                language,
-                agent_id=agent_id,
-                options=ToolCardBuildOptions(parallel_safe=True),
-            ),
+        # Calls the real parent __init__ (not Tool.__init__ directly) so the
+        # class satisfies G.CLS.01 / pylint's super-init-not-called, then
+        # replaces the resulting card: ReadFileTool.__init__ hardcodes
+        # build_tool_card("read_file", "ReadFileTool", ...), which would
+        # collide with GuardedSysOperationRail's identically-named tool in
+        # ability_manager (same f"{tool_id}_{agent_id}" id) — see module
+        # docstring's design_reference_rail-equivalent note in
+        # openjiuwen_reference_rail.py.
+        ReadFileTool.__init__(self, operation, language, agent_id, enable_image_multimodal=False)
+        self._card = build_tool_card(
+            _READ_NAME,
+            "DesignReadFileTool",
+            language,
+            agent_id=agent_id,
+            options=ToolCardBuildOptions(parallel_safe=True),
         )
-        self.operation = operation
-        self.enable_image_multimodal = False
         self._design_root = design_root
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:

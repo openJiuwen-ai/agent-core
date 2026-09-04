@@ -242,9 +242,9 @@ def ensure_table_width(s: str) -> str:
         if not tab:
             return env
         width = r"\textwidth" if ttype == "table*" else r"\columnwidth"
-        return env.replace(
-            tab.group(0), r"\adjustbox{max width=" + width + "}{%\n" + tab.group(0) + "}", 1
-        )
+        tabular_block = tab.group(0)
+        wrapped = f"\\adjustbox{{max width={width}}}{{%\n{tabular_block}}}"
+        return env.replace(tabular_block, wrapped, 1)
 
     return re.sub(r"\\begin\{(table\*?)\}.*?\\end\{\1\}", wrap, s, flags=re.S)
 
@@ -323,7 +323,7 @@ def render_results_table(rows: list[tuple[str, dict[str, str]]], metric_order: l
     lines = [
         r"\begin{table}[h]",
         r"\centering",
-        r"\begin{tabular}{l" + "r" * len(metric_order) + "}",
+        f"\\begin{{tabular}}{{l{'r' * len(metric_order)}}}",
         r"\toprule",
         header,
         r"\midrule",

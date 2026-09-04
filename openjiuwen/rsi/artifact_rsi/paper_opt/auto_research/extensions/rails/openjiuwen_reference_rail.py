@@ -18,8 +18,11 @@ Why a whole new rail instead of reusing SysOperationRail(read_only=True):
    ("read_file", "glob", "list_files"). Reusing them unmodified alongside
    GuardedSysOperationRail's identically-named tools would collide in
    ability_manager — one set silently overwrites the other (same
-   f"{name}_{agent_id}" id, registered with refresh semantics). So every tool
-   here is a thin subclass that builds its ToolCard under a distinct
+   f"{tool_id}_{agent_id}" id, registered with refresh semantics). So every
+   tool here is a thin subclass whose __init__ calls the real parent
+   __init__ (ReadFileTool/GlobTool/ListDirTool — not Tool directly, so the
+   class still satisfies "subclass must call its parent's __init__") and
+   then replaces the resulting self._card with one built under a distinct
    "openjiuwen_ref_*" name via the SDK's own documented runtime-registration
    hook, register_tool_provider() (openjiuwen/harness/prompts/tools/__init__.py),
    instead of the built-in names.
@@ -52,7 +55,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
@@ -267,21 +269,20 @@ class _RefReadFileTool(_ReferencePathMixin, ReadFileTool):
         agent_id: str | None,
         assets_root: Path,
     ):
-        # Deliberately calls Tool.__init__ directly, skipping ReadFileTool's
-        # own __init__ (which hardcodes build_tool_card("read_file", ...)) —
-        # see module docstring for why the name has to differ.
-        Tool.__init__(
-            self,
-            build_tool_card(
-                _READ_NAME,
-                "OpenJiuwenRefReadFileTool",
-                language,
-                agent_id=agent_id,
-                options=ToolCardBuildOptions(parallel_safe=True),
-            ),
+        # Calls the real parent __init__ (satisfies G.CLS.01 / pylint's
+        # super-init-not-called) then replaces the resulting card:
+        # ReadFileTool.__init__ hardcodes build_tool_card("read_file", ...),
+        # which would collide with GuardedSysOperationRail's identically-named
+        # tool in ability_manager — see module docstring for why the name has
+        # to differ.
+        ReadFileTool.__init__(self, operation, language, agent_id, enable_image_multimodal=False)
+        self._card = build_tool_card(
+            _READ_NAME,
+            "OpenJiuwenRefReadFileTool",
+            language,
+            agent_id=agent_id,
+            options=ToolCardBuildOptions(parallel_safe=True),
         )
-        self.operation = operation
-        self.enable_image_multimodal = False
         self._assets_root = assets_root
 
 
@@ -297,17 +298,14 @@ class _RefGlobTool(_ReferencePathMixin, GlobTool):
         agent_id: str | None,
         assets_root: Path,
     ):
-        Tool.__init__(
-            self,
-            build_tool_card(
-                _GLOB_NAME,
-                "OpenJiuwenRefGlobTool",
-                language,
-                agent_id=agent_id,
-                options=ToolCardBuildOptions(parallel_safe=True),
-            ),
+        GlobTool.__init__(self, operation, language, agent_id)
+        self._card = build_tool_card(
+            _GLOB_NAME,
+            "OpenJiuwenRefGlobTool",
+            language,
+            agent_id=agent_id,
+            options=ToolCardBuildOptions(parallel_safe=True),
         )
-        self.operation = operation
         self._assets_root = assets_root
 
 
@@ -322,17 +320,14 @@ class _RefListDirTool(_ReferencePathMixin, ListDirTool):
         agent_id: str | None,
         assets_root: Path,
     ):
-        Tool.__init__(
-            self,
-            build_tool_card(
-                _LIST_NAME,
-                "OpenJiuwenRefListDirTool",
-                language,
-                agent_id=agent_id,
-                options=ToolCardBuildOptions(parallel_safe=True),
-            ),
+        ListDirTool.__init__(self, operation, language, agent_id)
+        self._card = build_tool_card(
+            _LIST_NAME,
+            "OpenJiuwenRefListDirTool",
+            language,
+            agent_id=agent_id,
+            options=ToolCardBuildOptions(parallel_safe=True),
         )
-        self.operation = operation
         self._assets_root = assets_root
 
 
