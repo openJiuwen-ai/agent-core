@@ -3625,3 +3625,33 @@ def test_a_one_file_seed_takes_the_name_the_card_gives_it(tmp_path: Path) -> Non
     from openjiuwen.rsi.artifact_rsi.program_opt.program import files_of
     assert spec.entrypoint == "solver.py"
     assert list(files_of(spec.baseline_code, "solver.py")) == ["solver.py"]
+
+
+def test_relative_to_baseline_turns_the_ratio_the_way_the_criterion_says() -> None:
+    """`relative_to_baseline` read no direction: every metric was lower-is-better.
+
+    Every card that used it before happened to minimise — tour length, bins,
+    seconds, error — so the inversion had nowhere to show. AlgoTune's metric
+    is a speedup to be *maximised*, and the first live run of `polynomial_real`
+    adopted a candidate at 0.51x (twice as slow as the reference) as its best
+    node at a score of 0.66, then reported `completed`. The numbers below are
+    that run's.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.scorecard import normalize
+
+    maximize = {"direction": "maximize", "normalize": {"kind": "relative_to_baseline"}}
+    minimize = {"direction": "minimize", "normalize": {"kind": "relative_to_baseline"}}
+
+    # A speedup: the reference is 1.0x and sits at 0.5 either way.
+    assert normalize(maximize, 1.0, 1.0) == pytest.approx(0.5)
+    # Twice as slow must score *below* the reference, not above it.
+    assert normalize(maximize, 0.511, 1.0) < 0.5
+    assert normalize(maximize, 0.511, 1.0) == pytest.approx(0.511 / 1.511)
+    # Twice as fast lands where a halved error lands under minimize: 0.667.
+    assert normalize(maximize, 2.0, 1.0) == pytest.approx(2 / 3)
+    assert normalize(minimize, 0.5, 1.0) == pytest.approx(2 / 3)
+    # A zero is the floor for a maximised metric and the ceiling for a minimised one.
+    assert normalize(maximize, 0.0, 1.0) == 0.0
+    assert normalize(minimize, 0.0, 1.0) == 1.0
+    # Absent direction keeps the meaning every existing card was written against.
+    assert normalize({"normalize": {"kind": "relative_to_baseline"}}, 0.5, 1.0) == pytest.approx(2 / 3)
