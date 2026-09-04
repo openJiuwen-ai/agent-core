@@ -36,7 +36,7 @@ import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.headers_helper import (
@@ -44,6 +44,8 @@ from openjiuwen.core.foundation.llm.headers_helper import (
     build_base_headers,
     merge_request_headers,
 )
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.reasoning import (
     UNSET_REASONING,
     apply_reasoning_plan,
@@ -51,8 +53,6 @@ from openjiuwen.core.foundation.llm.reasoning import (
     reasoning_request_controls,
     resolve_reasoning_plan,
 )
-from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema import (
     AudioGenerationResponse,
     ImageGenerationResponse,
@@ -99,6 +99,21 @@ _IMAGE_DATA_URL_PATTERN = re.compile(
     r"^data:(image/(?:jpeg|png|gif|webp));base64,(.+)$",
     flags=re.IGNORECASE | re.DOTALL,
 )
+
+
+def _finish_reason_from_anthropic(
+        stop_reason: Optional[str],
+        *,
+        has_tool_calls: bool = False,
+) -> str:
+    """Normalize Anthropic stop reasons to the shared finish-reason schema."""
+    if has_tool_calls or stop_reason == "tool_use":
+        return "tool_calls"
+    if stop_reason == "max_tokens":
+        return "length"
+    if stop_reason in ("end_turn", "stop_sequence"):
+        return "stop"
+    return stop_reason or "stop"
 
 
 def _to_plain_data(value: Any) -> Any:
@@ -1250,8 +1265,9 @@ class AnthropicModelClient(BaseModelClient):
                 )
 
         stop_reason = getattr(response, "stop_reason", None) or ""
-        finish_reason = "tool_calls" if tool_calls else (
-            "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
+        finish_reason = _finish_reason_from_anthropic(
+            stop_reason,
+            has_tool_calls=bool(tool_calls),
         )
 
         provider_metadata_candidates = (
@@ -1487,13 +1503,7 @@ class AnthropicModelClient(BaseModelClient):
             delta = getattr(event, "delta", None)
             usage = getattr(event, "usage", None)
             stop_reason = getattr(delta, "stop_reason", None) if delta is not None else None
-            finish_reason = "stop"
-            if stop_reason == "tool_use":
-                finish_reason = "tool_calls"
-            elif stop_reason in ("end_turn", "stop_sequence", "max_tokens"):
-                finish_reason = "stop"
-            elif stop_reason:
-                finish_reason = stop_reason
+            finish_reason = _finish_reason_from_anthropic(stop_reason)
             usage_metadata = self._usage_from_anthropic(usage) if usage is not None else None
             return AssistantMessageChunk(
                 content="",
