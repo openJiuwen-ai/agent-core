@@ -4,13 +4,18 @@
 
 from __future__ import annotations
 
+import getpass
 import json
+import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.evaluator import case_runner
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     CaseExecutionResult,
     SingleHarnessExecutionBackend,
@@ -20,7 +25,12 @@ from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     _single_harness_team_skill_metadata,
     build_backend,
 )
-from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
+from openjiuwen.rsi.harness_rsi.evaluator.case_runner import (
+    CaseRunner,
+    _runtime_home_dir,
+    _runtime_home_root,
+    _runtime_home_root_name,
+)
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger import (
     ExactMatchJudger,
@@ -263,3 +273,69 @@ def test_artifact_files_are_derived_from_case_contract() -> None:
 )
 def test_runtime_workspace_metadata_is_not_harvested(path: str) -> None:
     assert _is_runtime_workspace_metadata(path) is True
+
+
+class TestRuntimeHomeRoot:
+    """The runtime-home parent sits in a world-writable temp root.
+
+    A fixed name there belongs to whichever OS account created it first,
+    so the name has to be scoped to the current user.
+    """
+
+    @pytest.fixture
+    def temp_root(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        # gettempdir() memoises its answer; clear it so the env var is re-read.
+        monkeypatch.setattr(tempfile, "tempdir", None)
+        return tmp_path
+
+    def test_root_name_carries_the_uid(self) -> None:
+        getuid = getattr(os, "getuid", None)
+        if getuid is None:
+            pytest.skip("os.getuid is unavailable on this platform")
+        assert _runtime_home_root_name().endswith(f"-{getuid()}")
+
+    def test_root_name_falls_back_to_the_login_name(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Windows exposes no getuid; the login name stands in for it.
+        monkeypatch.delattr(os, "getuid", raising=False)
+        monkeypatch.setattr(getpass, "getuser", lambda: "Some User\\name")
+        assert _runtime_home_root_name().endswith("-Some_User_name")
+
+    def test_root_is_created_under_the_temp_dir(self, temp_root: Path) -> None:
+        root = _runtime_home_root()
+        assert root.is_dir()
+        assert root.parent == temp_root
+        assert root.name == _runtime_home_root_name()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not enforced on Windows")
+    def test_root_is_owner_only(self, temp_root: Path) -> None:
+        assert stat.S_IMODE(_runtime_home_root().stat().st_mode) == 0o700
+
+    def test_short_runtime_home_lives_under_the_per_user_root(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        temp_root: Path,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(case_runner, "_needs_short_runtime_home", lambda case_dir: True)
+        case_dir = tmp_path / "case"
+        case_dir.mkdir()
+
+        home = _runtime_home_dir(case_dir, "session-1")
+
+        assert home.parent == temp_root / _runtime_home_root_name()
+        # The digest keeps distinct sessions apart within one account.
+        assert home != _runtime_home_dir(case_dir, "session-2")
+
+    def test_case_dir_is_used_when_no_short_path_is_needed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(case_runner, "_needs_short_runtime_home", lambda case_dir: False)
+        case_dir = tmp_path / "case"
+        case_dir.mkdir()
+        assert _runtime_home_dir(case_dir, "session-1") == case_dir

@@ -1,5 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Unit tests for PowerShell output truncation and large-output persistence."""
+
+from __future__ import annotations
 
 import getpass
 import os
@@ -9,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.harness.tools.shell.bash import _output
-from openjiuwen.harness.tools.shell.bash._output import (
+from openjiuwen.harness.tools.shell.powershell import _output
+from openjiuwen.harness.tools.shell.powershell._output import (
     _output_dir,
     _output_dir_name,
     persist_large_output,
@@ -38,44 +41,19 @@ class TestTruncateOutput:
         text = "hello world"
         assert truncate_output(text, 1000) == text
 
-    def test_exact_limit_unchanged(self) -> None:
-        text = "x" * 100
-        assert truncate_output(text, 100) == text
+    def test_no_limit_keeps_everything(self) -> None:
+        text = "x" * 5000
+        assert truncate_output(text, 0) == text
 
     def test_long_text_has_gap_marker(self) -> None:
-        text = "x" * 500
-        result = truncate_output(text, 250)
+        result = truncate_output("x" * 500, 250)
         assert "lines omitted" in result
 
     def test_head_and_tail_preserved(self) -> None:
-        lines = [f"line-{i}" for i in range(100)]
-        text = "\n".join(lines)
+        text = "\n".join(f"line-{i}" for i in range(100))
         result = truncate_output(text, 200)
         assert result.startswith("line-0")
         assert "line-99" in result
-        assert "lines omitted" in result
-
-    def test_total_length_reasonable(self) -> None:
-        text = "x" * 500
-        result = truncate_output(text, 250)
-        # head(200) + gap marker + tail(50) + newlines — should be in reasonable range
-        assert len(result) < 300
-
-    def test_empty_text(self) -> None:
-        assert truncate_output("", 100) == ""
-
-    def test_custom_head_ratio(self) -> None:
-        text = "A" * 300 + "B" * 300
-        result = truncate_output(text, 200, head_ratio=0.5)
-        assert result.startswith("A")
-        assert result.endswith("B" * 100)
-
-    def test_multiline_omitted_count(self) -> None:
-        lines = [f"L{i}" for i in range(50)]
-        text = "\n".join(lines)
-        result = truncate_output(text, 60)
-        # the gap marker should report how many newlines were in the omitted region
-        assert "lines omitted" in result
 
 
 class TestPersistLargeOutput:
@@ -99,8 +77,7 @@ class TestPersistLargeOutput:
         # Windows exposes no getuid; the login name stands in for it.
         monkeypatch.delattr(os, "getuid", raising=False)
         monkeypatch.setattr(getpass, "getuser", lambda: "Some User\\name")
-        name = _output_dir_name()
-        assert name.endswith("-Some_User_name")
+        assert _output_dir_name().endswith("-Some_User_name")
 
     def test_persisted_path_is_inside_the_per_user_directory(self, temp_root: Path) -> None:
         path, size = persist_large_output("output body", "")

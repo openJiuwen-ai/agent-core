@@ -3,11 +3,15 @@
 """Smart output truncation and large-output persistence."""
 from __future__ import annotations
 
+import getpass
 import hashlib
+import os
 import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from openjiuwen.core.common.logging import sys_operation_logger
 
 
 def truncate_output(text: str, max_chars: int, *, head_ratio: float = 0.8) -> str:
@@ -26,7 +30,39 @@ def truncate_output(text: str, max_chars: int, *, head_ratio: float = 0.8) -> st
     return f"{head}\n\n... [{omitted_lines} lines omitted] ...\n\n{tail}"
 
 
-_OUTPUT_DIR: Path = Path(tempfile.gettempdir()) / "openjiuwen_powershell_outputs"
+_OUTPUT_DIR_BASE_NAME = "openjiuwen_powershell_outputs"
+
+
+def _output_dir_name() -> str:
+    """Return the per-user directory name for persisted command output."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return f"{_OUTPUT_DIR_BASE_NAME}-{getuid()}"
+    # Windows has no getuid; fall back to the login name, sanitized for path use.
+    user = getpass.getuser() or "unknown"
+    return f"{_OUTPUT_DIR_BASE_NAME}-{re.sub(r'[^A-Za-z0-9_.-]', '_', user)}"
+
+
+def _output_dir() -> Path:
+    """Create or reuse the per-user directory holding persisted command output.
+
+    The name carries the uid and the mode is 0700 because the shared
+    temporary directory is writable by every account.  The path is resolved
+    on each call rather than at import, so an overridden temporary directory
+    is honoured and the directory is recreated after an external cleanup.
+    """
+    directory = Path(tempfile.gettempdir()) / _output_dir_name()
+    directory.mkdir(parents=True, exist_ok=True)
+    # Owner-only: the outputs are per-user now, and the temp root is world-readable.
+    try:
+        directory.chmod(0o700)
+    except OSError as exc:
+        sys_operation_logger.warning(
+            "Failed to restrict the command output directory, output_dir=%s, error=%s",
+            directory,
+            exc,
+        )
+    return directory
 
 
 def persist_large_output(stdout: str, stderr: str) -> tuple[str, int]:
@@ -38,8 +74,7 @@ def persist_large_output(stdout: str, stderr: str) -> tuple[str, int]:
     content_bytes = combined.encode("utf-8", errors="replace")
     digest = hashlib.sha256(content_bytes).hexdigest()[:12]
 
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    path = _OUTPUT_DIR / f"powershell_{digest}.txt"
+    path = _output_dir() / f"powershell_{digest}.txt"
 
     if not path.exists():
         path.write_bytes(content_bytes)
