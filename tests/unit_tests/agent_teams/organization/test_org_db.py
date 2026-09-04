@@ -28,9 +28,19 @@ async def test_org_db_context_creates_static_tables():
                 for column in inspect(sync_conn).get_columns("org_leader_message_receipt")
             }
         )
+        org_task_columns = await conn.run_sync(
+            lambda sync_conn: {col["name"] for col in inspect(sync_conn).get_columns("org_task")}
+        )
     assert set(ORG_STATIC_TABLE_NAMES).issubset(table_names)
+    assert "org_summary_execution" not in table_names
     assert "read_at" not in message_columns
     assert "read_at" not in receipt_columns
+    assert {
+        "aggregation_json",
+        "failure_code",
+        "failure_reason",
+        "failed_at",
+    }.issubset(org_task_columns)
     await db.close()
 
 
@@ -70,4 +80,77 @@ async def test_team_organization_manager_shares_db_context():
     await manager.task_pool.initialize()
     await manager.message_service.initialize()
     assert manager.task_pool.db_context.sessions is manager.message_service.db_context.sessions
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_org_task_columns_normalizes_legacy_terminal_statuses():
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await db.initialize()
+    assert db.engine is not None
+
+    def create_legacy_org_task(sync_conn) -> None:
+        sync_conn.exec_driver_sql(
+            """
+            CREATE TABLE org_task (
+                task_id TEXT PRIMARY KEY,
+                organization_id TEXT,
+                parent_task_id TEXT,
+                root_task_id TEXT,
+                creator_type TEXT,
+                creator_id TEXT,
+                creator_team_id TEXT,
+                status TEXT,
+                created_at INTEGER,
+                updated_at INTEGER,
+                title TEXT,
+                description TEXT,
+                task_type TEXT,
+                required_capabilities_json TEXT,
+                assignment_type TEXT,
+                assigned_team_id TEXT,
+                assigned_leader_id TEXT,
+                assigned_by_team_id TEXT,
+                assigned_at INTEGER,
+                output_spec_json TEXT,
+                output_context_json TEXT,
+                output_abstract TEXT,
+                metadata_json TEXT
+            )
+            """
+        )
+        sync_conn.exec_driver_sql(
+            """
+            INSERT INTO org_task (
+                task_id, organization_id, parent_task_id, root_task_id,
+                creator_type, creator_id, creator_team_id, status,
+                created_at, updated_at, title, description, task_type,
+                required_capabilities_json, assignment_type,
+                assigned_team_id, assigned_leader_id, assigned_by_team_id,
+                assigned_at, output_spec_json, output_context_json,
+                output_abstract, metadata_json
+            ) VALUES
+            ('t-cancelled', 'org-1', NULL, 't-cancelled', 'client', 'c1', NULL,
+             'CANCELLED', 1, 10, 'cancelled', 'd', NULL, '[]', 'unassigned',
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{}'),
+            ('t-expired', 'org-1', NULL, 't-expired', 'client', 'c1', NULL,
+             'EXPIRED', 2, 20, 'expired', 'd', NULL, '[]', 'unassigned',
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL, '{}')
+            """
+        )
+
+    async with db.engine.begin() as conn:
+        await conn.run_sync(create_legacy_org_task)
+        await conn.run_sync(org_db.ensure_org_static_tables)
+
+    async with db.engine.connect() as conn:
+        rows = await conn.exec_driver_sql(
+            "SELECT task_id, status, failure_code, failed_at FROM org_task ORDER BY task_id"
+        )
+        data = {row[0]: (row[1], row[2], row[3]) for row in rows}
+
+    assert data["t-cancelled"] == ("FAILED", "CANCELLED", 10)
+    assert data["t-expired"] == ("FAILED", "EXPIRED", 20)
     await db.close()

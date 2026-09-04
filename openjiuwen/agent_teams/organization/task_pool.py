@@ -34,6 +34,8 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTopic,
 )
 from openjiuwen.agent_teams.organization.schema import (
+    ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
+    ORG_TASK_TERMINAL_STATUS_VALUES,
     OrgAssignment,
     OrgAssignmentType,
     OrgInfoRecord,
@@ -41,8 +43,11 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgLeaderRecord,
     OrganizationSpec,
     OrgTask,
+    OrgTaskAggregationConfig,
+    OrgTaskAggregationMode,
     OrgTaskCreator,
     OrgTaskEventRecord,
+    OrgTaskFailureCode,
     OrgTaskOutputContext,
     OrgTaskOutputSpec,
     OrgTaskRecord,
@@ -52,6 +57,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskSource,
     OrgTaskSourceRecord,
     OrgTaskStatus,
+    default_root_aggregation,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -295,6 +301,7 @@ class OrgTaskManager:
         metadata: dict[str, Any] | None = None,
         delegated_to_team_id: str | None = None,
         delegated_to_leader_id: str | None = None,
+        aggregation_mode: OrgTaskAggregationMode | str | None = None,
     ) -> OrgTaskOpResult:
         await self.initialize()
         capabilities = required_capabilities or []
@@ -309,6 +316,20 @@ class OrgTaskManager:
         capabilities = list(dict.fromkeys(capability.strip() for capability in capabilities))
         task_id = task_id or f"org-task-{uuid.uuid4().hex[:12]}"
         now = get_current_time()
+        if parent_task_id and aggregation_mode is not None:
+            return OrgTaskOpResult(ok=False, reason="aggregation_mode is only allowed on root tasks")
+        if aggregation_mode is not None:
+            try:
+                mode = OrgTaskAggregationMode(aggregation_mode)
+            except ValueError:
+                return OrgTaskOpResult(ok=False, reason=f"invalid aggregation_mode: {aggregation_mode!r}")
+            if mode is OrgTaskAggregationMode.SUMMARY_TEAM:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason="SUMMARY_TEAM aggregation is not supported yet",
+                )
+            if mode is not OrgTaskAggregationMode.HIERARCHICAL:
+                return OrgTaskOpResult(ok=False, reason=f"invalid aggregation_mode: {aggregation_mode!r}")
         assignment_type = OrgAssignmentType.DELEGATED if delegated_to_team_id else OrgAssignmentType.UNASSIGNED
         status = OrgTaskStatus.DELEGATED if delegated_to_team_id else OrgTaskStatus.OPEN
         spec_model = self._coerce_output_spec(output_spec)
@@ -317,12 +338,28 @@ class OrgTaskManager:
                 parent = await session.get(OrgTaskRecord, parent_task_id)
                 if parent is None or parent.organization_id != self.organization_id:
                     return OrgTaskOpResult(ok=False, reason=f"parent task not found: {parent_task_id}")
-                if root_task_id is None:
-                    root_task_id = parent.root_task_id
+                expected_root = parent.root_task_id
+                if root_task_id is not None and root_task_id != expected_root:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            f"root_task_id must match parent.root_task_id ({expected_root!r}); "
+                            f"got {root_task_id!r}"
+                        ),
+                    )
+                root_task_id = expected_root
             else:
-                root_task_id = root_task_id or task_id
+                if root_task_id is not None and root_task_id != task_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=f"root task root_task_id must equal task_id ({task_id!r}); got {root_task_id!r}",
+                    )
+                root_task_id = task_id
             if await session.get(OrgTaskRecord, task_id) is not None:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
+            aggregation_json = None
+            if parent_task_id is None:
+                aggregation_json = _json_dumps(default_root_aggregation(task_id).model_dump())
             row = OrgTaskRecord(
                 task_id=task_id,
                 organization_id=self.organization_id,
@@ -343,6 +380,7 @@ class OrgTaskManager:
                 assigned_leader_id=delegated_to_leader_id,
                 assigned_by_team_id=created_by.team_id if delegated_to_team_id else None,
                 assigned_at=now if delegated_to_team_id else None,
+                aggregation_json=aggregation_json,
                 output_spec_json=_json_dumps(spec_model.model_dump() if spec_model else None),
                 metadata_json=_json_dumps(metadata or {}),
             )
@@ -458,11 +496,7 @@ class OrgTaskManager:
                 .where(
                     OrgTaskRecord.task_id == task_id,
                     OrgTaskRecord.organization_id == self.organization_id,
-                    OrgTaskRecord.status.not_in({
-                        OrgTaskStatus.COMPLETED.value,
-                        OrgTaskStatus.CANCELLED.value,
-                        OrgTaskStatus.EXPIRED.value,
-                    }),
+                    OrgTaskRecord.status.not_in(ORG_TASK_TERMINAL_STATUS_VALUES),
                     or_(
                         OrgTaskRecord.assigned_team_id.is_(None),
                         OrgTaskRecord.assigned_team_id == from_team_id,
@@ -483,11 +517,7 @@ class OrgTaskManager:
                 row = await session.get(OrgTaskRecord, task_id)
                 if row is None or row.organization_id != self.organization_id:
                     return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
-                if row.status in {
-                    OrgTaskStatus.COMPLETED.value,
-                    OrgTaskStatus.CANCELLED.value,
-                    OrgTaskStatus.EXPIRED.value,
-                }:
+                if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                     return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
                 if row.assigned_team_id and row.assigned_team_id != from_team_id:
                     return OrgTaskOpResult(
@@ -509,11 +539,7 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
             if row.assigned_team_id != team_id:
                 return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
-            if row.status in {
-                OrgTaskStatus.COMPLETED.value,
-                OrgTaskStatus.CANCELLED.value,
-                OrgTaskStatus.EXPIRED.value,
-            }:
+            if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
             if row.status == OrgTaskStatus.IN_PROGRESS.value:
                 return OrgTaskOpResult(ok=True, task=self._to_task(row))
@@ -544,11 +570,7 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
             if row.assigned_team_id != team_id:
                 return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
-            if row.status in {
-                OrgTaskStatus.COMPLETED.value,
-                OrgTaskStatus.CANCELLED.value,
-                OrgTaskStatus.EXPIRED.value,
-            }:
+            if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
             child_stmt = select(OrgTaskRecord).where(
                 OrgTaskRecord.organization_id == self.organization_id,
@@ -948,6 +970,8 @@ class OrgTaskManager:
     def _to_task(row: OrgTaskRecord) -> OrgTask:
         output_spec = _json_loads(row.output_spec_json, None)
         output_context = _json_loads(row.output_context_json, None)
+        aggregation_payload = _json_loads(row.aggregation_json, None)
+        status, failure_code = OrgTaskManager._task_status_from_row(row)
         return OrgTask(
             task_id=row.task_id,
             parent_task_id=row.parent_task_id,
@@ -958,7 +982,7 @@ class OrgTaskManager:
                 organization_id=row.organization_id,
                 team_id=row.creator_team_id,
             ),
-            status=OrgTaskStatus(row.status),
+            status=status,
             created_at=row.created_at,
             updated_at=row.updated_at,
             title=row.title,
@@ -972,11 +996,44 @@ class OrgTaskManager:
                 assigned_by_team_id=row.assigned_by_team_id,
                 assigned_at=row.assigned_at,
             ),
+            aggregation=OrgTaskAggregationConfig.model_validate(aggregation_payload)
+            if aggregation_payload
+            else None,
             output_spec=OrgTaskOutputSpec.model_validate(output_spec) if output_spec else None,
             output_context=OrgTaskOutputContext.model_validate(output_context) if output_context else None,
             output_abstract=row.output_abstract,
+            failure_code=failure_code,
+            failure_reason=row.failure_reason,
+            failed_at=row.failed_at,
             metadata=_json_loads(row.metadata_json, {}),
+        )
+
+    @staticmethod
+    def _task_status_from_row(row: OrgTaskRecord) -> tuple[OrgTaskStatus, OrgTaskFailureCode | None]:
+        legacy_failure = ORG_TASK_LEGACY_STATUS_FAILURE_CODES.get(row.status)
+        if legacy_failure is not None:
+            return OrgTaskStatus.FAILED, legacy_failure
+
+        failure_code: OrgTaskFailureCode | None = None
+        if row.failure_code:
+            try:
+                failure_code = OrgTaskFailureCode(row.failure_code)
+            except ValueError:
+                logger.warning(
+                    "Unknown org task failure_code=%r task_id=%s; treating as None",
+                    row.failure_code,
+                    row.task_id,
+                )
+
+        try:
+            return OrgTaskStatus(row.status), failure_code
+        except ValueError:
+            logger.warning(
+                "Unknown org task status=%r task_id=%s; degrading to FAILED",
+                row.status,
+                row.task_id,
             )
+            return OrgTaskStatus.FAILED, failure_code
 
     @staticmethod
     def _to_review(row: OrgTaskReviewRecord) -> OrgTaskReview:
