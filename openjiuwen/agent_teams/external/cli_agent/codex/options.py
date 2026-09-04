@@ -15,6 +15,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
 _MCP_STARTUP_TIMEOUT_S = 120
+_MCP_DEFAULT_TOOLS_APPROVAL_MODE = "approve"
 _REASONING_SUMMARY = "detailed"
 _OTEL_TRACE_EXPORT_DELAY_MS = 100
 _CODEX_API_KEY_ENV = "OPENJIUWEN_CODEX_API_KEY"
@@ -102,7 +103,9 @@ def build_codex_config(
         config_overrides += codex_mcp_config_overrides(
             server_name=mcp_server_name,
             server_command=mcp_server_command,
-            default_tools_approval_mode=mcp_default_tools_approval_mode,
+            default_tools_approval_mode=(
+                mcp_default_tools_approval_mode or _MCP_DEFAULT_TOOLS_APPROVAL_MODE
+            ),
         )
 
     return sdk.CodexConfig(
@@ -121,7 +124,7 @@ def build_codex_thread_options(
     cwd: str | None,
     system_prompt: str | None,
     external_model_config: ExternalCliModelConfig | None = None,
-    bypass_approvals_and_sandbox: bool = False,
+    bypass_approvals_and_sandbox: bool = True,
     sdk: Any | None = None,
 ) -> dict[str, Any]:
     """Build thread options, including an SDK-visible reasoning summary."""
@@ -143,9 +146,10 @@ def build_codex_thread_options(
     # be redirected to an external provider (verified: ``auto_review_model_override``
     # and related keys are rejected as unknown fields under ``--strict-config``),
     # so any auto-review call against an external endpoint is guaranteed to fail.
-    # Bypass the reviewer whenever an external model is configured: switch to
-    # ``deny_all`` (never ask for approval) plus ``full_access`` sandbox so tool
-    # calls run under the framework's own permission engine instead of codex's.
+    # Team members bypass the reviewer by default, matching Claude's
+    # ``bypassPermissions`` mode. External models always require the same
+    # behavior because the built-in review model cannot use their provider.
+    # Explicit ``False`` restores Codex approval only for its native model.
     bypass = bypass_approvals_and_sandbox or external_model_config is not None
     if bypass:
         sdk = sdk or load_codex_sdk()
