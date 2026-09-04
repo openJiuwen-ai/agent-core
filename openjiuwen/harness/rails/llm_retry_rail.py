@@ -264,7 +264,10 @@ class LLMRetryRail(DeepAgentRail):
             reason: str,
             delay: float,
     ) -> None:
-        """向前端发重试通知，复用既有的 chat.error 事件通道."""
+        """向前端发重试通知，复用既有的 chat.error 事件通道.
+
+        retry_notice=True 是结构化标记：下游（落盘过滤/展示映射）按标记识别重试通知。
+        """
         session = ctx.session
         if session is None:
             return
@@ -277,6 +280,7 @@ class LLMRetryRail(DeepAgentRail):
                         f"模型调用异常，将在 {delay:.1f} 秒后进行"
                         f"第 {retry_count} 次重试（共 {self.max_retries} 次）"
                     ),
+                    "retry_notice": True,
                 },
             ))
         except Exception:

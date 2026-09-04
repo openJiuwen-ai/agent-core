@@ -253,3 +253,33 @@ async def test_rail_propagates_stream_timeout_after_retry_exhaustion():
 
     assert "LLM stream timeout" in str(exc_info.value)
     assert model.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_notice_carries_structured_flag():
+    """重试通知带 retry_notice=True 结构化标记：下游（jiuwenswarm 落盘过滤/
+    前端展示映射）按标记识别。"""
+    rail = LLMRetryRail(max_retries=2)
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    written = []
+
+    async def _write(item):
+        written.append(item)
+
+    session = MagicMock()
+    session.write_stream = _write
+    try:
+        ctx.session = session
+    except (AttributeError, TypeError):
+        pytest.skip("AgentCallbackContext 不支持 session 赋值")
+    ctx.exception = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="[181001] model call failed, reason: openAI API async stream error: boom",
+    )
+
+    await rail.on_model_exception(ctx)
+
+    assert len(written) == 1
+    assert written[0].payload["retry_notice"] is True
+    assert "模型调用异常" in written[0].payload["error"]
