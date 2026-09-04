@@ -844,12 +844,7 @@ def build_browser_runtime_tools(
     """
 
     return [
-        BrowserCancelTool(runtime, language),
-        BrowserClearCancelTool(runtime, language),
         BrowserProbeInteractivesTool(runtime, language),
         BrowserProbeCardsTool(runtime, language),
         BrowserBatchInteractTool(runtime, language),
-        BrowserCustomActionTool(runtime, language),
-        BrowserListActionsTool(runtime, language),
-        BrowserRuntimeHealthTool(runtime, language),
     ]

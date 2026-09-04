@@ -187,7 +187,7 @@ def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
     assert "browser_run_code_unsafe" not in english
     assert "browser_run_code_unsafe" not in chinese
     assert "makes a browser_run_code tool visible" in english
-    assert "工具可见" in chinese
+    assert "明确暴露 browser_run_code" in chinese
 
 
 def test_selected_capabilities_are_logged_and_forwarded_to_runtime(caplog) -> None:
@@ -223,7 +223,7 @@ def test_unknown_capability_error_lists_rejected_and_available_names() -> None:
     message = str(exc_info.value)
     assert "Unsupported browser capabilities: not-a-capability" in message
     assert (
-        "Available capabilities: core, advanced_code, unsafe_dev, pdf, vision, "
+        "Available capabilities: core, advanced_code, extended_interaction, unsafe_dev, pdf, vision, "
         "devtools, config, network, storage, testing"
     ) in message
 
@@ -319,7 +319,7 @@ def test_default_wiring_main_agent_has_browser_runtime_rail() -> None:
 
     rails = calls[0].get("rails", [])
     assert any(isinstance(rail, BrowserRuntimeRail) for rail in rails)
-    assert any(isinstance(rail, BrowserWorkingContextRail) for rail in rails)
+    assert not any(isinstance(rail, BrowserWorkingContextRail) for rail in rails)
 
 
 def test_default_wiring_adds_browser_state_and_windows_large_tool_results() -> None:
@@ -341,10 +341,12 @@ def test_default_wiring_adds_browser_state_and_windows_large_tool_results() -> N
         "browser_probe_interactives",
         "browser_probe_cards",
         "browser_snapshot",
+        "browser_find",
         "browser_evaluate",
     ]
     assert config.keep_last_k == 1
     assert processor_map["BrowserWorkingContextProcessor"].max_recent_steps > 0
+    assert processor_map["BrowserWorkingContextProcessor"].runtime_projection_only is True
     assert processor_map["BrowserStateContextProcessor"].provider is not None
     assert config.trim_size == 1000
     assert config.min_offload_chars == 4096
@@ -377,9 +379,13 @@ def test_caller_context_processor_rail_is_augmented_with_browser_state() -> None
     # processor rather than competing with a second context rail.
     assert context_rails == [caller_rail]
     assert [key for key, _ in caller_rail._user_processors] == [
+        "ToolResultWindowProcessor",
         "BrowserStateContextProcessor",
         "BrowserWorkingContextProcessor",
     ]
+    processor_map = dict(caller_rail._user_processors)
+    assert processor_map["ToolResultWindowProcessor"].keep_last_k == 1
+    assert "browser_find" in processor_map["ToolResultWindowProcessor"].tool_names
 
 
 def test_default_wiring_does_not_add_sys_operation_rail() -> None:

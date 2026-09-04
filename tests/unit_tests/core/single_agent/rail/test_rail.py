@@ -1172,6 +1172,43 @@ class TestForceFinish(
         second = ctx.consume_force_finish()
         assert second is None
 
+    async def test_explicit_model_continue_is_one_shot(self):
+        """A rail can require one more model turn after protocol-only text."""
+
+        agent, _ = _make_agent()
+        ctx = AgentCallbackContext(agent=agent)
+
+        ctx.request_model_continue()
+
+        assert ctx.consume_model_continue_request() is True
+        assert ctx.consume_model_continue_request() is False
+
+    async def test_after_model_call_can_continue_without_a_tool_call(self):
+        """Recoverable protocol text must not end the ReAct invocation."""
+
+        agent, _ = _make_agent()
+
+        class ContinueRail(AgentRail):
+            async def after_model_call(self, ctx):
+                response = ctx.inputs.response
+                if response.content == "protocol-only":
+                    ctx.request_model_continue()
+
+        await agent.register_rail(ContinueRail())
+        mock_llm = MockLLMModel()
+        mock_llm.set_responses(
+            [
+                create_text_response("protocol-only"),
+                create_text_response("recovered"),
+            ]
+        )
+
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            result = await agent.invoke({"query": "test protocol recovery"})
+
+        assert result["output"] == "recovered"
+        assert mock_llm.call_count == 2
+
     async def test_rail_decorator_returns_force_finish_payload(self):
         """@rail decorator returns the force_finish payload instead of None."""
         from openjiuwen.core.single_agent.rail.base import rail, AgentCallbackEvent

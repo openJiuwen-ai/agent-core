@@ -623,6 +623,65 @@ def test_wait_for_tab_is_a_valid_condition_and_activates_new_tab(tmp_path: Path)
     assert payload["result"]["ok"] is True
     assert payload["result"]["url"] == "https://example.test/new"
     assert payload["result"]["conditions"][0]["observed"]["count"] == 2
+
+
+def test_wait_for_url_switches_to_matching_new_tab(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed; skipping generated JavaScript execution test")
+
+    js_function = _build_batch_interact_script(
+        {
+            "steps": [
+                {"op": "click", "selector": "#open"},
+                {"op": "wait_for_url", "url_contains": "/new"},
+            ],
+            "timeout_ms": 500,
+            "condition_timeout_ms": 1000,
+            "generation_id": "g2",
+        }
+    )
+    runner = tmp_path / "run_wait_for_url_new_tab.js"
+    runner.write_text(
+        textwrap.dedent(
+            f"""
+            const fn = ({js_function});
+            const calls = [];
+            const pages = [];
+            const context = {{ pages: () => pages }};
+            const newPage = {{
+              context: () => context,
+              url: () => 'https://example.test/new',
+              title: async () => 'New tab',
+              bringToFront: async () => calls.push('activated'),
+            }};
+            class FakeLocator {{
+              first() {{ return this; }}
+              async count() {{ return 1; }}
+              async waitFor() {{}}
+              async isVisible() {{ return true; }}
+              async isEnabled() {{ return true; }}
+              async click() {{ pages.push(newPage); }}
+            }}
+            const oldPage = {{
+              context: () => context,
+              locator: () => new FakeLocator(),
+              url: () => 'https://example.test/old',
+              title: async () => 'Old tab',
+            }};
+            pages.push(oldPage);
+            fn(oldPage).then((result) => console.log(JSON.stringify({{ result, calls }})));
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run([node, str(runner)], check=True, text=True, capture_output=True)
+    payload = json.loads(completed.stdout)
+    assert payload["result"]["ok"] is True
+    assert payload["result"]["url"] == "https://example.test/new"
+    assert payload["result"]["steps"][1]["tab_switched"] is True
+    assert payload["calls"] == ["activated"]
     assert payload["calls"] == ["activated"]
 
 

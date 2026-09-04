@@ -220,6 +220,8 @@ def build_semantic_state(state: Mapping[str, Any]) -> Dict[str, Any]:
     url = _canonical_url(source.get("url") or state.get("url"))
     form_values = _normalize_named_values(source.get("form_values"))
     selected_filters = _normalize_named_values(source.get("selected_filters"))
+    action_feedback = _normalize_named_values(source.get("action_feedback"))
+    commerce_state = _normalize_named_values(source.get("commerce_state"))
     field_coverage = sorted(
         {
             _compact_text(field, 80).lower()
@@ -227,13 +229,21 @@ def build_semantic_state(state: Mapping[str, Any]) -> Dict[str, Any]:
             if _compact_text(field, 80)
         }
     )[:_MAX_STATE_ITEMS]
-    return {
+    normalized_state = {
         "url": url,
         "form_values": form_values,
         "selected_filters": selected_filters,
         "result_count": _normalize_result_count(source.get("result_count")),
         "field_coverage": field_coverage,
     }
+    first_result_text = _compact_text(source.get("first_result_text"), 240)
+    if first_result_text:
+        normalized_state["first_result_text"] = first_result_text
+    if action_feedback:
+        normalized_state["action_feedback"] = action_feedback
+    if commerce_state:
+        normalized_state["commerce_state"] = commerce_state
+    return normalized_state
 
 
 def _digest(value: Mapping[str, Any]) -> str:
@@ -313,6 +323,12 @@ class SemanticStateTracker:
         semantic_state = build_semantic_state(raw_state)
         self._field_coverage.update(semantic_state.get("field_coverage") or [])
         semantic_state["field_coverage"] = sorted(self._field_coverage)
+        previous_state = self._last_state or {}
+        changed_fields = sorted(
+            key
+            for key in set(previous_state) | set(semantic_state)
+            if previous_state.get(key) != semantic_state.get(key)
+        )
         state_digest = _digest(semantic_state)
         filter_digest = _digest(_filter_state(semantic_state))
         previous_digest = self._history[-1] if self._history else ""
@@ -358,6 +374,7 @@ class SemanticStateTracker:
             "revision": self._revision,
             "action_group_id": normalized_group_id,
             "semantic_state": semantic_state,
+            "changed_fields": changed_fields,
             "progress": progress,
             "observable_progress": progress in {"initial", "progress"},
             "consecutive_no_progress": self._consecutive_no_progress,

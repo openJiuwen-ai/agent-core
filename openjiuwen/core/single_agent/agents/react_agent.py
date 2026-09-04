@@ -2773,11 +2773,12 @@ class ReActAgent(BaseAgent):
                         )
 
                         if not ai_message.tool_calls:
+                            force_model_continue = ctx.consume_model_continue_request()
                             # If steering arrived while the
                             # model was generating, continue
                             # the loop so the next iteration
                             # drains and injects it.
-                            if ctx.has_pending_steering():
+                            if force_model_continue or ctx.has_pending_steering():
                                 continue
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}

@@ -4,6 +4,9 @@ import json
 import logging
 from pathlib import Path
 
+from openjiuwen.harness.tools.browser_move.playwright_runtime.probe_semantics import (
+    normalize_card_probe_payload,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
     BrowserSelectorCache,
     apply_site_card_semantics,
@@ -519,3 +522,116 @@ def test_selector_cache_demotes_csdn_author_links_from_title_and_primary_link(
     assert "a.block-title.so-item-report" in selectors["title_selectors"]
     assert "a.user" in serialized
     assert "author_selectors" in selectors
+
+
+def test_google_probe_counts_only_natural_external_results() -> None:
+    payload = {
+        "url": "https://www.google.com/search?q=openjiuwen",
+        "generation_id": "g4",
+        "cards": [
+            {
+                "title": "OpenJiuwen documentation",
+                "primary_link": "https://openjiuwen.example/docs",
+                "selector_hint": "div.g:nth-of-type(1)",
+            },
+            {
+                "title": "AI Overview",
+                "text_preview": "AI Overview generated answer",
+                "selector_hint": "div.ai-overview",
+            },
+            {
+                "title": "People also ask",
+                "text_preview": "People also ask",
+                "selector_hint": "div.related-question-pair",
+            },
+            {
+                "title": "OpenJiuwen app",
+                "primary_link": "https://play.google.com/store/apps/details?id=test",
+                "text_preview": "Google Play",
+            },
+            {
+                "title": "Search settings",
+                "primary_link": "https://www.google.com/preferences",
+            },
+            {
+                "title": "Sponsored OpenJiuwen hosting",
+                "primary_link": "https://sponsor.example/openjiuwen",
+                "semantic_badges": ["Sponsored"],
+            },
+        ],
+    }
+
+    normalize_card_probe_payload(payload)
+
+    assert payload["observed_count"] == 1
+    assert payload["cards"][0]["result_index"] == 1
+    assert all(card["result_index"] is None for card in payload["cards"][1:])
+    assert {card["kind"] for card in payload["cards"][1:]} >= {
+        "ai_overview",
+        "people_also_ask",
+        "commercial_module",
+        "navigation_link",
+        "promotion",
+    }
+
+
+def test_csdn_probe_excludes_download_commercial_and_profile_links() -> None:
+    payload = {
+        "url": "https://so.csdn.net/so/search?q=fastapi&t=blog",
+        "generation_id": "g2",
+        "cards": [
+            {
+                "title": "FastAPI tutorial",
+                "primary_link": "https://blog.csdn.net/alice/article/details/123",
+            },
+            {
+                "title": "FastAPI source download",
+                "primary_link": "https://download.csdn.net/download/alice/456",
+            },
+            {
+                "title": "FastAPI paid course",
+                "primary_link": "https://edu.csdn.net/course/detail/789",
+            },
+            {
+                "title": "Alice profile",
+                "primary_link": "https://blog.csdn.net/alice",
+            },
+        ],
+    }
+
+    normalize_card_probe_payload(payload)
+
+    assert payload["observed_count"] == 1
+    assert payload["cards"][0]["result_index"] == 1
+    assert [card["kind"] for card in payload["cards"][1:]] == [
+        "download_resource",
+        "commercial_module",
+        "navigation_link",
+    ]
+    assert all(card["result_index"] is None for card in payload["cards"][1:])
+
+
+def test_probe_reports_classification_conflict_in_one_observation() -> None:
+    payload = {
+        "url": "https://search.example/results?q=test",
+        "generation_id": "g1",
+        "cards": [
+            {
+                "title": "Example result",
+                "primary_link": "https://example.test/item/1",
+                "selector_hint": "div.result:nth-of-type(1)",
+            },
+            {
+                "title": "Example result",
+                "primary_link": "https://example.test/item/1",
+                "selector_hint": "div.sponsored-ad",
+                "semantic_badges": ["sponsored"],
+            },
+        ],
+    }
+
+    normalize_card_probe_payload(payload)
+
+    assert payload["diagnostics"]["classification_conflict"] is True
+    assert payload["diagnostics"]["recommended_fallback"] == "one_precise_probe"
+    assert payload["observed_count"] == 1

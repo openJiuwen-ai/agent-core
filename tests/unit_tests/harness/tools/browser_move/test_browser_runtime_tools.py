@@ -47,7 +47,7 @@ def _make_runtime() -> BrowserAgentRuntime:
 
 def test_build_browser_runtime_tools_returns_helper_tools_by_default() -> None:
     tools = build_browser_runtime_tools(_make_runtime())
-    assert len(tools) == 8
+    assert len(tools) == 3
 
 
 def test_each_tool_is_tool_subclass() -> None:
@@ -63,36 +63,17 @@ def test_each_tool_has_tool_card() -> None:
 def test_default_helper_tool_names() -> None:
     names = [tool.card.name for tool in build_browser_runtime_tools(_make_runtime())]
     assert names == [
-        "browser_cancel_run",
-        "browser_clear_cancel",
         "browser_probe_interactives",
         "browser_probe_cards",
         "browser_batch_interact",
-        "browser_custom_action",
-        "browser_list_custom_actions",
-        "browser_runtime_health",
     ]
 
 
 def test_helper_tool_classes() -> None:
-    (
-        cancel,
-        clear_cancel,
-        probe_interactives,
-        probe_cards,
-        batch_interact,
-        custom_action,
-        list_actions,
-        health,
-    ) = build_browser_runtime_tools(_make_runtime())
-    assert isinstance(cancel, BrowserCancelTool)
-    assert isinstance(clear_cancel, BrowserClearCancelTool)
+    probe_interactives, probe_cards, batch_interact = build_browser_runtime_tools(_make_runtime())
     assert isinstance(probe_interactives, BrowserProbeInteractivesTool)
     assert isinstance(probe_cards, BrowserProbeCardsTool)
     assert isinstance(batch_interact, BrowserBatchInteractTool)
-    assert isinstance(custom_action, BrowserCustomActionTool)
-    assert isinstance(list_actions, BrowserListActionsTool)
-    assert isinstance(health, BrowserRuntimeHealthTool)
 
 
 def test_language_en_uses_non_empty_descriptions() -> None:

@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-09-03 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -76,6 +76,12 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 8. **工具装载顺序**：`create_deep_agent` / `DeepAgentConfig.tools` 进 `ability_manager`；
    rail init 再动态加工具（`SysOperationRail` 100 先铺文件系统/shell 工具，见 `S_04`
    梯队 100）。工具分批装载的时序语义由 rail priority 保证。
+9. **Browser 默认工具面保持紧凑**：默认只暴露常用 Playwright primitive、两类 Probe、
+   Batch 和受限 offload recall。诊断、取消、custom-action discovery、拖放及其他低频能力
+   通过显式 capability 启用；runtime 内部 transport 工具不进入模型工具面。
+10. **Browser 可恢复错误不消耗模型回合**：generation 刷新、单步骤 Batch primitive 改写、
+    primary link 导航、Probe JSON 一次重试和新标签页 URL 等待由 runtime 确定性处理；只有
+    无法唯一解析目标或页面语义确实不充分时才把紧凑错误返回模型。
 
 ## 接口契约
 

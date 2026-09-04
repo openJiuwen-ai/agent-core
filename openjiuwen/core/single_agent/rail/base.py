@@ -570,6 +570,9 @@ class AgentCallbackContext:
     _force_finish_request: Optional[ForceFinishRequest] = field(
         default=None, init=False, repr=False
     )
+    _model_continue_requested: bool = field(
+        default=False, init=False, repr=False
+    )
     _steering_queue: Optional[asyncio.Queue] = field(
         default=None, init=False, repr=False
     )
@@ -641,6 +644,23 @@ class AgentCallbackContext:
         request = self._force_finish_request
         self._force_finish_request = None
         return request
+
+    def request_model_continue(self) -> None:
+        """Require one more ReAct model iteration after a text response.
+
+        Rails use this when a provider emits recoverable protocol text instead
+        of a real tool call. The request is intentionally one-shot and does
+        not bypass the agent iteration budget.
+        """
+
+        self._model_continue_requested = True
+
+    def consume_model_continue_request(self) -> bool:
+        """Read and clear the one-shot model continuation request."""
+
+        requested = self._model_continue_requested
+        self._model_continue_requested = False
+        return requested
 
     @property
     def has_force_finish_request(self) -> bool:

@@ -84,6 +84,8 @@ def test_build_interactive_probe_js_contains_high_value_selectors() -> None:
     assert "calendar_date" in js
     assert "sort_tab" in js
     assert "rating_filter" in js
+    assert "selectionSourceFromUrl" in js
+    assert "url-param" in js
     assert "hotel_destination" in js
     assert "hotel_checkin" in js
     assert "hotel_checkout" in js
@@ -224,7 +226,26 @@ def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None
     assert result["elements"][0]["generation_id"] == result["page_state"]["generation_id"]
     assert "id" not in result["elements"][0]
     assert "selector_hint" not in result["elements"][0]
-    assert result["page_state"]["interactives"][0]["target_id"] == result["elements"][0]["target_id"]
+    assert "interactives" not in result["page_state"]
+    assert result["page_state"]["generation_id"] == result["generation_id"]
+    assert result["elements"][0]["target_id"]
+
+
+def test_runtime_probe_interactives_recovers_one_malformed_json_result() -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._code_executor = AsyncMock(
+        side_effect=[
+            "not-json",
+            {"ok": True, "url": "https://example.com", "title": "Example", "elements": []},
+        ]
+    )
+
+    result = _run(runtime.probe_interactives(query="search"))
+
+    assert result["ok"] is True
+    assert result["diagnostics"]["parse_retry_count"] == 1
+    assert runtime._code_executor.await_count == 2
 
 
 def test_runtime_probe_interactives_handles_missing_code_executor() -> None:

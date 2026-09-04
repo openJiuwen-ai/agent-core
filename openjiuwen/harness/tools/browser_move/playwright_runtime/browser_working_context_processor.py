@@ -53,7 +53,7 @@ class BrowserWorkingContextProcessor(ContextProcessor):
         del kwargs
         store = BrowserWorkingContextStore(self.config)
         session = context.get_session_ref() if context is not None else None
-        if context is not None:
+        if context is not None and not self.config.runtime_projection_only:
             store.commit_pending_from_messages(session, context.get_messages())
 
         prompt_text = store.render_and_consume_one_step(session)

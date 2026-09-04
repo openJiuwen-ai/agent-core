@@ -134,6 +134,7 @@ def test_cards_add_primary_link_and_field_coverage_to_page_state() -> None:
 
 def test_card_detail_fields_register_generation_scoped_read_only_targets() -> None:
     state = BrowserPageState(page_id="page-detail", generation=2)
+    state.set_requested_fields(["author", "likes"])
     payload = {
         "cards": [
             {
