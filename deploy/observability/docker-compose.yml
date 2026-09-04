@@ -139,6 +139,8 @@ services:
       CLICKHOUSE_PASSWORD: clickhouse
     volumes:
       - langfuse_ch:/var/lib/clickhouse
+      # 轻量化: 关闭 ClickHouse 系统日志表 (详见 clickhouse-logs.xml)
+      - ./clickhouse-logs.xml:/etc/clickhouse-server/config.d/logs.xml:ro
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
