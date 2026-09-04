@@ -21,6 +21,7 @@ from openjiuwen.core.common.logging.events import (
     AgentEvent,
     BaseLogEvent,
     create_log_event,
+    EventStatus,
     get_event_class,
     LLMEvent,
     LogEventType,
@@ -930,3 +931,108 @@ def test_custom_event_validation():
 
     # Cleanup
     unregister_event_class(custom_type)
+
+
+def _read_single_json_record(log_file: str) -> dict:  # type: ignore
+    """Read the only JSON record written to *log_file*."""
+    with open(log_file, "r", encoding="utf-8") as f:
+        return json.loads(f.read().strip())
+
+
+def _json_logger(name: str, log_file: str) -> DefaultLogger:  # type: ignore
+    """Build a file-only JSON logger for status assertions."""
+    return DefaultLogger(
+        name,
+        {
+            "log_file": log_file,
+            "output": ["file"],
+            "structured_output_format": "json",
+            "level": logging.DEBUG,
+            "backup_count": 5,
+            "max_bytes": 10 * 1024 * 1024,
+            "format": "%(message)s",
+        },
+    )
+
+
+def test_error_record_with_event_object_is_not_labelled_success(temp_log_dir):  # type: ignore
+    """An event object logged at ERROR must not report ``status: success``.
+
+    ``BaseLogEvent.status`` defaults to ``SUCCESS`` and callers building an
+    event for a failure rarely override it, so the payload used to contradict
+    the very record it belongs to.
+    """
+    log_file = os.path.join(temp_log_dir, "event_error.log")  # type: ignore
+    logger = _json_logger("test_event_error_status", log_file)
+
+    event = create_log_event(LogEventType.AGENT_ERROR, module_id="agent_123")
+    logger.error("Operation failed", event=event)
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    parsed = _read_single_json_record(log_file)
+
+    assert parsed["log_level"] == "ERROR"
+    assert parsed["status"] == "failure"
+
+    safe_close_logger_handlers(logger)
+
+
+def test_error_record_from_event_type_is_not_labelled_success(temp_log_dir):  # type: ignore
+    """The keyword-built path carries the same default and needs the same fix."""
+    log_file = os.path.join(temp_log_dir, "kwargs_error.log")  # type: ignore
+    logger = _json_logger("test_kwargs_error_status", log_file)
+
+    logger.error("Operation failed", event_type=LogEventType.AGENT_ERROR, module_id="agent_123")
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    parsed = _read_single_json_record(log_file)
+
+    assert parsed["log_level"] == "ERROR"
+    assert parsed["status"] == "failure"
+
+    safe_close_logger_handlers(logger)
+
+
+def test_explicit_non_success_status_survives_an_error_record(temp_log_dir):  # type: ignore
+    """A status the caller chose is kept; only the ``SUCCESS`` default is replaced."""
+    log_file = os.path.join(temp_log_dir, "explicit_status.log")  # type: ignore
+    logger = _json_logger("test_explicit_status", log_file)
+
+    event = create_log_event(
+        LogEventType.AGENT_ERROR,
+        module_id="agent_123",
+        status=EventStatus.TIMEOUT,
+    )
+    logger.error("Operation timed out", event=event)
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    parsed = _read_single_json_record(log_file)
+
+    assert parsed["status"] == "timeout"
+
+    safe_close_logger_handlers(logger)
+
+
+def test_info_record_keeps_the_success_status(temp_log_dir):  # type: ignore
+    """Records below ERROR are untouched, so ordinary events keep reporting success."""
+    log_file = os.path.join(temp_log_dir, "info_status.log")  # type: ignore
+    logger = _json_logger("test_info_status", log_file)
+
+    event = create_log_event(LogEventType.AGENT_END, module_id="agent_123")
+    logger.info("Operation finished", event=event)
+
+    for handler in logger.logger().handlers:
+        handler.flush()
+
+    parsed = _read_single_json_record(log_file)
+
+    assert parsed["log_level"] == "INFO"
+    assert parsed["status"] == "success"
+
+    safe_close_logger_handlers(logger)
