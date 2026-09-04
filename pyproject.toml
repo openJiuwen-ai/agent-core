@@ -123,7 +123,6 @@ all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
 
 cli = ["click>=8.0", "rich>=13.0", "prompt-toolkit>=3.0"]
 
-default = []
 # Includes A2A SDK so the A2A remote/server plugins work when using `openjiuwen[all]`.
 all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a]"]
 
