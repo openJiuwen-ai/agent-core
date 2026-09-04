@@ -1,0 +1,44 @@
+# ════════════════════════════════════════════════════════════
+#  This repository tracks Python sources and the prompt
+#  templates. Nothing else.
+#
+#  Config, schemas, docs, notebooks, datasets, model weights and
+#  every generated artifact stay local. That includes the files
+#  the code needs in order to run (pyproject.toml, environment.yml,
+#  configs/default.yaml, qa.json), so a fresh clone is source only
+#  and will not execute as-is.
+#
+#  This is an allowlist, not a denylist: ignore everything first,
+#  then re-include the two kinds of file we publish. New file
+#  types are therefore ignored by default and have to be opted in
+#  here deliberately.
+#
+#  NOTE: gitignore has no end-of-line comments. A `#` only starts
+#  a comment at the start of a line, so every comment here sits on
+#  its own line.
+# ════════════════════════════════════════════════════════════
+
+# ── Ignore everything ───────────────────────────────────────
+# `!*/` re-includes directories so git can descend into them.
+# Without it git prunes every directory at the top level and the
+# re-inclusions below are never reached.
+*
+!*/
+
+# ── The only tracked content ────────────────────────────────
+!*.py
+!prompts/*.md
+!.gitignore
+
+# ── Re-exclude trees that contain .py files we do not publish ──
+# `!*.py` above matches at any depth, so these have to be shut
+# out again by name. Rules are last-match-wins, so they must sit
+# below the re-inclusions.
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+model/
+outputs/
+outputs_mac_api_before_reference_update/
+benchmark/data/
