@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
+import os
 import platform
 from typing import Optional, Dict, Any, Literal, AsyncIterator, Callable, Tuple
 import sys
@@ -28,8 +29,6 @@ class CodeOperation(BaseCodeOperation):
     _UNIX_CMD_LIMIT: int = 100000
     _SUPPORT_LANGUAGE_CONFIG_DICT: Dict[str, Any] = {
         "python": {
-            "exec_cli": lambda code: [sys.executable, "-u", "-c", code],
-            "exec_file": lambda path: [sys.executable, "-u", path],
             "file_suffix": ".py",
         },
         "javascript": {
@@ -38,6 +37,50 @@ class CodeOperation(BaseCodeOperation):
             "file_suffix": ".js",
         }
     }
+    _MANAGED_PYTHON_ENV_VARS = ("CLAW_PYTHON_EXE", "CLAW_PYTHON_BASE_EXE")
+
+    @staticmethod
+    def _is_usable_python_exe(path: str) -> bool:
+        """True when path is an existing readable file (Windows python.exe has no POSIX +x)."""
+        if not path or not os.path.isfile(path):
+            return False
+        if os.name == "nt":
+            return os.access(path, os.R_OK)
+        return os.access(path, os.R_OK | os.X_OK)
+
+    @classmethod
+    def resolve_python_executable(cls) -> str:
+        """Prefer desktop-injected managed Python; fall back to this process interpreter."""
+        for env_name in cls._MANAGED_PYTHON_ENV_VARS:
+            raw = (os.environ.get(env_name) or "").strip()
+            if cls._is_usable_python_exe(raw):
+                return raw
+        return sys.executable
+
+    @classmethod
+    def _prepare_code_env(
+            cls,
+            language: Literal["python", "javascript"],
+            environment: Optional[Dict[str, str]],
+            python_exe: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Merge subprocess env; drop frozen PYTHONHOME/PYTHONPATH when spawning another Python."""
+        env = OperationUtils.prepare_environment(environment)
+        custom_keys = set((environment or {}).keys())
+        if language == "javascript":
+            env["NODE_DISABLE_COLORS"] = "1"
+            return env
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        if python_exe:
+            spawned = os.path.normcase(os.path.abspath(python_exe))
+            current = os.path.normcase(os.path.abspath(sys.executable))
+            if spawned != current:
+                if "PYTHONHOME" not in custom_keys:
+                    env.pop("PYTHONHOME", None)
+                if "PYTHONPATH" not in custom_keys:
+                    env.pop("PYTHONPATH", None)
+        return env
 
     @classmethod
     def _get_default_cmd_limit(cls):
@@ -67,6 +110,15 @@ class CodeOperation(BaseCodeOperation):
         lang_config = cls._SUPPORT_LANGUAGE_CONFIG_DICT.get(language)
         if lang_config is None:
             return None, None
+
+        if language == "python":
+            python_exe = cls.resolve_python_executable()
+            if not force_file and len(code) <= cls._get_default_cmd_limit():
+                return [python_exe, "-u", "-c", code], None
+            temp_path = await OperationUtils.create_tmp_file(code, lang_config["file_suffix"])
+            if temp_path is None:
+                return None, None
+            return [python_exe, "-u", temp_path], temp_path
 
         if not force_file and len(code) <= cls._get_default_cmd_limit():
             return lang_config["exec_cli"](code), None
@@ -146,12 +198,8 @@ class CodeOperation(BaseCodeOperation):
                 return _create_exec_code_err(error_msg="subprocess cmd can not be none",
                                              data=ExecuteCodeData(code_content=code, language=language))
 
-            env = OperationUtils.prepare_environment(environment)
-            if language == "javascript":
-                env["NODE_DISABLE_COLORS"] = "1"
-            elif language == "python":
-                env["PYTHONIOENCODING"] = "utf-8"
-                env["PYTHONUTF8"] = "1"
+            python_exe = cmd[0] if language == "python" else None
+            env = self._prepare_code_env(language, environment, python_exe)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -165,28 +213,28 @@ class CodeOperation(BaseCodeOperation):
             process_handler = OperationUtils.create_handler(process=process, encoding=encoding, timeout=timeout)
             invoke_data = await process_handler.invoke()
             invoke_exception = getattr(invoke_data, "exception", None)
+            result_data = ExecuteCodeData(
+                code_content=code,
+                language=language,
+                exit_code=invoke_data.exit_code,
+                stdout=invoke_data.stdout,
+                stderr=invoke_data.stderr
+            )
             if isinstance(invoke_exception, asyncio.TimeoutError):
                 if code_file_path:
                     await OperationUtils.delete_tmp_file(code_file_path)
                 return _create_exec_code_err(error_msg=f"execution timeout after {timeout} seconds",
-                                             data=ExecuteCodeData(
-                                                 code_content=code,
-                                                 language=language,
-                                                 exit_code=invoke_data.exit_code,
-                                                 stdout=invoke_data.stdout,
-                                                 stderr=invoke_data.stderr
-                                             ))
+                                             data=result_data)
+            if invoke_data.exit_code != 0:
+                error_msg = (invoke_data.stderr or "").strip() or (
+                    f"process exited with code {invoke_data.exit_code}"
+                )
+                return _create_exec_code_err(error_msg=error_msg, data=result_data)
 
             success_result = ExecuteCodeResult(
                 code=StatusCode.SUCCESS.code,
                 message="Code executed successfully",
-                data=ExecuteCodeData(
-                    code_content=code,
-                    language=language,
-                    exit_code=invoke_data.exit_code,
-                    stdout=invoke_data.stdout,
-                    stderr=invoke_data.stderr
-                )
+                data=result_data
             )
             sys_operation_logger.info("End to execute code", event=self._create_sys_operation_event(
                 event_type=LogEventType.SYS_OP_END,
@@ -290,12 +338,8 @@ class CodeOperation(BaseCodeOperation):
             return
 
         try:
-            env = OperationUtils.prepare_environment(environment)
-            if language == "javascript":
-                env["NODE_DISABLE_COLORS"] = "1"
-            elif language == "python":
-                env["PYTHONIOENCODING"] = "utf-8"
-                env["PYTHONUTF8"] = "1"
+            python_exe = cmd[0] if language == "python" else None
+            env = self._prepare_code_env(language, environment, python_exe)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.DEVNULL,
@@ -339,6 +383,9 @@ class CodeOperation(BaseCodeOperation):
                     """Handle process exit events, return result by exit code judgment"""
                     exit_code = event.data
                     chunk_data = ExecuteCodeChunkData(chunk_index=idx, exit_code=exit_code)
+                    if exit_code != 0:
+                        error_msg = f"process exited with code {exit_code}"
+                        return _create_exec_code_stream_err(error_msg, chunk_data)
                     exit_result = ExecuteCodeStreamResult(
                         code=StatusCode.SUCCESS.code,
                         message="Code executed successfully",

@@ -1,10 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import os
+import sys
 from typing import Dict, List, AsyncIterator
 
 import pytest
 import pytest_asyncio
+
+from openjiuwen.core.sys_operation.local.code_operation import CodeOperation
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import OperationMode, SysOperationCard, SysOperation
@@ -213,13 +216,13 @@ print(os.getenv('COUNT'))
         code = "print('missing quote"  # Syntax error: missing closing quote
         result: ExecuteCodeResult = await sys_op.code().execute_code(code=code)
 
-        assert result.code == StatusCode.SUCCESS.code
-        assert result.message == "Code executed successfully"
+        assert result.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
         assert result.data is not None
         assert result.data.code_content == code
         assert result.data.language == "python"
         assert result.data.exit_code != 0
         assert "SyntaxError" in result.data.stderr
+        assert "SyntaxError" in result.message
 
     @pytest.mark.asyncio
     async def test_execute_code_timeout(self, sys_op: SysOperation):
@@ -378,13 +381,10 @@ console.log(`15 * 25 = ${num1 * num2}`);
             options={"force_file": True}
         )
 
-        # 1. Verify execution success (status code + message)
-        assert result.code == StatusCode.SUCCESS.code
-        assert result.message == "Code executed successfully"
-        # 2. Verify exit code is non-0 (error marker)
+        assert result.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
         assert result.data.exit_code != 0
-        # 3. Verify stderr contains error detail (undefined variable)
         assert "undefined_variable_999" in result.data.stderr
+        assert "undefined_variable_999" in result.message
 
     @pytest.mark.asyncio
     async def test_execute_code_force_file_true_timeout(self, sys_op: SysOperation):
@@ -504,8 +504,9 @@ print("stream test for python")
 
         executed_res = results[-1]
         assert executed_res is not None
-        assert executed_res.message == "Code executed successfully"
+        assert executed_res.code == StatusCode.SYS_OPERATION_CODE_EXECUTION_ERROR.code
         assert executed_res.data.exit_code != 0
+        assert "process exited with code" in executed_res.message
 
     @pytest.mark.asyncio
     async def test_execute_code_stream_javascript_normal(self, sys_op: SysOperation):
@@ -646,3 +647,71 @@ print(os.getenv("TEST_ENV_VALUE"))
         assert executed_res is not None
         assert executed_res.message == "Code executed successfully"
         assert executed_res.data.exit_code == 0
+
+
+class TestResolvePythonExecutable:
+    """Managed Python env vars without spinning a full execute_code run."""
+
+    def test_prefers_readable_claw_python_exe(self, tmp_path, monkeypatch):
+        preferred = tmp_path / "managed-python.exe"
+        preferred.write_bytes(b"")
+        preferred.chmod(0o755)
+        monkeypatch.setenv("CLAW_PYTHON_EXE", str(preferred))
+        monkeypatch.setenv("CLAW_PYTHON_BASE_EXE", sys.executable)
+        assert CodeOperation.resolve_python_executable() == str(preferred)
+
+    def test_falls_back_to_base_when_primary_missing(self, tmp_path, monkeypatch):
+        base = tmp_path / "base-python.exe"
+        base.write_bytes(b"")
+        base.chmod(0o755)
+        monkeypatch.setenv("CLAW_PYTHON_EXE", str(tmp_path / "missing.exe"))
+        monkeypatch.setenv("CLAW_PYTHON_BASE_EXE", str(base))
+        assert CodeOperation.resolve_python_executable() == str(base)
+
+    def test_falls_back_to_sys_executable_without_env(self, monkeypatch):
+        monkeypatch.delenv("CLAW_PYTHON_EXE", raising=False)
+        monkeypatch.delenv("CLAW_PYTHON_BASE_EXE", raising=False)
+        assert CodeOperation.resolve_python_executable() == sys.executable
+
+    def test_prepare_env_strips_frozen_vars_for_other_python(self, monkeypatch):
+        monkeypatch.setenv("PYTHONHOME", "/frozen-home")
+        monkeypatch.setenv("PYTHONPATH", "/frozen-path")
+        other = sys.executable + ".other"
+        env = CodeOperation._prepare_code_env("python", None, other)
+        assert "PYTHONHOME" not in env
+        assert "PYTHONPATH" not in env
+        kept = CodeOperation._prepare_code_env(
+            "python",
+            {"PYTHONPATH": "keep-me"},
+            other,
+        )
+        assert kept["PYTHONPATH"] == "keep-me"
+
+    def test_prepare_env_keeps_frozen_vars_for_same_interpreter(self, monkeypatch):
+        monkeypatch.setenv("PYTHONHOME", "/frozen-home")
+        env = CodeOperation._prepare_code_env("python", None, sys.executable)
+        assert env["PYTHONHOME"] == "/frozen-home"
+
+
+@pytest.mark.asyncio
+class TestExecuteCodeManagedPython:
+    @pytest_asyncio.fixture
+    async def sys_op(self):
+        await Runner.start()
+        card_id = "test_code_op_managed"
+        card = SysOperationCard(id=card_id, mode=OperationMode.LOCAL)
+        add_res = Runner.resource_mgr.add_sys_operation(card)
+        assert add_res.is_ok()
+        yield Runner.resource_mgr.get_sys_operation(card_id)
+        Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+        await Runner.stop()
+
+    async def test_execute_code_uses_claw_python_exe(self, sys_op: SysOperation, monkeypatch):
+        monkeypatch.setenv("CLAW_PYTHON_EXE", sys.executable)
+        monkeypatch.delenv("CLAW_PYTHON_BASE_EXE", raising=False)
+        result = await sys_op.code().execute_code(
+            code="import sys; print(sys.executable)",
+            language="python",
+        )
+        assert result.code == StatusCode.SUCCESS.code
+        assert result.data.stdout.strip() == sys.executable
