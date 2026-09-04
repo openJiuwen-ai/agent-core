@@ -554,6 +554,49 @@ async def test_beam_judge_reason_uses_english_without_seed_copy(tmp_path):
     assert result["reason"] == "skill-b is useful"
 
 
+@pytest.mark.asyncio
+async def test_beam_keeps_high_scoring_state_that_leaves_the_frontier(tmp_path):
+    """A state retained in an early round must survive to the final merge.
+
+    ``skill-t`` is the highest scoring candidate in the graph and cannot be
+    expanded, so it leaves the frontier after round one. Everything reached
+    later scores lower. It must still be recommended.
+    """
+    artifacts = _artifacts(
+        tmp_path,
+        edges=[
+            _edge("skill-a", "skill-t", confidence=0.95),
+            _edge("skill-a", "skill-m", confidence=0.92),
+            _edge("skill-m", "skill-n", confidence=0.91),
+            _edge("skill-m", "skill-p", confidence=0.90),
+        ],
+    )
+    llm = _FakeBeamLLM({"skill-t": 0.99, "skill-m": 0.85, "skill-n": 0.80, "skill-p": 0.79})
+
+    result = await _planner(
+        artifacts,
+        llm,
+        top_k=2,
+        max_depth=4,
+        candidate_skill_ids=["skill-a"],
+    ).plan("compose a plan")
+
+    assert ("skill-a", "skill-t") in _plan_signatures(result)
+    # The superseded prefix of an extended state is not a plan of its own.
+    assert ("skill-a", "skill-m") not in _plan_signatures(result)
+    # Expansion is unchanged: the archive feeds the final merge, not the frontier.
+    assert [
+        (
+            json.loads(call["user_content"])["current_skill"]["id"],
+            tuple(item["skill"]["id"] for item in json.loads(call["user_content"])["candidates"]),
+        )
+        for call in llm.judge_calls
+    ] == [
+        ("skill-a", ("skill-t", "skill-m")),
+        ("skill-m", ("skill-n", "skill-p")),
+    ]
+
+
 def _planner(
     artifacts: GraphArtifacts,
     llm: _FakeBeamLLM,
