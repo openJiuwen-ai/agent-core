@@ -187,7 +187,7 @@ async def build_cli_runtime(
     mcp_server_name: str = "openjiuwen-team",
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
     mcp_default_tools_approval_mode: str | None = None,
-    codex_bypass_approvals_and_sandbox: bool = False,
+    codex_bypass_approvals_and_sandbox: bool = True,
     codex_turn_idle_timeout_s: float | None = None,
     codex_turn_idle_retries: int | None = None,
     external_model_config: ExternalCliModelConfig | None = None,
@@ -229,8 +229,9 @@ async def build_cli_runtime(
         mcp_server_command: Launch argv for the team MCP stdio server.
         mcp_default_tools_approval_mode: Optional Codex-only approval policy
             scoped to tools from the injected team MCP server.
-        codex_bypass_approvals_and_sandbox: Explicit high-risk Codex-only mode
-            that disables approval prompts and the SDK sandbox.
+        codex_bypass_approvals_and_sandbox: Codex-only switch that disables
+            approval prompts and the SDK sandbox by default. Set to ``False``
+            to restore Codex approval and sandbox handling.
         codex_turn_idle_timeout_s: Optional Codex-only inactivity ceiling for
             one SDK turn. Every received SDK notification refreshes it.
         codex_turn_idle_retries: Optional number of same-thread retries when a

@@ -88,7 +88,7 @@ def test_build_codex_config_uses_sdk_config_and_mcp_overrides():
     )
 
 
-def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_argv():
+def test_build_codex_config_defaults_team_mcp_tools_to_approve():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_config
 
     config = build_codex_config(
@@ -105,7 +105,7 @@ def test_build_codex_config_uses_custom_binary_without_rebuilding_app_server_arg
 
     assert config.kwargs["codex_bin"] == "/opt/codex"
     assert 'mcp_servers.team.command="team-mcp"' in config.kwargs["config_overrides"]
-    assert not any("default_tools_approval_mode" in item for item in config.kwargs["config_overrides"])
+    assert 'mcp_servers.team.default_tools_approval_mode="approve"' in config.kwargs["config_overrides"]
     assert "launch_args_override" not in config.kwargs
 
 
@@ -290,12 +290,13 @@ def test_build_codex_config_keeps_model_trace_and_mcp_overrides_together():
     assert not any(item.startswith("review_model=") for item in overrides)
 
 
-def test_build_codex_thread_options_leave_approval_and_sandbox_unset():
+def test_build_codex_thread_options_can_explicitly_restore_approval_and_sandbox():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_thread_options
 
     options = build_codex_thread_options(
         cwd="/workspace",
         system_prompt="You are the developer.",
+        bypass_approvals_and_sandbox=False,
     )
 
     assert options == {
@@ -355,7 +356,7 @@ def test_build_codex_thread_options_bypasses_for_external_model_even_when_unset(
     assert options["sandbox"] == "full-access"
 
 
-def test_build_codex_thread_options_can_explicitly_bypass_safety_boundaries():
+def test_build_codex_thread_options_bypasses_approval_and_sandbox_by_default():
     from openjiuwen.agent_teams.external.cli_agent.codex.options import build_codex_thread_options
 
     sdk = SimpleNamespace(
@@ -365,7 +366,6 @@ def test_build_codex_thread_options_can_explicitly_bypass_safety_boundaries():
     options = build_codex_thread_options(
         cwd="/workspace",
         system_prompt=None,
-        bypass_approvals_and_sandbox=True,
         sdk=sdk,
     )
 
