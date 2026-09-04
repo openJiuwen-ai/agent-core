@@ -479,7 +479,10 @@ class PuctEngine:
             # with those files replaced.
             parent_files = files_of(parent_code, spec.entrypoint)
             files, summary = reply_format.parse(reply, parent_files, spec.entrypoint)
-            if files and not edits_an_existing_file(parent_files, files):
+            # An empty reply has nothing to check for edits; the reason it is
+            # empty is already recorded (a failed call) or about to be
+            # (`note_empty`), and both say more than "it changed no file".
+            if reply.strip() and files and not edits_an_existing_file(parent_files, files):
                 # Everything it wrote landed in new paths nothing imports, so
                 # the program that runs is still the parent's. Said here, with
                 # the paths named, because the alternative is a candidate that
@@ -597,7 +600,14 @@ class _Reporter:
         never existed.
         """
         with self._lock:
-            self._empty[iteration] = f"this call returned nothing: {reason}"
+            # First cause wins. A call that failed is upstream of everything
+            # the draw does with its empty reply, and the second reason that
+            # arrives is about the empty reply, not about why it is empty.
+            # Measured: six calls refused with HTTP 429 (quota exhausted) were
+            # reported as "the reply wrote nothing and left every existing
+            # file alone" — pointing the reader at the model's output when the
+            # model was never reached.
+            self._empty.setdefault(iteration, f"this call returned nothing: {reason}")
 
     def note_empty(self, iteration: int) -> None:
         """Two failures wear the same empty reply and need opposite fixes."""

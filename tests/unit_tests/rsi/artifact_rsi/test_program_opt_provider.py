@@ -3668,3 +3668,52 @@ def test_relative_to_baseline_turns_the_ratio_the_way_the_criterion_says() -> No
     assert normalize(minimize, 0.0, 1.0) == 1.0
     # Absent direction keeps the meaning every existing card was written against.
     assert normalize({"normalize": {"kind": "relative_to_baseline"}}, 0.5, 1.0) == pytest.approx(2 / 3)
+
+
+def test_a_refused_model_call_is_reported_as_the_refusal_not_as_an_empty_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first cause is the one the reader needs.
+
+    Six calls came back HTTP 429 (quota exhausted). Each failure was recorded,
+    then the draw parsed the empty reply, found it edited no file, and recorded
+    *that* over it — so the run said "the reply wrote nothing and left every
+    existing file alone", sending the reader to the model's output when the
+    model was never reached. A failed call's reason now stays, and an empty
+    reply is not checked for edits at all.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    _no_runtime_probe(monkeypatch)
+
+    def factory(spec, on_usage, should_stop):  # type: ignore[no-untyped-def]
+        def complete(prompt, sink=None, on_failure=None):  # type: ignore[no-untyped-def]
+            if on_failure is not None:
+                on_failure("RateLimitError: Error code: 429 - AccountQuotaExceeded")
+            return ""
+        return complete
+
+    engine = PuctEngine(completion_factory=factory, evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="run-429", algorithm="puct", expansions=2, scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60}}]},
+        baseline_code='"""seed"""\nVALUE = 1\n',
+        script=('"""define VALUE"""\nimport importlib, json, os\n'
+                'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
+                'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
+                '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+    )
+
+    events: list[dict] = []
+    engine.run(spec, events.append, lambda: False)
+
+    said = " ".join(e["message"] for e in events if e.get("type") == "log" and e.get("level") == "error")
+    assert "429" in said, said
+    assert "wrote nothing" not in said, said
