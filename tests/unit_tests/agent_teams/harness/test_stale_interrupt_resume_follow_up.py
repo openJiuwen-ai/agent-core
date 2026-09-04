@@ -528,3 +528,133 @@ async def test_interrupt_settle_without_follow_ups_still_settles_idle() -> None:
         assert observed_phases == [HarnessState.RUNNING]
     finally:
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_second_approval_sent_while_running_resumes_after_reinterrupt() -> None:
+    """Exercise the complete two-approval / two-interrupt supervisor sequence.
+
+    Both slots are pending when approval 1 starts its resume round. Approval 2
+    then enters through the public ``send`` path while that round is RUNNING,
+    so the real supervisor parks it as a follow-up. The first resume consumes
+    slot 1, re-commits only slot 2, and returns ``interrupt``. Its settle must
+    start approval 2 immediately as a structured resume round.
+
+    This closes the gap left by the narrower settle test above, which seeded a
+    single pending slot and inserted the follow-up directly into the queue.
+    """
+
+    def interruption_state(*tool_call_ids: str) -> ToolInterruptionState:
+        return ToolInterruptionState(
+            ai_message=AssistantMessage(content="requesting approval"),
+            iteration=1,
+            interrupted_tools={
+                tool_call_id: ToolInterruptEntry(
+                    tool_call=ToolCall(
+                        id=tool_call_id,
+                        type="function",
+                        name=f"needs_approval_{tool_call_id}",
+                        arguments="{}",
+                    ),
+                    interrupt_requests={
+                        tool_call_id: InterruptRequest(message="approve?")
+                    },
+                )
+                for tool_call_id in tool_call_ids
+            },
+        )
+
+    def approval(tool_call_id: str) -> InteractiveInput:
+        value = InteractiveInput()
+        value.update(
+            tool_call_id,
+            {"approved": True, "feedback": "", "auto_confirm": False},
+        )
+        return value
+
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+        session = harness._session
+        session.update_state(
+            {INTERRUPTION_KEY: interruption_state("call-1", "call-2")}
+        )
+
+        first_resume_entered = asyncio.Event()
+        second_approval_parked = asyncio.Event()
+        base_invoke = fake.invoke
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            invocation_index = len(fake.invocations)
+            query = inputs.get("query") if isinstance(inputs, dict) else inputs
+            if invocation_index == 0:
+                assert isinstance(query, InteractiveInput)
+                assert set(query.user_inputs) == {"call-1"}
+                first_resume_entered.set()
+                await asyncio.wait_for(second_approval_parked.wait(), timeout=3.0)
+
+                # Mirrors ReAct resume: the old T1/T2 state is consumed, then
+                # the still-unapproved T2 ask is committed again before the
+                # round returns an interrupt result.
+                invoke_session.update_state({INTERRUPTION_KEY: None})
+                invoke_session.update_state(
+                    {INTERRUPTION_KEY: interruption_state("call-2")}
+                )
+                await base_invoke(inputs, invoke_session, **kwargs)
+                return {"output": "", "result_type": "interrupt"}
+
+            assert invocation_index == 1
+            assert isinstance(query, InteractiveInput)
+            assert set(query.user_inputs) == {"call-2"}
+            assert invoke_session.get_state(INTERRUPTION_KEY) is not None
+            invoke_session.update_state({INTERRUPTION_KEY: None})
+            return await base_invoke(inputs, invoke_session, **kwargs)
+
+        fake.invoke = invoke
+
+        states: list[HarnessState] = []
+
+        async def record_state(new: HarnessState) -> None:
+            states.append(new)
+
+        await harness.subscribe(on_state=record_state)
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send(approval("call-1"))
+            await asyncio.wait_for(first_resume_entered.wait(), timeout=3.0)
+
+            # Public send, not a direct queue seed: _on_send(RUNNING) performs
+            # the production enqueue exercised by the reported failure.
+            await harness.send(approval("call-2"))
+            second_approval_parked.set()
+
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while (
+                asyncio.get_running_loop().time() < deadline
+                and len(fake.invocations) < 2
+            ):
+                await asyncio.sleep(0.01)
+            assert len(fake.invocations) == 2
+            assert await wait_for_state(harness, HarnessState.IDLE)
+
+            queries = [inv.get("query") for inv in fake.invocations]
+            assert [set(query.user_inputs) for query in queries] == [
+                {"call-1"},
+                {"call-2"},
+            ]
+            assert session.get_state(INTERRUPTION_KEY) is None
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(session).pending_follow_ups == []
+            assert [s for s in states if s is not HarnessState.TERMINATED] == [
+                HarnessState.RUNNING,
+                HarnessState.IDLE,
+            ]
+        finally:
+            second_approval_parked.set()
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
