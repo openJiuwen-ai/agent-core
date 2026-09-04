@@ -64,6 +64,15 @@ def build_codex_config(
         config_overrides += codex_model_config_overrides(external_model_config)
         if external_model_config.api_key:
             process_env[_CODEX_API_KEY_ENV] = external_model_config.api_key
+        # An external model targets a non-OpenAI endpoint, but codex's request
+        # compression decision only checks the provider name and the ambient
+        # ChatGPT login in ~/.codex/auth.json — not the effective base_url.
+        # With a ChatGPT login present and a provider named "OpenAI", codex
+        # would zstd-compress request bodies that the external endpoint cannot
+        # decode (it sees "Failed to parse the request body as JSON"). Disable
+        # compression for external endpoints only; members running the official
+        # endpoint with a ChatGPT login keep the compression optimization.
+        config_overrides += ("features.enable_request_compression=false",)
     if native_otel_trace_endpoint:
         # Codex uses an OTel batch span processor. Keep its delivery interval
         # below Jiuwen's turn-finalization grace period so the native logical
