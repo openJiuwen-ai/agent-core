@@ -157,7 +157,6 @@ async def test_concurrent_org_claim_same_task_single_winner(org_manager):
             manager.claim_task(
                 task_id="race-task",
                 team_id=f"team-{index}",
-                leader_id=f"leader-{index}",
             )
             for index in range(10)
         ]
@@ -185,7 +184,7 @@ async def test_claim_and_delegate_use_single_assignment(org_manager):
     )
     assert result.ok
 
-    claimed = await manager.claim_task(task_id="task-1", team_id="team-a", leader_id="leader-a")
+    claimed = await manager.claim_task(task_id="task-1", team_id="team-a")
     assert claimed.ok
     assert claimed.task.status == OrgTaskStatus.CLAIMED
     assert claimed.task.assignment.assignment_type == OrgAssignmentType.CLAIMED
@@ -196,23 +195,27 @@ async def test_claim_and_delegate_use_single_assignment(org_manager):
         task_id="task-1",
         from_team_id="team-a",
         to_team_id="team-b",
-        to_leader_id="leader-b",
     )
     assert delegated.ok
     assert delegated.task.status == OrgTaskStatus.DELEGATED
     assert delegated.task.assignment.assignment_type == OrgAssignmentType.DELEGATED
     assert delegated.task.assignment.team_id == "team-b"
-    assert delegated.task.assignment.leader_id == "leader-b"
     assert delegated.task.assignment.assigned_by_team_id == "team-a"
 
 
 @pytest.mark.asyncio
 async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
     manager, _ = org_manager
-    creator = OrgTaskCreator(
+    client = OrgTaskCreator(
         creator_type="client",
         creator_id="client-1",
         organization_id="org-1",
+    )
+    team_a = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
     )
     assert (
         await manager.create_task(
@@ -220,9 +223,10 @@ async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
             title="Root",
             description="Root task.",
             required_capabilities=["analysis"],
-            created_by=creator,
+            created_by=client,
         )
     ).ok
+    assert (await manager.claim_task(task_id="root-1", team_id="team-a")).ok
     assert (
         await manager.create_task(
             task_id="child-1",
@@ -230,9 +234,10 @@ async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
             title="Child",
             description="Child task.",
             required_capabilities=["analysis"],
-            created_by=creator,
+            created_by=team_a,
         )
     ).ok
+    assert (await manager.claim_task(task_id="child-1", team_id="team-a")).ok
 
     grandchild = await manager.create_task(
         task_id="grandchild-1",
@@ -240,7 +245,7 @@ async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
         title="Grandchild",
         description="Grandchild task.",
         required_capabilities=["analysis"],
-        created_by=creator,
+        created_by=team_a,
     )
     assert grandchild.ok
     assert grandchild.task.root_task_id == "root-1"
@@ -249,10 +254,16 @@ async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
 @pytest.mark.asyncio
 async def test_create_task_rejects_conflicting_root_task_id(org_manager):
     manager, _ = org_manager
-    creator = OrgTaskCreator(
+    client = OrgTaskCreator(
         creator_type="client",
         creator_id="client-1",
         organization_id="org-1",
+    )
+    team_a = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
     )
     assert (
         await manager.create_task(
@@ -260,7 +271,7 @@ async def test_create_task_rejects_conflicting_root_task_id(org_manager):
             title="Root",
             description="Root task.",
             required_capabilities=["analysis"],
-            created_by=creator,
+            created_by=client,
         )
     ).ok
 
@@ -270,11 +281,12 @@ async def test_create_task_rejects_conflicting_root_task_id(org_manager):
         title="Bad root",
         description="Caller passed a mismatched root_task_id.",
         required_capabilities=["analysis"],
-        created_by=creator,
+        created_by=client,
     )
     assert not bad_root.ok
     assert "root task root_task_id must equal task_id" in bad_root.reason
     assert await manager.get_task("root-2") is None
+    assert (await manager.claim_task(task_id="root-1", team_id="team-a")).ok
 
     assert (
         await manager.create_task(
@@ -283,7 +295,7 @@ async def test_create_task_rejects_conflicting_root_task_id(org_manager):
             title="Child",
             description="Child task.",
             required_capabilities=["analysis"],
-            created_by=creator,
+            created_by=team_a,
         )
     ).ok
 
@@ -294,7 +306,7 @@ async def test_create_task_rejects_conflicting_root_task_id(org_manager):
         title="Bad child",
         description="Caller passed a mismatched root_task_id.",
         required_capabilities=["analysis"],
-        created_by=creator,
+        created_by=team_a,
     )
     assert not bad_child.ok
     assert "root_task_id must match parent.root_task_id" in bad_child.reason
@@ -307,7 +319,7 @@ async def test_create_task_rejects_conflicting_root_task_id(org_manager):
         title="Matching child",
         description="Explicit root_task_id matches parent.",
         required_capabilities=["analysis"],
-        created_by=creator,
+        created_by=team_a,
     )
     assert matching.ok
     assert matching.task.root_task_id == "root-1"
@@ -370,6 +382,68 @@ async def test_create_task_rejects_invalid_parent(org_manager):
 
 
 @pytest.mark.asyncio
+async def test_only_assigned_team_can_create_child_tasks(org_manager):
+    manager, _ = org_manager
+    client = OrgTaskCreator(creator_type="client", creator_id="client-1", organization_id="org-1")
+    team_a = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
+    team_b = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-b",
+        organization_id="org-1",
+        team_id="team-b",
+    )
+    assert (
+        await manager.create_task(
+            task_id="parent-ownership",
+            title="Parent",
+            description="Owned by team A.",
+            required_capabilities=["analysis"],
+            created_by=client,
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="parent-ownership", team_id="team-a")).ok
+
+    wrong_team = await manager.create_task(
+        task_id="wrong-team-child",
+        parent_task_id="parent-ownership",
+        title="Wrong owner child",
+        description="Team B must not create it.",
+        required_capabilities=["analysis"],
+        created_by=team_b,
+    )
+    assert not wrong_team.ok
+    assert wrong_team.reason == "only the parent task's assigned team can create child tasks"
+
+    no_team = await manager.create_task(
+        task_id="client-child",
+        parent_task_id="parent-ownership",
+        title="Client child",
+        description="Clients must not create child tasks.",
+        required_capabilities=["analysis"],
+        created_by=client,
+    )
+    assert not no_team.ok
+    assert no_team.reason == "child task must be created by a team"
+
+    assert (await manager.complete_task(task_id="parent-ownership", team_id="team-a")).ok
+    terminal_parent = await manager.create_task(
+        task_id="terminal-parent-child",
+        parent_task_id="parent-ownership",
+        title="Late child",
+        description="Completed parents must not gain children.",
+        required_capabilities=["analysis"],
+        created_by=team_a,
+    )
+    assert not terminal_parent.ok
+    assert terminal_parent.reason == "parent task is terminal: parent-ownership"
+
+
+@pytest.mark.asyncio
 async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
     manager, _ = org_manager
     creator = OrgTaskCreator(
@@ -385,6 +459,7 @@ async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
         required_capabilities=["analysis"],
         created_by=creator,
     )
+    assert (await manager.claim_task(task_id="root-task-1", team_id="team-a")).ok
     child = await manager.create_task(
         task_id="child-task-1",
         parent_task_id="root-task-1",
@@ -511,7 +586,6 @@ async def test_start_task_status_guards(org_manager):
     claimed = await manager.claim_task(
         task_id="start-guard-task",
         team_id="team-a",
-        leader_id="leader-a",
     )
     assert claimed.ok
 
@@ -591,6 +665,7 @@ async def test_org_create_task_tool_exposes_hierarchical_aggregation_and_rejects
     tool = OrgCreateTaskTool(manager, team_id="team-a", leader_id="leader-a")
     params = tool.card.input_params["properties"]["aggregation_mode"]
     assert params["enum"] == [OrgTaskAggregationMode.HIERARCHICAL.value]
+    assert "root_task_id" not in tool.card.input_params["properties"]
 
     created = await tool.invoke(
         {
@@ -632,7 +707,7 @@ async def test_completed_event_points_to_db_result(org_manager):
             organization_id="org-1",
         ),
     )
-    await manager.claim_task(task_id="task-2", team_id="team-a", leader_id="leader-a")
+    await manager.claim_task(task_id="task-2", team_id="team-a")
     completed = await manager.complete_task(
         task_id="task-2",
         team_id="team-a",
@@ -726,7 +801,6 @@ async def test_publish_leader_message_event_skips_team_inbox_delivery(org_manage
             task_id="task-delegated",
             delegated_by_team_id="team-a",
             delegated_to_team_id="team-b",
-            delegated_to_leader_id="leader-b",
         ),
         team_inbox_id="team-b",
     )
@@ -911,7 +985,7 @@ async def test_organization_events_are_persisted_for_activity_views(org_manager)
             organization_id="org-1",
         ),
     )
-    await manager.claim_task(task_id="activity-task", team_id="team-a", leader_id="leader-a")
+    await manager.claim_task(task_id="activity-task", team_id="team-a")
 
     assert manager.db.session_local is not None
     async with manager.db.session_local() as session:
@@ -947,7 +1021,7 @@ async def test_child_task_completion_creates_pending_review(org_manager):
             organization_id="org-1",
         ),
     )
-    await manager.claim_task(task_id="parent-1", team_id="team-a", leader_id="leader-a")
+    await manager.claim_task(task_id="parent-1", team_id="team-a")
     child = await manager.create_task(
         task_id="child-1",
         parent_task_id="parent-1",
@@ -962,7 +1036,7 @@ async def test_child_task_completion_creates_pending_review(org_manager):
         ),
     )
     assert child.ok
-    await manager.claim_task(task_id="child-1", team_id="team-b", leader_id="leader-b")
+    await manager.claim_task(task_id="child-1", team_id="team-b")
 
     blocked_parent = await manager.complete_task(task_id="parent-1", team_id="team-a")
     assert not blocked_parent.ok
@@ -1020,7 +1094,7 @@ async def test_summary_task_sources_read_completed_outputs(org_manager):
             organization_id="org-1",
         ),
     )
-    await manager.claim_task(task_id="source-1", team_id="team-finance", leader_id="leader-finance")
+    await manager.claim_task(task_id="source-1", team_id="team-finance")
 
     early_summary = await manager.create_summary_task(
         task_id="summary-early",
@@ -1187,7 +1261,6 @@ async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_r
     assert (await manager.claim_task(
         task_id="claimed-test-task",
         team_id="team-b",
-        leader_id="leader-team-b",
     )).ok
 
     turns = []
@@ -1207,7 +1280,6 @@ async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_r
                 leader_id="leader-team-b",
                 task_id="claimed-test-task",
                 claimed_by_team_id="team-b",
-                claimed_by_leader_id="leader-team-b",
             )
         )
     )
@@ -1218,6 +1290,36 @@ async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_r
     assert "claimed-test-task" in prompt
     assert "org_update_task(action='start')" in prompt
     assert "org_update_task(action='complete')" in prompt
+    assert "org_create_task(parent_task_id='claimed-test-task')" in prompt
+    assert "org_view_child_tasks" in prompt
+
+
+@pytest.mark.asyncio
+async def test_task_execution_prompts_describe_child_decomposition(active_organization_runtime):
+    runtime, _, session_id = active_organization_runtime
+    prompts: list[str] = []
+
+    def capture_prompt(**kwargs):
+        prompts.append(kwargs["prompt"])
+
+    runtime._schedule_leader_turn = capture_prompt
+    runtime._schedule_delegated_turn(
+        team_id="team-a",
+        session_id=session_id,
+        task_id="delegated-parent",
+        organization_id="org-1",
+    )
+    runtime._schedule_parent_completion_turn(
+        team_id="team-a",
+        session_id=session_id,
+        child_task_id="child-1",
+        parent_task_id="parent-1",
+        organization_id="org-1",
+    )
+
+    assert "org_create_task(parent_task_id='delegated-parent')" in prompts[0]
+    assert "org_view_child_tasks" in prompts[0]
+    assert "org_create_task(parent_task_id='parent-1')" in prompts[1]
 
 
 @pytest.mark.asyncio
@@ -1291,7 +1393,6 @@ async def test_cold_recovered_leader_rebinds_from_persisted_membership(active_or
     assert (await manager.claim_task(
         task_id="claimed-before-recovery",
         team_id="team-b",
-        leader_id="leader-team-b",
     )).ok
 
     # Model a process restart: the durable tables remain but the in-memory
@@ -1430,7 +1531,7 @@ async def test_completed_child_wakes_its_creator_team(active_organization_runtim
             organization_id="org-completed-child",
         ),
     )
-    await manager.claim_task(task_id="parent", team_id="team-a", leader_id="leader-team-a")
+    await manager.claim_task(task_id="parent", team_id="team-a")
     await manager.create_task(
         task_id="child",
         parent_task_id="parent",
