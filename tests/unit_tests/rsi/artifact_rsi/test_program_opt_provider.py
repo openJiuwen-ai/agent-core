@@ -3524,6 +3524,7 @@ def test_a_timeout_and_a_refusal_arrive_with_the_same_exit_code() -> None:
     """
     from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
         ExecutionUnavailable,
+        _Run,
         _stage_and_run,
     )
 
@@ -3562,7 +3563,8 @@ def test_a_timeout_and_a_refusal_arrive_with_the_same_exit_code() -> None:
 
     async def run(result: object) -> object:
         return await _stage_and_run(
-            _Operation(result), {"x.py": "1\n"}, ["python", "x.py"], {}, 2, None)
+            _Operation(result),
+            _Run({"x.py": "1\n"}, ["python", "x.py"], {}, 2, None))
 
     outcome = asyncio.run(run(_Result()))
 

@@ -31,9 +31,10 @@ import threading
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+import logging
 from typing import Any, Literal
 
-import logging
+from agentdescent.filetree import load_tree
 
 from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
 from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
@@ -44,8 +45,6 @@ from openjiuwen.rsi.artifact_rsi.program_opt.program import (
     local_roots,
     validate_source,
 )
-from agentdescent.filetree import load_tree
-
 from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
 from openjiuwen.rsi.artifact_rsi.program_opt.execution import (
     EvaluationExecution,
@@ -144,7 +143,8 @@ class PuctProgramArtifactProvider:
 
     # -- validation ------------------------------------------------------------
 
-    def validate_input(self, artifact_path: str | None) -> ArtifactValidationResult:
+    @staticmethod
+    def validate_input(artifact_path: str | None) -> ArtifactValidationResult:
         """Whether this path is a program the search could start from.
 
         Starts no optimization and creates no task snapshot. Deliberately cheap
@@ -174,7 +174,7 @@ class PuctProgramArtifactProvider:
         # is a package is read whole, at its own relative paths.
         try:
             files = _seed_files(path)
-        except (OSError, UnicodeDecodeError, ValueError) as error:
+        except (OSError, ValueError) as error:
             return ArtifactValidationResult(valid=False, errors=[{
                 "code": "ARTIFACT_UNREADABLE",
                 "message": f"{artifact_path} could not be read as a program: {error}",
@@ -341,7 +341,8 @@ class PuctProgramArtifactProvider:
 
     # -- queries ---------------------------------------------------------------
 
-    def read_state(self, task_id: str) -> EngineState:
+    @staticmethod
+    def read_state(task_id: str) -> EngineState:
         """The latest durable state, read without side effects."""
         state = read_state_file(task_id)
         if state is None:
@@ -352,7 +353,8 @@ class PuctProgramArtifactProvider:
             )
         return state.to_engine_state()
 
-    def read_report(self, task_id: str) -> EngineReport:
+    @staticmethod
+    def read_report(task_id: str) -> EngineReport:
         """The current or final report, with every artifact the task produced."""
         report = read_report_file(task_id)
         if report is None:
@@ -362,7 +364,8 @@ class PuctProgramArtifactProvider:
             )
         return report
 
-    def get_tree(self, task_id: str) -> TreeResponse:
+    @staticmethod
+    def get_tree(task_id: str) -> TreeResponse:
         """The complete tree, rejected branches included."""
         tree = read_tree_file(task_id)
         return tree if tree is not None else TreeResponse(nodes=[], depth=0, iteration=0)
@@ -396,7 +399,8 @@ class PuctProgramArtifactProvider:
                 return ref
         raise FileNotFoundError(f"artifact {artifact_id} does not belong to task {task_id}")
 
-    def _best_artifact_id(self, task_id: str, best_node_id: str | None) -> str | None:
+    @staticmethod
+    def _best_artifact_id(task_id: str, best_node_id: str | None) -> str | None:
         """Which artifact the winning node points at."""
         if not best_node_id:
             return None
@@ -559,8 +563,8 @@ class PuctProgramArtifactProvider:
             return execution_from_sys_operation(self._sys_operation, loop)
         return local_execution(Path(spec.run_dir) / "workspace", loop)
 
+    @staticmethod
     def _spec_for(
-        self,
         request: ArtifactEngineRequest,
         *,
         resumed: bool,

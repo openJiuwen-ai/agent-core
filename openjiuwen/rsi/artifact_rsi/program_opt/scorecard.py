@@ -119,8 +119,11 @@ def normalize(criterion: Mapping[str, Any], raw: Optional[float], baseline: Opti
 
 
 def normalized_weights(scorecard: Mapping[str, Any]) -> Dict[str, float]:
-    """Weights as fractions of their sum, so a card whose weights read 3 and 1
-    means the same as one that reads 0.75 and 0.25."""
+    """Weights as fractions of their sum.
+
+    So a card whose weights read 3 and 1 means the same as one that reads 0.75
+    and 0.25.
+    """
     criteria = scorecard.get("criteria") or []
     total = sum(float(c.get("weight", 0)) for c in criteria)
     if total <= 0:
@@ -130,8 +133,11 @@ def normalized_weights(scorecard: Mapping[str, Any]) -> Dict[str, float]:
 
 def aggregate(scorecard: Mapping[str, Any], normalized: Mapping[str, float]) -> float:
     """Weighted sum, or weighted geometric mean when no weak dimension is
-    acceptable — a geomean is dragged to zero by any criterion near zero, which
-    is exactly what "don't trade this away" means."""
+    acceptable.
+
+    A geomean is dragged to zero by any criterion near zero, which is exactly
+    what "don't trade this away" means.
+    """
     weights = normalized_weights(scorecard)
     if scorecard.get("aggregate") == "weighted_geomean":
         product = 1.0

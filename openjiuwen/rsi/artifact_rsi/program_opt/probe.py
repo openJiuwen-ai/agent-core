@@ -323,6 +323,7 @@ def _refuse_noisy(evaluate, baseline_code: str, shards, baseline: float,
         "random in the scoring (fix the seed, take the median of several passes)"
     )
 
+
 def _refuse_thin_headroom(baseline: float, worsened: Optional[float],
                           threshold: float) -> None:
     """Refuse a start with less room above it than the scoring can resolve.

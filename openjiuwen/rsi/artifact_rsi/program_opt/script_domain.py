@@ -173,18 +173,16 @@ def script_domain(
     evaluator_file, evaluator_command = _evaluator_run(evaluator_file, evaluator_command)
 
     def evaluate(code: str, shards: Sequence[int]) -> Tuple[bool, Dict[str, Any], str]:
-        try:
-            payload = _run_evaluator(
-                code, script, cases_for(shards, _total, _seed),
-                execute=execute, timeout=candidate_timeout,
-                entrypoint=entrypoint, evaluator_file=evaluator_file,
-                evaluator_command=tuple(evaluator_command),
-            )
-        except ScriptError:
-            # A broken evaluator is not a bad candidate. Raised so the run
-            # stops and says which of the two is wrong, rather than reporting
-            # every candidate as invalid until the budget runs out.
-            raise
+        # `ScriptError` is deliberately not caught here. A broken evaluator is
+        # not a bad candidate: letting it out stops the run and says which of
+        # the two is wrong, rather than reporting every candidate as invalid
+        # until the budget runs out.
+        payload = _run_evaluator(
+            code, script, cases_for(shards, _total, _seed),
+            execute=execute, timeout=candidate_timeout,
+            entrypoint=entrypoint, evaluator_file=evaluator_file,
+            evaluator_command=tuple(evaluator_command),
+        )
 
         if not payload.get("valid", False):
             # The failure text is what the reflector learns from and what the

@@ -297,6 +297,7 @@ Its score: {parent_score}. Best so far: {best_score}.
 {how_to_change}
 """
 
+
 def _feedback(text: str) -> str:
     """The evaluator's own diagnosis of the parent, as a prompt section.
 

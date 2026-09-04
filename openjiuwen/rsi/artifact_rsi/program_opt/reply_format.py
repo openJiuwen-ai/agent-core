@@ -118,6 +118,7 @@ with its path, exactly like the listing above:
 _PROGRAM_TAG = re.compile(r"<PROGRAM>(.*?)</PROGRAM>", re.DOTALL | re.IGNORECASE)
 _SUMMARY_TAG = re.compile(r"<CHANGE_SUMMARY>(.*?)</CHANGE_SUMMARY>", re.DOTALL | re.IGNORECASE)
 
+
 def _tagged_instructions(entrypoint: str = DEFAULT_ENTRYPOINT) -> str:
     """The `tagged` protocol. Upstream's wording, with the one word that named
     a language replaced by the file it actually writes."""

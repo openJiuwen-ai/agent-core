@@ -74,6 +74,16 @@ def _noop(_kind: str, _payload: Dict[str, Any]) -> None:
     return None
 
 
+#: The fields one proposal carries between the strategy and the aggregator.
+#:
+#: `promise` is the model's own rating of the direction, carried so the
+#: aggregator can hand it to `FlatPuct` as `P(s, a)`. Metadata about the
+#: proposal rather than part of the program, and empty unless the run asked
+#: for a prior.
+_STATE_KEYS = ("code", "program_id", "change_summary", "parent_id", "parent_index",
+               "promise")
+
+
 class PuctStrategy:
     """One executable program, and the parser that turns a reply into a Diff."""
 
@@ -91,16 +101,12 @@ class PuctStrategy:
     def render(self, state: Dict[str, str]) -> str:
         return state.get("code", self.domain.initial_program)
 
-    def keys(self) -> Sequence[str]:
-        # `promise` is the model's own rating of the direction, carried so the
-        # aggregator can hand it to `FlatPuct` as `P(s, a)`. Metadata about the
-        # proposal rather than part of the program, and empty unless the run
-        # asked for a prior.
-        return ("code", "program_id", "change_summary", "parent_id", "parent_index",
-                "promise")
+    @staticmethod
+    def keys() -> Sequence[str]:
+        return _STATE_KEYS
 
+    @staticmethod
     def to_diff(
-        self,
         state: Dict[str, str],
         proposal: str,
         author: str,
@@ -112,7 +118,7 @@ class PuctStrategy:
             code = str(payload["code"]).strip()
             iteration = int(payload["iteration"])
             parent_index = int(payload["parent_index"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError):
             return None
         # An empty reply still becomes a diff, and so still becomes a node that
         # scores `-inf`. Upstream's `futs.search` appends the node regardless --
@@ -391,7 +397,7 @@ def make_reward(domain: Domain) -> Callable[[Task, str], float]:
             if not payload.get("valid"):
                 return 0.0
             return domain.reward(payload["metrics"])
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError):
             return 0.0
 
     return reward

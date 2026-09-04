@@ -261,6 +261,9 @@ class ProgramRunState:
     def _seeded(self, event: dict[str, Any]) -> Iterator[EngineEvent]:
         self.baseline = event.get("baselineScore")
         self.score = self.baseline
+        # Named before the node is built because the same id goes on the node
+        # and into its `program` extra, and the store must be asked once.
+        seed_artifact = self._artifact(0, event.get("codeHash"))
         node = RsiTreeNode(
             node_id=node_id_for(self.task_id, 0),
             iteration=0,
@@ -271,7 +274,7 @@ class ProgramRunState:
             summary=("the starting program"
                      + (f" — gate {self.baseline:.4f} (baseline)"
                         if self.baseline is not None else "")),
-            snapshot_artifact_id=(seed_artifact := self._artifact(0, event.get("codeHash"))),
+            snapshot_artifact_id=seed_artifact,
             reason=None,
             failure_class=None,
             changes=[],
@@ -298,8 +301,14 @@ class ProgramRunState:
         """
         change = node.changes[0].summary if node.changes else ""
         evaluation = (node.extra.get("program") or {}).get("evaluation") or {}
-        score = next((v for v in (evaluation.get("gate"), evaluation.get("reward"),
-                                  node.score) if v is not None), None)
+        # First of the three that was actually measured. Written out because a
+        # generator spanning two lines inside a `next` is the shape this reads
+        # worst in.
+        score = None
+        for candidate in (evaluation.get("gate"), evaluation.get("reward"), node.score):
+            if candidate is not None:
+                score = candidate
+                break
         if not evaluation.get("valid", True):
             first_line = str(node.reason or "").strip().splitlines()[0][:120] \
                 if str(node.reason or "").strip() else "no diagnosis"
@@ -676,9 +685,7 @@ def read_report_file(task_id: str) -> Optional[EngineReport]:
         task_id=payload.get("task_id", task_id),
         status=payload.get("status", "created"),
         best_node_id=payload.get("best_node_id"),
-        artifact_index=[ref for ref in
-                        (_artifact_ref_from(raw) for raw in payload.get("artifact_index") or [])
-                        if ref is not None],
+        artifact_index=_artifact_refs(payload.get("artifact_index")),
         summary=payload.get("summary"),
         usage=_usage_from(payload.get("usage")),
     )
@@ -727,6 +734,20 @@ def _depth_of(nodes: list[RsiTreeNode], by_id: dict[str, RsiTreeNode]) -> int:
             depth += 1
         deepest = max(deepest, depth)
     return deepest
+
+
+def _artifact_refs(raw: Any) -> list[ArtifactRef]:
+    """Every artifact row that parses, in order; the rest dropped.
+
+    A row this reader cannot understand is a row written by a version that is
+    not this one — worth skipping rather than worth failing a whole report for.
+    """
+    refs: list[ArtifactRef] = []
+    for row in raw or []:
+        ref = _artifact_ref_from(row)
+        if ref is not None:
+            refs.append(ref)
+    return refs
 
 
 def _usage_from(raw: Any) -> Optional[RsiUsage]:

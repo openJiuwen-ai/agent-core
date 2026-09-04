@@ -100,9 +100,11 @@ def validate_names(packages: Sequence[str]) -> List[str]:
 
 
 def probe_imports(names: Sequence[str], execute: "EvaluationExecution") -> Optional[str]:
-    """``None`` when every module imports inside the execution environment,
-    else the probe's output tail. Only vetted names go in — they are spliced
-    into a command line."""
+    """``None`` when every module imports inside the execution environment.
+
+    Otherwise the probe's output tail. Only vetted names go in — they are
+    spliced into a command line.
+    """
     joined = ", ".join(names)
     outcome = execute({}, ["python", "-c", f"import {joined}"], {}, 120.0, None)
     if outcome.exit_code == 0:

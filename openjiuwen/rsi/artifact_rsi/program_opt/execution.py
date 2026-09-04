@@ -60,13 +60,25 @@ EvaluationExecution = Callable[
 ]
 
 
+@dataclass(frozen=True)
+class _Run:
+    """One command and the tree it needs staged around it.
+
+    The five together *are* the seam's signature (`EvaluationExecution`), so
+    they travel as one value rather than as five parameters restated at every
+    hop between the closure and the staging.
+    """
+
+    files: Mapping[str, str]
+    command: Sequence[str]
+    env: Mapping[str, str]
+    timeout: float
+    result_file: Optional[str]
+
+
 async def _stage_and_run(
     sys_operation: Any,
-    files: Mapping[str, str],
-    command: Sequence[str],
-    env: Mapping[str, str],
-    timeout: float,
-    result_file: Optional[str],
+    run: _Run,
     scratch_root: Optional[Path] = None,
 ) -> ExecutionOutcome:
     """One evaluation inside one sandbox: stage, run, read back.
@@ -92,7 +104,7 @@ async def _stage_and_run(
     # stages no files, and the candidate-runtime probe came back "No such file
     # or directory" — reported as an execution environment missing numpy, on a
     # machine where numpy was installed.
-    staged = dict(files) or {".evolve": "one evaluation's scratch directory\n"}
+    staged = dict(run.files) or {".evolve": "one evaluation's scratch directory\n"}
     written = await asyncio.gather(*(
         fs.write_file(f"{scratch}/{path}", text, prepend_newline=False)
         for path, text in staged.items()
@@ -111,10 +123,10 @@ async def _stage_and_run(
             )
 
     completed = await shell.execute_cmd(
-        shlex.join(command),
+        shlex.join(run.command),
         cwd=scratch,
-        timeout=max(1, int(timeout)),
-        environment=dict(env),
+        timeout=max(1, int(run.timeout)),
+        environment=dict(run.env),
     )
     data = getattr(completed, "data", completed)
     output = f"{getattr(data, 'stderr', '')}{getattr(data, 'stdout', '')}"
@@ -144,12 +156,12 @@ async def _stage_and_run(
         reason = getattr(completed, "message", "") or f"error {code}"
         if "timeout" not in reason.lower():
             raise ExecutionUnavailable(
-                f"the execution environment refused `{shlex.join(command)}`: {reason}")
+                f"the execution environment refused `{shlex.join(run.command)}`: {reason}")
         output = f"{output}\n{reason}".strip()
     result_text: Optional[str] = None
-    if result_file is not None:
+    if run.result_file is not None:
         try:
-            read = await fs.read_file(f"{scratch}/{result_file}")
+            read = await fs.read_file(f"{scratch}/{run.result_file}")
             content = getattr(getattr(read, "data", read), "content", None)
             result_text = content if isinstance(content, str) else None
         except Exception:  # noqa: BLE001 - absence is an ordinary outcome
@@ -179,7 +191,7 @@ def _bridge(operation: Any, loop: Any,
         result_file: Optional[str],
     ) -> ExecutionOutcome:
         future = asyncio.run_coroutine_threadsafe(
-            _stage_and_run(operation, files, command, env, timeout, result_file,
+            _stage_and_run(operation, _Run(files, command, env, timeout, result_file),
                            scratch_root), loop)
         return future.result(timeout + 120)
 

@@ -48,6 +48,7 @@ from .program import Program, files_of
 #: The artifact id the selection rows carry. Only ever compared with itself.
 ARTIFACT_ID = "puct"
 
+
 @dataclass
 class Node:
     """`futs.Node`, with the program payload this port carries alongside it."""
@@ -117,6 +118,24 @@ class PuctTree:
             root = Node(0, None, program, score)
             self.nodes.append(root)
             return root
+
+    def resume_at(self, iteration: int) -> None:
+        """Continue numbering from `iteration` instead of from 1.
+
+        A restored tree already has nodes whose iterations are in the event
+        log, and the counter has to skip past them: reusing a number would put
+        two different candidates under one label. Public because `restore` is
+        the caller and reaching into the counter from outside was exactly the
+        kind of access this makes unnecessary.
+        """
+        with self._lock:
+            self._next_iteration = max(self._next_iteration, int(iteration))
+
+    @property
+    def next_iteration(self) -> int:
+        """The label the next selection will carry."""
+        with self._lock:
+            return self._next_iteration
 
     def _backpropagate_locked(self, node: Node) -> None:
         """`futs.backpropagate_visit` -- the node, then every ancestor."""

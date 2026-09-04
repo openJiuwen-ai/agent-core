@@ -64,6 +64,7 @@ def total_slots(split) -> int:
     """How many shard slots a split declares, under either field naming."""
     if not isinstance(split, dict):
         return 0
+
     def read(*names: str) -> int:
         for name in names:
             value = split.get(name)

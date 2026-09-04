@@ -139,8 +139,8 @@ def restore_tree(
     # Iterations are what the model call is labelled with and what the tree
     # counts against `candidate_limit`. Continuing from the highest one seen
     # keeps a resumed run's numbering monotone in the event log.
-    tree._next_iteration = max((node.program.iteration for node in nodes), default=0) + 1
-    log.info("restored %d node(s), resuming at iteration %d", len(nodes), tree._next_iteration)
+    tree.resume_at(max((node.program.iteration for node in nodes), default=0) + 1)
+    log.info("restored %d node(s), resuming at iteration %d", len(nodes), tree.next_iteration)
     return tree
 
 
