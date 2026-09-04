@@ -66,20 +66,18 @@ class OrgTaskCreatedEvent(BaseOrgEvent):
 
 
 class OrgTaskClaimedEvent(BaseOrgEvent):
-    """Published after an open task is claimed by one leader."""
+    """Published after an open task is claimed by one team."""
 
     task_id: str
     claimed_by_team_id: str
-    claimed_by_leader_id: str
 
 
 class OrgTaskDelegatedEvent(BaseOrgEvent):
-    """Published after a task is delegated to another team leader."""
+    """Published after a task is delegated to another team."""
 
     task_id: str
     delegated_by_team_id: str
     delegated_to_team_id: str
-    delegated_to_leader_id: str | None = None
 
 
 class OrgTaskCompletedEvent(BaseOrgEvent):
