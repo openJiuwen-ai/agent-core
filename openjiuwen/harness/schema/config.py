@@ -161,6 +161,15 @@ class AudioModelConfig:
 
 
 @dataclass
+class TaskLoopNoProgressGuardConfig:
+    """Guard repeated empty/near-empty no-tool answers in task-loop mode."""
+
+    enabled: bool = True
+    max_consecutive_empty_answers: int = 3
+    min_answer_chars: int = 20
+
+
+@dataclass
 class DeepAgentConfig:
     """Runtime configuration for DeepAgent.
 
@@ -284,6 +293,15 @@ class DeepAgentConfig:
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
+
+    # Task-loop no-progress guard: stop repeated short answer rounds.
+    task_loop_no_progress_guard: TaskLoopNoProgressGuardConfig = field(
+        default_factory=lambda: TaskLoopNoProgressGuardConfig()
+    )
+
+    # Skill budget: gently truncate skill prompts by dropping whole low-ranked skills.
+    skill_budget_max_skills: Optional[int] = None
+    skill_budget_max_total_chars: Optional[int] = None
 
 
 @dataclass

@@ -1142,3 +1142,69 @@ async def test_skill_rail_multi_dir_with_missing_dirs(tmp_path: Path):
     await skill_rail.before_invoke(ctx)
 
     assert _sorted_skill_names(skill_rail.skills) == ["skill-a", "skill-c"]
+
+
+def test_skill_use_rail_apply_skill_budget_no_budget():
+    """When no budget is set, all skills are returned unchanged."""
+    rail = SkillUseRail(skills_dir="./", skill_mode="all", include_tools=False)
+    skills = [
+        _MockSkill(name="alpha", description="Alpha does alpha things."),
+        _MockSkill(name="beta", description="Beta handles beta tasks."),
+    ]
+    result = rail._apply_skill_budget(skills, query="do alpha")
+    assert [s.name for s in result] == ["alpha", "beta"]
+
+
+def test_skill_use_rail_apply_skill_budget_max_skills():
+    """max_skills drops lowest-ranked whole skills."""
+    rail = SkillUseRail(
+        skills_dir="./", skill_mode="all", include_tools=False, max_skills=2
+    )
+    skills = [
+        _MockSkill(name="alpha", description="Alpha does alpha things."),
+        _MockSkill(name="beta", description="Beta handles beta tasks."),
+        _MockSkill(name="gamma", description="Gamma is for gamma work."),
+    ]
+    result = rail._apply_skill_budget(skills, query="alpha tasks")
+    assert len(result) == 2
+    assert result[0].name == "alpha"  # highest keyword overlap
+
+
+def test_skill_use_rail_apply_skill_budget_max_total_chars():
+    """max_total_chars drops lowest-ranked whole skills until under budget."""
+    rail = SkillUseRail(
+        skills_dir="./",
+        skill_mode="all",
+        include_tools=False,
+        max_total_chars=50,
+    )
+    skills = [
+        _MockSkill(name="alpha", description="Short."),
+        _MockSkill(name="beta", description="This is a much longer description that exceeds budget."),
+    ]
+    result = rail._apply_skill_budget(skills, query="beta")
+    # beta ranks higher (query match), but total chars might still exceed 50
+    # if so, alpha gets dropped first (lower rank), then beta if still over
+    total = sum(len(s.description) for s in result)
+    assert total <= 50
+
+
+def test_skill_use_rail_extract_keywords():
+    """Keyword extraction removes stop words and short tokens."""
+    text = "The quick brown fox does something with Python code."
+    keywords = SkillUseRail._extract_keywords(text)
+    assert "quick" in keywords
+    assert "brown" in keywords
+    assert "fox" in keywords
+    assert "python" in keywords
+    assert "code" in keywords
+    assert "the" not in keywords  # stop word
+    assert "does" not in keywords  # stop word
+
+
+class _MockSkill:
+    """Minimal mock for Skill objects in budget tests."""
+
+    def __init__(self, name: str, description: str):
+        self.name = name
+        self.description = description

@@ -1634,6 +1634,7 @@ class ReActAgent(BaseAgent):
             except Exception as exc:
                 if image_input_present and self._is_image_input_unsupported_error(exc):
                     ai_message = self._build_image_input_unsupported_message()
+                    ctx.extra["_last_image_unsupported"] = True
                 else:
                     await self._emit_context_usage(
                         ctx,
@@ -1705,6 +1706,7 @@ class ReActAgent(BaseAgent):
             if image_input_present and self._is_image_input_unsupported_error(exc):
                 ai_message = self._build_image_input_unsupported_message()
                 ctx.inputs.response = ai_message
+                ctx.extra["_last_image_unsupported"] = True
                 await self._emit_context_usage(
                     ctx,
                     context_window,
@@ -1905,8 +1907,18 @@ class ReActAgent(BaseAgent):
     def _build_image_input_unsupported_message() -> AssistantMessage:
         return AssistantMessage(
             content=(
-                "当前主模型或模型服务端点不支持图片输入，因此无法直接读取这张图片的内容。"
-                "请切换到支持视觉输入的主模型，或配置专用视觉模型工具后再读取图片。"
+                "[Vision Input Unsupported] The current model or endpoint does not support image input.\n"
+                "当前主模型或模型服务端点不支持图片输入。\n\n"
+                "Suggested alternatives / 建议替代方案：\n"
+                "1. If reading a PDF, use `read_file` in text mode or use `pypdf`/`pdfplumber` "
+                "to extract text and form fields directly, without rendering pages to images.\n"
+                "   如果读取的是 PDF，请使用文本模式读取，或用 `pypdf` 提取文本和表单字段。\n"
+                "2. If reading an image (JPG/PNG), describe what information you need and ask the "
+                "user for a text transcription, or use an available OCR tool if one is configured.\n"
+                "   如果读取的是图片，请描述所需信息并请用户提供文字转录。\n"
+                "3. If the task absolutely requires vision, configure a `vision_model_config` "
+                "with a vision-capable endpoint.\n"
+                "   如果任务必须依赖视觉，请配置支持视觉输入的模型。"
             ),
             tool_calls=[],
         )
@@ -2778,6 +2790,13 @@ class ReActAgent(BaseAgent):
                             # the loop so the next iteration
                             # drains and injects it.
                             if ctx.has_pending_steering():
+                                continue
+                            # If the only failure was an unsupported image
+                            # input, continue the loop so the model sees the
+                            # error message in context and can try a fallback.
+                            if ctx.extra.get("_last_image_unsupported"):
+                                ctx.extra["_last_image_unsupported"] = False
+                                await self.context_engine.save_contexts(session)
                                 continue
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}

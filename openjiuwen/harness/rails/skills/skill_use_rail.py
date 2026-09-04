@@ -11,6 +11,7 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
@@ -78,6 +79,8 @@ class SkillUseRail(DeepAgentRail):
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_store: Optional[EvolutionStore] = None,
         multimodal_skill_mode: str = "hint",
+        max_skills: Optional[int] = None,
+        max_total_chars: Optional[int] = None,
     ):
         """Initialize SkillUseRail.
 
@@ -93,6 +96,10 @@ class SkillUseRail(DeepAgentRail):
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
             multimodal_skill_mode: ``hint`` (default), ``attach``, or ``branch``.
+            max_skills: Optional hard cap on the number of skills injected in ``all`` mode.
+            max_total_chars: Optional soft cap on total skill description chars in ``all`` mode.
+                When exceeded, skills are ranked by keyword overlap with the query and low-ranked
+                whole skills are dropped (gentle truncation — never mid-text).
         """
         super().__init__()
 
@@ -111,6 +118,8 @@ class SkillUseRail(DeepAgentRail):
         self.disabled_skills = self._normalize_name_set(disabled_skills)
         self.evolution_store: Optional[EvolutionStore] = evolution_store
         self.multimodal_skill_mode = multimodal_skill_mode
+        self.max_skills = max_skills
+        self.max_total_chars = max_total_chars
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
@@ -433,7 +442,8 @@ class SkillUseRail(DeepAgentRail):
             else list(self.skills)
         )
         await self._fetch_evolution_texts([*baseline_skills, *self.skills])
-        skills_section = self._build_skills_section(baseline_skills)
+        query = self._extract_query_from_messages(ctx)
+        skills_section = self._build_skills_section(baseline_skills, query=query)
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
         else:
@@ -456,10 +466,16 @@ class SkillUseRail(DeepAgentRail):
             for item, update_at in self._discover_skill_dirs(roots)
         )
 
-    def _build_skills_section(self, skills: Optional[List[Skill]] = None):
-        """Build the stable system prompt section from session baseline skills."""
+    def _build_skills_section(self, skills: Optional[List[Skill]] = None, query: Optional[str] = None):
+        """Build the stable system prompt section from session baseline skills.
+
+        Args:
+            skills: Optional skill list override. Defaults to self.skills.
+            query: Optional task query for budget-based ranking.
+        """
         skills = self.skills if skills is None else skills
         if self.skill_mode == self.SKILL_MODE_ALL:
+            skills = self._apply_skill_budget(skills, query)
             body_lines: List[str] = []
             for idx, skill in enumerate(skills):
                 body_lines.append(
@@ -482,6 +498,107 @@ class SkillUseRail(DeepAgentRail):
                 language=self.system_prompt_builder.language,
                 mode="auto_list",
             )
+
+    def _apply_skill_budget(
+        self,
+        skills: List[Skill],
+        query: Optional[str] = None,
+    ) -> List[Skill]:
+        """Rank skills by query relevance and drop low-ranked ones to stay under budget.
+
+        This implements *gentle truncation*: whole skills are dropped,
+        never mid-description.
+
+        Args:
+            skills: Full list of skills to consider.
+            query: Optional task query for relevance scoring.
+
+        Returns:
+            Filtered skill list within budget constraints.
+        """
+        if not skills:
+            return skills
+        if self.max_skills is None and self.max_total_chars is None:
+            return skills
+
+        # Score skills by keyword overlap with query (or description length as fallback)
+        if query:
+            keywords = self._extract_keywords(query)
+            scored = []
+            for skill in skills:
+                text = f"{skill.name} {skill.description}".lower()
+                score = sum(1 for kw in keywords if kw in text)
+                scored.append((score, skill))
+            scored.sort(key=lambda x: (-x[0], x[1].name))
+            ranked = [s for _, s in scored]
+        else:
+            # Without a query, preserve original order (assumed pre-sorted by importance)
+            ranked = list(skills)
+
+        # Apply hard skill count cap
+        if self.max_skills is not None and len(ranked) > self.max_skills:
+            dropped = ranked[self.max_skills:]
+            ranked = ranked[:self.max_skills]
+            logger.info(
+                "[SkillUseRail] Dropped %d skills due to max_skills=%d: %s",
+                len(dropped),
+                self.max_skills,
+                ", ".join(s.name for s in dropped),
+            )
+
+        # Apply soft char cap by dropping lowest-ranked whole skills
+        if self.max_total_chars is not None:
+            total_chars = sum(len(s.description or "") for s in ranked)
+            while ranked and total_chars > self.max_total_chars:
+                dropped_skill = ranked.pop()
+                total_chars -= len(dropped_skill.description or "")
+                logger.info(
+                    "[SkillUseRail] Dropped skill '%s' to stay under max_total_chars=%d "
+                    "(remaining chars=%d)",
+                    dropped_skill.name,
+                    self.max_total_chars,
+                    total_chars,
+                )
+
+        return ranked
+
+    _STOP_WORDS: Set[str] = frozenset({
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "to", "of", "and", "or", "in", "on", "at", "by", "for", "with", "as",
+        "this", "that", "these", "those", "it", "its", "from", "have", "has",
+        "had", "do", "does", "did", "will", "would", "could", "should", "may",
+        "might", "can", "shall", "you", "your", "we", "our", "i", "my", "he",
+        "she", "they", "them", "their", "what", "which", "who", "when", "where",
+        "why", "how", "all", "each", "every", "both", "few", "more", "most",
+        "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+    })
+
+    @classmethod
+    def _extract_keywords(cls, text: str) -> Set[str]:
+        """Extract lowercase alphanumeric keywords from text, removing stop words."""
+        words = set()
+        for token in text.lower().split():
+            token = "".join(c for c in token if c.isalnum())
+            if token and token not in cls._STOP_WORDS and len(token) > 2:
+                words.add(token)
+        return words
+
+    @staticmethod
+    def _extract_query_from_messages(ctx: AgentCallbackContext) -> Optional[str]:
+        """Extract the latest user query from context messages for skill ranking.
+
+        Looks at the last few messages and returns the content of the most
+        recent UserMessage, or None if no user messages are found.
+        """
+        messages = getattr(ctx.inputs, "messages", None)
+        if not messages:
+            return None
+        for message in reversed(messages):
+            if isinstance(message, UserMessage):
+                content = getattr(message, "content", None)
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        return None
 
     def get_skills_for_session(self, session: Any = None) -> List[Skill]:
         """Return the current skill view for a tool invocation.
