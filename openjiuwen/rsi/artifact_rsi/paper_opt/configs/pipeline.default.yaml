@@ -1,0 +1,207 @@
+# OpenJiuwen runtime config — each module reads this itself to construct/configure
+# its own runtime (no shared factory). api_key is deliberately not a config
+# field — code_implementation reads it from the API_KEY env var only, so it
+# never ends up committed alongside this file. base_url/model are left null
+# here on purpose: env vars (API_BASE/MODEL_NAME/MODEL_PROVIDER, e.g. via
+# .env) always take precedence, but a non-null placeholder here would still
+# shadow them if one were ever set by mistake.
+openjiuwen:
+  # Leave null to use env MODEL_NAME / API_BASE (see repo-root .env).
+  base_url: null
+  model: null
+  provider: null
+  # Per-completion-request timeout in seconds
+  timeout: 600
+
+pipeline:
+  topic: "Adaptive Multi-Agent Systems for Real-Time Decision Making in Complex Environments"  
+  modules:
+    topic_survey: true
+    idea_generation: true
+    experiment_design: true
+    code_implementation: true
+    experiment_execution: true
+    reporting: true
+
+manager:
+  max_iterations: 30
+  max_rounds: 50
+  max_survey_calls: 3
+  max_code_retries: 4
+  max_design_revisions: 6
+  max_execution_retries: 4
+  max_decision_retries: 2
+  max_reporting_retries: 3
+  max_history_chars: 24000
+  max_report_chars: 10000
+  excerpt_chars: 4000
+  modules:
+    topic_survey: true
+    experiment_design: true
+    code_implementation: true
+    experiment_execution: true
+    reflection: true
+    reporting: true
+
+# Host + OpenJiuwen observability. Subagent model/tool traces are written to
+# experiments/<run_id>/modules/<module>/round_NNN_attempt_NNN/agent_trace.jsonl
+# with redaction/size caps. Raw SDK logs go under experiments/<run_id>/openjiuwen/.
+# SDK and pipeline logs are file-only by default so huge LLM dumps cannot freeze
+# the terminal. Set console: true only for short local debugging.
+logging:
+  enabled: true
+  level: INFO
+  console: false
+  content_mode: redacted
+  max_field_chars: 4000
+  backup_count: 10
+  max_bytes: 10485760
+
+topic_survey:
+  max_papers: 5
+  max_web_pages: 5
+  max_iterations: 30
+  include_paid_search: true
+  free_search:
+    duckduckgo: true
+    bing: true
+
+experiment_design:
+  max_iterations: 20
+  skills: []
+  context:
+    enabled: true
+    preset: true
+    engine:
+      # Soft budget used as the ratio denominator (not provider max window).
+      context_window_tokens: 200000
+      enable_reload: true
+      enable_tiktoken_counter: true
+      enable_openrouter_model_context_window_tokens: false
+      compression_recall_config:
+        enabled: false
+      # Flip true for one multi-revision run to verify compression triggers.
+      enable_context_debug: false
+      context_debug_dir: null
+    processors:
+      # ~10k: oversized tool/PDF results offloaded and reloadable.
+      MessageSummaryOffloader:
+        add_message_threshold_ratio: 0.05
+        ttl_seconds: 300
+        ttl_context_occupancy_ratio: 0.50
+        ttl_message_threshold_ratio: 0.15
+        protected_tool_names: []
+      # ~80k: compress completed prior create/update turns in the same session.
+      DialogueCompressor:
+        trigger_context_ratio: 0.40
+        min_target_context_ratio: 0.05
+      # ~140k: long single user turn.
+      CurrentRoundCompressor:
+        trigger_context_ratio: 0.70
+        min_target_context_ratio: 0.05
+        keep_recent_messages: 8
+      # ~170k emergency.
+      RoundLevelCompressor:
+        trigger_context_ratio: 0.85
+        min_target_context_ratio: 0.05
+        keep_recent_messages: 8
+  checkpointer:
+    type: persistence
+    db_type: sqlite
+    db_path: data/interim/checkpoints/experiment_design.db
+    db_enable_wal: true
+
+code_implementation:
+  # Bound on the coding agent's task-loop + LSP fix-loop iterations before it
+  # must stop and report status="failed" rather than keep retrying forever.
+  max_iterations: 40
+  # Per-variant wall-clock budget for `python run.py --method <name> --smoke-test`
+  smoke_test_timeout_seconds: 3000
+  # Retries *beyond* the first attempt when smoke-test re-run fails
+  max_smoke_test_retries: 2
+
+experiment_execution:
+  # Per-variant wall-clock budget for the real run
+  timeout_seconds: 6000
+  # Extra attempts after the first, only for launch_error/timeout failures
+  # (plausibly transient/infra) — nonzero_exit/missing_metrics/invalid_metrics
+  # are never retried, since that's a deterministic code bug a bare retry
+  # can't fix.
+  max_transient_retries: 1
+
+reflection:
+  # Input is fully known upfront (plan + result) — one completion, one
+  # write_file call. A low cap catches a stuck/looping model instead of
+  # burning the same budget code_implementation needs for iterative work.
+  max_iterations: 20
+
+reporting:
+  # Skills-driven DeepAgent session (ts-plan/ts-write/ts-review/ts-latex)
+  # that writes and compiles a full paper — see docs/paper_writing_design.md.
+  # Task-loop turn budget for the whole session, not per-section. Bumped
+  # from 40: ts-review's adversarial pass (see ts-review/SKILL.md) can
+  # spawn up to 3 isolated paper-reviewer subagent calls per round, up to
+  # 3 rounds — real isolation, but real added turns on top of the
+  # write/repair loop.
+  max_iterations: 60
+  # Per-completion timeout (seconds), overriding the shared
+  # openjiuwen.timeout default for this module only (see agent.py's
+  # _setting). Bumped from the global 600s default: a real run with many
+  # variants and a large evidence set hit `completion_timeout` while
+  # generating/expanding the ~2000-3000 word Method section, and a
+  # paper-reviewer subagent reading the entire assembled draft is itself a
+  # large completion. Other modules keep the 600s default.
+  timeout: 900
+  # Per-source timeout (seconds) for bibliography.py's best-effort Crossref/
+  # arXiv metadata enrichment (bibliography.try_enrich_from_network) — never
+  # blocks the module on a slow/offline network, just falls back to the
+  # existing PDF/HTML metadata scrape past this budget.
+  bibliography_timeout: 5.0
+  method_figure:
+    # Adds the ts-figure skill (method/architecture figure + optional
+    # improved results figure) between ts-write and ts-review. False
+    # removes it from the model's available skills entirely (see
+    # agent.py::_enabled_skill_dirs), not just an instruction to skip it —
+    # reverts to today's behavior (deterministic results.pdf only, no
+    # method figure).
+    enabled: true
+    # Both null by default: ts-figure's Draw.io path (see its SKILL.md and
+    # scripts/attempt_drawio.py) needs an actual `drawio` CLI on PATH plus
+    # an external checkout of qhy991/Scientific-Figure-Design (its own
+    # build_drawio_figure.py + assets/paper-icons/ catalog) — neither is
+    # vendored into this repo. Leave both null to always use the
+    # matplotlib fallback (render_method_figure.py), which needs nothing
+    # extra and is what every run uses until both are set.
+    drawio_bin: null
+    drawio_skill_dir: null
+
+# Standalone LaTeX-in / dual-rubric scoresheet-out module (not registered in pipeline/manager).
+paper_scoring:
+  timeout: 600
+  temperature: 0
+  rubric_samples: 5
+  max_validation_retries: 1
+  context_window_tokens: 128000
+  output_reserve_tokens: 4000
+  prompt_overhead_tokens: 2500
+  min_text_chars: 200
+  max_figures: 12
+  figure_max_side: 1280
+  dispersion_range: 3
+  dispersion_mad: 1.0
+  general_weights:
+    soundness: 0.30
+    clarity: 0.20
+    contribution: 0.25
+    overall: 0.25
+  experiment_weights:
+    question_alignment: 0.20
+    design_and_controls: 0.20
+    measurement_and_statistics: 0.20
+    reporting_and_reproducibility: 0.15
+    claim_evidence_alignment: 0.15
+    overall_experimental_rigor: 0.10
+  composite_weights:
+    general: 0.50
+    experiment: 0.50
+
