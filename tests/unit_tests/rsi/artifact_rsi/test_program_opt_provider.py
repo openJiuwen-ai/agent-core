@@ -3671,7 +3671,7 @@ def test_relative_to_baseline_turns_the_ratio_the_way_the_criterion_says() -> No
 
 
 def test_a_refused_model_call_is_reported_as_the_refusal_not_as_an_empty_edit(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The first cause is the one the reader needs.
 
@@ -3709,6 +3709,7 @@ def test_a_refused_model_call_is_reported_as_the_refusal_not_as_an_empty_edit(
                 'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
                 'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
                 '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+        run_dir=str(tmp_path),
     )
 
     events: list[dict] = []
@@ -3720,7 +3721,7 @@ def test_a_refused_model_call_is_reported_as_the_refusal_not_as_an_empty_edit(
 
 
 def test_the_card_can_say_how_many_repair_attempts_a_direction_gets(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`options.repair_attempts` reaches the fix-it loop.
 
@@ -3758,7 +3759,7 @@ def test_the_card_can_say_how_many_repair_attempts_a_direction_gets(
                 'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
                 'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
                 '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
-        options={"repair_attempts": 4},
+        options={"repair_attempts": 4}, run_dir=str(tmp_path),
     )
 
     engine.run(spec, lambda event: None, lambda: False)
