@@ -215,6 +215,7 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
         "skill_tool",
         "memory_search",
         "memory_get",
+        "free_search",
         "paid_search",
         "fetch_webpage",
         "write_memory",

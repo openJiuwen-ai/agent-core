@@ -379,3 +379,48 @@ async def test_tool_call_rejects_a_name_that_was_not_searched():
     assert output.success is False
     assert "must be returned by tool_search" in (output.error or "")
     assert manager.executed == []
+
+
+@pytest.mark.asyncio
+async def test_tool_call_requires_new_search_after_tool_schema_changes():
+    rail, agent, manager = _rail_and_agent()
+    rail.seed_cached_tools(
+        all_tool_infos=[
+            ToolInfo(
+                name="cron_create_job",
+                description="Create a calendar reminder",
+                parameters=FULL_SCHEMA,
+            )
+        ]
+    )
+    session = _FakeSession()
+    search_tool = manager.registered["tool_search"][1]
+    await search_tool.invoke({"query": "calendar", "limit": 1}, session=session)
+
+    deferred_card = next(
+        card for card in manager.cards if card.name == "cron_create_job"
+    )
+    deferred_card.input_params["properties"]["text"]["description"] = (
+        "Updated reminder text"
+    )
+
+    call_tool = manager.registered["tool_call"][1]
+    wrapper_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ToolCallInputs(
+            tool_call=SimpleNamespace(id="wrapper-call"),
+            tool_name="tool_call",
+            tool_args={"name": "cron_create_job", "args": {}},
+        ),
+        session=session,
+    )
+    output = await call_tool.invoke(
+        wrapper_ctx.inputs.tool_args,
+        session=session,
+        _tool_callback_context=wrapper_ctx,
+    )
+
+    assert output.success is False
+    assert "has changed" in (output.error or "")
+    assert manager.executed == []
+    assert rail._get_discovered_tools(session) == []
