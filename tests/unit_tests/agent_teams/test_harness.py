@@ -29,7 +29,13 @@ import pytest
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.harness import team_harness as harness_module
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.agents.react_agent import (
+    InterruptionState,
+    WorkflowInterruptEntry,
+)
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 
 
@@ -357,6 +363,44 @@ def test_is_pending_interrupt_resume_valid_rejects_mismatched_ids() -> None:
     interactive.update("call-2", {"approved": True})
 
     assert harness.is_pending_interrupt_resume_valid(interactive) is False
+
+
+def test_is_pending_interrupt_resume_valid_accepts_addressed_workflow_inputs() -> None:
+    state = InterruptionState(
+        ai_message=AssistantMessage(content="workflow input"),
+        iteration=1,
+        interrupted_workflows={
+            "workflow-1": WorkflowInterruptEntry(
+                tool_call=ToolCall(
+                    id="workflow-call-1",
+                    type="function",
+                    name="workflow-1",
+                    arguments="{}",
+                ),
+                component_ids=["component-1"],
+                workflow_execution_state=object(),
+            ),
+        },
+        pending_workflow_id="workflow-1",
+        pending_component_id="component-1",
+    )
+    session = MagicMock(name="LoopSession")
+    session.get_state.return_value = state
+    harness = _make_harness(_stub_native(loop_session=session))
+
+    keyed = InteractiveInput()
+    keyed.update("component-1", "keyed feedback")
+    wrong_key = InteractiveInput()
+    wrong_key.update("another-component", "unaddressed feedback")
+
+    assert harness.is_pending_interrupt_resume_valid(keyed) is True
+    assert (
+        harness.is_pending_interrupt_resume_valid(
+            InteractiveInput(raw_inputs="raw feedback"),
+        )
+        is True
+    )
+    assert harness.is_pending_interrupt_resume_valid(wrong_key) is False
 
 
 def test_init_cwd_for_round_no_op_without_workspace() -> None:

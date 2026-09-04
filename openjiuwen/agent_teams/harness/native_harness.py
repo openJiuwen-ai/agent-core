@@ -994,30 +994,34 @@ class NativeHarness(DeepAgent):
     def _interrupt_resume_still_pending(
         self, content: Any, session: Any,
     ) -> bool:
-        """Return True if ``content`` still matches a pending interrupt slot.
-
-        Mirrors ``TeamHarness.is_pending_interrupt_resume_valid`` so the
-        supervisor (sole writer of round state) can drop a stale duplicate
-        InteractiveInput follow-up whose interrupt slot was already consumed.
-        Reads the same session the round mutates (``self._session``), where
-        ``react_agent`` publishes/clears ``INTERRUPTION_KEY``.
-        """
+        """Return whether any keyed input still has a tool-interrupt slot."""
         if not isinstance(content, InteractiveInput):
             return False
+        return bool(set(content.user_inputs).intersection(self._pending_tool_resume_ids(session)))
+
+    @staticmethod
+    def _pending_tool_resume_ids(session: Any) -> frozenset[str]:
+        """Return the tool request IDs currently awaiting a resume."""
         if session is None:
-            return False
+            return frozenset()
         state = session.get_state(INTERRUPTION_KEY)
-        if state is None:
-            return False
         interrupted = getattr(state, "interrupted_tools", {}) or {}
-        pending_ids: set = set()
+        pending_ids: set[str] = set()
         for entry in interrupted.values():
             requests = getattr(entry, "interrupt_requests", {}) or {}
-            pending_ids.update(requests.keys())
-        if not pending_ids:
-            return False
-        resume_ids = set(content.user_inputs.keys())
-        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+            pending_ids.update(requests)
+        return frozenset(pending_ids)
+
+    @classmethod
+    def _matching_tool_resume_ids(cls, content: Any, session: Any) -> frozenset[str]:
+        """Return tool request IDs matched by a structured resume, if any."""
+        if not isinstance(content, InteractiveInput):
+            return frozenset()
+        resume_ids = set(content.user_inputs)
+        pending_ids = cls._pending_tool_resume_ids(session)
+        if resume_ids and resume_ids.issubset(pending_ids):
+            return frozenset(resume_ids)
+        return frozenset()
 
     async def _on_round_done(self, cmd: _CmdRoundFinished) -> None:
         """Settle a finished round, always resolving a deferred pause ack.
@@ -1163,8 +1167,10 @@ class NativeHarness(DeepAgent):
         # texts) start the next round here instead of stranding behind the
         # interrupt stop.
         follow_ups = self._drain_pending_follow_ups(session)
-        # Idempotency: drop InteractiveInput follow-ups whose interrupt slot was
-        # already consumed by the prior resume round. ``resume_interrupt``
+        # Idempotency: drop only a tool approval that duplicates IDs consumed
+        # by this tool-resume round. A generic InteractiveInput may instead be
+        # a workflow resume and must not be inferred stale from its shape.
+        # ``resume_interrupt``
         # releases ``_interrupt_lock`` before ``harness.send`` (to break the
         # hold-and-wait deadlock with ``_on_idle_settled``), so check-then-send
         # is no longer atomic under the lock — a double-delivered approval can
@@ -1177,8 +1183,11 @@ class NativeHarness(DeepAgent):
         if follow_ups is not None:
             kept = []
             for f in follow_ups:
-                if isinstance(f, InteractiveInput) and not self._interrupt_resume_still_pending(
-                    f, session
+                follow_up_ids = set(f.user_inputs) if isinstance(f, InteractiveInput) else set()
+                if (
+                    follow_up_ids
+                    and follow_up_ids.issubset(active.tool_resume_ids)
+                    and not self._interrupt_resume_still_pending(f, session)
                 ):
                     continue
                 kept.append(f)
@@ -1301,6 +1310,7 @@ class NativeHarness(DeepAgent):
             round_id=round_id,
             task_id=task_id,
             original_query=query,
+            tool_resume_ids=self._matching_tool_resume_ids(query, self._session),
             deep_agent=self,
             task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=asyncio.Queue(),

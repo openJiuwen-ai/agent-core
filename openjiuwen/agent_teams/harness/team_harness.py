@@ -368,6 +368,16 @@ class TeamHarness:
         state = session.get_state(INTERRUPTION_KEY)
         if state is None:
             return False
+        from openjiuwen.core.single_agent.agents.react_agent import InterruptionState
+
+        if isinstance(state, InterruptionState):
+            pending = state.interrupted_workflows.get(state.pending_workflow_id)
+            if pending is None or pending.collected_input is not None:
+                return False
+            return (
+                user_input.raw_inputs is not None
+                or state.pending_component_id in user_input.user_inputs
+            )
         interrupted = getattr(state, "interrupted_tools", {}) or {}
         pending_ids: set = set()
         for entry in interrupted.values():

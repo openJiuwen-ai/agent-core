@@ -18,6 +18,7 @@ import pytest
 
 from openjiuwen.core.foundation.llm import AssistantMessage, UsageMetadata, ToolCall, ToolMessage
 from openjiuwen.core.session.agent import create_agent_session
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.runner import Runner
@@ -169,6 +170,19 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await Runner.stop()
 
+    def test_build_interactive_input_maps_raw_input_to_pending_component(self):
+        agent = _make_agent("agent_raw_input")
+
+        for raw_input in ("feedback", "", []):
+            with self.subTest(raw_input=raw_input):
+                supplied = InteractiveInput(raw_inputs=raw_input)
+                result = agent._build_interactive_input(supplied, ["component-a"])
+
+                self.assertEqual(result.user_inputs, {"component-a": raw_input})
+                self.assertIsNone(result.raw_inputs)
+                self.assertEqual(supplied.raw_inputs, raw_input)
+                self.assertEqual(supplied.user_inputs, {})
+
     @pytest.mark.asyncio
     async def test_invoke_interrupt_then_resume(self):
         """First invoke interrupts; second invoke resumes and returns answer."""
@@ -201,7 +215,10 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
             result1 = await agent.invoke({"query": "start"}, session=session)
             self.assertEqual(result1.get("result_type"), "interrupt", result1)
 
-            result2 = await agent.invoke({"query": "user feedback"}, session=session)
+            result2 = await agent.invoke(
+                {"query": InteractiveInput(raw_inputs="user feedback")},
+                session=session,
+            )
             self.assertEqual(result2.get("result_type"), "answer", result2)
             self.assertIn("Resume complete!", result2.get("output", ""))
 
@@ -243,10 +260,16 @@ class TestInvokeInterruptResume(unittest.IsolatedAsyncioTestCase):
             result1 = await agent.invoke({"query": "start"}, session=session)
             self.assertEqual(result1.get("result_type"), "interrupt", result1)
 
-            result2 = await agent.invoke({"query": "feedback for c1"}, session=session)
+            result2 = await agent.invoke(
+                {"query": InteractiveInput(raw_inputs="feedback for c1")},
+                session=session,
+            )
             self.assertEqual(result2.get("result_type"), "interrupt", result2)
 
-            result3 = await agent.invoke({"query": "feedback for c2"}, session=session)
+            result3 = await agent.invoke(
+                {"query": InteractiveInput(raw_inputs="feedback for c2")},
+                session=session,
+            )
             self.assertEqual(result3.get("result_type"), "answer", result3)
             self.assertIn("Both workflows done!", result3.get("output", ""))
 

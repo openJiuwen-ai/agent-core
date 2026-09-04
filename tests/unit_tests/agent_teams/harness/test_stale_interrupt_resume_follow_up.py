@@ -26,6 +26,10 @@ from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.agents.react_agent import (
+    InterruptionState,
+    WorkflowInterruptEntry,
+)
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
@@ -64,32 +68,84 @@ def script_first_round_interrupt(fake: Any, harness: Any, observed_phases: list)
     fake.invoke = invoke
 
 
+def workflow_interruption_state() -> InterruptionState:
+    """Build the workflow state shape committed by ReActAgent."""
+    return InterruptionState(
+        ai_message=AssistantMessage(content="waiting for workflow input"),
+        iteration=1,
+        interrupted_workflows={
+            "workflow-1": WorkflowInterruptEntry(
+                tool_call=ToolCall(
+                    id="workflow-call-1",
+                    type="function",
+                    name="workflow-1",
+                    arguments="{}",
+                ),
+                component_ids=["component-1"],
+                workflow_execution_state=object(),
+            ),
+        },
+        pending_workflow_id="workflow-1",
+        pending_component_id="component-1",
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_stale_interactive_input_follow_up_dropped_after_slot_consumed() -> None:
     """A duplicate InteractiveInput follow-up whose interrupt slot is already
     cleared must not start a spurious round.
 
-    The first round runs a normal query (no interrupt involved). The stale
-    InteractiveInput was enqueued as a follow-up; when the first round settles,
-    its interrupt slot is gone (never set), so the guard in ``_on_round_done``
-    drops it. Only the first round's query is ever invoked.
+    The first round is a real tool resume and the queued input repeats the same
+    request ID. Once that round clears the slot, settle drops only the proven
+    duplicate instead of starting a spurious second round.
     """
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
         fake = await start_harness(harness, answer_output="done")
 
-        stale = InteractiveInput()
-        stale.update("call-x", {"approved": True, "feedback": "", "auto_confirm": False})
-        # No INTERRUPTION_KEY seeded on the session → the slot is cleared, so
-        # this follow-up is stale and must be dropped, not run as a round.
-        harness.loop_controller.enqueue_follow_up(stale)
+        session = harness._session
+        session.update_state(
+            {
+                INTERRUPTION_KEY: ToolInterruptionState(
+                    ai_message=AssistantMessage(content="requesting approval"),
+                    iteration=1,
+                    interrupted_tools={
+                        "call-x": ToolInterruptEntry(
+                            tool_call=ToolCall(
+                                id="call-x",
+                                type="function",
+                                name="needs_approval",
+                                arguments="{}",
+                            ),
+                            interrupt_requests={
+                                "call-x": InterruptRequest(message="approve?")
+                            },
+                        ),
+                    },
+                )
+            }
+        )
+
+        approval = InteractiveInput()
+        approval.update("call-x", {"approved": True, "feedback": "", "auto_confirm": False})
+        duplicate = approval.model_copy(deep=True)
+        harness.loop_controller.enqueue_follow_up(duplicate)
+
+        base_invoke = fake.invoke
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            result = await base_invoke(inputs, invoke_session, **kwargs)
+            invoke_session.update_state({INTERRUPTION_KEY: None})
+            return result
+
+        fake.invoke = invoke
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
         try:
-            await harness.send("do the thing")
+            await harness.send(approval)
             assert await wait_for_state(harness, HarnessState.IDLE)
             # Let any unintended spurious follow-up round surface before counting.
             await asyncio.sleep(0.1)
@@ -98,9 +154,171 @@ async def test_stale_interactive_input_follow_up_dropped_after_slot_consumed() -
             await consumer
 
         queries = [inv.get("query") for inv in fake.invocations]
-        assert queries == ["do the thing"]  # stale InteractiveInput NOT run
+        assert queries == [approval]
         assert answer_outputs(collected) == ["done"]
         assert harness.state is HarnessState.TERMINATED
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_follow_up_with_unconsumed_tool_id_is_not_dropped_as_duplicate() -> None:
+    """A T1/T2 retry is not stale while T2 remains pending."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+        session = harness._session
+        session.update_state(
+            {
+                INTERRUPTION_KEY: ToolInterruptionState(
+                    ai_message=AssistantMessage(content="requesting approvals"),
+                    iteration=1,
+                    interrupted_tools={
+                        call_id: ToolInterruptEntry(
+                            tool_call=ToolCall(
+                                id=call_id,
+                                type="function",
+                                name="needs_approval",
+                                arguments="{}",
+                            ),
+                            interrupt_requests={
+                                call_id: InterruptRequest(message="approve?")
+                            },
+                        )
+                        for call_id in ("call-1", "call-2")
+                    },
+                )
+            }
+        )
+
+        first = InteractiveInput()
+        first.update("call-1", {"approved": True})
+        first.update("call-2", {"approved": True})
+        mixed = InteractiveInput()
+        mixed.update("call-1", {"approved": True})
+        mixed.update("call-2", {"approved": True})
+
+        base_invoke = fake.invoke
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        invoke_count = 0
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            nonlocal invoke_count
+            invoke_count += 1
+            call_number = invoke_count
+            if call_number == 1:
+                first_started.set()
+                await release_first.wait()
+            result = await base_invoke(inputs, invoke_session, **kwargs)
+            if call_number == 1:
+                invoke_session.update_state(
+                    {
+                        INTERRUPTION_KEY: ToolInterruptionState(
+                            ai_message=AssistantMessage(content="requesting approval"),
+                            iteration=1,
+                            interrupted_tools={
+                                "call-2": ToolInterruptEntry(
+                                    tool_call=ToolCall(
+                                        id="call-2",
+                                        type="function",
+                                        name="needs_approval",
+                                        arguments="{}",
+                                    ),
+                                    interrupt_requests={
+                                        "call-2": InterruptRequest(message="approve?")
+                                    },
+                                )
+                            },
+                        )
+                    }
+                )
+            return result
+
+        fake.invoke = invoke
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            assert await harness.send(first) == 1
+            await asyncio.wait_for(first_started.wait(), timeout=3.0)
+            assert await harness.send(mixed) == 2
+            release_first.set()
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while asyncio.get_running_loop().time() < deadline and len(fake.invocations) < 2:
+                await asyncio.sleep(0.01)
+            assert len(fake.invocations) == 2
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            release_first.set()
+            await harness.stop()
+            await consumer
+
+        assert fake.invocations[1]["query"] == mixed
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("input_shape", ["raw", "keyed"])
+async def test_workflow_resume_follow_up_is_not_filtered_as_tool_duplicate(
+    input_shape: str,
+) -> None:
+    """A workflow resume queued during RUNNING starts as the next round."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+        harness._session.update_state(
+            {INTERRUPTION_KEY: workflow_interruption_state()}
+        )
+        base_invoke = fake.invoke
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        invoke_count = 0
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            nonlocal invoke_count
+            invoke_count += 1
+            if invoke_count == 1:
+                first_started.set()
+                await release_first.wait()
+            return await base_invoke(inputs, invoke_session, **kwargs)
+
+        fake.invoke = invoke
+
+        if input_shape == "raw":
+            resume = InteractiveInput(raw_inputs="workflow feedback")
+        else:
+            resume = InteractiveInput()
+            resume.update("component-1", "workflow feedback")
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            assert await harness.send("finish current round") == 1
+            await asyncio.wait_for(first_started.wait(), timeout=3.0)
+            assert await harness.send(resume) == 2
+            release_first.set()
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while (
+                asyncio.get_running_loop().time() < deadline
+                and len(fake.invocations) < 2
+            ):
+                await asyncio.sleep(0.01)
+            assert len(fake.invocations) == 2
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            release_first.set()
+            await harness.stop()
+            await consumer
+
+        query = fake.invocations[1]["query"]
+        assert isinstance(query, InteractiveInput)
+        assert query == resume
     finally:
         await Runner.stop()
 
