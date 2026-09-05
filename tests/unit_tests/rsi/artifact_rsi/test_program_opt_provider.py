@@ -3853,3 +3853,42 @@ def test_the_cards_timeout_is_the_candidates_timeout(tmp_path: Path) -> None:
     spec = provider._spec_for(request, resumed=False)
 
     assert spec.candidate_timeout_seconds == 300.0
+
+
+def test_an_event_consumer_that_never_returns_does_not_stall_the_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delivery wait is made under the fold lock and had no bound.
+
+    A consumer that never returned would hold that lock forever; every worker's
+    next event queues behind it, the loop sits idle, and the search stands
+    still with nothing to report — the state a 45-expansion AlgoTune run was
+    found in after nine hours. The observability channel must not be able to
+    stop the search it is observing.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import puct_provider
+
+    class _TwoEventEngine:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            emit(events.seeded(0, 0.25, code_hash="sha256:aa"))  # type: ignore[operator]
+            emit(events.search_finished("succeeded", 0, 1))  # type: ignore[operator]
+
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(puct_provider, "EVENT_DELIVERY_SECONDS", 0.5)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine", _TwoEventEngine)
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, max_iterations=1)
+    _scorecard(Path(request.run_dir))
+
+    async def drive() -> object:
+        async def never(event: object) -> None:
+            await asyncio.Event().wait()          # a consumer that hangs
+        return await asyncio.wait_for(provider.run(request, never), timeout=20)
+
+    result = asyncio.run(drive())
+
+    assert result.status in ("completed", "failed"), result

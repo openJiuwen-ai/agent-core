@@ -25,6 +25,7 @@ things are being translated, and each is a shape change rather than a rename:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import re
 import threading
@@ -85,6 +86,11 @@ DEFAULT_WORKERS = 1
 #: evaluation in flight; past a handful the limit stops being this process.
 MAX_WORKERS = 8
 
+#: How long one event may take to be delivered before the search stops
+#: waiting for it. Generous — a slow consumer is the contract's problem to
+#: carry — but finite, because the wait is made under the fold lock.
+EVENT_DELIVERY_SECONDS = 120.0
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +108,14 @@ async def _notify(on_event: OnEvent | None, event: Any) -> None:
     if on_event is None:
         return
     try:
-        await on_event(event)
+        # Bounded for the same reason the threaded sink's wait is: a consumer
+        # that never returns must not hold the run. Status events go this way
+        # (running / paused / completed); a hang here left a finished search
+        # never reporting that it had finished.
+        await asyncio.wait_for(on_event(event), timeout=EVENT_DELIVERY_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("event delivery did not return within %ss (observability channel); "
+                       "continuing without it", EVENT_DELIVERY_SECONDS)
     except Exception as error:  # noqa: BLE001 - observation must not kill the run
         logger.warning("event delivery failed (observability channel): %s", error)
 
@@ -509,8 +522,18 @@ class PuctProgramArtifactProvider:
                     # provider carry the queue's back-pressure. But waited-on is
                     # not died-of: a callback exception is an observability
                     # fault, and the search it was watching must outlive it.
+                    # Bounded, for the same reason: this wait holds `fold`, and
+                    # every worker's next event queues behind it. A delivery
+                    # that never returns would stall the whole search with the
+                    # loop idle and every worker parked on one lock — the shape
+                    # a 45-expansion AlgoTune run was found in after nine hours.
                     try:
-                        future.result()
+                        future.result(timeout=EVENT_DELIVERY_SECONDS)
+                    except concurrent.futures.TimeoutError:
+                        future.cancel()
+                        logger.warning(
+                            "event delivery did not return within %ss (observability "
+                            "channel); the search continues without it", EVENT_DELIVERY_SECONDS)
                     except Exception as error:  # noqa: BLE001
                         logger.warning(
                             "event delivery failed (observability channel): %s", error)
