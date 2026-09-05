@@ -1121,11 +1121,13 @@ class NativeHarness(DeepAgent):
                 return
             logger.warning(
                 "[NativeHarness] round_id=%s died abnormally (%s)%s; "
-                "giving up on its query and going idle",
+                "giving up on its query",
                 cmd.round_id,
                 death_reason,
                 " again after a retry" if active.failure_retry else "",
             )
+            if await self._start_pending_follow_up_round(active, session):
+                return
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1145,6 +1147,36 @@ class NativeHarness(DeepAgent):
         # completion: inputs queued while it ran (the 2nd..Nth approvals,
         # texts) start the next round here instead of stranding behind the
         # interrupt stop.
+        if await self._start_pending_follow_up_round(active, session):
+            return
+
+        # A resume round has single-round semantics: it must not continue the
+        # task plan using its InteractiveInput query (that would re-resume an
+        # already-cleared interrupt). An interrupt-ended round likewise settles
+        # to IDLE awaiting the external resume -- it must not auto-continue the
+        # task plan past an unanswered permission ask. Both settle here, only
+        # after the drain above had its chance to start the queued follow-up
+        # round.
+        if is_resume or result_type == "interrupt":
+            await self._transition(HarnessState.IDLE)
+            return
+
+        # A continuation round that resumed a paused InteractiveInput round has
+        # no replayable query, so there is nothing to drive a task-plan
+        # continuation with.
+        if self._has_remaining_tasks(session) and active.original_query:
+            nxt = self._start_round(active.original_query)
+            await self._emit_round("started", nxt.round_id)
+            return
+
+        await self._transition(HarnessState.IDLE)
+
+    async def _start_pending_follow_up_round(
+        self,
+        active: ActiveRound,
+        session: Session,
+    ) -> bool:
+        """Start queued follow-ups using the existing normal-settle rules."""
         follow_ups = self._drain_pending_follow_ups(session)
         # Idempotency: drop only a tool approval that duplicates IDs consumed
         # by this tool-resume round. A generic InteractiveInput may instead be
@@ -1181,32 +1213,12 @@ class NativeHarness(DeepAgent):
             for f in follow_ups:
                 if f is not interactive:
                     self.loop_controller.enqueue_follow_up(f)
-            return
+            return True
         if follow_ups is not None:
             nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
-            return
-
-        # A resume round has single-round semantics: it must not continue the
-        # task plan using its InteractiveInput query (that would re-resume an
-        # already-cleared interrupt). An interrupt-ended round likewise settles
-        # to IDLE awaiting the external resume — it must not auto-continue the
-        # task plan past an unanswered permission ask. Both settle here, only
-        # after the drain above had its chance to start the queued follow-up
-        # round.
-        if is_resume or result_type == "interrupt":
-            await self._transition(HarnessState.IDLE)
-            return
-
-        # A continuation round that resumed a paused InteractiveInput round has
-        # no replayable query, so there is nothing to drive a task-plan
-        # continuation with.
-        if self._has_remaining_tasks(session) and active.original_query:
-            nxt = self._start_round(active.original_query)
-            await self._emit_round("started", nxt.round_id)
-            return
-
-        await self._transition(HarnessState.IDLE)
+            return True
+        return False
 
     async def _on_stop(self, cmd: _CmdStop) -> None:
         """Terminal cleanup: cancel active round, transition TERMINATED.
