@@ -31,17 +31,24 @@ async def test_graceful_abort_finishes_current_round_then_stops() -> None:
         harness = NativeHarness(make_spec())
         # Round runs long enough that abort lands while it is in-flight.
         fake = await start_harness(harness, sleep_seconds=0.1)
+        session = harness._session
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
         try:
             await harness.send("go")
             await wait_invoke_running(fake)
+            harness.loop_controller.enqueue_follow_up("queued before graceful abort")
+            state = harness.load_state(session)
+            state.pending_follow_ups.append("persisted before graceful abort")
+            harness.save_state(session, state)
             await harness.abort(immediate=False)
             assert await wait_for_state(harness, HarnessState.IDLE)
             # The round was NOT cancelled (graceful): invoke ran to completion.
             assert fake.cancelled_count == 0
             assert len(fake.invocations) == 1
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(session).pending_follow_ups == []
             # Graceful abort emits no abort marker (the round completed normally).
             assert aborted_markers(collected) == []
         finally:
@@ -186,6 +193,144 @@ async def test_immediate_abort_no_completed_round_clears_to_baseline() -> None:
             # Pre-round baseline (index 0) had an empty current segment.
             assert ctx.get_messages(with_history=False) == []
         finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_immediate_abort_discards_both_follow_up_queues() -> None:
+    """A fresh send after hard abort must not resurrect pre-abort inputs."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, sleep_seconds=5.0)
+        session = harness._session
+
+        state = harness.load_state(session)
+        state.pending_follow_ups.append("persisted before abort")
+        harness.save_state(session, state)
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("longjob")
+            await wait_invoke_running(fake)
+            harness.loop_controller.enqueue_follow_up("queued during round")
+
+            await harness.abort(immediate=True)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(session).pending_follow_ups == []
+
+            fake.sleep_seconds = 0.0
+            await harness.send("fresh input")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert [inv["query"] for inv in fake.invocations] == [
+                "longjob",
+                "fresh input",
+            ]
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_abort_while_paused_discards_follow_up_queues() -> None:
+    """Turning a pause into an abort discards inputs retained by the pause."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, sleep_seconds=5.0)
+        session = harness._session
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("longjob")
+            await wait_invoke_running(fake)
+            await harness.pause()
+            assert harness.state is HarnessState.PAUSED
+
+            harness.loop_controller.enqueue_follow_up("queued while paused")
+            state = harness.load_state(session)
+            state.pending_follow_ups.append("persisted while paused")
+            harness.save_state(session, state)
+
+            await harness.abort(immediate=True)
+            assert harness.state is HarnessState.IDLE
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(session).pending_follow_ups == []
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_abort_while_idle_discards_stranded_follow_up_queues() -> None:
+    """An idempotent IDLE abort still closes the old queue lifecycle."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        await start_harness(harness)
+        session = harness._session
+        harness.loop_controller.enqueue_follow_up("queued before idle abort")
+        state = harness.load_state(session)
+        state.pending_follow_ups.append("persisted before idle abort")
+        harness.save_state(session, state)
+
+        await harness.abort(immediate=True)
+
+        assert harness.state is HarnessState.IDLE
+        assert harness.loop_controller.drain_follow_up() == []
+        assert harness.load_state(session).pending_follow_ups == []
+        await harness.stop()
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_abort_discards_both_follow_up_queues() -> None:
+    """A task-loop cancellation uses the same terminal abort queue semantics."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness)
+        session = harness._session
+        invoke_entered = asyncio.Event()
+        release_invoke = asyncio.Event()
+        base_invoke = fake.invoke
+
+        async def invoke(inputs, invoke_session, **kwargs):
+            invoke_entered.set()
+            await asyncio.wait_for(release_invoke.wait(), timeout=3.0)
+            result = await base_invoke(inputs, invoke_session, **kwargs)
+            harness.loop_coordinator.request_abort()
+            return result
+
+        fake.invoke = invoke
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("cancelled task")
+            await asyncio.wait_for(invoke_entered.wait(), timeout=3.0)
+            harness.loop_controller.enqueue_follow_up("queued before task cancel")
+            state = harness.load_state(session)
+            state.pending_follow_ups.append("persisted before task cancel")
+            harness.save_state(session, state)
+            release_invoke.set()
+
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(session).pending_follow_ups == []
+        finally:
+            release_invoke.set()
             await harness.stop()
             await consumer
     finally:

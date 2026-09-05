@@ -860,17 +860,24 @@ class NativeHarness(DeepAgent):
           the loop exits at the following model-call boundary.
         """
         phase = self._st.phase
+        session = self._session
         if phase is HarnessState.IDLE:
+            if session is not None:
+                self._discard_follow_ups(session)
             self._ack(cmd.ack, None)
             return
         if phase is HarnessState.PAUSED:
             self._st.paused_query = None
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             self._ack(cmd.ack, None)
             return
 
         active = self._st.active
         if active is None:
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             self._ack(cmd.ack, None)
             return
@@ -887,6 +894,8 @@ class NativeHarness(DeepAgent):
                 active.last_iter_snapshot or active.pre_round_snapshot,
             )
             self._reset_coordinator()
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._emit_round_aborted(active.round_id, "abort")
             await self._emit_round("aborted", active.round_id)
             self._st.active = None
@@ -1091,7 +1100,7 @@ class NativeHarness(DeepAgent):
         # Graceful abort: the round finished; the user asked to stop. Drop any
         # queued follow-ups and go IDLE.
         if was_graceful:
-            self._drain_follow_ups_discard(session)
+            self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1137,6 +1146,7 @@ class NativeHarness(DeepAgent):
         # interrupt-shaped result with is_aborted set as a side effect, and
         # abort must win.
         if coordinator.is_aborted:
+            self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1541,8 +1551,8 @@ class NativeHarness(DeepAgent):
         self.save_state(session, st)
         return batch
 
-    def _drain_follow_ups_discard(self, session: Session) -> None:
-        """Drop all queued follow-ups (LoopQueues + state) on graceful stop."""
+    def _discard_follow_ups(self, session: Session) -> None:
+        """Drop both follow-up queues when an abort ends their round."""
         controller = self.loop_controller
         if controller is not None:
             controller.drain_follow_up()

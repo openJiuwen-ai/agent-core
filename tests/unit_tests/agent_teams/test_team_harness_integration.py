@@ -24,8 +24,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
-
 import pytest
 
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
@@ -165,10 +163,29 @@ async def test_real_native_immediate_abort_through_team_chain() -> None:
         await harness.send("work for a while")
         await wait_invoke_running(fake)  # the inner work is genuinely in-flight
 
+        native = harness.inner_agent
+        session = native._session
+        native.loop_controller.enqueue_follow_up("native queued before abort")
+        state = native.load_state(session)
+        state.pending_follow_ups.append("native persisted before abort")
+        native.save_state(session, state)
+        rec.controller._pending_interrupt_resumes.append(object())
+
         # Cancel through the StreamController seam (cooperative cancel forwards
         # an immediate abort to the runtime).
         await rec.controller.cancel_agent()
         assert await wait_for_state(harness, HarnessState.IDLE)
+        assert rec.controller._pending_interrupt_resumes == []
+        assert native.loop_controller.drain_follow_up() == []
+        assert native.load_state(session).pending_follow_ups == []
+
+        fake.sleep_seconds = 0.0
+        await harness.send("fresh input")
+        assert await wait_for_state(harness, HarnessState.IDLE)
+        assert [inv["query"] for inv in fake.invocations] == [
+            "work for a while",
+            "fresh input",
+        ]
 
         markers = await _collect_until(
             rec.controller.stream_queue,

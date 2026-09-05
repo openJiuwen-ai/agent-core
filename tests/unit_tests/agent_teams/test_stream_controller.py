@@ -43,6 +43,7 @@ class _FakeRuntime:
         self._chunks = chunks or []
         self.state = HarnessState.IDLE
         self.abort_calls: list[bool] = []
+        self.pause_calls = 0
         self.sent: list[tuple[Any, bool]] = []
         self._state_cbs: list[Callable[..., Any]] = []
         self._round_cbs: list[Callable[..., Any]] = []
@@ -72,6 +73,9 @@ class _FakeRuntime:
 
     async def abort(self, *, immediate: bool = False) -> None:
         self.abort_calls.append(immediate)
+
+    async def pause(self) -> None:
+        self.pause_calls += 1
 
     def has_pending_interrupt(self) -> bool:
         return self._pending_interrupt
@@ -597,6 +601,84 @@ async def test_drain_agent_task_forwards_immediate_abort() -> None:
     await sc.drain_agent_task()
 
     assert runtime.abort_calls == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize(
+    ("method_name", "immediate"),
+    [("cancel_agent", True), ("cooperative_cancel", False)],
+)
+async def test_cancel_discards_pending_interrupt_resumes_and_drain_task(
+    method_name: str,
+    immediate: bool,
+) -> None:
+    """Cancel closes the StreamController approval queue lifecycle."""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+    sc._pending_interrupt_resumes.extend([object(), object()])
+
+    drain_started = asyncio.Event()
+
+    async def blocked_drain() -> None:
+        drain_started.set()
+        await asyncio.Event().wait()
+
+    drain = asyncio.create_task(blocked_drain())
+    sc._drain_task = drain
+    await drain_started.wait()
+
+    await getattr(sc, method_name)()
+
+    assert runtime.abort_calls == [immediate]
+    assert sc._pending_interrupt_resumes == []
+    assert sc._drain_task is None
+    assert drain.done()
+    assert drain.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_finally_discards_resumes_queued_during_failed_abort() -> None:
+    """Post-abort cleanup runs even when abort raises after a queue race."""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+    raced_resume = object()
+    drain_started = asyncio.Event()
+
+    async def blocked_drain() -> None:
+        drain_started.set()
+        await asyncio.Event().wait()
+
+    async def failing_abort(*, immediate: bool = False) -> None:
+        runtime.abort_calls.append(immediate)
+        sc._pending_interrupt_resumes.append(raced_resume)
+        sc._drain_task = asyncio.create_task(blocked_drain())
+        await drain_started.wait()
+        raise RuntimeError("abort failed")
+
+    runtime.abort = failing_abort
+
+    with pytest.raises(RuntimeError, match="abort failed"):
+        await sc.cancel_agent()
+
+    assert runtime.abort_calls == [True]
+    assert sc._pending_interrupt_resumes == []
+    assert sc._drain_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_preserves_pending_interrupt_resumes() -> None:
+    """Pause is resumable and must not inherit abort queue cleanup."""
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+    pending = object()
+    sc._pending_interrupt_resumes.append(pending)
+
+    await sc.pause_agent()
+
+    assert sc._pending_interrupt_resumes == [pending]
 
 
 @pytest.mark.level1

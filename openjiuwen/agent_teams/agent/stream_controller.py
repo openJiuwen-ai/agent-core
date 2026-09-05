@@ -221,6 +221,23 @@ class StreamController:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+    async def _discard_pending_interrupt_resumes(self) -> None:
+        """Clear queued approvals and stop a detached deferred-drain task."""
+        async with self._interrupt_lock:
+            self._pending_interrupt_resumes.clear()
+            drain = self._drain_task
+            self._drain_task = None
+        if drain is not None and not drain.done():
+            drain.cancel()
+            try:
+                await drain
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    raise
+            except Exception:
+                pass
+
     async def _forward_outputs(self) -> None:
         """Pump runtime.outputs() into the stream queue + observers for the cycle."""
         harness = self._resources.harness
@@ -455,14 +472,22 @@ class StreamController:
     async def cancel_agent(self) -> None:
         """Hard-cancel the in-flight round (rollback to last boundary)."""
         harness = self._resources.harness
-        if harness is not None:
-            await harness.abort(immediate=True)
+        try:
+            await self._discard_pending_interrupt_resumes()
+            if harness is not None:
+                await harness.abort(immediate=True)
+        finally:
+            await self._discard_pending_interrupt_resumes()
 
     async def cooperative_cancel(self) -> None:
         """Ask the in-flight round to finish gracefully (no rollback)."""
         harness = self._resources.harness
-        if harness is not None:
-            await harness.abort(immediate=False)
+        try:
+            await self._discard_pending_interrupt_resumes()
+            if harness is not None:
+                await harness.abort(immediate=False)
+        finally:
+            await self._discard_pending_interrupt_resumes()
 
     async def pause_agent(self) -> None:
         """Pause the in-flight round at its nearest inner iteration boundary.
