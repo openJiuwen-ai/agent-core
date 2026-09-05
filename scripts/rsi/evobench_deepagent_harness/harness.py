@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
 from evobench.models.client import ModelConfig
 
 from openjiuwen.core.foundation.llm import UserMessage
@@ -968,13 +969,43 @@ def _materialize_runtime_skills(
     return runtime_root, materialized
 
 
+def _load_prompt_sections(harness_dir: Path) -> list[str]:
+    """Load standard RSI prompt sections in stable priority order."""
+    manifest = harness_dir / "prompt_sections" / "sections.yaml"
+    if not manifest.is_file():
+        return []
+    payload = yaml.safe_load(manifest.read_text(encoding="utf-8")) or {}
+    sections = payload.get("sections", []) if isinstance(payload, dict) else payload
+    if not isinstance(sections, list):
+        raise ValueError("prompt_sections/sections.yaml must contain a sections list")
+
+    loaded: list[tuple[int, str]] = []
+    for index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            raise ValueError(f"prompt section {index} must be a mapping")
+        file_ref = str(section.get("file") or section.get("path") or "").strip()
+        if not file_ref:
+            continue
+        relative = Path(file_ref)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"prompt section path must be package-relative: {file_ref}")
+        path = harness_dir / relative
+        if not path.is_file():
+            path = harness_dir / "prompt_sections" / "files" / relative
+        resolved = path.resolve()
+        resolved.relative_to(harness_dir.resolve())
+        loaded.append((int(section.get("priority", 30)), resolved.read_text(encoding="utf-8").strip()))
+    return [text for _, text in sorted(loaded, key=lambda item: item[0]) if text]
+
+
 class PolicyHarness:
     """Evo-Bench protocol adapter backed by the latest openJiuwen DeepAgent."""
 
     def __init__(self, harness_dir: str | Path, model_config: ModelConfig) -> None:
         self.harness_dir = Path(harness_dir).resolve()
         self.config = json.loads((self.harness_dir / "harness.json").read_text(encoding="utf-8"))
-        self.system_prompt = (self.harness_dir / self.config["system_prompt"]).read_text(encoding="utf-8")
+        base_prompt = (self.harness_dir / self.config["system_prompt"]).read_text(encoding="utf-8").strip()
+        self.system_prompt = "\n\n".join([base_prompt, *_load_prompt_sections(self.harness_dir)])
         self.model_config = model_config
 
     def run_task(

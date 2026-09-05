@@ -74,6 +74,36 @@ def test_load_wrapped_cases_json(tmp_path: Path) -> None:
     assert _case_ids(batches) == [["case_001", "case_002"]]
 
 
+def test_load_benchmark_suite_without_dropping_task_contract(tmp_path: Path) -> None:
+    """A suite file is accepted through the same dataset_files interface."""
+    suite = tmp_path / "train_suite.json"
+    _write_json(
+        suite,
+        {
+            "assets_dir": "../assets",
+            "validation": [
+                {
+                    "id": "task-001",
+                    "prompt": "complete the task",
+                    "domain": "office",
+                    "public_files": ["brief.pdf"],
+                    "scorer": {"type": "rubric"},
+                }
+            ],
+        },
+    )
+
+    loader = DataLoader(DataLoaderConfig(batch_size=10))
+    case = list(loader.load_files([str(suite)]))[0][0]
+
+    assert case["case_id"] == "task-001"
+    assert case["task_id"] == "task-001"
+    assert case["input"] == "complete the task"
+    assert case["public_files"] == ["brief.pdf"]
+    assert case["scorer"] == {"type": "rubric"}
+    assert case["case_path"] == str(suite.resolve())
+
+
 def test_load_mixed_json_shapes_in_sorted_file_order(tmp_path: Path) -> None:
     """DataLoader expands all supported JSON shapes in sorted file order."""
     _write_json(tmp_path / "001_single.json", {"case_id": "case_001"})

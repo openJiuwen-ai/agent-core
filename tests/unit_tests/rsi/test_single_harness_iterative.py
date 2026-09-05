@@ -690,6 +690,33 @@ def test_load_cases_is_a_public_validating_entry_point(tmp_path: Path) -> None:
     assert cases == [{"case_id": "case_001", "case_path": str(dataset_path), "case_index": 1}]
 
 
+def test_load_cases_accepts_a_benchmark_suite_through_the_existing_api(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "train_suite.json"
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "validation": [
+                    {
+                        "id": "task-001",
+                        "prompt": "complete the task",
+                        "domain": "office",
+                        "public_files": ["source.xlsx"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cases = load_cases([str(dataset_path)])
+
+    assert cases[0]["case_id"] == "task-001"
+    assert cases[0]["task_id"] == "task-001"
+    assert cases[0]["input"] == "complete the task"
+    assert cases[0]["public_files"] == ["source.xlsx"]
+    assert cases[0]["case_path"] == str(dataset_path.resolve())
+
+
 def test_frozen_baseline_keeps_epoch_optimization_batch_sequential(tmp_path: Path) -> None:
     dataset_path = tmp_path / "dataset" / "cases.json"
     dataset_path.parent.mkdir()

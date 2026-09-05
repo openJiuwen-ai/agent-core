@@ -1,0 +1,447 @@
+# coding: utf-8
+"""Run the RSI single-Harness loop through the official Evo-Bench protocol."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import shutil
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from examples.rsi.evobench.rsi_evaluator import (
+    EvoBenchRSIEvaluator,
+    EvoBenchRSIEvaluatorConfig,
+)
+from examples.rsi.evobench.runtime import resolve_evobench_root
+from examples.rsi.task_bundle import load_task_bundle
+from openjiuwen.rsi.harness_rsi.config import load_auto_coordinating_harness_config
+from openjiuwen.rsi.harness_rsi.single_harness import (
+    IterativeSingleHarnessRequest,
+    SingleHarnessIterativeOptimizationOrchestrator,
+    load_cases,
+)
+
+DEFAULT_OUTPUT_ROOT = Path(".evobench_runs/rsi_claw20")
+DEFAULT_RUN_MODEL = Path(".local/rsi/models/token_plan_deepseek_v4_flash_single_harness.yaml")
+DEFAULT_OPTIMIZATION_MODEL = Path(".local/rsi/models/bailian_glm5_1_single_harness.yaml")
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeInputs:
+    """Resolved portable inputs for one Evo-Bench RSI run."""
+
+    harness_refs: Path | None
+    evaluation_model: Path
+    analysis_model: Path
+    member_optimization_model: Path
+    judge_model: Path
+
+
+def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_stdio()
+    args = _parse_args(argv)
+    runtime_inputs = _resolve_runtime_inputs(args)
+    suite_path = Path(args.suite_path).expanduser().resolve()
+    if not suite_path.is_file():
+        raise FileNotFoundError(suite_path)
+
+    run_dir = Path(args.output_dir).expanduser().resolve() / _safe_name(args.run_name)
+    if run_dir.exists() and not args.resume:
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    dataset_path = _write_dataset(
+        suite_path,
+        run_dir / "dataset" / "cases.json",
+        task_ids=args.task_id,
+        limit=args.limit,
+    )
+    selected_cases = load_cases([str(dataset_path)])
+    execution_mode = _resolve_execution_mode(args.execution_mode, selected_cases)
+    selected_case_count = len(selected_cases)
+    if args.batch_size < 1:
+        raise ValueError("--batch-size must be at least 1")
+    dataset_id = f"evobench_validation_{selected_case_count}"
+    harness_refs_path = _write_seed_refs(
+        resolve_evobench_root(args.evobench_root),
+        run_dir / "harnesses" / "harness_refs.yaml",
+        source_path=runtime_inputs.harness_refs,
+    )
+    config_path = _write_config(
+        run_dir=run_dir,
+        run_model=runtime_inputs.evaluation_model,
+        analysis_model=runtime_inputs.analysis_model,
+        member_optimization_model=runtime_inputs.member_optimization_model,
+        batch_size=args.batch_size,
+        max_epochs=args.max_epochs,
+        sibling_candidate_count=args.sibling_candidate_count,
+        max_issue_attempts=args.max_issue_attempts,
+        # The control-plane limit includes the initial candidate round. The
+        # user-facing flag counts feedback-driven repairs after that attempt.
+        max_repair_rounds=args.max_repair_rounds + 1,
+        improver_policy_ref=args.improver_policy_ref,
+    )
+    config = load_auto_coordinating_harness_config(str(config_path))
+    evaluator = EvoBenchRSIEvaluator(
+        EvoBenchRSIEvaluatorConfig(
+            evobench_root=args.evobench_root,
+            policy_model_config=str(runtime_inputs.evaluation_model),
+            judge_model_config=str(runtime_inputs.judge_model),
+            judge_model=args.judge_model,
+            rollout_concurrency=args.rollout_concurrency,
+            existing_official_result=None,
+            execution_mode=execution_mode,
+            env_file=args.env_file,
+            e2b_template=args.e2b_template,
+            apex_template=args.apex_template,
+        )
+    )
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        config,
+        evaluator=evaluator,
+    )
+
+    async def _run() -> Any:
+        result = await orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs_path),
+                output_dir=str(run_dir / "single_harness_optimization"),
+                task_id=args.run_name,
+                dataset_id=dataset_id,
+                resume=args.resume,
+                baseline_eval_ref_path="",
+                # The benchmark evolves H after every batch. Each batch source
+                # execution is the paired pre-intervention reference; do not
+                # spend a separate full-suite H0 pass before optimization.
+                auto_full_baseline=False,
+            )
+        )
+        return result
+
+    result = asyncio.run(_run())
+    print("BASELINE_MODE=paired_batch_source_evaluations")
+    print(f"SINGLE_HARNESS_STATE={result.state_path}")
+    print(f"SINGLE_HARNESS_REPORT={result.report_path}")
+    print(f"BEST_HARNESS_REFS={result.best_harness_refs_path}")
+    print(f"PUBLISHED_HARNESS_REFS={result.published_harness_refs_path}")
+    print(f"BEST_STRICT_TASK_PASS_RATE={result.best_score}")
+    print(f"BEST_PASS_HAT_K={result.best_score}")
+    print(f"RUN_DIR={run_dir}")
+    return 0
+
+
+def _write_dataset(
+    suite_path: Path,
+    output_path: Path,
+    *,
+    task_ids: list[str] | None = None,
+    limit: int = 0,
+) -> Path:
+    suite = json.loads(suite_path.read_text(encoding="utf-8"))
+    tasks = suite.get("validation", [])
+    if not isinstance(tasks, list) or not tasks:
+        raise ValueError(f"Evo-Bench suite has no validation tasks: {suite_path}")
+    requested = {str(task_id) for task_id in (task_ids or []) if str(task_id)}
+    available = {str(task.get("id", "")): task for task in tasks if isinstance(task, dict)}
+    missing = sorted(requested - set(available))
+    if missing:
+        raise ValueError(f"Evo-Bench tasks not present in the frozen suite: {missing}")
+    selected = [available[task_id] for task_id in task_ids or []] if requested else tasks
+    if limit > 0:
+        selected = selected[:limit]
+    for task in selected:
+        if not isinstance(task, dict):
+            raise ValueError("Evo-Bench validation task must be a mapping")
+        task_id = str(task.get("id", "") or "")
+        domain = str(task.get("domain", "")).lower()
+        if not task_id or domain not in {"general", "office"}:
+            raise ValueError(f"RSI local no-key suite requires General or Office tasks: {task_id or '<missing>'}")
+        source = task_id.split("-", 1)[0]
+        if source not in {"claw", "gdpval", "apex"}:
+            raise ValueError(f"RSI suite rejects unsupported task source: {task_id}")
+    filtered_suite = dict(suite)
+    filtered_suite["validation"] = selected
+    raw_assets_dir = str(suite.get("assets_dir") or "").strip()
+    if raw_assets_dir:
+        assets_dir = Path(raw_assets_dir).expanduser()
+        if not assets_dir.is_absolute():
+            assets_dir = suite_path.parent / assets_dir
+        filtered_suite["assets_dir"] = str(assets_dir.resolve())
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(filtered_suite, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return output_path
+
+
+def _write_seed_refs(
+    evobench_root: Path,
+    output_path: Path,
+    *,
+    source_path: Path | None = None,
+) -> Path:
+    if source_path is not None:
+        payload = yaml.safe_load(source_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(payload, dict):
+            raise ValueError(f"harness refs must be a mapping: {source_path}")
+        refs = payload.get("harness_refs")
+        if not isinstance(refs, dict) or not refs:
+            raise ValueError(f"harness refs must contain a non-empty harness_refs mapping: {source_path}")
+        resolved_refs = {str(name): str(_resolve_bundle_ref(source_path, value)) for name, value in refs.items()}
+        roles = payload.get("roles")
+        resolved_roles: list[dict[str, Any]] = []
+        if isinstance(roles, list):
+            for raw_role in roles:
+                if not isinstance(raw_role, dict):
+                    continue
+                role = dict(raw_role)
+                if role.get("harness_ref_path"):
+                    role["harness_ref_path"] = str(_resolve_bundle_ref(source_path, role["harness_ref_path"]))
+                resolved_roles.append(role)
+        policy_harness = Path(resolved_refs.get("policy_harness", ""))
+        if not policy_harness.is_dir():
+            raise FileNotFoundError(
+                f"policy_harness directory referenced by {source_path} was not found: {policy_harness}"
+            )
+        normalized = dict(payload)
+        normalized["harness_refs"] = resolved_refs
+        if isinstance(roles, list):
+            normalized["roles"] = resolved_roles
+        _write_yaml(output_path, normalized)
+        return output_path
+
+    harness = (evobench_root / "policy_harness_seed").resolve()
+    if not harness.is_dir():
+        raise FileNotFoundError(harness)
+    _write_yaml(
+        output_path,
+        {
+            "version": 1,
+            "harness_refs": {"policy_harness": str(harness)},
+            "roles": [
+                {
+                    "role": "policy_harness",
+                    "member_name": "policy_harness",
+                    "description": "Official Evo-Bench PolicyHarness.",
+                    "harness_ref_path": str(harness),
+                }
+            ],
+        },
+    )
+    return output_path
+
+
+def _resolve_bundle_ref(refs_path: Path, value: Any) -> Path:
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = refs_path.parent / path
+    return path.resolve()
+
+
+def _write_config(  # pylint: disable=huawei-too-many-arguments
+    *,
+    run_dir: Path,
+    run_model: Path,
+    analysis_model: Path,
+    member_optimization_model: Path,
+    batch_size: int,
+    max_epochs: int,
+    sibling_candidate_count: int,
+    max_issue_attempts: int,
+    max_repair_rounds: int,
+    improver_policy_ref: str,
+) -> Path:
+    for path in (run_model, analysis_model, member_optimization_model):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    path = run_dir / "single_harness.yaml"
+    _write_yaml(
+        path,
+        {
+            "workspace_dir": str(run_dir / "workspace"),
+            "max_epochs": max_epochs,
+            "model_configs": {
+                "evaluation": str(run_model),
+                "analysis": str(analysis_model),
+                "member_optimization": str(member_optimization_model),
+            },
+            "data_loader": {
+                "file_pattern": "cases.json",
+                "batch_size": batch_size,
+                "batch_balance_keys": ["domain", "source", "task_type"],
+            },
+            "evaluator": {
+                "backend": "single_harness",
+                "evaluation_method": "evobench-claw-official",
+            },
+            "evaluation_result_analyzer": {
+                # Preserve every per-case diagnosis (up to six) through
+                # deterministic aggregation. Candidate evaluation remains
+                # bounded separately by max_issue_attempts_per_batch.
+                "max_issues": max(20, batch_size * 6),
+                "evidence_limit_per_issue": 3,
+            },
+            "member_optimizer": {
+                "max_roles_per_run": 1,
+                "max_actions_per_plan": 2,
+                "max_issue_attempts_per_batch": max_issue_attempts,
+                "max_repair_rounds_per_batch": max_repair_rounds,
+                "sibling_candidate_count": sibling_candidate_count,
+                "improver_policy_ref": improver_policy_ref,
+                "min_attribution_confidence": 0.1,
+                "allowed_action_groups": ["prompt"],
+                "allowed_prompt_surfaces": ["prompt_section"],
+                "candidate_min_target_behavior_delta": 0.0,
+            },
+            "scheduling": {
+                "evaluation_strategy": "hybrid",
+                "coordination_strategy": "team_first_single_pass",
+                "promotion_policy": "epoch_full_evaluation",
+                "full_evaluation_enabled": True,
+            },
+        },
+    )
+    return path
+
+
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-name", default="rsi_claw20_v1")
+    parser.add_argument(
+        "--task-dir",
+        default="",
+        help=(
+            "Portable task directory containing harness/harness_refs.yaml and "
+            "models/{evaluation,analysis,member_optimization}.yaml. Explicit CLI paths override it."
+        ),
+    )
+    parser.add_argument("--suite-path", required=True)
+    parser.add_argument("--execution-mode", choices=("auto", "local", "e2b"), default="auto")
+    parser.add_argument("--env-file", default=".local/rsi/evobench.env")
+    parser.add_argument("--e2b-template", default="evobench-20260808")
+    parser.add_argument("--apex-template", default="evobench-apex-spec")
+    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_ROOT))
+    parser.add_argument("--evobench-root", default="")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--task-id", action="append", default=[])
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=2,
+        help="Cases optimized sequentially per batch; the epoch still ends with one full-suite checkpoint.",
+    )
+    parser.add_argument("--max-epochs", type=int, default=1)
+    parser.add_argument(
+        "--sibling-candidate-count",
+        type=int,
+        default=1,
+        help=(
+            "Harness candidates generated per issue. The single-harness optimization default is 1; "
+            "values above 1 are reserved for explicit candidate-feedback experiments."
+        ),
+    )
+    parser.add_argument(
+        "--max-issue-attempts",
+        type=int,
+        default=8,
+        help="Maximum distinct issue cohorts evaluated per batch; 0 means unlimited.",
+    )
+    parser.add_argument(
+        "--max-repair-rounds",
+        type=int,
+        default=1,
+        help="Feedback-driven repair rounds after the initial candidate attempt.",
+    )
+    parser.add_argument("--rollout-concurrency", type=int, default=5)
+    parser.add_argument("--improver-policy-ref", default="")
+    parser.add_argument("--harness-refs-path", default="")
+    parser.add_argument("--run-model-config-ref", default="")
+    parser.add_argument(
+        "--optimization-model-config-ref",
+        default="",
+        help="Compatibility option used for both Analyzer and Improver unless their explicit options are set.",
+    )
+    parser.add_argument("--analysis-model-config-ref", default="")
+    parser.add_argument("--member-optimization-model-config-ref", default="")
+    parser.add_argument("--judge-model-config-ref", default="")
+    parser.add_argument("--judge-model", default="qwen3.7-plus")
+    return parser.parse_args(argv)
+
+
+def _resolve_runtime_inputs(args: argparse.Namespace) -> RuntimeInputs:
+    task_dir = str(getattr(args, "task_dir", "") or "").strip()
+    bundle = load_task_bundle(task_dir) if task_dir else None
+    compatibility_model = str(getattr(args, "optimization_model_config_ref", "") or "").strip()
+
+    evaluation_model = _configured_path(
+        getattr(args, "run_model_config_ref", ""),
+        bundle.evaluation_model if bundle else DEFAULT_RUN_MODEL,
+    )
+    analysis_model = _configured_path(
+        getattr(args, "analysis_model_config_ref", "") or compatibility_model,
+        bundle.analysis_model if bundle else DEFAULT_OPTIMIZATION_MODEL,
+    )
+    member_optimization_model = _configured_path(
+        getattr(args, "member_optimization_model_config_ref", "") or compatibility_model,
+        bundle.member_optimization_model if bundle else DEFAULT_OPTIMIZATION_MODEL,
+    )
+    judge_fallback = bundle.judge_model if bundle and bundle.judge_model is not None else analysis_model
+    judge_model = _configured_path(
+        getattr(args, "judge_model_config_ref", ""),
+        judge_fallback,
+    )
+    harness_value = str(getattr(args, "harness_refs_path", "") or "").strip()
+    harness_refs = (
+        Path(harness_value).expanduser().resolve() if harness_value else bundle.harness_refs if bundle else None
+    )
+
+    return RuntimeInputs(
+        harness_refs=harness_refs,
+        evaluation_model=evaluation_model,
+        analysis_model=analysis_model,
+        member_optimization_model=member_optimization_model,
+        judge_model=judge_model,
+    )
+
+
+def _configured_path(value: Any, fallback: Path) -> Path:
+    raw = str(value or "").strip()
+    return Path(raw).expanduser().resolve() if raw else Path(fallback).expanduser().resolve()
+
+
+def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def _safe_name(value: str) -> str:
+    clean = "".join(char if char.isalnum() or char in "-_" else "_" for char in value)
+    return clean.strip("_") or "rsi_claw20"
+
+
+def _resolve_execution_mode(requested: str, cases: list[dict[str, Any]]) -> str:
+    if requested != "auto":
+        return requested
+    return "e2b" if any(str(case.get("domain", "")).lower() == "office" for case in cases) else "local"
+
+
+def _configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

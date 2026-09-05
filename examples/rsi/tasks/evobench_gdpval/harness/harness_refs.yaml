@@ -1,0 +1,8 @@
+version: 1
+harness_refs:
+  policy_harness: ../../../../../scripts/rsi/evobench_deepagent_harness
+roles:
+  - role: policy_harness
+    member_name: policy_harness
+    description: Evo-Bench PolicyHarness backed by openJiuwen DeepAgent.
+    harness_ref_path: ../../../../../scripts/rsi/evobench_deepagent_harness

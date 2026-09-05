@@ -17,7 +17,7 @@ import yaml
 
 from openjiuwen.rsi.events import OnEvent, emit
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
-from openjiuwen.rsi.harness_rsi.data_loader import DataLoader
+from openjiuwen.rsi.harness_rsi.data_loader import DataLoader, load_json_cases
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
     EvaluationResultAnalyzer,
 )
@@ -1786,19 +1786,7 @@ def load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     for dataset_file in dataset_files:
         path = Path(dataset_file).expanduser().resolve()
-        with path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-        if isinstance(data, dict) and isinstance(data.get("cases"), list):
-            raw_cases = data["cases"]
-        elif isinstance(data, dict):
-            raw_cases = [data]
-        elif isinstance(data, list):
-            raw_cases = data
-        else:
-            raise ValueError(f"dataset json must contain case mappings: {path}")
-        for index, case in enumerate(raw_cases, start=1):
-            if not isinstance(case, dict):
-                raise ValueError(f"dataset case must be a mapping: {path}#{index}")
+        for index, case in enumerate(load_json_cases(path), start=1):
             cases.append({**case, "case_path": str(path), "case_index": index})
     case_ids = [str(case.get("case_id", "") or "").strip() for case in cases]
     if any(not case_id for case_id in case_ids):
