@@ -285,3 +285,6 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 
 /.codex/
 /.agents/
+
+# Test runs that leave a run_dir unset fall back here; never part of the tree.
+data/evolve-candidates/
