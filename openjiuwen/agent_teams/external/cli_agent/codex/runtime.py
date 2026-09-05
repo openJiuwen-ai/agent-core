@@ -162,7 +162,14 @@ class _CodexRetryBudgetExceeded(RuntimeError):
 
 
 class _CodexAuthFallbackRequested(RuntimeError):
-    """Signal that the current prompt must be retried on the fallback model."""
+    """Signal that the current prompt must be retried on the fallback model.
+
+    Carries a message so the turn span's error status (which stringifies the
+    exception) stays readable in trace backends.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("codex auth fallback activated; retrying prompt on the fallback model")
 
 
 class CodexSdkRuntime(CliRuntimeBase):
