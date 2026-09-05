@@ -23,6 +23,22 @@ class CodeGraphProfile(StrEnum):
     GRAPH = "graph"
 
 
+class CodeGraphRetrievalInterface(StrEnum):
+    """How graph tools talk to the model.
+
+    ``CLASSIC`` keeps the current find_* payload and tool table.
+    ``FOCUSED`` is the ACI contract: summary candidates, role groups,
+    a single next action, and ``focus_code`` instead of ``select_code_context``.
+    Locate-exam mode always stays classic.
+    """
+
+    CLASSIC = "classic"
+    FOCUSED = "focused"
+
+
+RETRIEVAL_INTERFACE_DEFAULT = CodeGraphRetrievalInterface.CLASSIC.value
+
+
 class LocalizationPhase(StrEnum):
     """Sub-phase of Code Graph localization inside a coding agent.
 
@@ -80,6 +96,32 @@ def resolve_code_graph_profile(
 
         logger.warning(
             "unknown code_graph profile %r; falling back to %r", text, default.value
+        )
+        return default
+
+
+def resolve_code_graph_retrieval_interface(
+    value: Any,
+    *,
+    default: CodeGraphRetrievalInterface = CodeGraphRetrievalInterface.CLASSIC,
+) -> CodeGraphRetrievalInterface:
+    """Accept ``classic`` / ``focused``. Anything else falls back to ``classic``."""
+    if isinstance(value, CodeGraphRetrievalInterface):
+        return value
+    if value is None or isinstance(value, bool):
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    try:
+        return CodeGraphRetrievalInterface(text)
+    except ValueError:
+        from openjiuwen.core.common.logging import logger
+
+        logger.warning(
+            "unknown code_graph retrieval_interface %r; falling back to %r",
+            text,
+            default.value,
         )
         return default
 
@@ -320,6 +362,10 @@ _EVIDENCE_META_KEYS = (
     "qualified_name",
     "large_class",
     "submit",
+    "candidate_id",
+    "role",
+    "signature",
+    "lines",
 )
 
 
@@ -358,6 +404,22 @@ class CodeGraphRunState:
     search_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Locate-exam only. Keys: extra_read, relation_hop, related_seen.
     submit_nudges: set[str] = field(default_factory=set)
+    retrieval_interface: str = RETRIEVAL_INTERFACE_DEFAULT
+    focused_candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
+    focus_seq: int = 0
+    current_focus: dict[str, Any] | None = None
+
+    @property
+    def uses_focused(self) -> bool:
+        """Product-graph ACI. Locate exam and ``off`` never take this path."""
+        if self.profile != CodeGraphProfile.GRAPH.value:
+            return False
+        if self.is_locate_exam:
+            return False
+        return (
+            resolve_code_graph_retrieval_interface(self.retrieval_interface)
+            == CodeGraphRetrievalInterface.FOCUSED
+        )
 
     @property
     def is_locate_exam(self) -> bool:
@@ -377,6 +439,8 @@ class CodeGraphRunState:
         mode = (self.prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
         if mode == PROMPT_MODE_LOCATE:
             return "submit_code_context"
+        if self.uses_focused:
+            return "focus_code"
         return "select_code_context"
 
     def remember_payload(self, payload: dict[str, Any]) -> None:
@@ -390,7 +454,15 @@ class CodeGraphRunState:
         top_id = str(payload.get("symbol_id") or "")
         if top_id and file_name:
             self.candidates[top_id] = compact_tool_evidence(payload)
-        for key in ("matches", "symbols", "related", "chunks", "definitions", "focus"):
+        for key in (
+            "matches",
+            "symbols",
+            "related",
+            "chunks",
+            "definitions",
+            "focus",
+            "candidates",
+        ):
             items = payload.get(key) or []
             if not isinstance(items, list):
                 continue

@@ -15,6 +15,7 @@ from openjiuwen.core.retrieval.code_graph.query.test_paths import is_test_path
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.code_graph._base import CodeGraphBaseTool, CodeGraphToolContext
 from openjiuwen.harness.tools.code_graph.commit_code_context import SubmitCodeContextTool
+from openjiuwen.harness.tools.code_graph.focus_code import FocusCodeTool
 from openjiuwen.harness.tools.code_graph.search_code import FindCodeSymbolsTool
 from openjiuwen.harness.tools.code_graph.search_text import SearchSourceTextTool
 from openjiuwen.harness.tools.code_graph.select_context import SelectCodeContextTool
@@ -31,6 +32,7 @@ __all__ = [
     "FindCodeSymbolsTool",
     "FindImportersTool",
     "FindSubclassesTool",
+    "FocusCodeTool",
     "InspectCodeStructureTool",
     "ReadSymbolTool",
     "ResolveSymbolTool",

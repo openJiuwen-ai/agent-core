@@ -67,7 +67,17 @@ class FindCodeSymbolsTool(CodeGraphBaseTool):
             return output
         output.data["candidates_only"] = True
         matches = [item for item in (output.data.get("matches") or []) if isinstance(item, dict)]
-        if "next_actions" not in output.data:
+        if getattr(state, "uses_focused", False):
+            from openjiuwen.harness.tools.code_graph.focused import apply_focused_observation
+
+            apply_focused_observation(
+                output.data,
+                query=query,
+                state=state,
+                raw_items=matches,
+                matched_by=["symbol"],
+            )
+        elif "next_actions" not in output.data:
             if bool(getattr(state, "is_locate_exam", False)):
                 actions = locate_search_next_actions(query, matches)
             else:
@@ -115,10 +125,21 @@ class FindCodeSymbolsTool(CodeGraphBaseTool):
             return None
         payload = dict(cached)
         payload["duplicate_query"] = True
-        payload["message"] = (
-            "same query as earlier in this task; cached result returned. "
-            "Call read_symbol or a find_* relation tool instead of rewording the search."
-        )
+        if getattr(state, "uses_focused", False):
+            from openjiuwen.harness.tools.code_graph.focused import focus_reminder
+
+            extra = focus_reminder(state)
+            payload["message"] = (
+                "same query as earlier in this task; cached result returned. "
+                "Call focus_code on a candidate instead of rewording the search."
+            )
+            if extra:
+                payload["message"] = f"{payload['message']} {extra}"
+        else:
+            payload["message"] = (
+                "same query as earlier in this task; cached result returned. "
+                "Call read_symbol or a find_* relation tool instead of rewording the search."
+            )
         return ToolOutput(success=True, data=payload)
 
     @staticmethod
