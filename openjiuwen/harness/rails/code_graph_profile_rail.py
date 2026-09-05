@@ -30,6 +30,7 @@ from openjiuwen.harness.schema.code_graph import (
     FIND_GRAPH_QUERY_POLICY,
     bind_code_graph_runtime,
     resolve_code_graph_profile,
+    resolve_code_graph_retrieval_interface,
 )
 from openjiuwen.harness.tools.code_graph import (
     LOCATE_EXAM_TOOL_NAMES,
@@ -75,12 +76,14 @@ class CodeGraphProfileRail(DeepAgentRail):
         repo_root: str | None = None,
         config: CodeGraphConfig | None = None,
         prompt_mode: str = PROMPT_MODE_PRODUCT,
+        retrieval_interface: Any = None,
     ) -> None:
         super().__init__()
         self.profile = resolve_code_graph_profile(profile)
         self.repo_root = repo_root
         self.config = config or CodeGraphConfig()
         self.prompt_mode = prompt_mode or PROMPT_MODE_PRODUCT
+        self.retrieval_interface = resolve_code_graph_retrieval_interface(retrieval_interface)
         self.session_id = ""
         self.run_state: CodeGraphRunState | None = None
         self._tools: list[Any] = []
@@ -146,6 +149,7 @@ class CodeGraphProfileRail(DeepAgentRail):
                 self.run_state,
                 profile=self.profile,
                 prompt_mode=self.prompt_mode,
+                retrieval_interface=self.retrieval_interface,
             ):
                 if agent.ability_manager.get(tool.card.name) is not None:
                     continue
@@ -182,6 +186,7 @@ class CodeGraphProfileRail(DeepAgentRail):
             request=CodeGraphRequest(query="", budget=budget),
             profile=self.profile.value,
             prompt_mode=self.prompt_mode or PROMPT_MODE_PRODUCT,
+            retrieval_interface=self.retrieval_interface.value,
         )
 
     def _inject_prompt(self, agent: Any) -> None:
@@ -193,6 +198,7 @@ class CodeGraphProfileRail(DeepAgentRail):
                 self.profile,
                 language=lang,
                 prompt_mode=self.prompt_mode,
+                retrieval_interface=self.retrieval_interface,
             )
             for lang in ("en", "cn")
         }

@@ -14,9 +14,11 @@ from typing import Dict, Optional
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.schema.code_graph import (
     CodeGraphProfile,
+    CodeGraphRetrievalInterface,
     PROMPT_MODE_LOCATE,
     PROMPT_MODE_PRODUCT,
     resolve_code_graph_profile,
+    resolve_code_graph_retrieval_interface,
 )
 
 GRAPH_PROFILE_PROMPT_EN = """\
@@ -145,9 +147,56 @@ trace_call_paths 只用于多跳路径，必须传 direction=callers 或 callees
 submit_code_context 会生成 <PATCH_CONTEXT>，不要自己打标签。
 """
 
+GRAPH_FOCUSED_PROFILE_PROMPT_EN = """\
+Code Graph (profile: graph, retrieval_interface: focused):
+Search returns short candidates. Do not read every hit. Focus, then edit.
+
+1. Named class / function / method: resolve_symbol, then focus_code.
+2. Unknown name: find_code_symbols (at most 5 summaries). Pick one candidate.
+3. Exact literals (quoted text, errors, config keys, decorators):
+   search_source_text with match_mode=exact. Use match_mode=lexical for
+   natural-language behaviour. auto chooses for you.
+4. Results are grouped: implementation / test / build. Edit implementation
+   unless the issue is about tests or packaging.
+5. Call focus_code(candidate_id) to open a 50-100 line window. That is the
+   edit target. Do not keep searching the same query.
+6. inspect_code_structure for a large class before focusing a method.
+7. After a focused window, edit the current source and run the relevant tests.
+   There is no select_code_context or submit tool.
+8. Relation tools (find_callers, find_importers, ...) are not on the default
+   table. Only use them when the issue itself asks about callers or registration.
+9. If a tool returns UNAVAILABLE, graph tools come off and grep/glob return.
+   A single ERROR is not that: narrow the query or read_file.
+"""
+
+GRAPH_FOCUSED_PROFILE_PROMPT_CN = """\
+Code Graph（profile: graph，retrieval_interface: focused）：
+检索只返回摘要候选。不要把每条命中都读完。先聚焦，再编辑。
+
+1. 已知类/函数/方法：resolve_symbol，然后 focus_code。
+2. 不知道精确名：find_code_symbols（最多 5 条摘要），选一个候选。
+3. 精确字面量（引号文本、报错、配置键、decorator）：
+   search_source_text，match_mode=exact。自然语言行为用 lexical。auto 会代选。
+4. 结果按 implementation / test / build 分组。默认改 implementation，
+   除非 issue 本身要求改测试或打包。
+5. 用 focus_code(candidate_id) 打开 50–100 行窗口，这就是编辑目标。
+   不要对同一查询反复搜索。
+6. 大类先 inspect_code_structure，再聚焦具体方法。
+7. 聚焦后改当前源码并跑相关测试。没有 select_code_context，也没有 submit。
+8. find_callers / find_importers 等不在默认工具表。只有 issue 明确问调用者
+   或注册时才用。
+9. 若返回 UNAVAILABLE，图工具会摘掉并恢复 grep/glob。单次 ERROR 不是这种
+   失败：缩小查询或改用 read_file。
+"""
+
 GRAPH_PROFILE_PROMPT: Dict[str, str] = {
     "en": GRAPH_PROFILE_PROMPT_EN,
     "cn": GRAPH_PROFILE_PROMPT_CN,
+}
+
+GRAPH_FOCUSED_PROFILE_PROMPT: Dict[str, str] = {
+    "en": GRAPH_FOCUSED_PROFILE_PROMPT_EN,
+    "cn": GRAPH_FOCUSED_PROFILE_PROMPT_CN,
 }
 
 LOCATE_EXAM_PROMPT: Dict[str, str] = {
@@ -161,6 +210,7 @@ def build_code_graph_profile_prompt(
     *,
     language: Optional[str] = None,
     prompt_mode: str = PROMPT_MODE_PRODUCT,
+    retrieval_interface: object = None,
 ) -> str:
     """Prompt text for one profile. Empty string when the profile is off."""
     resolved_profile = resolve_code_graph_profile(profile)
@@ -170,10 +220,18 @@ def build_code_graph_profile_prompt(
     mode = (prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
     if mode == PROMPT_MODE_LOCATE:
         return LOCATE_EXAM_PROMPT.get(resolved_language, LOCATE_EXAM_PROMPT["cn"])
+    if (
+        resolve_code_graph_retrieval_interface(retrieval_interface)
+        == CodeGraphRetrievalInterface.FOCUSED
+    ):
+        return GRAPH_FOCUSED_PROFILE_PROMPT.get(
+            resolved_language, GRAPH_FOCUSED_PROFILE_PROMPT["cn"]
+        )
     return GRAPH_PROFILE_PROMPT.get(resolved_language, GRAPH_PROFILE_PROMPT["cn"])
 
 
 __all__ = [
+    "GRAPH_FOCUSED_PROFILE_PROMPT",
     "GRAPH_PROFILE_PROMPT",
     "LOCATE_EXAM_PROMPT",
     "build_code_graph_profile_prompt",

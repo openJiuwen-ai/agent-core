@@ -170,6 +170,7 @@ def build_code_agent_config(
     code_graph_profile: Optional[str] = None,
     code_graph_config: Optional[Any] = None,
     code_graph_prompt_mode: Optional[str] = None,
+    code_graph_retrieval_interface: Optional[str] = None,
     inject_builtin_plan_agents: bool = True,
 ) -> SubAgentConfig:
     """Build a SubAgentConfig that materializes as create_code_agent().
@@ -188,6 +189,8 @@ def build_code_agent_config(
             factory_kwargs["code_graph_config"] = code_graph_config
         if code_graph_prompt_mode:
             factory_kwargs["code_graph_prompt_mode"] = code_graph_prompt_mode
+        if code_graph_retrieval_interface:
+            factory_kwargs["code_graph_retrieval_interface"] = code_graph_retrieval_interface
     if not inject_builtin_plan_agents:
         factory_kwargs["inject_builtin_plan_agents"] = False
     return SubAgentConfig(
@@ -240,6 +243,7 @@ def create_code_agent(
     code_graph_profile: Optional[str] = None,
     code_graph_config: Optional[Any] = None,
     code_graph_prompt_mode: Optional[str] = None,
+    code_graph_retrieval_interface: Optional[str] = None,
     inject_builtin_plan_agents: bool = True,
     **config_kwargs: Any,
 ) -> DeepAgent:
@@ -293,6 +297,10 @@ def create_code_agent(
         inject_builtin_plan_agents = bool(config_kwargs.pop("inject_builtin_plan_agents"))
     if "code_graph_prompt_mode" in config_kwargs and not code_graph_prompt_mode:
         code_graph_prompt_mode = str(config_kwargs.pop("code_graph_prompt_mode") or "") or None
+    if "code_graph_retrieval_interface" in config_kwargs and not code_graph_retrieval_interface:
+        code_graph_retrieval_interface = (
+            str(config_kwargs.pop("code_graph_retrieval_interface") or "") or None
+        )
     # Plan-mode composition now belongs to code_agent (not deep_agent).
     effective_subagents = list(subagents or [])
     if inject_builtin_plan_agents:
@@ -321,13 +329,19 @@ def create_code_agent(
         if not any(isinstance(rail, CodeGraphProfileRail) for rail in final_rails):
             from openjiuwen.harness.schema.code_graph import PROMPT_MODE_PRODUCT
 
-            final_rails.append(
-                CodeGraphProfileRail(
-                    code_graph_profile,
-                    config=code_graph_config,
-                    prompt_mode=code_graph_prompt_mode or PROMPT_MODE_PRODUCT,
-                )
-            )
+            rail_kwargs: Dict[str, Any] = {
+                "config": code_graph_config,
+                "prompt_mode": code_graph_prompt_mode or PROMPT_MODE_PRODUCT,
+            }
+            import inspect as _inspect
+
+            if (
+                "retrieval_interface"
+                in _inspect.signature(CodeGraphProfileRail.__init__).parameters
+                and code_graph_retrieval_interface
+            ):
+                rail_kwargs["retrieval_interface"] = code_graph_retrieval_interface
+            final_rails.append(CodeGraphProfileRail(code_graph_profile, **rail_kwargs))
 
     # --- CodingMemoryRail ---
     if embedding_config is not None and not any(isinstance(r, CodingMemoryRail) for r in final_rails):
