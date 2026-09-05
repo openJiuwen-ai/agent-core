@@ -253,13 +253,13 @@ async def test_legacy_literal_payload_is_accepted_but_malformed_splits_continuit
         _span(
             "tool.call",
             2,
-            attributes={semconv.GEN_AI_TOOL_OUTPUT: "{'result': ['safe']}"},
+            attributes={semconv.GEN_AI_TOOL_CALL_RESULT: "{'result': ['safe']}"},
         )
     )
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert not issues
     rail.trajectory_span_processor.on_end(
-        _span("tool.call", 3, attributes={semconv.GEN_AI_TOOL_OUTPUT: "{'broken': ]"})
+        _span("tool.call", 3, attributes={semconv.GEN_AI_TOOL_CALL_RESULT: "{'broken': ]"})
     )
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert {issue["code"] for issue in issues} == {"tool_payload_json_error"}
@@ -349,7 +349,7 @@ async def test_parallel_tool_callbacks_claim_one_batched_drain_by_call_id() -> N
                 attributes={
                     semconv.GEN_AI_TOOL_NAME: name,
                     semconv.GEN_AI_TOOL_CALL_ID: call_id,
-                    semconv.GEN_AI_TOOL_ID: f"resource-{name}",
+                    semconv.OJ_TOOL_RESOURCE_ID: f"resource-{name}",
                 },
             )
         )
@@ -631,7 +631,7 @@ async def test_resource_id_without_call_id_uses_tool_name_fallback() -> None:
             1,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "lookup",
-                semconv.GEN_AI_TOOL_ID: "resource-lookup",
+                semconv.OJ_TOOL_RESOURCE_ID: "resource-lookup",
             },
         )
     )
@@ -752,8 +752,8 @@ async def test_rail_preserves_repeated_skill_occurrences() -> None:
                 parent_span_id=1,
                 attributes={
                     semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                    semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": skill, "relative_file_path": "SKILL.md"}),
-                    semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True}),
+                    semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps({"skill_name": skill, "relative_file_path": "SKILL.md"}),
+                    semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True}),
                 },
             )
         )
@@ -880,7 +880,7 @@ async def test_observability_closes_spans_before_symphony_drains_by_priority() -
     shared_span_context.reset_state()
     root = tracer.start_span("run.root")
     root.set_attribute(semconv.OJ_TRACE_ROOT, True)
-    root.set_attribute(semconv.OJ_SESSION_ID, "session-1")
+    root.set_attribute(semconv.GEN_AI_CONVERSATION_ID, "session-1")
     shared_span_context.set_root_span(root, session_id="session-1")
     agent = SimpleNamespace(
         member_name="solo",
@@ -945,7 +945,7 @@ async def test_observability_closes_spans_before_symphony_drains_by_priority() -
 
     assert len(received) == 1
     names = {str(span["name"]) for span in iter_spans(received[0].trajectory)}
-    assert {"llm.call", "tool.lookup", "agent.solo.react_iteration.1", "agent.solo.invoke"} <= names
+    assert {"chat fake", "execute_tool lookup", "agent.solo.react_iteration.1", "agent.solo.invoke"} <= names
     assert "missing_required_span" not in received[0].quality_flags
     assert [(fragment.capability_type, fragment.capability_name) for fragment in received[0].execution_fragments] == [
         ("tool", "lookup")
@@ -993,7 +993,7 @@ async def test_bad_final_increment_keeps_prior_clean_trace_and_quality_flag() ->
     rail.trajectory_span_processor.on_end(_span("llm.call", 1))
     rail._drain_for_hook(ctx)
     rail.trajectory_span_processor.on_end(
-        _span("tool.call", 2, attributes={semconv.GEN_AI_TOOL_OUTPUT: "{'broken': ]"})
+        _span("tool.call", 2, attributes={semconv.GEN_AI_TOOL_CALL_RESULT: "{'broken': ]"})
     )
     await rail.after_invoke(ctx)
     assert len(received) == 1

@@ -149,7 +149,7 @@ def _team_member_fragments(
     for identity, span in by_identity.items():
         if span_category(span) != "agent":
             continue
-        member_id = str(span_attributes(span).get(semconv.AT_MEMBER_ID) or "").strip()
+        member_id = str(span_attributes(span).get(semconv.AT_MEMBER_NAME) or "").strip()
         if not member_id:
             continue
         trace_roots = roots_by_trace.get(identity[0])
@@ -556,7 +556,7 @@ def _subagent_capability_name(
             return subagent_type
     for identity in child_agents:
         attrs = span_attributes(by_identity[identity])
-        for key in (semconv.AT_AGENT_ID, semconv.AT_AGENT_NAME):
+        for key in (semconv.AT_AGENT_ID, semconv.GEN_AI_AGENT_NAME):
             value = str(attrs.get(key) or "").strip()
             if value:
                 return value

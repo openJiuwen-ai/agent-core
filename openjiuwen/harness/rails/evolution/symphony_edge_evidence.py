@@ -984,7 +984,7 @@ def _subagent_result_references(
             references[reference].add(fragment.anchor_span_id)
     branch = span_index.span_for(fragment, fragment.branch_span_id)
     if branch is not None and fragment.branch_span_id in fragment.span_ids:
-        for reference in _structured_references(span_attributes(branch).get(semconv.AT_AGENT_OUTPUT)):
+        for reference in _structured_references(span_attributes(branch).get(semconv.OJ_SPAN_OUTPUT)):
             references[reference].add(fragment.branch_span_id)
     return references
 

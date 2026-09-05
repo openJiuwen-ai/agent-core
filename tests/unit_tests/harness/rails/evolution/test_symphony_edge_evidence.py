@@ -58,9 +58,9 @@ def _tool(
 ) -> dict[str, Any]:
     attributes: dict[str, Any] = {semconv.GEN_AI_TOOL_NAME: name}
     if tool_input is not None:
-        attributes[semconv.GEN_AI_TOOL_INPUT] = tool_input
+        attributes[semconv.GEN_AI_TOOL_CALL_ARGUMENTS] = tool_input
     if tool_output is not None:
-        attributes[semconv.GEN_AI_TOOL_OUTPUT] = tool_output
+        attributes[semconv.GEN_AI_TOOL_CALL_RESULT] = tool_output
     return _span(
         f"tool.{name}",
         span_id,
@@ -407,9 +407,9 @@ def test_forged_fragment_cannot_create_forged_evidence_reference() -> None:
 
 def test_team_member_candidates_use_only_same_trace_observed_order() -> None:
     trajectory = _trajectory(
-        _span("agent.leader", 1, attributes={semconv.AT_MEMBER_ID: "leader"}),
-        _span("agent.writer", 2, attributes={semconv.AT_MEMBER_ID: "writer"}),
-        _span("agent.other", 3, trace_number=2, attributes={semconv.AT_MEMBER_ID: "other"}),
+        _span("agent.leader", 1, attributes={semconv.AT_MEMBER_NAME: "leader"}),
+        _span("agent.writer", 2, attributes={semconv.AT_MEMBER_NAME: "writer"}),
+        _span("agent.other", 3, trace_number=2, attributes={semconv.AT_MEMBER_NAME: "other"}),
     )
     continuity = ((0, trajectory),)
     fragments = project_symphony_execution_fragments(continuity, team_members_only=True)
