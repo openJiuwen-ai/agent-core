@@ -331,6 +331,9 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     if category == "auth_required" and chunk_index == 0 and await self._activate_auth_fallback():
                         retry_with_fallback = True
                         status = "cancelled"
+                        # Distinguish this designed self-healing retry from a
+                        # real abort on the turn span.
+                        self._span_bridge.record_cancel_reason("auth_fallback")
                         break
                     for chunk in deferred_failure_chunks:
                         team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
@@ -343,6 +346,11 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                         reason=reason,
                         summary=summary,
                     )
+                    # Mark the turn span failed: the generator returns normally
+                    # from here, so without an explicit status the span would
+                    # read as a successful turn in trace backends.
+                    status = "failed"
+                    error = RuntimeError(summary)
                     # Turn terminal failure delivered; end the generator cleanly
                     # so _drive_turn maps it onto a failed round.
                     return
@@ -604,6 +612,10 @@ class _NoopClaudeSpanBridge:
     @staticmethod
     def finish_turn(*, status: str, error: Any | None = None) -> None:
         """Ignore turn completion."""
+
+    @staticmethod
+    def record_cancel_reason(_: str) -> None:
+        """Ignore the cancellation reason."""
 
     @staticmethod
     def tool_execution_context() -> ContextManager[None]:

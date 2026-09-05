@@ -55,6 +55,10 @@ class NoopClaudeSpanBridge:
         """Ignore turn completion."""
 
     @staticmethod
+    def record_cancel_reason(_: str) -> None:
+        """Ignore the cancellation reason."""
+
+    @staticmethod
     def tool_execution_context() -> ContextManager[None]:
         """Return a no-op context for local tool execution."""
         return nullcontext()
@@ -210,6 +214,32 @@ class ClaudeSpanBridge:
                 "external_runtime.agent_kind": "claude",
             },
         )
+        if span.is_recording():
+            # Attribute mirror: OTLP UIs such as Langfuse drop span events, so
+            # the finalized failure must also live on attributes to be visible
+            # there. The turn span status is upgraded here because the SDK
+            # reports terminal failures inside the message stream (the turn
+            # generator returns normally), which would otherwise leave the
+            # span reading as a successful turn.
+            span.set_attribute("external_runtime.failure_id", failure_id)
+            span.set_attribute("external_runtime.failure_category", category)
+            span.set_attribute("external_runtime.failure_phase", phase)
+            if round_id is not None:
+                span.set_attribute("external_runtime.failure_round_id", round_id)
+            span.set_attribute("external_runtime.failure_summary", summary)
+            span.set_status(Status(StatusCode.ERROR, summary))
+
+    def record_cancel_reason(self, reason: str) -> None:
+        """Explain a cancelled turn on an attribute for OTLP UIs.
+
+        A ``cancelled`` span is ambiguous: it may be a user abort, a shutdown,
+        or a designed self-healing path such as the auth fallback retry. The
+        reason attribute makes the distinction visible in trace backends that
+        drop span events (e.g. Langfuse).
+        """
+        span = self._turn_span
+        if span is not None and span.is_recording():
+            span.set_attribute("claude.turn.cancel_reason", reason)
 
     def finish_turn(self, *, status: str, error: Any | None = None) -> None:
         """Close the current Claude round span and any pending child spans."""
