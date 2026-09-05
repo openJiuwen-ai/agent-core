@@ -25,6 +25,7 @@ things are being translated, and each is a shape change rather than a rename:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import re
 import threading
@@ -85,6 +86,11 @@ DEFAULT_WORKERS = 1
 #: evaluation in flight; past a handful the limit stops being this process.
 MAX_WORKERS = 8
 
+#: How long one event may take to be delivered before the search stops
+#: waiting for it. Generous — a slow consumer is the contract's problem to
+#: carry — but finite, because the wait is made under the fold lock.
+EVENT_DELIVERY_SECONDS = 120.0
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +108,14 @@ async def _notify(on_event: OnEvent | None, event: Any) -> None:
     if on_event is None:
         return
     try:
-        await on_event(event)
+        # Bounded for the same reason the threaded sink's wait is: a consumer
+        # that never returns must not hold the run. Status events go this way
+        # (running / paused / completed); a hang here left a finished search
+        # never reporting that it had finished.
+        await asyncio.wait_for(on_event(event), timeout=EVENT_DELIVERY_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("event delivery did not return within %ss (observability channel); "
+                       "continuing without it", EVENT_DELIVERY_SECONDS)
     except Exception as error:  # noqa: BLE001 - observation must not kill the run
         logger.warning("event delivery failed (observability channel): %s", error)
 
@@ -509,8 +522,18 @@ class PuctProgramArtifactProvider:
                     # provider carry the queue's back-pressure. But waited-on is
                     # not died-of: a callback exception is an observability
                     # fault, and the search it was watching must outlive it.
+                    # Bounded, for the same reason: this wait holds `fold`, and
+                    # every worker's next event queues behind it. A delivery
+                    # that never returns would stall the whole search with the
+                    # loop idle and every worker parked on one lock — the shape
+                    # a 45-expansion AlgoTune run was found in after nine hours.
                     try:
-                        future.result()
+                        future.result(timeout=EVENT_DELIVERY_SECONDS)
+                    except concurrent.futures.TimeoutError:
+                        future.cancel()
+                        logger.warning(
+                            "event delivery did not return within %ss (observability "
+                            "channel); the search continues without it", EVENT_DELIVERY_SECONDS)
                     except Exception as error:  # noqa: BLE001
                         logger.warning(
                             "event delivery failed (observability channel): %s", error)
@@ -591,7 +614,8 @@ class PuctProgramArtifactProvider:
 
         files: dict[str, str] = {}
         if request.artifact_path:
-            files = _seed_files(Path(request.artifact_path).expanduser())
+            files = _seed_files(Path(request.artifact_path).expanduser(),
+                                entrypoint=str(card.get("entrypoint") or "") or None)
         entrypoint = str(card.get("entrypoint") or "") or _entrypoint_of(files) or DEFAULT_ENTRYPOINT
         if files and entrypoint not in files:
             raise ValueError(
@@ -620,6 +644,12 @@ class PuctProgramArtifactProvider:
             run_dir=str(run_dir),
             options=dict(card.get("options") or {}),
             reply_format=str(card.get("reply_format") or "").strip() or "files",
+            # The card's per-candidate ceiling. It was documented, written on
+            # every card, and never read: every run took `RunSpec`'s 60 s
+            # default. Measured on AlgoTune's `lu_factorization` with three
+            # workers evaluating at once — a card saying 300 s, evaluations
+            # killed at 60, the loop dead before its first model call.
+            candidate_timeout_seconds=_candidate_timeout(card, RunSpec.candidate_timeout_seconds),
             # From the scorecard when it says, else `RunSpec`'s default. The
             # model's own request config is opaque here — the contract hands
             # over an initialized instance, not its settings — so the per-run
@@ -692,16 +722,24 @@ def _workers_from(value: Any) -> int:
     return max(1, min(workers, MAX_WORKERS))
 
 
-def _seed_files(path: Path) -> dict[str, str]:
+def _seed_files(path: Path, entrypoint: str | None = None) -> dict[str, str]:
     """The starting program as `{relpath: text}`, from a file or a directory.
 
-    A single file is placed at the default entrypoint, which is how every
-    one-file run has always worked. A directory keeps its own layout, so a seed
-    that is already a package is not renamed into this provider's conventions
-    just to be optimized.
+    A single file is placed at the entrypoint the card names, or at the default
+    one when the card says nothing — which is how every one-file run has always
+    worked. A directory keeps its own layout, so a seed that is already a
+    package is not renamed into this provider's conventions just to be
+    optimized.
+
+    The card's name wins because a contract can be about the filename: AlgoTune
+    calls `solver.py`, and a one-file seed that was always renamed to
+    `candidate.py` could never satisfy a card saying so — the run was refused
+    for "the program does not contain solver.py" with the file right there.
     """
     if path.is_dir():
         return load_tree(str(path))
+    if entrypoint:
+        return {entrypoint: path.read_text(encoding="utf-8")}
     # A Python file is placed at the default entrypoint, which is what lets an
     # evaluator say `import candidate` without the drafting model having to
     # invent a convention. Anything else keeps the name it arrived with:
@@ -769,6 +807,16 @@ def _packages_from(raw: Any) -> tuple[str, ...]:
             )
         names.append(name)
     return tuple(names)
+
+
+def _candidate_timeout(card: Mapping[str, Any], default: float) -> float:
+    """`measure.timeoutSeconds` of the first criterion, else the default."""
+    scorecard = card.get("scorecard", card) or {}
+    for criterion in scorecard.get("criteria") or []:
+        value = (criterion.get("measure") or {}).get("timeoutSeconds")
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    return default
 
 
 def _command_from(raw: Any) -> tuple[str, ...]:

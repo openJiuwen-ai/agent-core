@@ -73,6 +73,7 @@ from .restore import RestoreError, restore_baseline, restore_tree
 from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
 from .script_domain import ScriptError, script_domain
 from .search import (
+    REPAIR_ATTEMPTS,
     PuctStrategy,
     PuctTreeAggregator,
     make_propose,
@@ -369,6 +370,12 @@ class PuctEngine:
                 # asked for back.
                 repair_prompt=lambda code, error: repair_prompt(
                     code, error, spec.entrypoint, template=spec.repair_template),
+                # From the card, because the right number is the task's: on a
+                # benchmark whose winning direction usually fails to compile on
+                # its first draft (AlgoTune, numba), two attempts abandon the
+                # direction and four reach it — upstream's 540x run on
+                # `polynomial_real` repaired its way there with four.
+                repair_attempts=int(spec.options.get("repair_attempts", REPAIR_ATTEMPTS)),
             ),
             "repo_path": str(repo),
             "run": make_run(domain),
@@ -479,7 +486,10 @@ class PuctEngine:
             # with those files replaced.
             parent_files = files_of(parent_code, spec.entrypoint)
             files, summary = reply_format.parse(reply, parent_files, spec.entrypoint)
-            if files and not edits_an_existing_file(parent_files, files):
+            # An empty reply has nothing to check for edits; the reason it is
+            # empty is already recorded (a failed call) or about to be
+            # (`note_empty`), and both say more than "it changed no file".
+            if reply.strip() and files and not edits_an_existing_file(parent_files, files):
                 # Everything it wrote landed in new paths nothing imports, so
                 # the program that runs is still the parent's. Said here, with
                 # the paths named, because the alternative is a candidate that
@@ -559,6 +569,7 @@ class _Reporter:
         # never does — a stop, a crash — and an absent reason has to be
         # distinguishable from a reason the framework declined to give.
         self._stop_reason = ""
+        self._framework_error = ""
         self._planned = spec.expansions
         self.attempted = 0
         self.scored = 0
@@ -597,7 +608,14 @@ class _Reporter:
         never existed.
         """
         with self._lock:
-            self._empty[iteration] = f"this call returned nothing: {reason}"
+            # First cause wins. A call that failed is upstream of everything
+            # the draw does with its empty reply, and the second reason that
+            # arrives is about the empty reply, not about why it is empty.
+            # Measured: six calls refused with HTTP 429 (quota exhausted) were
+            # reported as "the reply wrote nothing and left every existing
+            # file alone" — pointing the reader at the model's output when the
+            # model was never reached.
+            self._empty.setdefault(iteration, f"this call returned nothing: {reason}")
 
     def note_empty(self, iteration: int) -> None:
         """Two failures wear the same empty reply and need opposite fixes."""
@@ -824,9 +842,13 @@ class _Reporter:
         done = len(self.tree.nodes) - 1  # the seed is not an expansion
         self._stop_reason = reason
         self._planned = planned
-
-        if error:
-            self.emit(events.log("warn", f"the search was ended by an error: {error[:300]}"))
+        # Kept, because `finish` has to know. Logged at "warn" and forgotten,
+        # the framework's own error left a run that made zero model calls
+        # reporting `completed` with no error message — measured on AlgoTune's
+        # `lu_factorization`: 508 seconds, one node, "stopped because error",
+        # status completed. The reader had a success and nothing to read.
+        self._framework_error = error or ("the search loop stopped on an error it did not describe"
+                                          if reason == "error" else "")
         if retired:
             self.emit(events.log(
                 "warn",
@@ -875,6 +897,13 @@ class _Reporter:
                 "candidates do not implement the interface the evaluator calls, or the "
                 "scoring only looks at a part none of them touched.",
             ))
+        if status == "succeeded" and self._framework_error:
+            # The loop died. Whatever the tree holds was made before that, and
+            # a run that ended this way did not finish its search — "succeeded"
+            # would be the framework's crash wearing the user's result.
+            status = "failed"
+            self.emit(events.log(
+                "error", f"the search was ended by an error: {self._framework_error[:500]}"))
         if status == "succeeded" and self.attempted and not self.scored:
             # Not "the search found nothing": nothing ever ran. Reporting that as
             # success sends the user looking at their scorecard for a fault that
@@ -887,6 +916,12 @@ class _Reporter:
                 f"the most common reason was: {common}",
             ))
 
+        if not self.tree.nodes:
+            # The loop died before it seeded. There is no best node to name
+            # and nothing to hold out — only the failure to report.
+            self.emit(events.search_finished(
+                "failed", None, 0, stop_reason=self._stop_reason, expansions_planned=self._planned))
+            return
         best = self.tree.best()
         test_score: Optional[float] = None
         if status != "failed" and best.program.valid and self.domain.test_shards:

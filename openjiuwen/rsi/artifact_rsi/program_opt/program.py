@@ -98,7 +98,8 @@ def local_roots(files: Iterable[str]) -> frozenset:
     return frozenset(roots)
 
 
-def _import_allowed(module: str, local: Iterable[str] = ()) -> Tuple[bool, str]:
+def _import_allowed(module: str, local: Iterable[str] = (),
+                    guarded: bool = False) -> Tuple[bool, str]:
     """Whether a candidate may import this, and why not.
 
     "Not installed" and "not allowed" are different answers and need different
@@ -111,6 +112,15 @@ def _import_allowed(module: str, local: Iterable[str] = ()) -> Tuple[bool, str]:
     # A sibling module in the program's own tree. Checked before `find_spec`,
     # which asks a different question ("is it installed") and would answer no.
     if root in local:
+        return True, ""
+    if guarded:
+        # Inside a `try` whose handler is there to catch exactly this. The
+        # point of `try: import x / except ImportError: x = None` is that `x`
+        # may be absent, so "not installed" is the case the program already
+        # handles — refusing it here refused upstream's own reference (its
+        # `threadpoolctl` guard) on any machine without that package, which is
+        # most of them. The deny list above still applies: a guard says the
+        # import may fail, not that it may reach outside the process.
         return True, ""
     if importlib.util.find_spec(root) is None:
         return False, f"import {module!r} is not installed in the candidate runtime"
@@ -256,16 +266,28 @@ def validate_source(source: str, max_length: int = 20_000,
     # is callable is decided where it can be: the evaluator's own import, and
     # the probe that scores the seed before any budget is spent.
 
+    # Imports whose absence the program already handles: those in the body of
+    # a `try`. The handler's type is not inspected — a bare `except` or
+    # `except Exception` catches ImportError too, and AlgoTune's own guards
+    # are written both ways.
+    guarded_imports: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        for stmt in node.body:
+            for inner in ast.walk(stmt):
+                if isinstance(inner, (ast.Import, ast.ImportFrom)):
+                    guarded_imports.add(id(inner))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                ok, why = _import_allowed(alias.name, local)
+                ok, why = _import_allowed(alias.name, local, guarded=id(node) in guarded_imports)
                 if not ok:
                     return False, why
         elif isinstance(node, ast.ImportFrom):
             if not node.module:
                 return False, "a relative import has nothing to resolve against"
-            ok, why = _import_allowed(node.module, local)
+            ok, why = _import_allowed(node.module, local, guarded=id(node) in guarded_imports)
             if not ok:
                 return False, why
         elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
@@ -281,6 +303,14 @@ def validate_source(source: str, max_length: int = 20_000,
         ast.ClassDef,
         ast.Assign,
         ast.AnnAssign,
+        # `try: from x import y / except ImportError: y = None` — how an
+        # optional dependency is bound, and how AlgoTune's own task files bind
+        # theirs (`threadpoolctl`, in `polynomial_real` among others). Refusing
+        # it keeps nothing out: the import deny list, the dunder check and the
+        # forbidden-name check all walk the whole tree, so a statement inside
+        # the block is gated exactly as one outside it. What refusing it did
+        # was reject upstream's own reference implementation as a seed.
+        ast.Try,
     )
     for node in tree.body:
         if not isinstance(node, allowed_top_level):

@@ -175,7 +175,7 @@ def _read_promise_op(raw: Any) -> Optional[float]:
 #: either — every attempt is a model call the user pays for, and a candidate
 #: that resists two fixes is usually a design that wants replacing, which the
 #: next expansion does anyway.
-_REPAIR_ATTEMPTS = 2
+REPAIR_ATTEMPTS = 2
 
 #: What a nothing-came-back candidate scores, wherever it is noticed.
 NO_CANDIDATE = "no candidate program came back; the model call returned nothing"
@@ -205,7 +205,7 @@ def make_propose(
     on_event: OnEvent = _noop,
     check: Optional[Callable[[str], Tuple[bool, Dict[str, Any], str]]] = None,
     repair_prompt: Optional[Callable[[str, str], str]] = None,
-    repair_attempts: int = _REPAIR_ATTEMPTS,
+    repair_attempts: int = REPAIR_ATTEMPTS,
 ) -> Callable[[str, Task, str, float], Optional[str]]:
     """Select a parent and ask the model to rewrite it.
 

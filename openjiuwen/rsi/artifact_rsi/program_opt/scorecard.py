@@ -93,15 +93,28 @@ def normalize(criterion: Mapping[str, Any], raw: Optional[float], baseline: Opti
         reference = float(baseline) if baseline not in (None, 0) else None
         if reference is None:
             return 0.0
-        if value <= 0:
-            return 1.0
         # `ratio / (1 + ratio)`, not `clamp(ratio)`. The plain ratio saturates
         # the instant a candidate beats the baseline: every improvement ties at
         # 1.0, and with the default solved threshold the baseline itself scores
         # 1.0 and the search stops before its first expansion. Strictly
         # increasing and never at its bound — baseline 0.5, half the error
         # 0.667, a tenth 0.909, twice the error 0.333.
-        ratio = reference / value
+        #
+        # Which way the ratio goes is the criterion's `direction`, and it was
+        # not read here: every metric was treated as lower-is-better. Measured
+        # on AlgoTune's `polynomial_real`, whose metric is a speedup to be
+        # *maximised*: a candidate at 0.51x — twice as slow as the reference —
+        # scored 0.66, was adopted as the best node, and the run reported
+        # `completed`. Absent, the direction stays lower-is-better, which is
+        # what every card written against this normaliser so far meant.
+        if criterion.get("direction") == "maximize":
+            if value <= 0:
+                return 0.0
+            ratio = value / reference
+        else:
+            if value <= 0:
+                return 1.0
+            ratio = reference / value
         return _clamp(ratio / (1.0 + ratio))
     if kind == "clamp":
         lo = float(criterion["normalize"].get("lo", 0.0))

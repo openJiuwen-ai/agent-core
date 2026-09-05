@@ -298,6 +298,17 @@ Its score: {parent_score}. Best so far: {best_score}.
 """
 
 
+#: How much of the evaluator's diagnosis reaches the next prompt.
+#:
+#: 500 was enough for a sentence and not for a report. AlgoTune's harness
+#: answers every evaluation with its eval block, the invalid examples and a
+#: line-level profile of the parent — about 3 000 characters — and the profile
+#: is what turns "make it faster" into "this line is 90% of the time". Cut at
+#: 500 the prompt kept the headline and lost the one part that steers. Still
+#: bounded: a chatty evaluator must not be able to crowd out the program.
+FEEDBACK_CHARS = 4000
+
+
 def _feedback(text: str) -> str:
     """The evaluator's own diagnosis of the parent, as a prompt section.
 
@@ -311,7 +322,7 @@ def _feedback(text: str) -> str:
     """
     if not text.strip():
         return ""
-    return f"\nWhat the evaluator said about it: {text.strip()[:500]}\n"
+    return f"\nWhat the evaluator said about it: {text.strip()[:FEEDBACK_CHARS]}\n"
 
 
 def _history(recent: Sequence[str]) -> str:
