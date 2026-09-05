@@ -21,6 +21,41 @@ if TYPE_CHECKING:
 _CLAUDE_ENV_STRIP_PREFIXES = ("CLAUDECODE", "CLAUDE_CODE_")
 _ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 _ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
+# Claude Code's native OTel export: spans (beta) need both the master switch
+# and the enhanced-telemetry beta flag; the CLI fails silently on exporter
+# errors, so a short export interval keeps spans flowing before turn end.
+_CLAUDE_OTEL_EXPORT_INTERVAL_MS = "1000"
+
+
+def claude_otel_env(endpoint: str) -> dict[str, str]:
+    """Build the env vars pointing Claude Code's OTel export at ``endpoint``.
+
+    Claude Code's OTLP exporter only speaks gRPC — with ``http/protobuf`` it
+    silently connects and never sends data (verified against CLI 2.1.206 and
+    2.1.259) — so the protocol is pinned to grpc and ``endpoint`` must be the
+    shared receiver's gRPC listener. Raw API body log events
+    (``OTEL_LOG_RAW_API_BODIES=1``) carry the full Messages API
+    request/response JSON to that receiver; the bridge redacts content before
+    anything lands in our spans, so the export stays inside our observability
+    pipeline.
+    """
+    return {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+        "OTEL_TRACES_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
+        "OTEL_LOGS_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
+        "OTEL_LOG_RAW_API_BODIES": "1",
+        # The gRPC client honors http_proxy/https_proxy and would route the
+        # loopback export through the user's proxy, which may not forward
+        # 127.0.0.1 traffic. Exempt loopback instead of clearing the proxy
+        # vars: business traffic (the model API) may legitimately need them.
+        "no_proxy": "127.0.0.1,localhost",
+        "NO_PROXY": "127.0.0.1,localhost",
+    }
 
 
 def load_claude_sdk() -> Any:
@@ -48,6 +83,7 @@ def build_claude_options(
     member_name: str,
     resume_external_backend: bool,
     external_model_config: "ExternalCliModelConfig | None" = None,
+    otel_trace_endpoint: str | None = None,
 ) -> "ClaudeAgentOptions":
     """Build SDK options matching the previous Claude CLI member behavior."""
     sdk = load_claude_sdk()
@@ -59,6 +95,12 @@ def build_claude_options(
     resume = claude_session_id if resume_external_backend else None
     model = None
     settings = None
+    process_env = dict(env)
+    if otel_trace_endpoint:
+        # Native Claude Code spans (claude_code.llm_request etc.) exported to
+        # the shared loopback receiver. ``env`` is merged on top of the
+        # inherited environment by the Python SDK.
+        process_env.update(claude_otel_env(otel_trace_endpoint))
     if external_model_config is not None:
         model = external_model_config.model
         # Inject the external endpoint into the flag-settings layer (the CLI
@@ -77,7 +119,7 @@ def build_claude_options(
         add_dirs=list(add_dirs),
         cli_path=cli_path,
         cwd=cwd,
-        env=env,
+        env=process_env,
         mcp_servers=None,
         model=model,
         permission_mode="bypassPermissions",
@@ -125,6 +167,7 @@ def strip_parent_claude_env(environ: dict[str, str]) -> dict[str, str]:
 
 __all__ = [
     "build_claude_options",
+    "claude_otel_env",
     "build_claude_session_id",
     "delete_claude_session",
     "load_claude_sdk",

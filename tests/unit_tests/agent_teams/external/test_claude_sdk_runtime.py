@@ -419,6 +419,53 @@ def fake_claude_sdk(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_build_claude_runtime_disables_native_otel_for_ssh(
+    fake_claude_sdk: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NativeBridge:
+        attach_count = 0
+
+        async def attach_native_trace(self) -> str:
+            self.attach_count += 1
+            return "http://127.0.0.1:4317"
+
+    bridge = _NativeBridge()
+
+    def build_native_bridge(
+        *,
+        member_name: str,
+        member_agent_id: str | None,
+        team_name: str | None,
+        session_id: str | None,
+        role: str | None,
+    ) -> _NativeBridge:
+        del member_name, member_agent_id, team_name, session_id, role
+        return bridge
+
+    monkeypatch.setattr(claude_runtime_mod, "_build_claude_span_bridge", build_native_bridge)
+
+    runtime = await claude_runtime_mod.build_claude_runtime(
+        member_name="claude-1",
+        cwd="/remote/project",
+        add_dirs=(),
+        env={"OPENJIUWEN_TEAM_JOIN": "{}"},
+        inject_mcp=False,
+        mcp_server_name="openjiuwen-team",
+        mcp_server_command=("openjiuwen-team-mcp",),
+        system_prompt=None,
+        ssh_transport=SshTransportConfig(host="127.0.0.1", username="u", password="pw"),
+        team_session_id="sess-1",
+        resume_external_backend=False,
+    )
+
+    assert bridge.attach_count == 0
+    assert "CLAUDE_CODE_ENABLE_TELEMETRY" not in runtime._options.env
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in runtime._options.env
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     token = set_session_id("sess-1")
     try:
@@ -490,9 +537,10 @@ async def test_build_cli_runtime_maps_claude_model_config(fake_claude_sdk):
     assert flag_settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-test"
 
 
+@pytest.mark.asyncio
 @pytest.mark.level0
-def test_build_claude_runtime_resumes_session_for_fallback(fake_claude_sdk):
-    runtime = claude_runtime_mod.build_claude_runtime(
+async def test_build_claude_runtime_resumes_session_for_fallback(fake_claude_sdk):
+    runtime = await claude_runtime_mod.build_claude_runtime(
         member_name="claude-1",
         cwd="/project",
         add_dirs=(),
@@ -897,12 +945,13 @@ async def test_build_cli_runtime_requires_session_context(fake_claude_sdk):
         await spawn_mod.build_cli_runtime(_ctx())
 
 
+@pytest.mark.asyncio
 @pytest.mark.level0
-def test_claude_sdk_missing_dependency_reports_clear_error(monkeypatch):
+async def test_claude_sdk_missing_dependency_reports_clear_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
 
     with pytest.raises(BaseError):
-        spawn_mod.build_claude_runtime(
+        await spawn_mod.build_claude_runtime(
             member_name="claude-1",
             cwd=None,
             add_dirs=(),

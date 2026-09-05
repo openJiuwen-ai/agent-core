@@ -298,7 +298,7 @@ async def build_cli_runtime(
             "OPENJIUWEN_TEAM_JOIN" in env,
             ssh_transport is not None,
         )
-        return build_claude_runtime(
+        return await build_claude_runtime(
             member_name=ctx.member_name or "",
             cwd=cwd,
             add_dirs=add_dirs,

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from contextlib import aclosing, nullcontext
 from dataclasses import dataclass
@@ -402,6 +403,12 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     await self._finalize_turn_failure(exc)
                     raise exc
         finally:
+            # Native OTel body events can trail the message stream slightly;
+            # give the batched export a moment before the turn span closes.
+            wait_native = getattr(self._span_bridge, "wait_for_native_observations", None)
+            if wait_native is not None and status != "cancelled":
+                with contextlib.suppress(Exception):
+                    await wait_native()
             self._span_bridge.finish_turn(status=status, error=error)
         if retry_with_fallback:
             raise _ClaudeAuthFallbackRequested()
@@ -508,6 +515,15 @@ class ClaudeSdkRuntime(CliRuntimeBase):
 
     async def aclose(self) -> None:
         """Disconnect the SDK client. Idempotent."""
+        detach = getattr(self._span_bridge, "detach_native_trace", None)
+        if callable(detach):
+            try:
+                detach()
+            except Exception:  # noqa: BLE001 - observability is optional
+                team_logger.warning(
+                    "[{}] failed to detach claude native otel subscription",
+                    self._member_name,
+                )
         if self._client is None:
             self._sdk_mcp_tool_set = None
             return
@@ -519,7 +535,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             self._sdk_mcp_tool_set = None
 
 
-def build_claude_runtime(
+async def build_claude_runtime(
     *,
     member_name: str,
     cwd: str | None,
@@ -543,34 +559,6 @@ def build_claude_runtime(
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     _ = mcp_server_command
-    options = build_claude_options(
-        cwd=cwd,
-        add_dirs=add_dirs,
-        env=env,
-        cli_path=cli_path,
-        external_model_config=external_model_config,
-        system_prompt=system_prompt,
-        team_session_id=team_session_id,
-        member_name=member_name,
-        resume_external_backend=resume_external_backend,
-    )
-    fallback_options = None
-    if external_model_config is None and fallback_external_model_config is not None:
-        fallback_options = build_claude_options(
-            cwd=cwd,
-            add_dirs=add_dirs,
-            env=env,
-            cli_path=cli_path,
-            external_model_config=fallback_external_model_config,
-            system_prompt=system_prompt,
-            team_session_id=team_session_id,
-            member_name=member_name,
-            resume_external_backend=True,
-        )
-    transport = None
-    if ssh_transport is not None:
-        team_logger.info("[external-cli] using claude sdk ssh transport for member {}", member_name)
-        transport = build_claude_sdk_ssh_transport(prompt=_empty_prompt(), options=options, config=ssh_transport)
     span_bridge = _build_claude_span_bridge(
         member_name=member_name,
         member_agent_id=member_agent_id,
@@ -578,6 +566,78 @@ def build_claude_runtime(
         session_id=team_session_id,
         role=role,
     )
+    # Native Claude Code OTel spans (claude_code.llm_request) are best-effort:
+    # a failure to attach only disables the augmentation.
+    otel_trace_endpoint = None
+    attach_native_trace = getattr(span_bridge, "attach_native_trace", None)
+    if ssh_transport is not None and callable(attach_native_trace):
+        team_logger.info(
+            "[external-cli] claude native otel disabled for ssh member {}; loopback receiver is local-only",
+            member_name,
+        )
+    elif callable(attach_native_trace):
+        try:
+            otel_trace_endpoint = await attach_native_trace()
+        except Exception as exc:  # noqa: BLE001 - observability is optional
+            team_logger.warning(
+                "[external-cli] claude native otel disabled for member {}: {}",
+                member_name,
+                exc,
+            )
+            otel_trace_endpoint = None
+    process_env = dict(env)
+    if otel_trace_endpoint:
+        team_logger.info(
+            "[external-cli] claude native otel enabled for member {} endpoint={}",
+            member_name,
+            otel_trace_endpoint,
+        )
+        # Pin the trace parent explicitly. The SDK injects the ambient OTel
+        # context at connect() time, but member turns (and the auth-fallback
+        # reconnect) run in bare background tasks with no active span — the
+        # CLI subprocess would then start its own root trace and the bridge's
+        # trace-id filter would drop every native span. Explicit env wins over
+        # the SDK's injection, and the team span's trace id matches the turn
+        # spans' (children of it), so the filter accepts either.
+        traceparent = None
+        native_traceparent = getattr(span_bridge, "native_traceparent", None)
+        if callable(native_traceparent):
+            try:
+                traceparent = native_traceparent()
+            except Exception:  # noqa: BLE001 - observability is optional
+                traceparent = None
+        if traceparent:
+            process_env.setdefault("TRACEPARENT", traceparent)
+    options = build_claude_options(
+        cwd=cwd,
+        add_dirs=add_dirs,
+        env=process_env,
+        cli_path=cli_path,
+        external_model_config=external_model_config,
+        system_prompt=system_prompt,
+        team_session_id=team_session_id,
+        member_name=member_name,
+        resume_external_backend=resume_external_backend,
+        otel_trace_endpoint=otel_trace_endpoint,
+    )
+    fallback_options = None
+    if external_model_config is None and fallback_external_model_config is not None:
+        fallback_options = build_claude_options(
+            cwd=cwd,
+            add_dirs=add_dirs,
+            env=process_env,
+            cli_path=cli_path,
+            external_model_config=fallback_external_model_config,
+            system_prompt=system_prompt,
+            team_session_id=team_session_id,
+            member_name=member_name,
+            resume_external_backend=True,
+            otel_trace_endpoint=otel_trace_endpoint,
+        )
+    transport = None
+    if ssh_transport is not None:
+        team_logger.info("[external-cli] using claude sdk ssh transport for member {}", member_name)
+        transport = build_claude_sdk_ssh_transport(prompt=_empty_prompt(), options=options, config=ssh_transport)
     return ClaudeSdkRuntime(
         member_name=member_name,
         options=options,
