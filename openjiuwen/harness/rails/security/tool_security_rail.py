@@ -49,6 +49,18 @@ TOOL_NAME_ALIASES = {
     "exec_command": "mcp_exec_command",
 }
 
+# These tools execute a command directly. An empty command is an invalid tool
+# invocation, rather than an operation that should wait for permission.
+# ``create_terminal`` is intentionally excluded: creating a terminal may be a
+# valid command-less operation for callers that populate it later.
+_COMMAND_REQUIRED_TOOLS = frozenset({
+    "bash",
+    "powershell",
+    "pwsh",
+    "core.powershell",
+    "mcp_exec_command",
+})
+
 
 class PermissionInterruptRail(ConfirmInterruptRail):
     """Permission interrupt rail.
@@ -401,6 +413,17 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         user_input: Optional[Any],
         auto_confirm_config: Optional[dict] = None,
     ):
+        invalid_reason = self._invalid_command_tool_call_reason(tool_call)
+        if invalid_reason:
+            logger.warning(
+                "[PermissionEngine] permission.rail.invalid_tool_call "
+                "tool=%s tool_call_id=%s reason=%s",
+                getattr(tool_call, "name", ""),
+                getattr(tool_call, "id", ""),
+                invalid_reason,
+            )
+            return self.reject(tool_result=invalid_reason)
+
         tool_name = tool_call.name if tool_call is not None else ""
         normalized_name = self._normalize_tool_name(tool_name)
         tool_args = self.parse_tool_args(tool_call)
@@ -676,6 +699,45 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         if isinstance(args, dict):
             return args
         return {}
+
+    def _invalid_command_tool_call_reason(
+        self,
+        tool_call: Optional[ToolCall],
+    ) -> str | None:
+        """Return an error for command tools with missing or malformed arguments.
+
+        Permission checks must not turn malformed command calls into ASK
+        interrupts. Doing so creates an approval request that contains no
+        command and cannot provide meaningful consent to the user.
+        """
+        if tool_call is None:
+            return None
+
+        raw_tool_name = str(getattr(tool_call, "name", "") or "").strip()
+        tool_name = self._normalize_tool_name(raw_tool_name).lower()
+        if tool_name not in _COMMAND_REQUIRED_TOOLS:
+            return None
+
+        raw_args = getattr(tool_call, "arguments", None)
+        if isinstance(raw_args, dict):
+            args = raw_args
+        elif isinstance(raw_args, str):
+            if not raw_args.strip():
+                return f"[INVALID_TOOL_ARGUMENTS] {raw_tool_name} arguments is empty"
+            try:
+                args = json.loads(raw_args)
+            except (TypeError, ValueError):
+                return f"[INVALID_TOOL_ARGUMENTS] {raw_tool_name} arguments is invalid JSON"
+            if not isinstance(args, dict):
+                return f"[INVALID_TOOL_ARGUMENTS] {raw_tool_name} arguments must be an object"
+        else:
+            return f"[INVALID_TOOL_ARGUMENTS] {raw_tool_name} arguments has an invalid type"
+
+        command = args.get("command") or args.get("cmd")
+        if not isinstance(command, str) or not command.strip():
+            return f"[INVALID_TOOL_ARGUMENTS] {raw_tool_name} requires a non-empty command"
+
+        return None
 
     @staticmethod
     def parse_confirm_payload(user_input: Any) -> Optional[PermissionConfirmResponse]:
