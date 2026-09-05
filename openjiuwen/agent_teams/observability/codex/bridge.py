@@ -1196,6 +1196,19 @@ class CodexSpanBridge:
             span.set_attribute("codex.error.last", detail)
             span.set_attribute("codex.error.last_will_retry", will_retry)
 
+    def record_context_compacted(self) -> None:
+        """Stamp a native Codex context compaction on the current turn span.
+
+        Codex compacts the thread context on its own; without this marker the
+        trace shows an unexplained context shrink. Mirrors ``record_error``:
+        both a span event (OTel-native backends) and an attribute (OTLP UIs
+        such as Langfuse drop span events).
+        """
+        span = self._turn_span
+        if span is not None and span.is_recording():
+            span.add_event("codex.context_compacted", {})
+            span.set_attribute("codex.context_compacted", True)
+
     def record_external_runtime_failure(
         self,
         *,

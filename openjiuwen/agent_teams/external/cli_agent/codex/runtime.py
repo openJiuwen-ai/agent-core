@@ -25,12 +25,32 @@ from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
 _INTERRUPT_TIMEOUT_S = 5.0
-_DEFAULT_TURN_IDLE_TIMEOUT_S = 180.0
+# A Codex member's parent thread stays notification-silent while a sub-agent
+# or a long-running tool executes (their items live on other threads), so the
+# idle ceiling must cover those silent spans. 600s accommodates common
+# long-running operations (dependency install, document generation) without
+# disabling the watchdog for genuinely hung turns. Per-team override:
+# ``ExternalCliAgentSpec.codex_turn_idle_timeout_s``.
+_DEFAULT_TURN_IDLE_TIMEOUT_S = 600.0
 _DEFAULT_TURN_IDLE_RETRIES = 1
 _DEFAULT_MAX_WILL_RETRY_COUNT = 5
 _NO_ACTIVE_TURN_ERROR_CODE = -32600
 _NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
-_TOOL_ITEM_TYPES = {"commandExecution", "dynamicToolCall", "fileChange", "mcpToolCall"}
+_TOOL_ITEM_TYPES = {
+    "commandExecution",
+    "dynamicToolCall",
+    "fileChange",
+    "mcpToolCall",
+    # Sub-agent collaboration: the parent thread reports the spawn / send_input
+    # / wait / close calls and sub-agent lifecycle as items; a sub-agent's own
+    # tool items stay on its own thread and never reach this stream.
+    "collabAgentToolCall",
+    "subAgentActivity",
+    # Built-in non-shell tool items surfaced for frontend visibility.
+    "webSearch",
+    "imageGeneration",
+    "sleep",
+}
 _REASONING_METHODS = {
     "item/reasoning/summaryTextDelta",
     "item/reasoning/textDelta",
@@ -97,6 +117,9 @@ class _NoopCodexSpanBridge:
         pass
 
     def record_error(self, _: Any, **__: Any) -> None:
+        pass
+
+    def record_context_compacted(self) -> None:
         pass
 
     def finish_turn(self, **_: Any) -> None:
@@ -679,6 +702,11 @@ class CodexSdkRuntime(CliRuntimeBase):
         if method in _REASONING_METHODS:
             self._span_bridge.append_reasoning(str(getattr(payload, "delta", "") or ""))
             return
+        if method == "item/plan/delta":
+            # Codex's proposed plan text: trace-only (not a frontend chunk), so
+            # the turn span shows what the member is planning.
+            self._span_bridge.append_reasoning(str(getattr(payload, "delta", "") or ""))
+            return
         if method == "thread/tokenUsage/updated":
             usage = getattr(payload, "token_usage", None)
             last = getattr(usage, "last", None)
@@ -698,6 +726,13 @@ class CodexSdkRuntime(CliRuntimeBase):
         if method in {"item/started", "item/completed"}:
             item = _thread_item(payload)
             item_type = _item_type(item)
+            if item_type == "contextCompaction" and method == "item/completed":
+                # Trace-only marker: v2 clients get compaction as a completed
+                # contextCompaction item (the legacy thread/compacted
+                # notification is not sent to v2), and it is not a tool call,
+                # so it never becomes a chunk.
+                self._span_bridge.record_context_compacted()
+                return
             if item_type not in _TOOL_ITEM_TYPES:
                 return
             call_id = str(getattr(item, "id", "") or "")
@@ -1058,8 +1093,11 @@ def _notification_chunks(notification: Any, start_index: int) -> list[OutputSche
             return [_tool_call_chunk(item, start_index)]
     if method == "item/completed":
         item = _thread_item(payload)
-        if _item_type(item) in _TOOL_ITEM_TYPES:
+        item_type = _item_type(item)
+        if item_type in _TOOL_ITEM_TYPES:
             return [_tool_result_chunk(item, start_index)]
+        if item_type == "contextCompaction":
+            return [_context_compaction_chunk(item, start_index)]
     if method == "error":
         # Failure classification is handled by _handle_failure_notification
         # before this function runs. Produce no chunks; the turn continues for
@@ -1122,6 +1160,32 @@ def _tool_result_chunk(item: Any, index: int) -> OutputSchema:
     )
 
 
+def _context_compaction_chunk(item: Any, index: int) -> OutputSchema:
+    """Build a compression-state chunk from a completed contextCompaction item.
+
+    Codex compacts the thread context natively and reports it as a bare
+    ``contextCompaction`` item (id only). Map it onto the same
+    ``context.compression_state`` chunk shape a native in-process member emits
+    (see ``ContextCompressionState``), so the frontend renders one uniform
+    compaction signal regardless of member kind. Codex exposes no before/after
+    statistics — those fields stay at their defaults rather than being
+    fabricated, and ``compact_summary`` stays empty so the web layer skips its
+    compaction-summary history write (which would otherwise need real content).
+    """
+    return OutputSchema(
+        type="context.compression_state",
+        index=index,
+        payload={
+            "type": "context.compression_state",
+            "operation_id": getattr(item, "id", ""),
+            "status": "completed",
+            "phase": "active_compress",
+            "processor": "codex_native",
+            "summary": "Codex compacted the member thread context",
+        },
+    )
+
+
 def _thread_item(payload: Any) -> Any:
     """Unwrap the SDK's ``ThreadItem`` root model."""
     item = getattr(payload, "item", None)
@@ -1142,7 +1206,22 @@ def _tool_name(item: Any) -> str:
         return "shell"
     if item_type == "fileChange":
         return "apply_patch"
+    if item_type == "collabAgentToolCall":
+        # Tool enum values are camelCase ("spawnAgent", "sendInput", ...) —
+        # flatten to snake_case so the stream shows one name family.
+        return "collab_" + _camel_to_snake(str(_enum_value(getattr(item, "tool", "")) or ""))
+    if item_type == "subAgentActivity":
+        return "sub_agent_activity"
+    if item_type == "webSearch":
+        return "web_search"
+    if item_type == "imageGeneration":
+        return "image_generation"
     return item_type
+
+
+def _camel_to_snake(value: str) -> str:
+    """Convert a camelCase identifier to snake_case."""
+    return "".join(f"_{char.lower()}" if char.isupper() else char for char in value)
 
 
 def _tool_args(item: Any) -> Any:
@@ -1153,6 +1232,40 @@ def _tool_args(item: Any) -> Any:
         return {"command": getattr(item, "command", ""), "cwd": getattr(item, "cwd", "")}
     if item_type == "fileChange":
         return {"changes": _jsonable(getattr(item, "changes", []))}
+    if item_type == "collabAgentToolCall":
+        # Drop empty fields: wait / close calls carry no prompt, model or
+        # receivers, and surfacing them as null / [] is noise on the card.
+        collab_args: dict[str, Any] = {
+            "status": str(_enum_value(getattr(item, "status", "")) or ""),
+        }
+        prompt = getattr(item, "prompt", None)
+        if prompt:
+            collab_args["prompt"] = prompt
+        model = getattr(item, "model", None)
+        if model:
+            collab_args["model"] = model
+        receiver_thread_ids = _jsonable(getattr(item, "receiver_thread_ids", None))
+        if receiver_thread_ids:
+            collab_args["receiver_thread_ids"] = receiver_thread_ids
+        return collab_args
+    if item_type == "subAgentActivity":
+        return {
+            "kind": str(_enum_value(getattr(item, "kind", "")) or ""),
+            "agent_path": getattr(item, "agent_path", ""),
+            "agent_thread_id": getattr(item, "agent_thread_id", ""),
+        }
+    if item_type == "webSearch":
+        # The item's ``query`` field carries the action detail (search terms,
+        # opened URL, or find-in-page pattern), not a search query. Name it
+        # ``detail`` so the value is not mistaken for search terms.
+        return {
+            "detail": getattr(item, "query", ""),
+            "action": _jsonable(getattr(item, "action", None)),
+        }
+    if item_type == "imageGeneration":
+        return {"revised_prompt": getattr(item, "revised_prompt", None)}
+    if item_type == "sleep":
+        return {"duration_ms": getattr(item, "duration_ms", 0)}
     return {}
 
 
@@ -1172,6 +1285,34 @@ def _tool_result(item: Any) -> Any:
         return f"exit_code={getattr(item, 'exit_code', None)}"
     if item_type == "fileChange":
         return _normalize_tool_result({"status": _enum_value(getattr(item, "status", None))})
+    if item_type == "collabAgentToolCall":
+        return _normalize_tool_result(
+            {
+                "status": str(_enum_value(getattr(item, "status", "")) or ""),
+                "agents_states": _jsonable(getattr(item, "agents_states", None)),
+            }
+        )
+    if item_type == "subAgentActivity":
+        return _normalize_tool_result(
+            {
+                "kind": str(_enum_value(getattr(item, "kind", "")) or ""),
+                "agent_path": getattr(item, "agent_path", ""),
+            }
+        )
+    if item_type == "webSearch":
+        # The v2 ThreadItem carries the action detail only; structured search
+        # results stay on the Codex side and never reach this stream.
+        return _normalize_tool_result({"detail": getattr(item, "query", "")})
+    if item_type == "imageGeneration":
+        return _normalize_tool_result(
+            {
+                "status": getattr(item, "status", ""),
+                "result": getattr(item, "result", ""),
+                "saved_path": _jsonable(getattr(item, "saved_path", None)),
+            }
+        )
+    if item_type == "sleep":
+        return _normalize_tool_result({"duration_ms": getattr(item, "duration_ms", 0)})
     return None
 
 
