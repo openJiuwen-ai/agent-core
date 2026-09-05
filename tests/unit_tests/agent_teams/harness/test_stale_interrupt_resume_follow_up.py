@@ -876,3 +876,109 @@ async def test_second_approval_sent_while_running_resumes_after_reinterrupt() ->
             await consumer
     finally:
         await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_auto_confirm_consumed_sibling_approval_does_not_start_spurious_round() -> None:
+    """A sibling consumed indirectly by one resume is a stale duplicate.
+
+    The core ToolInterruptHandler re-executes every interrupted tool, and a
+    session-level auto-confirm can therefore consume call-2 while call-1 is the
+    only ID carried by the active query. A concurrently delivered call-2
+    approval must be recognized as belonging to that round's original pending
+    scope once no call-2 slot remains.
+    """
+
+    def interruption_state(*tool_call_ids: str) -> ToolInterruptionState:
+        return ToolInterruptionState(
+            ai_message=AssistantMessage(content="requesting approval"),
+            iteration=1,
+            interrupted_tools={
+                tool_call_id: ToolInterruptEntry(
+                    tool_call=ToolCall(
+                        id=tool_call_id,
+                        type="function",
+                        name="same_approval_tool",
+                        arguments="{}",
+                    ),
+                    interrupt_requests={
+                        tool_call_id: InterruptRequest(
+                            message="approve?",
+                            auto_confirm_key="same_approval_tool",
+                        )
+                    },
+                )
+                for tool_call_id in tool_call_ids
+            },
+            auto_confirm_mapping={
+                tool_call_id: "same_approval_tool"
+                for tool_call_id in tool_call_ids
+            },
+        )
+
+    def approval(tool_call_id: str, *, auto_confirm: bool = False) -> InteractiveInput:
+        value = InteractiveInput()
+        value.update(
+            tool_call_id,
+            {
+                "approved": True,
+                "feedback": "",
+                "auto_confirm": auto_confirm,
+            },
+        )
+        return value
+
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+        session = harness._session
+        session.update_state(
+            {INTERRUPTION_KEY: interruption_state("call-1", "call-2")}
+        )
+
+        first_resume_entered = asyncio.Event()
+        sibling_approval_parked = asyncio.Event()
+        base_invoke = fake.invoke
+        invocation_count = 0
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            nonlocal invocation_count
+            invocation_count += 1
+            query = inputs.get("query") if isinstance(inputs, dict) else inputs
+            if invocation_count > 1:
+                return await base_invoke(inputs, invoke_session, **kwargs)
+            assert isinstance(query, InteractiveInput)
+            assert set(query.user_inputs) == {"call-1"}
+            first_resume_entered.set()
+            await asyncio.wait_for(sibling_approval_parked.wait(), timeout=3.0)
+
+            # Mirrors ToolInterruptHandler + ConfirmInterruptRail: call-1 stores
+            # the shared auto-confirm key; re-executing the whole interruption
+            # state auto-approves call-2, leaving no pending tool slot.
+            invoke_session.update_state({INTERRUPTION_KEY: None})
+            return await base_invoke(inputs, invoke_session, **kwargs)
+
+        fake.invoke = invoke
+
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            first = approval("call-1", auto_confirm=True)
+            await harness.send(first)
+            await asyncio.wait_for(first_resume_entered.wait(), timeout=3.0)
+            await harness.send(approval("call-2"))
+            sibling_approval_parked.set()
+
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            await asyncio.sleep(0.1)
+            assert invocation_count == 1
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(session).pending_follow_ups == []
+        finally:
+            sibling_approval_parked.set()
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()

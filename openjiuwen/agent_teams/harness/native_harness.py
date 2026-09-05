@@ -54,7 +54,6 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -71,6 +70,10 @@ from openjiuwen.agent_teams.harness.control import (
     _CmdStop,
 )
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
+from openjiuwen.agent_teams.harness.interrupt_resume import (
+    pending_tool_resume_ids,
+    tool_resume_scope_ids,
+)
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.snapshot_rail import (
     COOPERATIVE_STOP_TYPE,
@@ -997,31 +1000,7 @@ class NativeHarness(DeepAgent):
         """Return whether any keyed input still has a tool-interrupt slot."""
         if not isinstance(content, InteractiveInput):
             return False
-        return bool(set(content.user_inputs).intersection(self._pending_tool_resume_ids(session)))
-
-    @staticmethod
-    def _pending_tool_resume_ids(session: Any) -> frozenset[str]:
-        """Return the tool request IDs currently awaiting a resume."""
-        if session is None:
-            return frozenset()
-        state = session.get_state(INTERRUPTION_KEY)
-        interrupted = getattr(state, "interrupted_tools", {}) or {}
-        pending_ids: set[str] = set()
-        for entry in interrupted.values():
-            requests = getattr(entry, "interrupt_requests", {}) or {}
-            pending_ids.update(requests)
-        return frozenset(pending_ids)
-
-    @classmethod
-    def _matching_tool_resume_ids(cls, content: Any, session: Any) -> frozenset[str]:
-        """Return tool request IDs matched by a structured resume, if any."""
-        if not isinstance(content, InteractiveInput):
-            return frozenset()
-        resume_ids = set(content.user_inputs)
-        pending_ids = cls._pending_tool_resume_ids(session)
-        if resume_ids and resume_ids.issubset(pending_ids):
-            return frozenset(resume_ids)
-        return frozenset()
+        return bool(set(content.user_inputs).intersection(pending_tool_resume_ids(session)))
 
     async def _on_round_done(self, cmd: _CmdRoundFinished) -> None:
         """Settle a finished round, always resolving a deferred pause ack.
@@ -1186,7 +1165,7 @@ class NativeHarness(DeepAgent):
                 follow_up_ids = set(f.user_inputs) if isinstance(f, InteractiveInput) else set()
                 if (
                     follow_up_ids
-                    and follow_up_ids.issubset(active.tool_resume_ids)
+                    and follow_up_ids.issubset(active.tool_resume_scope_ids)
                     and not self._interrupt_resume_still_pending(f, session)
                 ):
                     continue
@@ -1310,7 +1289,7 @@ class NativeHarness(DeepAgent):
             round_id=round_id,
             task_id=task_id,
             original_query=query,
-            tool_resume_ids=self._matching_tool_resume_ids(query, self._session),
+            tool_resume_scope_ids=tool_resume_scope_ids(query, self._session),
             deep_agent=self,
             task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=asyncio.Queue(),

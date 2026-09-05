@@ -109,9 +109,10 @@ class ActiveRound:
             ``InteractiveInput`` marks a single-round interrupt resume, which
             ``_on_round_done`` settles to IDLE rather than continuing the task
             plan with the resume payload.
-        tool_resume_ids: Tool-interrupt request IDs that ``original_query``
-            matched when this round started. Used only to identify a duplicate
-            approval queued concurrently with this resume round.
+        tool_resume_scope_ids: All tool-interrupt request IDs pending when a
+            valid tool-resume ``original_query`` started this round. Used only
+            to identify an approval consumed directly or indirectly by this
+            resume round and queued concurrently with it.
         deep_agent: Reference to the owning DeepAgent (the harness itself; the
             SnapshotRail reads context/state through it).
         task: The asyncio.Task running ``NativeHarness._run_round``.
@@ -156,7 +157,7 @@ class ActiveRound:
     deep_agent: "DeepAgent"
     task: asyncio.Task
     steering_queue: asyncio.Queue
-    tool_resume_ids: frozenset[str] = field(default_factory=frozenset)
+    tool_resume_scope_ids: frozenset[str] = field(default_factory=frozenset)
     graceful_abort: bool = False
     failure_retry: bool = False
     pre_round_snapshot: SafeStateSnapshot | None = None
