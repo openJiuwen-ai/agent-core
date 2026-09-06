@@ -355,6 +355,7 @@ class PaperTreeOrchestrator:
             reflection = None
             if (self.config.get("manager") or {}).get("modules", {}).get("reflection", False):
                 reflection = ReflectionAgent(self.config, model=self.model)
+
             async def on_stage(module: str) -> None:
                 labels = {
                     "manager": "正在规划下一阶段",

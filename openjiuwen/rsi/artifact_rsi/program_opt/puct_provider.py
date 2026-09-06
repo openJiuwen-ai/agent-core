@@ -537,8 +537,7 @@ class PuctProgramArtifactProvider:
             prepared_request = self._prepare_request(request)
             spec = self._spec_for(prepared_request, resumed=resumed)
             execute = self._execution or self._execution_for(spec, loop)
-        except (ModelConfigError, ExecutionUnavailable,
-                FileNotFoundError, ValueError, OSError, shutil.Error) as error:
+        except (ModelConfigError, ExecutionUnavailable, ValueError, OSError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
             if isinstance(error, shutil.Error) or (
                 isinstance(error, OSError) and not isinstance(error, FileNotFoundError)
