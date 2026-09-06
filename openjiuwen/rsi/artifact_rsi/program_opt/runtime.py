@@ -56,7 +56,18 @@ def completion_factory_from_model(model: Any, loop: Any) -> Callable[..., Any]:
         should_stop: Callable[[], bool],
     ) -> Callable[..., str]:
         max_tokens = int(getattr(spec, "max_tokens_per_call", 0) or DEFAULT_MAX_TOKENS_PER_CALL)
-        timeout = float(getattr(spec, "options", {}).get("completion_timeout", DEFAULT_CALL_TIMEOUT_SECONDS))
+        options = getattr(spec, "options", {}) or {}
+        timeout = float(options.get("completion_timeout", DEFAULT_CALL_TIMEOUT_SECONDS))
+        invoke_kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+        }
+        # The scorecard owns the optimizer's model-call policy.  In particular,
+        # reasoning is not part of the engine's search knobs: it must cross this
+        # seam explicitly or the initialized Model silently falls back to its
+        # own default (DeepSeek V4 defaults to thinking enabled/high).
+        if "reasoning" in options and options["reasoning"] is not None:
+            invoke_kwargs["reasoning"] = options["reasoning"]
 
         def complete(
             prompt: str,
@@ -71,7 +82,7 @@ def completion_factory_from_model(model: Any, loop: Any) -> Callable[..., Any]:
             # patience was fiction and every long call came back as a candidate
             # that "returned nothing". One budget, declared once, told to both.
             future = asyncio.run_coroutine_threadsafe(
-                model.invoke(prompt, max_tokens=max_tokens, timeout=timeout), loop,
+                model.invoke(prompt, **invoke_kwargs), loop,
             )
             deadline = time.monotonic() + timeout
             while True:

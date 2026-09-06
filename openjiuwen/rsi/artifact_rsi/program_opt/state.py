@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress
+from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress, NodeStageEvent
 from openjiuwen.rsi.schema import (
     ArtifactRef,
     EngineReport,
@@ -152,10 +152,13 @@ class ProgramRunState:
         tree = read_tree_file(self.task_id)
         if tree is not None:
             for node in tree.nodes:
-                index = _index_of(node.node_id)
+                program = node.extra.get("program") or {}
+                index = program.get("candidate_index")
+                if index is None:
+                    index = -node.iteration if ":attempt:" in node.node_id else _index_of(node.node_id)
                 if index is not None:
                     self.nodes[index] = node
-            self.iteration = max((node.iteration for node in tree.nodes), default=0)
+            self.iteration = tree.iteration
         report = read_report_file(self.task_id)
         if report is not None:
             for ref in report.artifact_index:
@@ -177,21 +180,27 @@ class ProgramRunState:
         self.status = "failed"
         self.error_code = code
         self.error_message = message
+        self._close_pending(message)
         self._persist()
 
     def finish(self) -> None:
         if self.status not in ("failed", "terminated", "paused"):
             self.status = "completed"
+        self._close_pending("本次候选未完成，任务已结束或暂停")
         self._persist()
+
+    def _close_pending(self, reason: str) -> None:
+        for index, node in list(self.nodes.items()):
+            if node.type in {"provisional", "candidate"}:
+                self.nodes[index] = _with(node, type="pruned", summary=reason, reason=reason)
 
     # -- the projection --------------------------------------------------------
 
     def absorb(self, event: dict[str, Any]) -> Iterator[EngineEvent]:
         """One search event in, zero or more contract events out.
 
-        Zero is the common case: `selected` and `evaluated` change a node that is
-        not finished yet, and emitting a partial node would break the contract's
-        rule that `EventNode` carries a complete one.
+        Pending candidates publish a durable snapshot and stage transitions.
+        Completion counters change only once the merger supplies a verdict.
 
         The argument is the event itself — what `Emit` is documented to carry
         and what `PuctEngine` actually passes. It used to unwrap a
@@ -203,12 +212,45 @@ class ProgramRunState:
         """
         kind = event.get("type")
 
-        if kind == "seeded":
+        if kind == "candidate_started":
+            iteration = int(event["iteration"])
+            parent = int(event["parentIndex"])
+            node = RsiTreeNode(
+                node_id=f"artifact:{self.task_id}:attempt:{iteration}",
+                iteration=iteration, parent_id=self._node_ref(parent),
+                type="provisional", adopted=False, score=None,
+                summary="正在生成程序", snapshot_artifact_id=None, reason=None,
+                failure_class=None, changes=[],
+                extra=self._program_extra(logical_kind="pending", candidate_index=None,
+                    parent_index=parent, artifact_id=None, evaluation=None),
+            )
+            self.nodes[-iteration] = node
+            self._persist()
+            yield EventNode(node=node)
+        elif kind == "candidate_discarded":
+            index = -int(event["iteration"])
+            node = self.nodes.get(index)
+            if node is not None:
+                node = _with(node, type="pruned", summary="候选已被搜索丢弃", reason="候选已被搜索丢弃")
+                self.nodes[index] = node
+                self._persist()
+                yield EventNode(node=node)
+        elif kind == "stage":
+            node = next((n for n in self.nodes.values() if n.iteration == int(event["iteration"])), None)
+            if node is not None and node.type == "provisional":
+                stage = {"id": event["id"], "name": event["name"]}
+                node = _with(node, summary=stage["name"], extra={**node.extra, "stage": stage})
+                self.nodes[-node.iteration] = node
+                self._persist()
+                yield NodeStageEvent(node_ref=node.node_id, stage=stage)
+        elif kind == "seeded":
             yield from self._seeded(event)
         elif kind == "selected":
             self._selected(event)
         elif kind == "expanded":
             self._expanded(event)
+            self._persist()
+            yield EventNode(node=self.nodes[int(event.get("nodeIndex", 0))])
         elif kind == "evaluated":
             self._evaluated(event)
         elif kind == "merged":
@@ -219,6 +261,10 @@ class ProgramRunState:
             self._logged(event)
         elif kind == "search_finished":
             self._finished(event)
+
+    def _node_ref(self, index: int) -> str:
+        node = self.nodes.get(index)
+        return node.node_id if node is not None else node_id_for(self.task_id, index)
 
     def _program_extra(
         self,
@@ -389,16 +435,17 @@ class ProgramRunState:
         parent = event.get("parentIndex")
         valid = bool(event.get("valid"))
         failure_class = None if valid else classify_failure(event.get("error"))
-        artifact_id = self._artifact(index, event.get("codeHash"))
+        pending = self.nodes.pop(-int(event.get("iteration") or index), None)
+        artifact_id = self._artifact(index, event.get("codeHash"), node_ref=pending.node_id if pending else None)
         promise = event.get("promise")
         self.nodes[index] = RsiTreeNode(
-            node_id=node_id_for(self.task_id, index),
+            node_id=pending.node_id if pending else self._node_ref(index),
             iteration=int(event.get("iteration") or index),
-            parent_id=None if parent is None else node_id_for(self.task_id, int(parent)),
+            parent_id=None if parent is None else self._node_ref(int(parent)),
             type="candidate",
             adopted=False,
             score=event.get("score"),
-            summary=event.get("changeSummary"),
+            summary="正在判定是否采纳候选",
             snapshot_artifact_id=artifact_id,
             reason=event.get("error"),
             failure_class=failure_class,
@@ -417,7 +464,6 @@ class ProgramRunState:
                 puct={"prior": promise} if promise is not None else None,
             ),
         )
-        self.iteration = max(self.iteration, int(event.get("iteration") or 0))
 
     def _evaluated(self, event: dict[str, Any]) -> None:
         index = int(event.get("nodeIndex", 0))
@@ -456,6 +502,7 @@ class ProgramRunState:
         node = _with(node, extra=self._update_program(node, logical_kind=node.type))
         node = _with(node, summary=self._composed_summary(node, accepted))
         self.nodes[index] = node
+        self.iteration = sum(n.type in {"adopted", "rejected"} for n in self.nodes.values())
         flipped: list[RsiTreeNode] = []
         if accepted:
             self.best_node_id = node.node_id
@@ -531,7 +578,7 @@ class ProgramRunState:
             self.status = "completed"
         best = event.get("bestNodeIndex")
         if best is not None:
-            self.best_node_id = node_id_for(self.task_id, int(best))
+            self.best_node_id = self._node_ref(int(best))
             self._recompute_chain()
         planned = event.get("expansionsPlanned")
         made = event.get("candidates")
@@ -545,7 +592,7 @@ class ProgramRunState:
 
     # -- artifacts -------------------------------------------------------------
 
-    def _artifact(self, index: int, code_hash: Any) -> Optional[str]:
+    def _artifact(self, index: int, code_hash: Any, *, node_ref: str | None = None) -> Optional[str]:
         digest = str(code_hash or "").removeprefix("sha256:")
         if not digest:
             return None
@@ -559,7 +606,7 @@ class ProgramRunState:
             return artifact_id
         self.artifacts[artifact_id] = ArtifactRef(
             artifact_id=artifact_id,
-            node_id=node_id_for(self.task_id, index),
+            node_id=node_ref or self._node_ref(index),
             # A directory, because a candidate is a file tree and one file is
             # only its commonest shape. Named without a suffix for the same
             # reason: `candidate-3.py` would be a lie about a package.
@@ -603,7 +650,7 @@ class ProgramRunState:
         _write_atomically(self.run_dir / STATE_FILE, self.to_engine_state())
         _write_atomically(self.run_dir / REPORT_FILE, self.to_report())
         _write_atomically(self.run_dir / NODES_FILE, {
-            "nodes": [self.nodes[index] for index in sorted(self.nodes)],
+            "nodes": sorted(self.nodes.values(), key=lambda node: node.iteration),
         })
 
 
@@ -722,7 +769,7 @@ def read_tree_file(task_id: str) -> Optional[TreeResponse]:
              if node is not None]
     by_id = {node.node_id: node for node in nodes}
     return TreeResponse(nodes=nodes, depth=_depth_of(nodes, by_id),
-                        iteration=max((node.iteration for node in nodes), default=0))
+                        iteration=sum(node.type in {"adopted", "rejected"} for node in nodes))
 
 
 def _depth_of(nodes: list[RsiTreeNode], by_id: dict[str, RsiTreeNode]) -> int:

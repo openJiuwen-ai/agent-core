@@ -277,8 +277,9 @@ class CodeImplementationAgent:
     files out of the folder experiment_execution actually runs.
     """
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], *, model: Any | None = None):
         self.config = config
+        self._injected_model = model
 
     def run(self, inputs: CodeImplementationInput) -> CodeImplementationOutput:
         return asyncio.run(self._run_async(inputs))
@@ -692,7 +693,7 @@ class CodeImplementationAgent:
         # is respected.
         os.environ.setdefault("OPENJIUWEN_BASH_STRICT", "1")
 
-        model = init_model(
+        model = self._injected_model or init_model(
             provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),
             model_name=self._setting("model", "MODEL_NAME", default="default"),
             api_key=self._setting("api_key", "API_KEY", required=True, secret=True),

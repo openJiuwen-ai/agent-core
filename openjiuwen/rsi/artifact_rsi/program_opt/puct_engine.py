@@ -55,13 +55,11 @@ from .program import (
     bundle,
     edits_an_existing_file,
     files_of,
-    is_python,
     read_promise,
 )
 from .prompt import repair_prompt, with_promise_request
 from .execution import EvaluationExecution
 from .provision import (
-    CANDIDATE_RUNTIME,
     ProvisionError,
     ensure,
     import_name,
@@ -629,8 +627,9 @@ class _Reporter:
                     f"the model spent all {spent.completion} output tokens on hidden "
                     f"thinking and had not started the answer when it hit the "
                     f"{self.spec.max_tokens_per_call} per-call ceiling. Raise "
-                    "max_tokens_per_call in the task's scorecard.json — whether the "
-                    "model thinks at all is the injected Model's own configuration"
+                    "max_tokens_per_call or set options.reasoning in the task's "
+                    "scorecard.json — whether the model thinks at all is controlled "
+                    "by the injected Model and this per-run override"
                 )
             else:
                 self._empty[iteration] = "the model returned an empty reply"
@@ -668,6 +667,8 @@ class _Reporter:
         if kind == "selected":
             self.attempted += 1
             self.emit(events.selected(payload["parent_index"], payload["ancestors"]))
+        elif kind == "stage":
+            self.emit({"type": "stage", **payload})
         elif kind == "seeded":
             seed_score = payload["metrics"].get(SCORE_KEY)
             if isinstance(seed_score, (int, float)) and math.isfinite(float(seed_score)):
@@ -692,6 +693,7 @@ class _Reporter:
                 },
             ))
         elif kind == "discarded":
+            self.emit({"type": "candidate_discarded", "iteration": int(payload["ops"].get("iteration") or 0)})
             # A proposal the staleness filter threw away. It cost a model call
             # and produced no node, so a run that planned 20 expansions and made
             # 18 has these as the difference — and until this branch existed the
@@ -750,6 +752,9 @@ class _Reporter:
         else:
             self.scored += 1
 
+        # Publish attempts only once generation/evaluation has returned. A
+        # parallel selection batch must not expose empty provisional nodes.
+        self.emit({"type": "candidate_started", "iteration": iteration, "parentIndex": node.parent_index})
         self.emit(events.expanded(
             node.index, node.parent_index, _depth(self.tree, node),
             metrics.get(SCORE_KEY) if valid else None, valid,
@@ -995,10 +1000,12 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
         # fail identically, and a search that reports twelve failed candidates
         # sends the user reading candidates for a fault in the configuration.
         raise _Refusal("this scorecard is scored by an evaluator script but was given none")
-    # Asked of the environment candidates actually run in, through the seam —
-    # this interpreter's own answer is not that environment's. One probe covers
-    # the candidate runtime and the promised packages together, and pip is
-    # reached only when something is actually missing.
+    # Ask only for packages explicitly declared by the scorecard. A generic
+    # Python task does not implicitly require numpy/pandas/scipy/sklearn: the
+    # folder-only provider path has no package declaration, and many valid
+    # tasks (including standard-library tasks) do not need that stack.
+    # Probing a fixed list made every such task fail before the first rollout
+    # when one optional package was absent from the candidate environment.
     try:
         shape = format_for(spec.reply_format)
     except ReplyFormatError as error:
@@ -1017,14 +1024,7 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
         wanted = validate_names(spec.packages or [])
     except ProvisionError as error:
         raise _Refusal(str(error)) from error
-    # The runtime is a Python fact: `CANDIDATE_RUNTIME` is what the AST gate
-    # lets a *Python* candidate import, and probing it means running an
-    # interpreter in the execution environment. A run whose program is Rust
-    # neither needs numpy nor has any reason to require that Python exists
-    # there at all — this probe refusing such a run was the last thing pinning
-    # the search to one language.
-    runtime = CANDIDATE_RUNTIME if is_python(spec.entrypoint) else ()
-    names = sorted({*runtime, *(import_name(package) for package in wanted)})
+    names = sorted({import_name(package) for package in wanted})
     if names and probe_imports(names, execute) is not None:
         if wanted:
             # Refused rather than warned about: a run whose candidates were
@@ -1036,13 +1036,6 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
                 raise _Refusal(str(error)) from error
             if installed:
                 log.info("run %s provisioned %s", spec.search_id, ", ".join(installed))
-        failure = probe_imports(runtime, execute) if runtime else None
-        if failure is not None:
-            raise _Refusal(
-                f"the execution environment is missing part of the candidate runtime "
-                f"({', '.join(runtime)}): {failure}. The AST gate lets "
-                "candidates import these, so without them every candidate fails"
-            )
 
 
 def _split_of(spec: RunSpec) -> Dict[str, int]:

@@ -1569,6 +1569,7 @@ class SubagentRegistry:
 def build_registry(
     config: dict[str, Any],
     *,
+    model: Any | None = None,
     topic_survey: TopicSurveyAgent | None = None,
     experiment_design: ExperimentDesignAgent | None = None,
     code_implementation: CodeImplementationAgent | None = None,
@@ -1581,15 +1582,15 @@ def build_registry(
     adapters: dict[ModuleId, SubagentAdapter] = {}
     if "topic_survey" in allowed:
         adapters["topic_survey"] = TopicSurveyAdapter(
-            topic_survey or TopicSurveyAgent(config)
+            topic_survey or TopicSurveyAgent(config, model=model)
         )
     if "experiment_design" in allowed:
         adapters["experiment_design"] = ExperimentDesignAdapter(
-            experiment_design or ExperimentDesignAgent(config)
+            experiment_design or ExperimentDesignAgent(config, model=model)
         )
     if "code_implementation" in allowed:
         adapters["code_implementation"] = CodeImplementationAdapter(
-            code_implementation or CodeImplementationAgent(config)
+            code_implementation or CodeImplementationAgent(config, model=model)
         )
     if "experiment_execution" in allowed:
         adapters["experiment_execution"] = ExperimentExecutionAdapter(
@@ -1600,7 +1601,7 @@ def build_registry(
             raise RuntimeError("reflection is enabled but no reflection agent was provided")
         adapters["reflection"] = ReflectionAdapter(reflection)
     if "reporting" in allowed:
-        adapters["reporting"] = ReportingAdapter(reporting or ReportingAgent(config))
+        adapters["reporting"] = ReportingAdapter(reporting or ReportingAgent(config, model=model))
     if not adapters:
         raise RuntimeError("manager registry has no enabled modules")
     return SubagentRegistry(adapters=adapters)

@@ -124,16 +124,9 @@ class PaperTreeOrchestrator:
         self.optimization_instruction = optimization_instruction
         self.artifact_path = artifact_path
         # AgentServer-resolved openjiuwen.core.foundation.llm.Model
-        # instance (ArtifactEngineRequest.model). Currently only threaded
-        # into paper scoring (see _build_node) -- NOT yet into the
-        # six-module ManagerRuntime pipeline, since only 3 of its 6 module
-        # agents (manager/experiment_design/topic_survey) have a `model=`
-        # injection seam today; reflection/reporting/code_implementation
-        # don't, and ManagerRuntime itself has no direct pass-through
-        # parameter (see docs/agent_core_rsi_migration_risks.md's model
-        # verification notes). `None` is a legitimate value here -- every
-        # downstream consumer that accepts it self-resolves its own model
-        # from `config` instead.
+        # instance (ArtifactEngineRequest.model), shared by scoring and all
+        # model-backed pipeline modules. None retains standalone config/env
+        # resolution without changing process-global model credentials.
         self.model = model
         self.config_path = config_path
         # Loaded once for the task's lifetime -- reused for both the
@@ -290,16 +283,12 @@ class PaperTreeOrchestrator:
         await self._emit(
             NodeStageEvent(
                 node_ref=node_id,
-                stage={"id": "pipeline_run", "name": "Running research pipeline"},
+                stage={"id": "pipeline_run", "name": "正在规划研究流程"},
             )
         )
         terminal = await self._run_manager(seed)
 
-        # Only the two stages we can actually observe from outside
-        # ManagerRuntime today — see docs/paper_tree_orchestrator_design.md
-        # "NodeStageEvent granularity" note. Finer-grained per-module stages
-        # would need tailing manager/events.jsonl from a background task,
-        # deliberately deferred. Scoring happens whenever a paper exists at
+        # ManagerRuntime forwards module starts through on_stage. Scoring happens whenever a paper exists at
         # all (even with no frontier score to compare against yet) — see
         # _build_node: the candidate's own score must still be computed and
         # stored so the *next* round has something to compare against.
@@ -307,7 +296,7 @@ class PaperTreeOrchestrator:
             await self._emit(
                 NodeStageEvent(
                     node_ref=node_id,
-                    stage={"id": "score", "name": "Scoring paper"},
+                    stage={"id": "score", "name": "正在评估论文"},
                 )
             )
 
@@ -365,8 +354,28 @@ class PaperTreeOrchestrator:
             load_project_dotenv()
             reflection = None
             if (self.config.get("manager") or {}).get("modules", {}).get("reflection", False):
-                reflection = ReflectionAgent(self.config)
-            runtime = ManagerRuntime(self.config, reflection=reflection)
+                reflection = ReflectionAgent(self.config, model=self.model)
+            async def on_stage(module: str) -> None:
+                labels = {
+                    "manager": "正在规划下一阶段",
+                    "topic_survey": "正在调研文献",
+                    "experiment_design": "正在设计实验",
+                    "code_implementation": "正在实现代码",
+                    "experiment_execution": "正在执行实验",
+                    "reflection": "正在分析与反思",
+                    "reporting": "正在撰写论文",
+                }
+                node = next(
+                    (n for n in self.storage.load_tree() if _node_run_id(n) == seed.run_id),
+                    None,
+                )
+                if node is not None:
+                    await self._emit(NodeStageEvent(
+                        node_ref=node.node_id,
+                        stage={"id": module, "name": labels.get(module, module)},
+                    ))
+
+            runtime = ManagerRuntime(self.config, model=self.model, reflection=reflection, on_stage=on_stage)
             return await runtime.arun(
                 topic=seed.topic,
                 research_paths=seed.research_paths or None,
@@ -564,5 +573,13 @@ class PaperTreeOrchestrator:
         return finalized
 
     async def _emit(self, event) -> None:
+        if isinstance(event, NodeStageEvent):
+            for node in self.storage.load_tree():
+                if node.node_id == event.node_ref:
+                    self.storage.append_node(node.model_copy(update={
+                        "summary": event.stage.get("name"),
+                        "extra": {**node.extra, "stage": dict(event.stage)},
+                    }))
+                    break
         if self.on_event is not None:
             await self.on_event(event)

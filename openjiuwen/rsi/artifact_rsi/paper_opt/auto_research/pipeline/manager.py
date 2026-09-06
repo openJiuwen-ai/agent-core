@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.ids import new_run_id
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import (
@@ -382,6 +382,7 @@ class ManagerRuntime:
         config: dict[str, Any],
         *,
         manager: ManagerAgent | None = None,
+        model: Any | None = None,
         registry: SubagentRegistry | None = None,
         reflection: ReflectionAgent | None = None,
         reporting: ReportingAgent | None = None,
@@ -389,12 +390,15 @@ class ManagerRuntime:
         experiment_design=None,
         code_implementation=None,
         experiment_execution=None,
+        on_stage: Callable[[str], Awaitable[None]] | None = None,
     ):
         self.config = config
+        self.on_stage = on_stage
         self.reflection = reflection
         enabled = _enabled_modules(config, has_reflection=reflection is not None)
         self.registry = registry or build_registry(
             config,
+            model=model,
             topic_survey=topic_survey,
             experiment_design=experiment_design,
             code_implementation=code_implementation,
@@ -403,7 +407,7 @@ class ManagerRuntime:
             reporting=reporting,
             enabled=enabled,
         )
-        self.manager = manager or ManagerAgent(config)
+        self.manager = manager or ManagerAgent(config, model=model)
         self._enabled = enabled
 
     @staticmethod
@@ -554,6 +558,8 @@ class ManagerRuntime:
         round_index: int,
     ) -> SubagentReport:
         adapter = self.registry.get(contract.module)
+        if self.on_stage is not None:
+            await self.on_stage(contract.module)
         attempt = 1
         if contract.module == "code_implementation":
             attempt = state.task_state.counters.code_attempts + 1
@@ -727,6 +733,8 @@ class ManagerRuntime:
             sync_host_requirements(state)
             round_index = state.task_state.counters.rounds_used + 1
             started = utc_now()
+            if self.on_stage is not None:
+                await self.on_stage("manager")
             try:
                 decision = await self._decide_with_repair(state, round_index)
             except DecisionValidationError as exc:

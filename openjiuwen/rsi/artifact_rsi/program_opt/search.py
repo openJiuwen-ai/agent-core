@@ -267,6 +267,7 @@ def make_propose(
         code, summary, promise = "", "", None
         attempts = max(1, repair_attempts) if check and repair_prompt else 1
         for attempt in range(attempts):
+            on_event("stage", {"iteration": iteration, "id": "generate", "name": "正在生成程序" if attempt == 0 else "正在修复程序"})
             code, summary, drawn = complete(prompt, iteration, parent.program.code)
             # Kept from the first reply that carried one: a redraw is the same
             # direction being written again, so its rating is a second reading
@@ -275,6 +276,7 @@ def make_propose(
             last = attempt == attempts - 1
             if last or not code.strip():
                 break
+            on_event("stage", {"iteration": iteration, "id": "check", "name": "正在试运行程序"})
             valid, metrics, error = check(code)
             if not _is_dead(domain, valid, metrics):
                 break
@@ -295,6 +297,7 @@ def make_propose(
         parent_doc = _first_doc_line(entry_source(parent.program.code))
         if summary.strip() and summary.strip() in (parent_summary, parent_doc):
             summary = ""
+        on_event("stage", {"iteration": iteration, "id": "evaluate", "name": "等待或正在执行候选评测"})
         return json.dumps(
             {
                 "change_summary": summary,

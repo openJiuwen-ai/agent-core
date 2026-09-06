@@ -21,9 +21,8 @@ comes from the scorecard here, not from a hard-wired benchmark.
 
 .. danger:: The gate is not a security boundary, and must not be read as one.
 
-   A candidate needs pandas, numpy and scikit-learn — a stack that can read
-   files and spawn processes — so admitting those admits most of what a gate
-   would otherwise stop. What it buys is that the ordinary accidents (a
+   A candidate may use whatever non-blocked packages are installed in the
+   execution environment. What it buys is that the ordinary accidents (a
    candidate that shells out, calls ``open``, or reaches for a dunder) fail
    here, with a readable message, instead of at evaluation.
 
