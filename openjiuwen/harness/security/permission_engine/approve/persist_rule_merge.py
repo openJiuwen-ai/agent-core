@@ -19,12 +19,12 @@ from openjiuwen.harness.security.permission_engine.approve.persist_rule_suggesti
     build_permission_suggestions,
 )
 from openjiuwen.harness.security.permission_engine.models import PermissionsSection
+from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+    is_shell_tool,
+    shell_tools_from_config,
+)
 
 logger = logging.getLogger(__name__)
-
-_SHELL_APPROVAL_TOOLS = frozenset({
-    "bash", "powershell", "mcp_exec_command", "create_terminal",
-})
 
 
 def _resolve_agent_config_yaml_path(explicit: Path | None) -> Path | None:
@@ -391,7 +391,7 @@ def merge_permission_allow_rule_into_permissions(
         )
         return cast(PermissionsSection, perms), False
     shell_ast_result = None
-    if tool_name in _SHELL_APPROVAL_TOOLS:
+    if is_shell_tool(tool_name, shell_tools_from_config(perms)):
         shell_ast_result = parse_shell_for_permission(
             str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
         )
@@ -399,10 +399,11 @@ def merge_permission_allow_rule_into_permissions(
         tool_name,
         tool_args,
         shell_ast_result=shell_ast_result,
+        permission_config=perms,
     )
     non_path = [s for s in suggestions if str(s.match_type or "").lower() != "path"]
     if not _persist_tiered_approval_override_suggestions(perms, non_path):
-        if tool_name not in _SHELL_APPROVAL_TOOLS:
+        if not is_shell_tool(tool_name, shell_tools_from_config(perms)):
             if _persist_tiered_tool_allow(perms, tool_name):
                 logger.info(
                     "[PermissionEngine] permission.merge.ok tool=%s target=tools",
@@ -441,10 +442,6 @@ def persist_cli_trusted_directory(
         return {"ok": False, "error": "path resolves to empty"}
 
     try:
-        from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
-            _SHELL_TOOLS,
-        )
-
         cfg_path = _resolve_agent_config_yaml_path(config_yaml_path)
         if cfg_path is None:
             return {"ok": False, "error": "no agent config yaml path (pass config_yaml_path)"}
@@ -498,7 +495,7 @@ def persist_cli_trusted_directory(
                     return True
             return False
 
-        shell_tools = sorted(_SHELL_TOOLS)
+        shell_tools = sorted(shell_tools_from_config(permissions))
         if not _has_id(shell_override_id):
             overrides.append({
                 "id": shell_override_id,

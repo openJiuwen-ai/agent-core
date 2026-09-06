@@ -179,3 +179,30 @@ def test_persist_cli_trusted_directory_writes_file_guard(tmp_path: Path) -> None
     assert checker.evaluate(
         "read_file", {"file_path": str(trusted / "x.txt")}
     ) is None
+
+
+def test_persist_cli_add_dir_shell_override_uses_injected_categories(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "agent.yaml"
+    trusted = tmp_path / "trusted_dir"
+    trusted.mkdir()
+    bootstrap = {
+        "enabled": True,
+        "categories": {"shell": ["powershell", "run_cmd"]},
+        "tools": {},
+    }
+    result = persist_cli_trusted_directory(
+        str(trusted),
+        config_yaml_path=yaml_path,
+        bootstrap_permissions=bootstrap,
+    )
+    assert result.get("ok") is True
+
+    import yaml
+
+    data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    overrides = (data["permissions"].get("approval_overrides") or [])
+    shell_override = next(
+        o for o in overrides
+        if isinstance(o, dict) and o.get("match_type") == "command"
+    )
+    assert set(shell_override["tools"]) == {"powershell", "run_cmd"}

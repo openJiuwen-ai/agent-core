@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,12 +18,13 @@ from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import (
     ShellSubcommand,
     parse_shell_for_permission,
 )
+from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+    is_shell_tool,
+    shell_tools_from_config,
+)
 
 logger = logging.getLogger(__name__)
 
-_SHELL_SUGGESTION_TOOLS = frozenset({
-    "bash", "powershell", "mcp_exec_command", "create_terminal",
-})
 _PATH_SUGGESTION_TOOLS = frozenset({
     "read_file", "write_file", "edit_file",
     "read_text_file", "write_text_file",
@@ -50,8 +52,9 @@ def build_permission_suggestions(
         tool_name: str,
         tool_args: dict[str, Any],
         shell_ast_result: ShellAstParseResult | None = None,
+        permission_config: Mapping[str, Any] | None = None,
 ) -> list[PermissionSuggestion]:
-    if tool_name in _SHELL_SUGGESTION_TOOLS:
+    if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
         command = str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
         if not command:
             return []
