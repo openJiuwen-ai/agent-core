@@ -39,6 +39,10 @@ from openjiuwen.harness.security.patterns import (
     write_permissions_section_to_agent_config_yaml,
 )
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
+from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+    is_shell_tool,
+    shell_tools_from_config,
+)
 
 
 TOOL_NAME_ALIASES = {
@@ -124,7 +128,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name or ""
         tool_args = self.parse_tool_args(tool_call)
 
-        if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
+        if is_shell_tool(
+            self._normalize_tool_name(tool_name),
+            shell_tools_from_config(self._engine.config),
+        ):
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
             return self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
 
@@ -804,7 +811,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         tool_name = tool_call.name if tool_call else ""
         tool_args = self.parse_tool_args(tool_call)
-        presentation = build_permission_ask_presentation(tool_name, tool_args, result)
+        presentation = build_permission_ask_presentation(
+            tool_name, tool_args, result, permission_config=self._engine.config,
+        )
         hint = self._build_always_allow_hint(tool_call)
         return render_ask_presentation_message(presentation, always_allow_hint=hint)
 
@@ -819,7 +828,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         tool_name = tool_call.name if tool_call else ""
         tool_args = self.parse_tool_args(tool_call)
-        presentation = build_permission_ask_presentation(tool_name, tool_args, result)
+        presentation = build_permission_ask_presentation(
+            tool_name, tool_args, result, permission_config=self._engine.config,
+        )
         return {
             "ask_category": presentation.category,
             "ask_title": presentation.title,
@@ -850,7 +861,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 path_hint = val.strip()
                 break
 
-        if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
+        if is_shell_tool(
+            self._normalize_tool_name(tool_name),
+            shell_tools_from_config(self._engine.config),
+        ):
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
             shell_key = self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
             if shell_key:
