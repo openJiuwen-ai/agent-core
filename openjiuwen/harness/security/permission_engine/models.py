@@ -146,6 +146,7 @@ class PermissionsSection(TypedDict, total=False):
 
         permissions:
           enabled: true
+          package_builtin_rules: true  # host-only; default true
           schema: tiered_policy
           tools:
             read_file: ask
@@ -166,9 +167,11 @@ class PermissionsSection(TypedDict, total=False):
     """
 
     enabled: bool
+    package_builtin_rules: NotRequired[bool]
     schema: NotRequired[str]
     defaults: NotRequired[dict[str, Any]]
     tools: NotRequired[dict[str, Any]]
+    categories: NotRequired[dict[str, list[str]]]
     rules: NotRequired[list[dict[str, Any]]]
     approval_overrides: NotRequired[list[ApprovalOverrideEntry]]
     file_guard: NotRequired[FileGuardSection]

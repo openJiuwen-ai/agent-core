@@ -83,7 +83,8 @@ def test_package_shell_rules_include_powershell_tool() -> None:
     rules = load_package_command_rules()
     assert rules
     for rule in rules:
-        assert "powershell" in (rule.get("tools") or []), rule.get("id")
+        tools = rule.get("tools") or []
+        assert "shell" in tools or "powershell" in tools, rule.get("id")
 
 
 def test_interpreter_sink_asks_cat_pipe_sh() -> None:
@@ -184,6 +185,105 @@ def test_extract_bare_redirect_target(tmp_path: Path) -> None:
 def test_extract_skips_unexpanded_redirect_target(tmp_path: Path) -> None:
     accesses = extract_shell_path_accesses("echo hi > $OUT", tmp_path)
     assert all("$" not in p.name for p, _act in accesses)
+
+
+def test_extract_skips_redirect_inside_quoted_assignment(tmp_path: Path) -> None:
+    accesses = extract_shell_path_accesses(
+        '''OUT="echo 'hello' > output.txt" && echo ok''',
+        tmp_path,
+    )
+    assert not any(p.name == "output.txt" for p, _act in accesses)
+
+
+def test_extract_expands_tilde_kube_config(tmp_path: Path) -> None:
+    expected = (Path.home() / ".kube" / "config").resolve()
+    for cmd in ("cat ~/.kube/config", r"cat ~\.kube\config"):
+        accesses = extract_shell_path_accesses(cmd, tmp_path)
+        assert any(
+            p.resolve() == expected and act == "read" for p, act in accesses
+        ), cmd
+        joined = [str(p).replace("\\", "/") for p, _ in accesses]
+        assert not any("/~/" in item or item.endswith("/~") for item in joined), cmd
+
+
+def test_extract_expands_userprofile_kube_config(tmp_path: Path) -> None:
+    expected = (Path.home() / ".kube" / "config").resolve()
+    cmds = (
+        r"cat %USERPROFILE%\.kube\config",
+        r"cat %userprofile%/.kube/config",
+        r"cat %HOMEDRIVE%%HOMEPATH%\.kube\config",
+        r"cat %USERPROFILE%.kube\config",
+        r"cat ~.kube\config",
+    )
+    for cmd in cmds:
+        accesses = extract_shell_path_accesses(cmd, tmp_path)
+        assert any(
+            p.resolve() == expected and act == "read" for p, act in accesses
+        ), (cmd, [(str(p), a) for p, a in accesses])
+        joined = [str(p).replace("\\", "/") for p, _ in accesses]
+        assert not any("%USERPROFILE%" in item.upper() for item in joined), cmd
+        glued = Path.home().name + ".kube"
+        assert not any(glued in item.replace("\\", "/") for item in joined), cmd
+
+
+def test_tilde_kube_config_hits_file_guard(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = {
+        "enabled": True,
+        "tools": {"bash": "allow"},
+        "defaults": {"*": "allow"},
+        "rules": [
+            {
+                "id": "shell_allow_cat",
+                "tools": ["bash"],
+                "action": "allow",
+                "pattern": "cat *",
+            },
+        ],
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+            "workspace": {"read": "allow", "write": "allow", "exec": "ask"},
+        },
+    }
+    engine = _engine(cfg, workspace_root=workspace)
+    level, matched = engine.evaluate_global_policy_directly(
+        "bash",
+        {"command": r"cat ~\.kube\config", "workdir": str(workspace)},
+    )
+    assert level == PermissionLevel.ASK
+    assert "file_guard" in (matched or "")
+
+
+def test_userprofile_kube_config_hits_file_guard(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    cfg = {
+        "enabled": True,
+        "tools": {"bash": "allow"},
+        "defaults": {"*": "allow"},
+        "rules": [
+            {
+                "id": "shell_allow_cat",
+                "tools": ["bash"],
+                "action": "allow",
+                "pattern": "cat *",
+            },
+        ],
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+            "workspace": {"read": "allow", "write": "allow", "exec": "ask"},
+        },
+    }
+    engine = _engine(cfg, workspace_root=workspace)
+    level, matched = engine.evaluate_global_policy_directly(
+        "bash",
+        {"command": r"cat %USERPROFILE%\.kube\config", "workdir": str(workspace)},
+    )
+    assert level == PermissionLevel.ASK
+    assert "file_guard" in (matched or "")
 
 
 def test_extract_set_content_env_path(tmp_path: Path) -> None:
