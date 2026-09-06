@@ -18,6 +18,7 @@ def test_metrics_fields_defaults():
 def test_metrics_exporter_rejects_unknown_value():
     import pytest
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         ObservabilityConfig(metrics_exporter="bogus")
 
@@ -48,4 +49,3 @@ def test_recorder_record_methods_do_not_raise(monkeypatch):
         rec.record_iteration_error("agent-1", "team-1")
     finally:
         rec.shutdown()
-

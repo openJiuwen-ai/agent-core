@@ -580,11 +580,7 @@ class AgentObservabilityRail(DeepAgentRail):
         agent_id = str(attributes.get(DA_AGENT_NAME) or "unknown")
         team_id = str(attributes.get(OJ_TEAM_ID) or "")
         start_time = getattr(span, "start_time", None)
-        duration_ms = (
-            (time.time_ns() - start_time) / 1_000_000.0
-            if start_time is not None
-            else 0.0
-        )
+        duration_ms = (time.time_ns() - start_time) / 1_000_000.0 if start_time is not None else 0.0
         rec.record_iteration_duration(agent_id, team_id, duration_ms)
         if exception is not None:
             rec.record_iteration_error(agent_id, team_id)

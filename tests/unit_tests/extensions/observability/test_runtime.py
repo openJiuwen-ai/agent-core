@@ -23,6 +23,7 @@ def reset_observability_runtime():
     from openjiuwen.extensions.observability import metrics as _metrics
     from openjiuwen.extensions.observability.demand import reset_observability_demands
     from openjiuwen.extensions.observability.setup import shutdown_observability
+
     shutdown_observability()
     _metrics.set_metrics_recorder(None)
     reset_observability_demands()
@@ -204,6 +205,7 @@ def test_metrics_initialized_when_enabled(reset_observability_runtime):
         is_metrics_enabled,
         shutdown_observability,
     )
+
     cfg = ObservabilityConfig(metrics_enabled=True, metrics_exporter="console")
     init_observability(cfg)
     try:
@@ -220,6 +222,7 @@ def test_metrics_not_initialized_by_default(reset_observability_runtime):
         is_metrics_enabled,
         shutdown_observability,
     )
+
     init_observability(ObservabilityConfig())
     try:
         assert not is_metrics_enabled()
@@ -234,6 +237,7 @@ def test_metrics_initialized_on_second_runtime_when_enabled(reset_observability_
         is_metrics_enabled,
         shutdown_observability,
     )
+
     init_observability(ObservabilityConfig())  # first init: tracing only
     assert not is_metrics_enabled()
     init_observability(ObservabilityConfig(metrics_enabled=True, metrics_exporter="console"))
