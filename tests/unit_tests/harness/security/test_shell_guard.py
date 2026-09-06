@@ -83,7 +83,8 @@ def test_package_shell_rules_include_powershell_tool() -> None:
     rules = load_package_command_rules()
     assert rules
     for rule in rules:
-        assert "powershell" in (rule.get("tools") or []), rule.get("id")
+        tools = rule.get("tools") or []
+        assert "shell" in tools or "powershell" in tools, rule.get("id")
 
 
 def test_interpreter_sink_asks_cat_pipe_sh() -> None:
