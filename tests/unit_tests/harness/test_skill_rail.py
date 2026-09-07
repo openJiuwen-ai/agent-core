@@ -1097,7 +1097,8 @@ def test_skill_use_rail_apply_skill_budget_max_skills():
 
 
 def test_skill_use_rail_apply_skill_budget_max_total_chars():
-    """max_total_chars drops lowest-ranked whole skills until under budget."""
+    """max_total_chars is a soft cap: when the single highest-ranked skill alone
+    exceeds the budget, it is still retained (never an empty skill list)."""
     rail = SkillUseRail(
         skills_dir="./",
         skill_mode="all",
@@ -1109,8 +1110,29 @@ def test_skill_use_rail_apply_skill_budget_max_total_chars():
         _MockSkill(name="beta", description="This is a much longer description that exceeds budget."),
     ]
     result = rail._apply_skill_budget(skills, query="beta")
-    # beta ranks higher (query match), but total chars might still exceed 50
-    # if so, alpha gets dropped first (lower rank), then beta if still over
+    # beta ranks highest (query match) and alone exceeds the 50-char budget;
+    # dropping it too would leave the model with no skills at all.
+    assert result, "highest-ranked skill must be retained even when over budget"
+    assert [s.name for s in result] == ["beta"]
+
+
+def test_skill_use_rail_apply_skill_budget_max_total_chars_drops_low_ranked():
+    """max_total_chars drops whole lowest-ranked skills until back under budget."""
+    rail = SkillUseRail(
+        skills_dir="./",
+        skill_mode="all",
+        include_tools=False,
+        max_total_chars=50,
+    )
+    skills = [
+        _MockSkill(name="alpha", description="Short."),
+        _MockSkill(name="beta", description="Beta handles beta tasks."),
+        _MockSkill(name="gamma", description="Gamma is for gamma work."),
+    ]
+    result = rail._apply_skill_budget(skills, query="beta")
+    # beta ranks highest; gamma ties with alpha at the bottom and is dropped
+    # first, leaving beta + alpha comfortably under budget.
+    assert [s.name for s in result] == ["beta", "alpha"]
     total = sum(len(s.description) for s in result)
     assert total <= 50
 

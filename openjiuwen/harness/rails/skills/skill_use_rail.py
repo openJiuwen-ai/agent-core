@@ -84,7 +84,9 @@ class SkillUseRail(DeepAgentRail):
             max_skills: Optional hard cap on the number of skills injected in ``all`` mode.
             max_total_chars: Optional soft cap on total skill description chars in ``all`` mode.
                 When exceeded, skills are ranked by keyword overlap with the query and low-ranked
-                whole skills are dropped (gentle truncation — never mid-text).
+                whole skills are dropped (gentle truncation — never mid-text). The cap is soft:
+                the single highest-ranked skill is always retained, even when it alone exceeds
+                the limit.
         """
         super().__init__()
 
@@ -530,7 +532,10 @@ class SkillUseRail(DeepAgentRail):
         """Rank skills by query relevance and drop low-ranked ones to stay under budget.
 
         This implements *gentle truncation*: whole skills are dropped,
-        never mid-description.
+        never mid-description. ``max_total_chars`` is a soft cap — the
+        highest-ranked skill is always retained, even when it alone exceeds
+        the limit, so callers never get an empty list back from a non-empty
+        input.
 
         Args:
             skills: Full list of skills to consider.
@@ -569,16 +574,26 @@ class SkillUseRail(DeepAgentRail):
                 ", ".join(s.name for s in dropped),
             )
 
-        # Apply soft char cap by dropping lowest-ranked whole skills
+        # Apply soft char cap by dropping lowest-ranked whole skills.
+        # The cap is soft: the highest-ranked skill is always retained, even if it
+        # alone exceeds max_total_chars, so the model never sees an empty skill list.
         if self.max_total_chars is not None:
             total_chars = sum(len(s.description or "") for s in ranked)
-            while ranked and total_chars > self.max_total_chars:
+            while len(ranked) > 1 and total_chars > self.max_total_chars:
                 dropped_skill = ranked.pop()
                 total_chars -= len(dropped_skill.description or "")
                 logger.info(
                     "[SkillUseRail] Dropped skill '%s' to stay under max_total_chars=%d "
                     "(remaining chars=%d)",
                     dropped_skill.name,
+                    self.max_total_chars,
+                    total_chars,
+                )
+            if ranked and total_chars > self.max_total_chars:
+                logger.warning(
+                    "[SkillUseRail] Skill '%s' alone exceeds max_total_chars=%d "
+                    "(%d chars); keeping it so the skills section is never empty",
+                    ranked[0].name,
                     self.max_total_chars,
                     total_chars,
                 )
