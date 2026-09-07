@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 from os import PathLike
 
 from openjiuwen.core.common.logging import logger
@@ -415,15 +415,61 @@ def resolve_deep_agent_parts(
     )
 
 
+PostApplyRailFactory = Callable[["DeepAgent", "DeepAgentParts"], Sequence[AgentRail] | None]
+"""Signature for post-apply rail factories.
+
+A factory takes the just-configured ``DeepAgent`` and the ``DeepAgentParts``
+that were applied onto it, and returns a sequence of additional rails to
+queue onto the agent. Factories are responsible for idempotency (skip if the
+rail is already present). Returning ``None`` or an empty sequence is a no-op.
+"""
+
+
+_POST_APPLY_RAIL_FACTORIES: list[PostApplyRailFactory] = []
+"""Module-level registry of post-apply rail factories.
+
+Adapters (e.g. JiuwenSwarm) call :func:`register_post_apply_rail_factory` to
+inject platform-specific rails that aren't in the default ``parts.rails`` —
+notably ``PermissionInterruptRail`` for chat-team leaders whose
+``TeamAgentSpec`` doesn't include it. The factories run after
+``apply_deep_agent_parts`` has finished its own rail queue loop, so adapters
+see the final agent state and can decide what to add based on the resolved
+config / build context.
+"""
+
+
+def register_post_apply_rail_factory(factory: PostApplyRailFactory) -> None:
+    """Register a factory that produces additional rails after ``parts.rails``.
+
+    The factory is invoked once per :func:`apply_deep_agent_parts` call, after
+    ``parts.rails`` have been queued. Each returned rail (non-``None``) is
+    added via ``agent.add_rail()`` and goes through the same lazy async
+    registration path as ``parts.rails``. Factories must be idempotent — if a
+    rail of the same type is already pending, the factory should return an
+    empty list.
+
+    Args:
+        factory: A callable taking ``(agent, parts)`` and returning a list of
+            ``AgentRail`` instances (or ``None`` / an empty list).
+
+    Raises:
+        TypeError: If ``factory`` is not callable.
+    """
+    if not callable(factory):
+        raise TypeError(f"post-apply rail factory must be callable, got {type(factory).__name__}")
+    _POST_APPLY_RAIL_FACTORIES.append(factory)
+
+
 def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
     """Apply resolved :class:`DeepAgentParts` onto a target DeepAgent.
 
     Configures the agent from ``parts.config`` (rebuilding its inner
     ReActAgent), registers concrete tool instances on the shared resource
-    manager, adds tool cards to the ability manager, and queues all rails for
-    lazy async init. The target may be a fresh ``DeepAgent`` (the
-    :func:`create_deep_agent` path) or a ``NativeHarness`` configuring itself
-    (forward construction, no throwaway template).
+    manager, adds tool cards to the ability manager, queues all rails for
+    lazy async init, and finally invokes any registered post-apply rail
+    factories to inject platform-specific rails. The target may be a fresh
+    ``DeepAgent`` (the :func:`create_deep_agent` path) or a ``NativeHarness``
+    configuring itself (forward construction, no throwaway template).
     """
     agent.configure(parts.config)
 
@@ -450,6 +496,28 @@ def apply_deep_agent_parts(agent: DeepAgent, parts: DeepAgentParts) -> None:
     # Queue rails for lazy async registration (user rails + default rails)
     for rail_inst in parts.rails:
         agent.add_rail(rail_inst)
+
+    # Invoke registered post-apply rail factories so adapters can inject
+    # platform-specific rails that aren't in parts.rails. Factory exceptions
+    # are caught and logged so a faulty factory can't break construction —
+    # the agent is still usable, it just won't have that rail.
+    for factory in _POST_APPLY_RAIL_FACTORIES:
+        factory_qualname = getattr(factory, "__qualname__", repr(factory))
+        try:
+            extra_rails = factory(agent, parts)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "post-apply rail factory %s raised: %s",
+                factory_qualname,
+                exc,
+            )
+            continue
+        if not extra_rails:
+            continue
+        for rail in extra_rails:
+            if rail is None:
+                continue
+            agent.add_rail(rail)
 
 
 def create_deep_agent(

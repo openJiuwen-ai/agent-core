@@ -30,6 +30,7 @@ __all__ = [
     "VisionModelConfig",
     "create_deep_agent",
     "Workspace",
+    "register_post_apply_rail_factory",
 ]
 
 
@@ -75,6 +76,11 @@ def __getattr__(name: str) -> Any:
             Workspace,
         )
         return Workspace
+    if name == "register_post_apply_rail_factory":
+        from openjiuwen.harness.factory import (
+            register_post_apply_rail_factory,
+        )
+        return register_post_apply_rail_factory
     raise AttributeError(
         f"module {__name__!r} has no attribute {name!r}"
     )
