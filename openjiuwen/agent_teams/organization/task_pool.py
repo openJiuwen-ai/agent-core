@@ -300,7 +300,6 @@ class OrgTaskManager:
         output_spec: OrgTaskOutputSpec | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         delegated_to_team_id: str | None = None,
-        delegated_to_leader_id: str | None = None,
         aggregation_mode: OrgTaskAggregationMode | str | None = None,
     ) -> OrgTaskOpResult:
         await self.initialize()
@@ -338,6 +337,15 @@ class OrgTaskManager:
                 parent = await session.get(OrgTaskRecord, parent_task_id)
                 if parent is None or parent.organization_id != self.organization_id:
                     return OrgTaskOpResult(ok=False, reason=f"parent task not found: {parent_task_id}")
+                if not created_by.team_id:
+                    return OrgTaskOpResult(ok=False, reason="child task must be created by a team")
+                if parent.assigned_team_id != created_by.team_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason="only the parent task's assigned team can create child tasks",
+                    )
+                if parent.status in ORG_TASK_TERMINAL_STATUS_VALUES:
+                    return OrgTaskOpResult(ok=False, reason=f"parent task is terminal: {parent_task_id}")
                 expected_root = parent.root_task_id
                 if root_task_id is not None and root_task_id != expected_root:
                     return OrgTaskOpResult(
@@ -377,7 +385,6 @@ class OrgTaskManager:
                 required_capabilities_json=_json_dumps(capabilities),
                 assignment_type=assignment_type.value,
                 assigned_team_id=delegated_to_team_id,
-                assigned_leader_id=delegated_to_leader_id,
                 assigned_by_team_id=created_by.team_id if delegated_to_team_id else None,
                 assigned_at=now if delegated_to_team_id else None,
                 aggregation_json=aggregation_json,
@@ -393,7 +400,6 @@ class OrgTaskManager:
                 task,
                 created_by.team_id or "",
                 delegated_to_team_id,
-                delegated_to_leader_id,
             )
         return OrgTaskOpResult(ok=True, task=task)
 
@@ -441,7 +447,7 @@ class OrgTaskManager:
             rows = (await session.execute(stmt)).scalars().all()
             return [self._to_task(row) for row in rows]
 
-    async def claim_task(self, *, task_id: str, team_id: str, leader_id: str) -> OrgTaskOpResult:
+    async def claim_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
         await self.initialize()
         now = get_current_time()
         async with self._write() as session:
@@ -457,7 +463,6 @@ class OrgTaskManager:
                     status=OrgTaskStatus.CLAIMED.value,
                     assignment_type=OrgAssignmentType.CLAIMED.value,
                     assigned_team_id=team_id,
-                    assigned_leader_id=leader_id,
                     assigned_by_team_id=None,
                     assigned_at=now,
                     updated_at=now,
@@ -472,10 +477,8 @@ class OrgTaskManager:
             OrgTaskClaimedEvent(
                 organization_id=self.organization_id,
                 team_id=team_id,
-                leader_id=leader_id,
                 task_id=task_id,
                 claimed_by_team_id=team_id,
-                claimed_by_leader_id=leader_id,
             )
         )
         return OrgTaskOpResult(ok=True, task=task)
@@ -486,7 +489,6 @@ class OrgTaskManager:
         task_id: str,
         from_team_id: str,
         to_team_id: str,
-        to_leader_id: str | None = None,
     ) -> OrgTaskOpResult:
         await self.initialize()
         now = get_current_time()
@@ -506,7 +508,6 @@ class OrgTaskManager:
                     status=OrgTaskStatus.DELEGATED.value,
                     assignment_type=OrgAssignmentType.DELEGATED.value,
                     assigned_team_id=to_team_id,
-                    assigned_leader_id=to_leader_id,
                     assigned_by_team_id=from_team_id,
                     assigned_at=now,
                     updated_at=now,
@@ -527,7 +528,7 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"task delegate failed: {task_id}")
             row = await session.get(OrgTaskRecord, task_id)
         task = self._to_task(row)
-        await self._publish_task_delegated(task, from_team_id, to_team_id, to_leader_id)
+        await self._publish_task_delegated(task, from_team_id, to_team_id)
         return OrgTaskOpResult(ok=True, task=task)
 
     async def start_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
@@ -620,7 +621,6 @@ class OrgTaskManager:
             OrgTaskCompletedEvent(
                 organization_id=self.organization_id,
                 team_id=team_id,
-                leader_id=row.assigned_leader_id,
                 task_id=task_id,
             )
         )
@@ -887,7 +887,6 @@ class OrgTaskManager:
         task: OrgTask,
         from_team_id: str,
         to_team_id: str,
-        to_leader_id: str | None,
     ) -> None:
         await self._publish_event(
             OrgTaskDelegatedEvent(
@@ -896,7 +895,6 @@ class OrgTaskManager:
                 task_id=task.task_id,
                 delegated_by_team_id=from_team_id,
                 delegated_to_team_id=to_team_id,
-                delegated_to_leader_id=to_leader_id,
             ),
             team_inbox_id=to_team_id,
         )
@@ -992,7 +990,6 @@ class OrgTaskManager:
             assignment=OrgAssignment(
                 assignment_type=OrgAssignmentType(row.assignment_type),
                 team_id=row.assigned_team_id,
-                leader_id=row.assigned_leader_id,
                 assigned_by_team_id=row.assigned_by_team_id,
                 assigned_at=row.assigned_at,
             ),

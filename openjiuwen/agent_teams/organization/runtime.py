@@ -838,8 +838,13 @@ class OrganizationRuntimeManager:
         prompt = (
             f"Organization task {task_id} in {organization_id} was delegated to your team. "
             "Inspect it with org_view_tasks(action='get'), then use org_update_task(action='start') "
-            "when you are ready, execute it through your team workflow, and complete it with "
-            "the resulting output context and output abstract."
+            "when you are ready. If an independent part requires another organization team's "
+            "capabilities, keep this parent task assigned to your team and create a focused OPEN child "
+            f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, "
+            "acceptance criteria, and only the capabilities it needs; do not set delegated_to_team_id. "
+            "Track children with org_view_child_tasks and do not complete the parent until its direct "
+            "children are completed and accepted. Otherwise execute the task through your team workflow "
+            "and complete it with the resulting output context and output abstract."
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
@@ -888,9 +893,14 @@ class OrganizationRuntimeManager:
             f"Your team claimed organization task {task_id} in {organization_id}. "
             "Inspect it with org_view_tasks(action='get'). If it is still assigned to your team and "
             "its status is CLAIMED, immediately call org_update_task(action='start'). Then execute the "
-            "defined scope through your Team workflow. When finished, submit one concrete result or "
-            "failure report with org_update_task(action='complete'). If the task is already IN_PROGRESS "
-            "or COMPLETED, do not duplicate work."
+            "defined scope through your Team workflow. If an independent part requires another organization "
+            "team's capabilities, keep this parent task assigned to your team and create a focused OPEN child "
+            f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, acceptance "
+            "criteria, and only the capabilities it needs; do not set delegated_to_team_id. Track children "
+            "with org_view_child_tasks and do not complete the parent until its direct children are completed "
+            "and accepted. When the task is actually complete, submit one concrete result with "
+            "org_update_task(action='complete'). If the task is already IN_PROGRESS or COMPLETED, do not "
+            "duplicate work."
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
@@ -908,7 +918,8 @@ class OrganizationRuntimeManager:
             f"Inspect its result and pending review with org_review_task, then accept or reject it. "
             f"If accepted, use the child output to continue parent task {parent_task_id}. "
             "If rejected, create at most one focused repair task for the team whose capabilities match "
-            "the reported defect; include the child report and acceptance criteria in that task. Do not "
+            f"the reported defect with org_create_task(parent_task_id='{parent_task_id}'); include the "
+            "child report and acceptance criteria in that task. Do not "
             "leave the parent waiting without either accepting/rejecting the child or creating that repair. "
             "When all direct child tasks are accepted, complete the parent task with its integrated result. "
             "For the root task, put the user-facing final delivery in org_update_task output_context.description: "

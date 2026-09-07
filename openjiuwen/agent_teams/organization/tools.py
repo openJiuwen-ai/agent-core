@@ -429,13 +429,6 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             "properties": {
                 "task_id": {"type": "string"},
                 "parent_task_id": {"type": "string"},
-                "root_task_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional. Derived by Task Pool: roots must equal task_id; "
-                        "children must equal parent.root_task_id. Conflicting values are rejected."
-                    ),
-                },
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "task_type": {"type": "string"},
@@ -443,7 +436,6 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 "output_spec": {"type": "object"},
                 "metadata": {"type": "object"},
                 "delegated_to_team_id": {"type": "string"},
-                "delegated_to_leader_id": {"type": "string"},
                 "aggregation_mode": {
                     "type": "string",
                     "enum": [OrgTaskAggregationMode.HIERARCHICAL.value],
@@ -473,7 +465,6 @@ class OrgCreateTaskTool(_OrgLeaderTool):
         result = await self.manager.create_task(
             task_id=inputs.get("task_id"),
             parent_task_id=inputs.get("parent_task_id"),
-            root_task_id=inputs.get("root_task_id"),
             title=inputs["title"],
             description=inputs["description"],
             task_type=inputs.get("task_type"),
@@ -487,7 +478,6 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 team_id=self.team_id,
             ),
             delegated_to_team_id=inputs.get("delegated_to_team_id"),
-            delegated_to_leader_id=inputs.get("delegated_to_leader_id"),
             aggregation_mode=inputs.get("aggregation_mode"),
         )
         if not result.ok or result.task is None:
@@ -517,7 +507,6 @@ class OrgClaimTaskTool(_OrgLeaderTool):
         result = await self.manager.claim_task(
             task_id=inputs.get("task_id", ""),
             team_id=self.team_id,
-            leader_id=self.leader_id,
         )
         if not result.ok or result.task is None:
             return ToolOutput(success=False, error=result.reason)
@@ -540,7 +529,6 @@ class OrgDelegateTaskTool(_OrgLeaderTool):
             "properties": {
                 "task_id": {"type": "string"},
                 "to_team_id": {"type": "string"},
-                "to_leader_id": {"type": "string"},
             },
             "required": ["task_id", "to_team_id"],
         }
@@ -551,7 +539,6 @@ class OrgDelegateTaskTool(_OrgLeaderTool):
             task_id=inputs.get("task_id", ""),
             from_team_id=self.team_id,
             to_team_id=inputs.get("to_team_id", ""),
-            to_leader_id=inputs.get("to_leader_id"),
         )
         if not result.ok or result.task is None:
             return ToolOutput(success=False, error=result.reason)

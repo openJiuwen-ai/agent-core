@@ -89,7 +89,6 @@ class OrgTaskCreator(BaseModel):
 class OrgAssignment(BaseModel):
     assignment_type: OrgAssignmentType = OrgAssignmentType.UNASSIGNED
     team_id: str | None = None
-    leader_id: str | None = None
     assigned_by_team_id: str | None = None
     assigned_at: int | None = None
 
@@ -235,7 +234,6 @@ class OrgTaskRecord(SQLModel, table=True):
     required_capabilities_json: str | None = None
     assignment_type: str = SQLField(default=OrgAssignmentType.UNASSIGNED.value, index=True)
     assigned_team_id: str | None = SQLField(default=None, index=True)
-    assigned_leader_id: str | None = None
     assigned_by_team_id: str | None = None
     assigned_at: int | None = None
     aggregation_json: str | None = None
