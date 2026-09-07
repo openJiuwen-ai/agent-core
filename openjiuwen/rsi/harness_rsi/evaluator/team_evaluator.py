@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import shutil
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -90,6 +91,7 @@ class TeamEvaluator:
         harness_refs_path: str,
         output_dir: str,
         dataset: DatasetArtifact | None = None,
+        on_case_stage: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> str:
         """Run one batch of cases with fresh Team runtimes and persist artifacts."""
         eval_dir = _prepare_eval_dir(output_dir)
@@ -109,6 +111,7 @@ class TeamEvaluator:
         )
 
         harness_refs = _load_harness_refs(harness_refs_path) if harness_refs_path else {}
+        total_cases = len(cases)
 
         for case_index, case in enumerate(cases, start=1):
             case_id = str(case.get("case_id") or f"case_{case_index:03d}")
@@ -122,6 +125,16 @@ class TeamEvaluator:
 
             retry_history: list[dict[str, Any]] = []
             retry_limit = max(0, int(self.config.transient_case_retry_limit))
+            if on_case_stage is not None:
+                await on_case_stage(
+                    {
+                        "case_index": case_index,
+                        "total_cases": total_cases,
+                        "case_id": case_id,
+                        "status": "running",
+                        "score": None,
+                    }
+                )
             for attempt in range(retry_limit + 1):
                 try:
                     case_ref = await self.case_runner.execute(
@@ -161,6 +174,16 @@ class TeamEvaluator:
                     encoding="utf-8",
                 )
             case_refs.append(case_ref)
+            if on_case_stage is not None:
+                await on_case_stage(
+                    {
+                        "case_index": case_index,
+                        "total_cases": total_cases,
+                        "case_id": case_id,
+                        "status": str(getattr(case_ref, "status", "") or ""),
+                        "score": getattr(case_ref, "score", None),
+                    }
+                )
 
         summary_path = await self.metrics_collector.collect(
             str(case_results_dir),

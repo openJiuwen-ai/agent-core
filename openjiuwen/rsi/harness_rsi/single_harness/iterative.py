@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from typing import Any
 
 import yaml
 
-from openjiuwen.rsi.events import OnEvent, emit
+from openjiuwen.rsi.events import NodeStageEvent, OnEvent, emit
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
 from openjiuwen.rsi.harness_rsi.data_loader import DataLoader, load_json_cases
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
@@ -56,7 +57,10 @@ from openjiuwen.rsi.harness_rsi.schema import (
     EvaluationResultAnalysisInvocation,
 )
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
+    analysis_stage_payload,
+    case_stage_payload,
     epoch_node_event,
+    generate_stage_payload,
     progress_event,
     root_node_event,
 )
@@ -244,6 +248,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 harness_refs_path=source_refs,
                 output_dir=output_dir / "evaluations" / "frozen_baseline",
                 dataset=dataset,
+                node_ref="h0",
+                on_event=on_event,
             )
             _initialize_frozen_baseline(
                 state,
@@ -330,6 +336,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     harness_refs_path=current_refs,
                     output_dir=batch_dir / "source",
                     dataset=dataset,
+                    node_ref="h0",
+                    on_event=on_event,
                 )
                 batch_before_refs = current_refs
                 attempt_records: list[dict[str, Any]] = []
@@ -381,6 +389,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             state,
                             active_cases,
                         ),
+                        on_event=on_event,
                     )
                     hypotheses_ref = compile_optimization_hypotheses(
                         analysis_ref_path=analysis_ref,
@@ -431,6 +440,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         attempt_dir = batch_dir / "attempts" / f"a{attempt_index:03d}"
                         before_attempt_refs = current_refs
                         rejected_capabilities = _rejected_capabilities(state)
+                        await emit(
+                            on_event,
+                            NodeStageEvent(
+                                node_ref="h0",
+                                stage=generate_stage_payload(1, 1, "running"),
+                            ),
+                        )
                         try:
                             member_ref = await model_usage_stage("optimize")(self.member_optimizer.optimize)(
                                 eval_ref_path=attempt_source_eval_ref,
@@ -457,6 +473,19 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                 },
                             )
                         member_info = _read_yaml(member_ref)
+                        generation_error = member_info.get("candidate_generation_error")
+                        await emit(
+                            on_event,
+                            NodeStageEvent(
+                                node_ref="h0",
+                                stage=generate_stage_payload(
+                                    1,
+                                    1,
+                                    "error" if generation_error else "done",
+                                    error=str(generation_error) if generation_error else None,
+                                ),
+                            ),
+                        )
                         candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or before_attempt_refs)
                         capabilities = _candidate_capabilities(member_info)
                         gate = await self._candidate_gate(
@@ -475,6 +504,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                 candidate_index=1,
                             ),
                             dataset=dataset,
+                            node_ref="h0",
+                            on_event=on_event,
                         )
                         if member_info.get("candidate_generation_error"):
                             gate["candidate_generation_error"] = member_info["candidate_generation_error"]
@@ -550,6 +581,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             harness_refs_path=current_refs,
                             output_dir=attempt_dir / "residual_source",
                             dataset=dataset,
+                            node_ref="h0",
+                            on_event=on_event,
                         )
                         residual_eval_refs.append(residual_eval_ref)
                         residual_scores = _eval_case_scores(residual_eval_ref)
@@ -638,6 +671,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 harness_refs_path=current_refs,
                 output_dir=output_dir / "evaluations" / f"e{epoch:03d}" / "full",
                 dataset=dataset,
+                node_ref="h0",
+                on_event=on_event,
             )
             full_score = _eval_score(full_eval_ref)
             epoch_provisional_gates = [
@@ -832,16 +867,41 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         harness_refs_path: str,
         output_dir: Path,
         dataset: DatasetArtifact,
+        node_ref: str = "h0",
+        on_event: OnEvent | None = None,
     ) -> str:
         existing = output_dir / "eval_ref.yaml"
         if _eval_ref_complete(existing):
             return str(existing)
+
+        async def emit_case_stage(payload: dict[str, Any]) -> None:
+            await emit(
+                on_event,
+                NodeStageEvent(
+                    node_ref=node_ref,
+                    stage=case_stage_payload(
+                        int(payload.get("case_index", 0)),
+                        int(payload.get("total_cases", 0)),
+                        str(payload.get("status") or "running"),
+                        case_id=str(payload.get("case_id") or "") or None,
+                        score=payload.get("score"),
+                    ),
+                ),
+            )
+
+        # External benchmark adapters may still implement the original signature.
+        parameters = inspect.signature(self.evaluator.evaluate_batch).parameters
+        supports_stages = "on_case_stage" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
+        stage_kwargs = {"on_case_stage": emit_case_stage} if supports_stages and on_event is not None else {}
         return await self.evaluator.evaluate_batch(
             cases=cases,
             team_skill_ref_path="",
             harness_refs_path=harness_refs_path,
             output_dir=str(output_dir),
             dataset=dataset,
+            **stage_kwargs,
         )
 
     @model_usage_stage("analyze")
@@ -853,6 +913,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         output_dir: Path,
         source_stage: str = "single_harness_batch",
         prior_candidate_feedback: dict[str, Any] | None = None,
+        node_ref: str = "h0",
+        on_event: OnEvent | None = None,
     ) -> str:
         existing = output_dir / "analysis_ref.yaml"
         attempts = [existing, *sorted(output_dir.glob("retry_*/analysis_ref.yaml"))]
@@ -867,19 +929,31 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             while (output_dir / f"retry_{index:03d}").exists():
                 index += 1
             output_dir = output_dir / f"retry_{index:03d}"
-        result = await self.analyzer.analyze(
-            EvaluationResultAnalysisInvocation(
-                eval_ref_path=eval_ref_path,
-                case_results_dir=str(Path(eval_ref_path).parent / "cases"),
-                case_traces_dir=str(Path(eval_ref_path).parent / "cases"),
-                team_skill_ref_path="",
-                harness_refs_path=harness_refs_path,
-                output_dir=str(output_dir),
-                source_stage=source_stage,
-                prior_candidate_feedback=dict(prior_candidate_feedback or {}),
+        await emit(on_event, NodeStageEvent(node_ref=node_ref, stage=analysis_stage_payload("running")))
+        try:
+            result = await self.analyzer.analyze(
+                EvaluationResultAnalysisInvocation(
+                    eval_ref_path=eval_ref_path,
+                    case_results_dir=str(Path(eval_ref_path).parent / "cases"),
+                    case_traces_dir=str(Path(eval_ref_path).parent / "cases"),
+                    team_skill_ref_path="",
+                    harness_refs_path=harness_refs_path,
+                    output_dir=str(output_dir),
+                    source_stage=source_stage,
+                    prior_candidate_feedback=dict(prior_candidate_feedback or {}),
+                )
             )
-        )
-        load_analysis_ref(result).require_usable()
+            load_analysis_ref(result).require_usable()
+        except Exception as exc:
+            await emit(
+                on_event,
+                NodeStageEvent(
+                    node_ref=node_ref,
+                    stage=analysis_stage_payload("error", error=_safe_candidate_error(exc)["message"]),
+                ),
+            )
+            raise
+        await emit(on_event, NodeStageEvent(node_ref=node_ref, stage=analysis_stage_payload("done")))
         return result
 
     async def _candidate_gate(
@@ -895,6 +969,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         output_dir: Path,
         dataset: DatasetArtifact,
         frozen_target_case_ids: set[str] | None = None,
+        node_ref: str | None = None,
+        on_event: OnEvent | None = None,
     ) -> dict[str, Any]:
         original_source_score = _eval_score(source_eval_ref)
         base = {
@@ -969,6 +1045,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 harness_refs_path=candidate_harness_refs_path,
                 output_dir=output_dir,
                 dataset=dataset,
+                node_ref=node_ref or "h0",
+                on_event=on_event,
             )
         except Exception as exc:  # noqa: BLE001 - preserve the public adapter's infrastructure reporting
             return {
@@ -1225,6 +1303,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 output_dir=output_dir / "failure_analysis",
                 source_stage="single_harness_candidate_failure",
                 prior_candidate_feedback=paired_feedback,
+                node_ref=node_ref or "h0",
+                on_event=on_event,
             )
             candidate_failure_diagnoses = _compact_analysis_diagnoses(candidate_failure_analysis_ref)
         return {

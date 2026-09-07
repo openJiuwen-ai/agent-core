@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from openjiuwen.rsi.schema import RsiModelCall, RsiStatus, RsiTreeNode, RsiUsage
 
@@ -73,7 +73,7 @@ class NodeStageEvent:
     """
 
     node_ref: str
-    stage: dict[str, str]
+    stage: dict[str, Any]
     note: str | None = None
     event_type: Literal["node.stage"] = field(default="node.stage", init=False)
 
