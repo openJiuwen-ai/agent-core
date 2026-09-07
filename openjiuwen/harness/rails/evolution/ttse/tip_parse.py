@@ -48,7 +48,7 @@ _GENERIC_ACTIONS: FrozenSet[str] = frozenset(
 # Lightweight anchors that keep a condition from being "too generic".
 _CONDITION_ANCHOR_RE = re.compile(
     r"(\.\w{1,8}\b|"  # file extension
-    r"\b(csv|json|log|xml|yaml|yml|tsv|parquet|grader|benchmark)\b|"
+    r"\b(csv|json|log|xml|yaml|yml|tsv|parquet|api)\b|"
     r"[\\/][\w.\-]+|"  # path fragment
     r"`[^`]+`|"
     r"\b(skill|tool)\b)",

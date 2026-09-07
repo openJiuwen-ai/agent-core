@@ -40,7 +40,7 @@ def render_facts_md(facts: Optional[Sequence[RuleInput]], *, retrieved: bool = F
         (
             "The most relevant confirmed observations for THIS task (retrieved from the full bank). Treat as true."
             if retrieved
-            else "Confirmed observations about this benchmark environment, learned from prior tasks. Treat as true."
+            else "Confirmed observations about what the environment is like, learned from prior tasks. Treat as true."
         ),
         "",
     )

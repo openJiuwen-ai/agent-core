@@ -18,12 +18,18 @@ from dataclasses import dataclass
 FACT_TIP_DEFINITION = """\
 Each rule is either a FACT or a TIP, with DIFFERENT grammatical forms.
 
-A FACT is a DECLARATIVE statement describing a property of THIS benchmark environment
-(the harness, task types, file layouts, what the grader checks, how tools behave here).
-Its subject is the world/things, NOT you. It states how things ARE, with no instruction.
-Examples: "the grader for csv tasks checks exact column names case-sensitively",
-"log_analysis tasks expect output as plain text in answer.txt, not JSON",
-"meeting transcripts are large; read them with grep first, not wholesale".
+A FACT is a DECLARATIVE statement about what the environment is like — a latent
+regularity of the environment that was verified in this trajectory and is stable
+across similar tasks. Typical sources: object/data state, actual API or tool
+semantics, domain constraints. Its subject is the world/things, NOT you.
+It states how things ARE, with no instruction.
+
+A FACT is NOT a restatement of the system prompt, a skill's SKILL.md, or documented
+tool usage. If the knowledge is already written there, do not extract it.
+
+Examples: "objects inside closed containers are not visible until the container is opened",
+"this CRM CSV export uses semicolon delimiters, not commas",
+"the search API silently truncates queries longer than 200 characters".
 A FACT must NOT contain "you should", "must do", or "in order to" — if it does, it's a TIP.
 
 A TIP is a PROCEDURAL rule about what YOU should do, written EXACTLY as:
@@ -40,7 +46,12 @@ Classify with BOTH tests:
 - SUBJECT TEST: about a property of the world -> FACT; about what you do -> TIP.
 - NECESSITY TEST: going against it FAILS the task (hard constraint) -> FACT;
   going against it only makes you slower/suboptimal (soft heuristic) -> TIP.
-When unsure, default to TIP."""
+When unsure, default to TIP.
+
+Do NOT extract:
+- this turn's user request restated as a rule
+- names, secrets, account ids, one-off URLs, or ticket numbers
+- guesses not verified in the trajectory"""
 
 
 @dataclass(frozen=True)
@@ -66,13 +77,14 @@ def induce_prompt(_task_prompt: str, traj_text: str, capabilities: str, bank: Ex
         outcome_lbl = "FAILED COMPLETELY"
         guidance = (
             "This task FAILED. Extract LESSONS: (1) FACTS about the environment that CAUSED "
-            "or contributed to the failure (a tool that errored, a missing file, a grader "
-            "requirement the agent missed) - only verified observations from the trajectory, "
-            "not guesses; (2) TIPs about what the agent SHOULD have done instead, reframing "
-            "the mistake as the correct positive action: 'When <cond>: use <capability> to "
-            "<correct action>'. Do NOT extract the wrong actions themselves as tips."
+            "or contributed to the failure (a tool that errored, a missing file, an "
+            "environmental constraint the agent missed) - only verified observations from "
+            "the trajectory, not guesses; (2) TIPs about what the agent SHOULD have done "
+            "instead, reframing the mistake as the correct positive action: 'When <cond>: "
+            "use <capability> to <correct action>'. Do NOT extract the wrong actions "
+            "themselves as tips."
         )
-    return f"""You are extracting reusable knowledge from an agent task on a benchmark that was {outcome_lbl}.
+    return f"""You are extracting reusable knowledge from an agent task that was {outcome_lbl}.
 
 {FACT_TIP_DEFINITION}
 
@@ -91,6 +103,7 @@ Agent trajectory (USER turn is the task; then what the agent actually did):
 {guidance}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
+Write each rule in the same language as the USER turn.
 Prefer specific, verified observations over vague generalities. Output ONLY new rules,
 each on its own line, prefixed [FACT] or [TIP]:
 [FACT] <declarative fact about this environment>
@@ -118,7 +131,7 @@ def induce_batch_prompt(group, capabilities: str, existing_facts: str, existing_
             f"=== Task {i}/{n} [{tid}] — {lbl} ===\nTrajectory excerpt:\n{traj[:1100]}"
         )
     tasks_block = "\n\n".join(blocks)
-    return f"""You are extracting reusable knowledge from a BATCH of {n} agent tasks on a benchmark.
+    return f"""You are extracting reusable knowledge from a BATCH of {n} agent tasks.
 
 {FACT_TIP_DEFINITION}
 
@@ -135,6 +148,7 @@ The {n} tasks in this batch (outcome + trajectory excerpt each; USER turn is the
 {tasks_block}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
+Write each rule in the same language as the USER turn.
 Prioritize rules that GENERALIZE across tasks. For FAILED tasks, extract the lesson (what
 the environment required or what the agent SHOULD have done), not the wrong action itself.
 
@@ -146,7 +160,7 @@ If you have nothing new, output exactly: NONE
 
 
 BLAME_SYSTEM = (
-    "You are diagnosing why an agent FAILED a benchmark task. The agent had a set of rules "
+    "You are diagnosing why an agent FAILED a task. The agent had a set of rules "
     "(facts/tips) in its context during the task. Attribute the failure to AT MOST ONE rule "
     "that was WRONG or MISLED the agent (caused a wrong action or made it miss the right one). "
     "If no rule is at fault, say NONE. Be strict: only blame a rule you can tie to a concrete "
