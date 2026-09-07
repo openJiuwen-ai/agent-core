@@ -269,7 +269,8 @@ async def test_codex_retry_exhaustion_reports_unknown_upstream_cause():
     assert failure.category == "rate_limited"
     assert failure.reason.sdk_error_code == "responseTooManyFailedAttempts"
     assert "did not provide a specific upstream cause" in failure.summary
-    assert "账户额度" in failure.suggested_action
+    assert "显式触发新的 round" in failure.suggested_action
+    assert "账户额度" not in failure.suggested_action
 
 
 @pytest.mark.asyncio

@@ -71,9 +71,23 @@ def test_renders_external_runtime_failed_as_team_event(_lang):
     assert "http_status=400" in text
     assert "sdk_error_type=SdkError" in text
     assert "sdk_error_code=badRequest" in text
+    assert "user_action_required=True" in text
     assert "CLI 已成功启动" in text
     assert "不得将其诊断为 CLI 未安装" in text
+    assert "已识别到必须由用户或外部系统完成的操作" in text
+    assert "不表示已安排新的 round" in text
     logger.info("rendered: %s", text)
+
+
+def test_false_user_action_is_not_rendered_as_definitive(_lang):
+    text = MessageHandler._render_external_runtime_failed(
+        _Msg(protocol="json", content=_failure_payload(user_action_required=False)),
+    )
+
+    assert text is not None
+    assert "user_action_required=False" in text
+    assert "尚未识别到必须由用户完成的操作" in text
+    assert "后续仍可能需要用户介入" in text
 
 
 def test_non_json_returns_none(_lang):
@@ -111,6 +125,8 @@ def test_english_render(_lang):
     assert "model gpt-effective" in text
     assert "http_status=400" in text
     assert "CLI started successfully" in text
+    assert "identified an action that the user or an external system must complete" in text
+    assert "does not mean a new round was scheduled" in text
 
 
 def test_missing_model_renders_unknown_for_backward_compatibility(_lang):
