@@ -234,11 +234,12 @@ def break_cycles(
     edges: list[tuple[str, str, str]],
     stats: dict[tuple[str, str, str], EdgeStats],
 ) -> list[tuple[str, str, str]]:
-    """按 support 升序移除弱边直到无环（确定性环拆除）。"""
+    """按 support 升序移除环上的弱边直到无环（确定性环拆除）。
 
-    adjacency: dict[str, list[str]] = defaultdict(list)
-    for source, target, _relation in edges:
-        adjacency[source].append(target)
+    仅删除真正位于有向环上的边：对候选边 source→target，若删除后
+    target 仍可达 source，则该边在环上（删除后仍构成环），需要移除。
+    环外的树状边不受影响。support 相同时按边元组排序保证确定性。
+    """
 
     def has_cycle(edge_list: list[tuple[str, str, str]]) -> bool:
         graph: dict[str, list[str]] = defaultdict(list)
@@ -262,17 +263,35 @@ def break_cycles(
 
         return any(visit(node) for node in list(graph))
 
-    candidates = sorted(
-        edges,
-        key=lambda item: (stats[item].support, item),
-    )
+    def on_cycle(edge: tuple[str, str, str], edge_list: list[tuple[str, str, str]]) -> bool:
+        """edge 是否位于有向环上：删除后 target 仍可达 source。"""
+
+        source, target, _relation = edge
+        graph: dict[str, list[str]] = defaultdict(list)
+        for src, dst, _rel in edge_list:
+            if (src, dst, _rel) != edge:
+                graph[src].append(dst)
+        # target 可达 source ⟺ 存在路径 source→target→...→source（自环已覆盖）
+        reachable: set[str] = set()
+        pending = [target]
+        while pending:
+            node = pending.pop()
+            if node in reachable:
+                continue
+            reachable.add(node)
+            pending.extend(graph.get(node, []))
+        return source in reachable
+
     kept = list(edges)
-    for candidate in candidates:
-        if not kept:
+    while has_cycle(kept):
+        # 候选顺序：support 升序、同 support 按边元组排序（确定性）
+        candidates = sorted(
+            (edge for edge in kept if on_cycle(edge, kept)),
+            key=lambda item: (stats[item].support, item),
+        )
+        if not candidates:
             break
-        trial = [edge for edge in kept if edge != candidate]
-        if has_cycle(trial):
-            kept = trial
+        kept.remove(candidates[0])
     return kept
 
 

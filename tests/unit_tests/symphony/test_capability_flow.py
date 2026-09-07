@@ -21,7 +21,12 @@ from openjiuwen.symphony.flow.codegen import (
     validate_generated_script,
     validate_meta_name,
 )
-from openjiuwen.symphony.flow.distill import normalize_execution_graph
+from openjiuwen.symphony.flow.distill import (
+    EdgeStats,
+    break_cycles,
+    normalize_execution_graph,
+    topological_order,
+)
 from openjiuwen.symphony.orchestration import SymphonyFlowConfig
 
 
@@ -469,3 +474,82 @@ def test_team_subagent_nodes_keep_capability_type() -> None:
     assert evidence is not None
     assert evidence.graph["nodes"]["leader"]["metadata"]["capability_type"] == "subagent"
     assert evidence.graph["nodes"]["writer"]["metadata"]["capability_type"] == "subagent"
+
+
+def _stats(support: int) -> EdgeStats:
+    return EdgeStats(support=support, success=support)
+
+
+def test_break_cycles_removes_weakest_edge_on_ring() -> None:
+    """纯环输入：拆除一条环边后必须无环，且拓扑序覆盖全部成员。"""
+
+    edges = [("A", "B", "r"), ("B", "C", "r"), ("C", "A", "r")]
+    stats = {edge: _stats(5) for edge in edges}
+
+    kept = break_cycles(edges, stats)
+
+    assert len(kept) == 2
+    # 同 support 按边元组排序：删除 ("A", "B", "r")
+    assert ("A", "B", "r") not in kept
+    pack = {
+        "nodes": {node: {} for node in ("A", "B", "C")},
+        "edges": [{"source": src, "target": dst} for src, dst, _ in kept],
+    }
+    assert sorted(topological_order(pack)) == ["A", "B", "C"]
+
+
+def test_break_cycles_keeps_tree_edges_outside_ring() -> None:
+    """环外树边不参与拆环：即使 support 最低也不能被误删。"""
+
+    edges = [("A", "B", "r"), ("B", "C", "r"), ("C", "A", "r"), ("D", "E", "r")]
+    stats = {
+        ("A", "B", "r"): _stats(5),
+        ("B", "C", "r"): _stats(5),
+        ("C", "A", "r"): _stats(5),
+        ("D", "E", "r"): _stats(1),
+    }
+
+    kept = break_cycles(edges, stats)
+
+    assert ("D", "E", "r") in kept
+    assert len(kept) == 3
+
+
+def test_break_cycles_removes_self_loop() -> None:
+    kept = break_cycles([("A", "A", "r")], {("A", "A", "r"): _stats(5)})
+
+    assert kept == []
+
+
+def test_break_cycles_handles_multiple_rings_by_support() -> None:
+    """8 字双环：每个环各拆一条 support 最低的环边。"""
+
+    edges = [
+        ("A", "B", "r"),
+        ("B", "C", "r"),
+        ("C", "A", "r"),
+        ("C", "D", "r"),
+        ("D", "E", "r"),
+        ("E", "C", "r"),
+    ]
+    stats = {
+        ("A", "B", "r"): _stats(9),
+        ("B", "C", "r"): _stats(9),
+        ("C", "A", "r"): _stats(2),
+        ("C", "D", "r"): _stats(9),
+        ("D", "E", "r"): _stats(9),
+        ("E", "C", "r"): _stats(1),
+    }
+
+    kept = break_cycles(edges, stats)
+
+    # 环1 拆 C→A（support=2），环2 拆 E→C（support=1），公共边 B→C 保留
+    assert ("C", "A", "r") not in kept
+    assert ("E", "C", "r") not in kept
+    assert len(kept) == 4
+
+
+def test_break_cycles_acyclic_input_unchanged() -> None:
+    edges = [("A", "B", "r"), ("B", "C", "r")]
+
+    assert break_cycles(edges, {edge: _stats(5) for edge in edges}) == edges
