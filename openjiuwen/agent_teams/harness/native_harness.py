@@ -1225,12 +1225,12 @@ class NativeHarness(DeepAgent):
             kept: list[tuple[Any, InterruptResumeKind]] = []
             for f, kind in tagged_follow_ups:
                 follow_up_ids = set(f.user_inputs) if isinstance(f, InteractiveInput) else set()
-                if (
+                is_consumed_tool_resume = (
                     kind == "tool"
-                    and follow_up_ids
+                    and bool(follow_up_ids)
                     and follow_up_ids.issubset(active.tool_resume_scope_ids)
-                    and not self._interrupt_resume_still_pending(f, session)
-                ):
+                )
+                if is_consumed_tool_resume and not self._interrupt_resume_still_pending(f, session):
                     continue
                 kept.append((f, kind))
             tagged_follow_ups = kept or None
