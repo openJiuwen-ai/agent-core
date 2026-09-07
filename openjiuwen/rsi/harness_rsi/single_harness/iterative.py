@@ -65,6 +65,7 @@ from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     progress_event,
     root_node_event,
 )
+from openjiuwen.rsi.usage import ModelUsageObserver, bind_model_usage, model_usage_stage, set_usage_node
 
 _ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail"]
 _ALLOWED_PROMPT_SURFACES = ["prompt_section"]
@@ -160,6 +161,29 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         *,
         on_event: OnEvent | None = None,
     ) -> IterativeSingleHarnessResult:
+        async with ModelUsageObserver(on_event).observe() as observer:
+            try:
+                return await self._run(request, on_event=on_event)
+            finally:
+                # Include interrupted calls even when the controller aborts.
+                # The call ledger is the reconciliation source after a crash.
+                await observer.finish_pending()
+                if observer.state is not None:
+                    directory = Path(request.output_dir).expanduser().resolve()
+                    _write_yaml_atomic(directory / "single_harness_state.yaml", observer.state)
+                    report_path = directory / "single_harness_report.yaml"
+                    if report_path.is_file():
+                        report = _read_yaml(report_path)
+                        report["usage"] = observer.state.get("usage")
+                        report["model_calls_path"] = observer.state.get("model_calls_path", "")
+                        _write_yaml_atomic(report_path, report)
+
+    async def _run(
+        self,
+        request: IterativeSingleHarnessRequest,
+        *,
+        on_event: OnEvent | None = None,
+    ) -> IterativeSingleHarnessResult:
         output_dir = Path(request.output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         state_path = output_dir / "single_harness_state.yaml"
@@ -194,6 +218,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             if stored_task_id != request.task_id:
                 raise ValueError("resume task_id does not match single-harness state")
         state["task_id"] = request.task_id or stored_task_id
+        await bind_model_usage(state, output_dir)
         state["improver_policy"] = {
             "version_id": self.improver_policy.version_id,
             "policy_digest": self.improver_policy.canonical_digest,
@@ -255,6 +280,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             epoch_start_retained_case_ids = set(working_retained_case_ids)
             if all_case_ids <= working_retained_case_ids:
                 break
+            set_usage_node(f"epoch-{epoch:03d}")
             if callable(getattr(type(self.data_loader), "load_files", None)):
                 planned_batches = list(self.data_loader.load_files(request.dataset_files, epoch=epoch))
             else:
@@ -1018,6 +1044,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         _write_yaml_atomic(report_path, _build_report(state, dataset))
         return _result_from_state(state, state_path, report_path)
 
+    @model_usage_stage("evaluate")
     async def _evaluate(
         self,
         *,
@@ -1037,6 +1064,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
         )
 
+    @model_usage_stage("analyze")
     async def _analyze(
         self,
         *,
@@ -1074,6 +1102,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         load_analysis_ref(result).require_usable()
         return result
 
+    @model_usage_stage("optimize")
     async def _generate_sibling_candidate_proposals(
         self,
         *,
@@ -4523,6 +4552,8 @@ def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, 
         "status": state["status"],
         "max_iteration": state.get("max_iteration"),
         "iteration": len(state["epoch_checkpoints"]),
+        "usage": state.get("usage"),
+        "model_calls_path": state.get("model_calls_path", ""),
         "dataset_id": dataset.dataset_id,
         "dataset_cases": dataset.cases,
         "allowed_action_groups": state["allowed_action_groups"],

@@ -54,11 +54,11 @@ class ArtifactValidationResult:
 
 @dataclass(frozen=True, slots=True)
 class RsiUsageTokens:
-    """Cumulative token counters for one optimization task."""
+    """Provider token counters; ``None`` means the counter was not reported."""
 
-    input: int
-    output: int
-    cache_hit: int
+    input: int | None
+    output: int | None
+    cache_hit: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +66,19 @@ class RsiUsage:
     """Cumulative model and optimization-engine usage."""
 
     tokens: RsiUsageTokens
-    cost_estimate: float
+    cost_estimate: float | None
     call_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RsiModelCall:
+    """One completed model request, without prompts or credentials."""
+
+    model: str
+    call_count: int
+    tokens: RsiUsageTokens
+    status: Literal["succeeded", "failed", "incomplete"] = "succeeded"
+    duration_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +180,7 @@ __all__ = [
     "EngineResult",
     "EngineState",
     "RsiChange",
+    "RsiModelCall",
     "RsiScenario",
     "RsiStatus",
     "RsiTaskCreateRequest",

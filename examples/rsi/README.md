@@ -45,6 +45,61 @@ Harness differs from the evaluated version, its node has no score until that
 exact version is evaluated. The AgentServer HTTP handler is maintained by the
 caller; this repository provides the engine request and event contract.
 
+## Model calls and token usage
+
+The same `on_event` callback additionally receives `EventUsage`
+(`event_type="progress.usage"`, `family="progress"`, `kind="usage"`). Existing
+progress/node event shapes and the epoch/batch optimization algorithm are unchanged.
+Pass the service's `task_id` in `IterativeSingleHarnessRequest` for attribution.
+
+| Field | Meaning |
+| --- | --- |
+| `task_id`, `ts`, `event_id` | Task identity, UTC timestamp, increasing usage-record sequence |
+| `call_id` | Stable request id; deduplicate by `(task_id, call_id)` |
+| `node_ref` | `h0` for the baseline; `epoch-001`, etc. for an iteration |
+| `stage_ref` | `evaluate`, `judge`, `analyze`, or `optimize` |
+| `model_call.model`, `call_count` | Model name and one call, not a stage total |
+| `model_call.tokens` | `input`, `output`, `cache_hit` raw provider counters |
+| `model_call.status`, `duration_ms` | `succeeded`/`failed`/`incomplete` and elapsed time |
+
+```python
+from dataclasses import asdict
+from openjiuwen.rsi.events import EventUsage
+
+async def on_event(event):
+    if isinstance(event, EventUsage):
+        await usage_recorder.record(asdict(event))  # service-owned persistence/push
+    else:
+        await handle_existing_engine_event(event)
+```
+
+`EventProgress.usage`, `single_harness_state.yaml` and the final report contain
+the cumulative snapshot. Do not add that snapshot to the per-call deltas again.
+The adjacent `model_calls.jsonl` retains each delta before callback delivery.
+Resume restores totals without re-emitting old deltas; the service can reconcile
+missed deliveries from that ledger using `call_id`, not the debug sequence.
+An iteration reference can appear in usage before its completed tree node arrives.
+Runs created before this instrumentation have no recoverable historical counters;
+resuming them records only new calls, not an estimate for their old work.
+
+Unknown provider counters are `null`, not zero. A cumulative counter is also
+`null` if any contributing call omitted it; known per-call counters remain in
+the ledger. Cache hits are a subset of input, and reasoning tokens are already
+part of output: neither is added a second time. `cost_estimate` stays `null`;
+pricing belongs to the service. Failed observed requests count as calls even if
+the provider returns no usage. Streaming chunks do not increment call count.
+SDK-internal HTTP retries that emit no core callback cannot be counted separately.
+No prompts, responses, API keys, endpoint URLs or raw exceptions enter these events.
+
+Automatic capture covers in-process core `Model` calls, including Task Agent,
+Analyzer, Improver and an LLM Judge. External evaluators (WSL/E2B subprocesses or
+independent SDK clients) must report their own per-call usage to the parent with
+`openjiuwen.rsi.usage.record_model_usage(model=..., call_id=..., usage=...,
+stage_ref="judge")`. Their calls are not silently inferred from scores or trace
+text. The standalone Evo-Bench subprocess currently does not export these deltas,
+so its Task Agent/Judge usage is **not included** until that adapter implements
+the hook. Deterministic test-based judges make no model calls.
+
 ## Diagnosis and candidate generation
 
 The Harness engine uses the migrated experiment-side diagnosis flow: a bounded,

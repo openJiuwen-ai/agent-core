@@ -11,6 +11,7 @@ from typing import Any
 
 from openjiuwen.rsi.events import EventNode, EventProgress
 from openjiuwen.rsi.schema import RsiChange, RsiTreeNode
+from openjiuwen.rsi.usage import usage_snapshot
 
 _PROVISIONAL_STATUSES = {"provisional"}
 
@@ -27,7 +28,7 @@ def progress_event(
         total_iterations=max(0, int(total_iterations)),
         score=_number(state.get("best_score")),
         baseline=_number(state.get("baseline_score")),
-        usage=None,
+        usage=usage_snapshot(state.get("usage")),
     )
 
 

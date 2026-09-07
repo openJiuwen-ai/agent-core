@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
-from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress
+from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress, EventUsage
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
@@ -48,6 +48,7 @@ from openjiuwen.rsi.harness_rsi.single_harness.iterative import (
     _tool_names_match,
     _validate_and_filter_planned_batches,
 )
+from openjiuwen.rsi.usage import record_model_usage
 
 
 def test_failed_route_cannot_consume_budget_reserved_for_queued_alternative() -> None:
@@ -63,6 +64,74 @@ def test_failed_route_cannot_consume_budget_reserved_for_queued_alternative() ->
         remaining_attempt_budget=None,
         remaining_sibling_count=3,
     )
+
+
+def test_run_emits_stage_usage_and_resume_does_not_recharge_cached_work(tmp_path: Path) -> None:
+    events: list[EngineEvent] = []
+
+    async def charge(model: str, stage_ref: str | None = None) -> None:
+        await record_model_usage(
+            model=model,
+            call_id=f"{model}-{len(events)}",
+            usage={"input_tokens": 5, "output_tokens": 2, "cache_read_tokens": 0},
+            stage_ref=stage_ref,
+        )
+
+    class Evaluator(_Evaluator):
+        async def evaluate_batch(self, **kwargs):
+            await charge("task-model")
+            await charge("judge-model", "judge")
+            return await super().evaluate_batch(**kwargs)
+
+    class Analyzer(_Analyzer):
+        async def analyze(self, invocation):
+            await charge("analysis-model")
+            return await super().analyze(invocation)
+
+    class Optimizer(_MemberOptimizer):
+        async def optimize(self, **kwargs):
+            await charge("optimization-model")
+            return await super().optimize(**kwargs)
+
+    async def sink(event):
+        events.append(event)
+
+    dataset = tmp_path / "cases.json"
+    dataset.write_text(json.dumps({"cases": [{"case_id": "one", "input": "fix"}]}), encoding="utf-8")
+    refs = tmp_path / "refs.yaml"
+    _write_yaml(refs, {"harness_refs": {"solver": "baseline"}})
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+        ),
+        evaluator=Evaluator(),
+        analyzer=Analyzer(),
+        member_optimizer=Optimizer(),
+    )
+    arguments = dict(
+        dataset_files=[str(dataset)],
+        harness_refs_path=str(refs),
+        output_dir=str(tmp_path / "run"),
+        task_id="usage-run",
+    )
+    result = asyncio.run(orchestrator.run(IterativeSingleHarnessRequest(**arguments), on_event=sink))
+    calls = [event for event in events if isinstance(event, EventUsage)]
+    assert calls
+    assert {event.stage_ref for event in calls} == {"evaluate", "judge", "analyze", "optimize"}
+    assert {event.node_ref for event in calls} == {"epoch-001"}
+    report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    assert report["usage"] == state["usage"]
+    assert state["usage"]["call_count"] == len(calls)
+    assert state["usage"]["tokens"]["input"] == len(calls) * 5
+    assert [event for event in events if isinstance(event, EventProgress)][-1].usage.call_count == len(calls)
+    assert report["best_score"] == 1.0
+    count = len(events)
+    asyncio.run(orchestrator.run(IterativeSingleHarnessRequest(**arguments, resume=True), on_event=sink))
+    assert len(events) == count
+    assert yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))["usage"] == state["usage"]
 
 
 def test_realized_action_without_predicted_outcome_refutes_hypothesis() -> None:
