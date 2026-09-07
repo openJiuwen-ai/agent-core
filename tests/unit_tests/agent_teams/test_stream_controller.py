@@ -639,6 +639,137 @@ async def test_cancel_discards_pending_interrupt_resumes_and_drain_task(
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+@pytest.mark.parametrize(
+    ("method_name", "immediate"),
+    [("cancel_agent", True), ("cooperative_cancel", False)],
+)
+async def test_cancel_unblocks_production_interrupt_drain_before_abort(
+    method_name: str,
+    immediate: bool,
+) -> None:
+    """Cancel must not wait behind the drain lock before forwarding abort."""
+    runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    send_started = asyncio.Event()
+    block_send = asyncio.Event()
+
+    async def blocked_send(content: Any, *, immediate: bool = False) -> None:
+        runtime.sent.append((content, immediate))
+        send_started.set()
+        await block_send.wait()
+
+    runtime.send = blocked_send
+    sc = _make_controller(runtime)
+    approval = object()
+    sc._pending_interrupt_resumes.append(approval)
+    drain = asyncio.create_task(sc._drain_pending_interrupt_resumes())
+    sc._drain_task = drain
+    await asyncio.wait_for(send_started.wait(), timeout=1.0)
+    assert sc._interrupt_lock.locked()
+
+    cancel_task = asyncio.create_task(getattr(sc, method_name)())
+    try:
+        done, _ = await asyncio.wait({cancel_task}, timeout=0.5)
+        assert cancel_task in done
+        await cancel_task
+        assert runtime.abort_calls == [immediate]
+        assert drain.cancelled()
+        assert sc._drain_task is None
+        assert sc._pending_interrupt_resumes == []
+    finally:
+        block_send.set()
+        drain.cancel()
+        cancel_task.cancel()
+        await asyncio.gather(drain, cancel_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stop_unblocks_production_interrupt_drain_without_abort() -> None:
+    """Lifecycle stop detaches the drain but retains its non-abort contract."""
+    runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    send_started = asyncio.Event()
+    block_send = asyncio.Event()
+
+    async def blocked_send(content: Any, *, immediate: bool = False) -> None:
+        runtime.sent.append((content, immediate))
+        send_started.set()
+        await block_send.wait()
+
+    runtime.send = blocked_send
+    sc = _make_controller(runtime)
+    sc._pending_interrupt_resumes.append(object())
+    drain = asyncio.create_task(sc._drain_pending_interrupt_resumes())
+    sc._drain_task = drain
+    await asyncio.wait_for(send_started.wait(), timeout=1.0)
+
+    stop_task = asyncio.create_task(sc.stop())
+    try:
+        await asyncio.wait_for(stop_task, timeout=0.5)
+        assert drain.cancelled()
+        assert sc._drain_task is None
+        assert sc._pending_interrupt_resumes == []
+        assert runtime.abort_calls == []
+    finally:
+        block_send.set()
+        drain.cancel()
+        stop_task.cancel()
+        await asyncio.gather(drain, stop_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_propagates_caller_cancellation_after_detaching_drain() -> None:
+    """A caller cancel is not hidden by the post-abort cleanup pass."""
+    runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    send_started = asyncio.Event()
+    block_send = asyncio.Event()
+    abort_started = asyncio.Event()
+    block_abort = asyncio.Event()
+
+    async def blocked_send(content: Any, *, immediate: bool = False) -> None:
+        runtime.sent.append((content, immediate))
+        send_started.set()
+        await block_send.wait()
+
+    async def blocked_abort(*, immediate: bool = False) -> None:
+        runtime.abort_calls.append(immediate)
+        abort_started.set()
+        await block_abort.wait()
+
+    runtime.send = blocked_send
+    runtime.abort = blocked_abort
+    sc = _make_controller(runtime)
+    sc._pending_interrupt_resumes.append(object())
+    drain = asyncio.create_task(sc._drain_pending_interrupt_resumes())
+    sc._drain_task = drain
+    await asyncio.wait_for(send_started.wait(), timeout=1.0)
+
+    cancel_task = asyncio.create_task(sc.cancel_agent())
+    try:
+        await asyncio.wait_for(abort_started.wait(), timeout=0.5)
+        cancel_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(cancel_task, timeout=0.5)
+        assert runtime.abort_calls == [True]
+        assert drain.cancelled()
+        assert sc._drain_task is None
+        assert sc._pending_interrupt_resumes == []
+    finally:
+        block_send.set()
+        block_abort.set()
+        drain.cancel()
+        cancel_task.cancel()
+        await asyncio.gather(drain, cancel_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_cancel_finally_discards_resumes_queued_during_failed_abort() -> None:
     """Post-abort cleanup runs even when abort raises after a queue race."""
     runtime = _FakeRuntime()
