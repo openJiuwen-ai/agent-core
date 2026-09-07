@@ -91,6 +91,10 @@ class _BackendCallResult:
         raw_text:      The LLM's original text reply before coercion — used as
                        ``outcome`` in ``AGENT_COMPLETED`` progress events.
         tokens:        Tokens billed by this call (``AgentResult.tokens``); ``None`` on skip / failure.
+        attempts:      Attempts actually spent when the call failed — the loop can
+                       short-circuit (skip / budget fail-fast) before using all
+                       ``rt.retries + 1``; ``None`` when no attempt ran (e.g. a
+                       spawn-limit rejection before the backend call).
     """
 
     result: Any = None
@@ -98,6 +102,7 @@ class _BackendCallResult:
     error_detail: str | None = None
     raw_text: str | None = None
     tokens: int | None = None
+    attempts: int | None = None
 
 
 def _task_id():
@@ -592,9 +597,10 @@ async def agent(
         )
 
     if not call_result.succeeded:
-        attempts = rt.retries + 1
         label = opts.get("label") or "agent"
-        msg = f"agent {label!r} failed after {attempts} attempts"
+        msg = f"agent {label!r} failed"
+        if call_result.attempts is not None and call_result.attempts > 1:
+            msg = f"{msg} after {call_result.attempts} attempts"
         if call_result.error_detail:
             msg = f"{msg}: {call_result.error_detail}"
         _emit_agent_failed(
@@ -682,7 +688,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                     f"{str(e)}; no retry — {ex[1]}"
                 )
                 return _BackendCallResult(
-                    result=None, succeeded=False, error_detail=ex[1],
+                    result=None, succeeded=False, error_detail=ex[1], attempts=attempt,
                     tokens=burned_tokens if burned_tokens > 0 else None,
                 )
             rt.log_sink(
@@ -698,7 +704,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         if res.skipped:
             detail = "backend declined (skipped)"
             rt.log_sink(f"[wf] agent {label!r} skipped")
-            return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
+            return _BackendCallResult(result=None, succeeded=False, error_detail=detail, attempts=attempt)
         if json_schema is not None:
             try:
                 coerced = coerce(res.structured, json_schema, model)
@@ -718,7 +724,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
     return _BackendCallResult(
-        result=None, succeeded=False, error_detail=detail,
+        result=None, succeeded=False, error_detail=detail, attempts=attempts,
         tokens=burned_tokens if burned_tokens > 0 else None,
     )
 
@@ -1103,10 +1109,11 @@ class AgentSession:
             )
             call_result = await self._drive(rt, req)
             if not call_result.succeeded:
-                attempts = rt.retries + 1
                 who = "human" if self._human else "agent"
                 label = opts.get("label") or who
-                msg = f"{who} session {label!r} failed after {attempts} attempts"
+                msg = f"{who} session {label!r} failed"
+                if call_result.attempts is not None and call_result.attempts > 1:
+                    msg = f"{msg} after {call_result.attempts} attempts"
                 if call_result.error_detail:
                     msg = f"{msg}: {call_result.error_detail}"
                 _emit_agent_failed(
