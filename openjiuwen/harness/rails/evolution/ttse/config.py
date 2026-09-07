@@ -44,12 +44,12 @@ class TTSEConfig:
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
             Overflow keeps the tail (actions/observations), not the USER head.
         inject_enabled: Inject the bank (or top-K) into the system prompt.
-        inject_mode: Where FACT/TIP land. Default ``legacy_system`` keeps the
-            current P:45 body (no behavior change). ``disk_catalog`` leaves a
+        inject_mode: Where FACT/TIP land. Default ``disk_catalog`` leaves a
             fixed guidance section, trails the category listing as a prompt
             attachment, and exposes ``ttse_consult(category=)`` for FACT/TIP.
-            ``trailing_attach`` is accepted but currently falls back to
-            ``legacy_system``.
+            ``legacy_system`` keeps the P:45 body (FACT/TIP dumped into the
+            system prompt). ``trailing_attach`` is accepted but currently
+            falls back to ``legacy_system``.
         evolve_enabled: Run induction after each task to grow the bank.
         success_threshold: Score >= this counts as success (Slice 3 gating).
         induce_llm_policy: LLM invocation policy for induce/blame/synthesize.
@@ -75,7 +75,7 @@ class TTSEConfig:
     top_k_tips: int = 10
     traj_char_budget: int = 9000
     inject_enabled: bool = True
-    inject_mode: str = "legacy_system"
+    inject_mode: str = "disk_catalog"
     evolve_enabled: bool = True
     success_threshold: float = 0.999
     induce_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY

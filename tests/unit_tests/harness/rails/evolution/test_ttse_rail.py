@@ -76,13 +76,15 @@ class ScriptedLLM:
 def _make_rail(tmp_path, llm, *, cfg=None, success_detector=None) -> TTSERail:
     """Induce/blame regression helper: inject TrajectoryErrorSuccessDetector by default.
 
-    Production default is SignalBasedSuccessDetector; existing rail tests rely on
-    ``ttse_score`` / no-error defaults from TrajectoryErrorSuccessDetector.
+    Production default is SignalBasedSuccessDetector + ``disk_catalog``. Existing
+    rail tests rely on ``ttse_score`` / no-error defaults and pin
+    ``legacy_system`` so classify LLM calls do not pollute induce/blame counts.
     """
     return TTSERail(
         llm=llm,
         model="dummy-model",
-        ttse_config=cfg or TTSEConfig(store_path=str(tmp_path / "bank.json")),
+        ttse_config=cfg
+        or TTSEConfig(store_path=str(tmp_path / "bank.json"), inject_mode="legacy_system"),
         success_detector=success_detector
         if success_detector is not None
         else TrajectoryErrorSuccessDetector(),
@@ -522,7 +524,9 @@ async def test_induce_batch_parses_rules():
 async def test_rail_batch_induce_amortizes_to_one_call(tmp_path):
     """With batch_size=2, two tasks induce via a SINGLE LLM call."""
     llm = ScriptedLLM(lambda p: "[FACT] batch fact" if "BATCH" in p else "NONE")
-    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), batch_size=2)
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "b.json"), batch_size=2, inject_mode="legacy_system"
+    )
     rail = _make_rail(tmp_path, llm, cfg=cfg)
     snap = {
         "messages": [{"role": "user", "content": "q"}],
@@ -549,7 +553,9 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
         return "NONE"
 
     llm = ScriptedLLM(handler)
-    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), batch_size=2)
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "b.json"), batch_size=2, inject_mode="legacy_system"
+    )
     rail = _make_rail(tmp_path, llm, cfg=cfg)
     await rail._ttse_store.add_fact("F1 bad fact")
     await rail._ttse_store.add_fact("F2 keeper")
@@ -576,7 +582,9 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
 @pytest.mark.asyncio
 async def test_rail_flush_induces_partial_buffer(tmp_path):
     llm = ScriptedLLM(lambda p: "[FACT] flushed fact" if "BATCH" in p else "NONE")
-    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), batch_size=5)
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "b.json"), batch_size=5, inject_mode="legacy_system"
+    )
     rail = _make_rail(tmp_path, llm, cfg=cfg)
     snap = {
         "messages": [{"role": "user", "content": "q"}],
@@ -885,12 +893,18 @@ def test_detect_tool_error_signals_skips_data_fetch_tools():
 
 
 # ----------------------------------------------------------------------
-# disk_catalog: guidance section, post-write classify, consult (opt-in)
+# disk_catalog: default inject_mode (guidance section, post-write classify, consult)
 # ----------------------------------------------------------------------
 
 
+def test_default_inject_mode_is_disk_catalog():
+    cfg = TTSEConfig()
+    assert cfg.inject_mode == "disk_catalog"
+    assert cfg.is_disk_catalog() is True
+
+
 def _disk_catalog_cfg(tmp_path) -> TTSEConfig:
-    return TTSEConfig(store_path=str(tmp_path / "bank.json"), inject_mode="disk_catalog")
+    return TTSEConfig(store_path=str(tmp_path / "bank.json"))
 
 
 @pytest.mark.asyncio
@@ -918,7 +932,11 @@ async def test_disk_catalog_injects_guidance_not_rule_body(tmp_path):
 @pytest.mark.asyncio
 async def test_legacy_mode_does_not_classify_after_induce(tmp_path):
     llm = ScriptedLLM(lambda p: "[FACT] success fact" if "extracting" in p else "NONE")
-    rail = _make_rail(tmp_path, llm)
+    rail = _make_rail(
+        tmp_path,
+        llm,
+        cfg=TTSEConfig(store_path=str(tmp_path / "bank.json"), inject_mode="legacy_system"),
+    )
     snap = {
         "messages": [{"role": "user", "content": "do task"}, {"role": "assistant", "content": "done"}],
         "ttse_capabilities": "- grep",
