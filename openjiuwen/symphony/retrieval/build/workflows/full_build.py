@@ -3,12 +3,18 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Dict, Sequence
 
 from openjiuwen.symphony.retrieval.build.models import TREE_INDEX_FILENAME
 from openjiuwen.symphony.retrieval.build.scanners import create_scanner, normalize_item_type
 from openjiuwen.symphony.retrieval.build.tree import DynamicTreeConfig, TreeBuildConfig, TreeManagerConfig
+from openjiuwen.symphony.retrieval.build.tree.one_shot import (
+    OneShotSkill,
+    OneShotSkillTreeBuilder,
+    OneShotTreeBuildConfig,
+)
 from openjiuwen.symphony.retrieval.build.tree.schema import normalize_root_categories
 from openjiuwen.symphony.retrieval.build.workflows.item_sources import ResolvedItemPath, resolve_materialized_item_paths
 from openjiuwen.symphony.retrieval.build.workflows.output_writer import unlink_if_exists, write_index_outputs
@@ -114,15 +120,16 @@ class _IndexBuildWorkflow:
     ) -> dict:
         if can_build_tree_with_llm(self._config):
             LOGGER.info(
-                "tree llm runtime | workers=%s | timeout_seconds=%s | classify_batch_cap=%s",
-                self._config.tree_max_workers,
+                "tree llm runtime | method=%s | timeout_seconds=%s",
+                "one-shot" if self._item_type == "skill" else "recursive",
                 self._config.tree_timeout_seconds,
-                self._config.tree_classify_batch_cap,
             )
             with timer.phase("build_tree_llm"):
                 from openjiuwen.symphony.retrieval.build.workflows import index_builder as public_module
 
                 try:
+                    if self._item_type == "skill":
+                        return self._build_one_shot_tree(aggregate_dir, pre_scanned_skills)
                     return public_module.build_tree(
                         skills_dir=aggregate_dir,
                         output_path=tree_output_path,
@@ -161,6 +168,55 @@ class _IndexBuildWorkflow:
             if pre_scanned_skills is None:
                 return {"nodes": build_fallback_tree_nodes(aggregate_dir=aggregate_dir)}
             return {"nodes": self._fallback_tree_nodes_from_scanned(pre_scanned_skills)}
+
+    def _build_one_shot_tree(self, aggregate_dir: Path, pre_scanned_skills: Dict[str, dict] | None) -> dict:
+        entries = (
+            list(pre_scanned_skills.values())
+            if pre_scanned_skills is not None
+            else create_scanner("skill", aggregate_dir).to_dict_list()
+        )
+        skills = [
+            OneShotSkill(
+                name=str(item.get("name") or item["id"]),
+                description=str(item.get("description") or ""),
+                worker_id=str(item["id"]),
+                skill_path=str(item.get("path") or ""),
+            )
+            for item in entries
+        ]
+        with ExitStack() as stack:
+            client = self._config.llm_openai_client
+            if client is None:
+                from openai import OpenAI
+
+                client = stack.enter_context(
+                    OpenAI(
+                        api_key=self._config.tree_llm_api_key,
+                        base_url=self._config.tree_llm_base_url or None,
+                        max_retries=0,
+                    )
+                )
+            result = OneShotSkillTreeBuilder(
+                client=client,
+                model=self._config.llm_model,
+                config=OneShotTreeBuildConfig(
+                    max_depth=self._config.tree_max_depth,
+                    max_output_tokens=self._config.tree_max_output_tokens or OneShotTreeBuildConfig.max_output_tokens,
+                    timeout_seconds=self._config.tree_timeout_seconds,
+                    seed=self._config.llm_seed,
+                ),
+            ).build(skills)
+        LOGGER.info(
+            "one-shot tree built | skills=%s | llm_calls=%s | prompt_tokens=%s | completion_tokens=%s "
+            "| total_tokens=%s | elapsed_seconds=%.3f",
+            len(skills),
+            result.llm_calls,
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.total_tokens,
+            result.elapsed_seconds,
+        )
+        return result.tree_preset
 
     def _write_outputs(
         self,

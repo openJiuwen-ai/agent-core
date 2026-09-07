@@ -88,6 +88,7 @@ class OneShotTreeBuildConfig:
     max_output_tokens: int = 32768
     timeout_seconds: float = 420.0
     reasoning_effort: str | None = None
+    seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_depth < 1:
@@ -200,6 +201,8 @@ class OneShotSkillTreeBuilder:
         }
         if self.config.reasoning_effort:
             request["reasoning_effort"] = self.config.reasoning_effort
+        if self.config.seed is not None:
+            request["extra_body"]["seed"] = self.config.seed
         response = self.client.chat.completions.create(**request)
         choice = response.choices[0]
         if getattr(choice, "finish_reason", None) == "length":
