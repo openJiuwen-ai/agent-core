@@ -8,12 +8,18 @@ instead of adding benchmark runtimes to RSI.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import (
     EvaluationJudger,
     JudgeResult,
     _reference_answer,
+)
+from openjiuwen.rsi.harness_rsi.evaluator.swebench_runtime import (
+    SWEbenchInfrastructureError,
+    collect_model_patch,
+    run_official_swebench_evaluation,
 )
 
 if TYPE_CHECKING:
@@ -36,11 +42,12 @@ class ScriptBasedJudger(EvaluationJudger):
         execution_result: CaseExecutionResult,
         output_dir: str = "",
     ) -> JudgeResult:
-        del output_dir
         if execution_result.execution_status != "passed":
             return self._failure_result(execution_result.error)
         if execution_result.judge_result is not None:
             return execution_result.judge_result
+        if isinstance(case.get("swebench"), dict):
+            return _judge_swebench(case=case, execution_result=execution_result, output_dir=output_dir)
 
         expected = _reference_answer(case)
         if expected is None:
@@ -61,3 +68,75 @@ class ScriptBasedJudger(EvaluationJudger):
 
 
 __all__ = ["ScriptBasedJudger"]
+
+
+def _judge_swebench(
+    *,
+    case: dict[str, Any],
+    execution_result: CaseExecutionResult,
+    output_dir: str,
+) -> JudgeResult:
+    workspace_dir = Path(execution_result.workspace_dir).expanduser().resolve()
+    try:
+        model_patch = _load_swebench_model_patch(
+            execution_result=execution_result,
+            workspace_dir=workspace_dir,
+        )
+        patch_path = Path(output_dir).expanduser().resolve() / "verifier" / "model.patch"
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(model_patch, encoding="utf-8")
+        if not model_patch.strip():
+            return JudgeResult(
+                method="swebench_official",
+                score=0.0,
+                passed=False,
+                reason="official SWE-bench evaluation received an empty model patch",
+                metadata={
+                    "model_patch_path": str(patch_path),
+                    "model_patch_chars": 0,
+                    "empty_patch": True,
+                },
+            )
+        result = run_official_swebench_evaluation(
+            case=case,
+            model_patch=model_patch,
+            output_dir=Path(output_dir),
+        )
+        metadata = dict(result)
+        metadata.pop("passed", None)
+        metadata.pop("score", None)
+        metadata.pop("reason", None)
+        metadata["model_patch_path"] = str(patch_path)
+        metadata["model_patch_chars"] = len(model_patch)
+        return JudgeResult(
+            method="swebench_official",
+            score=float(result["score"]),
+            passed=bool(result["passed"]),
+            reason=str(result["reason"]),
+            metadata=metadata,
+        )
+    except SWEbenchInfrastructureError:
+        raise
+    except Exception as exc:
+        return JudgeResult(
+            method="swebench_official",
+            score=0.0,
+            passed=False,
+            reason=str(exc),
+            metadata={"model_patch_chars": 0},
+        )
+
+
+def _load_swebench_model_patch(
+    *,
+    execution_result: CaseExecutionResult,
+    workspace_dir: Path,
+) -> str:
+    """Load the patch captured in Linux before falling back to the host checkout."""
+    captured_path = str((execution_result.metadata or {}).get("swebench_model_patch_path", "")).strip()
+    if not captured_path:
+        return collect_model_patch(workspace_dir)
+    try:
+        return Path(captured_path).expanduser().resolve().read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SWEbenchInfrastructureError(f"failed to read captured SWE-bench patch: {captured_path}: {exc}") from exc

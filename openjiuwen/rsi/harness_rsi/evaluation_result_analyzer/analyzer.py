@@ -168,8 +168,10 @@ not additions to the original task requirements.
 - prior_candidate_feedback compares the same case's Source and Candidate.
   Preserve newly passing checks, inspect regressions and still-failing checks,
   and revise a mechanism contradicted by this experiment. Do not re-diagnose
-  only checks the candidate already fixed or claim a zero task score means
-  that no individual behavior improved.
+  checks that remain passing in the current evaluation or claim a zero task
+  score means that no individual behavior improved. Historical success does
+  not establish success in a later execution; diagnose current failures even
+  when an earlier candidate passed the same check.
 - Judge quality gaps are failure leads, not automatically proven causal facts.
   verification_gap describes missing evaluator confidence; it is not by itself
   a member defect. Missing or unreadable trace/artifact evidence is an analysis
@@ -544,8 +546,8 @@ def _build_diagnosis_input_json(
         "prior_candidate_feedback_policy": (
             "Treat paired official test deltas as authoritative experiment "
             "evidence. Preserve newly passing operations. Diagnose newly regressed "
-            "checks first, then remaining failures, and do not emit a diagnosis "
-            "covering only checks already fixed by the candidate. Candidate "
+            "checks first, then remaining failures. A historical candidate win "
+            "does not override failure or missing output in the current evaluation. Candidate "
             "diagnoses are hypotheses unless the verifier delta independently "
             "supports them."
         ),
@@ -974,9 +976,8 @@ def _normalize_case_diagnoses(
     """Expand one model response into bounded, independent diagnoses.
 
     New responses use ``{"diagnoses": [...]}``; a legacy single diagnosis object
-    remains valid. Candidate feedback is used deterministically so regressions and
-    residual failures cannot be displaced by already-fixed checks when the model
-    returns more than the per-case limit.
+    remains valid. Historical feedback prioritizes regressions and residual
+    failures within the per-case limit; it cannot veto a current diagnosis.
     """
     raw_diagnoses = parsed.get("diagnoses")
     if raw_diagnoses is None:
@@ -996,12 +997,10 @@ def _normalize_case_diagnoses(
             continue
         if failure_cluster:
             diagnosis["failure_cluster"] = failure_cluster
-        priority, fixed_only = _diagnosis_feedback_priority(
+        priority = _diagnosis_feedback_priority(
             diagnosis,
             feedback_sets=feedback_sets,
         )
-        if fixed_only:
-            continue
         ranked.append((priority, index, diagnosis))
 
     normalized: list[dict[str, Any]] = []
@@ -1066,18 +1065,20 @@ def _diagnosis_feedback_priority(
     diagnosis: dict[str, Any],
     *,
     feedback_sets: dict[str, set[str]],
-) -> tuple[int, bool]:
+) -> int:
     checks = {
         _normalize_cluster_text(value)
         for value in _diagnosis_failed_checks(diagnosis)
         if _normalize_cluster_text(value)
     }
     if checks & feedback_sets["regressed"]:
-        return 0, False
+        return 0
     if checks & feedback_sets["remaining"]:
-        return 1, False
-    fixed_only = bool(checks and checks <= feedback_sets["fixed"])
-    return 2, fixed_only
+        return 1
+    # A prior win is not evidence that a later execution still passes.
+    if checks and checks <= feedback_sets["fixed"]:
+        return 3
+    return 2
 
 
 def _diagnosis_failure_cluster(diagnosis: dict[str, Any]) -> dict[str, Any]:
@@ -1323,6 +1324,9 @@ def _diagnosis_unavailable_result(
     if isinstance(exc, _DiagnosisOutputFormatError):
         error_type = "output_format"
         mechanism = "The diagnosis model exhausted bounded JSON-format repair."
+    elif isinstance(exc, _DiagnosisContentError):
+        error_type = "diagnosis_content"
+        mechanism = "Valid JSON contained no usable diagnosis entries after bounded repair."
     elif isinstance(exc, DiagnosisAgentExecutionError):
         error_type = "agent_runtime"
         mechanism = "Diagnosis agent execution failed before completing an answer."
@@ -2302,12 +2306,16 @@ def _unusable_diagnosis_output_error(
     """Classify exhausted malformed output without hiding permanent failures."""
     latest = next((value for value in reversed(outputs) if value), "")
     excerpt = _truncate_text(latest, 256)
+    if _contains_model_service_error_text(latest):
+        return ValueError(f"per-case diagnosis output contained a model-service error for {case_id}: {excerpt}")
+    if _extract_json_object(latest) is not None:
+        return _DiagnosisContentError(
+            f"per-case diagnosis output contained JSON but no usable diagnosis entries for {case_id}: {excerpt}"
+        )
     if any(_contains_incomplete_json_object(value) for value in outputs):
         return RetryableModelOutputError(
             f"per-case diagnosis output remained incomplete JSON after repair for {case_id}: {excerpt}"
         )
-    if _contains_model_service_error_text(latest):
-        return ValueError(f"per-case diagnosis output contained a model-service error for {case_id}: {excerpt}")
     return _DiagnosisOutputFormatError(f"per-case diagnosis output did not contain JSON for {case_id}: {excerpt}")
 
 
@@ -2644,7 +2652,7 @@ class DiagnosisAgentStrategy:
                     for index, diagnosis in enumerate(diagnoses, start=1)
                 ]
             except Exception as exc:
-                if isinstance(exc, (_DiagnosisOutputFormatError, DiagnosisAgentExecutionError)):
+                if isinstance(exc, (_DiagnosisOutputFormatError, _DiagnosisContentError, DiagnosisAgentExecutionError)):
                     logger.warning(
                         "per-case diagnosis unavailable for %s: %s",
                         case.case_id,
@@ -2745,7 +2753,14 @@ async def _run_agent(
 
 def _build_json_repair_prompt(original_prompt: str, previous_output: str) -> str:
     """Build a second-pass prompt that repairs format without changing evidence."""
-    return f"""Previous diagnosis output was not valid JSON.
+    problem = (
+        "Previous diagnosis output contained JSON but no usable diagnosis entries. "
+        "Provide a diagnoses list of objects grounded in the current evidence; "
+        "use target_ref=unassigned when the cause is unsupported."
+        if _extract_json_object(previous_output) is not None
+        else "Previous diagnosis output was not valid JSON."
+    )
+    return f"""{problem}
 
 You must convert the diagnosis into the required single valid JSON object.
 Do not include Markdown, prose, analysis notes, or text before/after the JSON.
@@ -2754,7 +2769,7 @@ Preserve the original task evidence and target_ref semantics from the original p
 Original diagnosis prompt:
 {_truncate_text(original_prompt, 6000)}
 
-Previous invalid output:
+Previous output:
 {_truncate_text(previous_output, 2000)}
 
 Return only the single valid JSON object required by the original prompt.
@@ -3071,3 +3086,7 @@ def is_team_coordinator_role(*values: str | None) -> bool:
     return any(
         (value or "").strip().lower().replace("-", "_").replace(" ", "_") in _COORDINATOR_ROLE_KEYS for value in values
     )
+
+
+class _DiagnosisContentError(ValueError):
+    """Parsed JSON contains no usable diagnosis after bounded content repair."""

@@ -26,6 +26,15 @@ from openjiuwen.rsi.harness_rsi.evaluator.controlled_skill_treatment_rail import
     ControlledSkillTreatmentRail,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.judger import JudgeResult
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.swebench_runtime import prepare_swebench_workspace
+from openjiuwen.rsi.harness_rsi.evaluator.terminal_bench_runtime import (
+    TerminalBenchCommandRecorder,
+    build_terminal_bench_sys_operation,
+    remove_terminal_bench_container,
+    start_terminal_bench_solver_container,
+    sync_container_git_patch_to_workspace,
+)
 from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
     RSISkillUseRail,
     RSISysOperationRail,
@@ -38,6 +47,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     load_member_optimizer_model,
 )
+from openjiuwen.rsi.harness_rsi.runtime_reliability import build_single_agent_reliability_rail
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +114,9 @@ class SingleHarnessExecutionBackend:
         workspace_after: dict[str, dict[str, Any]] = {}
         controlled_skill_treatment: ControlledSkillTreatmentRail | None = None
         skill_use_rails: list[Any] = []
+        solver_container_name = ""
+        command_recorder: TerminalBenchCommandRecorder | None = None
+        swebench_model_patch_path = ""
 
         try:
             role_name, harness_path = _resolve_single_harness_ref(harness_refs or {})
@@ -112,11 +125,41 @@ class SingleHarnessExecutionBackend:
                 output_dir=Path(output_dir).expanduser().resolve(),
                 session_id=session_id,
             )
-            _prepare_single_harness_workspace(case, workspace_dir)
+            swebench = case.get("swebench")
+            sys_operation = None
+            if isinstance(swebench, dict):
+                timeout_sec = int(float(swebench.get("timeout_sec") or 1800))
+                image = prepare_swebench_workspace(
+                    case=case,
+                    workspace_dir=workspace_dir,
+                    timeout_sec=timeout_sec,
+                )
+                command_recorder = TerminalBenchCommandRecorder()
+                solver_container_name = start_terminal_bench_solver_container(
+                    docker_image=image,
+                    case_id=str(case.get("case_id") or session_id),
+                    workspace_dir=workspace_dir,
+                    timeout_sec=timeout_sec,
+                    container_workspace_dir="/testbed",
+                    mount_workspace=False,
+                )
+                sys_operation = build_terminal_bench_sys_operation(
+                    sys_operation_id=f"sweb_single_{session_id}",
+                    container_name=solver_container_name,
+                    workspace_dir=workspace_dir,
+                    recorder=command_recorder,
+                    container_workspace_dir="/testbed",
+                    clean_shell=True,
+                    runtime_environment=_swebench_testbed_environment(),
+                    enforce_in_container_timeout=True,
+                )
+            else:
+                _prepare_single_harness_workspace(case, workspace_dir)
             workspace_before = _snapshot_workspace(workspace_dir)
             model = load_member_optimizer_model(self.config.model_config_ref)
             agent_rails = _single_harness_rails(
                 team_skill_ref_path,
+                shell_only=bool(solver_container_name),
                 controlled_skill_name=_controlled_skill_name(case),
             )
             controlled_skill_treatment = next(
@@ -139,7 +182,7 @@ class SingleHarnessExecutionBackend:
                 language="en",
                 restrict_to_work_dir=False,
                 auto_create_workspace=True,
-                sys_operation=None,
+                sys_operation=sys_operation,
             )
             await Runner.start()
             started = True
@@ -156,6 +199,8 @@ class SingleHarnessExecutionBackend:
                 # selector receives only task text and Skill metadata.
                 skill_rail.list_skill_model = model
                 skill_rail.trigger_at_task_start = True
+            if solver_container_name:
+                _enforce_container_sys_operation_rail(agent)
             _attach_single_harness_trajectory_rail(
                 agent,
                 output_dir=output_dir,
@@ -168,13 +213,34 @@ class SingleHarnessExecutionBackend:
                 {"query": _case_inputs(case)},
                 session=session_id,
             )
+        except EvaluationInfrastructureError:
+            status = "failed"
+            raise
         except Exception as exc:
             status = "failed"
             error = str(exc)
         finally:
+            if solver_container_name:
+                try:
+                    model_patch = sync_container_git_patch_to_workspace(
+                        container_name=solver_container_name,
+                        workspace_dir=workspace_dir,
+                        container_workspace_dir="/testbed",
+                    )
+                    patch_path = Path(output_dir).expanduser().resolve() / "verifier" / "container_model.patch"
+                    patch_path.parent.mkdir(parents=True, exist_ok=True)
+                    patch_path.write_text(model_patch, encoding="utf-8")
+                    swebench_model_patch_path = str(patch_path)
+                except Exception as exc:
+                    status = "failed"
+                    error = f"failed to sync SWE-bench solver workspace: {exc}"
             workspace_after = _snapshot_workspace(workspace_dir)
-            if started:
-                await Runner.stop()
+            try:
+                if started:
+                    await Runner.stop()
+            finally:
+                if solver_container_name:
+                    remove_terminal_bench_container(solver_container_name)
 
         logger.info("[SingleHarnessExecutionBackend] end to execute case: {}".format(case.get("case_id", "")))
         return CaseExecutionResult(
@@ -192,11 +258,24 @@ class SingleHarnessExecutionBackend:
                     controlled_skill_treatment.evidence() if controlled_skill_treatment is not None else None
                 ),
                 skill_triggers=[rail.task_trigger_evidence() for rail in skill_use_rails],
+                command_recorder=command_recorder,
+                swebench_model_patch_path=swebench_model_patch_path,
             ),
         )
 
     async def cleanup(self, team_name: str, session_id: str) -> None:
         """No-op cleanup; this backend starts and stops Runner inside execute()."""
+
+
+def _enforce_container_sys_operation_rail(agent: Any) -> None:
+    """Keep workspace edits in the solver container after Plugin loading."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+    from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
+
+    for skill_rail in agent.find_rails_by_type((SkillUseRail,)):
+        skill_rail.include_tools = False
+    agent.strip_rails_by_type((SysOperationRail,))
+    agent.add_rail(RSISysOperationRail(shell_only=True, bash_pipefail=True))
 
 
 def _attach_single_harness_trajectory_rail(
@@ -231,7 +310,8 @@ def _single_harness_rails(
         RSISysOperationRail(
             shell_only=shell_only,
             bash_pipefail=shell_only,
-        )
+        ),
+        build_single_agent_reliability_rail(),
     ]
     if controlled_skill_name:
         rails.append(ControlledSkillTreatmentRail(controlled_skill_name))
@@ -316,8 +396,15 @@ def _artifact_files_from_value(value: Any) -> list[str]:
 
 
 def _normalize_case_input_for_backend(case: dict[str, Any], value: Any) -> Any:
-    """Return case input unchanged; external adapters own environment hints."""
-    del case
+    """Expose the container workspace without altering the stored task input."""
+    if isinstance(case.get("swebench"), dict) and isinstance(value, str):
+        return (
+            "Execution environment: the repository is mounted at "
+            "`/testbed` inside the task container. Shell commands already run there. "
+            "Use `bash` for repository file inspection and edits; do not guess another path or "
+            "use host filesystem tools.\n\n"
+            f"{value}"
+        )
     return value
 
 
@@ -349,11 +436,14 @@ def _single_harness_workspace_dir(
     output_dir: Path,
     session_id: str,
 ) -> Path:
-    has_external_workspace = bool(str(case.get("workspace_source_dir", "") or "").strip())
+    has_external_workspace = bool(
+        str(case.get("workspace_source_dir", "") or "").strip() or isinstance(case.get("swebench"), dict)
+    )
     if os.name != "nt" or not has_external_workspace:
         return output_dir / "workspace"
-    runtime_root = Path(".local/rsi/single_harness_runtime").resolve()
-    safe_session = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in session_id)
+    runtime_root = Path(".local/w").resolve()
+    workspace_key = f"{output_dir.resolve()}\0{session_id}"
+    safe_session = hashlib.sha256(workspace_key.encode("utf-8")).hexdigest()[:16]
     return runtime_root / safe_session
 
 
@@ -443,6 +533,8 @@ def _single_harness_metadata(
     team_skill_ref_path: str | Path | None,
     controlled_skill_treatment: dict[str, Any] | None = None,
     skill_triggers: list[dict[str, Any]] | None = None,
+    command_recorder: TerminalBenchCommandRecorder | None = None,
+    swebench_model_patch_path: str = "",
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "member_id": role_name,
@@ -456,6 +548,10 @@ def _single_harness_metadata(
         metadata["controlled_skill_treatment"] = controlled_skill_treatment
     if skill_triggers:
         metadata["skill_triggers"] = [dict(item) for item in skill_triggers]
+    if command_recorder is not None:
+        metadata["command_log"] = command_recorder.to_list()
+    if swebench_model_patch_path:
+        metadata["swebench_model_patch_path"] = swebench_model_patch_path
     return metadata
 
 
@@ -576,3 +672,21 @@ __all__ = [
     "SingleHarnessExecutionBackend",
     "build_backend",
 ]
+
+
+def _swebench_testbed_environment() -> dict[str, str]:
+    """Use the image's testbed interpreter without running conda activation.
+
+    SWE-bench images activate this environment from login-shell profiles.
+    Replaying that profile for every tool call is both expensive and capable
+    of leaving conda activation processes behind when a docker exec times out.
+    """
+    return {
+        "CONDA_DEFAULT_ENV": "testbed",
+        "CONDA_PREFIX": "/opt/miniconda3/envs/testbed",
+        "PATH": (
+            "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        ),
+        "PYTHONNOUSERSITE": "1",
+    }

@@ -55,11 +55,6 @@ from openjiuwen.rsi.harness_rsi.schema import (
     DatasetArtifact,
     EvaluationResultAnalysisInvocation,
 )
-from openjiuwen.rsi.harness_rsi.single_harness.candidate_feedback import (
-    build_candidate_feedback_cohort,
-    canonical_candidate_fingerprint,
-    rank_candidate_proposals,
-)
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     epoch_node_event,
     progress_event,
@@ -133,6 +128,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             )
         if not config.scheduling.full_evaluation_enabled:
             raise ValueError("iterative single-harness optimization requires the epoch full checkpoint")
+        if config.member_optimizer.sibling_candidate_count != 1 or config.member_optimizer.improver_policy_ref:
+            raise ValueError("single-harness optimization requires one candidate and no improver evolution policy")
         restricted_member_config = replace(
             config.member_optimizer,
             action_group_configs=list(_ALLOWED_ACTION_GROUPS),
@@ -343,44 +340,48 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 hypotheses_ref = ""
                 analysis_refs: list[str] = []
                 hypotheses_refs: list[str] = []
-                residual_eval_refs: list[str] = []
-                attempted_issue_signatures: set[str] = set()
-                max_issue_attempts = int(self.config.member_optimizer.max_issue_attempts_per_batch)
-                max_repair_rounds = int(self.config.member_optimizer.max_repair_rounds_per_batch)
-                attempt_index = 0
-                issue_attempt_count = 0
-                analysis_round_index = 0
                 last_analysis_issue_count = 0
                 last_optimization_hypothesis_count = 0
+                residual_eval_refs: list[str] = []
+                attempted_issue_ids: set[str] = set()
+                attempted_issue_signatures: set[str] = set()
+                max_repair_rounds = max(
+                    1,
+                    int(self.config.member_optimizer.max_repair_rounds_per_batch),
+                )
+                attempt_index = 0
+                analysis_round_index = 0
                 repair_stop_reason = "repair_round_limit_reached"
-                current_repair_round = 1
-                repair_resume_contexts: list[dict[str, Any]] = []
                 attempt_source_eval_ref = source_eval_ref
-                active_cases = _cases_with_ids(batch, _nonpassing_case_ids(source_eval_ref))
-                pending_analysis_ref = ""
+                source_case_scores = _eval_case_scores(source_eval_ref)
+                _sync_retained_case_ids(
+                    working_retained_case_ids,
+                    source_case_scores,
+                )
+                active_cases = _cases_with_ids(
+                    batch,
+                    _nonpassing_case_ids(source_eval_ref),
+                )
 
-                while active_cases:
+                while active_cases and attempt_index < max_repair_rounds:
                     analysis_round_index += 1
                     analysis_dir = (
                         batch_dir / "analysis"
                         if analysis_round_index == 1
                         else batch_dir / "residual_analyses" / f"r{analysis_round_index:03d}"
                     )
-                    if pending_analysis_ref:
-                        analysis_ref = pending_analysis_ref
-                        pending_analysis_ref = ""
-                    else:
-                        analysis_ref = await self._analyze(
-                            eval_ref_path=attempt_source_eval_ref,
-                            harness_refs_path=current_refs,
-                            output_dir=analysis_dir,
-                            source_stage=(
-                                "single_harness_batch"
-                                if analysis_round_index == 1
-                                else "single_harness_residual_repair"
-                            ),
-                            prior_candidate_feedback=_prior_candidate_feedback(state, active_cases),
-                        )
+                    analysis_ref = await self._analyze(
+                        eval_ref_path=attempt_source_eval_ref,
+                        harness_refs_path=current_refs,
+                        output_dir=analysis_dir,
+                        source_stage=(
+                            "single_harness_batch" if analysis_round_index == 1 else "single_harness_residual_repair"
+                        ),
+                        prior_candidate_feedback=_prior_candidate_feedback(
+                            state,
+                            active_cases,
+                        ),
+                    )
                     hypotheses_ref = compile_optimization_hypotheses(
                         analysis_ref_path=analysis_ref,
                         cases=active_cases,
@@ -393,8 +394,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     issue_signatures = _analysis_issue_signatures(analysis_ref)
                     last_analysis_issue_count = len(issue_case_ids)
                     last_optimization_hypothesis_count = len(hypotheses)
+                    if not issue_case_ids or not hypotheses:
+                        repair_stop_reason = (
+                            "no_actionable_analysis_issues" if not issue_case_ids else "no_executable_hypotheses"
+                        )
+                        break
                     nonpassing_case_ids = _nonpassing_case_ids(attempt_source_eval_ref)
-                    issue_queue: list[tuple[str, str]] = []
+                    issue_queue: list[tuple[str | None, str]] = []
                     repeated_issue_ids: list[str] = []
                     known_issue_signatures = set(attempted_issue_signatures)
                     for hypothesis in hypotheses:
@@ -402,297 +408,145 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         if not issue_id:
                             continue
                         target_case_ids = issue_case_ids.get(issue_id, set())
-                        if not target_case_ids or not (target_case_ids & nonpassing_case_ids):
+                        if target_case_ids and not (target_case_ids & nonpassing_case_ids):
                             continue
                         signature = issue_signatures.get(issue_id, issue_id)
-                        if signature in known_issue_signatures:
+                        if issue_id in attempted_issue_ids or signature in known_issue_signatures:
                             repeated_issue_ids.append(issue_id)
                             continue
                         issue_queue.append((issue_id, signature))
                         known_issue_signatures.add(signature)
                     if not issue_queue:
-                        if repair_resume_contexts:
-                            resume = repair_resume_contexts.pop()
-                            current_refs = str(resume["harness_refs_path"])
-                            attempt_source_eval_ref = str(resume["eval_ref_path"])
-                            pending_analysis_ref = str(resume["analysis_ref_path"])
-                            active_cases = list(resume["active_cases"])
-                            current_repair_round = int(resume["repair_round_index"])
-                            continue
-                        if repeated_issue_ids:
-                            repair_stop_reason = "repeated_issue_detected"
-                        elif not issue_case_ids:
-                            repair_stop_reason = "no_actionable_analysis_issues"
-                        elif not hypotheses:
-                            repair_stop_reason = "no_executable_hypotheses"
-                        else:
-                            repair_stop_reason = "no_applicable_hypotheses_for_active_cases"
+                        repair_stop_reason = "repeated_issue_detected" if repeated_issue_ids else "no_residual_issues"
                         break
 
                     refresh_residual_analysis = False
-                    issue_budget_exhausted = False
-                    repair_budget_exhausted = False
-                    deferred_repairs: list[dict[str, Any]] = []
-                    for issue_queue_index, (issue_id, issue_signature) in enumerate(issue_queue):
-                        if max_issue_attempts and issue_attempt_count >= max_issue_attempts:
-                            issue_budget_exhausted = True
+                    for issue_id, issue_signature in issue_queue:
+                        if attempt_index >= max_repair_rounds:
                             break
                         attempt_index += 1
-                        issue_attempt_count += 1
+                        if issue_id:
+                            attempted_issue_ids.add(issue_id)
                         attempted_issue_signatures.add(issue_signature)
                         attempt_dir = batch_dir / "attempts" / f"a{attempt_index:03d}"
                         before_attempt_refs = current_refs
-                        frozen_target_case_ids = set(issue_case_ids.get(issue_id, set()))
-                        frozen_target_case_ids &= nonpassing_case_ids
-                        if not frozen_target_case_ids:
-                            continue
-                        cohort_id = _improvement_cohort_id(
-                            epoch=epoch,
-                            batch_index=batch_index,
-                            repair_round_index=current_repair_round,
-                            issue_signature=issue_signature,
-                            parent_harness_refs_path=before_attempt_refs,
-                            source_eval_ref_path=attempt_source_eval_ref,
-                            analysis_ref_path=analysis_ref,
-                            frozen_target_case_ids=frozen_target_case_ids,
-                            improver_policy_digest=self.improver_policy.canonical_digest,
-                        )
-                        frozen_experience = {
-                            "journal": list(state.get("optimization_journal", [])),
-                            "lever_scoreboard": dict(state.get("lever_scoreboard", {})),
-                        }
-                        proposals, cohort_manifest_path = await self._generate_sibling_candidate_proposals(
-                            cohort_id=cohort_id,
+                        rejected_capabilities = _rejected_capabilities(state)
+                        try:
+                            member_ref = await model_usage_stage("optimize")(self.member_optimizer.optimize)(
+                                eval_ref_path=attempt_source_eval_ref,
+                                analysis_result_path=analysis_ref,
+                                harness_refs_path=before_attempt_refs,
+                                output_dir=str(output_dir / "member_optimizations"),
+                                defer_publish=True,
+                                rejected_capabilities=rejected_capabilities,
+                                single_harness=True,
+                                optimization_hypotheses_path=hypotheses_ref,
+                                optimization_issue_ids=([issue_id] if issue_id else None),
+                                optimization_experience={
+                                    "journal": list(state.get("optimization_journal", [])),
+                                    "lever_scoreboard": dict(state.get("lever_scoreboard", {})),
+                                },
+                            )
+                        except Exception as exc:  # noqa: BLE001 - report failed generation without fabricating a candidate
+                            member_ref = str(attempt_dir / "generation_error.yaml")
+                            _write_yaml_atomic(
+                                Path(member_ref),
+                                {
+                                    "status": "generation_error",
+                                    "candidate_generation_error": _safe_candidate_error(exc),
+                                },
+                            )
+                        member_info = _read_yaml(member_ref)
+                        candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or before_attempt_refs)
+                        capabilities = _candidate_capabilities(member_info)
+                        gate = await self._candidate_gate(
+                            cases=active_cases,
                             source_eval_ref=attempt_source_eval_ref,
                             analysis_ref=analysis_ref,
-                            parent_harness_refs_path=before_attempt_refs,
-                            optimization_hypotheses_path=hypotheses_ref,
-                            source_issue_id=issue_id,
-                            source_issue_signature=issue_signature,
-                            frozen_target_case_ids=frozen_target_case_ids,
-                            frozen_experience=frozen_experience,
-                            rejected_capabilities=_rejected_capability_history(state["candidate_gates"]),
-                            output_dir=output_dir,
+                            before_harness_refs_path=before_attempt_refs,
+                            candidate_harness_refs_path=candidate_refs,
+                            member_status=str(member_info.get("status", "") or ""),
+                            capabilities=capabilities,
+                            output_dir=_candidate_evaluation_output_dir(
+                                optimization_output_dir=output_dir,
+                                epoch=epoch,
+                                batch_index=batch_index,
+                                attempt_index=attempt_index,
+                                candidate_index=1,
+                            ),
+                            dataset=dataset,
                         )
-                        _verify_frozen_candidate_proposals(proposals)
-                        sibling_gates: list[dict[str, Any]] = []
-                        for proposal in proposals:
-                            candidate_id = str(proposal.get("candidate_id", "") or "")
-                            candidate_index = int(proposal.get("candidate_index", 0) or 0)
-                            candidate_refs = str(proposal.get("candidate_harness_refs_path", "") or before_attempt_refs)
-                            gate = await self._candidate_gate(
-                                cases=active_cases,
-                                source_eval_ref=attempt_source_eval_ref,
-                                analysis_ref=analysis_ref,
-                                before_harness_refs_path=before_attempt_refs,
-                                candidate_harness_refs_path=candidate_refs,
-                                member_status=str(proposal.get("member_status", "") or ""),
-                                capabilities=[
-                                    dict(item) for item in proposal.get("capabilities", []) if isinstance(item, dict)
-                                ],
-                                causal_intervention_contracts=[
-                                    dict(item)
-                                    for item in proposal.get("causal_intervention_contracts", [])
-                                    if isinstance(item, dict)
-                                ],
-                                output_dir=_candidate_evaluation_output_dir(
-                                    optimization_output_dir=output_dir,
-                                    epoch=epoch,
-                                    batch_index=batch_index,
-                                    attempt_index=attempt_index,
-                                    candidate_index=candidate_index,
-                                ),
-                                dataset=dataset,
-                                frozen_target_case_ids=frozen_target_case_ids,
-                            )
-                            primary_accepted = bool(gate["accepted"])
-                            gate.update(
-                                {
-                                    "epoch": epoch,
-                                    "batch_index": batch_index,
-                                    "batch_attempt_index": attempt_index,
-                                    "repair_round_index": current_repair_round,
-                                    "analysis_round_index": analysis_round_index,
-                                    "improvement_cohort_id": cohort_id,
-                                    "cohort_manifest_path": cohort_manifest_path,
-                                    "candidate_id": candidate_id,
-                                    "candidate_index": candidate_index,
-                                    "candidate_fingerprint": str(proposal.get("candidate_fingerprint", "") or ""),
-                                    "predicted_score": _number(proposal.get("predicted_score")),
-                                    "predicted_rank": int(proposal.get("predicted_rank", 0) or 0),
-                                    "ranking_policy": str(proposal.get("ranking_policy", "") or ""),
-                                    "ranking_features": (
-                                        dict(proposal.get("ranking_features", {}))
-                                        if isinstance(proposal.get("ranking_features"), dict)
-                                        else {}
-                                    ),
-                                    "improver_version_id": str(proposal.get("improver_version_id", "") or ""),
-                                    "improver_policy_digest": str(proposal.get("improver_policy_digest", "") or ""),
-                                    "rank_frozen": bool(proposal.get("rank_frozen")),
-                                    "rank_frozen_before_evaluation": True,
-                                    "source_issue_id": issue_id or "",
-                                    "source_issue_signature": issue_signature,
-                                    "member_optimization_ref_path": str(
-                                        proposal.get("member_optimization_ref_path", "") or ""
-                                    ),
-                                    "candidate_generation_error": (
-                                        dict(proposal.get("generation_error", {}))
-                                        if isinstance(proposal.get("generation_error"), dict)
-                                        else {}
-                                    ),
-                                    "composition_mode": str(proposal.get("composition_mode", "") or ""),
-                                    "primary_gate_accepted": primary_accepted,
-                                    "primary_gate_reason": str(gate.get("reason", "")),
-                                    "qualified_for_promotion": primary_accepted,
-                                    "selected_for_promotion": False,
-                                    "evaluation_input_mode": "original_task",
-                                }
-                            )
-                            sibling_gates.append(gate)
-
-                        selection_top_m = min(
-                            int(self.improver_policy.budget_policy["top_m"]),
-                            len(sibling_gates),
-                        )
-                        for gate in sibling_gates:
-                            within_budget = int(gate.get("predicted_rank", 0) or 0) <= selection_top_m
-                            gate["selection_top_m"] = selection_top_m
-                            gate["within_selection_budget"] = within_budget
-                            gate["selection_budget_role"] = "counterfactual_metric_only"
-                            gate["qualified_for_promotion"] = bool(gate.get("primary_gate_accepted"))
-                        winner = _select_sibling_winner(sibling_gates)
-                        winner_id = str((winner or {}).get("candidate_id", "") or "")
-                        winner_attempt_record: dict[str, Any] | None = None
-                        for gate in sibling_gates:
-                            selected = bool(winner_id) and gate.get("candidate_id") == winner_id
-                            gate["selected_for_promotion"] = selected
-                            if selected:
-                                gate["status"] = "provisional"
-                                gate["reason"] = "candidate_passed_batch_gate_pending_epoch_checkpoint"
-                            elif gate.get("primary_gate_accepted"):
-                                gate["accepted"] = False
-                                gate["status"] = "superseded"
-                                gate["reason"] = "qualified_sibling_not_selected"
-                            member_ref = str(gate.get("member_optimization_ref_path", "") or "")
-                            candidate_refs = str(gate.get("candidate_harness_refs_path", "") or "")
-                            _persist_promotion(
-                                member_ref,
-                                (candidate_refs if candidate_refs != before_attempt_refs else ""),
-                                gate,
-                            )
-                            state["candidate_gates"].append(gate)
-                            if on_event is not None:
-                                _write_yaml_atomic(state_path, state)
-                                await emit(on_event, progress_event(state, total_iterations=total_iterations))
-                            attempt_record = {
-                                "attempt_index": attempt_index,
-                                "candidate_index": int(gate.get("candidate_index", 0) or 0),
-                                "candidate_id": str(gate.get("candidate_id", "") or ""),
-                                "improvement_cohort_id": cohort_id,
+                        if member_info.get("candidate_generation_error"):
+                            gate["candidate_generation_error"] = member_info["candidate_generation_error"]
+                        primary_accepted = bool(gate["accepted"])
+                        gate.update(
+                            {
+                                "epoch": epoch,
+                                "batch_index": batch_index,
+                                "batch_attempt_index": attempt_index,
+                                "repair_round_index": attempt_index,
                                 "analysis_round_index": analysis_round_index,
                                 "source_issue_id": issue_id or "",
                                 "source_issue_signature": issue_signature,
-                                "source_eval_ref_path": attempt_source_eval_ref,
-                                "analysis_ref_path": analysis_ref,
-                                "optimization_hypotheses_path": hypotheses_ref,
                                 "member_optimization_ref_path": member_ref,
-                                "before_harness_refs_path": before_attempt_refs,
-                                "after_harness_refs_path": candidate_refs if selected else before_attempt_refs,
-                                "candidate_gate_status": gate["status"],
-                                "candidate_gate_reason": gate["reason"],
-                                "source_native_target_score": gate.get("source_native_target_score"),
-                                "candidate_native_target_score": gate.get("candidate_native_target_score"),
-                                "native_target_score_delta": gate.get("native_target_score_delta"),
-                                "native_dimension_delta": gate.get("native_dimension_delta"),
-                                "accepted_target_case_ids": (list(gate.get("target_case_ids", [])) if selected else []),
-                                "completed_target_case_ids": [],
-                                "residual_case_ids": [],
-                                "residual_eval_ref_path": "",
+                                "primary_gate_accepted": primary_accepted,
+                                "primary_gate_reason": str(gate.get("reason", "")),
+                                "evaluation_input_mode": "original_task",
                             }
-                            attempt_records.append(attempt_record)
-                            if selected:
-                                winner_attempt_record = attempt_record
-
-                        cohort_feedback = build_candidate_feedback_cohort(
-                            cohort={
-                                "cohort_id": cohort_id,
-                                "parent_harness_ref": before_attempt_refs,
-                                "source_eval_ref": attempt_source_eval_ref,
-                                "analysis_ref_path": analysis_ref,
-                                "optimization_hypotheses_path": hypotheses_ref,
-                                "source_issue_id": issue_id or "",
-                                "source_issue_signature": issue_signature,
-                                "target_case_ids": sorted(frozen_target_case_ids),
-                                "evaluation_protocol": "single_harness_target_local_v1",
-                                "requested_candidate_count": int(self.config.member_optimizer.sibling_candidate_count),
-                                "rank_frozen": True,
-                                "ranking_policy": self.improver_policy.ranking_policy,
-                                "improver_version_id": self.improver_policy.version_id,
-                                "improver_policy_digest": self.improver_policy.canonical_digest,
-                                "cohort_manifest_path": cohort_manifest_path,
-                            },
-                            candidates=sibling_gates,
-                            selected_candidate_id=winner_id,
-                            top_m=selection_top_m,
                         )
-                        _attach_native_signal_feedback(cohort_feedback, sibling_gates)
-                        state["improvement_instances"][cohort_id] = cohort_feedback
-                        _write_candidate_feedback_ledger(state, output_dir)
-                        _refresh_optimization_experience(state, output_dir)
-                        last_gate = winner or _best_realized_sibling_gate(sibling_gates)
-                        last_member_ref = str((last_gate or {}).get("member_optimization_ref_path", "") or "")
-                        if winner is None:
-                            repair_parent = _best_realized_sibling_gate(sibling_gates)
-                            repair_analysis_ref = str(
-                                (repair_parent or {}).get("candidate_failure_analysis_ref_path", "") or ""
+                        if primary_accepted:
+                            gate["status"] = "provisional"
+                            gate["reason"] = "candidate_passed_batch_gate_pending_epoch_checkpoint"
+                            current_refs = candidate_refs
+                            accepted_target_case_ids.update(
+                                str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)
                             )
-                            repair_eval_ref = str((repair_parent or {}).get("candidate_eval_ref_path", "") or "")
-                            repair_refs = str((repair_parent or {}).get("candidate_harness_refs_path", "") or "")
-                            if repair_analysis_ref and repair_eval_ref and repair_refs:
-                                residual_case_ids = _nonpassing_case_ids(repair_eval_ref)
-                                repair_active_cases = _cases_with_ids(active_cases, residual_case_ids)
-                                if repair_active_cases and current_repair_round < max_repair_rounds:
-                                    deferred_repairs.append(
-                                        {
-                                            "gate": repair_parent,
-                                            "harness_refs_path": repair_refs,
-                                            "eval_ref_path": repair_eval_ref,
-                                            "analysis_ref_path": repair_analysis_ref,
-                                            "active_cases": repair_active_cases,
-                                            "resume_context": {
-                                                "harness_refs_path": before_attempt_refs,
-                                                "eval_ref_path": attempt_source_eval_ref,
-                                                "analysis_ref_path": analysis_ref,
-                                                "active_cases": list(active_cases),
-                                                "repair_round_index": current_repair_round,
-                                            },
-                                        }
-                                    )
-                                    remaining_sibling_count = len(issue_queue) - issue_queue_index - 1
-                                    remaining_attempt_budget = (
-                                        max_issue_attempts - issue_attempt_count if max_issue_attempts else None
-                                    )
-                                    # Prefer immediate evidence-led repair when
-                                    # budget permits, but never let one semantic
-                                    # hypothesis consume the slots required to
-                                    # try already-queued alternatives.
-                                    if not _must_preserve_budget_for_siblings(
-                                        remaining_attempt_budget=remaining_attempt_budget,
-                                        remaining_sibling_count=remaining_sibling_count,
-                                    ):
-                                        break
-                                    continue
-                                elif repair_active_cases:
-                                    repair_budget_exhausted = True
+                        _persist_promotion(
+                            member_ref,
+                            (candidate_refs if candidate_refs != before_attempt_refs else ""),
+                            gate,
+                        )
+                        state["candidate_gates"].append(gate)
+                        _refresh_optimization_experience(state, output_dir)
+                        attempt_record = {
+                            "attempt_index": attempt_index,
+                            "analysis_round_index": analysis_round_index,
+                            "source_issue_id": issue_id or "",
+                            "source_issue_signature": issue_signature,
+                            "source_eval_ref_path": attempt_source_eval_ref,
+                            "analysis_ref_path": analysis_ref,
+                            "optimization_hypotheses_path": hypotheses_ref,
+                            "member_optimization_ref_path": member_ref,
+                            "before_harness_refs_path": before_attempt_refs,
+                            "after_harness_refs_path": current_refs,
+                            "candidate_gate_status": gate["status"],
+                            "candidate_gate_reason": gate["reason"],
+                            "accepted_target_case_ids": (
+                                list(gate.get("target_case_ids", [])) if primary_accepted else []
+                            ),
+                            "completed_target_case_ids": [],
+                            "residual_case_ids": [],
+                            "residual_eval_ref_path": "",
+                        }
+                        attempt_records.append(attempt_record)
+                        last_member_ref = member_ref
+                        last_gate = gate
+                        if not primary_accepted:
+                            if _candidate_failure_supports_repair(gate):
+                                # A completed candidate evaluation is new causal
+                                # evidence. Re-open this issue inside the bounded
+                                # repair budget so Analyzer can preserve progress or
+                                # move an available-but-unapplied capability to a
+                                # stronger runtime surface.
+                                if issue_id:
+                                    attempted_issue_ids.discard(issue_id)
+                                attempted_issue_signatures.discard(issue_signature)
+                                refresh_residual_analysis = True
+                                break
                             continue
 
-                        current_refs = str(winner.get("candidate_harness_refs_path", "") or before_attempt_refs)
-                        accepted_target_case_ids.update(
-                            str(case_id) for case_id in winner.get("target_case_ids", []) if str(case_id)
-                        )
-
                         residual_eval_ref = await self._evaluate(
-                            cases=active_cases,
+                            cases=batch,
                             harness_refs_path=current_refs,
                             output_dir=attempt_dir / "residual_source",
                             dataset=dataset,
@@ -700,22 +554,25 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         residual_eval_refs.append(residual_eval_ref)
                         residual_scores = _eval_case_scores(residual_eval_ref)
                         completed_case_ids = {case_id for case_id, score in residual_scores.items() if score >= 1.0}
-                        _sync_retained_case_ids(working_retained_case_ids, residual_scores)
+                        _sync_retained_case_ids(
+                            working_retained_case_ids,
+                            residual_scores,
+                        )
                         residual_case_ids = _nonpassing_case_ids(residual_eval_ref)
-                        if winner_attempt_record is not None:
-                            winner_attempt_record.update(
-                                {
-                                    "completed_target_case_ids": sorted(
-                                        set(winner.get("target_case_ids", [])) & completed_case_ids
-                                    ),
-                                    "residual_case_ids": sorted(residual_case_ids),
-                                    "residual_eval_ref_path": residual_eval_ref,
-                                }
-                            )
-                        active_cases = _cases_with_ids(active_cases, residual_case_ids)
+                        attempt_record.update(
+                            {
+                                "completed_target_case_ids": sorted(
+                                    set(gate.get("target_case_ids", [])) & completed_case_ids
+                                ),
+                                "residual_case_ids": sorted(residual_case_ids),
+                                "residual_eval_ref_path": residual_eval_ref,
+                            }
+                        )
+                        active_cases = _cases_with_ids(
+                            batch,
+                            residual_case_ids,
+                        )
                         attempt_source_eval_ref = residual_eval_ref
-                        current_repair_round = 1
-                        repair_resume_contexts.clear()
                         refresh_residual_analysis = True
                         if not active_cases:
                             repair_stop_reason = "all_batch_cases_completed"
@@ -725,44 +582,17 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         break
                     if refresh_residual_analysis:
                         continue
-                    if deferred_repairs:
-                        selected_repair = max(
-                            deferred_repairs,
-                            key=lambda item: _sibling_realized_sort_key(item["gate"]),
-                        )
-                        selected_repair["gate"]["selected_as_repair_parent"] = True
-                        repair_resume_contexts.append(dict(selected_repair["resume_context"]))
-                        current_refs = str(selected_repair["harness_refs_path"])
-                        attempt_source_eval_ref = str(selected_repair["eval_ref_path"])
-                        pending_analysis_ref = str(selected_repair["analysis_ref_path"])
-                        active_cases = list(selected_repair["resume_context"]["active_cases"])
-                        current_repair_round += 1
-                        continue
-                    if issue_budget_exhausted:
-                        repair_stop_reason = "issue_attempt_limit_reached"
-                        break
-                    if repair_budget_exhausted:
-                        if repair_resume_contexts:
-                            resume = repair_resume_contexts.pop()
-                            current_refs = str(resume["harness_refs_path"])
-                            attempt_source_eval_ref = str(resume["eval_ref_path"])
-                            pending_analysis_ref = str(resume["analysis_ref_path"])
-                            active_cases = list(resume["active_cases"])
-                            current_repair_round = int(resume["repair_round_index"])
-                            continue
-                        repair_stop_reason = "repair_round_limit_reached"
-                        break
                     repair_stop_reason = (
                         "repeated_issue_detected" if repeated_issue_ids else "issue_queue_exhausted_without_acceptance"
                     )
                     break
 
-                if not active_cases and repair_stop_reason != "all_batch_cases_completed":
+                if active_cases and attempt_index >= max_repair_rounds:
+                    repair_stop_reason = "repair_round_limit_reached"
+                elif not active_cases and repair_stop_reason != "all_batch_cases_completed":
                     repair_stop_reason = "all_batch_cases_completed"
 
                 batch_accepted = bool(accepted_target_case_ids)
-                if not batch_accepted:
-                    current_refs = batch_before_refs
                 batch_gate_status = (
                     "provisional" if batch_accepted else str((last_gate or {}).get("status", "not_generated"))
                 )
@@ -781,14 +611,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "analysis_ref_paths": analysis_refs,
                     "optimization_hypotheses_paths": hypotheses_refs,
                     "residual_eval_ref_paths": residual_eval_refs,
-                    "repair_round_count": current_repair_round if attempt_index else 0,
-                    "candidate_cohort_count": attempt_index,
-                    "issue_attempt_count": issue_attempt_count,
-                    "max_issue_attempts": max_issue_attempts,
-                    "max_repair_rounds": max_repair_rounds,
-                    "repair_stop_reason": repair_stop_reason,
+                    "repair_round_count": attempt_index,
                     "last_analysis_issue_count": last_analysis_issue_count,
                     "last_optimization_hypothesis_count": last_optimization_hypothesis_count,
+                    "max_repair_rounds": max_repair_rounds,
+                    "repair_stop_reason": repair_stop_reason,
                     "residual_case_ids": sorted(
                         str(case.get("case_id", "") or "")
                         for case in active_cases
@@ -796,13 +623,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     ),
                     "member_optimization_ref_path": last_member_ref,
                     "candidate_attempts": attempt_records,
-                    "improvement_cohort_ids": list(
-                        dict.fromkeys(
-                            str(item.get("improvement_cohort_id", "") or "")
-                            for item in attempt_records
-                            if str(item.get("improvement_cohort_id", "") or "")
-                        )
-                    ),
                     "before_harness_refs_path": batch_before_refs,
                     "after_harness_refs_path": current_refs,
                     "candidate_gate_status": batch_gate_status,
@@ -811,6 +631,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "retained_case_ids_after_batch": sorted(working_retained_case_ids),
                 }
                 _write_yaml_atomic(state_path, state)
+                await emit(on_event, progress_event(state, total_iterations=total_iterations))
 
             full_eval_ref = await self._evaluate(
                 cases=all_cases,
@@ -819,16 +640,17 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 dataset=dataset,
             )
             full_score = _eval_score(full_eval_ref)
-            epoch_provisional_gates = []
-            provisional_target_case_ids: set[str] = set()
-            for gate in state["candidate_gates"]:
-                is_current_epoch = int(gate.get("epoch", 0) or 0) == epoch
-                if not is_current_epoch or gate.get("status") != "provisional":
-                    continue
-                epoch_provisional_gates.append(gate)
-                for case_id in gate.get("target_case_ids", []):
-                    if str(case_id):
-                        provisional_target_case_ids.add(str(case_id))
+            epoch_provisional_gates = [
+                gate
+                for gate in state["candidate_gates"]
+                if int(gate.get("epoch", 0) or 0) == epoch and gate.get("status") == "provisional"
+            ]
+            provisional_target_case_ids = {
+                str(case_id)
+                for gate in epoch_provisional_gates
+                for case_id in gate.get("target_case_ids", [])
+                if str(case_id)
+            }
             checkpoint = {
                 "epoch": epoch,
                 "score": full_score,
@@ -840,47 +662,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             full_case_scores = _eval_case_scores(full_eval_ref)
             full_failed_case_ids = sorted(case_id for case_id, score in full_case_scores.items() if score < 1.0)
             previous_best_eval_ref = str(state.get("best_eval_ref_path", "") or "")
-            epoch_source_eval_ref = _epoch_full_source_eval_ref(
-                state,
-                epoch=epoch,
-                expected_case_ids=all_case_ids,
+            previous_best_case_scores = _eval_case_scores(previous_best_eval_ref) if previous_best_eval_ref else {}
+            regressed_best_case_ids = sorted(
+                case_id
+                for case_id, previous_score in previous_best_case_scores.items()
+                if case_id in set(state.get("retained_case_ids", []))
+                and full_case_scores.get(case_id, 0.0) < previous_score
             )
-            comparison_eval_ref = previous_best_eval_ref or epoch_source_eval_ref
-            previous_best_case_scores = _eval_case_scores(comparison_eval_ref) if comparison_eval_ref else {}
-            current_official_metrics = _eval_official_metrics(full_eval_ref)
-            previous_official_metrics = _eval_official_metrics(comparison_eval_ref) if comparison_eval_ref else {}
-            metric_name_changed = bool(
-                previous_official_metrics
-                and current_official_metrics
-                and previous_official_metrics.get("primary_metric") != current_official_metrics.get("primary_metric")
-            )
-            official_score_regressed = bool(
-                previous_official_metrics
-                and current_official_metrics
-                and (_number(current_official_metrics.get("primary_score")) or 0.0)
-                < (_number(previous_official_metrics.get("primary_score")) or 0.0)
-            )
-            new_infra_failures = bool(
-                current_official_metrics
-                and int(current_official_metrics.get("infra_failures", 0) or 0)
-                > int(previous_official_metrics.get("infra_failures", 0) or 0)
-            )
-            new_policy_violations = bool(
-                current_official_metrics
-                and int(current_official_metrics.get("policy_violations", 0) or 0)
-                > int(previous_official_metrics.get("policy_violations", 0) or 0)
-            )
-            opaque_snapshot_epoch = any(
-                str(gate.get("composition_mode", "") or "") == "opaque_snapshot" for gate in epoch_provisional_gates
-            )
-            protected_case_ids = set(state.get("retained_case_ids", []))
-            if opaque_snapshot_epoch and not protected_case_ids:
-                protected_case_ids = {case_id for case_id, score in previous_best_case_scores.items() if score >= 1.0}
-            regressed_best_case_ids = []
-            for case_id, previous_score in previous_best_case_scores.items():
-                if case_id in protected_case_ids and full_case_scores.get(case_id, 0.0) < previous_score:
-                    regressed_best_case_ids.append(case_id)
-            regressed_best_case_ids.sort()
             failed_retention_case_ids = sorted(
                 case_id for case_id in working_retained_case_ids if full_case_scores.get(case_id, 0.0) < 1.0
             )
@@ -890,50 +678,40 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             full_passing_case_ids = {case_id for case_id, score in full_case_scores.items() if score >= 1.0}
             full_failed_machine_evidence = _failed_machine_evidence(full_eval_ref)
             full_error_case_ids = _error_case_ids(full_eval_ref)
-            gate_selections = []
-            for gate in epoch_provisional_gates:
-                gate_selections.append(
-                    _select_gate_from_epoch_checkpoint(
-                        gate,
-                        full_eval_ref=full_eval_ref,
-                        error_case_ids=full_error_case_ids,
-                        machine_evidence_case_ids=_machine_evidence_case_ids(full_failed_machine_evidence),
-                    )
+            gate_selections = [
+                _select_gate_from_epoch_checkpoint(
+                    gate,
+                    full_eval_ref=full_eval_ref,
+                    error_case_ids=full_error_case_ids,
+                    machine_evidence_case_ids=_machine_evidence_case_ids(full_failed_machine_evidence),
                 )
-            checkpoint_blocked = bool(
-                metric_name_changed
-                or official_score_regressed
-                or new_infra_failures
-                or new_policy_violations
-                or regressed_best_case_ids
-            )
-            if checkpoint_blocked:
-                for selection in gate_selections:
-                    selection.update(
-                        {
-                            "retained": False,
-                            "reason": "epoch_full_checkpoint_regressed_or_inconclusive",
-                            "failure_class": "regression_or_retention_failure",
-                        }
-                    )
-            opaque_partial_selection = _reject_mixed_opaque_snapshot_selection(
-                epoch_provisional_gates,
-                gate_selections,
-            )
-            if opaque_partial_selection:
-                checkpoint_blocked = True
-            retained_gates = []
-            removed_gates = []
-            for gate, selection in zip(epoch_provisional_gates, gate_selections, strict=True):
-                destination = retained_gates if selection["retained"] else removed_gates
-                destination.append(gate)
+                for gate in epoch_provisional_gates
+            ]
+            retained_gates = [
+                gate
+                for gate, selection in zip(
+                    epoch_provisional_gates,
+                    gate_selections,
+                    strict=True,
+                )
+                if selection["retained"]
+            ]
+            removed_gates = [
+                gate
+                for gate, selection in zip(
+                    epoch_provisional_gates,
+                    gate_selections,
+                    strict=True,
+                )
+                if not selection["retained"]
+            ]
             selected_refs = current_refs
             checkpoint_status = (
                 "verified_with_inconclusive_cases"
                 if full_error_case_ids or full_failed_machine_evidence
                 else "verified"
             )
-            if retained_gates and removed_gates and not opaque_snapshot_epoch:
+            if retained_gates and removed_gates:
                 selected_refs = _materialize_checkpoint_filtered_harness(
                     output_dir=output_dir,
                     epoch=epoch,
@@ -956,44 +734,46 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "status": checkpoint_status,
                     "previous_best_score": best_score,
                     "previous_best_eval_ref_path": previous_best_eval_ref,
-                    "comparison_eval_ref_path": comparison_eval_ref,
                     "regressed_best_case_ids": regressed_best_case_ids,
                     "failed_retention_case_ids": failed_retention_case_ids,
                     "failed_case_ids": full_failed_case_ids,
                     "failed_target_case_ids": failed_target_case_ids,
                     "failed_machine_evidence": full_failed_machine_evidence,
                     "error_case_ids": sorted(full_error_case_ids),
-                    "official_metrics": current_official_metrics,
-                    "previous_official_metrics": previous_official_metrics,
-                    "metric_name_changed": metric_name_changed,
-                    "official_score_regressed": official_score_regressed,
-                    "new_infra_failures": new_infra_failures,
-                    "new_policy_violations": new_policy_violations,
-                    "opaque_snapshot_epoch": opaque_snapshot_epoch,
-                    "opaque_partial_selection": opaque_partial_selection,
-                    "retained_candidate_action_ids": _capability_action_ids(retained_gates),
-                    "removed_candidate_action_ids": _capability_action_ids(removed_gates),
+                    "retained_candidate_action_ids": sorted(
+                        {
+                            str(capability.get("action_id", "") or "")
+                            for gate in retained_gates
+                            for capability in gate.get("capabilities", [])
+                            if str(capability.get("action_id", "") or "")
+                        }
+                    ),
+                    "removed_candidate_action_ids": sorted(
+                        {
+                            str(capability.get("action_id", "") or "")
+                            for gate in removed_gates
+                            for capability in gate.get("capabilities", [])
+                            if str(capability.get("action_id", "") or "")
+                        }
+                    ),
                     "selected_harness_refs_path": (selected_refs if retained_gates else epoch_start_refs),
                     "post_checkpoint_replay_performed": False,
                 }
             )
             state["epoch_checkpoints"].append(checkpoint)
-            promotion_applied = bool(not checkpoint_blocked and retained_gates)
-            noop_initial_score_seed = bool(
-                state.get("best_score") is None
-                and not epoch_provisional_gates
-                and current_refs == epoch_start_refs
-                and checkpoint_status == "verified"
+            checkpoint["promotion_applied"] = bool(retained_gates)
+            checkpoint["noop_initial_score_seed"] = bool(
+                not epoch_provisional_gates and checkpoint_status == "verified" and best_score is None
             )
-            checkpoint["promotion_applied"] = promotion_applied
-            checkpoint["noop_initial_score_seed"] = noop_initial_score_seed
-            if promotion_applied or noop_initial_score_seed:
+            if retained_gates or (
+                not epoch_provisional_gates and checkpoint_status == "verified" and best_score is None
+            ):
                 current_refs = selected_refs
                 state["best_score"] = full_score
                 state["best_eval_ref_path"] = full_eval_ref
                 state["best_harness_refs_path"] = current_refs
                 state["retained_case_ids"] = sorted(full_passing_case_ids)
-                if noop_initial_score_seed:
+                if not epoch_provisional_gates:
                     state["baseline_score"] = full_score
                     state["baseline_eval_ref_path"] = full_eval_ref
             else:
@@ -1102,158 +882,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         load_analysis_ref(result).require_usable()
         return result
 
-    @model_usage_stage("optimize")
-    async def _generate_sibling_candidate_proposals(
-        self,
-        *,
-        cohort_id: str,
-        source_eval_ref: str,
-        analysis_ref: str,
-        parent_harness_refs_path: str,
-        optimization_hypotheses_path: str,
-        source_issue_id: str | None,
-        source_issue_signature: str,
-        frozen_target_case_ids: set[str],
-        frozen_experience: dict[str, Any],
-        rejected_capabilities: list[dict[str, Any]],
-        output_dir: Path,
-    ) -> tuple[list[dict[str, Any]], str]:
-        """Materialize and freeze every sibling before any task evaluation."""
-        requested_count = int(self.config.member_optimizer.sibling_candidate_count)
-        cohort_dir = output_dir / "member_optimizations" / "sibling_cohorts" / cohort_id
-        manifest_path = cohort_dir / "cohort_manifest.yaml"
-        existing = _read_yaml(manifest_path) if manifest_path.is_file() else {}
-        expected_identity = {
-            "parent_harness_refs_path": parent_harness_refs_path,
-            "source_eval_ref_path": source_eval_ref,
-            "analysis_ref_path": analysis_ref,
-            "optimization_hypotheses_path": optimization_hypotheses_path,
-            "source_issue_id": source_issue_id or "",
-            "source_issue_signature": source_issue_signature,
-            "frozen_target_case_ids": sorted(frozen_target_case_ids),
-            "requested_candidate_count": requested_count,
-            "improver_version_id": self.improver_policy.version_id,
-            "improver_policy_digest": self.improver_policy.canonical_digest,
-        }
-        if existing and any(existing.get(key) != value for key, value in expected_identity.items()):
-            raise RuntimeError(f"sibling cohort manifest identity changed during resume: {manifest_path}")
-        existing_candidates = {
-            str(item.get("candidate_id", "") or ""): dict(item)
-            for item in existing.get("candidates", [])
-            if isinstance(item, dict) and str(item.get("candidate_id", "") or "")
-        }
-        proposals: list[dict[str, Any]] = []
-        manifest: dict[str, Any] = {
-            "schema_version": 1,
-            "status": "generating",
-            "cohort_id": cohort_id,
-            **expected_identity,
-            "rank_frozen": False,
-            "candidates": [],
-        }
-        for candidate_index in range(1, requested_count + 1):
-            candidate_id = f"{cohort_id}_c{candidate_index:03d}"
-            cached = existing_candidates.get(candidate_id, {})
-            cached_member_ref = str(cached.get("member_optimization_ref_path", "") or "")
-            cached_candidate_refs = str(cached.get("candidate_harness_refs_path", "") or "")
-            if Path(cached_member_ref).is_file() and Path(cached_candidate_refs).is_file():
-                proposal = cached
-            else:
-                sibling_generation = {
-                    "cohort_id": cohort_id,
-                    "candidate_id": candidate_id,
-                    "generation_index": candidate_index,
-                    "candidate_index": candidate_index,
-                    "candidate_count": requested_count,
-                    "prior_proposals": [_candidate_proposal_summary(item) for item in proposals],
-                    "outcomes_available": False,
-                }
-                candidate_experience = {
-                    "journal": list(frozen_experience.get("journal", [])),
-                    "lever_scoreboard": dict(frozen_experience.get("lever_scoreboard", {})),
-                    "frozen_target_case_ids": sorted(frozen_target_case_ids),
-                }
-                if requested_count > 1:
-                    candidate_experience["sibling_generation"] = sibling_generation
-                if self._explicit_improver_policy:
-                    policy_payload = self.improver_policy.to_dict()
-                    candidate_experience["improver_policy"] = {
-                        "version_id": self.improver_policy.version_id,
-                        "policy_digest": self.improver_policy.canonical_digest,
-                        "generation_directives": policy_payload["generation_directives"],
-                        "budget_policy": policy_payload["budget_policy"],
-                    }
-                try:
-                    member_ref = await self.member_optimizer.optimize(
-                        eval_ref_path=source_eval_ref,
-                        analysis_result_path=analysis_ref,
-                        harness_refs_path=parent_harness_refs_path,
-                        output_dir=str(cohort_dir / f"c{candidate_index:03d}"),
-                        defer_publish=True,
-                        rejected_capabilities=list(rejected_capabilities),
-                        single_harness=True,
-                        optimization_hypotheses_path=optimization_hypotheses_path,
-                        optimization_issue_ids=([source_issue_id] if source_issue_id else None),
-                        optimization_experience=candidate_experience,
-                    )
-                except Exception as exc:  # noqa: BLE001 - isolate one candidate, preserve the benchmark run
-                    proposal = {
-                        "candidate_id": candidate_id,
-                        "candidate_index": candidate_index,
-                        "generation_order": candidate_index,
-                        "member_optimization_ref_path": "",
-                        "candidate_harness_refs_path": parent_harness_refs_path,
-                        "member_status": "generation_error",
-                        "composition_mode": "",
-                        "plan_path": "",
-                        "plan_sha256": "",
-                        "capabilities": [],
-                        "causal_intervention_contracts": [],
-                        "candidate_fingerprint": "",
-                        "generation_error": _safe_candidate_error(exc),
-                    }
-                else:
-                    member_info = _read_yaml(member_ref)
-                    candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or parent_harness_refs_path)
-                    capabilities = _candidate_capabilities(member_info)
-                    plan_path = str(member_info.get("plan_path", "") or "")
-                    proposal = {
-                        "candidate_id": candidate_id,
-                        "candidate_index": candidate_index,
-                        "generation_order": candidate_index,
-                        "member_optimization_ref_path": member_ref,
-                        "candidate_harness_refs_path": candidate_refs,
-                        "member_status": str(member_info.get("status", "") or ""),
-                        "composition_mode": _member_composition_mode(member_info),
-                        "plan_path": plan_path,
-                        "plan_sha256": _file_sha256(plan_path) if Path(plan_path).is_file() else "",
-                        "capabilities": capabilities,
-                        "causal_intervention_contracts": _causal_intervention_contracts(capabilities),
-                        "candidate_fingerprint": canonical_candidate_fingerprint(capabilities),
-                    }
-            proposals.append(proposal)
-            manifest["candidates"] = proposals
-            _write_yaml_atomic(manifest_path, manifest)
-
-        ranked = rank_candidate_proposals(
-            proposals,
-            frozen_target_case_ids=set(frozen_target_case_ids),
-            improver_policy=self.improver_policy,
-        )
-        manifest.update(
-            {
-                "status": "frozen",
-                "rank_frozen": True,
-                "ranking_policy": self.improver_policy.ranking_policy,
-                "improver_version_id": self.improver_policy.version_id,
-                "improver_policy_digest": self.improver_policy.canonical_digest,
-                "generated_candidate_count": len(ranked),
-                "candidates": ranked,
-            }
-        )
-        _write_yaml_atomic(manifest_path, manifest)
-        return ranked, str(manifest_path)
-
     async def _candidate_gate(
         self,
         *,
@@ -1264,14 +892,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         candidate_harness_refs_path: str,
         member_status: str,
         capabilities: list[dict[str, Any]],
-        causal_intervention_contracts: list[dict[str, Any]] | None = None,
         output_dir: Path,
         dataset: DatasetArtifact,
         frozen_target_case_ids: set[str] | None = None,
     ) -> dict[str, Any]:
-        causal_intervention_contracts = [
-            dict(item) for item in (causal_intervention_contracts or []) if isinstance(item, dict)
-        ] or _causal_intervention_contracts(capabilities)
         original_source_score = _eval_score(source_eval_ref)
         base = {
             "source_eval_ref_path": source_eval_ref,
@@ -1306,23 +930,23 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             }
         batch_case_ids = {str(case.get("case_id", "") or "") for case in cases if str(case.get("case_id", "") or "")}
         target_case_ids = (
-            set(frozen_target_case_ids) & batch_case_ids
-            if frozen_target_case_ids is not None
-            else _capability_target_case_ids(
+            _capability_target_case_ids(
                 capabilities,
                 fallback_target_case_ids=fallback_target_case_ids,
             )
             & batch_case_ids
         )
+        if frozen_target_case_ids is not None:
+            target_case_ids = set(frozen_target_case_ids) & batch_case_ids
         if not target_case_ids:
             target_case_ids = set(fallback_target_case_ids) & batch_case_ids
         inconclusive_source_target_case_ids = sorted(_error_case_ids(source_eval_ref) & target_case_ids)
         if inconclusive_source_target_case_ids:
             return {
+                **base,
                 "accepted": False,
                 "status": "inconclusive",
                 "reason": "source_gate_inconclusive_due_to_error_cases",
-                **base,
                 "target_case_ids": sorted(target_case_ids),
                 "inconclusive_source_target_case_ids": inconclusive_source_target_case_ids,
             }
@@ -1346,33 +970,32 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 output_dir=output_dir,
                 dataset=dataset,
             )
-        except Exception as exc:  # noqa: BLE001 - one candidate must not abort the benchmark
+        except Exception as exc:  # noqa: BLE001 - preserve the public adapter's infrastructure reporting
             return {
+                **base,
                 "accepted": False,
                 "status": "inconclusive",
                 "reason": "candidate_evaluation_failed",
-                **base,
                 "target_case_ids": sorted(target_case_ids),
                 "candidate_evaluation_error": _safe_candidate_error(exc),
             }
         skipped_target_case_ids = sorted(_skipped_case_ids(candidate_eval_ref) & target_case_ids)
         if skipped_target_case_ids:
             return {
+                **base,
                 "accepted": False,
                 "status": "inconclusive",
                 "reason": "candidate_gate_inconclusive_due_to_infrastructure_skip",
-                **base,
                 "candidate_eval_ref_path": candidate_eval_ref,
                 "skipped_target_case_ids": skipped_target_case_ids,
             }
         candidate_case_scores = _eval_case_scores(candidate_eval_ref)
         source_native_signals = _eval_case_native_signals(paired_source_eval_ref)
         candidate_native_signals = _eval_case_native_signals(candidate_eval_ref)
-        source_native_case_scores = _native_case_scores(source_native_signals)
-        candidate_native_case_scores = _native_case_scores(candidate_native_signals)
-        source_native_target_score = _average_case_scores(source_native_case_scores, target_case_ids)
-        candidate_native_target_score = _average_case_scores(candidate_native_case_scores, target_case_ids)
-        native_target_score_delta = candidate_native_target_score - source_native_target_score
+        source_native_target_score = _average_case_scores(_native_case_scores(source_native_signals), target_case_ids)
+        candidate_native_target_score = _average_case_scores(
+            _native_case_scores(candidate_native_signals), target_case_ids
+        )
         native_dimension_deltas_by_case, native_dimension_delta = _native_dimension_deltas(
             source_native_signals,
             candidate_native_signals,
@@ -1387,13 +1010,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             candidate_eval_ref,
             target_case_ids,
         )
-        intervention_excerpts = _candidate_intervention_excerpts_by_case(
-            capabilities,
-            target_case_ids,
-        )
-        for case_id, excerpt in intervention_excerpts.items():
-            if not candidate_patch_excerpts_by_case.get(case_id):
-                candidate_patch_excerpts_by_case[case_id] = excerpt
         candidate_target_score = _average_case_scores(candidate_case_scores, target_case_ids)
         target_score_delta = candidate_target_score - source_target_score
         source_score = source_target_score
@@ -1411,16 +1027,29 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         )
         candidate_non_target_score = None
         non_target_score_delta = None
-        expected_tools = _expected_runtime_names(capabilities, action_group="tool")
+        expected_tools = sorted(
+            {
+                str(capability.get("runtime_name", ""))
+                for capability in capabilities
+                if capability.get("action_group") == "tool"
+                and capability.get("operation") in {"add", "modify"}
+                and str(capability.get("runtime_name", ""))
+            }
+        )
         invoked_tools_by_case = _invoked_tool_names_by_case(candidate_eval_ref)
         pre_edit_tools_by_case, first_edit_steps_by_case = _pre_edit_invoked_names_by_case(
             candidate_eval_ref, action_group="tool"
         )
-        invoked_tool_names: set[str] = set()
-        for names in invoked_tools_by_case.values():
-            invoked_tool_names.update(names)
-        invoked_tools = sorted(invoked_tool_names)
-        expected_skills = _expected_runtime_names(capabilities, action_group="skill")
+        invoked_tools = sorted({name for names in invoked_tools_by_case.values() for name in names})
+        expected_skills = sorted(
+            {
+                str(capability.get("runtime_name", ""))
+                for capability in capabilities
+                if capability.get("action_group") == "skill"
+                and capability.get("operation") in {"add", "modify"}
+                and str(capability.get("runtime_name", ""))
+            }
+        )
         invoked_skills_by_case = _invoked_skill_names_by_case(candidate_eval_ref)
         pre_edit_skills_by_case, skill_first_edit_steps_by_case = _pre_edit_invoked_names_by_case(
             candidate_eval_ref, action_group="skill"
@@ -1429,14 +1058,32 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             current = first_edit_steps_by_case.get(case_id)
             if current is None or (step is not None and step < current):
                 first_edit_steps_by_case[case_id] = step
-        invoked_skill_names: set[str] = set()
-        for names in invoked_skills_by_case.values():
-            invoked_skill_names.update(names)
-        invoked_skills = sorted(invoked_skill_names)
+        invoked_skills = sorted({name for names in invoked_skills_by_case.values() for name in names})
+        later_edit_usage = {
+            group: _pre_edit_invoked_names_by_case(
+                candidate_eval_ref,
+                action_group=group,
+                allow_later_edit=True,
+            )[0]
+            for group in ("tool", "skill")
+            if any(
+                item.get("action_group") == group
+                and item.get("activation_phase") in {"post_diagnosis", "pre_submission"}
+                for item in capabilities
+            )
+        }
+        # Answer-only tasks have no edit boundary. Preserve their existing
+        # successful-usage contract rather than requiring an artificial write.
+        for group, early_usage in (("tool", pre_edit_tools_by_case), ("skill", pre_edit_skills_by_case)):
+            if group in later_edit_usage:
+                for case_id, names in early_usage.items():
+                    if case_id not in first_edit_steps_by_case:
+                        later_edit_usage[group][case_id] = set(names)
         missing_tool_invocations = _missing_capability_invocations(
             capabilities,
             action_group="tool",
             invoked_names_by_case=pre_edit_tools_by_case,
+            later_edit_names_by_case=later_edit_usage.get("tool"),
             fallback_target_case_ids=fallback_target_case_ids,
             names_match=_tool_names_match,
         )
@@ -1445,6 +1092,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             capabilities,
             action_group="skill",
             invoked_names_by_case=pre_edit_skills_by_case,
+            later_edit_names_by_case=later_edit_usage.get("skill"),
             fallback_target_case_ids=fallback_target_case_ids,
             names_match=_skill_names_match,
         )
@@ -1469,7 +1117,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             case_id for case_id, delta in verifier_deltas_by_case.items() if bool(delta.get("partial_progress"))
         )
         verifier_progress_target_case_ids = sorted(
-            case_id for case_id, delta in verifier_deltas_by_case.items() if delta.get("newly_passed_requirements")
+            case_id
+            for case_id, delta in verifier_deltas_by_case.items()
+            if delta.get("newly_passed_fail_to_pass") or delta.get("newly_passed_atomic_checks")
         )
         target_improved = bool(failing_target_case_ids) and (
             not unimproved_target_case_ids and not regressed_target_case_ids
@@ -1510,7 +1160,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 invoked_tools_by_case,
                 names_match=_tool_names_match,
             ):
-                reason = "expected_tool_invoked_after_first_persistent_edit"
+                reason = "expected_tool_invoked_outside_activation_window"
             else:
                 reason = "expected_tool_not_invoked_on_target_case"
         elif missing_skills:
@@ -1519,7 +1169,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 invoked_skills_by_case,
                 names_match=_skill_names_match,
             ):
-                reason = "expected_skill_invoked_after_first_persistent_edit"
+                reason = "expected_skill_invoked_outside_activation_window"
             else:
                 reason = "expected_skill_not_invoked_on_target_case"
         elif failed_machine_evidence:
@@ -1547,90 +1197,23 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "by_case": {
                     case_id: [
                         {
-                            "schema_version": 2,
-                            "experiment_id": output_dir.name,
                             "kind": "paired_source_candidate_delta",
-                            "surface": ",".join(
-                                sorted(
-                                    {
-                                        str(capability.get("action_group", "") or "")
-                                        for capability in capabilities
-                                        if str(capability.get("action_group", "") or "")
-                                    }
-                                )
-                            ),
-                            "status": "rejected",
-                            "reason": reason,
-                            "selected_for_promotion": False,
                             "verifier_delta": dict(delta),
                             "candidate_patch_excerpt": str(candidate_patch_excerpts_by_case.get(case_id, "")),
-                            "source_native_score": _number(source_native_case_scores.get(case_id)),
-                            "candidate_native_score": _number(candidate_native_case_scores.get(case_id)),
-                            "native_score_delta": _paired_score_delta(
-                                source_native_case_scores,
-                                candidate_native_case_scores,
-                                case_id,
-                            ),
-                            "native_dimension_deltas": dict(native_dimension_deltas_by_case.get(case_id, {})),
-                            "source_native_signal": str(source_native_signals.get(case_id, {}).get("source", "")),
-                            "candidate_native_signal": str(candidate_native_signals.get(case_id, {}).get("source", "")),
-                            "native_signal_role": "sibling_and_repair_ranking_only",
-                            "source_target_score": _number(source_case_scores.get(case_id)),
-                            "candidate_target_score": _number(candidate_case_scores.get(case_id)),
-                            "target_score_delta": _paired_score_delta(
-                                source_case_scores,
-                                candidate_case_scores,
-                                case_id,
-                            ),
-                            "activation": _paired_candidate_activation(
-                                capabilities,
-                                case_id=case_id,
-                                pre_edit_tools_by_case=pre_edit_tools_by_case,
-                                pre_edit_skills_by_case=pre_edit_skills_by_case,
-                            ),
-                            "prediction": {
-                                "candidate_patch_excerpt": str(candidate_patch_excerpts_by_case.get(case_id, "")),
-                                "causal_intervention_contracts": [
-                                    dict(contract)
-                                    for contract in causal_intervention_contracts
-                                    if case_id in set(contract.get("target_case_ids", []))
+                            "candidate_behavior": {
+                                "gate_reason": reason,
+                                "failure_class": failure_class,
+                                "missing_skill_invocations": [
+                                    dict(item)
+                                    for item in missing_skill_invocations
+                                    if str(item.get("target_case_id", "")) == case_id
+                                ],
+                                "missing_tool_invocations": [
+                                    dict(item)
+                                    for item in missing_tool_invocations
+                                    if str(item.get("target_case_id", "")) == case_id
                                 ],
                             },
-                            "observed_outcome": {
-                                "status": "rejected",
-                                "reason": reason,
-                                "selected_for_promotion": False,
-                                "strict_score": {
-                                    "source": _number(source_case_scores.get(case_id)),
-                                    "candidate": _number(candidate_case_scores.get(case_id)),
-                                    "delta": _paired_score_delta(
-                                        source_case_scores,
-                                        candidate_case_scores,
-                                        case_id,
-                                    ),
-                                },
-                                "continuous_score": {
-                                    "source": _number(source_native_case_scores.get(case_id)),
-                                    "candidate": _number(candidate_native_case_scores.get(case_id)),
-                                    "delta": _paired_score_delta(
-                                        source_native_case_scores,
-                                        candidate_native_case_scores,
-                                        case_id,
-                                    ),
-                                    "source_signal": str(source_native_signals.get(case_id, {}).get("source", "")),
-                                    "candidate_signal": str(
-                                        candidate_native_signals.get(case_id, {}).get("source", "")
-                                    ),
-                                    "role": "sibling_and_repair_ranking_only",
-                                },
-                                "requirement_delta": dict(delta),
-                                "dimension_deltas": dict(native_dimension_deltas_by_case.get(case_id, {})),
-                            },
-                            "causal_intervention_contracts": [
-                                dict(contract)
-                                for contract in causal_intervention_contracts
-                                if case_id in set(contract.get("target_case_ids", []))
-                            ],
                         }
                     ]
                     for case_id, delta in verifier_deltas_by_case.items()
@@ -1644,37 +1227,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 prior_candidate_feedback=paired_feedback,
             )
             candidate_failure_diagnoses = _compact_analysis_diagnoses(candidate_failure_analysis_ref)
-            _materialize_candidate_activation_repair(
-                candidate_failure_analysis_ref,
-                capabilities=capabilities,
-                causal_intervention_contracts=causal_intervention_contracts,
-                diagnoses_by_case=candidate_failure_diagnoses,
-            )
-            activation_by_case = {
-                case_id: _refine_paired_candidate_activation(
-                    _paired_candidate_activation(
-                        capabilities,
-                        case_id=case_id,
-                        pre_edit_tools_by_case=pre_edit_tools_by_case,
-                        pre_edit_skills_by_case=pre_edit_skills_by_case,
-                    ),
-                    candidate_failure_diagnoses.get(case_id, []),
-                )
-                for case_id in target_case_ids
-            }
-        else:
-            activation_by_case = {
-                case_id: _paired_candidate_activation(
-                    capabilities,
-                    case_id=case_id,
-                    pre_edit_tools_by_case=pre_edit_tools_by_case,
-                    pre_edit_skills_by_case=pre_edit_skills_by_case,
-                )
-                for case_id in target_case_ids
-            }
-        causal_failure_class = ""
-        if not accepted and not _eval_has_errors(candidate_eval_ref):
-            causal_failure_class = _causal_candidate_failure_classification(activation_by_case)
         return {
             "accepted": accepted,
             "status": (
@@ -1686,7 +1238,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             ),
             "reason": reason,
             "failure_class": failure_class,
-            "causal_failure_class": causal_failure_class,
             **base,
             "candidate_eval_ref_path": candidate_eval_ref,
             "candidate_score": candidate_score,
@@ -1695,23 +1246,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "source_target_score": source_target_score,
             "candidate_target_score": candidate_target_score,
             "target_score_delta": target_score_delta,
-            # Evaluator-native scores are diagnostic ranking signals only. The
-            # acceptance and epoch-promotion gates above remain on eval-ref
-            # strict scores and must not be relaxed by this continuous delta.
             "source_native_target_score": source_native_target_score,
             "candidate_native_target_score": candidate_native_target_score,
-            "native_target_score_delta": native_target_score_delta,
-            "source_native_case_scores": source_native_case_scores,
-            "candidate_native_case_scores": candidate_native_case_scores,
-            "source_native_signal_sources_by_case": {
-                case_id: str(signal.get("source", "")) for case_id, signal in source_native_signals.items()
-            },
-            "candidate_native_signal_sources_by_case": {
-                case_id: str(signal.get("source", "")) for case_id, signal in candidate_native_signals.items()
-            },
+            "native_target_score_delta": candidate_native_target_score - source_native_target_score,
             "native_dimension_deltas_by_case": native_dimension_deltas_by_case,
             "native_dimension_delta": native_dimension_delta,
-            "native_signal_role": "sibling_and_repair_ranking_only",
+            "native_signal_role": "diagnostic_only",
             "failing_target_case_ids": failing_target_case_ids,
             "improved_target_case_ids": improved_target_case_ids,
             "unimproved_target_case_ids": unimproved_target_case_ids,
@@ -1722,8 +1262,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "candidate_patch_excerpts_by_case": candidate_patch_excerpts_by_case,
             "candidate_failure_analysis_ref_path": (candidate_failure_analysis_ref),
             "candidate_failure_diagnoses": candidate_failure_diagnoses,
-            "activation_by_case": activation_by_case,
-            "causal_intervention_contracts": causal_intervention_contracts,
             "task_acceptance_contracts": task_acceptance_contracts,
             "non_target_case_ids": sorted(non_target_case_ids),
             "source_non_target_score": source_non_target_score,
@@ -1748,6 +1286,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 case_id: sorted(names) for case_id, names in pre_edit_skills_by_case.items()
             },
             "first_persistent_edit_step_by_case": first_edit_steps_by_case,
+            "pre_final_edit_invoked_names_by_case": {
+                group: {case_id: sorted(names) for case_id, names in by_case.items()}
+                for group, by_case in later_edit_usage.items()
+            },
             "missing_expected_skill_names": missing_skills,
             "missing_expected_skill_invocations": missing_skill_invocations,
             "candidate_evaluation_mode": "natural",
@@ -1854,7 +1396,7 @@ def _request_fingerprint(
     improver_policy_digest: str,
 ) -> dict[str, Any]:
     return {
-        "optimization_chain_version": 18,
+        "optimization_chain_version": 19,
         "dataset_files": [str(Path(path).expanduser().resolve()) for path in request.dataset_files],
         "dataset_sha256": [_file_sha256(path) for path in request.dataset_files],
         "source_harness_refs_path": source_harness_refs_path,
@@ -1878,77 +1420,6 @@ def _file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _improvement_cohort_id(
-    *,
-    epoch: int,
-    batch_index: int,
-    repair_round_index: int,
-    issue_signature: str,
-    parent_harness_refs_path: str,
-    source_eval_ref_path: str,
-    analysis_ref_path: str,
-    frozen_target_case_ids: set[str],
-    improver_policy_digest: str,
-) -> str:
-    signature = hashlib.sha256(str(issue_signature).encode("utf-8")).hexdigest()[:8]
-    identity = json.dumps(
-        {
-            "parent_harness_refs_path": parent_harness_refs_path,
-            "source_eval_ref_path": source_eval_ref_path,
-            "analysis_ref_path": analysis_ref_path,
-            "frozen_target_case_ids": sorted(frozen_target_case_ids),
-            "improver_policy_digest": improver_policy_digest,
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    identity_digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:10]
-    return f"e{epoch:03d}_b{batch_index:03d}_r{repair_round_index:03d}_{signature}_{identity_digest}"
-
-
-def _candidate_evaluation_output_dir(
-    *,
-    optimization_output_dir: Path,
-    epoch: int,
-    batch_index: int,
-    attempt_index: int,
-    candidate_index: int,
-) -> Path:
-    """Keep candidate case artifacts below the Windows path-length boundary."""
-    return (
-        optimization_output_dir.parent
-        / "ce"
-        / f"e{epoch:03d}"
-        / f"b{batch_index:03d}"
-        / f"a{attempt_index:03d}"
-        / f"c{candidate_index:03d}"
-    )
-
-
-def _candidate_proposal_summary(proposal: dict[str, Any]) -> dict[str, Any]:
-    """Expose only pre-execution proposal semantics to later sibling planners."""
-    capabilities = []
-    for raw in proposal.get("capabilities", []):
-        if not isinstance(raw, dict):
-            continue
-        capabilities.append(
-            {
-                "action_group": str(raw.get("action_group", "") or ""),
-                "operation": str(raw.get("operation", "") or ""),
-                "target_path": str(raw.get("target_path", "") or ""),
-                "expected_effect": str(raw.get("expected_effect", "") or ""),
-                "lever": str((raw.get("lever_decision", {}) or {}).get("selected_lever", "") or ""),
-            }
-        )
-    return {
-        "candidate_id": str(proposal.get("candidate_id", "") or ""),
-        "candidate_fingerprint": str(proposal.get("candidate_fingerprint", "") or ""),
-        "capabilities": capabilities,
-        "execution_status": "not_started",
-    }
-
-
 def _safe_candidate_error(exc: Exception) -> dict[str, str]:
     message = str(exc).strip()
     message = re.sub(r"(?i)\bsk-[A-Za-z0-9._-]{8,}", "[redacted]", message)
@@ -1958,118 +1429,6 @@ def _safe_candidate_error(exc: Exception) -> dict[str, str]:
         "error_type": type(exc).__name__,
         "message": message[:2_000],
     }
-
-
-def _verify_frozen_candidate_proposals(proposals: list[dict[str, Any]]) -> None:
-    """Reject plan drift after pre-execution priority has been frozen."""
-    for proposal in proposals:
-        expected = str(proposal.get("plan_sha256", "") or "")
-        plan_path = str(proposal.get("plan_path", "") or "")
-        if not expected:
-            continue
-        if not Path(plan_path).is_file() or _file_sha256(plan_path) != expected:
-            raise RuntimeError(
-                f"frozen sibling candidate plan changed before evaluation: {proposal.get('candidate_id', '<unknown>')}"
-            )
-
-
-@dataclass(frozen=True, order=True, slots=True)
-class _SiblingRealizedSortKey:
-    candidate_score: float
-    target_delta: float
-    native_score: float
-    native_delta: float
-    dimension_delta: float
-    progress: int
-    negative_action_count: int
-    negative_predicted_rank: int
-
-
-def _sibling_realized_sort_key(gate: dict[str, Any]) -> _SiblingRealizedSortKey:
-    candidate_score = _number(gate.get("candidate_target_score"))
-    target_delta = _number(gate.get("target_score_delta"))
-    native_score = _number(gate.get("candidate_native_target_score"))
-    native_delta = _number(gate.get("native_target_score_delta"))
-    dimension_delta = _number(gate.get("native_dimension_delta"))
-    progress = len(gate.get("verifier_progress_target_case_ids", []) or [])
-    action_count = len(gate.get("capabilities", []) or [])
-    predicted_rank = int(gate.get("predicted_rank", 0) or 0)
-    return _SiblingRealizedSortKey(
-        candidate_score if candidate_score is not None else float("-inf"),
-        target_delta if target_delta is not None else float("-inf"),
-        native_score if native_score is not None else float("-inf"),
-        native_delta if native_delta is not None else float("-inf"),
-        dimension_delta if dimension_delta is not None else float("-inf"),
-        progress,
-        -action_count,
-        -predicted_rank,
-    )
-
-
-def _select_sibling_winner(
-    gates: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Select the best realized candidate; frozen ranks are feedback only."""
-    qualified = [gate for gate in gates if bool(gate.get("primary_gate_accepted"))]
-    return max(qualified, key=_sibling_realized_sort_key) if qualified else None
-
-
-def _best_realized_sibling_gate(gates: list[dict[str, Any]]) -> dict[str, Any] | None:
-    conclusive = [gate for gate in gates if _number(gate.get("candidate_target_score")) is not None]
-    return max(conclusive, key=_sibling_realized_sort_key) if conclusive else (gates[0] if gates else None)
-
-
-def _attach_native_signal_feedback(
-    cohort_feedback: dict[str, Any],
-    gates: list[dict[str, Any]],
-) -> None:
-    """Persist ranking-only continuous outcomes without changing gate metrics."""
-    gates_by_id = {
-        str(gate.get("candidate_id", "") or ""): gate for gate in gates if str(gate.get("candidate_id", "") or "")
-    }
-    for candidate in cohort_feedback.get("candidates", []):
-        if not isinstance(candidate, dict):
-            continue
-        gate = gates_by_id.get(str(candidate.get("candidate_id", "") or ""))
-        if gate is None:
-            continue
-        candidate["continuous_outcome"] = {
-            "source_native_target_score": _number(gate.get("source_native_target_score")),
-            "candidate_native_target_score": _number(gate.get("candidate_native_target_score")),
-            "native_target_score_delta": _number(gate.get("native_target_score_delta")),
-            "native_dimension_delta": _number(gate.get("native_dimension_delta")),
-            "source_signal_sources_by_case": dict(
-                gate.get("source_native_signal_sources_by_case", {})
-                if isinstance(gate.get("source_native_signal_sources_by_case"), dict)
-                else {}
-            ),
-            "candidate_signal_sources_by_case": dict(
-                gate.get("candidate_native_signal_sources_by_case", {})
-                if isinstance(gate.get("candidate_native_signal_sources_by_case"), dict)
-                else {}
-            ),
-            "role": "sibling_and_repair_ranking_only",
-            "promotion_authority": "eval_ref_case_score",
-        }
-    selection = cohort_feedback.get("selection")
-    if isinstance(selection, dict):
-        selection["realized_sort_policy"] = "strict_eval_ref_score_then_continuous_signal_v1"
-
-
-def _write_candidate_feedback_ledger(state: dict[str, Any], output_dir: Path) -> str:
-    path = output_dir / "candidate_feedback_ledger.yaml"
-    instances = state.get("improvement_instances", {})
-    cohorts = [instances[key] for key in sorted(instances)] if isinstance(instances, dict) else []
-    _write_yaml_atomic(
-        path,
-        {
-            "schema_version": 1,
-            "ledger_type": "single_harness_sibling_candidate_feedback",
-            "cohorts": cohorts,
-        },
-    )
-    state["candidate_feedback_ledger_path"] = str(path)
-    return str(path)
 
 
 def _result_from_state(
@@ -2246,15 +1605,6 @@ def _refresh_optimization_experience(
                     "epoch": int(gate.get("epoch", 0) or 0),
                     "batch_index": int(gate.get("batch_index", 0) or 0),
                     "action_id": str(capability.get("action_id", "") or ""),
-                    "improvement_cohort_id": str(gate.get("improvement_cohort_id", "") or ""),
-                    "candidate_id": str(gate.get("candidate_id", "") or ""),
-                    "candidate_index": int(gate.get("candidate_index", 0) or 0),
-                    "predicted_rank": int(gate.get("predicted_rank", 0) or 0),
-                    "predicted_score": _number(gate.get("predicted_score")),
-                    "improver_version_id": str(gate.get("improver_version_id", "") or ""),
-                    "improver_policy_digest": str(gate.get("improver_policy_digest", "") or ""),
-                    "selected_for_promotion": bool(gate.get("selected_for_promotion")),
-                    "qualified_for_promotion": bool(gate.get("qualified_for_promotion")),
                     "surface": str(capability.get("action_group", "") or ""),
                     "lever": str(decision.get("selected_lever", "unresolved") or "unresolved"),
                     "lever_decision": decision,
@@ -2262,16 +1612,10 @@ def _refresh_optimization_experience(
                     "source_target_score": _number(gate.get("source_target_score")),
                     "candidate_target_score": _number(gate.get("candidate_target_score")),
                     "target_score_delta": _number(gate.get("target_score_delta")),
-                    "source_native_target_score": _number(gate.get("source_native_target_score")),
-                    "candidate_native_target_score": _number(gate.get("candidate_native_target_score")),
-                    "native_target_score_delta": _number(gate.get("native_target_score_delta")),
-                    "native_dimension_delta": _number(gate.get("native_dimension_delta")),
-                    "native_signal_role": str(gate.get("native_signal_role", "") or ""),
                     "non_target_score_delta": _number(gate.get("non_target_score_delta")),
                     "status": str(gate.get("status", "") or ""),
                     "reason": str(gate.get("reason", "") or ""),
                     "failure_class": str(gate.get("failure_class", "") or ""),
-                    "causal_failure_class": str(gate.get("causal_failure_class", "") or ""),
                     "outcome": _experiment_outcome(gate),
                     "source_eval_ref_path": str(gate.get("paired_source_eval_ref_path", "") or ""),
                     "candidate_eval_ref_path": str(gate.get("candidate_eval_ref_path", "") or ""),
@@ -2293,9 +1637,6 @@ def _refresh_optimization_experience(
                         if isinstance(gate.get("candidate_failure_diagnoses"), dict)
                         else {}
                     ),
-                    "causal_intervention_contracts": [
-                        dict(item) for item in gate.get("causal_intervention_contracts", []) if isinstance(item, dict)
-                    ],
                     "epoch_checkpoint": {
                         "status": str(epoch_checkpoint.get("status", "") or ""),
                         "eval_ref_path": str(epoch_checkpoint.get("eval_ref_path", "") or ""),
@@ -2323,10 +1664,7 @@ def _refresh_optimization_experience(
         )
         entry["attempts"] += 1
         accepted = record.get("status") == "accepted"
-        if record.get("status") == "superseded":
-            entry["qualified_not_selected"] = int(entry.get("qualified_not_selected", 0)) + 1
-        else:
-            entry["accepted" if accepted else "rejected"] += 1
+        entry["accepted" if accepted else "rejected"] += 1
         target_delta = _number(record.get("target_score_delta")) or 0.0
         entry["total_target_score_delta"] += target_delta
         if target_delta > 0:
@@ -2359,13 +1697,7 @@ def _experiment_outcome(gate: dict[str, Any]) -> str:
         return "flipped" if gate.get("status") == "accepted" else "improved_but_rejected"
     verifier_deltas = gate.get("verifier_deltas_by_case", {})
     if isinstance(verifier_deltas, dict) and any(
-        isinstance(delta, dict)
-        and (
-            delta.get("newly_passed_requirements")
-            or delta.get("newly_passed_fail_to_pass")
-            or delta.get("newly_passed_atomic_checks")
-        )
-        for delta in verifier_deltas.values()
+        isinstance(delta, dict) and delta.get("newly_passed_fail_to_pass") for delta in verifier_deltas.values()
     ):
         return "partial_contract_progress"
     return "still_failed"
@@ -2383,6 +1715,12 @@ def _candidate_capabilities(member_info: dict[str, Any]) -> list[dict[str, Any]]
         optimization_contracts = [
             dict(item) for item in constraints.get("optimization_contracts", []) if isinstance(item, dict)
         ]
+        phases = {
+            str(item["decision_contract"].get("activation_phase", ""))
+            if isinstance(item.get("decision_contract"), dict)
+            else ""
+            for item in optimization_contracts
+        }
         decision_contracts = [
             dict(item.get("decision_contract", {}))
             for item in optimization_contracts
@@ -2403,6 +1741,7 @@ def _candidate_capabilities(member_info: dict[str, Any]) -> list[dict[str, Any]]
                     target_path,
                 ),
                 "expected_effect": str(action.get("expected_effect", "") or ""),
+                "activation_phase": next(iter(phases)) if len(phases) == 1 else "",
                 "decision_contracts": decision_contracts,
                 "attributed_issue_ids": [str(item) for item in action.get("attributed_issue_ids", []) if str(item)],
                 "analyzer_counterfactual_predictions": [
@@ -2525,8 +1864,6 @@ def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
         metadata = metadata if isinstance(metadata, dict) else {}
         attribution = metadata.get("attribution", {})
         attribution = attribution if isinstance(attribution, dict) else {}
-        causal_coverage = attribution.get("causal_coverage", {})
-        causal_coverage = causal_coverage if isinstance(causal_coverage, dict) else {}
         semantic_payload = {
             "category": str(issue.get("category", "") or "").strip().lower(),
             "summary": " ".join(str(issue.get("summary", "") or "").lower().split()),
@@ -2534,18 +1871,6 @@ def _analysis_issue_signatures(analysis_ref: str | Path) -> dict[str, str]:
             "failure_mode": " ".join(str(issue.get("failure_mode", "") or "").lower().split()),
             "target_ref": str(attribution.get("target_ref", issue.get("target_ref", "")) or "").strip().lower(),
             "affected_cases": sorted(str(case_id) for case_id in issue.get("affected_cases", []) if str(case_id)),
-            # A residual issue is a different repair problem after part of the
-            # original contract has been fixed, even when prose stays similar.
-            "explained_requirement_ids": sorted(
-                str(requirement_id)
-                for requirement_id in causal_coverage.get("explained_requirement_ids", [])
-                if str(requirement_id)
-            ),
-            "residual_requirement_ids": sorted(
-                str(requirement_id)
-                for requirement_id in causal_coverage.get("residual_requirement_ids", [])
-                if str(requirement_id)
-            ),
         }
         if not any(value for key, value in semantic_payload.items() if key != "affected_cases"):
             signatures[issue_id] = issue_id
@@ -2646,60 +1971,25 @@ def _compact_analysis_diagnoses(
         case_id = str(diagnosis.get("case_id", "") or "")
         if not case_id:
             continue
-        compact_diagnosis: dict[str, Any] = {}
-        for key in (
-            "summary",
-            "root_cause",
-            "critical_mistake",
-            "general_mechanism",
-            "recommendation",
-            "decision_contract",
-            "target_ref",
-            "confidence",
-            "diagnosis_status",
-            "analysis_failed",
-            "evidence_status",
-            "hypothesis_assessment",
-            "causal_coverage",
-            "prior_experiment_assessment",
-        ):
-            if key in diagnosis:
-                compact_diagnosis[key] = diagnosis.get(key)
-        compact.setdefault(case_id, []).append(compact_diagnosis)
+        compact.setdefault(case_id, []).append(
+            {
+                key: diagnosis.get(key)
+                for key in (
+                    "summary",
+                    "root_cause",
+                    "critical_mistake",
+                    "general_mechanism",
+                    "recommendation",
+                    "decision_contract",
+                    "target_ref",
+                    "confidence",
+                    "diagnosis_status",
+                    "analysis_failed",
+                )
+                if key in diagnosis
+            }
+        )
     return compact
-
-
-def _refine_paired_candidate_activation(
-    activation: dict[str, Any],
-    diagnoses: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Add paired behavioral evidence when a surface has no direct call event."""
-    assessments = [
-        dict(item["prior_experiment_assessment"])
-        for item in diagnoses
-        if isinstance(item, dict) and isinstance(item.get("prior_experiment_assessment"), dict)
-    ]
-    if not assessments:
-        return activation
-    values = {str(item.get("intervention_activated", "") or "").strip().casefold() for item in assessments}
-    values.discard("")
-    state = "triggered" if values == {"yes"} else "not_triggered" if "no" in values else "unknown"
-    refined = dict(activation)
-    refined.update(
-        {
-            "availability": "observed",
-            "state": state,
-            "observation_source": "candidate_failure_analysis",
-            "behavior_activation": {
-                "availability": "observed",
-                "state": state,
-                "assessment_count": len(assessments),
-                "predicted_behavior_occurred": _uniform_assessment_value(assessments, "predicted_behavior_occurred"),
-                "predicted_outcome_occurred": _uniform_assessment_value(assessments, "predicted_outcome_occurred"),
-            },
-        }
-    )
-    return refined
 
 
 def _uniform_assessment_value(assessments: list[dict[str, Any]], key: str) -> str:
@@ -2735,304 +2025,6 @@ def _causal_candidate_failure_classification(activation_by_case: dict[str, dict[
     return ""
 
 
-def _materialize_candidate_activation_repair(
-    analysis_ref_path: str | Path,
-    *,
-    capabilities: list[dict[str, Any]],
-    causal_intervention_contracts: list[dict[str, Any]],
-    diagnoses_by_case: dict[str, list[dict[str, Any]]],
-) -> None:
-    """Keep a failed causal intervention repairable without inventing task semantics."""
-    analysis_path = Path(analysis_ref_path).expanduser().resolve()
-    analysis = _read_yaml(analysis_path)
-    if analysis.get("issues"):
-        return
-    raw_issues_path = str(analysis.get("issues_path", "") or "").strip()
-    issues_path = Path(raw_issues_path) if raw_issues_path else None
-    if issues_path is not None and not issues_path.is_absolute():
-        issues_path = analysis_path.parent / issues_path
-    if issues_path is not None and issues_path.is_file() and _read_yaml(issues_path).get("issues"):
-        return
-
-    capability = next((item for item in capabilities if isinstance(item, dict)), None)
-    contract = next((item for item in causal_intervention_contracts if isinstance(item, dict)), None)
-    if capability is None or contract is None:
-        return
-    affected_cases: list[str] = []
-    assessments: list[dict[str, Any]] = []
-    for case_id, diagnoses in diagnoses_by_case.items():
-        for diagnosis in diagnoses:
-            assessment = diagnosis.get("prior_experiment_assessment", {})
-            if not isinstance(assessment, dict):
-                continue
-            if str(assessment.get("predicted_behavior_occurred", "") or "").casefold() != "no":
-                continue
-            affected_cases.append(case_id)
-            assessments.append(dict(assessment))
-    if not affected_cases:
-        return
-
-    role = str(capability.get("role", "") or "solver")
-    surface = str(capability.get("action_group", "") or "prompt").casefold()
-    variable = {"prompt": "prompt_section", "skill": "skill", "tool": "tool", "rail": "rail"}.get(surface, "config")
-    target_ref = f"member_harness.{role}.{variable}"
-    predicted = str(contract.get("predicted_behavior_and_outcome", "") or "").strip()
-    intervention = str(contract.get("intervention", "") or "").strip()
-    digest = hashlib.sha256(
-        json.dumps(
-            {"target_ref": target_ref, "cases": sorted(set(affected_cases)), "predicted": predicted},
-            ensure_ascii=True,
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()[:12]
-    hypothesis_id = f"h_activation_{digest}"
-    evidence = [
-        {
-            "case_id": case_id,
-            "failure_mode": "candidate_intervention_behavior_not_reproduced",
-            "affected_component": role,
-        }
-        for case_id in sorted(set(affected_cases))
-    ]
-    issue = {
-        "issue_id": f"issue_activation_{digest}",
-        "category": "member_harness",
-        "severity": "high",
-        "summary": "The deployed candidate did not produce its pre-registered behavior on the paired target run.",
-        "affected_cases": sorted(set(affected_cases)),
-        "evidence": evidence,
-        "suspected_team_scope": "member",
-        "optimization_target": "member_harness",
-        "target_members": [role],
-        "recommendation": (
-            "Revise the activation and operational wording of the same intervention so its pre-registered "
-            "behavior becomes observable; do not change the task-semantic conclusion or add case literals."
-        ),
-        "metadata": {
-            "attribution": {
-                "evidence_status": "confirmed",
-                "selected_hypothesis_id": hypothesis_id,
-                "target_ref": target_ref,
-                "general_mechanism": (
-                    "When a deployed intervention does not cause its pre-registered behavior, strengthen its "
-                    "trigger, executable action, and observable completion condition on the same surface."
-                ),
-                "decision_contract": {
-                    "wrong_decision": (
-                        "The candidate intervention was delivered but its predicted behavior did not occur."
-                    ),
-                    "causal_distinction": (
-                        "This repair changes intervention activation and operationalization, not the unresolved "
-                        "task-semantic answer."
-                    ),
-                    "required_action": (
-                        f"Operationalize the existing intervention ({intervention}) so the recorded behavior occurs."
-                    ),
-                    "acceptance_observable": predicted,
-                    "scope_boundary": [
-                        "Preserve the original semantic decision contract.",
-                        "Do not add benchmark identifiers, evaluator answers, or case-specific literals.",
-                    ],
-                    "activation_phase": "task_execution",
-                },
-                "causal_coverage": {
-                    "explained_requirement_ids": ["candidate_intervention_behavior"],
-                    "residual_requirement_ids": [],
-                    "unexplained_observations": [],
-                    "sufficiency_status": "cluster_sufficient",
-                },
-                "hypothesis_assessment": [
-                    {
-                        "hypothesis_id": hypothesis_id,
-                        "status": "supported",
-                        "verification_status": "verified",
-                        "verification_basis": "paired_candidate_experiment",
-                        "falsifying_condition_status": "not_observed",
-                        "claim_follows_from_evidence": "yes",
-                        "reason": "The paired Analyzer observed that the pre-registered behavior did not occur.",
-                        "evidence_refs": evidence,
-                    }
-                ],
-                "prior_experiment_assessment": assessments[0],
-                "source_causal_intervention_contract": dict(contract),
-            }
-        },
-    }
-    analysis["issues"] = [issue]
-    _write_yaml_atomic(analysis_path, analysis)
-    if issues_path is not None:
-        _write_yaml_atomic(issues_path, {"issues": [issue]})
-
-
-def _causal_intervention_contracts(capabilities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Preserve what each candidate predicted before its outcome was observed."""
-    contracts: list[dict[str, Any]] = []
-    for capability in capabilities:
-        if not isinstance(capability, dict):
-            continue
-        expected_effect = _bounded_candidate_text(str(capability.get("expected_effect", "") or ""), 2_000)
-        if not expected_effect:
-            continue
-        decision_contracts = [dict(item) for item in capability.get("decision_contracts", []) if isinstance(item, dict)]
-        acceptance_observables = [
-            str(item.get("acceptance_observable", "") or "").strip()
-            for item in decision_contracts
-            if str(item.get("acceptance_observable", "") or "").strip()
-        ]
-        contracts.append(
-            {
-                "action_id": str(capability.get("action_id", "") or ""),
-                "action_group": str(capability.get("action_group", "") or ""),
-                "operation": str(capability.get("operation", "") or ""),
-                "attributed_issue_ids": [
-                    str(issue_id) for issue_id in capability.get("attributed_issue_ids", []) if str(issue_id)
-                ],
-                "target_case_ids": [str(case_id) for case_id in capability.get("target_case_ids", []) if str(case_id)],
-                "intervention": _bounded_candidate_text(
-                    str(
-                        capability.get("intervention")
-                        or capability.get("description")
-                        or capability.get("rationale")
-                        or ""
-                    ),
-                    2_000,
-                ),
-                "target_object": str(
-                    capability.get("runtime_name") or capability.get("target_path") or capability.get("action_group")
-                ),
-                "expected_observable_actions_or_state_changes": acceptance_observables or [expected_effect],
-                "success_condition": (
-                    "The candidate trajectory or artifact contains the pre-registered observable change, "
-                    "and the paired target outcome improves without regression."
-                ),
-                "refutation_condition": (
-                    "The pre-registered action occurs but its predicted outcome does not; this refutes the "
-                    "source causal hypothesis rather than requesting another wording-only repair."
-                ),
-                "predicted_behavior_and_outcome": expected_effect,
-                "analyzer_counterfactual_predictions": [
-                    str(item) for item in capability.get("analyzer_counterfactual_predictions", []) if str(item)
-                ],
-                "source_causal_hypothesis_id": str(capability.get("source_causal_hypothesis_id", "") or ""),
-                "source_causal_hypothesis_ids": [
-                    str(item) for item in capability.get("source_causal_hypothesis_ids", []) if str(item)
-                ],
-                "source_causal_hypothesis_semantic_id": str(
-                    capability.get("source_causal_hypothesis_semantic_id", "") or ""
-                ),
-                "source_causal_hypothesis_semantic_ids": [
-                    str(item) for item in capability.get("source_causal_hypothesis_semantic_ids", []) if str(item)
-                ],
-                "prediction_recorded_before_evaluation": True,
-            }
-        )
-    return contracts
-
-
-def _paired_candidate_activation(
-    capabilities: list[dict[str, Any]],
-    *,
-    case_id: str,
-    pre_edit_tools_by_case: dict[str, set[str]],
-    pre_edit_skills_by_case: dict[str, set[str]],
-) -> dict[str, Any]:
-    """Separate observed candidate delivery from surface behavior activation."""
-    delivery = {
-        "availability": "observed",
-        "state": "executed",
-        "evidence": "candidate_harness_was_used_for_paired_evaluation",
-    }
-    surfaces = {
-        str(capability.get("action_group", "") or "")
-        for capability in capabilities
-        if str(capability.get("action_group", "") or "")
-    }
-    expected: list[dict[str, Any]] = []
-    missing_runtime_name = False
-    for capability in capabilities:
-        action_group = str(capability.get("action_group", "") or "")
-        operation = str(capability.get("operation", "") or "")
-        if action_group not in {"skill", "tool"} or operation not in {"add", "modify", "update"}:
-            continue
-        target_case_ids = {
-            str(target_case_id) for target_case_id in capability.get("target_case_ids", []) if str(target_case_id)
-        }
-        if target_case_ids and case_id not in target_case_ids:
-            continue
-        runtime_name = str(capability.get("runtime_name", "") or "")
-        if not runtime_name:
-            missing_runtime_name = True
-            continue
-        observed_names = (
-            pre_edit_tools_by_case.get(case_id, set())
-            if action_group == "tool"
-            else pre_edit_skills_by_case.get(case_id, set())
-        )
-        names_match = _tool_names_match if action_group == "tool" else _skill_names_match
-        expected.append(
-            {
-                "surface": action_group,
-                "runtime_name": runtime_name,
-                "triggered_pre_edit": any(names_match(runtime_name, name) for name in observed_names),
-            }
-        )
-
-    if missing_runtime_name:
-        return {
-            "schema_version": 1,
-            "delivery": delivery,
-            "availability": "missing_artifact",
-            "state": "unknown",
-            "surfaces": sorted(surfaces),
-            "reason": "expected_runtime_name_missing",
-            "expected": expected,
-            "behavior_activation": {
-                "availability": "missing_artifact",
-                "state": "unknown",
-                "reason": "expected_runtime_name_missing",
-            },
-        }
-    if not expected:
-        availability = "not_instrumented" if surfaces & {"prompt", "rail", "config", "control"} else "not_applicable"
-        return {
-            "schema_version": 1,
-            "delivery": delivery,
-            "availability": availability,
-            "state": "unknown",
-            "surfaces": sorted(surfaces),
-            "reason": "surface_has_no_observable_activation_event",
-            "expected": [],
-            "behavior_activation": {
-                "availability": availability,
-                "state": "unknown",
-                "reason": "surface_has_no_observable_activation_event",
-            },
-        }
-
-    observed_count = sum(item["triggered_pre_edit"] is True for item in expected)
-    state = (
-        "triggered" if observed_count == len(expected) else "partially_triggered" if observed_count else "not_triggered"
-    )
-    return {
-        "schema_version": 1,
-        "delivery": delivery,
-        "availability": "observed",
-        "state": state,
-        "surfaces": sorted(surfaces & {"skill", "tool"}),
-        "expected_count": len(expected),
-        "observed_pre_edit_count": observed_count,
-        "trigger_rate": observed_count / len(expected),
-        "expected": expected,
-        "behavior_activation": {
-            "availability": "observed",
-            "state": state,
-            "expected_count": len(expected),
-            "observed_pre_edit_count": observed_count,
-            "trigger_rate": observed_count / len(expected),
-        },
-    }
-
-
 def _prior_candidate_feedback(
     state: dict[str, Any],
     cases: list[dict[str, Any]],
@@ -3046,11 +2038,9 @@ def _prior_candidate_feedback(
         deltas = record.get("verifier_deltas_by_case", {})
         diagnoses = record.get("candidate_failure_diagnoses", {})
         patches = record.get("candidate_patch_excerpts_by_case", {})
-        causal_contracts = record.get("causal_intervention_contracts", [])
         deltas = deltas if isinstance(deltas, dict) else {}
         diagnoses = diagnoses if isinstance(diagnoses, dict) else {}
         patches = patches if isinstance(patches, dict) else {}
-        causal_contracts = [dict(item) for item in causal_contracts if isinstance(item, dict)]
         for case_id in active_case_ids & set(deltas):
             diagnosis_value = diagnoses.get(case_id, {})
             if isinstance(diagnosis_value, list):
@@ -3064,25 +2054,13 @@ def _prior_candidate_feedback(
                     "experiment_id": str(record.get("experiment_id", "") or ""),
                     "surface": str(record.get("surface", "") or ""),
                     "outcome": str(record.get("outcome", "") or ""),
-                    "status": str(record.get("status", "") or ""),
-                    "reason": str(record.get("reason", "") or ""),
                     "failure_class": str(record.get("failure_class", "") or ""),
-                    "predicted_rank": record.get("predicted_rank"),
-                    "predicted_score": record.get("predicted_score"),
-                    "source_target_score": record.get("source_target_score"),
-                    "candidate_target_score": record.get("candidate_target_score"),
-                    "target_score_delta": record.get("target_score_delta"),
-                    "selected_for_promotion": record.get("selected_for_promotion"),
                     "verifier_delta": dict(deltas.get(case_id, {})),
                     "candidate_patch_excerpt": str(patches.get(case_id, "") or ""),
-                    # Preserve the singular field for older analyzer prompts.
+                    # Keep the singular field for older analyzer prompts while the
+                    # plural field carries every independent diagnosis.
                     "candidate_failure_diagnosis": (dict(case_diagnoses[0]) if case_diagnoses else {}),
                     "candidate_failure_diagnoses": case_diagnoses,
-                    "causal_intervention_contracts": [
-                        dict(contract)
-                        for contract in causal_contracts
-                        if case_id in set(contract.get("target_case_ids", []))
-                    ],
                 }
             )
     return {"by_case": {case_id: records[-3:] for case_id, records in by_case.items() if records}}
@@ -3096,10 +2074,7 @@ def _action_target_case_ids(
 ) -> set[str]:
     action_issue_ids = {str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)}
     if action_issue_ids:
-        target_case_ids: set[str] = set()
-        for issue_id in action_issue_ids:
-            target_case_ids.update(issue_case_ids.get(issue_id, set()))
-        return target_case_ids
+        return {case_id for issue_id in action_issue_ids for case_id in issue_case_ids.get(issue_id, set())}
     return set(target_case_ids_by_role.get(str(action.get("role", "") or ""), set()))
 
 
@@ -3708,6 +2683,7 @@ def _pre_edit_invoked_names_by_case(
     eval_ref_path: str,
     *,
     action_group: str,
+    allow_later_edit: bool = False,
 ) -> tuple[dict[str, set[str]], dict[str, int]]:
     """Return capability completions that preceded the first persistent edit."""
     names_by_case: dict[str, set[str]] = {}
@@ -3728,6 +2704,7 @@ def _pre_edit_invoked_names_by_case(
         kwargs = {
             "tool_names": names if action_group == "tool" else None,
             "skill_names": names if action_group == "skill" else None,
+            "allow_later_edit": allow_later_edit,
         }
         edit_steps: list[int] = []
         for trace in _case_usage_traces(case):
@@ -3821,12 +2798,7 @@ def _classify_gate_failure(
         return "infrastructure_or_evidence_failure"
     if missing_skill_invocations:
         return "natural_skill_activation_failure"
-    if any(
-        delta.get("newly_passed_requirements")
-        or delta.get("newly_passed_fail_to_pass")
-        or delta.get("newly_passed_atomic_checks")
-        for delta in (verifier_deltas_by_case or {}).values()
-    ):
+    if any(delta.get("newly_passed_fail_to_pass") for delta in (verifier_deltas_by_case or {}).values()):
         return "partial_contract_progress"
 
     failed_targets = {case_id for case_id in target_case_ids if candidate_case_scores.get(case_id, 0.0) < 1.0}
@@ -3836,7 +2808,7 @@ def _classify_gate_failure(
         return "semantic_non_reproduction"
     if "retention" in reason:
         return "regression_or_retention_failure"
-    if "not_invoked" in reason or "capability_not_invoked" in reason:
+    if "not_invoked" in reason or "invoked_outside_activation_window" in reason:
         return "capability_activation_failure"
     return "score_non_improvement"
 
@@ -4437,6 +3409,7 @@ def _missing_capability_invocations(
     invoked_names_by_case: dict[str, set[str]],
     fallback_target_case_ids: set[str],
     names_match: Any,
+    later_edit_names_by_case: dict[str, set[str]] | None = None,
 ) -> list[dict[str, str]]:
     missing: list[dict[str, str]] = []
     for capability in capabilities:
@@ -4450,8 +3423,11 @@ def _missing_capability_invocations(
         target_case_ids = {
             str(case_id) for case_id in capability.get("target_case_ids", []) if str(case_id)
         } or fallback_target_case_ids
+        eligible_names = invoked_names_by_case
+        if capability.get("activation_phase") in {"post_diagnosis", "pre_submission"}:
+            eligible_names = later_edit_names_by_case or {}
         for case_id in sorted(target_case_ids):
-            invoked_names = invoked_names_by_case.get(case_id, set())
+            invoked_names = eligible_names.get(case_id, set())
             if not any(names_match(runtime_name, invoked) for invoked in invoked_names):
                 missing.append(
                     {
@@ -4717,3 +3693,72 @@ __all__ = [
     "SingleHarnessIterativeOptimizationOrchestrator",
     "load_cases",
 ]
+
+
+def _candidate_failure_supports_repair(gate: dict[str, Any]) -> bool:
+    """Return whether a rejected candidate produced usable repair evidence."""
+    if str(gate.get("status", "")) != "rejected":
+        return False
+    return bool(gate.get("candidate_failure_analysis_ref_path")) or str(gate.get("reason", "")) in {
+        "candidate_made_partial_verifier_progress",
+        "expected_skill_not_invoked_on_target_case",
+        "expected_skill_invoked_after_first_persistent_edit",
+        "expected_skill_invoked_outside_activation_window",
+        "expected_tool_not_invoked_on_target_case",
+        "expected_tool_invoked_after_first_persistent_edit",
+        "expected_tool_invoked_outside_activation_window",
+    }
+
+
+def _rejected_capabilities(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return prior rejected actions with enough evidence for the next plan."""
+    return [
+        {
+            **dict(capability),
+            "rejection_reason": str(candidate_gate.get("reason", "")),
+            "failure_class": str(candidate_gate.get("failure_class", "")),
+            "target_confirmation": dict(
+                candidate_gate.get("target_confirmation", {})
+                if isinstance(candidate_gate.get("target_confirmation"), dict)
+                else {}
+            ),
+            "epoch_checkpoint_outcome": dict(
+                candidate_gate.get("epoch_checkpoint_outcome", {})
+                if isinstance(candidate_gate.get("epoch_checkpoint_outcome"), dict)
+                else {}
+            ),
+            "verifier_deltas_by_case": dict(
+                candidate_gate.get("verifier_deltas_by_case", {})
+                if isinstance(candidate_gate.get("verifier_deltas_by_case"), dict)
+                else {}
+            ),
+            "candidate_failure_diagnoses": dict(
+                candidate_gate.get("candidate_failure_diagnoses", {})
+                if isinstance(candidate_gate.get("candidate_failure_diagnoses"), dict)
+                else {}
+            ),
+        }
+        for candidate_gate in state["candidate_gates"]
+        if candidate_gate.get("status") == "rejected"
+        for capability in candidate_gate.get("capabilities", [])
+        if isinstance(capability, dict)
+    ]
+
+
+def _candidate_evaluation_output_dir(
+    *,
+    optimization_output_dir: Path,
+    epoch: int,
+    batch_index: int,
+    attempt_index: int,
+    candidate_index: int,
+) -> Path:
+    """Keep candidate case artifacts below the Windows path-length boundary."""
+    return (
+        optimization_output_dir.parent
+        / "ce"
+        / f"e{epoch:03d}"
+        / f"b{batch_index:03d}"
+        / f"a{attempt_index:03d}"
+        / f"c{candidate_index:03d}"
+    )
