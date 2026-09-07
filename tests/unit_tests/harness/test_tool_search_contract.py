@@ -15,7 +15,10 @@ from typing import Any
 import pytest
 
 from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolCard, ToolExposure, ToolInfo
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
@@ -26,7 +29,6 @@ from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.harness.tools.tool_discovery.tool_call import ToolCallTool
 from openjiuwen.harness.tools.tool_discovery.tool_search import ToolSearchTool
-
 
 FULL_SCHEMA = {
     "type": "object",
@@ -96,6 +98,16 @@ class _CapturingAbilityManager:
         return list(self.cards)
 
 
+class _InterruptingAbilityManager(_CapturingAbilityManager):
+    def __init__(self, interrupt: ToolInterruptException):
+        super().__init__()
+        self.interrupt = interrupt
+
+    async def execute(self, ctx, tool_call, session, parallel_tool_calls=False):
+        self.executed.append(tool_call)
+        return [(self.interrupt, None)]
+
+
 class _TestableProgressiveToolRail(ProgressiveToolRail):
     def seed_cached_tools(self, *, all_tool_infos):
         self._cached_all_tool_infos = list(all_tool_infos)
@@ -119,11 +131,11 @@ def _agent(ability_manager):
     )
 
 
-def _rail_and_agent():
+def _rail_and_agent(manager=None):
     rail = _TestableProgressiveToolRail(
         DeepAgentConfig(progressive_tool_enabled=True, language="cn")
     )
-    manager = _CapturingAbilityManager()
+    manager = manager or _CapturingAbilityManager()
     agent = _agent(manager)
     rail._agent_manager = manager
     rail.init(agent)
@@ -344,6 +356,54 @@ async def test_search_result_requires_tool_call_wrapper_and_unknown_name_is_reje
     assert rejected_ctx.extra.get("_skip_tool") is True
     assert isinstance(rejected_ctx.inputs.tool_msg, ToolMessage)
     assert rejected_ctx.inputs.tool_msg.tool_call_id == "unknown-call"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_propagates_deferred_tool_interrupt():
+    target_call = ToolCall(
+        id="wrapper-call:target",
+        type="function",
+        name="cron_create_job",
+        arguments="{}",
+    )
+    interrupt = ToolInterruptException(
+        request=InterruptRequest(message="Approve creating this job?"),
+        tool_call=target_call,
+    )
+    manager = _InterruptingAbilityManager(interrupt)
+    rail, agent, manager = _rail_and_agent(manager)
+    rail.seed_cached_tools(
+        all_tool_infos=[
+            ToolInfo(
+                name="cron_create_job",
+                description="Create a calendar reminder",
+                parameters=FULL_SCHEMA,
+            )
+        ]
+    )
+    session = _FakeSession()
+    search_tool = manager.registered["tool_search"][1]
+    await search_tool.invoke({"query": "calendar", "limit": 1}, session=session)
+
+    call_tool = manager.registered["tool_call"][1]
+    wrapper_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ToolCallInputs(
+            tool_call=SimpleNamespace(id="wrapper-call"),
+            tool_name="tool_call",
+            tool_args={"name": "cron_create_job", "args": {}},
+        ),
+        session=session,
+    )
+
+    with pytest.raises(ToolInterruptException) as exc_info:
+        await call_tool.invoke(
+            wrapper_ctx.inputs.tool_args,
+            session=session,
+            _tool_callback_context=wrapper_ctx,
+        )
+
+    assert exc_info.value is interrupt
 
 
 @pytest.mark.asyncio

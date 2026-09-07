@@ -1337,6 +1337,10 @@ class AbilityManager:
                 # round cancellation) propagate correctly through anyio CancelScope.
                 logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
                 raise
+            except ToolInterruptException:
+                # User-interaction interrupts are control flow. In particular,
+                # deferred tools can raise one from inside the tool_call wrapper.
+                raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"
                 logger.error(error_msg)

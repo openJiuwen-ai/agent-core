@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（61 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-09-01 |
+| 最近一次修订日期 | 2026-09-07 |
 | 关联 feature | `F_01_ask-user-otel-events.md` |
 
 ## 范围 / 边界
@@ -81,6 +81,12 @@
     `ask_user.resolved`；两个 Span 均走既有生命周期正常闭合。两条事件以
     `session_id + execution_subject_id + interaction_id` 关联，前端不得从 LLM 输出或下一次
     请求反推 ask_user 生命周期。
+12. **工具包装层必须保持中断透明**：`ToolInterruptException` 是交互控制流，不是工具失败；
+    deferred 工具经 `tool_search` / `tool_call` 执行时，`ProgressiveToolRail`、包装工具和
+    `AbilityManager` 必须将其原样传回既有中断处理路径，不得包装进 `ToolOutput` 或转换成
+    `AbilityExecutionError`。若 target 工具在包装层内中断，中断请求保留 target call ID，
+    但恢复执行必须从原 outer wrapper tool call 重新进入，以保持授权链和模型上下文中的
+    tool-call ID 配对；不得把 target 当作新的 deferred 工具直调，也不得放宽普通直调限制。
 
 ## 接口契约
 
