@@ -81,6 +81,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (
             "[三方运行时] 成员 {member_name}（{agent_kind}，模型 {model}）正在自动重试：{category}。"
+            "进度 {attempt}/{max_attempts}，原因：{reason_message}。"
+            "诊断字段：http_status={http_status}，sdk_error_code={sdk_error_code}。"
             "本轮不结束，成员状态不变，等待 SDK 后续结果。{summary}"
         ),
         "reliability.external_runtime_failed": (
@@ -100,6 +102,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "reliability.suggested_action.auth_required": "请登录 CLI 或配置有效的 API key",
         "reliability.suggested_action.quota_exceeded": "请检查账户额度或更换 API key",
         "reliability.suggested_action.rate_limited": "请稍后重试",
+        "reliability.suggested_action.codex_429_cause_unknown": (
+            "Codex 未提供具体的上游 429 原因；请检查服务端限流、账户额度和网关策略后再决定是否重试"
+        ),
         "reliability.suggested_action.request_rejected": (
             "模型服务拒绝了请求，请结合诊断字段和运行日志检查请求配置及服务端错误详情"
         ),
@@ -428,6 +433,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (
             "[external runtime] Member {member_name} ({agent_kind}, model {model}) is auto-retrying: {category}. "
+            "Progress: {attempt}/{max_attempts}. Reason: {reason_message}. "
+            "Diagnostics: http_status={http_status}, sdk_error_code={sdk_error_code}. "
             "The round stays open and member status is unchanged; awaiting the next SDK result. {summary}"
         ),
         "reliability.external_runtime_failed": (
@@ -451,6 +458,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "reliability.suggested_action.auth_required": "Log in to the CLI or configure a valid API key",
         "reliability.suggested_action.quota_exceeded": "Check account quota or switch to a different API key",
         "reliability.suggested_action.rate_limited": "Please retry later",
+        "reliability.suggested_action.codex_429_cause_unknown": (
+            "Codex did not provide the specific upstream cause for HTTP 429; inspect service rate limits, "
+            "account quota, and gateway policy before retrying"
+        ),
         "reliability.suggested_action.request_rejected": (
             "The model service rejected the request; inspect diagnostics and runtime logs for request configuration "
             "and server details"

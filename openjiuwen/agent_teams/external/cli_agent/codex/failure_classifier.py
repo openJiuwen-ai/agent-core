@@ -56,6 +56,15 @@ _HTTP_STATUS_CATEGORY: dict[int, ExternalRuntimeFailureCategory] = {
     529: "server_unavailable",
 }
 
+_SEMANTIC_ERROR_CODES = {
+    value.value
+    for value in CodexErrorInfoValue
+    if value is not CodexErrorInfoValue.other
+}
+_RETRY_EXHAUSTED_ERROR_CODE = (
+    next(iter(_v2.ResponseTooManyFailedAttemptsCodexErrorInfo.model_fields.values())).alias or ""
+)
+
 
 def classify_codex_error_info(
     error_info: Any,
@@ -171,6 +180,59 @@ def classify_codex_exception(
     )
 
 
+def _merge_codex_failure_reasons(
+    *reasons: ExternalRuntimeFailureReason,
+) -> ExternalRuntimeFailureReason:
+    """Merge Codex diagnostics without discarding distinct SDK details."""
+    messages: list[str] = []
+    for reason in reasons:
+        for line in reason.message.splitlines():
+            detail = line.strip()
+            if detail and detail.lower() != "unknown" and detail not in messages:
+                messages.append(detail)
+    preferred = reasons[-1] if reasons else ExternalRuntimeFailureReason()
+    return ExternalRuntimeFailureReason(
+        message="\n".join(messages),
+        sdk_error_type=next((reason.sdk_error_type for reason in reversed(reasons) if reason.sdk_error_type), ""),
+        sdk_error_code=preferred.sdk_error_code
+        or next((reason.sdk_error_code for reason in reversed(reasons) if reason.sdk_error_code), ""),
+        http_status=preferred.http_status
+        if preferred.http_status is not None
+        else next((reason.http_status for reason in reversed(reasons) if reason.http_status is not None), None),
+    )
+
+
+def merge_codex_failure_diagnostics(
+    diagnostics: list[tuple[ExternalRuntimeFailureCategory, ExternalRuntimeFailureReason]],
+    terminal_category: ExternalRuntimeFailureCategory,
+    terminal_reason: ExternalRuntimeFailureReason,
+) -> tuple[ExternalRuntimeFailureCategory, ExternalRuntimeFailureReason]:
+    """Merge retries and prefer an SDK semantic cause over transport exhaustion."""
+    if not diagnostics:
+        return terminal_category, terminal_reason
+    selected_category = terminal_category
+    selected_reason = terminal_reason
+    can_use_prior_cause = is_codex_retry_exhaustion(terminal_reason) or not terminal_reason.sdk_error_code
+    if can_use_prior_cause:
+        for candidate_category, candidate_reason in reversed(diagnostics):
+            if candidate_reason.sdk_error_code in _SEMANTIC_ERROR_CODES:
+                selected_category = candidate_category
+                selected_reason = candidate_reason
+                break
+    merged_reason = _merge_codex_failure_reasons(
+        *(candidate_reason for _, candidate_reason in diagnostics),
+        terminal_reason,
+    )
+    if selected_reason is not terminal_reason and selected_reason.sdk_error_code:
+        merged_reason = merged_reason.model_copy(update={"sdk_error_code": selected_reason.sdk_error_code})
+    return selected_category, merged_reason
+
+
+def is_codex_retry_exhaustion(reason: ExternalRuntimeFailureReason) -> bool:
+    """Return whether the reason is Codex SDK's structured retry-exhaustion variant."""
+    return reason.sdk_error_code == _RETRY_EXHAUSTED_ERROR_CODE
+
+
 # ------------------------------------------------------------------
 # Extraction helpers
 # ------------------------------------------------------------------
@@ -261,4 +323,6 @@ __all__ = [
     "classify_codex_exception",
     "classify_error_notification",
     "classify_turn_error",
+    "is_codex_retry_exhaustion",
+    "merge_codex_failure_diagnostics",
 ]

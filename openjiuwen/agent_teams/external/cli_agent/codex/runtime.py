@@ -21,6 +21,10 @@ from openjiuwen.agent_teams.external.cli_agent.codex.options import (
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+    ExternalRuntimeFailureCategory,
+    ExternalRuntimeFailureReason,
+)
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
@@ -262,6 +266,9 @@ class CodexSdkRuntime(CliRuntimeBase):
         self._turn_idle_retries = turn_idle_retries
         self._max_will_retry_count = max_will_retry_count
         self._will_retry_count: int = 0
+        self._failure_diagnostics: list[
+            tuple[ExternalRuntimeFailureCategory, ExternalRuntimeFailureReason]
+        ] = []
         self._thread_id: str | None = None
         self._persisted_thread_id: str | None = None
         self._client: Any | None = None
@@ -609,6 +616,7 @@ class CodexSdkRuntime(CliRuntimeBase):
         if self._reliability_ctx is not None:
             self._reliability_ctx.begin_attempt(phase="turn", round_id=self._current_round_id)
         self._will_retry_count = 0
+        self._failure_diagnostics.clear()
         self._span_bridge.start_turn(
             prompt=prompt,
             thread_id=self._thread_id,
@@ -819,6 +827,7 @@ class CodexSdkRuntime(CliRuntimeBase):
         from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import (
             classify_error_notification,
             classify_turn_error,
+            merge_codex_failure_diagnostics,
         )
 
         ctx = self._reliability_ctx
@@ -836,6 +845,8 @@ class CodexSdkRuntime(CliRuntimeBase):
                     return False
                 if category == "auth_required" and safe_to_retry and await self._activate_auth_fallback():
                     return True
+                self._failure_diagnostics.append((category, reason))
+                ctx.record_pending(category=category, reason=reason)
                 self._will_retry_count += 1
                 if self._will_retry_count > self._max_will_retry_count:
                     handle = self._active_turn
@@ -850,8 +861,11 @@ class CodexSdkRuntime(CliRuntimeBase):
                     category=category,
                     reason=reason,
                     summary=f"{self._member_name} Codex SDK retrying: {category}",
+                    attempt=self._will_retry_count,
+                    max_attempts=self._max_will_retry_count,
                 )
             else:
+                self._failure_diagnostics.append((category, reason))
                 ctx.record_pending(category=category, reason=reason)
             return False
         if method == "turn/completed":
@@ -869,14 +883,15 @@ class CodexSdkRuntime(CliRuntimeBase):
                 category, reason = ctx.pending_category, ctx.pending_reason
             else:
                 # No pending candidate and no turn.error: degrade to sdk_error.
-                from openjiuwen.agent_teams.schema.external_runtime_reliability import (
-                    ExternalRuntimeFailureReason,
-                )
-
                 category = "sdk_error"
                 reason = ExternalRuntimeFailureReason(
                     message="codex SDK turn failed without a structured error",
                 )
+            category, reason = merge_codex_failure_diagnostics(
+                self._failure_diagnostics,
+                category,
+                reason,
+            )
             if category == "auth_required" and safe_to_retry and await self._activate_auth_fallback():
                 return True
             if ctx is not None:
@@ -884,6 +899,7 @@ class CodexSdkRuntime(CliRuntimeBase):
                     category=category,
                     reason=reason,
                     summary=_codex_failure_summary(category, reason),
+                    suggested_action=_codex_suggested_action(reason),
                 )
         return False
 
@@ -891,26 +907,31 @@ class CodexSdkRuntime(CliRuntimeBase):
         """Finalize a Codex SDK exception, merging any pending candidate."""
         from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import (
             classify_codex_exception,
+            merge_codex_failure_diagnostics,
         )
-        from openjiuwen.agent_teams.schema.external_runtime_reliability import (
-            ExternalRuntimeFailureReason,
-        )
-
         ctx = self._reliability_ctx
         if ctx is None or ctx.has_finalized:
             return
         if isinstance(exc, _CodexRetryBudgetExceeded):
             category = exc.category
-            reason = ctx.pending_reason or ExternalRuntimeFailureReason(message=str(exc))
+            reason = ExternalRuntimeFailureReason(
+                message=str(exc),
+                sdk_error_type=type(exc).__name__,
+            )
         else:
             category, reason = classify_codex_exception(exc)
             if ctx.has_pending:
                 category = ctx.pending_category if ctx.pending_category is not None else category
-                reason = ctx.pending_reason or reason
+        category, reason = merge_codex_failure_diagnostics(
+            self._failure_diagnostics,
+            category,
+            reason,
+        )
         await ctx.finalize_failure(
             category=category,
             reason=reason,
-            summary=f"{self._member_name} Codex SDK turn failed: {type(exc).__name__}",
+            summary=_codex_failure_summary(category, reason),
+            suggested_action=_codex_suggested_action(reason),
         )
 
     async def _finalize_startup_failure(self, exc: BaseException) -> None:
@@ -1208,12 +1229,31 @@ def _notification_chunks(notification: Any, start_index: int) -> list[OutputSche
     return []
 
 
-def _codex_failure_summary(category: Any, reason: Any) -> str:
+def _codex_failure_summary(
+    category: ExternalRuntimeFailureCategory,
+    reason: ExternalRuntimeFailureReason,
+) -> str:
     """Build a one-line Codex failure summary from category and reason."""
+    from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import is_codex_retry_exhaustion
+
     message = getattr(reason, "message", "") or ""
+    if is_codex_retry_exhaustion(reason):
+        detail = message or str(category)
+        return f"Codex SDK turn failed after retries: {detail}. Codex did not provide a specific upstream cause"
     if message:
         return f"Codex SDK turn failed: {message}"
     return f"Codex SDK turn failed: {category}"
+
+
+def _codex_suggested_action(reason: ExternalRuntimeFailureReason) -> str:
+    """Return conservative guidance when Codex exposes only retry exhaustion."""
+    from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import is_codex_retry_exhaustion
+
+    if is_codex_retry_exhaustion(reason) and reason.http_status == 429:
+        from openjiuwen.agent_teams.i18n import t
+
+        return t("reliability.suggested_action.codex_429_cause_unknown")
+    return ""
 
 
 def _delta_chunks(chunk_type: str, payload: Any, index: int) -> list[OutputSchema]:

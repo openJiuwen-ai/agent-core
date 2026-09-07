@@ -181,8 +181,95 @@ async def test_codex_will_retry_publishes_retrying_event():
     assert len(mm.sent) == 0
     assert len(messager.published) == 1
     _topic_id, event_message = messager.published[0]
-    assert event_message.get_payload().model == "gpt-effective"
+    retrying = event_message.get_payload()
+    assert retrying.model == "gpt-effective"
+    assert retrying.reason.message == "overloaded"
+    assert retrying.attempt == 1
+    assert retrying.max_attempts == 5
     logger.info("retrying published, no failure message")
+
+
+@pytest.mark.asyncio
+async def test_codex_retry_detail_survives_terminal_retry_exhaustion():
+    from openai_codex.generated.v2_all import (
+        ResponseTooManyFailedAttempts,
+        ResponseTooManyFailedAttemptsCodexErrorInfo,
+    )
+
+    terminal_info = ResponseTooManyFailedAttemptsCodexErrorInfo(
+        response_too_many_failed_attempts=ResponseTooManyFailedAttempts(http_status_code=429),
+    )
+    notifications = [
+        _notification(
+            "error",
+            error=SimpleNamespace(
+                message="provider rejected the request",
+                additional_details="provider diagnostic id: detail-1",
+                codex_error_info="usageLimitExceeded",
+            ),
+            will_retry=True,
+        ),
+        _notification(
+            "turn/completed",
+            turn=SimpleNamespace(
+                status="failed",
+                error=SimpleNamespace(
+                    message="exceeded retry limit, last status: 429 Too Many Requests",
+                    additional_details=None,
+                    codex_error_info=terminal_info,
+                ),
+            ),
+        ),
+    ]
+    runtime, mm, _messager, _sink = _build_runtime(notifications)
+    await _start(runtime)
+
+    async for _chunk in runtime._drive({"query": "hi"}):
+        pass
+
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "quota_exceeded"
+    assert failure.user_action_required is True
+    assert failure.reason.sdk_error_code == "usageLimitExceeded"
+    assert failure.reason.http_status == 429
+    assert "provider diagnostic id: detail-1" in failure.reason.message
+    assert "exceeded retry limit" in failure.reason.message
+
+
+@pytest.mark.asyncio
+async def test_codex_retry_exhaustion_reports_unknown_upstream_cause():
+    from openai_codex.generated.v2_all import (
+        ResponseTooManyFailedAttempts,
+        ResponseTooManyFailedAttemptsCodexErrorInfo,
+    )
+
+    terminal_info = ResponseTooManyFailedAttemptsCodexErrorInfo(
+        response_too_many_failed_attempts=ResponseTooManyFailedAttempts(http_status_code=429),
+    )
+    notifications = [
+        _notification(
+            "turn/completed",
+            turn=SimpleNamespace(
+                status="failed",
+                error=SimpleNamespace(
+                    message="exceeded retry limit, last status: 429 Too Many Requests",
+                    additional_details=None,
+                    codex_error_info=terminal_info,
+                ),
+            ),
+        ),
+    ]
+    runtime, mm, _messager, _sink = _build_runtime(notifications)
+    await _start(runtime)
+
+    async for _chunk in runtime._drive({"query": "hi"}):
+        pass
+
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "rate_limited"
+    assert failure.reason.sdk_error_code == "responseTooManyFailedAttempts"
+    assert "did not provide a specific upstream cause" in failure.summary
+    assert "账户额度" in failure.suggested_action
 
 
 @pytest.mark.asyncio

@@ -12,12 +12,31 @@ from openjiuwen.agent_teams.external.cli_agent.codex.failure_classifier import (
     classify_codex_exception,
     classify_error_notification,
     classify_turn_error,
+    is_codex_retry_exhaustion,
+    merge_codex_failure_diagnostics,
 )
+from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailureReason
 
 
 def _error_info(value: str):
     """A plain enum-string codex_error_info (the common shape)."""
     return value
+
+
+def _retry_exhausted_reason(message: str) -> ExternalRuntimeFailureReason:
+    """Build a reason through Codex's structured retry-exhaustion variant."""
+    from openai_codex.generated.v2_all import (
+        ResponseTooManyFailedAttempts,
+        ResponseTooManyFailedAttemptsCodexErrorInfo,
+    )
+
+    error_info = ResponseTooManyFailedAttemptsCodexErrorInfo(
+        response_too_many_failed_attempts=ResponseTooManyFailedAttempts(http_status_code=429),
+    )
+    _category, reason = classify_turn_error(
+        SimpleNamespace(message=message, additional_details=None, codex_error_info=error_info),
+    )
+    return reason
 
 
 # --- classify_codex_error_info -----------------------------------------
@@ -161,3 +180,33 @@ def test_classify_codex_exception_unknown_is_sdk_error():
     category, reason = classify_codex_exception(ValueError("weird"))
     assert category == "sdk_error"
     assert "weird" in reason.message
+
+
+def test_merge_codex_failure_diagnostics_preserves_structured_cause_and_details():
+    category, merged = merge_codex_failure_diagnostics(
+        [
+            (
+                "quota_exceeded",
+                ExternalRuntimeFailureReason(
+                    message="upstream quota detail",
+                    sdk_error_code="usageLimitExceeded",
+                ),
+            )
+        ],
+        "rate_limited",
+        _retry_exhausted_reason("exceeded retry limit"),
+    )
+
+    assert category == "quota_exceeded"
+    assert merged.message == "upstream quota detail\nexceeded retry limit"
+    assert merged.sdk_error_code == "usageLimitExceeded"
+    assert merged.http_status == 429
+
+
+def test_retry_exhaustion_is_derived_from_codex_structured_variant():
+    reason = _retry_exhausted_reason("retry exhausted")
+
+    assert is_codex_retry_exhaustion(reason) is True
+    assert is_codex_retry_exhaustion(
+        ExternalRuntimeFailureReason(sdk_error_code="budget exceeded"),
+    ) is False

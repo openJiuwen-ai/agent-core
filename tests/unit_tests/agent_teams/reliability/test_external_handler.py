@@ -45,6 +45,13 @@ def _retrying_event() -> EventMessage:
             phase="turn",
             category="server_unavailable",
             summary="overloaded",
+            reason={
+                "message": "upstream overloaded",
+                "sdk_error_code": "serverOverloaded",
+                "http_status": 529,
+            },
+            attempt=2,
+            max_attempts=5,
             round_id=3,
         )
     )
@@ -66,6 +73,10 @@ async def test_leader_receives_retrying_nudge(_lang):
     assert "worker1" in host.delivered[0]
     assert "模型 gpt-effective" in host.delivered[0]
     assert "server_unavailable" in host.delivered[0]
+    assert "upstream overloaded" in host.delivered[0]
+    assert "2/5" in host.delivered[0]
+    assert "http_status=529" in host.delivered[0]
+    assert "sdk_error_code=serverOverloaded" in host.delivered[0]
 
 
 @pytest.mark.asyncio
