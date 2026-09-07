@@ -42,7 +42,14 @@ class TTSEConfig:
         top_k_facts / top_k_tips: How many rules to inject per task when a
             retrieval embedding provider is configured.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
+            Overflow keeps the tail (actions/observations), not the USER head.
         inject_enabled: Inject the bank (or top-K) into the system prompt.
+        inject_mode: Where FACT/TIP land. Default ``legacy_system`` keeps the
+            current P:45 body (no behavior change). ``disk_catalog`` leaves a
+            fixed guidance section, trails the category listing as a prompt
+            attachment, and exposes ``ttse_consult(category=)`` for FACT/TIP.
+            ``trailing_attach`` is accepted but currently falls back to
+            ``legacy_system``.
         evolve_enabled: Run induction after each task to grow the bank.
         success_threshold: Score >= this counts as success (Slice 3 gating).
         induce_llm_policy: LLM invocation policy for induce/blame/synthesize.
@@ -52,6 +59,7 @@ class TTSEConfig:
             induce on every task (default, the reference's per-task mode).
         batch_traj_budget: Per-task trajectory chars kept in the batch buffer
             (each task's excerpt is capped before the single batch induce call).
+        consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
     """
 
     store_path: str = ".ttse/bank.json"
@@ -63,11 +71,21 @@ class TTSEConfig:
     top_k_tips: int = 10
     traj_char_budget: int = 9000
     inject_enabled: bool = True
+    inject_mode: str = "legacy_system"
     evolve_enabled: bool = True
     success_threshold: float = 0.999
     induce_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY
     batch_size: int = 1
     batch_traj_budget: int = 1100
+    consult_max_chars: int = 8000
+    consult_max_rules: int = 40
+
+    def is_disk_catalog(self) -> bool:
+        """True when FACT/TIP are disclosed via ``ttse_consult``, not P:45.
+
+        The category listing is trailed as a prompt attachment; P:45 is guidance only.
+        """
+        return str(self.inject_mode or "").strip() == "disk_catalog"
 
 
 __all__ = ["TTSEConfig"]

@@ -11,6 +11,7 @@ configure/unconfigure API.
 from __future__ import annotations
 
 from types import SimpleNamespace
+import inspect
 from typing import Callable
 
 import pytest
@@ -20,6 +21,7 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import 
 )
 from openjiuwen.agent_evolving.signal import detect_tool_error_signals
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
 from openjiuwen.harness.rails.evolution.ttse import (
@@ -31,6 +33,10 @@ from openjiuwen.harness.rails.evolution.ttse import (
     configure_ttse_evolution,
     unconfigure_ttse_evolution,
 )
+from openjiuwen.harness.rails.evolution.ttse.catalog import project_catalog
+from openjiuwen.harness.rails.evolution.ttse.classify import parse_assignments
+from openjiuwen.harness.rails.evolution.ttse.consult import render_consult_result
+from openjiuwen.harness.rails.evolution.ttse.render import DISK_CATALOG_GUIDANCE_CN
 from openjiuwen.harness.rails.evolution.ttse.induction import (
     blame,
     induce,
@@ -55,7 +61,10 @@ class ScriptedLLM:
     async def invoke(self, *, model, messages, temperature=None, timeout=None, **kwargs):
         prompt = messages[0]["content"] if messages else ""
         self.calls.append(prompt)
-        return self.handler(prompt)
+        result = self.handler(prompt)
+        if inspect.isawaitable(result):
+            result = await result
+        return result
 
 
 def _make_rail(tmp_path, llm, *, cfg=None) -> TTSERail:
@@ -402,8 +411,11 @@ async def test_constructor_embedding_syncs_to_config_and_enables_retrieval(tmp_p
 
 @pytest.mark.asyncio
 async def test_trajectory_success_detector_signals():
-    det = TrajectoryErrorSuccessDetector(success_threshold=0.999)
+    det = TrajectoryErrorSuccessDetector(success_threshold=0.9)
     assert (await det.detect(None, None, snapshot={"ttse_score": 0.0})).outcome == "fail"
+    assert (await det.detect(None, None, snapshot={"ttse_score": 0.4})).outcome == "partial"
+    assert (await det.detect(None, None, snapshot={"ttse_score": 0.89})).outcome == "partial"
+    assert (await det.detect(None, None, snapshot={"ttse_score": 0.9})).outcome == "success"
     assert (await det.detect(None, None, snapshot={"ttse_score": 1.0})).outcome == "success"
     assert (await det.detect(None, None, snapshot={})).outcome == "success"  # no signal
     step = SimpleNamespace(error={"message": "boom"}, detail=None)
@@ -653,3 +665,209 @@ def test_detect_tool_error_signals_skips_data_fetch_tools():
         {"role": "tool", "name": "web_search", "content": "request failed"},
     ]
     assert detect_tool_error_signals(messages) == []
+
+
+# ----------------------------------------------------------------------
+# disk_catalog: guidance section, post-write classify, consult (opt-in)
+# ----------------------------------------------------------------------
+
+
+def _disk_catalog_cfg(tmp_path) -> TTSEConfig:
+    return TTSEConfig(store_path=str(tmp_path / "bank.json"), inject_mode="disk_catalog")
+
+
+@pytest.mark.asyncio
+async def test_disk_catalog_injects_guidance_not_rule_body(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    await rail._ttse_store.add_fact("PresentBench grades slides.md")
+    builder = SystemPromptBuilder()
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(
+            system_prompt_builder=builder,
+            query="make slides",
+            messages=[{"role": "user", "content": "make slides"}],
+        )
+    )
+    await rail.before_model_call(ctx)
+    section = builder.get_section(SectionName.TTSE_FACTS_TIPS)
+    text = section.content["cn"]
+    assert "ttse_consult(category=" in text
+    assert "无参" in text
+    assert text.strip() == DISK_CATALOG_GUIDANCE_CN.strip()
+    assert "PresentBench grades slides.md" not in text
+    assert "documents-office-and-records" not in text
+
+
+@pytest.mark.asyncio
+async def test_legacy_mode_does_not_classify_after_induce(tmp_path):
+    llm = ScriptedLLM(lambda p: "[FACT] success fact" if "extracting" in p else "NONE")
+    rail = _make_rail(tmp_path, llm)
+    snap = {
+        "messages": [{"role": "user", "content": "do task"}, {"role": "assistant", "content": "done"}],
+        "ttse_capabilities": "- grep",
+        "ttse_task_query": "do task",
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    assert len(llm.calls) == 1
+    assert "category" not in rail._ttse_store.facts[0]
+
+
+@pytest.mark.asyncio
+async def test_disk_catalog_classifies_after_bank_write(tmp_path):
+    def handler(p: str) -> str:
+        if "TTSE category assignment pass" in p:
+            return '{"assignments": {"1": "documents-office-and-records"}}'
+        if "extracting" in p:
+            return "[FACT] PresentBench grades slides.md, not a .pptx file"
+        return "NONE"
+
+    llm = ScriptedLLM(handler)
+    rail = _make_rail(tmp_path, llm, cfg=_disk_catalog_cfg(tmp_path))
+    snap = {
+        "messages": [{"role": "user", "content": "slides"}, {"role": "assistant", "content": "done"}],
+        "ttse_capabilities": "- read_file",
+        "ttse_task_query": "slides",
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    assert len(llm.calls) == 2
+    assert "extracting" in llm.calls[0]
+    assert "TTSE category assignment pass" in llm.calls[1]
+    assert "PresentBench grades slides.md" in rail._ttse_store.facts_texts()[0]
+    assert rail._ttse_store.facts[0]["category"] == "documents-office-and-records"
+    catalog = tmp_path / "CATALOG.md"
+    assert catalog.is_file()
+    assert "documents-office-and-records" in catalog.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_merge_inherits_existing_category(tmp_path):
+    store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "b.json")))
+    assert await store.add_fact("the csv grader is case-sensitive") is True
+    await store.set_categories([("the csv grader is case-sensitive", "fact", "documents-office-and-records")])
+    assert await store.add_fact("the csv grader is case-sensitive") is False
+    assert store.facts[0]["count"] == 2
+    assert store.facts[0]["category"] == "documents-office-and-records"
+
+
+def test_parse_assignments_illegal_id_becomes_other():
+    items = [("a fact", "fact"), ("a tip", "tip")]
+    parsed = parse_assignments(
+        '{"assignments": {"1": "not-a-real-id", "2": "software-engineering-devops"}}',
+        items,
+    )
+    assert parsed[0][2] == "other"
+    assert parsed[1][2] == "software-engineering-devops"
+
+
+@pytest.mark.asyncio
+async def test_consult_lists_catalog_and_opens_category(tmp_path):
+    store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
+    await store.add_fact("PresentBench grades slides.md")
+    await store.set_categories([("PresentBench grades slides.md", "fact", "documents-office-and-records")])
+    listing = render_consult_result(store)
+    assert "documents-office-and-records" in listing
+    assert "PresentBench grades slides.md" not in listing
+    opened = render_consult_result(store, category="documents-office-and-records")
+    assert "PresentBench grades slides.md" in opened
+    unknown = render_consult_result(store, category="world.pptx")
+    assert "Unknown category" in unknown
+    assert "trailing catalog" in unknown
+    project_catalog(store)
+    assert (tmp_path / "by_cat" / "documents-office-and-records" / "SUMMARY.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_disk_catalog_trails_listing_not_rule_body(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    await rail._ttse_store.add_fact("PresentBench grades slides.md")
+    await rail._ttse_store.set_categories(
+        [("PresentBench grades slides.md", "fact", "documents-office-and-records")]
+    )
+    manager = PromptAttachmentManager()
+    builder = SystemPromptBuilder()
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(session_id="sess-ttse"),
+        agent=SimpleNamespace(prompt_attachment_manager=manager),
+        inputs=SimpleNamespace(
+            system_prompt_builder=builder,
+            query="make slides",
+            messages=[{"role": "user", "content": "make slides"}],
+        ),
+    )
+    await rail.before_model_call(ctx)
+    sys_text = builder.get_section(SectionName.TTSE_FACTS_TIPS).content["cn"]
+    assert "PresentBench grades slides.md" not in sys_text
+    assert "documents-office-and-records" not in sys_text
+    attached = await manager.collect_for_session("sess-ttse")
+    assert len(attached) == 1
+    assert attached[0].section == "ttse_catalog"
+    body = attached[0].content or ""
+    assert "documents-office-and-records" in body
+    assert "ttse_consult(category=" in body
+    assert "PresentBench grades slides.md" not in body
+    rendered = manager.render(attached)
+    assert "documents-office-and-records" in rendered
+    assert "<prompt-attachment" in rendered
+
+
+@pytest.mark.asyncio
+async def test_disk_catalog_trails_empty_listing(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    manager = PromptAttachmentManager()
+    builder = SystemPromptBuilder()
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(session_id="sess-empty"),
+        agent=SimpleNamespace(prompt_attachment_manager=manager),
+        inputs=SimpleNamespace(system_prompt_builder=builder, query="hi", messages=[]),
+    )
+    await rail.before_model_call(ctx)
+    attached = await manager.collect_for_session("sess-empty")
+    assert attached and "(empty)" in (attached[0].content or "")
+
+
+@pytest.mark.asyncio
+async def test_disk_catalog_attachment_uses_context_session_id(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    manager = PromptAttachmentManager()
+    builder = SystemPromptBuilder()
+    ctx = SimpleNamespace(
+        session=None,
+        context=SimpleNamespace(session_id=lambda: "from-context"),
+        agent=SimpleNamespace(prompt_attachment_manager=manager),
+        inputs=SimpleNamespace(system_prompt_builder=builder, query="hi", messages=[]),
+    )
+    await rail.before_model_call(ctx)
+    attached = await manager.collect_for_session("from-context")
+    assert attached and attached[0].section == "ttse_catalog"
+
+
+def test_trajectory_adapter_reads_openai_tool_args_and_keeps_tail():
+    from openjiuwen.harness.rails.evolution.ttse.trajectory_adapter import (
+        messages_to_trajectory_text,
+    )
+
+    messages = [
+        {"role": "user", "content": "BRIEF_HEAD " + "x" * 80},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path": "slides.md", "content": "deck"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "name": "write_file", "content": "ok"},
+    ]
+    full = messages_to_trajectory_text(messages, budget=None)
+    assert "ACTION: write_file(" in full
+    assert "slides.md" in full
+    assert "BRIEF_HEAD" in full
+    cut = messages_to_trajectory_text(messages, budget=40)
+    assert "write_file" in cut
+    assert "BRIEF_HEAD" not in cut

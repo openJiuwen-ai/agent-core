@@ -104,4 +104,38 @@ def rules_numbered(flat: Sequence[Tuple[str, str]]) -> str:
     return "\n".join(f"{i}. [{rtype.upper()}] {text}" for i, (text, rtype) in enumerate(flat, 1))
 
 
-__all__ = ["render_facts_md", "render_tips_md", "build_section_text", "rules_numbered"]
+DISK_CATALOG_GUIDANCE_CN = """\
+## 经验目录（强制）
+
+末尾附件是经验类目和条数，不是 FACT/TIP 正文。闲聊可忽略该附件。
+非闲聊任务、在选择 skill、调用 `skill_acceleration_exec` 或动手之前：附件中若有与当前任务相关的类，必须先调用 `ttse_consult(category=该类id)`，根据返回的 FACT/TIP 再规划。不要一次打开无关类。
+附件为 `(empty)`，或没有任何相关类时，直接执行。
+不要无参调用 `ttse_consult` 再要一遍目录。
+经验是历史启发式，与当前工具证据冲突时以当前证据为准。
+禁止用 bash 或 `read_file` 读取经验库。
+"""
+
+DISK_CATALOG_GUIDANCE_EN = """\
+## Experience catalog (required)
+
+The trailing attachment lists experience categories and counts, not FACT/TIP bodies. Ignore it for chitchat.
+On a non-trivial task, before choosing a skill, calling `skill_acceleration_exec`, or acting: if a listed category applies, you MUST call `ttse_consult(category=<id>)` and plan from the returned FACT/TIP. Do not dump unrelated classes.
+If the attachment is `(empty)` or none apply, proceed without it.
+Do not call `ttse_consult` with no arguments to re-list the catalog.
+These are historical heuristics; if they conflict with current tool evidence, trust the current evidence.
+Do not use bash or `read_file` to read the experience bank.
+"""
+
+# Backward-compatible alias (English). Prefer the _CN / _EN constants in new code.
+DISK_CATALOG_GUIDANCE = DISK_CATALOG_GUIDANCE_EN
+
+
+__all__ = [
+    "render_facts_md",
+    "render_tips_md",
+    "build_section_text",
+    "rules_numbered",
+    "DISK_CATALOG_GUIDANCE",
+    "DISK_CATALOG_GUIDANCE_CN",
+    "DISK_CATALOG_GUIDANCE_EN",
+]

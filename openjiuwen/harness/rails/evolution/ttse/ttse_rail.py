@@ -29,13 +29,25 @@ from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 
 from .capabilities import render_capabilities
+from .catalog import project_catalog, render_catalog_markdown
+from .classify import classify_rules
 from .config import TTSEConfig
+from .consult import TTSE_CONSULT_TOOL_NAME, create_ttse_consult_tools
 from .induction import blame, induce, induce_batch, synthesize
-from .render import build_section_text, rules_numbered
+from .render import (
+    DISK_CATALOG_GUIDANCE_CN,
+    DISK_CATALOG_GUIDANCE_EN,
+    build_section_text,
+    rules_numbered,
+)
+
+_TTSE_CATALOG_SECTION = "ttse_catalog"
+_TTSE_CATALOG_PRIORITY = 200
 from .retrieval import retrieve_top_k
 from .stores import TTSERecordStore
 from .success import SuccessDetector, TrajectoryErrorSuccessDetector
@@ -76,7 +88,53 @@ class TTSERail(EvolutionRail):
         # Last capability list seen during induction; reused by flush() which
         # has no ctx/agent to introspect.
         self._last_capabilities: Optional[str] = None
+        self._agent: Any = None
+        self._consult_tools: list = []
+        self._attachment_manager: Any = None
         super().__init__(**kwargs)
+
+    def init(self, agent) -> None:
+        super().init(agent)
+        self._agent = agent
+        self._attachment_manager = getattr(agent, "prompt_attachment_manager", None)
+        self._sync_consult_tool(agent)
+
+    def uninit(self, agent) -> None:
+        self._drop_consult_tool(agent)
+        self._consult_tools = []
+        self._agent = None
+        self._attachment_manager = None
+        super().uninit(agent)
+
+    def sync_inject_mode(self) -> None:
+        """Register or drop ``ttse_consult`` after a live yaml flag change."""
+        if self._agent is not None:
+            self._sync_consult_tool(self._agent)
+
+    def _sync_consult_tool(self, agent) -> None:
+        want = bool(self._ttse_config.inject_enabled and self._ttse_config.is_disk_catalog())
+        have = bool(self._consult_tools)
+        if want and not have:
+            tools = create_ttse_consult_tools(
+                self._ttse_store,
+                max_chars=int(getattr(self._ttse_config, "consult_max_chars", 8000) or 8000),
+                max_rules=int(getattr(self._ttse_config, "consult_max_rules", 40) or 40),
+            )
+            self._register_runtime_tools(agent, tools)
+            self._consult_tools = tools
+            logger.info("[TTSERail] registered %s", TTSE_CONSULT_TOOL_NAME)
+        elif have and not want:
+            self._drop_consult_tool(agent)
+
+    def _drop_consult_tool(self, agent) -> None:
+        if not self._consult_tools:
+            return
+        self._unregister_runtime_tools(agent, self._consult_tools)
+        self._consult_tools = []
+        logger.info("[TTSERail] unregistered %s", TTSE_CONSULT_TOOL_NAME)
+
+    def _is_disk_catalog(self) -> bool:
+        return bool(self._ttse_config.is_disk_catalog())
 
     # ------------------------------------------------------------------
     # Snapshot enrichment: capture agent state while ctx is still alive
@@ -232,6 +290,7 @@ class TTSERail(EvolutionRail):
                         outcome,
                         self._ttse_store.stats(),
                     )
+                await self._maybe_project_catalog()
                 return
 
             # Batch mode (reference ``learn_batch``): buffer this task. blame/retire
@@ -282,6 +341,7 @@ class TTSERail(EvolutionRail):
                     reason[:60],
                     text[:60],
                 )
+            await self._maybe_project_catalog()
 
     async def _synthesize_resolving(self, capabilities: str) -> None:
         """Fail path step 2: propose one resolving TIP when >= 2 rules remain.
@@ -301,6 +361,8 @@ class TTSERail(EvolutionRail):
         )
         if new_tip and await self._ttse_store.add_tip(new_tip):
             logger.info("[TTSERail] synthesized resolving TIP: %s", new_tip[:80])
+            if self._is_disk_catalog():
+                await self._classify_added_rules([(new_tip, "tip")])
 
     async def _blame_and_resolve(self, task_query: str, traj_text: str, capabilities: str) -> None:
         """Per-task fail path: blame -> retire -> synthesize (before induce)."""
@@ -309,14 +371,41 @@ class TTSERail(EvolutionRail):
         await self._synthesize_resolving(capabilities)
 
     async def _add_rules(self, facts: List[str], tips: List[str]) -> int:
+        added_items: list[tuple[str, str]] = []
         added = 0
         for fact in facts:
             if await self._ttse_store.add_fact(fact):
                 added += 1
+                added_items.append((fact, "fact"))
         for tip in tips:
             if await self._ttse_store.add_tip(tip):
                 added += 1
+                added_items.append((tip, "tip"))
+        if added_items and self._is_disk_catalog():
+            await self._classify_added_rules(added_items)
         return added
+
+    async def _classify_added_rules(self, items: list[tuple[str, str]]) -> None:
+        """Assignment pass after bank write. Does not change induce."""
+        try:
+            assignments = await classify_rules(
+                llm=self._ttse_llm,
+                model=self._ttse_model,
+                policy=self._ttse_config.induce_llm_policy,
+                items=items,
+            )
+            patched = await self._ttse_store.set_categories(assignments)
+            logger.info("[TTSERail] wrote category on %s new rule(s)", patched)
+        except Exception as exc:  # noqa: BLE001 - never roll back bank writes
+            logger.warning("[TTSERail] category assignment skipped: %s", exc)
+
+    async def _maybe_project_catalog(self) -> None:
+        if not self._is_disk_catalog():
+            return
+        try:
+            await asyncio.to_thread(project_catalog, self._ttse_store)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[TTSERail] catalog projection skipped: %s", exc)
 
     async def _flush_batch(self, capabilities: str) -> None:
         """Batch flush: synthesize once + ONE induce_batch over buffered tasks."""
@@ -342,6 +431,7 @@ class TTSERail(EvolutionRail):
                 len(group),
                 self._ttse_store.stats(),
             )
+        await self._maybe_project_catalog()
 
     async def flush(self) -> None:
         """Force-induce any buffered (partial) batch.
@@ -372,6 +462,20 @@ class TTSERail(EvolutionRail):
         if builder is None:
             return
 
+        if self._is_disk_catalog():
+            builder.add_section(
+                PromptSection(
+                    name=SectionName.TTSE_FACTS_TIPS,
+                    content={
+                        "cn": DISK_CATALOG_GUIDANCE_CN,
+                        "en": DISK_CATALOG_GUIDANCE_EN,
+                    },
+                    priority=45,
+                )
+            )
+            await self._attach_disk_catalog(ctx)
+            return
+
         query = self._extract_query(ctx)
         body = await self._resolve_injection_body(query)
         if not body:
@@ -386,6 +490,59 @@ class TTSERail(EvolutionRail):
                 priority=45,
             )
         )
+
+    async def _attach_disk_catalog(self, ctx: AgentCallbackContext) -> None:
+        """Trail the category listing as a HISTORY prompt-attachment (not SYSTEM)."""
+        agent = getattr(ctx, "agent", None) or self._agent
+        manager = getattr(agent, "prompt_attachment_manager", None) or self._attachment_manager
+        if manager is None:
+            logger.warning("[TTSERail] skip catalog attachment: no prompt_attachment_manager")
+            return
+        session_id = self._catalog_session_id(ctx)
+        if not session_id:
+            logger.warning("[TTSERail] skip catalog attachment: no session_id")
+            return
+        counts = self._ttse_store.catalog_counts() if hasattr(self._ttse_store, "catalog_counts") else {}
+        content = render_catalog_markdown(counts)
+        try:
+            await manager.add_section(
+                session_id=session_id,
+                section=_TTSE_CATALOG_SECTION,
+                content=content,
+                kind=PromptAttachmentKind.TEXT,
+                source="ttse_rail",
+                priority=_TTSE_CATALOG_PRIORITY,
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning("[TTSERail] skip catalog attachment: %s", exc)
+            return
+        live = {k: int(v) for k, v in (counts or {}).items() if int(v or 0) > 0}
+        logger.info("[TTSERail] trailed catalog attachment session_id=%s counts=%s", session_id, live)
+
+    @staticmethod
+    def _catalog_session_id(ctx: AgentCallbackContext) -> str | None:
+        """Same session key the PromptAttachmentManager window mutator will collect."""
+        session = getattr(ctx, "session", None)
+        if session is not None:
+            getter = getattr(session, "get_session_id", None)
+            if callable(getter):
+                sid = getter()
+                if sid:
+                    return str(sid)
+            sid = getattr(session, "session_id", None)
+            if callable(sid):
+                sid = sid()
+            if sid:
+                return str(sid)
+        context = getattr(ctx, "context", None)
+        if context is not None:
+            sid = getattr(context, "session_id", None)
+            if callable(sid):
+                sid = sid()
+            if sid:
+                return str(sid)
+        return None
 
     async def _resolve_injection_body(self, query: str) -> str:
         """Compute (and per-invoke cache) the section body for ``query``.

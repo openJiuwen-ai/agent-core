@@ -2,13 +2,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Prompt building blocks for TTSE (Two-Track Self-Evolution).
 
-Ported VERBATIM from the TTSE reference implementation
-(``ttseopenclaw/ttse/prompts.py``). This is the frozen algorithm core: the
-FACT/TIP dual-judgment definition and the induce / blame / synthesize
-templates. ``FACT_TIP_DEFINITION`` and the rendered prompt TEXT are
-byte-identical to the source of truth; correlated ``induce_prompt`` parameters
-are bundled into :class:`ExistingBank` only to satisfy the repo's
-argument-count style rule (G.FNM.03) — the prompt sent to the model is unchanged.
+Ported from the TTSE reference implementation (``ttseopenclaw/ttse/prompts.py``).
+``FACT_TIP_DEFINITION`` is the frozen dual-judgment core. Induce / blame no
+longer paste a separate task-brief copy: ``traj_text`` already includes the
+USER turn (see ``messages_to_trajectory_text``). ``ExistingBank`` bundles
+correlated ``induce_prompt`` parameters to stay under G.FNM.03.
 
 A FACT is a declarative statement about THIS environment; a TIP is a procedural
 rule of the form ``When <condition>: use <capability> to <action>``.
@@ -57,7 +55,7 @@ class ExistingBank:
     tips: str
 
 
-def induce_prompt(task_prompt: str, traj_text: str, capabilities: str, bank: ExistingBank, outcome: str) -> str:
+def induce_prompt(_task_prompt: str, traj_text: str, capabilities: str, bank: ExistingBank, outcome: str) -> str:
     if outcome == "success":
         outcome_lbl = "SOLVED SUCCESSFULLY"
         guidance = "Extract the tactics and environment facts that LED to this success."
@@ -87,10 +85,7 @@ FACTS:
 TIPS:
 {bank.tips or "(none)"}
 
-Task given to the agent:
-{task_prompt[:1500]}
-
-Agent trajectory (what the agent actually did):
+Agent trajectory (USER turn is the task; then what the agent actually did):
 {traj_text}
 
 {guidance}
@@ -118,8 +113,10 @@ def induce_batch_prompt(group, capabilities: str, existing_facts: str, existing_
     """group: list of (task_id, task_prompt, traj_text, outcome_lbl). One GLM call."""
     n = len(group)
     blocks = []
-    for i, (tid, prompt, traj, lbl) in enumerate(group, 1):
-        blocks.append(f"=== Task {i}/{n} [{tid}] — {lbl} ===\nTask: {prompt[:600]}\nTrajectory excerpt:\n{traj[:1100]}")
+    for i, (tid, _prompt, traj, lbl) in enumerate(group, 1):
+        blocks.append(
+            f"=== Task {i}/{n} [{tid}] — {lbl} ===\nTrajectory excerpt:\n{traj[:1100]}"
+        )
     tasks_block = "\n\n".join(blocks)
     return f"""You are extracting reusable knowledge from a BATCH of {n} agent tasks on a benchmark.
 
@@ -134,7 +131,7 @@ FACTS:
 TIPS:
 {existing_tips or "(none)"}
 
-The {n} tasks in this batch (task prompt + outcome + trajectory excerpt each):
+The {n} tasks in this batch (outcome + trajectory excerpt each; USER turn is the task):
 {tasks_block}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
@@ -157,14 +154,11 @@ BLAME_SYSTEM = (
 )
 
 
-def blame_prompt(task_prompt: str, traj_text: str, rules_numbered: str) -> str:
-    return f"""Task the agent was given:
-{task_prompt[:1500]}
-
-Rules that were in the agent's context during this task (numbered, facts then tips):
+def blame_prompt(_task_prompt: str, traj_text: str, rules_numbered: str) -> str:
+    return f"""Rules that were in the agent's context during this task (numbered, facts then tips):
 {rules_numbered}
 
-The agent FAILED this task. Its trajectory:
+The agent FAILED this task. Its trajectory (USER turn is the task; then what it did):
 {traj_text}
 
 Which ONE rule (by its number) most contributed to the failure by being wrong or misleading?

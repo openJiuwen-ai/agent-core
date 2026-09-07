@@ -72,6 +72,18 @@ def _explicit_score(ctx: Any, snapshot: Optional[dict]) -> Optional[float]:
         return None
 
 
+def classify_explicit_score(score: float, *, success_threshold: float) -> str:
+    """Map a grader score onto ``success`` / ``partial`` / ``fail``.
+
+    ``>= success_threshold`` success; ``(0, success_threshold)`` partial; ``0`` fail.
+    """
+    if score >= success_threshold:
+        return "success"
+    if score > 0:
+        return "partial"
+    return "fail"
+
+
 def _trajectory_has_error(trajectory: Any) -> bool:
     """True if any recorded trajectory step carries an error."""
     if trajectory is None:
@@ -89,8 +101,8 @@ def _trajectory_has_error(trajectory: Any) -> bool:
 class TrajectoryErrorSuccessDetector(SuccessDetector):
     """Default detector: explicit-score-if-present, else trajectory-error scan.
 
-    * An explicit score (>= ``success_threshold`` -> success, > 0 -> partial,
-      else fail) wins when provided.
+    * An explicit score wins when provided: >= ``success_threshold`` -> success,
+      ``> 0`` -> partial, ``0`` -> fail.
     * Otherwise a recorded error on any trajectory step -> fail.
     * Otherwise success.
     """
@@ -108,11 +120,11 @@ class TrajectoryErrorSuccessDetector(SuccessDetector):
     ) -> SuccessOutcome:
         score = _explicit_score(ctx, snapshot)
         if score is not None:
-            if score >= self.success_threshold:
-                return SuccessOutcome("success", score, "explicit-score")
-            if score > 0:
-                return SuccessOutcome("partial", score, "explicit-score")
-            return SuccessOutcome("fail", score, "explicit-score")
+            return SuccessOutcome(
+                classify_explicit_score(score, success_threshold=self.success_threshold),
+                score,
+                "explicit-score",
+            )
         if _trajectory_has_error(trajectory):
             return SuccessOutcome("fail", 0.0, "trajectory-error")
         return SuccessOutcome("success", 1.0, "no-error-default")
@@ -155,11 +167,11 @@ class SignalBasedSuccessDetector(SuccessDetector):
     ) -> SuccessOutcome:
         score = _explicit_score(ctx, snapshot)
         if score is not None:
-            if score >= self.success_threshold:
-                return SuccessOutcome("success", score, "explicit-score")
-            if score > 0:
-                return SuccessOutcome("partial", score, "explicit-score")
-            return SuccessOutcome("fail", score, "explicit-score")
+            return SuccessOutcome(
+                classify_explicit_score(score, success_threshold=self.success_threshold),
+                score,
+                "explicit-score",
+            )
         types = self._signal_types(trajectory, messages)
         if "execution_failure" in types:
             return SuccessOutcome("fail", 0.0, "signal:execution_failure")
@@ -195,4 +207,5 @@ __all__ = [
     "SuccessOutcome",
     "TrajectoryErrorSuccessDetector",
     "SignalBasedSuccessDetector",
+    "classify_explicit_score",
 ]

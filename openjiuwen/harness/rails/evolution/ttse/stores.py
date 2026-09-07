@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
 
+from .categories import OTHER_CATEGORY, normalize_category
 from .config import TTSEConfig
 
 
@@ -56,7 +57,7 @@ class TTSERecordStore:
     ) -> None:
         self._config = config
         self._embedding: Optional[EmbeddingProvider] = embedding or config.embedding
-        self.facts: List[Dict[str, Any]] = []  # [{"text","count"}]
+        self.facts: List[Dict[str, Any]] = []  # [{"text","count","category"?}]
         self.tips: List[Dict[str, Any]] = []
         self.retired: List[Dict[str, Any]] = []  # [{"text","rtype","reason","retired_at_task"}]
         self._emb_cache: Dict[str, List[float]] = {}
@@ -179,6 +180,7 @@ class TTSERecordStore:
             matched = await self._find_duplicate(text, store)
             if matched is not None:
                 matched["count"] = matched.get("count", 0) + 1
+                # Keep the surviving record's category; do not reclassify on merge.
                 store.sort(key=lambda x: -x.get("count", 0))
                 return "merged"
             store.append({"text": text, "count": 1})
@@ -247,6 +249,45 @@ class TTSERecordStore:
         facts = [(r["text"], "fact") for r in self.facts_records()]
         tips = [(r["text"], "tip") for r in self.tips_records()]
         return facts + tips
+
+    @staticmethod
+    def record_category(record: Dict[str, Any]) -> str:
+        """Closed-set category for a bank record; missing/illegal → other."""
+        return normalize_category(record.get("category") if isinstance(record, dict) else None)
+
+    def catalog_counts(self) -> Dict[str, int]:
+        """FACT+TIP counts keyed by normalized category (includes other)."""
+        counts: Dict[str, int] = {}
+        for record in (*self.facts, *self.tips):
+            cid = self.record_category(record)
+            counts[cid] = counts.get(cid, 0) + 1
+        return counts
+
+    def records_for_category(self, category: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Facts and tips whose category matches ``category`` (normalized)."""
+        cid = normalize_category(category)
+        facts = [r for r in self.facts_records() if self.record_category(r) == cid]
+        tips = [r for r in self.tips_records() if self.record_category(r) == cid]
+        return facts, tips
+
+    async def set_categories(self, assignments: List[Tuple[str, str, str]]) -> int:
+        """Patch ``category`` on matching records. Returns how many were updated."""
+        if not assignments:
+            return 0
+        updated = 0
+        async with self._lock:
+            for text, rtype, category in assignments:
+                store = self.facts if rtype == "fact" else self.tips
+                n = _norm(text)
+                cid = normalize_category(category) or OTHER_CATEGORY
+                for record in store:
+                    if _norm(record.get("text", "")) == n:
+                        record["category"] = cid
+                        updated += 1
+                        break
+        if updated:
+            await self.save()
+        return updated
 
     def stats(self) -> Dict[str, int]:
         return {"facts": len(self.facts), "tips": len(self.tips), "retired": len(self.retired)}

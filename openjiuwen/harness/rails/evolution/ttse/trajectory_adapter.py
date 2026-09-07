@@ -29,8 +29,11 @@ def _extract_tool_calls(msg: dict) -> List[str]:
     rendered: List[str] = []
     for call in calls:
         if isinstance(call, dict):
-            name = call.get("name") or call.get("function", {}).get("name") or "tool"
+            fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = call.get("name") or fn.get("name") or "tool"
             args = call.get("arguments")
+            if args is None:
+                args = fn.get("arguments")
             if isinstance(args, (dict, list)):
                 args = json.dumps(args, ensure_ascii=False)
         else:
@@ -48,9 +51,9 @@ def messages_to_trajectory_text(
     """Flatten jiuwen message dicts into USER/THOUGHT/ACTION/OBSERVATION lines.
 
     System messages are skipped (they are prompt scaffolding, not behavior).
-    Output is head-truncated to ``budget`` characters, matching the reference's
-    trajectory budgeting. Accepts dict messages or message objects with
-    ``role``/``content`` attributes.
+    When ``budget`` is set and the flatten exceeds it, keep the **tail**
+    (ACTION/OBSERVATION) rather than the USER head. Accepts dict messages or
+    message objects with ``role``/``content`` attributes.
     """
     lines: List[str] = []
     for raw in messages or []:
@@ -81,8 +84,8 @@ def messages_to_trajectory_text(
         elif content:
             lines.append(f"{role.upper()}: {content}")
     text = "\n".join(lines)
-    if budget is not None and len(text) > budget:
-        text = text[:budget]
+    if budget is not None and budget > 0 and len(text) > budget:
+        text = text[-budget:]
     return text
 
 
