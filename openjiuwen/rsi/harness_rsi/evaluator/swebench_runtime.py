@@ -571,8 +571,8 @@ def _official_command(
         )
         return [*prefix, *base_args]
 
-    distro = str(config.get("wsl_distro") or DEFAULT_WSL_DISTRO)
-    python_path = str(config.get("python_path") or DEFAULT_WSL_PYTHON)
+    distro = str(config.get("wsl_distro") or os.environ.get("SWEBENCH_WSL_DISTRO") or DEFAULT_WSL_DISTRO)
+    python_path = str(config.get("python_path") or os.environ.get("SWEBENCH_WSL_PYTHON") or DEFAULT_WSL_PYTHON)
     translated = list(base_args)
     for host_path in (dataset_path, predictions_path):
         linux_path = _wsl_path(host_path, distro)

@@ -329,6 +329,61 @@ def test_custom_image_coordinates_are_shared_by_solver_and_official_command(
     assert command[command.index("--instance_image_tag") + 1] == "numpy1-v1"
 
 
+@pytest.mark.parametrize(
+    "host,config,env,expected_python,expected_distro",
+    [
+        ("nt", {}, {}, "python3", "Ubuntu-24.04"),
+        (
+            "nt",
+            {},
+            {"SWEBENCH_WSL_PYTHON": "/opt/swe venv/bin/python", "SWEBENCH_WSL_DISTRO": "Verifier"},
+            "/opt/swe venv/bin/python",
+            "Verifier",
+        ),
+        (
+            "nt",
+            {"python_path": "/explicit/python", "wsl_distro": "Explicit"},
+            {"SWEBENCH_WSL_PYTHON": "/env/python", "SWEBENCH_WSL_DISTRO": "Env"},
+            "/explicit/python",
+            "Explicit",
+        ),
+        ("posix", {}, {"SWEBENCH_WSL_PYTHON": "/wsl/python"}, "python", None),
+    ],
+)
+def test_official_command_respects_host_verifier_environment(
+    tmp_path,
+    monkeypatch,
+    host,
+    config,
+    env,
+    expected_python,
+    expected_distro,
+) -> None:
+    monkeypatch.delenv("SWEBENCH_WSL_PYTHON", raising=False)
+    monkeypatch.delenv("SWEBENCH_WSL_DISTRO", raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    dataset = tmp_path / "dataset.json"
+    predictions = tmp_path / "predictions.jsonl"
+    with (
+        patch("openjiuwen.rsi.harness_rsi.evaluator.swebench_runtime.os.name", host),
+        patch("openjiuwen.rsi.harness_rsi.evaluator.swebench_runtime._wsl_path", return_value="/mnt/test"),
+    ):
+        command = _official_command(
+            config=config,
+            dataset_path=dataset,
+            predictions_path=predictions,
+            instance_id="repo__case-1",
+            run_id="check",
+            timeout_sec=60,
+        )
+    assert command[command.index("-m") - 1] == expected_python
+    if expected_distro:
+        assert command[:4] == ["wsl", "-d", expected_distro, "--"]
+    else:
+        assert command[0] == "env"
+
+
 def test_setup_commands_derive_stable_non_latest_image_tag() -> None:
     config = {"verifier_setup_commands": ["python -m pip install 'numpy<2'"]}
 

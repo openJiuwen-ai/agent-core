@@ -242,7 +242,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             source_harness_refs_path=source_refs,
             expected_case_ids=all_case_ids,
         )
-        if request.auto_full_baseline and not str(state.get("baseline_eval_ref_path", "") or ""):
+        needs_baseline = request.auto_full_baseline and not str(state.get("baseline_eval_ref_path", "") or "")
+        if not resuming_existing_state or needs_baseline:
+            _write_yaml_atomic(state_path, state)
+            await emit(on_event, root_node_event(state))
+            await emit(on_event, progress_event(state, total_iterations=total_iterations))
+        if needs_baseline:
+            set_usage_node("h0")
             baseline_eval_ref = await self._evaluate(
                 cases=all_cases,
                 harness_refs_path=source_refs,
@@ -259,9 +265,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             )
         _write_yaml_atomic(state_path, state)
         baseline_after = str(state.get("baseline_eval_ref_path", "") or "")
-        if baseline_after and (not resuming_existing_state or baseline_after != baseline_before):
-            await emit(on_event, progress_event(state, total_iterations=total_iterations))
-        if not resuming_existing_state:
+        if baseline_after and baseline_after != baseline_before:
             await emit(on_event, root_node_event(state))
             await emit(on_event, progress_event(state, total_iterations=total_iterations))
         current_refs = str(state["best_harness_refs_path"])

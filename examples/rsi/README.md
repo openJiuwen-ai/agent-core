@@ -13,6 +13,23 @@ replacement service interface. Dataset schemas and official evaluation
 protocols stay in adapter modules; the RSI optimization engine stays
 benchmark-neutral.
 
+## SWE-bench verifier on Windows
+
+The Windows verifier runs the official SWE-bench harness in WSL. Configure the
+service process to use the WSL environment where SWE-bench is installed:
+
+```powershell
+$env:SWEBENCH_WSL_DISTRO = "Ubuntu-24.04"
+$env:SWEBENCH_WSL_PYTHON = "/path/to/swebench-venv/bin/python"
+wsl.exe -d $env:SWEBENCH_WSL_DISTRO -- $env:SWEBENCH_WSL_PYTHON -c "import swebench.harness.run_evaluation, docker; assert docker.from_env().ping()"
+```
+
+Run that check before starting AgentServer, which inherits these environment
+variables. Explicit case metadata `swebench.wsl_distro` and
+`swebench.python_path` takes precedence. With no overrides the defaults remain
+`Ubuntu-24.04` and `python3`. WSL overrides do not affect native Linux execution.
+Dataset validation alone does not verify this interpreter or Docker access.
+
 ## Frontend iteration limit
 
 The Harness engine accepts `IterativeSingleHarnessRequest.max_iteration`.
@@ -44,6 +61,27 @@ in the run's detailed records, not additional tree nodes. If the final selected
 Harness differs from the evaluated version, its node has no score until that
 exact version is evaluated. The AgentServer HTTP handler is maintained by the
 caller; this repository provides the engine request and event contract.
+
+## Full H0 before optimization
+
+Set `IterativeSingleHarnessRequest.auto_full_baseline=True` to evaluate every
+input case with the unchanged initial Harness before entering the existing
+epoch/batch loop. The engine default remains `False` for existing CLI callers;
+AgentServer enables it for newly created Harness tasks. Resumes must retain the
+value recorded in the run fingerprint, including older baseline-free runs.
+
+The complete evaluation is saved under `evaluations/frozen_baseline`. Before
+completion, `baseline` is `null`, not a partial-batch average or a fabricated
+zero. Once complete, the engine persists `baseline_score` and emits the existing
+`EventProgress.baseline` and an updated H0 `EventNode.score`, including a real
+zero score. AgentServer exposes these through `rsi.task.get` (`progress.baseline`),
+`rsi.report.get` (`baseline`), and `rsi.tree.get` (ROOT `score`), plus its existing
+progress/tree pushes. The frontend does not need a new request or response field.
+
+H0 uses iteration 0 and does not consume `max_iteration`. The root node is emitted
+before evaluation so per-case stages can be displayed while H0 is running.
+Resuming a completed baseline reuses its persisted evaluation; subsequent Harness
+scores never overwrite the frozen baseline.
 
 ## Model calls and token usage
 

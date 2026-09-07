@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
-from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress, EventUsage
+from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress, EventUsage, NodeStageEvent
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
@@ -228,15 +228,32 @@ def test_frozen_baseline_seeds_global_comparison_without_consuming_batches(tmp_p
 
 
 def test_auto_full_baseline_is_frozen_inside_single_run(tmp_path: Path) -> None:
+    events: list[EngineEvent] = []
+
+    async def sink(event: EngineEvent) -> None:
+        events.append(event)
+
+    class Evaluator(_Evaluator):
+        async def evaluate_batch(self, **kwargs: Any) -> str:
+            if Path(kwargs["output_dir"]).name == "frozen_baseline":
+                assert len(kwargs["cases"]) == 2
+                roots = [event.node for event in events if isinstance(event, EventNode)]
+                assert roots[0].node_id == "h0"
+                assert roots[0].score is None
+                await kwargs["on_case_stage"]({"case_index": 1, "total_cases": 2, "status": "running"})
+            else:
+                assert any(isinstance(event, EventProgress) and event.baseline == 0.0 for event in events)
+            return await super().evaluate_batch(**kwargs)
+
     dataset_path = tmp_path / "dataset" / "cases.json"
     dataset_path.parent.mkdir()
     dataset_path.write_text(
-        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}),
+        json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}, {"case_id": "case_002", "input": "fix"}]}),
         encoding="utf-8",
     )
     harness_refs = tmp_path / "harness_refs.yaml"
     _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
-    evaluator = _Evaluator()
+    evaluator = Evaluator()
     orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
         AutoCoordinatingHarnessConfig(
             max_epochs=1,
@@ -255,7 +272,8 @@ def test_auto_full_baseline_is_frozen_inside_single_run(tmp_path: Path) -> None:
                 harness_refs_path=str(harness_refs),
                 output_dir=str(tmp_path / "run"),
                 auto_full_baseline=True,
-            )
+            ),
+            on_event=sink,
         )
     )
     report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
@@ -264,6 +282,29 @@ def test_auto_full_baseline_is_frozen_inside_single_run(tmp_path: Path) -> None:
     assert report["baseline_score"] == 0.0
     assert Path(report["baseline_eval_ref_path"]).name == "eval_ref.yaml"
     assert report["best_score"] == 1.0
+    roots = [event.node for event in events if isinstance(event, EventNode) and event.node.type == "ROOT"]
+    assert [node.score for node in roots] == [None, 0.0]
+    stages = [event for event in events if isinstance(event, NodeStageEvent)]
+    assert stages[0].node_ref == "h0"
+    baseline_progress = next(event for event in events if isinstance(event, EventProgress) and event.baseline == 0.0)
+    assert baseline_progress.iteration == 0
+    assert baseline_progress.total_iterations == 1
+    assert len(report["epoch_checkpoints"]) == 1
+
+    call_count = len(evaluator.calls)
+    asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+                auto_full_baseline=True,
+                resume=True,
+            ),
+            on_event=sink,
+        )
+    )
+    assert len(evaluator.calls) == call_count
 
 
 def test_no_candidate_cannot_turn_stochastic_replay_into_best_score(tmp_path: Path) -> None:
