@@ -739,6 +739,10 @@ async def test_org_update_task_failed_action(org_manager):
     assert claimed.ok
 
     tool = OrgUpdateTaskTool(manager, team_id="team-a", leader_id="leader-a")
+    fail_props = tool.card.input_params["properties"]
+    assert fail_props["failure_code"]["enum"] == [OrgTaskFailureCode.EXECUTION_FAILED.value]
+    assert "action=failed" in fail_props["failure_reason"]["description"]
+
     result = await tool.invoke(
         {
             "action": "failed",
@@ -1220,6 +1224,15 @@ async def test_child_task_completion_creates_pending_review(org_manager):
     assert accepted.ok
     assert await manager.can_complete_parent_task(parent_task_id="parent-1", team_id="team-a")
 
+    reaccept = await manager.review_task(
+        task_id="child-1",
+        reviewer_team_id="team-a",
+        review_status=OrgTaskReviewStatus.REJECTED,
+        verdict="Changed mind",
+    )
+    assert not reaccept.ok
+    assert "final (ACCEPTED)" in reaccept.reason
+
     completed_parent = await manager.complete_task(task_id="parent-1", team_id="team-a")
     assert completed_parent.ok
 
@@ -1391,6 +1404,28 @@ async def test_create_task_repairs_task_id_validation(org_manager):
     assert not cross_parent.ok
     assert "same parent_task_id" in cross_parent.reason
 
+    not_yet_failed = await manager.create_task(
+        task_id="repair-too-early",
+        parent_task_id="parent-repair-val",
+        title="Repair too early",
+        description="Original still open",
+        required_capabilities=["analysis"],
+        repairs_task_id="child-orig",
+        created_by=creator,
+    )
+    assert not not_yet_failed.ok
+    assert "FAILED" in not_yet_failed.reason or "REJECTED" in not_yet_failed.reason
+
+    await manager.claim_task(task_id="child-orig", team_id="team-b", leader_id="leader-b")
+    assert (
+        await manager.fail_task(
+            task_id="child-orig",
+            team_id="team-b",
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+            failure_reason="broken",
+        )
+    ).ok
+
     ok = await manager.create_task(
         task_id="repair-ok",
         parent_task_id="parent-repair-val",
@@ -1431,6 +1466,29 @@ async def test_create_task_repairs_task_id_validation(org_manager):
 
     tool = OrgCreateTaskTool(manager, team_id="team-a", leader_id="leader-a")
     assert "repairs_task_id" in tool.card.input_params["properties"]
+    # First repair is still active, so a second create via the tool must be rejected.
+    tool_blocked = await tool.invoke(
+        {
+            "task_id": "repair-tool",
+            "parent_task_id": "parent-repair-val",
+            "title": "Repair via tool",
+            "description": "Tool exposes repairs_task_id",
+            "required_capabilities": ["analysis"],
+            "repairs_task_id": "child-orig",
+        }
+    )
+    assert not tool_blocked.success
+    assert "already has an active repair" in (tool_blocked.error or "")
+
+    await manager.claim_task(task_id="repair-ok", team_id="team-b", leader_id="leader-b")
+    assert (
+        await manager.fail_task(
+            task_id="repair-ok",
+            team_id="team-b",
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+            failure_reason="abandon for tool path",
+        )
+    ).ok
     tool_created = await tool.invoke(
         {
             "task_id": "repair-tool",
@@ -1477,6 +1535,15 @@ async def test_create_repair_enforces_retry_limit_and_updates_retry_count(org_ma
         metadata={"retry_limit": 1},
         created_by=creator,
     )
+    await manager.claim_task(task_id="child-retry", team_id="team-b", leader_id="leader-b")
+    assert (
+        await manager.fail_task(
+            task_id="child-retry",
+            team_id="team-b",
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+            failure_reason="broken",
+        )
+    ).ok
 
     first = await manager.create_task(
         task_id="repair-1",
@@ -1493,6 +1560,16 @@ async def test_create_repair_enforces_retry_limit_and_updates_retry_count(org_ma
     assert original.metadata["retry_limit"] == 1
     assert original.metadata["retry_count"] == 1
 
+    await manager.claim_task(task_id="repair-1", team_id="team-b", leader_id="leader-b")
+    assert (
+        await manager.fail_task(
+            task_id="repair-1",
+            team_id="team-b",
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+            failure_reason="abandoned attempt",
+        )
+    ).ok
+
     second = await manager.create_task(
         task_id="repair-2",
         parent_task_id="parent-retry",
@@ -1507,6 +1584,78 @@ async def test_create_repair_enforces_retry_limit_and_updates_retry_count(org_ma
     original = await manager.get_task("child-retry")
     assert original is not None
     assert original.metadata["retry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_review_task_locks_accepted_and_rejected_after_repair(org_manager):
+    manager, _ = org_manager
+    parent_creator = OrgTaskCreator(
+        creator_type="client",
+        creator_id="client-1",
+        organization_id="org-1",
+    )
+    leader_creator = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
+    await manager.create_task(
+        task_id="parent-lock-review",
+        title="Parent",
+        description="Parent",
+        required_capabilities=["coordination"],
+        created_by=parent_creator,
+    )
+    await manager.claim_task(task_id="parent-lock-review", team_id="team-a", leader_id="leader-a")
+    await manager.create_task(
+        task_id="child-lock-review",
+        parent_task_id="parent-lock-review",
+        title="Child",
+        description="Will be rejected then repaired",
+        required_capabilities=["analysis"],
+        created_by=leader_creator,
+    )
+    await manager.claim_task(task_id="child-lock-review", team_id="team-b", leader_id="leader-b")
+    assert (await manager.complete_task(task_id="child-lock-review", team_id="team-b")).ok
+    assert (
+        await manager.review_task(
+            task_id="child-lock-review",
+            reviewer_team_id="team-a",
+            review_status=OrgTaskReviewStatus.REJECTED,
+            verdict="Needs fix",
+        )
+    ).ok
+
+    # Before a repair exists, reviewer may still change the verdict.
+    flip = await manager.review_task(
+        task_id="child-lock-review",
+        reviewer_team_id="team-a",
+        review_status=OrgTaskReviewStatus.NEEDS_REVISION,
+        verdict="Clarify acceptance criteria",
+    )
+    assert flip.ok
+
+    assert (
+        await manager.create_task(
+            task_id="child-lock-repair",
+            parent_task_id="parent-lock-review",
+            title="Repair",
+            description="Fix",
+            required_capabilities=["analysis"],
+            repairs_task_id="child-lock-review",
+            created_by=leader_creator,
+        )
+    ).ok
+
+    locked = await manager.review_task(
+        task_id="child-lock-review",
+        reviewer_team_id="team-a",
+        review_status=OrgTaskReviewStatus.ACCEPTED,
+        verdict="Too late",
+    )
+    assert not locked.ok
+    assert "locked after repair" in locked.reason
 
 
 @pytest.mark.asyncio
@@ -1566,6 +1715,19 @@ async def test_rejected_child_superseded_by_accepted_repair_unblocks_parent(org_
     )
     assert repair.ok
     await manager.claim_task(task_id="child-fix", team_id="team-b", leader_id="leader-b")
+
+    concurrent = await manager.create_task(
+        task_id="child-fix-concurrent",
+        parent_task_id="parent-rej",
+        title="Concurrent repair",
+        description="Should be rejected while first repair is active",
+        required_capabilities=["analysis"],
+        repairs_task_id="child-rej",
+        created_by=leader_creator,
+    )
+    assert not concurrent.ok
+    assert "already has an active repair" in concurrent.reason
+
     assert (await manager.complete_task(task_id="child-fix", team_id="team-b")).ok
 
     assert not await manager.can_complete_parent_task(parent_task_id="parent-rej", team_id="team-a")
@@ -1579,8 +1741,93 @@ async def test_rejected_child_superseded_by_accepted_repair_unblocks_parent(org_
         )
     ).ok
     assert await manager.can_complete_parent_task(parent_task_id="parent-rej", team_id="team-a")
+
+    again = await manager.create_task(
+        task_id="child-fix-2",
+        parent_task_id="parent-rej",
+        title="Another repair",
+        description="Should be rejected: original already superseded",
+        required_capabilities=["analysis"],
+        repairs_task_id="child-rej",
+        created_by=leader_creator,
+    )
+    assert not again.ok
+    assert "already superseded by accepted repair" in again.reason
+    assert await manager.can_complete_parent_task(parent_task_id="parent-rej", team_id="team-a")
+
     completed_parent = await manager.complete_task(task_id="parent-rej", team_id="team-a")
     assert completed_parent.ok
+
+
+@pytest.mark.asyncio
+async def test_failed_repair_allows_next_repair_of_original(org_manager):
+    """Abandoned (failed) repair does not count as active; a new repair of the original is allowed."""
+    manager, _ = org_manager
+    parent_creator = OrgTaskCreator(
+        creator_type="client",
+        creator_id="client-1",
+        organization_id="org-1",
+    )
+    leader_creator = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
+    await manager.create_task(
+        task_id="parent-active-repair",
+        title="Parent",
+        description="Parent",
+        required_capabilities=["coordination"],
+        created_by=parent_creator,
+    )
+    await manager.claim_task(task_id="parent-active-repair", team_id="team-a", leader_id="leader-a")
+    await manager.create_task(
+        task_id="child-orig-active",
+        parent_task_id="parent-active-repair",
+        title="Original",
+        description="Will fail",
+        required_capabilities=["analysis"],
+        created_by=leader_creator,
+    )
+    await manager.claim_task(task_id="child-orig-active", team_id="team-b", leader_id="leader-b")
+    assert (
+        await manager.fail_task(
+            task_id="child-orig-active",
+            team_id="team-b",
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+            failure_reason="broken",
+        )
+    ).ok
+    first = await manager.create_task(
+        task_id="repair-active-1",
+        parent_task_id="parent-active-repair",
+        title="Repair 1",
+        description="First attempt",
+        required_capabilities=["analysis"],
+        repairs_task_id="child-orig-active",
+        created_by=leader_creator,
+    )
+    assert first.ok
+    await manager.claim_task(task_id="repair-active-1", team_id="team-b", leader_id="leader-b")
+    assert (
+        await manager.fail_task(
+            task_id="repair-active-1",
+            team_id="team-b",
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+            failure_reason="still broken",
+        )
+    ).ok
+    second = await manager.create_task(
+        task_id="repair-active-2",
+        parent_task_id="parent-active-repair",
+        title="Repair 2",
+        description="Second attempt after abandoned first",
+        required_capabilities=["analysis"],
+        repairs_task_id="child-orig-active",
+        created_by=leader_creator,
+    )
+    assert second.ok
 
 
 @pytest.mark.asyncio
@@ -2288,7 +2535,13 @@ async def test_review_requested_wakes_reviewer_team(active_organization_runtime)
     assert turns[0]["team_name"] == "team-a"
     prompt = turns[0]["inputs"]["query"]
     assert "child" in prompt
-    assert "at most one focused repair task" in prompt
+    assert "org_review_task" in prompt
+    assert "repairs_task_id=child" in prompt
+    assert "accepted or superseded by an accepted repair" in prompt
+    assert "org_delegate_task the rejected child" in prompt
+    assert "at most one" not in prompt
+    assert "retry_limit" not in prompt
+    assert "delegated_to_team_id" not in prompt
 
 
 @pytest.mark.asyncio
@@ -2364,7 +2617,10 @@ async def test_rejected_review_wakes_parent_for_repair(active_organization_runti
     assert "REJECTED" in prompt
     assert "org_create_task" in prompt
     assert "repairs_task_id=child" in prompt
+    assert "delegated_to_team_id" in prompt
+    assert "switching teams is optional" in prompt
     assert "repair" in prompt.lower()
+    assert "do not call org_delegate_task on the rejected" in prompt.lower()
 
 
 @pytest.mark.asyncio
@@ -2446,8 +2702,11 @@ async def test_failed_child_wakes_creator_team_for_repair(active_organization_ru
     assert "failed" in prompt.lower()
     assert "org_create_task" in prompt
     assert "repairs_task_id=child" in prompt
+    assert "delegated_to_team_id" in prompt
+    assert "switching teams is optional" in prompt
     assert "org_review_task" in prompt
     assert "EXECUTION_FAILED" in prompt
+    assert "do not call org_delegate_task on the failed" in prompt.lower()
 
 
 @pytest.mark.asyncio

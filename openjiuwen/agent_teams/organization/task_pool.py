@@ -82,6 +82,25 @@ _SUPERSEDEABLE_REVIEW_STATUSES = frozenset({
 })
 
 
+def _is_accepted_task(status: str, review: OrgTaskReviewRecord | None) -> bool:
+    return (
+        status == OrgTaskStatus.COMPLETED.value
+        and review is not None
+        and review.review_status == OrgTaskReviewStatus.ACCEPTED.value
+    )
+
+
+def _is_supersedable_task(status: str, review: OrgTaskReviewRecord | None) -> bool:
+    """FAILED, or COMPLETED with REJECTED/NEEDS_REVISION — repairable / abandonable terminal."""
+    if status == OrgTaskStatus.FAILED.value:
+        return True
+    return (
+        status == OrgTaskStatus.COMPLETED.value
+        and review is not None
+        and review.review_status in _SUPERSEDEABLE_REVIEW_STATUSES
+    )
+
+
 @dataclass
 class OrgTaskOpResult:
     ok: bool
@@ -93,6 +112,13 @@ class OrgTaskOpResult:
 # Local aliases keep call sites stable while sharing helpers with message_service.
 _json_dumps = json_dumps
 _json_loads = json_loads
+
+
+def _repairs_target_id(metadata_json: str | None) -> str | None:
+    target = _json_loads(metadata_json, {}).get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+    if isinstance(target, str) and target.strip():
+        return target.strip()
+    return None
 
 
 class OrgTaskManager:
@@ -421,15 +447,24 @@ class OrgTaskManager:
                             f"not another repair ({repairs_target} already repairs {nested.strip()})"
                         ),
                     )
-                retry_gate = await self._apply_repair_retry_budget(
+                if not await self._is_repairable_target(session, repaired):
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "repairs_task_id target must be FAILED, or COMPLETED with latest "
+                            f"review REJECTED/NEEDS_REVISION; got status={repaired.status!r} "
+                            f"for {repairs_target}"
+                        ),
+                    )
+                repair_gate = await self._apply_repair_create_guards(
                     session,
                     repaired=repaired,
                     parent_task_id=parent_task_id,
                     repairs_target=repairs_target,
                     now=now,
                 )
-                if retry_gate is not None:
-                    return retry_gate
+                if repair_gate is not None:
+                    return repair_gate
             if await session.get(OrgTaskRecord, task_id) is not None:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
             aggregation_json = None
@@ -857,6 +892,26 @@ class OrgTaskManager:
             if task_row.status != OrgTaskStatus.COMPLETED.value:
                 return OrgTaskOpResult(ok=False, reason=f"task is not completed: {task_id}")
             row = await self._get_latest_review_row(session, task_id)
+            if row is not None:
+                if _is_accepted_task(task_row.status, row):
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=f"task review is final (ACCEPTED): {task_id}",
+                    )
+                if _is_supersedable_task(task_row.status, row) and task_row.parent_task_id:
+                    repair_siblings = await self._list_sibling_repairs_of(
+                        session,
+                        parent_task_id=task_row.parent_task_id,
+                        repairs_target=task_id,
+                    )
+                    if repair_siblings:
+                        return OrgTaskOpResult(
+                            ok=False,
+                            reason=(
+                                f"task review is locked after repair was created "
+                                f"({repair_siblings[0].task_id} repairs {task_id})"
+                            ),
+                        )
             if row is None:
                 row = OrgTaskReviewRecord(
                     review_id=f"org-review-{uuid.uuid4().hex[:12]}",
@@ -914,29 +969,18 @@ class OrgTaskManager:
 
         repairs_of: dict[str, list[OrgTaskRecord]] = {}
         for child in child_rows:
-            meta = _json_loads(child.metadata_json, {})
-            target = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
-            if isinstance(target, str) and target.strip():
-                repairs_of.setdefault(target.strip(), []).append(child)
+            target = _repairs_target_id(child.metadata_json)
+            if target is not None:
+                repairs_of.setdefault(target, []).append(child)
 
         def _is_accepted(child: OrgTaskRecord) -> bool:
-            if child.status != OrgTaskStatus.COMPLETED.value:
-                return False
-            review = reviews.get(child.task_id)
-            return review is not None and review.review_status == OrgTaskReviewStatus.ACCEPTED.value
+            return _is_accepted_task(child.status, reviews.get(child.task_id))
 
         def _is_supersedable(child: OrgTaskRecord) -> bool:
-            if child.status == OrgTaskStatus.FAILED.value:
-                return True
-            if child.status != OrgTaskStatus.COMPLETED.value:
-                return False
-            review = reviews.get(child.task_id)
-            return review is not None and review.review_status in _SUPERSEDEABLE_REVIEW_STATUSES
+            return _is_supersedable_task(child.status, reviews.get(child.task_id))
 
         def _is_repair_child(child: OrgTaskRecord) -> bool:
-            meta = _json_loads(child.metadata_json, {})
-            target = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
-            return isinstance(target, str) and bool(target.strip())
+            return _repairs_target_id(child.metadata_json) is not None
 
         for child in child_rows:
             if _is_accepted(child):
@@ -955,7 +999,34 @@ class OrgTaskManager:
             return f"child task review is not accepted: {child.task_id}"
         return None
 
-    async def _apply_repair_retry_budget(
+    async def _is_repairable_target(self, session: Any, repaired: OrgTaskRecord) -> bool:
+        """True when the target matches the parent-complete supersedeable criteria."""
+        review = await self._get_latest_review_row(session, repaired.task_id)
+        return _is_supersedable_task(repaired.status, review)
+
+    async def _list_sibling_repairs_of(
+        self,
+        session: Any,
+        *,
+        parent_task_id: str,
+        repairs_target: str,
+    ) -> list[OrgTaskRecord]:
+        """Return direct siblings whose repairs_task_id points at repairs_target."""
+        sibling_rows = (
+            await session.execute(
+                select(OrgTaskRecord).where(
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.parent_task_id == parent_task_id,
+                )
+            )
+        ).scalars().all()
+        return [
+            sibling
+            for sibling in sibling_rows
+            if _repairs_target_id(sibling.metadata_json) == repairs_target
+        ]
+
+    async def _apply_repair_create_guards(
         self,
         session: Any,
         *,
@@ -964,7 +1035,7 @@ class OrgTaskManager:
         repairs_target: str,
         now: int,
     ) -> OrgTaskOpResult | None:
-        """Enforce optional retry_limit on the repaired task; bump retry_count. None = ok."""
+        """One sibling scan: reject active/accepted repairs, then enforce retry_limit and bump count."""
         repaired_meta = _json_loads(repaired.metadata_json, {})
         raw_limit = repaired_meta.get(ORG_TASK_RETRY_LIMIT_KEY)
         retry_limit: int | None = None
@@ -982,20 +1053,32 @@ class OrgTaskManager:
                     reason=f"invalid retry_limit on repaired task {repairs_target!r}: {raw_limit!r}",
                 )
 
-        sibling_rows = (
-            await session.execute(
-                select(OrgTaskRecord).where(
-                    OrgTaskRecord.organization_id == self.organization_id,
-                    OrgTaskRecord.parent_task_id == parent_task_id,
+        repair_siblings = await self._list_sibling_repairs_of(
+            session,
+            parent_task_id=parent_task_id,
+            repairs_target=repairs_target,
+        )
+        existing = len(repair_siblings)
+        for sibling in repair_siblings:
+            review = await self._get_latest_review_row(session, sibling.task_id)
+            if _is_accepted_task(sibling.status, review):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=(
+                        f"repairs_task_id target already superseded by accepted repair "
+                        f"{sibling.task_id}: {repairs_target}"
+                    ),
                 )
+            # Abandoned repair attempts (failed / rejected) do not block a new attempt.
+            if _is_supersedable_task(sibling.status, review):
+                continue
+            return OrgTaskOpResult(
+                ok=False,
+                reason=(
+                    f"repairs_task_id target already has an active repair "
+                    f"{sibling.task_id}: {repairs_target}"
+                ),
             )
-        ).scalars().all()
-        existing = 0
-        for sibling in sibling_rows:
-            meta = _json_loads(sibling.metadata_json, {})
-            target = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
-            if isinstance(target, str) and target.strip() == repairs_target:
-                existing += 1
 
         if retry_limit is not None and existing >= retry_limit:
             return OrgTaskOpResult(

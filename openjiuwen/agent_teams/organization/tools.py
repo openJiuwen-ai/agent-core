@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from openjiuwen.agent_teams.organization.schema import (
     OrgTaskAggregationMode,
     OrgTaskCreator,
+    OrgTaskFailureCode,
     OrgTaskOutputContext,
     OrgTaskOutputSpec,
     OrgTaskReviewStatus,
@@ -575,8 +576,18 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
                 "task_id": {"type": "string"},
                 "output_context": {"type": "object"},
                 "output_abstract": {"type": "string"},
-                "failure_code": {"type": "string"},
-                "failure_reason": {"type": "string"},
+                "failure_code": {
+                    "type": "string",
+                    "enum": [OrgTaskFailureCode.EXECUTION_FAILED.value],
+                    "description": (
+                        "Required when action=failed. Leader-reported execution failure only; "
+                        "other failure codes are reserved for system/internal fail_task calls."
+                    ),
+                },
+                "failure_reason": {
+                    "type": "string",
+                    "description": "Required when action=failed. Non-empty human-readable failure reason.",
+                },
             },
             "required": ["action", "task_id"],
         }

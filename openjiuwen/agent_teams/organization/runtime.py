@@ -982,16 +982,14 @@ class OrganizationRuntimeManager:
         self._scheduled_parent_reviews.add(review_key)
         prompt = (
             f"Child organization task {child_task_id} completed in {organization_id}. "
-            f"Inspect its result and pending review with org_review_task, then accept or reject it. "
+            f"Inspect its result with org_review_task, then accept or reject it. "
             f"If accepted, use the child output to continue parent task {parent_task_id}. "
-            "If rejected, create at most one focused repair task for the team whose capabilities match "
-            f"the reported defect with org_create_task(parent_task_id='{parent_task_id}'); include the "
-            "child report and acceptance criteria in that task. Do not "
-            "leave the parent waiting without either accepting/rejecting the child or creating that repair. "
-            "When all direct child tasks are accepted, complete the parent task with its integrated result. "
-            "For the root task, put the user-facing final delivery in org_update_task output_context.description: "
-            "project structure, startup instructions, API contract, executed test results, and known limitations. "
-            "Also provide a concise output_abstract."
+            "If rejected, create a repair with org_create_task "
+            f"(set repairs_task_id={child_task_id} on the original sibling; never repair-of-repair; "
+            "do not org_delegate_task the rejected child). "
+            "When all direct children are accepted or superseded by an accepted repair, "
+            "complete the parent. For a root task, put the user-facing delivery in "
+            "org_update_task output_context.description and provide output_abstract."
         )
         self._schedule_leader_turn(
             team_id=team_id,
@@ -1019,13 +1017,12 @@ class OrganizationRuntimeManager:
         prompt = (
             f"Child organization task {child_task_id} was reviewed as {review_status} "
             f"in {organization_id}. Parent task {parent_task_id} cannot advance on that child. "
-            "Read the child result and review verdict/required_changes, then either create at most "
-            "one focused repair task with org_create_task "
-            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
-            "repair; include defect report and acceptance "
-            "criteria; prefer capabilities that match the defect) or re-delegate with "
-            "org_delegate_task. Do not leave the parent waiting without a repair/re-delegation "
-            "decision, and do not silently reopen the rejected child task."
+            "Read the child result and review verdict/required_changes. "
+            + self._repair_create_instructions(
+                target_id=target_id,
+                report_phrase="defect report",
+                terminal_label="rejected/completed",
+            )
         )
         self._schedule_leader_turn(
             team_id=team_id,
@@ -1082,18 +1079,38 @@ class OrganizationRuntimeManager:
             f"(failure_code={failure_code}, failure_reason={failure_reason}). "
             f"Parent task {parent_task_id} cannot advance on that child. "
             "This is not a pending review — do not call org_review_task on the failed child. "
-            "Create at most one focused repair task with org_create_task "
-            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
-            "repair; include the failure "
-            "report and acceptance criteria) or re-delegate with org_delegate_task. "
-            "Do not leave the parent waiting without a repair/re-delegation decision, and do not "
-            "silently reopen the failed child task."
+            + self._repair_create_instructions(
+                target_id=target_id,
+                report_phrase="the failure report",
+                terminal_label="failed",
+            )
         )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
             prompt=prompt,
             review_key=review_key,
+        )
+
+    @staticmethod
+    def _repair_create_instructions(
+        *,
+        target_id: str,
+        report_phrase: str,
+        terminal_label: str,
+    ) -> str:
+        """Shared wake guidance for creating a repair sibling of a terminal child."""
+        return (
+            "Create a focused repair task with org_create_task "
+            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
+            f"repair; include {report_phrase} and acceptance criteria; prefer capabilities that "
+            "match the defect; if the original has retry_limit, do not exceed it). Same team may "
+            "execute the repair; switching teams is optional—only if switching teams, set "
+            "delegated_to_team_id on that new repair (or org_delegate_task the new OPEN repair "
+            "only). Do not call org_delegate_task on the "
+            f"{terminal_label} child, which is terminal. "
+            "Do not leave the parent waiting without creating that repair, and do not silently "
+            f"reopen the {terminal_label} child task."
         )
 
     @staticmethod
