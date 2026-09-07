@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-09-03 |
+| 最近一次修订日期 | 2026-09-07 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -41,8 +41,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 2. **工具注册走 `DeepAgent` / rail 的卡片机制**：工具以 `Tool | ToolCard` 形态存在，
    `card.name` 是身份（`_tool_identity` / `ability_manager.get(name)` 强校验）；新增工具
    不得复用已有 card.name。卸载先校验 card 身份（见 `S_04` 不变量 7）。
-3. **工具发现**：`tool_discovery/` 提供 `ToolSearchTool` + bm25 检索（`tool_discovery/bm25.py`），
-   是工具搜索的唯一入口；`ListSkillTool` / `SkillTool`（`tools/skills/`）负责技能类工具。
+3. **工具发现**：`tool_discovery/` 提供 `ToolSearchTool` + bm25 检索
+   （`tool_discovery/bm25.py`）以及固定的 `ToolCallTool` 包装器。模型先搜索并授权 deferred
+   工具，再经 `tool_call` 交给原 `AbilityManager` 生命周期执行；`ListSkillTool` /
+   `SkillTool`（`tools/skills/`）负责技能类工具。
 4. **工具分组簇**：
    - web：`create_web_tools()`（fetch / free_search / paid_search）+ `WebFreeSearchTool` /
      `WebFetchWebpageTool`；`is_free_search_enabled()` / `is_paid_search_enabled()` 门控。
@@ -134,7 +136,10 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 
 错误 / 返回语义：
 
-- 工具错误一律以 `ToolOutput(success=False, error=...)` 返回，不抛异常。
+- 可恢复的工具错误一律以 `ToolOutput(success=False, error=...)` 返回，不抛裸异常。
+  `ToolInterruptException` 属于用户交互控制流，所有工具包装层必须原样传播，具体契约见
+  `S_04`。经包装层进入中断状态的 deferred 工具在 resume 时重新执行原 wrapper call，
+  由 wrapper 在保留的搜索授权下再次分发 target；审批请求仍使用 target call ID。
 - `get_or_create_plan_slug` 缺 workspace_root → 抛；plan 文件路径经 `resolve_plan_file_path`
   固定解析（`<workspace_root>/<slug>/plan.md` 形态，实际以 `agent_mode_tools.py` 为准）。
 - `WorktreeManager` 操作失败抛 `GitError` / `WorktreeLockTimeout`（`tools/worktree/`）。
