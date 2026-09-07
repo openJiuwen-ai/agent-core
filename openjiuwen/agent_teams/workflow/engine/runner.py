@@ -329,6 +329,19 @@ async def run_workflow(
     wal_path = f"{journal_path}.wal" if journal_path else None
     journal = await Journal.load(resume, wal_path=wal_path)
     log(f"[wf] journal loaded: prior_records={len(journal.prior)} path={resume} wal={wal_path}")
+    # Cold-start resume recovers the launch args: the advisory template carries
+    # resume_id + script_path but no args, so a resume would otherwise run
+    # ``run(args=None)`` — a different path than the first run, defeating the
+    # cache (F_110 / S_18). Read them back from the run-level journal record.
+    resolved_args = args
+    if resolved_args is None and run_id is not None:
+        args_rec = journal.find_run_record(run_id, "args")
+        if args_rec is not None:
+            resolved_args = args_rec.get("args")
+    # Persist the launch args on the first run (caller supplied args) so a later
+    # cold-start resume can replay the same path; resume re-reads, no re-write.
+    if args is not None and run_id is not None:
+        await journal.write_run_record(run_id, "args", {"args": args})
     # Per-run budget on resume is NOT restored from a snapshot — the ledger
     # starts at spent=0 and the emit hooks re-bill it by replaying cache hits:
     # every cache-hit agent adds its record's stored ``tokens`` back, so the
@@ -339,7 +352,7 @@ async def run_workflow(
     rt = Runtime(
         backend=backend or MockBackend(),
         journal=journal,
-        args=args,
+        args=resolved_args,
         log_sink=log,
         progress_sink=progress_sink or noop_progress_sink,
         strict=strict,
