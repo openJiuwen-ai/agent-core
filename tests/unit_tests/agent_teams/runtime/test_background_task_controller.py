@@ -119,6 +119,38 @@ async def test_stop_sets_abort_reason_stop():
     assert h.abort_event.is_set() is True
 
 
+@pytest.mark.asyncio
+async def test_stop_none_stops_all_active_and_paused():
+    ctl = BackgroundTaskController()
+    ctl.register(_make_handle("wf_1"))
+    ctl.register(_make_handle("wf_2"))
+    await ctl.pause("wf_2")  # park wf_2 in _paused
+
+    ok = await ctl.stop(None)
+
+    assert ok is True
+    assert "wf_1" not in ctl._active and "wf_1" not in ctl._paused  # active → aborted + dropped
+    assert "wf_2" not in ctl._paused  # paused → relaunch closure dropped
+    assert not ctl._active and not ctl._paused
+
+
+@pytest.mark.asyncio
+async def test_stop_none_drops_paused_without_reaborting():
+    ctl = BackgroundTaskController()
+    h = _make_handle("wf_1")
+    ctl.register(h)
+    await ctl.pause("wf_1")
+    assert h.abort_event.reason == "pause"
+
+    ok = await ctl.stop(None)
+
+    assert ok is True
+    assert "wf_1" not in ctl._paused
+    # A paused run already wrote its pause record at pause time; stop must only
+    # drop the relaunch closure, not re-abort it to reason="stop".
+    assert h.abort_event.reason == "pause"
+
+
 # ---------------------------------------------------------------------------
 # Preserved legacy coverage (prior task), adapted to run_id-addressed keys.
 # ---------------------------------------------------------------------------

@@ -113,6 +113,21 @@ def test_run_with_mock_backend_and_progress_events(tmp_path):
     assert started and started[0].phase == "Greet" and started[0].prompt == "say hi"
 
 
+def test_workflow_started_carries_script_path(tmp_path):
+    """WORKFLOW_STARTED carries the absolute script path for cold-start resume advisory."""
+    script = _write(tmp_path, "metaonly.py", 'META = {"name": "m", "description": "d"}\nasync def run(args):\n    return 1\n')
+    events: list[WorkflowProgressEvent] = []
+
+    asyncio.run(
+        run_workflow(str(script), backend=MockBackend(), progress_sink=events.append)
+    )
+
+    started = events[0]
+    assert started.kind == ProgressKind.WORKFLOW_STARTED
+    assert started.script_path == str(script)
+
+
+
 _FOR_LOOP_SAME_LABEL_SCRIPT = '''
 from swarmflow import agent, parallel
 
