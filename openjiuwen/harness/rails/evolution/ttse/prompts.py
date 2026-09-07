@@ -192,6 +192,61 @@ If there is no contradiction or duplication, output exactly: NONE
 """
 
 
+DREAM_MERGE_SYSTEM = (
+    "You consolidate near-duplicate rules in a single track of an experience bank. "
+    "Reduce redundancy without dropping mutually exclusive conditions. "
+    "Output the structured verdict format exactly."
+)
+
+
+def dream_merge_prompt(
+    track: str,
+    rules_block: str,
+    sim_table: str,
+    *,
+    capabilities: str = "",
+) -> str:
+    """Prompt for Auto-dream soft-cluster merge (FACT or TIP track)."""
+    track_u = (track or "fact").upper()
+    tip_extra = ""
+    if track_u == "TIP":
+        tip_extra = f"""
+TIP constraints:
+- CANONICAL (for MERGE/REWRITE) MUST be exactly: When <condition>: use <capability> to <action>
+- <capability> MUST be ONE name from Available Capabilities below.
+- If conditions are mutually exclusive or meaningfully different, choose KEEP_DISTINCT.
+- Do NOT invent capabilities not listed.
+
+Available Capabilities:
+{capabilities or "(none)"}
+"""
+    else:
+        tip_extra = """
+FACT constraints:
+- CANONICAL must remain a DECLARATIVE environment statement (no "you should", no TIP form).
+- Never convert a FACT into a TIP.
+"""
+    return f"""You are consolidating a cluster of near-duplicate {track_u} rules from an agent experience bank.
+
+Goal: reduce redundancy while preserving distinct conditions. Prefer MERGE or REWRITE when
+rules are paraphrases of the same idea; KEEP_DISTINCT when conditions conflict or cover
+different cases. The count field is only an importance hint — never override "different
+conditions" just because one count is higher.
+
+Cluster rules (0-based index, text, count):
+{rules_block}
+
+Pairwise cosine similarities (i, j, sim):
+{sim_table or "(none)"}
+{tip_extra}
+Reply in EXACTLY this format:
+VERDICT: MERGE | KEEP_DISTINCT | REWRITE
+CANONICAL: <single retained or rewritten text; empty allowed for KEEP_DISTINCT>
+KEEP_INDICES: <comma-separated 0-based indices to keep when KEEP_DISTINCT; else empty>
+REASON: <one sentence>
+"""
+
+
 def detect_judge_prompt(query: str, final_reply: str) -> str:
     """One-shot reply-delivery judge: role → decompose goals → judge reply."""
     return f"""You are an advanced AI system serving as an impartial judge for an agent's text reply.

@@ -12,6 +12,7 @@ passed explicitly to :class:`TTSERail`, keeping the feature off by default.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -64,6 +65,18 @@ class TTSEConfig:
         detect_max_output_paths: Cap on extracted write paths (artifact gate).
         detect_final_reply_chars: Max chars of final assistant reply fed to Judge.
         detect_llm_policy: Short policy for the one-shot reply-delivery Judge.
+        dream_enabled: Run periodic Auto-dream bank hygiene.
+        dream_interval: Non-follow-up task iterations between dream attempts.
+        dream_min_hours: Min hours since last successful dream.
+        dream_min_rules: Skip LLM merge when facts+tips below this (prune/purge still run).
+        dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates.
+        dream_cluster_min_size: Min cluster size to consider for merge.
+        dream_max_llm_merges: Cap LLM merge calls per dream run.
+        dream_ttl_days: Retire rules not injected for this many days.
+        dream_prune_enabled: Enable TTL prune pass.
+        dream_prune_mode: ``retire`` (default) or ``delete``.
+        dream_purge_tips_enabled: Enable deterministic low-quality TIP purge.
+        dream_state_path: Optional path for dream-state.json; derived from store_path when empty.
     """
 
     store_path: str = ".ttse/bank.json"
@@ -93,6 +106,26 @@ class TTSEConfig:
             max_attempts=1,
         )
     )
+    # Auto-dream (bank hygiene)
+    dream_enabled: bool = True
+    dream_interval: int = 20
+    dream_min_hours: float = 24.0
+    dream_min_rules: int = 8
+    dream_soft_lo: float = 0.72
+    dream_cluster_min_size: int = 2
+    dream_max_llm_merges: int = 10
+    dream_ttl_days: int = 90
+    dream_prune_enabled: bool = True
+    dream_prune_mode: str = "retire"  # or "delete"
+    dream_purge_tips_enabled: bool = True
+    dream_state_path: str = ""
+
+    def resolved_dream_state_path(self) -> str:
+        """Path for dream-state.json (same directory as the bank by default)."""
+        if self.dream_state_path:
+            return self.dream_state_path
+        directory = os.path.dirname(self.store_path) or ".ttse"
+        return os.path.join(directory, "dream-state.json")
 
     def is_disk_catalog(self) -> bool:
         """True when FACT/TIP are disclosed via ``ttse_consult``, not P:45.

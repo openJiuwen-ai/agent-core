@@ -9,6 +9,8 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
   is configured, falling back to the reference's substring dedup otherwise.
 * Embeddings are cached by normalized text so retrieval (Slice 2) reuses them.
+* Records carry display/TTL metadata (``created_at``, ``updated_at``,
+  ``last_injected_at``, ``inject_hits``) for Auto-dream prune.
 """
 
 from __future__ import annotations
@@ -17,7 +19,8 @@ import asyncio
 import json
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
@@ -46,6 +49,42 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
+def _now() -> float:
+    return time.time()
+
+
+def _new_record(text: str, *, count: int = 1, now: Optional[float] = None) -> Dict[str, Any]:
+    ts = now if now is not None else _now()
+    return {
+        "text": text,
+        "count": count,
+        "created_at": ts,
+        "updated_at": ts,
+        "last_injected_at": None,
+        "inject_hits": 0,
+    }
+
+
+def _migrate_record(record: Dict[str, Any], default_ts: float) -> Dict[str, Any]:
+    """Fill missing TTL/display fields for legacy bank entries.
+
+    Conservative migration: treat missing ``last_injected_at`` as ``default_ts``
+    (file mtime or now) so an upgrade does not mass-prune overnight.
+    """
+    if "count" not in record:
+        record["count"] = 1
+    if "created_at" not in record:
+        record["created_at"] = default_ts
+    if "updated_at" not in record:
+        record["updated_at"] = record.get("created_at", default_ts)
+    if "last_injected_at" not in record:
+        # Legacy banks: assume recently shown to avoid one-shot wipe.
+        record["last_injected_at"] = record.get("created_at", default_ts)
+    if "inject_hits" not in record:
+        record["inject_hits"] = 0
+    return record
+
+
 class TTSERecordStore:
     """In-memory FACT/TIP bank with JSON persistence and semantic dedup."""
 
@@ -57,7 +96,7 @@ class TTSERecordStore:
     ) -> None:
         self._config = config
         self._embedding: Optional[EmbeddingProvider] = embedding or config.embedding
-        self.facts: List[Dict[str, Any]] = []  # [{"text","count","category"?}]
+        self.facts: List[Dict[str, Any]] = []  # [{"text","count","category"?,...meta}]
         self.tips: List[Dict[str, Any]] = []
         self.retired: List[Dict[str, Any]] = []  # [{"text","rtype","reason","retired_at_task"}]
         self._emb_cache: Dict[str, List[float]] = {}
@@ -73,10 +112,14 @@ class TTSERecordStore:
         if not path or not os.path.exists(path):
             return
         try:
+            default_ts = os.path.getmtime(path)
+        except OSError:
+            default_ts = _now()
+        try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            self.facts = list(data.get("facts", []))
-            self.tips = list(data.get("tips", []))
+            self.facts = [_migrate_record(dict(r), default_ts) for r in data.get("facts", [])]
+            self.tips = [_migrate_record(dict(r), default_ts) for r in data.get("tips", [])]
             self.retired = list(data.get("retired", []))
         except (OSError, ValueError) as exc:
             logger.warning("[TTSERail] bank load failed at %s: %s", path, exc)
@@ -162,6 +205,74 @@ class TTSERecordStore:
         return None
 
     # ------------------------------------------------------------------
+    # Soft clustering (Auto-dream)
+    # ------------------------------------------------------------------
+
+    async def soft_cluster(
+        self,
+        records: Sequence[Dict[str, Any]],
+        *,
+        soft_lo: float,
+        min_size: int = 2,
+    ) -> List[List[Dict[str, Any]]]:
+        """Union-find clusters by pairwise cosine >= ``soft_lo``.
+
+        Returns only components with ``len >= min_size``. Empty when no
+        embedding provider or fewer than ``min_size`` embeddable records.
+        """
+        if not self.has_embedding_provider() or len(records) < min_size:
+            return []
+        n = len(records)
+        vectors: List[Optional[List[float]]] = []
+        for record in records:
+            vectors.append(await self._embedding_of(record["text"]))
+        parent = list(range(n))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i: int, j: int) -> None:
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[rj] = ri
+
+        for i in range(n):
+            if vectors[i] is None:
+                continue
+            for j in range(i + 1, n):
+                if vectors[j] is None:
+                    continue
+                if _cosine(vectors[i], vectors[j]) >= soft_lo:
+                    union(i, j)
+
+        buckets: Dict[int, List[Dict[str, Any]]] = {}
+        for i, record in enumerate(records):
+            if vectors[i] is None:
+                continue
+            buckets.setdefault(find(i), []).append(record)
+        clusters = [members for members in buckets.values() if len(members) >= min_size]
+        clusters.sort(key=lambda c: -len(c))
+        return clusters
+
+    async def pairwise_sims(self, records: Sequence[Dict[str, Any]]) -> List[Tuple[int, int, float]]:
+        """Pairwise cosine similarities for LLM merge context (i < j)."""
+        out: List[Tuple[int, int, float]] = []
+        vectors: List[Optional[List[float]]] = []
+        for record in records:
+            vectors.append(await self._embedding_of(record["text"]))
+        for i in range(len(records)):
+            if vectors[i] is None:
+                continue
+            for j in range(i + 1, len(records)):
+                if vectors[j] is None:
+                    continue
+                out.append((i, j, _cosine(vectors[i], vectors[j])))
+        return out
+
+    # ------------------------------------------------------------------
     # Mutation
     # ------------------------------------------------------------------
 
@@ -181,9 +292,10 @@ class TTSERecordStore:
             if matched is not None:
                 matched["count"] = matched.get("count", 0) + 1
                 # Keep the surviving record's category; do not reclassify on merge.
+                matched["updated_at"] = _now()
                 store.sort(key=lambda x: -x.get("count", 0))
                 return "merged"
-            store.append({"text": text, "count": 1})
+            store.append(_new_record(text))
             store.sort(key=lambda x: -x.get("count", 0))
             del store[cap:]
             return "added"
@@ -208,7 +320,43 @@ class TTSERecordStore:
             logger.debug("[TTSERail] merged duplicate tip: %s", text[:80])
         return result == "added"
 
-    async def retire(self, text: str, rtype: str, reason: str, task_id: str = "") -> int:
+    async def add_record_direct(
+        self,
+        rtype: str,
+        text: str,
+        *,
+        count: int = 1,
+        save: bool = True,
+    ) -> Dict[str, Any]:
+        """Insert a record without online dedup (used by dream MERGE/REWRITE)."""
+        store = self.facts if rtype == "fact" else self.tips
+        cap = self._config.max_facts if rtype == "fact" else self._config.max_tips
+        record = _new_record(text, count=count)
+        async with self._lock:
+            store.append(record)
+            store.sort(key=lambda x: -x.get("count", 0))
+            del store[cap:]
+        if save:
+            await self.save()
+        return record
+
+    def mark_injected(self, records: Sequence[Dict[str, Any]], *, now: Optional[float] = None) -> int:
+        """Refresh display clock on records that actually entered the prompt.
+
+        Mutates the shared dict objects in the bank. Returns how many records
+        were updated.
+        """
+        ts = now if now is not None else _now()
+        updated = 0
+        for record in records:
+            if not isinstance(record, dict) or "text" not in record:
+                continue
+            record["last_injected_at"] = ts
+            record["inject_hits"] = int(record.get("inject_hits", 0)) + 1
+            updated += 1
+        return updated
+
+    async def retire(self, text: str, rtype: str, reason: str, task_id: str = "", *, save: bool = True) -> int:
         store = self.facts if rtype == "fact" else self.tips
         n = _norm(text)
         async with self._lock:
@@ -220,7 +368,22 @@ class TTSERecordStore:
                 self.tips = kept
             if removed:
                 self.retired.append({"text": text, "rtype": rtype, "reason": reason, "retired_at_task": task_id})
-        if removed:
+        if removed and save:
+            await self.save()
+        return removed
+
+    async def delete_record(self, text: str, rtype: str, *, save: bool = True) -> int:
+        """Remove from active bank without appending to retired."""
+        store = self.facts if rtype == "fact" else self.tips
+        n = _norm(text)
+        async with self._lock:
+            kept = [r for r in store if _norm(r["text"]) != n]
+            removed = len(store) - len(kept)
+            if rtype == "fact":
+                self.facts = kept
+            else:
+                self.tips = kept
+        if removed and save:
             await self.save()
         return removed
 
@@ -293,4 +456,4 @@ class TTSERecordStore:
         return {"facts": len(self.facts), "tips": len(self.tips), "retired": len(self.retired)}
 
 
-__all__ = ["TTSERecordStore"]
+__all__ = ["TTSERecordStore", "_cosine", "_norm", "_new_record", "_migrate_record"]

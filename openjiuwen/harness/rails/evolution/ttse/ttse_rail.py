@@ -33,11 +33,12 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmen
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
 
-from .capabilities import render_capabilities
+from .capabilities import list_capability_names, parse_capability_names_from_text, render_capabilities
 from .catalog import project_catalog, render_catalog_markdown
 from .classify import classify_rules
 from .config import TTSEConfig
 from .consult import TTSE_CONSULT_TOOL_NAME, create_ttse_consult_tools
+from .dream import load_dream_state, run_dream_pass
 from .induction import blame, induce, induce_batch, synthesize
 from .render import (
     DISK_CATALOG_GUIDANCE_CN,
@@ -82,8 +83,10 @@ class TTSERail(EvolutionRail):
         # Per-invoke injection cache (query -> rendered section body).
         self._inj_query: Optional[str] = None
         self._inj_body: Optional[str] = None
+        # Debounce bank saves after inject timestamp updates (once per resolve).
+        self._inject_dirty: bool = False
         # Serializes the whole bank-mutating reflection (blame/retire/synth/induce)
-        # so concurrent background reflections (one per invoke) don't interleave.
+        # and Auto-dream so concurrent background jobs don't interleave.
         self._evolution_lock = asyncio.Lock()
         # Batch induce buffer: when batch_size > 1, per-task observations collect
         # here and induce as ONE call every batch_size tasks (cost amortization).
@@ -95,6 +98,9 @@ class TTSERail(EvolutionRail):
         self._agent: Any = None
         self._consult_tools: list = []
         self._attachment_manager: Any = None
+        # Auto-dream: count non-follow-up task iterations between silent runs.
+        self._dream_non_followup_count: int = 0
+        self._dream_task: Optional[asyncio.Task] = None
         super().__init__(**kwargs)
 
     def init(self, agent) -> None:
@@ -458,6 +464,77 @@ class TTSERail(EvolutionRail):
             await self._flush_batch(self._last_capabilities or await render_capabilities(None))
 
     # ------------------------------------------------------------------
+    # Auto-dream (silent bank hygiene)
+    # ------------------------------------------------------------------
+
+    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+        """Count non-follow-up iterations and schedule a silent dream run."""
+        if not self._ttse_config.dream_enabled:
+            return
+        if self._dream_iteration_blocked(ctx):
+            return
+        self._dream_non_followup_count += 1
+        interval = max(1, int(self._ttse_config.dream_interval))
+        if self._dream_non_followup_count < interval:
+            return
+        self._dream_non_followup_count = 0
+        self._schedule_dream(ctx)
+
+    def _dream_iteration_blocked(self, ctx: AgentCallbackContext) -> bool:
+        if self._is_background_run(ctx):
+            return True
+        inputs = getattr(ctx, "inputs", None)
+        if bool(getattr(inputs, "is_follow_up", False)):
+            return True
+        extra = getattr(ctx, "extra", None) or {}
+        return bool(extra.get("is_follow_up", False))
+
+    def _schedule_dream(self, ctx: Optional[AgentCallbackContext] = None) -> None:
+        """Fire-and-forget dream; skip if a prior dream task is still running."""
+        if self._dream_task is not None and not self._dream_task.done():
+            logger.info("[TTSERail] dream schedule skipped: prior dream still running")
+            return
+        capabilities = self._last_capabilities
+        agent = getattr(ctx, "agent", None) if ctx is not None else None
+
+        async def _runner() -> None:
+            caps = capabilities
+            if not caps:
+                try:
+                    caps = await render_capabilities(agent)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[TTSERail] dream capability render failed: %s", exc)
+                    caps = ""
+            await self.run_dream(capabilities=caps)
+
+        self._dream_task = asyncio.create_task(_runner())
+
+    async def run_dream(self, *, capabilities: Optional[str] = None) -> None:
+        """Run Auto-dream under the evolution lock (prune → merge → purge)."""
+        caps = capabilities if capabilities is not None else (self._last_capabilities or "")
+        names = parse_capability_names_from_text(caps) if caps else set()
+        if not names:
+            try:
+                names = await list_capability_names(None)
+            except Exception:  # noqa: BLE001
+                names = set()
+
+        state = load_dream_state(self._ttse_config.resolved_dream_state_path())
+        async with self._evolution_lock:
+            try:
+                await run_dream_pass(
+                    self._ttse_store,
+                    self._ttse_config,
+                    llm=self._ttse_llm,
+                    model=self._ttse_model,
+                    capabilities=caps or "",
+                    capability_names=names,
+                    state=state,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[TTSERail] dream failed: %s", exc)
+
+    # ------------------------------------------------------------------
     # Injection (before_model_call)
     # ------------------------------------------------------------------
 
@@ -487,6 +564,9 @@ class TTSERail(EvolutionRail):
 
         query = self._extract_query(ctx)
         body = await self._resolve_injection_body(query)
+        if self._inject_dirty:
+            await self._ttse_store.save()
+            self._inject_dirty = False
         if not body:
             # Bank empty (or retrieval found nothing): drop any stale section.
             if builder.has_section(SectionName.TTSE_FACTS_TIPS):
@@ -566,6 +646,14 @@ class TTSERail(EvolutionRail):
         self._inj_body = body or None
         return body
 
+    def _mark_injected(self, facts: list, tips: list) -> None:
+        """Refresh display clock for records actually written into the prompt."""
+        records = [r for r in list(facts) + list(tips) if isinstance(r, dict)]
+        if not records:
+            return
+        if self._ttse_store.mark_injected(records):
+            self._inject_dirty = True
+
     async def _build_injection_body_async(self, query: str) -> str:
         """Top-K retrieval when an embedding provider is configured."""
         if not self._ttse_store.has_embedding_provider():
@@ -595,6 +683,7 @@ class TTSERail(EvolutionRail):
             logger.info("[TTSERail] embedding recall empty; skip TTSE section")
             return ""
         self._log_injected_rules(facts, tips, retrieved=True)
+        self._mark_injected(facts, tips)
         return build_section_text(facts, tips, retrieved=True)
 
     @staticmethod
@@ -617,6 +706,7 @@ class TTSERail(EvolutionRail):
         facts = self._ttse_store.facts_records()
         tips = self._ttse_store.tips_records()
         self._log_injected_rules(facts, tips, retrieved=False)
+        self._mark_injected(facts, tips)
         return build_section_text(facts, tips, retrieved=False)
 
     # ------------------------------------------------------------------
