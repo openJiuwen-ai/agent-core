@@ -11,8 +11,8 @@ things are being translated, and each is a shape change rather than a rename:
 
 * **Nine search events into three task events.** The search speaks in
   selections, expansions, evaluations and merges; the contract speaks in status,
-  progress and node. A node is only complete once the merger has ruled on it, so
-  the projection buffers rather than forwarding each part.
+  progress, node and node.stage. Pending candidates publish their current stage;
+  a candidate counts as completed only once the merger has ruled on it.
 * **A live stream into durable snapshots.** The contract requires `read_state`,
   `read_report` and `get_tree` to answer after a restart, so everything the
   events carry is written into `run_dir` as it happens.
@@ -25,8 +25,10 @@ things are being translated, and each is a shape change rather than a rename:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import re
+import shutil
 import threading
 from collections.abc import Mapping
 from dataclasses import replace
@@ -36,6 +38,10 @@ from typing import Any, Literal
 
 from agentdescent.filetree import load_tree
 
+from openjiuwen.rsi.artifact_rsi.program_opt.bundle import (
+    ProgramBundle,
+    resolve_program_bundle,
+)
 from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
 from openjiuwen.rsi.artifact_rsi.program_opt.probe import ProbeError, run_probe
 from openjiuwen.rsi.artifact_rsi.program_opt.program import (
@@ -85,6 +91,11 @@ DEFAULT_WORKERS = 1
 #: evaluation in flight; past a handful the limit stops being this process.
 MAX_WORKERS = 8
 
+#: How long one event may take to be delivered before the search stops
+#: waiting for it. Generous — a slow consumer is the contract's problem to
+#: carry — but finite, because the wait is made under the fold lock.
+EVENT_DELIVERY_SECONDS = 120.0
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +113,14 @@ async def _notify(on_event: OnEvent | None, event: Any) -> None:
     if on_event is None:
         return
     try:
-        await on_event(event)
+        # Bounded for the same reason the threaded sink's wait is: a consumer
+        # that never returns must not hold the run. Status events go this way
+        # (running / paused / completed); a hang here left a finished search
+        # never reporting that it had finished.
+        await asyncio.wait_for(on_event(event), timeout=EVENT_DELIVERY_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("event delivery did not return within %ss (observability channel); "
+                       "continuing without it", EVENT_DELIVERY_SECONDS)
     except Exception as error:  # noqa: BLE001 - observation must not kill the run
         logger.warning("event delivery failed (observability channel): %s", error)
 
@@ -169,11 +187,45 @@ class PuctProgramArtifactProvider:
             })
             return ArtifactValidationResult(valid=False, errors=errors)
 
-        # A directory is a program too. What is being optimized is a file tree
-        # — one file is the common case and not the only one — so a seed that
-        # is a package is read whole, at its own relative paths.
+        # A directory is a program too. When it is a task bundle, resolve the
+        # seed below its metadata-bearing root; the user only needs to select
+        # the one folder and the provider owns the bundle layout.
         try:
-            files = _seed_files(path)
+            program = resolve_program_bundle(path)
+            scorecard: Mapping[str, Any] | None = None
+            if program.is_bundle:
+                if program.scorecard_path is None:
+                    errors.append({
+                        "code": "ARTIFACT_SCORECARD_REQUIRED",
+                        "message": (
+                            f"{artifact_path} is a program task folder but has no "
+                            "run/scorecard.json"
+                        ),
+                    })
+                else:
+                    try:
+                        value = json.loads(
+                            program.scorecard_path.read_text(encoding="utf-8")
+                        )
+                    except (OSError, json.JSONDecodeError) as error:
+                        errors.append({
+                            "code": "ARTIFACT_SCORECARD_INVALID",
+                            "message": f"{program.scorecard_path} is not valid JSON: {error}",
+                        })
+                    else:
+                        if not isinstance(value, Mapping):
+                            errors.append({
+                                "code": "ARTIFACT_SCORECARD_INVALID",
+                                "message": f"{program.scorecard_path} must contain a JSON object",
+                            })
+                        else:
+                            scorecard = value
+            entrypoint_hint = (
+                str(scorecard.get("entrypoint") or "") or None
+                if scorecard is not None
+                else None
+            )
+            files = _seed_files(program.seed_path, entrypoint=entrypoint_hint)
         except (OSError, ValueError) as error:
             return ArtifactValidationResult(valid=False, errors=[{
                 "code": "ARTIFACT_UNREADABLE",
@@ -184,11 +236,10 @@ class PuctProgramArtifactProvider:
             # And stop: an empty program has nothing further to say, and
             # letting it flow on used to double-report the same fact as the
             # gate's "empty source".
-            return ArtifactValidationResult(valid=False, errors=[
-                {"code": "ARTIFACT_EMPTY", "message": "the program is empty"},
-            ])
+            errors.append({"code": "ARTIFACT_EMPTY", "message": "the program is empty"})
+            return ArtifactValidationResult(valid=False, errors=errors)
 
-        entrypoint = _entrypoint_of(files)
+        entrypoint = entrypoint_hint or _entrypoint_of(files)
         if entrypoint is None:
             errors.append({
                 "code": "ARTIFACT_ENTRYPOINT_UNCLEAR",
@@ -197,6 +248,15 @@ class PuctProgramArtifactProvider:
                            f"`{DEFAULT_ENTRYPOINT}`, or set `entrypoint` in the scorecard.",
             })
             return ArtifactValidationResult(valid=not errors, errors=errors)
+        if entrypoint not in files:
+            errors.append({
+                "code": "ARTIFACT_ENTRYPOINT_MISSING",
+                "message": (
+                    f"the scorecard names {entrypoint!r} as the entrypoint and the "
+                    f"program does not contain it: {', '.join(sorted(files)[:10])}"
+                ),
+            })
+            return ArtifactValidationResult(valid=False, errors=errors)
         source = files[entrypoint]
 
         # A shape check on the starting point only, and only when it is Python:
@@ -435,7 +495,7 @@ class PuctProgramArtifactProvider:
                                   "pause or terminate it before starting another",
                 )
         loop = asyncio.get_running_loop()
-        run_dir = Path(request.run_dir)
+        run_dir = Path(request.run_dir).expanduser().resolve()
         state = ProgramRunState(
             task_id=request.task_id,
             run_dir=run_dir,
@@ -474,11 +534,15 @@ class PuctProgramArtifactProvider:
                     "an initialized Model instance is required: AgentServer resolves "
                     "model_refs['optimizer'] via Runner.resource_mgr.get_model"
                 )
-            spec = self._spec_for(request, resumed=resumed)
+            prepared_request = self._prepare_request(request)
+            spec = self._spec_for(prepared_request, resumed=resumed)
             execute = self._execution or self._execution_for(spec, loop)
-        except (ModelConfigError, ExecutionUnavailable,
-                FileNotFoundError, ValueError) as error:
+        except (ModelConfigError, ExecutionUnavailable, ValueError, OSError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
+            if isinstance(error, shutil.Error) or (
+                isinstance(error, OSError) and not isinstance(error, FileNotFoundError)
+            ):
+                code = "ARTIFACT_PREPARE_ERROR"
             return await failed(code, str(error))
 
         stop = threading.Event()
@@ -509,8 +573,18 @@ class PuctProgramArtifactProvider:
                     # provider carry the queue's back-pressure. But waited-on is
                     # not died-of: a callback exception is an observability
                     # fault, and the search it was watching must outlive it.
+                    # Bounded, for the same reason: this wait holds `fold`, and
+                    # every worker's next event queues behind it. A delivery
+                    # that never returns would stall the whole search with the
+                    # loop idle and every worker parked on one lock — the shape
+                    # a 45-expansion AlgoTune run was found in after nine hours.
                     try:
-                        future.result()
+                        future.result(timeout=EVENT_DELIVERY_SECONDS)
+                    except concurrent.futures.TimeoutError:
+                        future.cancel()
+                        logger.warning(
+                            "event delivery did not return within %ss (observability "
+                            "channel); the search continues without it", EVENT_DELIVERY_SECONDS)
                     except Exception as error:  # noqa: BLE001
                         logger.warning(
                             "event delivery failed (observability channel): %s", error)
@@ -552,6 +626,55 @@ class PuctProgramArtifactProvider:
             error_message=state.error_message,
         )
 
+    @staticmethod
+    def _prepare_request(request: ArtifactEngineRequest) -> ArtifactEngineRequest:
+        """Own the task-folder layout and return a self-contained request.
+
+        The public request intentionally contains only one user-selected path.
+        A task folder may keep its scorecard under ``run/`` and its program
+        under ``seed/``; those are provider details.  Copying both into the
+        provider-owned run directory also makes resume independent of a source
+        folder that may later be moved or removed.
+        """
+        run_dir = Path(request.run_dir).expanduser().resolve()
+        run_dir.mkdir(parents=True, exist_ok=True)
+        scorecard_target = run_dir / "scorecard.json"
+        stage_manifest = run_dir / "input" / "program.json"
+
+        program: ProgramBundle | None = None
+        if not scorecard_target.exists():
+            program = resolve_program_bundle(request.artifact_path or "")
+            if program.scorecard_path is None:
+                raise FileNotFoundError(
+                    f"program optimization needs a scorecard in the selected task folder "
+                    f"or at {scorecard_target}"
+                )
+            _copy_file_once(program.scorecard_path, scorecard_target)
+        elif not scorecard_target.is_file():
+            raise ValueError(f"program scorecard path is not a file: {scorecard_target}")
+
+        staged = _read_stage_manifest(stage_manifest, run_dir)
+        if staged is None:
+            if program is None:
+                program = resolve_program_bundle(request.artifact_path or "")
+            effective_path, kind = _stage_seed(program.seed_path, run_dir)
+            _write_stage_manifest(stage_manifest, run_dir, effective_path, kind)
+        else:
+            effective_path = staged
+
+        if program is not None and program.prompts_path is not None:
+            prompts_target = run_dir / "prompts"
+            if not prompts_target.exists():
+                shutil.copytree(program.prompts_path, prompts_target)
+            elif not prompts_target.is_dir():
+                raise ValueError(f"program prompts path is not a directory: {prompts_target}")
+
+        return replace(
+            request,
+            run_dir=str(run_dir),
+            artifact_path=str(effective_path),
+        )
+
     def _execution_for(self, spec: RunSpec, loop: Any) -> EvaluationExecution:
         """How a candidate will be run.
 
@@ -588,10 +711,13 @@ class PuctProgramArtifactProvider:
                 "candidates, and nothing in ArtifactEngineRequest carries one"
             )
         card = json.loads(scorecard_path.read_text(encoding="utf-8"))
+        if not isinstance(card, Mapping):
+            raise ValueError(f"program scorecard at {scorecard_path} must contain a JSON object")
 
         files: dict[str, str] = {}
         if request.artifact_path:
-            files = _seed_files(Path(request.artifact_path).expanduser())
+            files = _seed_files(Path(request.artifact_path).expanduser(),
+                                entrypoint=str(card.get("entrypoint") or "") or None)
         entrypoint = str(card.get("entrypoint") or "") or _entrypoint_of(files) or DEFAULT_ENTRYPOINT
         if files and entrypoint not in files:
             raise ValueError(
@@ -620,6 +746,12 @@ class PuctProgramArtifactProvider:
             run_dir=str(run_dir),
             options=dict(card.get("options") or {}),
             reply_format=str(card.get("reply_format") or "").strip() or "files",
+            # The card's per-candidate ceiling. It was documented, written on
+            # every card, and never read: every run took `RunSpec`'s 60 s
+            # default. Measured on AlgoTune's `lu_factorization` with three
+            # workers evaluating at once — a card saying 300 s, evaluations
+            # killed at 60, the loop dead before its first model call.
+            candidate_timeout_seconds=_candidate_timeout(card, RunSpec.candidate_timeout_seconds),
             # From the scorecard when it says, else `RunSpec`'s default. The
             # model's own request config is opaque here — the contract hands
             # over an initialized instance, not its settings — so the per-run
@@ -692,16 +824,24 @@ def _workers_from(value: Any) -> int:
     return max(1, min(workers, MAX_WORKERS))
 
 
-def _seed_files(path: Path) -> dict[str, str]:
+def _seed_files(path: Path, entrypoint: str | None = None) -> dict[str, str]:
     """The starting program as `{relpath: text}`, from a file or a directory.
 
-    A single file is placed at the default entrypoint, which is how every
-    one-file run has always worked. A directory keeps its own layout, so a seed
-    that is already a package is not renamed into this provider's conventions
-    just to be optimized.
+    A single file is placed at the entrypoint the card names, or at the default
+    one when the card says nothing — which is how every one-file run has always
+    worked. A directory keeps its own layout, so a seed that is already a
+    package is not renamed into this provider's conventions just to be
+    optimized.
+
+    The card's name wins because a contract can be about the filename: AlgoTune
+    calls `solver.py`, and a one-file seed that was always renamed to
+    `candidate.py` could never satisfy a card saying so — the run was refused
+    for "the program does not contain solver.py" with the file right there.
     """
     if path.is_dir():
         return load_tree(str(path))
+    if entrypoint:
+        return {entrypoint: path.read_text(encoding="utf-8")}
     # A Python file is placed at the default entrypoint, which is what lets an
     # evaluator say `import candidate` without the drafting model having to
     # invent a convention. Anything else keeps the name it arrived with:
@@ -711,6 +851,86 @@ def _seed_files(path: Path) -> dict[str, str]:
     # either way.
     name = DEFAULT_ENTRYPOINT if path.suffix == ".py" else path.name
     return {name: path.read_text(encoding="utf-8")}
+
+
+def _stage_seed(seed_path: Path, run_dir: Path) -> tuple[Path, Literal["file", "directory"]]:
+    """Copy a resolved seed into the provider-owned input directory."""
+    destination = run_dir / "input" / "program"
+    if seed_path.is_dir():
+        if destination.exists() and not destination.is_dir():
+            raise ValueError(f"program staging path is not a directory: {destination}")
+        if seed_path.resolve() != destination.resolve():
+            shutil.copytree(seed_path, destination, dirs_exist_ok=True)
+        return destination, "directory"
+
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / seed_path.name
+    _copy_file_once(seed_path, target)
+    return target, "file"
+
+
+def _copy_file_once(source: Path, target: Path) -> None:
+    """Copy one immutable task input without replacing a resume snapshot."""
+    if target.exists():
+        if not target.is_file():
+            raise ValueError(f"program staging path is not a file: {target}")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{threading.get_ident()}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_stage_manifest(path: Path, run_dir: Path) -> Path | None:
+    """Recover the file-vs-directory shape saved for a previous attempt."""
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"program staging manifest {path} is not valid JSON: {error}") from error
+    if not isinstance(value, Mapping):
+        raise ValueError(f"program staging manifest {path} must contain a JSON object")
+
+    kind = value.get("kind")
+    relative = value.get("artifact_path")
+    if kind not in ("file", "directory") or not isinstance(relative, str) or not relative.strip():
+        raise ValueError(f"program staging manifest {path} has invalid input metadata")
+    candidate = (run_dir / relative).resolve()
+    try:
+        candidate.relative_to(run_dir)
+    except ValueError as error:
+        raise ValueError(f"program staging path must stay inside {run_dir}: {relative}") from error
+    if kind == "file" and not candidate.is_file():
+        raise FileNotFoundError(f"staged program file does not exist: {candidate}")
+    if kind == "directory" and not candidate.is_dir():
+        raise FileNotFoundError(f"staged program directory does not exist: {candidate}")
+    return candidate
+
+
+def _write_stage_manifest(
+    path: Path,
+    run_dir: Path,
+    effective_path: Path,
+    kind: Literal["file", "directory"],
+) -> None:
+    """Persist the staging shape atomically for resume."""
+    if path.exists():
+        return
+    relative = effective_path.resolve().relative_to(run_dir).as_posix()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"artifact_path": relative, "kind": kind}, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _entrypoint_of(files: Mapping[str, str]) -> str | None:
@@ -769,6 +989,16 @@ def _packages_from(raw: Any) -> tuple[str, ...]:
             )
         names.append(name)
     return tuple(names)
+
+
+def _candidate_timeout(card: Mapping[str, Any], default: float) -> float:
+    """`measure.timeoutSeconds` of the first criterion, else the default."""
+    scorecard = card.get("scorecard", card) or {}
+    for criterion in scorecard.get("criteria") or []:
+        value = (criterion.get("measure") or {}).get("timeoutSeconds")
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+    return default
 
 
 def _command_from(raw: Any) -> tuple[str, ...]:

@@ -55,13 +55,11 @@ from .program import (
     bundle,
     edits_an_existing_file,
     files_of,
-    is_python,
     read_promise,
 )
 from .prompt import repair_prompt, with_promise_request
 from .execution import EvaluationExecution
 from .provision import (
-    CANDIDATE_RUNTIME,
     ProvisionError,
     ensure,
     import_name,
@@ -73,6 +71,7 @@ from .restore import RestoreError, restore_baseline, restore_tree
 from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
 from .script_domain import ScriptError, script_domain
 from .search import (
+    REPAIR_ATTEMPTS,
     PuctStrategy,
     PuctTreeAggregator,
     make_propose,
@@ -369,6 +368,12 @@ class PuctEngine:
                 # asked for back.
                 repair_prompt=lambda code, error: repair_prompt(
                     code, error, spec.entrypoint, template=spec.repair_template),
+                # From the card, because the right number is the task's: on a
+                # benchmark whose winning direction usually fails to compile on
+                # its first draft (AlgoTune, numba), two attempts abandon the
+                # direction and four reach it — upstream's 540x run on
+                # `polynomial_real` repaired its way there with four.
+                repair_attempts=int(spec.options.get("repair_attempts", REPAIR_ATTEMPTS)),
             ),
             "repo_path": str(repo),
             "run": make_run(domain),
@@ -479,7 +484,10 @@ class PuctEngine:
             # with those files replaced.
             parent_files = files_of(parent_code, spec.entrypoint)
             files, summary = reply_format.parse(reply, parent_files, spec.entrypoint)
-            if files and not edits_an_existing_file(parent_files, files):
+            # An empty reply has nothing to check for edits; the reason it is
+            # empty is already recorded (a failed call) or about to be
+            # (`note_empty`), and both say more than "it changed no file".
+            if reply.strip() and files and not edits_an_existing_file(parent_files, files):
                 # Everything it wrote landed in new paths nothing imports, so
                 # the program that runs is still the parent's. Said here, with
                 # the paths named, because the alternative is a candidate that
@@ -559,6 +567,7 @@ class _Reporter:
         # never does — a stop, a crash — and an absent reason has to be
         # distinguishable from a reason the framework declined to give.
         self._stop_reason = ""
+        self._framework_error = ""
         self._planned = spec.expansions
         self.attempted = 0
         self.scored = 0
@@ -597,7 +606,14 @@ class _Reporter:
         never existed.
         """
         with self._lock:
-            self._empty[iteration] = f"this call returned nothing: {reason}"
+            # First cause wins. A call that failed is upstream of everything
+            # the draw does with its empty reply, and the second reason that
+            # arrives is about the empty reply, not about why it is empty.
+            # Measured: six calls refused with HTTP 429 (quota exhausted) were
+            # reported as "the reply wrote nothing and left every existing
+            # file alone" — pointing the reader at the model's output when the
+            # model was never reached.
+            self._empty.setdefault(iteration, f"this call returned nothing: {reason}")
 
     def note_empty(self, iteration: int) -> None:
         """Two failures wear the same empty reply and need opposite fixes."""
@@ -611,8 +627,9 @@ class _Reporter:
                     f"the model spent all {spent.completion} output tokens on hidden "
                     f"thinking and had not started the answer when it hit the "
                     f"{self.spec.max_tokens_per_call} per-call ceiling. Raise "
-                    "max_tokens_per_call in the task's scorecard.json — whether the "
-                    "model thinks at all is the injected Model's own configuration"
+                    "max_tokens_per_call or set options.reasoning in the task's "
+                    "scorecard.json — whether the model thinks at all is controlled "
+                    "by the injected Model and this per-run override"
                 )
             else:
                 self._empty[iteration] = "the model returned an empty reply"
@@ -650,6 +667,8 @@ class _Reporter:
         if kind == "selected":
             self.attempted += 1
             self.emit(events.selected(payload["parent_index"], payload["ancestors"]))
+        elif kind == "stage":
+            self.emit({"type": "stage", **payload})
         elif kind == "seeded":
             seed_score = payload["metrics"].get(SCORE_KEY)
             if isinstance(seed_score, (int, float)) and math.isfinite(float(seed_score)):
@@ -674,6 +693,7 @@ class _Reporter:
                 },
             ))
         elif kind == "discarded":
+            self.emit({"type": "candidate_discarded", "iteration": int(payload["ops"].get("iteration") or 0)})
             # A proposal the staleness filter threw away. It cost a model call
             # and produced no node, so a run that planned 20 expansions and made
             # 18 has these as the difference — and until this branch existed the
@@ -732,6 +752,9 @@ class _Reporter:
         else:
             self.scored += 1
 
+        # Publish attempts only once generation/evaluation has returned. A
+        # parallel selection batch must not expose empty provisional nodes.
+        self.emit({"type": "candidate_started", "iteration": iteration, "parentIndex": node.parent_index})
         self.emit(events.expanded(
             node.index, node.parent_index, _depth(self.tree, node),
             metrics.get(SCORE_KEY) if valid else None, valid,
@@ -824,9 +847,13 @@ class _Reporter:
         done = len(self.tree.nodes) - 1  # the seed is not an expansion
         self._stop_reason = reason
         self._planned = planned
-
-        if error:
-            self.emit(events.log("warn", f"the search was ended by an error: {error[:300]}"))
+        # Kept, because `finish` has to know. Logged at "warn" and forgotten,
+        # the framework's own error left a run that made zero model calls
+        # reporting `completed` with no error message — measured on AlgoTune's
+        # `lu_factorization`: 508 seconds, one node, "stopped because error",
+        # status completed. The reader had a success and nothing to read.
+        self._framework_error = error or ("the search loop stopped on an error it did not describe"
+                                          if reason == "error" else "")
         if retired:
             self.emit(events.log(
                 "warn",
@@ -875,6 +902,13 @@ class _Reporter:
                 "candidates do not implement the interface the evaluator calls, or the "
                 "scoring only looks at a part none of them touched.",
             ))
+        if status == "succeeded" and self._framework_error:
+            # The loop died. Whatever the tree holds was made before that, and
+            # a run that ended this way did not finish its search — "succeeded"
+            # would be the framework's crash wearing the user's result.
+            status = "failed"
+            self.emit(events.log(
+                "error", f"the search was ended by an error: {self._framework_error[:500]}"))
         if status == "succeeded" and self.attempted and not self.scored:
             # Not "the search found nothing": nothing ever ran. Reporting that as
             # success sends the user looking at their scorecard for a fault that
@@ -887,6 +921,12 @@ class _Reporter:
                 f"the most common reason was: {common}",
             ))
 
+        if not self.tree.nodes:
+            # The loop died before it seeded. There is no best node to name
+            # and nothing to hold out — only the failure to report.
+            self.emit(events.search_finished(
+                "failed", None, 0, stop_reason=self._stop_reason, expansions_planned=self._planned))
+            return
         best = self.tree.best()
         test_score: Optional[float] = None
         if status != "failed" and best.program.valid and self.domain.test_shards:
@@ -960,10 +1000,12 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
         # fail identically, and a search that reports twelve failed candidates
         # sends the user reading candidates for a fault in the configuration.
         raise _Refusal("this scorecard is scored by an evaluator script but was given none")
-    # Asked of the environment candidates actually run in, through the seam —
-    # this interpreter's own answer is not that environment's. One probe covers
-    # the candidate runtime and the promised packages together, and pip is
-    # reached only when something is actually missing.
+    # Ask only for packages explicitly declared by the scorecard. A generic
+    # Python task does not implicitly require numpy/pandas/scipy/sklearn: the
+    # folder-only provider path has no package declaration, and many valid
+    # tasks (including standard-library tasks) do not need that stack.
+    # Probing a fixed list made every such task fail before the first rollout
+    # when one optional package was absent from the candidate environment.
     try:
         shape = format_for(spec.reply_format)
     except ReplyFormatError as error:
@@ -982,14 +1024,7 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
         wanted = validate_names(spec.packages or [])
     except ProvisionError as error:
         raise _Refusal(str(error)) from error
-    # The runtime is a Python fact: `CANDIDATE_RUNTIME` is what the AST gate
-    # lets a *Python* candidate import, and probing it means running an
-    # interpreter in the execution environment. A run whose program is Rust
-    # neither needs numpy nor has any reason to require that Python exists
-    # there at all — this probe refusing such a run was the last thing pinning
-    # the search to one language.
-    runtime = CANDIDATE_RUNTIME if is_python(spec.entrypoint) else ()
-    names = sorted({*runtime, *(import_name(package) for package in wanted)})
+    names = sorted({import_name(package) for package in wanted})
     if names and probe_imports(names, execute) is not None:
         if wanted:
             # Refused rather than warned about: a run whose candidates were
@@ -1001,13 +1036,6 @@ def _refuse_unrunnable(spec: RunSpec, execute: "EvaluationExecution") -> None:
                 raise _Refusal(str(error)) from error
             if installed:
                 log.info("run %s provisioned %s", spec.search_id, ", ".join(installed))
-        failure = probe_imports(runtime, execute) if runtime else None
-        if failure is not None:
-            raise _Refusal(
-                f"the execution environment is missing part of the candidate runtime "
-                f"({', '.join(runtime)}): {failure}. The AST gate lets "
-                "candidates import these, so without them every candidate fails"
-            )
 
 
 def _split_of(spec: RunSpec) -> Dict[str, int]:

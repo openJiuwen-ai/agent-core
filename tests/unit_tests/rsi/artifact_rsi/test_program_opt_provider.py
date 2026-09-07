@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -140,6 +142,36 @@ def _scorecard(run_dir: Path, **extra: object) -> None:
     (run_dir / "scorecard.json").write_text(json.dumps(card), encoding="utf-8")
 
 
+def _program_task_folder(
+    tmp_path: Path,
+    *,
+    with_scorecard: bool = True,
+    artifact_path: str = "seed",
+) -> Path:
+    root = tmp_path / "program-task"
+    seed = root / "seed"
+    seed.mkdir(parents=True)
+    (seed / "candidate.py").write_text(SEED, encoding="utf-8")
+    (seed / "helpers.py").write_text(
+        "def identity(value):\n    return value\n",
+        encoding="utf-8",
+    )
+    run_dir = root / "run"
+    run_dir.mkdir()
+    (root / "task.json").write_text(
+        json.dumps({
+            "task_id": "folder-task",
+            "artifact_path": artifact_path,
+            "run_dir": "run",
+            "entrypoint": "candidate.py",
+        }),
+        encoding="utf-8",
+    )
+    if with_scorecard:
+        _scorecard(run_dir, entrypoint="candidate.py")
+    return root
+
+
 # -- the protocol ---------------------------------------------------------------
 
 
@@ -237,6 +269,23 @@ def test_a_usable_seed_validates(tmp_path: Path) -> None:
     assert PuctProgramArtifactProvider().validate_input(str(path)).valid is True
 
 
+def test_a_task_folder_validates_its_declared_seed_and_scorecard(tmp_path: Path) -> None:
+    task_folder = _program_task_folder(tmp_path)
+
+    result = PuctProgramArtifactProvider().validate_input(str(task_folder))
+
+    assert result.valid is True
+
+
+def test_a_task_folder_without_a_scorecard_is_rejected_at_creation(tmp_path: Path) -> None:
+    task_folder = _program_task_folder(tmp_path, with_scorecard=False)
+
+    result = PuctProgramArtifactProvider().validate_input(str(task_folder))
+
+    assert result.valid is False
+    assert "ARTIFACT_SCORECARD_REQUIRED" in [error["code"] for error in result.errors]
+
+
 @pytest.mark.parametrize(
     ("artifact_path", "code"),
     [(None, "ARTIFACT_PATH_REQUIRED"), ("", "ARTIFACT_PATH_REQUIRED")],
@@ -287,6 +336,17 @@ def test_the_token_ceiling_comes_from_the_scorecard_when_it_says(
     assert silent.max_tokens_per_call == 16_000   # RunSpec's own default
 
 
+def test_reasoning_policy_reaches_the_run_spec_from_the_scorecard(tmp_path: Path) -> None:
+    provider = PuctProgramArtifactProvider()
+    request = _request(tmp_path)
+    policy = {"mode": "enabled", "effort": "max"}
+    _scorecard(Path(request.run_dir), options={"reasoning": policy})
+
+    spec = provider._spec_for(request, resumed=False)
+
+    assert spec.options["reasoning"] == policy
+
+
 def test_the_starting_program_reaches_the_spec(tmp_path: Path) -> None:
     provider = PuctProgramArtifactProvider()
     request = _request(tmp_path)
@@ -297,6 +357,41 @@ def test_the_starting_program_reaches_the_spec(tmp_path: Path) -> None:
     assert "train_and_predict" in spec.baseline_code
     assert spec.expansions == request.max_iterations
     assert spec.search_id == request.task_id
+
+
+def test_the_provider_prepares_a_task_folder_into_its_own_run_directory(
+    tmp_path: Path,
+) -> None:
+    task_folder = _program_task_folder(tmp_path)
+    provider = PuctProgramArtifactProvider()
+    request = _request(tmp_path, artifact_path=str(task_folder))
+
+    prepared = provider._prepare_request(request)
+    prepared_path = Path(prepared.artifact_path or "")
+    spec = provider._spec_for(prepared, resumed=False)
+
+    assert prepared_path == Path(request.run_dir) / "input" / "program"
+    assert (prepared_path / "candidate.py").is_file()
+    assert (prepared_path / "helpers.py").is_file()
+    assert (Path(request.run_dir) / "scorecard.json").is_file()
+    assert "candidate.py" in spec.baseline_code
+    assert "helpers.py" in spec.baseline_code
+    assert "task.json" not in spec.baseline_code
+
+
+def test_run_prepares_a_single_file_seed_from_a_task_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _canned(monkeypatch, _SCRIPT)
+    task_folder = _program_task_folder(tmp_path, artifact_path="seed/candidate.py")
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, artifact_path=str(task_folder))
+
+    result = asyncio.run(provider.run(request))
+
+    assert result.status == "completed"
+    assert (Path(request.run_dir) / "scorecard.json").is_file()
+    assert (Path(request.run_dir) / "input" / "program" / "candidate.py").is_file()
 
 
 @pytest.mark.parametrize(
@@ -433,18 +528,18 @@ def test_the_root_arrives_as_one_complete_node(tmp_path: Path) -> None:
     assert node.node.parent_id is None
 
 
-def test_a_candidate_stays_silent_until_the_merger_has_ruled_on_it(
+def test_a_candidate_is_visible_without_counting_it_as_completed(
     tmp_path: Path,
 ) -> None:
-    """`EventNode` carries a *complete* node by contract, and a candidate is not
-    complete until it has been accepted or rejected. Announcing it at `expanded`
-    would publish a node whose `adopted` is a placeholder."""
+    """Publish the pending snapshot while keeping completed progress unchanged."""
     run = _state(tmp_path)
     _absorb(run, events.seeded(0, 0.25, code_hash="sha256:aa"))
 
-    assert _absorb(run, events.expanded(1, 0, 1, 0.4, True, iteration=1,
+    emitted = _absorb(run, events.expanded(1, 0, 1, 0.4, True, iteration=1,
                                        code_hash="sha256:bb",
-                                       change_summary="swapped the solver")) == []
+                                       change_summary="swapped the solver"))
+    assert len(emitted) == 1 and emitted[0].node.type == "candidate"
+    assert run.iteration == 0
     assert _absorb(run, events.evaluated(1, 0.42, {"rmse": 1.9}, gate_score=0.42)) == []
 
 
@@ -949,6 +1044,7 @@ def test_a_search_running_on_a_thread_delivers_its_events_to_the_callers_loop(
     assert kinds == [
         "EventStatus",   # running, before anything is measured
         "EventNode",     # the root
+        "EventNode",     # candidate awaiting the merge verdict
         "EventNode",     # the candidate, once the merger ruled on it
         "EventProgress",  # per merged node; a cost event no longer emits one
         "EventStatus",   # completed, last
@@ -1769,13 +1865,17 @@ def test_the_call_and_the_wait_agree_on_one_budget() -> None:
 
         class _Spec:
             max_tokens_per_call = 4096
-            options = {"completion_timeout": 42.0}
+            options = {
+                "completion_timeout": 42.0,
+                "reasoning": {"mode": "enabled", "effort": "max"},
+            }
 
         complete = factory(_Spec(), None, lambda: False)
         await _asyncio.to_thread(complete, "hello")
 
     asyncio.run(drive_custom())
     assert seen.get("timeout") == 42.0
+    assert seen.get("reasoning") == {"mode": "enabled", "effort": "max"}
 
 
 def test_a_one_file_listing_still_shows_its_path() -> None:
@@ -3042,14 +3142,11 @@ def test_a_shell_script_that_happens_to_parse_as_python_is_read_as_a_shell_scrip
 def test_a_non_python_run_does_not_have_to_have_python_in_its_sandbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The last thing pinning the search to one language.
+    """Pre-flight checks only packages explicitly named by the scorecard.
 
-    Before every run the engine probes numpy/pandas/scipy/sklearn in the
-    execution environment, because the AST gate lets a *Python* candidate
-    import them. For a program that is not Python the probe asks a question
-    about the wrong language — and refuses the run when the answer is no, so a
-    sandbox holding a Rust toolchain and no interpreter could not run a Rust
-    task at all.
+    A folder-only task has no package declaration. It must reach the search
+    even when optional scientific packages are absent from the candidate
+    runtime; otherwise a standard-library task fails before its first probe.
     """
     from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
     from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
@@ -3059,7 +3156,7 @@ def test_a_non_python_run_does_not_have_to_have_python_in_its_sandbox(
 
     def recording_probe(names, execute):  # type: ignore[no-untyped-def]
         probed.append(tuple(names))
-        return "no module named numpy"
+        return None
 
     monkeypatch.setattr(
         "openjiuwen.rsi.artifact_rsi.program_opt.puct_engine.probe_imports",
@@ -3088,13 +3185,21 @@ def test_a_non_python_run_does_not_have_to_have_python_in_its_sandbox(
         "a Rust run probed the Python candidate runtime; it would be refused "
         "in any sandbox without an interpreter"
     )
-    # And the Python case still asks, because there the question is real.
+    # A Python run without declared packages must not inherit a hidden
+    # numpy/pandas/scipy/sklearn requirement.
     from dataclasses import replace
 
     engine.run(replace(spec, baseline_code="x = 1\n", entrypoint="candidate.py"),
                events.append, lambda: False)
 
-    assert probed and "numpy" in probed[0]
+    assert probed == []
+
+    # Explicit scorecard packages remain part of the pre-flight contract.
+    engine.run(replace(spec, baseline_code="x = 1\n", entrypoint="candidate.py",
+                       packages=("scikit-learn",)),
+               events.append, lambda: False)
+
+    assert probed == [("sklearn",)]
 
 
 def test_a_search_over_a_shell_program_scored_by_a_shell_evaluator(
@@ -3273,6 +3378,41 @@ def test_a_command_that_stages_no_files_still_has_somewhere_to_run(tmp_path: Pat
         outcome = execute({}, ["python", "-c", "print('ran')"], {}, 30, None)
     finally:
         loop.call_soon_threadsafe(loop.stop)
+
+    assert outcome.exit_code == 0, outcome.output
+    assert "ran" in outcome.output
+
+
+def test_local_python_alias_works_without_a_python_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A service-launched local runtime may expose only ``python3``.
+
+    The evaluator protocol keeps ``python`` for sandbox portability, but the
+    local SysOperation bridge must adapt that name before handing it to the
+    shell.  This is the exact environment of the JiuwenSwarm server process:
+    ``python3`` is on the system PATH and ``python`` is not.
+    """
+    if os.name == "nt":
+        pytest.skip("the local Python alias differs on Windows")
+    path = os.pathsep.join(("/usr/bin", "/bin"))
+    if shutil.which("python3", path=path) is None:
+        pytest.skip("the host does not provide python3 on its system PATH")
+    if shutil.which("python", path=path) is not None:
+        pytest.skip("the host has a python alias, so this regression shape is unavailable")
+
+    monkeypatch.setenv("PATH", path)
+    from openjiuwen.rsi.artifact_rsi.program_opt.execution import local_execution
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        execute = local_execution(tmp_path / "work", loop)
+        outcome = execute({}, ["python", "-c", "print('ran')"], {}, 30, None)
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
 
     assert outcome.exit_code == 0, outcome.output
     assert "ran" in outcome.output
@@ -3573,3 +3713,322 @@ def test_a_timeout_and_a_refusal_arrive_with_the_same_exit_code() -> None:
 
     with pytest.raises(ExecutionUnavailable):
         asyncio.run(run(_Rejected()))
+
+
+def test_a_seed_that_guards_an_optional_import_passes_the_gate() -> None:
+    """`try: from x import y / except ImportError: y = None` at module level.
+
+    That is how an optional dependency is bound, and how AlgoTune's own task
+    files bind theirs — `polynomial_real` guards `threadpoolctl` exactly so.
+    The gate refused any top-level `try`, which kept nothing out (every check
+    that matters walks the whole tree) and rejected upstream's own reference
+    as a starting point. The block's *contents* are still gated: a forbidden
+    import inside it is refused the same as outside.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import validate_source
+
+    # A name that is installed nowhere, on purpose: the gate machine has no
+    # `threadpoolctl`, and a test that only passed where the optional package
+    # happened to be present was testing the machine, not the gate.
+    guarded = (
+        "import numpy as np\n"
+        "try:\n"
+        "    from no_such_optional_dep_xyz987 import limits\n"
+        "except Exception:\n"
+        "    limits = None\n"
+        "\n"
+        "def solve(problem):\n"
+        "    return np.roots(problem).tolist()\n"
+    )
+    ok, reason = validate_source(guarded)
+    assert ok, reason
+
+    # The guard is what makes the difference: the same import, unguarded, is
+    # still refused for not being installed.
+    bare = guarded.replace("try:\n    from no_such_optional_dep_xyz987 import limits\n"
+                           "except Exception:\n    limits = None\n",
+                           "from no_such_optional_dep_xyz987 import limits\n")
+    ok, reason = validate_source(bare)
+    assert not ok and "not installed" in reason, reason
+
+    # And a guard says the import may fail, not that it may reach outside the
+    # process: the deny list applies inside the block exactly as outside.
+    smuggled = guarded.replace("from no_such_optional_dep_xyz987 import limits",
+                               "import subprocess")
+    ok, reason = validate_source(smuggled)
+    assert not ok and "subprocess" in reason, "a try block hid a forbidden import"
+
+
+def test_a_one_file_seed_takes_the_name_the_card_gives_it(tmp_path: Path) -> None:
+    """A contract can be about the filename.
+
+    AlgoTune's harness imports `solver.py`, so its card says
+    `entrypoint: solver.py`. A single-file seed was always renamed to
+    `candidate.py` on the way in — and then refused, in the same breath, for
+    "the program does not contain solver.py", with the file right there. The
+    card's name wins when it gives one; the default stays for a card that
+    says nothing, which is every one-file run written before this.
+    """
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), entrypoint="solver.py")
+
+    spec = provider._spec_for(request, resumed=False)
+
+    from openjiuwen.rsi.artifact_rsi.program_opt.program import files_of
+    assert spec.entrypoint == "solver.py"
+    assert list(files_of(spec.baseline_code, "solver.py")) == ["solver.py"]
+
+
+def test_relative_to_baseline_turns_the_ratio_the_way_the_criterion_says() -> None:
+    """`relative_to_baseline` read no direction: every metric was lower-is-better.
+
+    Every card that used it before happened to minimise — tour length, bins,
+    seconds, error — so the inversion had nowhere to show. AlgoTune's metric
+    is a speedup to be *maximised*, and the first live run of `polynomial_real`
+    adopted a candidate at 0.51x (twice as slow as the reference) as its best
+    node at a score of 0.66, then reported `completed`. The numbers below are
+    that run's.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.scorecard import normalize
+
+    maximize = {"direction": "maximize", "normalize": {"kind": "relative_to_baseline"}}
+    minimize = {"direction": "minimize", "normalize": {"kind": "relative_to_baseline"}}
+
+    # A speedup: the reference is 1.0x and sits at 0.5 either way.
+    assert normalize(maximize, 1.0, 1.0) == pytest.approx(0.5)
+    # Twice as slow must score *below* the reference, not above it.
+    assert normalize(maximize, 0.511, 1.0) < 0.5
+    assert normalize(maximize, 0.511, 1.0) == pytest.approx(0.511 / 1.511)
+    # Twice as fast lands where a halved error lands under minimize: 0.667.
+    assert normalize(maximize, 2.0, 1.0) == pytest.approx(2 / 3)
+    assert normalize(minimize, 0.5, 1.0) == pytest.approx(2 / 3)
+    # A zero is the floor for a maximised metric and the ceiling for a minimised one.
+    assert normalize(maximize, 0.0, 1.0) == 0.0
+    assert normalize(minimize, 0.0, 1.0) == 1.0
+    # Absent direction keeps the meaning every existing card was written against.
+    assert normalize({"normalize": {"kind": "relative_to_baseline"}}, 0.5, 1.0) == pytest.approx(2 / 3)
+
+
+def test_a_refused_model_call_is_reported_as_the_refusal_not_as_an_empty_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first cause is the one the reader needs.
+
+    Six calls came back HTTP 429 (quota exhausted). Each failure was recorded,
+    then the draw parsed the empty reply, found it edited no file, and recorded
+    *that* over it — so the run said "the reply wrote nothing and left every
+    existing file alone", sending the reader to the model's output when the
+    model was never reached. A failed call's reason now stays, and an empty
+    reply is not checked for edits at all.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    _no_runtime_probe(monkeypatch)
+
+    def factory(spec, on_usage, should_stop):  # type: ignore[no-untyped-def]
+        def complete(prompt, sink=None, on_failure=None):  # type: ignore[no-untyped-def]
+            if on_failure is not None:
+                on_failure("RateLimitError: Error code: 429 - AccountQuotaExceeded")
+            return ""
+        return complete
+
+    engine = PuctEngine(completion_factory=factory, evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="run-429", algorithm="puct", expansions=2, scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60}}]},
+        baseline_code='"""seed"""\nVALUE = 1\n',
+        script=('"""define VALUE"""\nimport importlib, json, os\n'
+                'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
+                'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
+                '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+        run_dir=str(tmp_path),
+    )
+
+    events: list[dict] = []
+    engine.run(spec, events.append, lambda: False)
+
+    said = " ".join(e["message"] for e in events if e.get("type") == "log" and e.get("level") == "error")
+    assert "429" in said, said
+    assert "wrote nothing" not in said, said
+
+
+def test_the_card_can_say_how_many_repair_attempts_a_direction_gets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`options.repair_attempts` reaches the fix-it loop.
+
+    The right number is the task's. On AlgoTune the direction that wins is
+    numba, and a numba draft usually fails to compile the first time: two
+    attempts abandon the direction, four reach it — upstream's 540x run on
+    `polynomial_real` got there with four. The engine's default stays two.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import puct_engine
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    _no_runtime_probe(monkeypatch)
+    seen: dict[str, object] = {}
+    real = puct_engine.make_propose
+
+    def recording(*args: object, **kwargs: object) -> object:
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(puct_engine, "make_propose", recording)
+    engine = PuctEngine(completion_factory=lambda *a, **k: (lambda p, *r, **kw: ""),
+                        evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=1, scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60}}]},
+        baseline_code='"""seed"""\nVALUE = 1\n',
+        script=('"""define VALUE"""\nimport importlib, json, os\n'
+                'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
+                'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
+                '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+        options={"repair_attempts": 4}, run_dir=str(tmp_path),
+    )
+
+    engine.run(spec, lambda event: None, lambda: False)
+
+    assert seen.get("repair_attempts") == 4, f"the fix-it loop was built with {seen.get('repair_attempts')!r}"
+
+
+def test_the_evaluators_report_is_not_cut_where_the_profile_starts() -> None:
+    """The feedback cap has to hold a report, not a sentence.
+
+    AlgoTune's harness answers every evaluation with its eval block, the
+    invalid examples and a line-level profile of the parent — about 3 000
+    characters — and the profile is the part that steers. At 500 the prompt
+    kept the headline and lost the profile every time.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.prompt import _feedback
+
+    report = "Speedup: 1.0x\n" + "\n".join(f"  {i:>4}  {1:>4}  {0.5:>10.3f}  line {i}" for i in range(80))
+    assert 2500 < len(report) < 4000, len(report)
+
+    rendered = _feedback(report)
+
+    assert rendered.rstrip().endswith("line 79"), "the profile's tail was cut"
+
+
+def test_a_search_loop_that_died_is_a_failed_run_with_the_error_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The framework's own error was logged at "warn" and then forgotten.
+
+    Measured on AlgoTune's `lu_factorization`: the loop stopped on an error
+    before its first model call, the report said "planned 45 expansions, made
+    1; it stopped because error", and the run reported `completed` with no
+    error message at all — 508 seconds, one node, nothing to read. A loop
+    that died did not finish its search: failed, with the error where
+    `read_state` shows it.
+    """
+    import agentdescent.evolution as evolution
+    from types import SimpleNamespace
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import PuctEngine
+
+    _no_runtime_probe(monkeypatch)
+    monkeypatch.setattr(evolution, "evolve", lambda *a, **k: SimpleNamespace(
+        stop_reason="error", error="TypeError: unhashable type: 'list'", retired_workers=0))
+
+    engine = PuctEngine(completion_factory=lambda *a, **k: (lambda p, *r, **kw: ""),
+                        evaluation_execution=_local_execution)
+    spec = RunSpec(
+        search_id="run-1", algorithm="puct", expansions=3, scorecard_hash="sha256:x",
+        scorecard={"aggregate": "weighted_sum", "constraints": [], "criteria": [{
+            "id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+            "normalize": {"kind": "identity"},
+            "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                        "split": {"gateShards": 4, "rolloutShards": 4, "testShards": 2,
+                                  "shardRows": 1, "seed": 0, "trainRows": None},
+                        "timeoutSeconds": 60}}]},
+        baseline_code='"""seed"""\nVALUE = 1\n',
+        script=('"""define VALUE"""\nimport importlib, json, os\n'
+                'mod = importlib.import_module(os.environ["SCIENCE_AGENT_CANDIDATE"][:-3])\n'
+                'json.dump({"valid": True, "metrics": {"score": mod.VALUE / 10}},\n'
+                '          open(os.environ["SCIENCE_AGENT_RESULT"], "w"))\n'),
+        run_dir=str(tmp_path),
+    )
+
+    events: list[dict] = []
+    engine.run(spec, events.append, lambda: False)
+
+    finished = next(e for e in events if e.get("type") == "search_finished")
+    assert finished["status"] == "failed", finished
+    said = " ".join(e["message"] for e in events if e.get("type") == "log" and e.get("level") == "error")
+    assert "unhashable type" in said, said
+
+
+def test_the_cards_timeout_is_the_candidates_timeout(tmp_path: Path) -> None:
+    """`measure.timeoutSeconds` was on every card and read by nothing.
+
+    Every run took `RunSpec`'s 60 s default. On AlgoTune's `lu_factorization`
+    a card said 300 s, three workers evaluated at once, the evaluations were
+    killed at 60, and the search loop died before its first model call.
+    """
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path)
+    _scorecard(Path(request.run_dir), scorecard={
+        "aggregate": "weighted_sum", "constraints": [],
+        "criteria": [{"id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+                      "normalize": {"kind": "identity"},
+                      "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                                  "timeoutSeconds": 300}}]})
+
+    spec = provider._spec_for(request, resumed=False)
+
+    assert spec.candidate_timeout_seconds == 300.0
+
+
+def test_an_event_consumer_that_never_returns_does_not_stall_the_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The delivery wait is made under the fold lock and had no bound.
+
+    A consumer that never returned would hold that lock forever; every worker's
+    next event queues behind it, the loop sits idle, and the search stands
+    still with nothing to report — the state a 45-expansion AlgoTune run was
+    found in after nine hours. The observability channel must not be able to
+    stop the search it is observing.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt import puct_provider
+
+    class _TwoEventEngine:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        def run(self, spec: object, emit: object, should_stop: object) -> None:
+            emit(events.seeded(0, 0.25, code_hash="sha256:aa"))  # type: ignore[operator]
+            emit(events.search_finished("succeeded", 0, 1))  # type: ignore[operator]
+
+    _no_probe(monkeypatch)
+    monkeypatch.setattr(puct_provider, "EVENT_DELIVERY_SECONDS", 0.5)
+    monkeypatch.setattr(
+        "openjiuwen.rsi.artifact_rsi.program_opt.puct_provider.PuctEngine", _TwoEventEngine)
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, max_iterations=1)
+    _scorecard(Path(request.run_dir))
+
+    async def drive() -> object:
+        async def never(event: object) -> None:
+            await asyncio.Event().wait()          # a consumer that hangs
+        return await asyncio.wait_for(provider.run(request, never), timeout=20)
+
+    result = asyncio.run(drive())
+
+    assert result.status in ("completed", "failed"), result

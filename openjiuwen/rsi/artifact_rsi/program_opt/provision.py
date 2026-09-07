@@ -37,8 +37,8 @@ different supply chain wearing the same field.
 
 **Failure is a refusal, not a warning.** A run whose candidates were promised
 `xgboost` and did not get it fails every expansion with `ModuleNotFoundError`
-and reads as a model that cannot write code — the same failure the engine's
-pre-flight probe of `CANDIDATE_RUNTIME` exists to prevent at the other end.
+and reads as a model that cannot write code, so explicitly declared packages
+are checked before search begins.
 """
 
 from __future__ import annotations
@@ -195,8 +195,3 @@ def ensure(packages: Sequence[str], execute: "EvaluationExecution") -> Tuple[Lis
             f"pip reported success and yet importing {', '.join(names)} still fails: {failure}"
         )
     return wanted, f"installed {', '.join(names)}"
-
-
-#: Allowlisted modules a candidate may import; probed at run start through the
-#: injected execution, because that is the environment candidates run in.
-CANDIDATE_RUNTIME = ("numpy", "pandas", "scipy", "sklearn")

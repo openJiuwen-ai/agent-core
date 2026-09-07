@@ -83,8 +83,9 @@ class ReportingAgent:
     to write and compile the paper. See docs/paper_writing_design.md.
     """
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], *, model: Any | None = None):
         self.config = config
+        self._injected_model = model
         self._pw_config = dict(config.get("reporting") or {})
 
     def run(self, inputs: ReportingInput) -> ReportingOutput:
@@ -405,7 +406,7 @@ class ReportingAgent:
         # {"error": "completion_timeout"} well under 900s despite this
         # setting already resolving to 900.
         completion_timeout = float(self._setting("timeout", "MODEL_TIMEOUT", default="600"))
-        model = init_model(
+        model = self._injected_model or init_model(
             provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),
             model_name=self._setting("model", "MODEL_NAME", default="default"),
             api_key=self._setting("api_key", "API_KEY", required=True, secret=True),

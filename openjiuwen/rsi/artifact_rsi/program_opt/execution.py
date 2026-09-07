@@ -22,7 +22,9 @@ there — a test runs only text the test itself wrote.
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,6 +78,34 @@ class _Run:
     result_file: Optional[str]
 
 
+def _command_for_operation(operation: Any, command: Sequence[str]) -> tuple[str, ...]:
+    """Resolve the portable Python alias for a local operation.
+
+    The RSI protocol uses ``python`` in its evaluator and runtime probes so a
+    sandbox can resolve that name inside its own image.  JiuwenSwarm's local
+    server is often launched by an application or a service manager, where
+    the active interpreter is available as ``python3`` but no ``python``
+    symlink is on ``PATH``.  Keep the command a bare executable name: an
+    absolute interpreter path would be rejected by the local SysOperation's
+    sandbox-path check even though it is the right interpreter.
+
+    A remote sandbox owns its PATH and may intentionally provide a different
+    Python command, so only LOCAL operations are normalised here.
+    """
+    argv = tuple(str(part) for part in command)
+    if not argv or os.name == "nt":
+        return argv
+    if _is_local_operation(operation) and argv[0] == "python" and shutil.which("python") is None:
+        return ("python3", *argv[1:])
+    return argv
+
+
+def _is_local_operation(operation: Any) -> bool:
+    """Whether the injected operation executes on this host."""
+    raw_mode = getattr(operation, "mode", None)
+    return getattr(raw_mode, "value", raw_mode) == "local"
+
+
 async def _stage_and_run(
     sys_operation: Any,
     run: _Run,
@@ -87,6 +117,7 @@ async def _stage_and_run(
     run, and the one built per evaluation — because what an evaluation *is*
     does not depend on where the container came from.
     """
+    command = _command_for_operation(sys_operation, run.command)
     name = f"evolve-{uuid.uuid4().hex}"
     # Absolute when a root is given, because a relative path resolves against
     # agent-core's CWD context var and not against wherever the caller meant.
@@ -123,7 +154,7 @@ async def _stage_and_run(
             )
 
     completed = await shell.execute_cmd(
-        shlex.join(run.command),
+        shlex.join(command),
         cwd=scratch,
         timeout=max(1, int(run.timeout)),
         environment=dict(run.env),
@@ -156,7 +187,7 @@ async def _stage_and_run(
         reason = getattr(completed, "message", "") or f"error {code}"
         if "timeout" not in reason.lower():
             raise ExecutionUnavailable(
-                f"the execution environment refused `{shlex.join(run.command)}`: {reason}")
+                f"the execution environment refused `{shlex.join(command)}`: {reason}")
         output = f"{output}\n{reason}".strip()
     result_text: Optional[str] = None
     if run.result_file is not None:

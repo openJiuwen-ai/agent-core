@@ -175,7 +175,7 @@ def _read_promise_op(raw: Any) -> Optional[float]:
 #: either — every attempt is a model call the user pays for, and a candidate
 #: that resists two fixes is usually a design that wants replacing, which the
 #: next expansion does anyway.
-_REPAIR_ATTEMPTS = 2
+REPAIR_ATTEMPTS = 2
 
 #: What a nothing-came-back candidate scores, wherever it is noticed.
 NO_CANDIDATE = "no candidate program came back; the model call returned nothing"
@@ -205,7 +205,7 @@ def make_propose(
     on_event: OnEvent = _noop,
     check: Optional[Callable[[str], Tuple[bool, Dict[str, Any], str]]] = None,
     repair_prompt: Optional[Callable[[str, str], str]] = None,
-    repair_attempts: int = _REPAIR_ATTEMPTS,
+    repair_attempts: int = REPAIR_ATTEMPTS,
 ) -> Callable[[str, Task, str, float], Optional[str]]:
     """Select a parent and ask the model to rewrite it.
 
@@ -267,6 +267,8 @@ def make_propose(
         code, summary, promise = "", "", None
         attempts = max(1, repair_attempts) if check and repair_prompt else 1
         for attempt in range(attempts):
+            stage_name = "正在生成程序" if attempt == 0 else "正在修复程序"
+            on_event("stage", {"iteration": iteration, "id": "generate", "name": stage_name})
             code, summary, drawn = complete(prompt, iteration, parent.program.code)
             # Kept from the first reply that carried one: a redraw is the same
             # direction being written again, so its rating is a second reading
@@ -275,6 +277,7 @@ def make_propose(
             last = attempt == attempts - 1
             if last or not code.strip():
                 break
+            on_event("stage", {"iteration": iteration, "id": "check", "name": "正在试运行程序"})
             valid, metrics, error = check(code)
             if not _is_dead(domain, valid, metrics):
                 break
@@ -295,6 +298,7 @@ def make_propose(
         parent_doc = _first_doc_line(entry_source(parent.program.code))
         if summary.strip() and summary.strip() in (parent_summary, parent_doc):
             summary = ""
+        on_event("stage", {"iteration": iteration, "id": "evaluate", "name": "等待或正在执行候选评测"})
         return json.dumps(
             {
                 "change_summary": summary,
