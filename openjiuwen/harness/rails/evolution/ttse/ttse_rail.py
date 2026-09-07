@@ -475,9 +475,16 @@ class TTSERail(EvolutionRail):
             return
         self._dream_non_followup_count += 1
         interval = max(1, int(self._ttse_config.dream_interval))
+        logger.info(
+            "[TTSERail] dream session count=%s/%s session_id=%s",
+            self._dream_non_followup_count,
+            interval,
+            self._catalog_session_id(ctx),
+        )
         if self._dream_non_followup_count < interval:
             return
         self._dream_non_followup_count = 0
+        logger.info("[TTSERail] dream interval reached; scheduling offline dream")
         self._schedule_dream(ctx)
 
     def _dream_iteration_blocked(self, ctx: AgentCallbackContext) -> bool:
@@ -508,6 +515,7 @@ class TTSERail(EvolutionRail):
             await self.run_dream(capabilities=caps)
 
         self._dream_task = asyncio.create_task(_runner())
+        logger.info("[TTSERail] offline dream task scheduled")
 
     async def run_dream(self, *, capabilities: Optional[str] = None) -> None:
         """Run Auto-dream under the evolution lock (prune → merge → purge)."""
@@ -519,6 +527,12 @@ class TTSERail(EvolutionRail):
             except Exception:  # noqa: BLE001
                 names = set()
 
+        logger.info(
+            "[TTSERail] offline dream begin model=%s caps=%s bank=%s",
+            self._ttse_model,
+            len(names),
+            self._ttse_store.stats(),
+        )
         state = load_dream_state(self._ttse_config.resolved_dream_state_path())
         async with self._evolution_lock:
             try:

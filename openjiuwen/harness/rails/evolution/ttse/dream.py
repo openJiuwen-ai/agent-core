@@ -167,6 +167,20 @@ async def prune_stale(
 
     pruned_facts = await _prune_track("fact", store.facts)
     pruned_tips = await _prune_track("tip", store.tips)
+    if pruned_facts or pruned_tips:
+        logger.info(
+            "[TTSERail] dream prune done mode=%s ttl_days=%s pruned_facts=%s pruned_tips=%s",
+            mode,
+            config.dream_ttl_days,
+            pruned_facts,
+            pruned_tips,
+        )
+    else:
+        logger.debug(
+            "[TTSERail] dream prune idle mode=%s ttl_days=%s",
+            mode,
+            config.dream_ttl_days,
+        )
     return pruned_facts, pruned_tips
 
 
@@ -286,11 +300,24 @@ async def dream_merge(
         min_size=config.dream_cluster_min_size,
     )
     if not clusters:
+        logger.info(
+            "[TTSERail] dream merge no clusters track=%s rules=%s soft_lo=%s",
+            track,
+            len(records),
+            config.dream_soft_lo,
+        )
         return 0, 0
 
     merged = 0
     kept = 0
     budget = max(0, int(config.dream_max_llm_merges))
+    logger.info(
+        "[TTSERail] dream merge start track=%s rules=%s clusters=%s llm_budget=%s",
+        track,
+        len(records),
+        len(clusters),
+        budget,
+    )
     for cluster in clusters:
         if budget <= 0:
             break
@@ -388,6 +415,13 @@ async def run_dream_pass(
         logger.info("[TTSERail] dream skipped: %s", reason)
         return DreamResult(skipped=True, skip_reason=reason), dream_state
 
+    logger.info(
+        "[TTSERail] dream pass start bank=%s caps=%s state_path=%s last_dream_at=%s",
+        store.stats(),
+        len(capability_names or set()),
+        path,
+        dream_state.last_dream_at,
+    )
     result = DreamResult()
     names = capability_names or set()
 
