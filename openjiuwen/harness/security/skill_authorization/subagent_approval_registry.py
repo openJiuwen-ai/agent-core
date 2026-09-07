@@ -229,7 +229,9 @@ class SubagentApprovalRegistry:
         sid = str(session_id or "").strip()
         rid = str(approval_id or "").strip()
         scope = str(agent_scope_id or "").strip()
-        if not sid or not rid or not scope:
+        # approval_id is a unique uuid key; agent_scope_id is an optional
+        # cross-check. OfficeClaw / relay often omit it on resume chat.send.
+        if not sid or not rid:
             return False
         with self._guard:
             pending = self._pending.get(rid)
@@ -238,7 +240,7 @@ class SubagentApprovalRegistry:
             request = pending.request
             if request.session_id != sid or request.kind != kind:
                 return False
-            if request.agent_scope_id != scope:
+            if scope and request.agent_scope_id != scope:
                 logger.warning(
                     "[skill_authorization] subagent.approval_scope_mismatch "
                     "session=%s expected_scope=%s got_scope=%s kind=%s",
