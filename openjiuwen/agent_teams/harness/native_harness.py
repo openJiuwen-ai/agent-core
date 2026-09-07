@@ -1158,13 +1158,16 @@ class NativeHarness(DeepAgent):
             return
 
         # Decision priority (matches _run_task_loop, updated):
-        #   follow-up (external immediate=False sends, incl. approvals parked
-        #   while RUNNING) > interrupt stop > remaining task-plan task.
-        # An interrupt-ended round reaches the same drain as a normal
-        # completion: inputs queued while it ran (the 2nd..Nth approvals,
-        # texts) start the next round here instead of stranding behind the
-        # interrupt stop.
-        if await self._start_pending_follow_up_round(active, session):
+        #   eligible follow-up > interrupt stop > remaining task-plan task.
+        # An interrupt-ended round may start a queued InteractiveInput that can
+        # resolve it (the 2nd..Nth approvals); plain text remains buffered until
+        # the interrupt chain clears. Normal completion still drains the whole
+        # follow-up batch under the existing rules.
+        if await self._start_pending_follow_up_round(
+            active,
+            session,
+            resume_only=result_type == "interrupt",
+        ):
             return
 
         # A resume round has single-round semantics: it must not continue the
@@ -1192,8 +1195,10 @@ class NativeHarness(DeepAgent):
         self,
         active: ActiveRound,
         session: Session,
+        *,
+        resume_only: bool = False,
     ) -> bool:
-        """Start queued follow-ups using the existing normal-settle rules."""
+        """Start queued follow-ups allowed by the current settle state."""
         follow_ups = self._drain_pending_follow_ups(session)
         tagged_follow_ups: list[tuple[Any, InterruptResumeKind]] | None = None
         if follow_ups is not None:
@@ -1234,6 +1239,15 @@ class NativeHarness(DeepAgent):
                     continue
                 kept.append((f, kind))
             tagged_follow_ups = kept or None
+        if resume_only and tagged_follow_ups is not None and not any(
+            isinstance(f, InteractiveInput) for f, _ in tagged_follow_ups
+        ):
+            # Plain text cannot resolve an outstanding interrupt. Keep it in
+            # the persisted buffer until a structured resume clears the chain.
+            state = self.load_state(session)
+            state.pending_follow_ups.extend(f for f, _ in tagged_follow_ups)
+            self.save_state(session, state)
+            return False
         # InteractiveInput must go through _start_round directly (structured
         # resume); the batch text pipeline (from_user_input(list)) would
         # str() it into a text frame, breaking the resume.

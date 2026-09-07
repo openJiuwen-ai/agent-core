@@ -744,14 +744,8 @@ async def test_interrupt_settle_drains_queued_approval_follow_up() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_interrupt_settle_drains_text_follow_ups_as_batch_round() -> None:
-    """An interrupt-ended round must also drain queued TEXT follow-ups.
-
-    Not just approvals: any input parked while the interrupted round ran
-    (user text, rail follow-ups, async-tool completions) rides the same
-    settle-time drain and starts the batch text round. Without the fix the
-    interrupt stop strands those too.
-    """
+async def test_interrupt_settle_defers_text_follow_up_until_resume() -> None:
+    """An interrupt-ended round must not use plain text as its resume input."""
     await Runner.start()
     try:
         harness = NativeHarness(make_spec())
@@ -765,33 +759,48 @@ async def test_interrupt_settle_drains_text_follow_ups_as_batch_round() -> None:
         await harness.subscribe(on_state=record_state)
 
         observed_phases: list = []
-        script_first_round_interrupt(fake, harness, observed_phases)
+        base_invoke = fake.invoke
+        first_round_started = asyncio.Event()
+        text_parked = asyncio.Event()
+
+        async def invoke(inputs: Any, session: Any, **kwargs: Any) -> dict:
+            first_round_started.set()
+            await asyncio.wait_for(text_parked.wait(), timeout=3.0)
+            result = await base_invoke(inputs, session, **kwargs)
+            observed_phases.append(harness.state)
+            if len(fake.invocations) == 1:
+                return {"output": "", "result_type": "interrupt"}
+            return result
+
+        fake.invoke = invoke
 
         collected: list = []
         consumer = asyncio.create_task(drain_outputs(harness, collected))
         try:
-            harness.loop_controller.enqueue_follow_up("a text follow-up during interrupt")
             await harness.send("start work")
-            deadline = asyncio.get_running_loop().time() + 3.0
-            while (
-                asyncio.get_running_loop().time() < deadline
-                and len(fake.invocations) < 2
-            ):
-                await asyncio.sleep(0.01)
-            assert len(fake.invocations) == 2  # the queued text ran, not stranded
+            await asyncio.wait_for(first_round_started.wait(), timeout=3.0)
+            await harness.send("a text follow-up during interrupt")
+            text_parked.set()
             assert await wait_for_state(harness, HarnessState.IDLE)
+            await asyncio.sleep(0.1)
+
+            assert len(fake.invocations) == 1
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(harness._session).pending_follow_ups == [
+                "a text follow-up during interrupt"
+            ]
         finally:
+            text_parked.set()
             await harness.stop()
             await consumer
 
         queries = [inv.get("query") for inv in fake.invocations]
-        assert queries == ["start work", "a text follow-up during interrupt"]
-        # Phase contract: no IDLE bounce inside the chain; IDLE exactly once.
+        assert queries == ["start work"]
         assert [s for s in states if s is not HarnessState.TERMINATED] == [
             HarnessState.RUNNING,
             HarnessState.IDLE,
         ]
-        assert observed_phases == [HarnessState.RUNNING, HarnessState.RUNNING]
+        assert observed_phases == [HarnessState.RUNNING]
     finally:
         await Runner.stop()
 
@@ -860,7 +869,13 @@ async def test_interrupt_settle_without_follow_ups_still_settles_idle() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_second_approval_sent_while_running_resumes_after_reinterrupt() -> None:
+@pytest.mark.parametrize(
+    "follow_up_order",
+    [("text", "approval"), ("approval", "text")],
+)
+async def test_second_approval_bypasses_text_across_reinterrupt(
+    follow_up_order: tuple[str, str],
+) -> None:
     """Exercise the complete two-approval / two-interrupt supervisor sequence.
 
     Both slots are pending when approval 1 starts its resume round. Approval 2
@@ -933,11 +948,14 @@ async def test_second_approval_sent_while_running_resumes_after_reinterrupt() ->
                 await base_invoke(inputs, invoke_session, **kwargs)
                 return {"output": "", "result_type": "interrupt"}
 
-            assert invocation_index == 1
-            assert isinstance(query, InteractiveInput)
-            assert set(query.user_inputs) == {"call-2"}
-            assert invoke_session.get_state(INTERRUPTION_KEY) is not None
-            invoke_session.update_state({INTERRUPTION_KEY: None})
+            if invocation_index == 1:
+                assert isinstance(query, InteractiveInput)
+                assert set(query.user_inputs) == {"call-2"}
+                assert invoke_session.get_state(INTERRUPTION_KEY) is not None
+                invoke_session.update_state({INTERRUPTION_KEY: None})
+            else:
+                assert invocation_index == 2
+                assert query == "ordinary text waits for approvals"
             return await base_invoke(inputs, invoke_session, **kwargs)
 
         fake.invoke = invoke
@@ -954,25 +972,30 @@ async def test_second_approval_sent_while_running_resumes_after_reinterrupt() ->
             await harness.send(approval("call-1"))
             await asyncio.wait_for(first_resume_entered.wait(), timeout=3.0)
 
-            # Public send, not a direct queue seed: _on_send(RUNNING) performs
-            # the production enqueue exercised by the reported failure.
-            await harness.send(approval("call-2"))
+            # Public sends, not direct queue seeds: both orderings must select
+            # the structured resume while the interrupt chain remains open.
+            for item in follow_up_order:
+                if item == "approval":
+                    await harness.send(approval("call-2"))
+                else:
+                    await harness.send("ordinary text waits for approvals")
             second_approval_parked.set()
 
             deadline = asyncio.get_running_loop().time() + 3.0
             while (
                 asyncio.get_running_loop().time() < deadline
-                and len(fake.invocations) < 2
+                and len(fake.invocations) < 3
             ):
                 await asyncio.sleep(0.01)
-            assert len(fake.invocations) == 2
+            assert len(fake.invocations) == 3
             assert await wait_for_state(harness, HarnessState.IDLE)
 
             queries = [inv.get("query") for inv in fake.invocations]
-            assert [set(query.user_inputs) for query in queries] == [
-                {"call-1"},
-                {"call-2"},
-            ]
+            assert isinstance(queries[0], InteractiveInput)
+            assert set(queries[0].user_inputs) == {"call-1"}
+            assert isinstance(queries[1], InteractiveInput)
+            assert set(queries[1].user_inputs) == {"call-2"}
+            assert queries[2] == "ordinary text waits for approvals"
             assert session.get_state(INTERRUPTION_KEY) is None
             assert harness.loop_controller.drain_follow_up() == []
             assert harness.load_state(session).pending_follow_ups == []

@@ -1,6 +1,6 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-07-31
+最近一次修订日期：2026-09-07
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -168,6 +168,8 @@ PAUSED 收到 `send` 等价于「resume + 把新内容 steer 进去」——**�
 
 **2. interrupt resume（`send(InteractiveInput)`，HITL 中断恢复）**：经 `submit_round` 透传
 （executor `_extract_interactive_input` 原生 resume）；resume round 单轮语义，完成后 settle 到
-IDLE 不续 task_plan。StreamController 仅校验 `is_pending_interrupt_resume_valid` 后转发，不再
-client 侧排队。此路径与 warm resume 正交：一个 InteractiveInput round 被 pause 时不缓存其 query
+IDLE 不续 task_plan。interrupt settle 只允许排队的 InteractiveInput 启动下一 resume round；普通文本
+保留到 interrupt 链解除后的正常 settle，不会被当作 resume 输入。StreamController 校验
+`is_pending_interrupt_resume_valid` 后转发或暂存尚未重新 commit 的后续 approval，不把普通消息混入该队列。
+此路径与 warm resume 正交：一个 InteractiveInput round 被 pause 时不缓存其 query
 （不可 replay），PAUSED 收到 InteractiveInput 则直接起它自己的单轮 round。
