@@ -8,7 +8,7 @@ import re
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -46,6 +46,11 @@ class SkillIndexSnapshot:
     nodes: tuple[dict[str, Any], ...]
     record_hashes: tuple[tuple[str, str], ...]
     fingerprint: str
+    taxonomy_fingerprint: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        payload = json.dumps(self.nodes, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        object.__setattr__(self, "taxonomy_fingerprint", hashlib.sha256(payload.encode("utf-8")).hexdigest())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -228,6 +233,18 @@ class SkillDirectoryView:
         if worker_id is None:
             raise ValueError(f"No such Skill metadata path: {normalized}")
         return self.record_by_id[worker_id]
+
+    def category_text(self, worker_id: str) -> str:
+        """Return ordered category names and descriptions for one Skill."""
+
+        path = str(PurePosixPath(self.record_path_by_id[worker_id]).parent)
+        levels: list[tuple[str, str]] = []
+        while path not in {"", ".", "/"}:
+            node = self.node_by_path.get(path)
+            if node is not None:
+                levels.append((node.label, _searchable_category_description(node.description)))
+            path = str(PurePosixPath(path).parent)
+        return "\n".join(part for level in reversed(levels) for part in level if part)
 
     def _scoped_entries(
         self,
@@ -506,9 +523,7 @@ class SkillFS:
     ) -> tuple[str, ...]:
         """Search one live scope using corpus statistics cached by inventory hash."""
 
-        cache_key = (
-            self._artifact.inventory.fingerprint + "\0" + "\0".join(item.worker_id for item in self._artifact.items)
-        )
+        cache_key = self._artifact.fingerprint
         if self._lexical_index is None or cache_key != self._lexical_cache_key:
             with _LEXICAL_CACHE_LOCK:
                 self._lexical_index = _LEXICAL_CACHE.get(cache_key)
@@ -519,6 +534,9 @@ class SkillFS:
                                 item.worker_id,
                                 item.name,
                                 item.description,
+                                self.read_body(item),
+                                item.aliases,
+                                self._view.category_text(item.worker_id),
                             )
                             for item in self._artifact.items
                         )
@@ -542,8 +560,15 @@ class SkillFS:
         )
         return tuple(hit.key for hit in hits)
 
+    def content_match_snippet(self, record: SkillRecord, queries: tuple[str, ...]) -> str:
+        """Return bounded evidence hidden by the compact result row."""
+
+        if self._lexical_index is None:
+            return ""
+        return self._lexical_index.match_snippet(record.worker_id, queries)
+
     def missing_content_terms(self, query: str) -> tuple[str, ...]:
-        """Return natural query terms absent from the current metadata index."""
+        """Return natural query terms absent from the current content index."""
 
         if self._lexical_index is None:
             return ()
@@ -567,6 +592,7 @@ class SkillFS:
             "inventory": inventory.fingerprint,
             "visible": [item.worker_id for item in items],
             "index": snapshot.fingerprint if snapshot is not None else "",
+            "taxonomy": snapshot.taxonomy_fingerprint if snapshot is not None else "",
             "state": index_state,
         }
         fingerprint = hashlib.sha256(
@@ -765,6 +791,16 @@ def _build_live_tree(
             items=root.items,
         )
     return root, catalog
+
+
+def _searchable_category_description(value: str) -> str:
+    lines = []
+    for raw_line in str(value or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.casefold().startswith(("covers ", "representative ", "don't select when:")):
+            continue
+        lines.append(line)
+    return " ".join(lines)
 
 
 def _validate_taxonomy_nodes(nodes: tuple[dict[str, Any], ...], *, expected_worker_ids: set[str]) -> None:
