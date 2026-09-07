@@ -537,7 +537,7 @@ class InstalledSkillsDirectoryToolkit:
                 category_text=view.category_text(item.worker_id),
             )
             for snippet in snippets:
-                rows.append(_search_match_row(item, view, indexes, snippet))
+                rows.append(_search_row(item, view, indexes, snippet))
         complete = limit is None or all(count < limit for count in query_counts)
         total_count = len(rows) if result == "matches" else len(all_matches)
         return _Execution(tuple(rows), total_count, complete)
@@ -736,31 +736,6 @@ def _search_row(
     if snippet:
         fields.append(f"match: {snippet}")
     fields.extend((f"desc: {description}", f"path: {_skill_path(record)}"))
-    return _Row(
-        "  ".join(fields),
-        record.worker_id,
-    )
-
-
-def _search_match_row(
-    record: SkillRecord,
-    directory: SkillDirectoryView,
-    indexes: tuple[int, ...],
-    snippet: str,
-) -> _Row:
-    fields = [
-        f"- [skill] {record.worker_id}",
-        f"category: {_skill_category(directory, record.worker_id)}",
-    ]
-    if indexes:
-        fields.append(f"matches: {', '.join(map(str, indexes))}")
-    fields.extend(
-        (
-            f"match: {snippet}",
-            f"desc: {_compact(record.description or record.name, _SKILL_DESCRIPTION_CHARS)}",
-            f"path: {_skill_path(record)}",
-        )
-    )
     return _Row(
         "  ".join(fields),
         record.worker_id,

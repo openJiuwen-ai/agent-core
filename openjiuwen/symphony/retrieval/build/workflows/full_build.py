@@ -10,11 +10,6 @@ from typing import Dict, Sequence
 from openjiuwen.symphony.retrieval.build.models import TREE_INDEX_FILENAME
 from openjiuwen.symphony.retrieval.build.scanners import create_scanner, normalize_item_type
 from openjiuwen.symphony.retrieval.build.tree import DynamicTreeConfig, TreeBuildConfig, TreeManagerConfig
-from openjiuwen.symphony.retrieval.build.tree.one_shot import (
-    OneShotSkill,
-    OneShotSkillTreeBuilder,
-    OneShotTreeBuildConfig,
-)
 from openjiuwen.symphony.retrieval.build.tree.schema import normalize_root_categories
 from openjiuwen.symphony.retrieval.build.workflows.item_sources import ResolvedItemPath, resolve_materialized_item_paths
 from openjiuwen.symphony.retrieval.build.workflows.output_writer import unlink_if_exists, write_index_outputs
@@ -170,6 +165,12 @@ class _IndexBuildWorkflow:
             return {"nodes": self._fallback_tree_nodes_from_scanned(pre_scanned_skills)}
 
     def _build_one_shot_tree(self, aggregate_dir: Path, pre_scanned_skills: Dict[str, dict] | None) -> dict:
+        from openjiuwen.symphony.retrieval.build.tree.one_shot import (
+            OneShotSkill,
+            OneShotSkillTreeBuilder,
+            OneShotTreeBuildConfig,
+        )
+
         entries = (
             list(pre_scanned_skills.values())
             if pre_scanned_skills is not None
@@ -177,10 +178,10 @@ class _IndexBuildWorkflow:
         )
         skills = [
             OneShotSkill(
-                name=str(item.get("name") or item["id"]),
-                description=str(item.get("description") or ""),
-                worker_id=str(item["id"]),
-                skill_path=str(item.get("path") or ""),
+                name=item.get("name") or item["id"],
+                description=item.get("description") or "",
+                worker_id=item["id"],
+                skill_path=item.get("path") or "",
             )
             for item in entries
         ]

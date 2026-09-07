@@ -3,12 +3,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any, Mapping, Sequence
+from typing import Any, Sequence
 
 from openjiuwen.symphony.retrieval.build.workflows.tree_text import slug_term, text_tokens, unique_child_cid
 
 from .json_parser import parse_json_from_response
-
 
 _FORBIDDEN_CATEGORY_TERMS = frozenset({"composio", "mcp", "rube"})
 _KEBAB_CASE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -69,6 +68,16 @@ class OneShotSkill:
     description: str = ""
     worker_id: str = ""
     skill_path: str = ""
+
+    def __post_init__(self) -> None:
+        name = str(self.name or "").strip()
+        for key, value in (
+            ("name", name),
+            ("description", " ".join(str(self.description or "").split())),
+            ("worker_id", str(self.worker_id or name).strip()),
+            ("skill_path", str(self.skill_path or "").strip()),
+        ):
+            object.__setattr__(self, key, value)
 
 
 @dataclass(frozen=True)
@@ -149,7 +158,7 @@ class OneShotSkillTreeBuilder:
         self.model = str(model).strip()
         self.config = config or OneShotTreeBuildConfig()
 
-    def build(self, skills: Sequence[OneShotSkill | Mapping[str, Any]]) -> OneShotTreeBuildResult:
+    def build(self, skills: Sequence[OneShotSkill]) -> OneShotTreeBuildResult:
         started = perf_counter()
         normalized = self._normalize_skills(skills)
         if not normalized:
@@ -217,40 +226,19 @@ class OneShotSkillTreeBuilder:
         return content, (prompt_tokens, completion_tokens, total_tokens)
 
     @staticmethod
-    def _normalize_skills(skills: Sequence[OneShotSkill | Mapping[str, Any]]) -> tuple[OneShotSkill, ...]:
-        normalized: list[OneShotSkill] = []
+    def _normalize_skills(skills: Sequence[OneShotSkill]) -> tuple[OneShotSkill, ...]:
         seen: dict[str, str] = {}
-        for raw_skill in skills:
-            if isinstance(raw_skill, OneShotSkill):
-                skill = raw_skill
-            elif isinstance(raw_skill, Mapping):
-                name = str(raw_skill.get("name") or "").strip()
-                skill = OneShotSkill(
-                    name=name,
-                    description=str(raw_skill.get("description") or ""),
-                    worker_id=str(raw_skill.get("worker_id") or name),
-                    skill_path=str(raw_skill.get("skill_path") or ""),
-                )
-            else:
-                raise TypeError("skills must contain OneShotSkill or mapping values")
-
-            name = str(skill.name or "").strip()
+        for skill in skills:
+            if not isinstance(skill, OneShotSkill):
+                raise TypeError("skills must contain OneShotSkill values")
+            name = skill.name
             if not name:
                 raise ValueError("Skill name cannot be empty")
             folded = name.casefold()
             if folded in seen:
                 raise ValueError(f"duplicate Skill name: {name!r} conflicts with {seen[folded]!r}")
             seen[folded] = name
-            description = " ".join(str(skill.description or "").split())
-            normalized.append(
-                OneShotSkill(
-                    name=name,
-                    description=description,
-                    worker_id=str(skill.worker_id or name).strip(),
-                    skill_path=str(skill.skill_path or "").strip(),
-                )
-            )
-        return tuple(sorted(normalized, key=lambda item: (item.name.casefold(), item.name)))
+        return tuple(sorted(skills, key=lambda item: (item.name.casefold(), item.name)))
 
     def _validate_response(
         self,
@@ -337,9 +325,7 @@ class OneShotSkillTreeBuilder:
             issues = []
             if unknown:
                 issues.append(f"unknown Skill names: {', '.join(sorted(set(unknown))[:12])}")
-            issues.append(
-                f"model omitted {len(missing)} of {len(skills)} Skill names: {', '.join(missing[:12])}"
-            )
+            issues.append(f"model omitted {len(missing)} of {len(skills)} Skill names: {', '.join(missing[:12])}")
             raise _ResponseValidationError(issues)
 
         leaves: list[OneShotLeaf] = []

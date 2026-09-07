@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import math
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from typing import Iterable, Pattern, Sequence
-
 
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+.#/-]*|[\u3400-\u9fff]+")
 
@@ -44,25 +43,23 @@ class LexicalIndex:
 
     def __init__(self, documents: Sequence[LexicalDocument]) -> None:
         self._documents = {document.key: document for document in documents}
-        self._search_text = {document.key: _search_text(document) for document in documents}
-        tokens_by_key = {document.key: _tokens(_weighted_text(document)) for document in documents}
-        self._field_tokens = {
-            document.key: (
-                set(_tokens(document.key)),
-                set(_tokens(document.name)),
-                set(_tokens("\n".join(document.aliases))),
-                set(_tokens(document.description)),
-                set(_tokens(_without_front_matter(document.body))),
-                set(_tokens(document.category)),
+        self._search_text: dict[str, str] = {}
+        self._field_tokens: dict[str, tuple[set[str], ...]] = {}
+        self._frequencies: dict[str, Counter[str]] = {}
+        self._lengths: dict[str, int] = {}
+        postings: Counter[str] = Counter()
+        for key, document in self._documents.items():
+            fields = _document_fields(document)
+            tokens = tuple(_tokens(value) for value in fields)
+            self._search_text[key] = "\n".join((*fields[:2], *document.aliases, *fields[3:]))
+            self._field_tokens[key] = tuple(set(values) for values in tokens)
+            # Reuse field tokens with the existing weights; category is scored separately.
+            frequencies = Counter(
+                token for values, weight in zip(tokens, (5, 5, 5, 4, 1)) for _ in range(weight) for token in values
             )
-            for document in documents
-        }
-        self._frequencies = {key: Counter(tokens) for key, tokens in tokens_by_key.items()}
-        self._lengths = {key: len(tokens) for key, tokens in tokens_by_key.items()}
-        postings: dict[str, int] = defaultdict(int)
-        for tokens in tokens_by_key.values():
-            for token in set(tokens):
-                postings[token] += 1
+            self._frequencies[key] = frequencies
+            self._lengths[key] = sum(frequencies.values())
+            postings.update(frequencies.keys())
         self._bm25 = _BM25Stats(
             average_length=sum(self._lengths.values()) / max(1, len(self._lengths)),
             postings=dict(postings),
@@ -464,28 +461,14 @@ def _matched_excerpt(value: str, terms: set[str], max_chars: int) -> str:
     return _excerpt(value, 0, min(len(value), max_chars), max_chars)
 
 
-def _search_text(document: LexicalDocument) -> str:
-    return "\n".join(
-        (
-            document.key,
-            document.name,
-            *document.aliases,
-            document.description,
-            _without_front_matter(document.body),
-            document.category,
-        )
-    )
-
-
-def _weighted_text(document: LexicalDocument) -> str:
-    return "\n".join(
-        (
-            *([document.key] * 5),
-            *([document.name] * 5),
-            *(document.aliases * 5),
-            *([document.description] * 4),
-            _without_front_matter(document.body),
-        )
+def _document_fields(document: LexicalDocument) -> tuple[str, ...]:
+    return (
+        document.key,
+        document.name,
+        "\n".join(document.aliases),
+        document.description,
+        _without_front_matter(document.body),
+        document.category,
     )
 
 
@@ -495,29 +478,24 @@ def _ranking_query(query: str) -> str:
 
 def _tokens(value: str) -> list[str]:
     tokens: list[str] = []
-    for raw in _WORD_RE.findall(str(value or "")):
-        folded = raw.casefold().strip("._-/")
-        if not folded:
+    for part in _surface_tokens(value):
+        tokens.append(part)
+        if not part.isascii():
             continue
-        if re.fullmatch(r"[\u3400-\u9fff]+", folded):
-            tokens.append(folded)
-            tokens.extend(folded[slice(index, index + 2)] for index in range(max(0, len(folded) - 1)))
-            continue
-        if re.fullmatch(r"[a-z0-9]+(?:\+\+|#)", folded):
-            tokens.append(folded)
-            continue
-        for part in re.split(r"[_+.#/-]+", folded):
-            if len(part) <= 1 and not part.isdigit():
-                continue
-            tokens.append(part)
-            singular = _singular(part)
-            if singular != part:
-                tokens.append(singular)
-            tokens.extend(form for form in _verb_forms(part) if form != part and form != singular)
+        singular = _singular(part)
+        if singular != part:
+            tokens.append(singular)
+        tokens.extend(form for form in _verb_forms(part) if form != part and form != singular)
     return tokens
 
 
 def _surface_terms(value: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(_surface_tokens(value)))
+
+
+def _surface_tokens(value: str) -> list[str]:
+    """Split text once without dropping repetitions needed by BM25."""
+
     terms: list[str] = []
     for raw in _WORD_RE.findall(str(value or "")):
         folded = raw.casefold().strip("._-/")
@@ -531,7 +509,7 @@ def _surface_terms(value: str) -> tuple[str, ...]:
             terms.append(folded)
             continue
         terms.extend(part for part in re.split(r"[_+.#/-]+", folded) if len(part) > 1 or part.isdigit())
-    return tuple(dict.fromkeys(terms))
+    return terms
 
 
 def _query_term_families(value: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -667,14 +645,7 @@ def _phrase_score(document: LexicalDocument, query: str, *, case_insensitive: bo
     alternatives = [part.strip() for part in query.split("|") if part.strip()]
     if not alternatives:
         return 0.0
-    fields = (
-        document.key,
-        document.name,
-        "\n".join(document.aliases),
-        document.description,
-        _without_front_matter(document.body),
-        document.category,
-    )
+    fields = _document_fields(document)
     if case_insensitive:
         alternatives = [part.casefold() for part in alternatives]
         fields = tuple(field.casefold() for field in fields)
