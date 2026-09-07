@@ -273,6 +273,48 @@ async def test_codex_retry_exhaustion_reports_unknown_upstream_cause():
 
 
 @pytest.mark.asyncio
+async def test_codex_terminal_failure_keeps_pending_for_later_round() -> None:
+    from openai_codex.generated.v2_all import (
+        ResponseTooManyFailedAttempts,
+        ResponseTooManyFailedAttemptsCodexErrorInfo,
+    )
+
+    terminal_info = ResponseTooManyFailedAttemptsCodexErrorInfo(
+        response_too_many_failed_attempts=ResponseTooManyFailedAttempts(http_status_code=429),
+    )
+    failed_turn = [
+        _notification(
+            "turn/completed",
+            turn=SimpleNamespace(
+                status="failed",
+                error=SimpleNamespace(
+                    message="exceeded retry limit, last status: 429 Too Many Requests",
+                    additional_details=None,
+                    codex_error_info=terminal_info,
+                ),
+            ),
+        ),
+    ]
+    pending_turn = [_notification("turn/completed", turn=SimpleNamespace(status="completed"))]
+    runtime, mm, _messager, _sink = _build_runtime(failed_turn)
+    await _start(runtime)
+    thread = runtime._thread
+    assert isinstance(thread, _FakeThread)
+    thread._turns.append(pending_turn)
+    runtime._current_round_id = 1
+    await runtime.follow_up("task-board")
+
+    async for _chunk in runtime._drive({"query": "member-start"}):
+        pass
+
+    assert len(mm.sent) == 1
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.round_id == 1
+    assert runtime._pending == ["task-board"]
+    assert thread._turns == [pending_turn]
+
+
+@pytest.mark.asyncio
 async def test_codex_turn_final_401_finalizes_auth_required():
     notifications = [
         _notification(

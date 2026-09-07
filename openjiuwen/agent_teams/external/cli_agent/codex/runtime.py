@@ -603,6 +603,12 @@ class CodexSdkRuntime(CliRuntimeBase):
                     thread = self._thread
                     continue
                 break
+            if self._reliability_ctx is not None and self._reliability_ctx.has_finalized:
+                # A terminal SDK failure ends the member round. Keep messages
+                # queued during the failed turn for an explicit later retry
+                # instead of issuing another model request under the same
+                # outer round id and reporting a second final failure.
+                return
             prompt = None if self._aborted else self._drain_pending()
 
     async def _run_turn(
