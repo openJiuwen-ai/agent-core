@@ -471,3 +471,80 @@ async def test_after_task_iteration_schedules_dream(tmp_path):
     # scheduled as create_task — yield to loop
     await asyncio.sleep(0)
     assert called["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_dream_projects_catalog_after_prune(tmp_path):
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        inject_mode="disk_catalog",
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=100,
+        dream_ttl_days=90,
+        dream_prune_mode="retire",
+        dream_purge_tips_enabled=False,
+    )
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
+    now = time.time()
+    stale = _new_record("stale slides fact", now=now - 91 * 86400)
+    stale["last_injected_at"] = now - 91 * 86400
+    stale["category"] = "documents-office-and-records"
+    keep = _new_record("keep devops fact", now=now - 10 * 86400)
+    keep["last_injected_at"] = now - 10 * 86400
+    keep["category"] = "software-engineering-devops"
+    rail._ttse_store.facts = [stale, keep]
+    await rail._ttse_store.save()
+
+    await rail.run_dream(capabilities="")
+
+    catalog = tmp_path / "CATALOG.md"
+    assert catalog.is_file()
+    text = catalog.read_text(encoding="utf-8")
+    assert "software-engineering-devops" in text
+    assert "documents-office-and-records" not in text
+    assert (tmp_path / "by_cat" / "software-engineering-devops" / "SUMMARY.md").is_file()
+    assert not (tmp_path / "by_cat" / "documents-office-and-records").exists()
+
+
+@pytest.mark.asyncio
+async def test_run_dream_classifies_merged_canonical(tmp_path):
+    emb = FakeEmbedding(
+        {
+            "grader checks case": [1.0, 0.0],
+            "grader is case sensitive": [0.99, 0.01],
+        }
+    )
+
+    def handler(prompt: str):
+        if "TTSE category assignment pass" in prompt:
+            return '{"assignments": {"1": "software-engineering-devops"}}'
+        return (
+            "VERDICT: MERGE\n"
+            "CANONICAL: the grader checks names case-sensitively\n"
+            "KEEP_INDICES:\n"
+            "REASON: near duplicates\n"
+        )
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        inject_mode="disk_catalog",
+        embedding=emb,
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_prune_enabled=False,
+        dream_purge_tips_enabled=False,
+        dream_soft_lo=0.72,
+    )
+    rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
+    for text in ("grader checks case", "grader is case sensitive"):
+        await rail._ttse_store.add_record_direct("fact", text, count=2, save=False)
+    await rail._ttse_store.save()
+
+    await rail.run_dream(capabilities="")
+
+    assert len(rail._ttse_store.facts) == 1
+    assert rail._ttse_store.facts[0]["category"] == "software-engineering-devops"
+    catalog = (tmp_path / "CATALOG.md").read_text(encoding="utf-8")
+    assert "software-engineering-devops" in catalog

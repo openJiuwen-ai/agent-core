@@ -70,6 +70,7 @@ class DreamResult:
     kept_clusters: int = 0
     purged_tips: int = 0
     elapsed_secs: float = 0.0
+    added_items: List[Tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -250,10 +251,10 @@ async def _apply_merge_verdict(
     verdict: MergeVerdict,
     *,
     capability_names: Optional[Set[str]] = None,
-) -> str:
-    """Apply MERGE/REWRITE/KEEP. Returns action label used for logging."""
+) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """Apply MERGE/REWRITE/KEEP. Returns (action, new rule or None)."""
     if verdict.verdict == "KEEP_DISTINCT":
-        return "keep"
+        return "keep", None
 
     canonical = (verdict.canonical or "").strip()
     if not canonical:
@@ -265,14 +266,14 @@ async def _apply_merge_verdict(
                 "[TTSERail] dream merge TIP canonical invalid (%s); keeping distinct",
                 verdict.verdict,
             )
-            return "keep_invalid_tip"
+            return "keep_invalid_tip", None
 
     total_count = sum(int(r.get("count", 0)) for r in cluster)
     reason = "dream_merge" if verdict.verdict == "MERGE" else "dream_rewrite"
     for record in cluster:
         await store.retire(record["text"], track, reason, save=False)
     await store.add_record_direct(track, canonical, count=max(total_count, 1), save=False)
-    return verdict.verdict.lower()
+    return verdict.verdict.lower(), (canonical, track)
 
 
 async def dream_merge(
@@ -285,14 +286,14 @@ async def dream_merge(
     config: TTSEConfig,
     capabilities: str = "",
     capability_names: Optional[Set[str]] = None,
-) -> Tuple[int, int]:
-    """Soft-cluster + LLM merge one track. Returns (merged_or_rewritten, kept)."""
+) -> Tuple[int, int, List[Tuple[str, str]]]:
+    """Soft-cluster + LLM merge one track. Returns (merged, kept, new rules)."""
     records = store.facts if track == "fact" else store.tips
     if len(records) < config.dream_cluster_min_size:
-        return 0, 0
+        return 0, 0, []
     if not store.has_embedding_provider():
         logger.info("[TTSERail] dream merge skipped for %s: no embedding provider", track)
-        return 0, 0
+        return 0, 0, []
 
     clusters = await store.soft_cluster(
         list(records),
@@ -306,10 +307,11 @@ async def dream_merge(
             len(records),
             config.dream_soft_lo,
         )
-        return 0, 0
+        return 0, 0, []
 
     merged = 0
     kept = 0
+    added_items: List[Tuple[str, str]] = []
     budget = max(0, int(config.dream_max_llm_merges))
     logger.info(
         "[TTSERail] dream merge start track=%s rules=%s clusters=%s llm_budget=%s",
@@ -337,7 +339,7 @@ async def dream_merge(
             continue
 
         # TIP: one rewrite retry when MERGE/REWRITE yields invalid shape.
-        action = await _apply_merge_verdict(
+        action, added = await _apply_merge_verdict(
             store, track, cluster, verdict, capability_names=capability_names
         )
         if action == "keep_invalid_tip" and verdict.verdict in ("MERGE", "REWRITE"):
@@ -351,10 +353,12 @@ async def dream_merge(
                 capabilities=capabilities + "\n\nPrevious CANONICAL was invalid; rewrite as a valid TIP or KEEP_DISTINCT.",
             )
             if retry is not None:
-                action = await _apply_merge_verdict(
+                action, added = await _apply_merge_verdict(
                     store, track, cluster, retry, capability_names=capability_names
                 )
 
+        if added is not None:
+            added_items.append(added)
         if action in ("merge", "rewrite"):
             merged += 1
             logger.info(
@@ -372,7 +376,7 @@ async def dream_merge(
                 len(cluster),
                 (verdict.reason or "")[:80],
             )
-    return merged, kept
+    return merged, kept, added_items
 
 
 async def dream_purge_tips(
@@ -431,7 +435,7 @@ async def run_dream_pass(
 
     n_rules = len(store.facts) + len(store.tips)
     if n_rules >= config.dream_min_rules:
-        mf, kf = await dream_merge(
+        mf, kf, items_f = await dream_merge(
             store,
             "fact",
             llm=llm,
@@ -441,7 +445,7 @@ async def run_dream_pass(
             capabilities=capabilities,
             capability_names=names,
         )
-        mt, kt = await dream_merge(
+        mt, kt, items_t = await dream_merge(
             store,
             "tip",
             llm=llm,
@@ -453,6 +457,7 @@ async def run_dream_pass(
         )
         result.merged_clusters = mf + mt
         result.kept_clusters = kf + kt
+        result.added_items = items_f + items_t
     else:
         logger.info(
             "[TTSERail] dream merge skipped: rules=%s < min_rules=%s",

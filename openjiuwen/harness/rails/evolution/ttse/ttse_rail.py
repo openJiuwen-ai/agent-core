@@ -536,7 +536,7 @@ class TTSERail(EvolutionRail):
         state = load_dream_state(self._ttse_config.resolved_dream_state_path())
         async with self._evolution_lock:
             try:
-                await run_dream_pass(
+                result, _ = await run_dream_pass(
                     self._ttse_store,
                     self._ttse_config,
                     llm=self._ttse_llm,
@@ -545,6 +545,10 @@ class TTSERail(EvolutionRail):
                     capability_names=names,
                     state=state,
                 )
+                if not result.skipped:
+                    if result.added_items and self._is_disk_catalog():
+                        await self._classify_added_rules(result.added_items)
+                    await self._maybe_project_catalog()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[TTSERail] dream failed: %s", exc)
 
