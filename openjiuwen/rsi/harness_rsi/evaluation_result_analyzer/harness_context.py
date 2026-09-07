@@ -162,14 +162,8 @@ def prepare_harness_context(
             if isinstance(section, dict) and section.get("file") is not None:
                 _local_path(root, _resolve_section_file(root, str(section["file"])))
         if (root / "manifest.json").is_file():
-            normalized = [
-                spec.model_dump()
-                for spec in _build_prompt_section_specs(
-                    sections,
-                    base_dir=root,
-                    package_root=root,
-                )
-            ]
+            prompt_specs = _build_prompt_section_specs(sections, base_dir=root, package_root=root)
+            normalized = [spec.model_dump() for spec in prompt_specs]
         else:
             normalized = [_normalize_prompt_section(section, root) for section in _as_list(sections)]
         for name in ("identity", "soul"):

@@ -246,16 +246,8 @@ def _validate_action_issue_text_scope(
     action_issue_ids: set[str],
 ) -> list[str]:
     """Reject prose that silently merges diagnoses outside the declared issue."""
-    scoped_fields = {
-        key: action.get(key)
-        for key in (
-            "description",
-            "rationale",
-            "expected_effect",
-            "risk_notes",
-            "constraints",
-        )
-    }
+    scope_fields = ("description", "rationale", "expected_effect", "risk_notes", "constraints")
+    scoped_fields = {key: action.get(key) for key in scope_fields}
     text = yaml.safe_dump(scoped_fields, allow_unicode=True).lower()
     merged_claims = (
         "both attributed issues",
@@ -633,7 +625,7 @@ class MemberActionPlannerAgent:
         self._agent_skills_dirs = list(agent_skills_dirs or [])
         self._harness_structure_rail = HarnessStructureRail()
 
-    async def create_plan(
+    async def create_plan(  # pylint: disable=huawei-too-many-arguments
         self,
         targets: list[MemberOptimizationTarget],
         role_attribution_report: RoleAttributionReport,
@@ -681,7 +673,8 @@ class MemberActionPlannerAgent:
             build_retry_message=self._build_retry_message,
         )
 
-    def _build_retry_message(self, original: Any, error: Any) -> str:
+    @staticmethod
+    def _build_retry_message(original: Any, error: Any) -> str:
         return (
             "Return ONLY one valid JSON or YAML mapping.\n"
             "Do not include reasoning or markdown outside the final object.\n\n"
@@ -696,8 +689,8 @@ class MemberActionPlannerAgent:
             "matching action for that target."
         )
 
+    @staticmethod
     def _build_harness_summaries(
-        self,
         targets: list[MemberOptimizationTarget],
     ) -> dict[str, str]:
         summaries: dict[str, str] = {}
@@ -740,7 +733,7 @@ class MemberActionPlannerAgent:
         return summaries
 
     @staticmethod
-    def _build_user_message(
+    def _build_user_message(  # pylint: disable=huawei-too-many-arguments
         targets: list[MemberOptimizationTarget],
         role_attribution_report: RoleAttributionReport,
         mechanism_attribution_report: MechanismAttributionReport,
@@ -894,9 +887,11 @@ that behavior and narrow the next action to remaining_failed_fail_to_pass.
 Do not describe a binary 0-to-0 case score as "no effect" when the official
 per-test delta records partial contract progress.
 """
-            if not scoreboard and not recent:
+            if "journal" not in optimization_experience and "lever_scoreboard" not in optimization_experience:
                 experience_context = ""
 
+        policy_context = _build_improver_policy_context(optimization_experience)
+        sibling_context = _build_sibling_generation_context(optimization_experience)
         return f"""## Current Action Contract
 
 {action_contract}
@@ -914,9 +909,7 @@ per-test delta records partial contract progress.
 {role_mechanisms_text}
 {hypothesis_contract}
 {experience_context}
-{_build_improver_policy_context(optimization_experience)}
-{_build_sibling_generation_context(optimization_experience)}
-{validation_feedback}
+{policy_context}{sibling_context}{validation_feedback}
 {rejected_feedback}
 
 ## Output
@@ -975,14 +968,6 @@ def _bind_immutable_hypotheses(
                 "public_trigger": item.get("public_trigger", []),
                 "decisive_probe": item.get("decisive_probe", {}),
             }
-            if item.get("supported_causal_hypothesis_ids"):
-                contract["supported_causal_hypothesis_ids"] = item["supported_causal_hypothesis_ids"]
-            if item.get("supported_causal_hypothesis_semantic_ids"):
-                contract["supported_causal_hypothesis_semantic_ids"] = item["supported_causal_hypothesis_semantic_ids"]
-            if item.get("falsified_causal_hypothesis_ids"):
-                contract["falsified_causal_hypothesis_ids"] = item["falsified_causal_hypothesis_ids"]
-            if item.get("falsified_causal_hypothesis_semantic_ids"):
-                contract["falsified_causal_hypothesis_semantic_ids"] = item["falsified_causal_hypothesis_semantic_ids"]
             if isinstance(item.get("decision_contract"), dict) and item.get("decision_contract"):
                 contract["decision_contract"] = item["decision_contract"]
             if isinstance(item.get("lever_policy"), dict) and item.get("lever_policy"):
@@ -996,31 +981,6 @@ def _bind_immutable_hypotheses(
             contracts.append(contract)
         constraints = dict(action.get("constraints") or {})
         constraints["optimization_contracts"] = contracts
-        supported_causal_ids: list[str] = []
-        falsified_causal_ids: set[str] = set()
-        for item in selected:
-            for hypothesis_id in item.get("supported_causal_hypothesis_ids", []):
-                normalized = str(hypothesis_id)
-                if normalized and normalized not in supported_causal_ids:
-                    supported_causal_ids.append(normalized)
-            for hypothesis_id in item.get("falsified_causal_hypothesis_ids", []):
-                normalized = str(hypothesis_id)
-                if normalized:
-                    falsified_causal_ids.add(normalized)
-        if set(supported_causal_ids) & falsified_causal_ids:
-            raise RuntimeError("optimization hypothesis marks one causal hypothesis both supported and falsified")
-        if any(item.get("hypothesis_assessment") for item in selected) and not supported_causal_ids:
-            raise RuntimeError("optimization hypothesis has no supported causal hypothesis")
-        if supported_causal_ids:
-            constraints["source_causal_hypothesis_ids"] = supported_causal_ids
-        supported_causal_semantic_ids: list[str] = []
-        for item in selected:
-            for semantic_id in item.get("supported_causal_hypothesis_semantic_ids", []):
-                normalized = str(semantic_id)
-                if normalized and normalized not in supported_causal_semantic_ids:
-                    supported_causal_semantic_ids.append(normalized)
-        if supported_causal_semantic_ids:
-            constraints["source_causal_hypothesis_semantic_ids"] = supported_causal_semantic_ids
         policies = [
             dict(item.get("lever_policy", {}))
             for item in selected
@@ -1260,23 +1220,20 @@ def _is_inactionable_mechanism(mechanism: RoleMechanismAttribution) -> bool:
 
 def _compact_experiment_for_planner(record: dict[str, Any]) -> dict[str, Any]:
     """Keep causal candidate feedback while excluding bulky artifact payloads."""
-    return {
-        key: record.get(key)
-        for key in (
-            "experiment_id",
-            "surface",
-            "lever",
-            "target_case_ids",
-            "status",
-            "reason",
-            "failure_class",
-            "outcome",
-            "verifier_deltas_by_case",
-            "candidate_failure_diagnoses",
-            "epoch_checkpoint",
-        )
-        if key in record
-    }
+    experiment_fields = (
+        "experiment_id",
+        "surface",
+        "lever",
+        "target_case_ids",
+        "status",
+        "reason",
+        "failure_class",
+        "outcome",
+        "verifier_deltas_by_case",
+        "candidate_failure_diagnoses",
+        "epoch_checkpoint",
+    )
+    return {key: record.get(key) for key in experiment_fields if key in record}
 
 
 def _adapt_prompt_surface_within_instruction_lever(
@@ -1368,7 +1325,7 @@ class MemberActionPlanner:
             agent_skills_dirs=agent_skills_dirs,
         )
 
-    async def plan(
+    async def plan(  # pylint: disable=huawei-too-many-arguments
         self,
         targets: list[MemberOptimizationTarget],
         role_attribution_report: RoleAttributionReport,
@@ -1619,6 +1576,8 @@ class MemberActionPlanner:
             },
         )
 
+    # Preserve the published instance-method calling convention.
+    # pylint: disable-next=add-staticmethod-or-classmethod-decorator
     def write_plan(self, plan: MemberOptimizationPlan, output_dir: Path) -> Path:
         """Write plan to plan.yaml."""
         path = output_dir / "plan.yaml"

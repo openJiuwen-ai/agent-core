@@ -184,12 +184,11 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
             break
     adopted = bool(checkpoint.get("promotion_applied"))
     rejected = checkpoint.get("status") == "rejected"
-    changes = [
-        change
-        for candidate in _mapping_items(state.get("candidate_gates"))
-        if adopted and int(candidate.get("epoch", 0)) == epoch and candidate.get("status") == "accepted"
-        for change in _changes(candidate.get("capabilities"))
-    ]
+    changes = []
+    if adopted:
+        for candidate in _mapping_items(state.get("candidate_gates")):
+            if int(candidate.get("epoch", 0)) == epoch and candidate.get("status") == "accepted":
+                changes.extend(_changes(candidate.get("capabilities")))
     # A filtered or rolled-back Harness was not the one in the full replay.
     score = _number(checkpoint.get("score")) if selected and selected == evaluated else None
     return EventNode(

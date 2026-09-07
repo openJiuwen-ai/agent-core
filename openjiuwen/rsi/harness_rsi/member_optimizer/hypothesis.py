@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -66,84 +65,6 @@ def compile_optimization_hypotheses(
         decisive_probe = _decisive_probe(issue)
         target_ref = str(attribution.get("target_ref", "") or "").strip()
         decision_contract = _decision_contract(issue, attribution)
-        causal_coverage = (
-            dict(attribution.get("causal_coverage", {})) if isinstance(attribution.get("causal_coverage"), dict) else {}
-        )
-        hypothesis_assessment = (
-            list(attribution.get("hypothesis_assessment", []))
-            if isinstance(attribution.get("hypothesis_assessment"), list)
-            else []
-        )
-        assessment_statuses = {
-            str(item.get("status", "") or "").strip().casefold()
-            for item in hypothesis_assessment
-            if isinstance(item, dict)
-        }
-        selected_causal_hypothesis_id = str(attribution.get("selected_hypothesis_id", "") or "").strip()
-        supported_assessment_ids: list[str] = []
-        for item in hypothesis_assessment:
-            if not isinstance(item, dict):
-                continue
-            hypothesis_id = str(item.get("hypothesis_id", "") or "").strip()
-            status = str(item.get("status", "") or "").strip().casefold()
-            if hypothesis_id and status == "supported":
-                supported_assessment_ids.append(hypothesis_id)
-        if not selected_causal_hypothesis_id and len(supported_assessment_ids) == 1:
-            # Backward compatibility for pre-v12 Analyzer artifacts. One and
-            # only one supported hypothesis is already an unambiguous binding.
-            selected_causal_hypothesis_id = supported_assessment_ids[0]
-        selected_causal_hypothesis_semantic_id = str(
-            attribution.get("selected_hypothesis_semantic_id", "") or ""
-        ).strip()
-        selected_assessment_supported = False
-        for item in hypothesis_assessment:
-            if not isinstance(item, dict):
-                continue
-            hypothesis_id = str(item.get("hypothesis_id", "") or "").strip()
-            if hypothesis_id != selected_causal_hypothesis_id:
-                continue
-            status = str(item.get("status", "") or "").strip().casefold()
-            selected_assessment_supported = selected_assessment_supported or status == "supported"
-        evidence_status = str(attribution.get("evidence_status", "") or "").strip().casefold()
-        valid_target = bool(target_ref) and target_ref.casefold() != "unassigned"
-        # Bounded diagnosis has no second-audit status field. Preserve explicit
-        # rejections in legacy artifacts without requiring their retired schema.
-        valid_evidence = evidence_status in {"", "confirmed", "supported_hypothesis"} and bool(target_case_ids)
-        selected_assessment_ready = (
-            "supported" in assessment_statuses and bool(selected_causal_hypothesis_id) and selected_assessment_supported
-        )
-        if not valid_target or not valid_evidence or (hypothesis_assessment and not selected_assessment_ready):
-            continue
-        # A supported local contributor may coexist with unresolved causal
-        # alternatives outside its claimed cluster. The Analyzer keeps those
-        # alternatives for audit/refinement; they must not suppress the
-        # evidence-backed intervention. A confirmed diagnosis remains strict.
-        prior_experiment_assessment = (
-            dict(attribution.get("prior_experiment_assessment", {}))
-            if isinstance(attribution.get("prior_experiment_assessment"), dict)
-            else {}
-        )
-        supported_causal_ids: list[str] = []
-        supported_causal_semantic_ids: list[str] = []
-        falsified_causal_ids: list[str] = []
-        falsified_causal_semantic_ids: list[str] = []
-        for item in hypothesis_assessment:
-            if not isinstance(item, dict):
-                continue
-            hypothesis_id = str(item.get("hypothesis_id", "") or "")
-            semantic_id = str(item.get("hypothesis_semantic_id", "") or "")
-            status = str(item.get("status", "") or "").strip().casefold()
-            if status == "supported" and hypothesis_id == selected_causal_hypothesis_id:
-                supported_causal_ids.append(hypothesis_id)
-                if semantic_id:
-                    supported_causal_semantic_ids.append(semantic_id)
-            if status == "falsified" and hypothesis_id:
-                falsified_causal_ids.append(hypothesis_id)
-            if status == "falsified" and semantic_id:
-                falsified_causal_semantic_ids.append(semantic_id)
-        if selected_causal_hypothesis_semantic_id:
-            supported_causal_semantic_ids.append(selected_causal_hypothesis_semantic_id)
-
         payload: dict[str, Any] = {
             "source_issue_id": issue.issue_id,
             "target_case_ids": target_case_ids,
@@ -163,15 +84,6 @@ def compile_optimization_hypotheses(
             "public_trigger": public_triggers,
             "decisive_probe": decisive_probe,
             "decision_contract": decision_contract,
-            "causal_coverage": causal_coverage,
-            "hypothesis_assessment": hypothesis_assessment,
-            "selected_causal_hypothesis_id": selected_causal_hypothesis_id,
-            "selected_causal_hypothesis_semantic_id": selected_causal_hypothesis_semantic_id,
-            "supported_causal_hypothesis_ids": list(dict.fromkeys(supported_causal_ids)),
-            "supported_causal_hypothesis_semantic_ids": list(dict.fromkeys(supported_causal_semantic_ids)),
-            "falsified_causal_hypothesis_ids": list(dict.fromkeys(falsified_causal_ids)),
-            "falsified_causal_hypothesis_semantic_ids": list(dict.fromkeys(falsified_causal_semantic_ids)),
-            "prior_experiment_assessment": prior_experiment_assessment,
             "evidence_refs": _evidence_refs(issue.evidence),
             "diagnostic_lens": _diagnostic_lens(issue),
             "intent": "corrective",
@@ -235,13 +147,12 @@ def write_candidate_manifest(
 ) -> str:
     """Write optimizer-only provenance without polluting runtime resources."""
     hypotheses = load_optimization_hypotheses(hypotheses_path)
-    selected_issue_ids = {
-        str(issue_id)
-        for action in plan.get("actions", [])
-        if isinstance(action, dict)
-        for issue_id in action.get("attributed_issue_ids", [])
-        if str(issue_id)
-    }
+    selected_issue_ids = set()
+    for action in plan.get("actions", []):
+        if isinstance(action, dict):
+            selected_issue_ids.update(
+                str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)
+            )
     selected = [
         hypothesis for hypothesis in hypotheses if str(hypothesis.get("source_issue_id", "")) in selected_issue_ids
     ]
@@ -318,21 +229,14 @@ def _strip_benchmark_transport(value: str) -> str:
         "execution environment:",
         "shell commands already run there.",
         "use `bash` for repository file inspection",
+        "swe-bench lite instance:",
         "repository:",
         "base commit:",
         "work in the checked-out repository.",
         "diagnose the issue, implement the smallest correct fix",
         "do not modify tests to make them pass.",
     )
-    kept = []
-    for line in str(value or "").splitlines():
-        normalized = line.strip().lower()
-        benchmark_instance_header = bool(
-            re.match(r"^[a-z0-9_. -]*(?:bench|benchmark)[a-z0-9_. -]*\binstance\s*:", normalized)
-        )
-        if normalized.startswith(transport_prefixes) or benchmark_instance_header:
-            continue
-        kept.append(line)
+    kept = [line for line in str(value or "").splitlines() if not line.strip().lower().startswith(transport_prefixes)]
     return "\n".join(kept).strip()
 
 
@@ -356,9 +260,6 @@ def _decisive_probe(issue: Any) -> dict[str, Any]:
     return {
         "root_cause": attribution.get("root_cause", ""),
         "critical_mistake": attribution.get("critical_mistake", ""),
-        "causal_coverage": attribution.get("causal_coverage", {}),
-        "hypothesis_assessment": attribution.get("hypothesis_assessment", []),
-        "prior_experiment_assessment": attribution.get("prior_experiment_assessment", {}),
         "validation_observations": metadata.get("validation_observations", {}),
         "verifier_observations": metadata.get("verifier_observations", {}),
     }
@@ -390,26 +291,12 @@ def _decision_contract(issue: Any, attribution: dict[str, Any]) -> dict[str, Any
         "post_diagnosis",
         "pre_submission",
     }:
-        phase_text = " ".join(
-            str(value or "")
-            for value in (
-                supplied.get("required_action"),
-                issue.recommendation,
-                supplied.get("acceptance_observable"),
-            )
-        ).lower()
+        phase_parts = (supplied.get("required_action"), issue.recommendation, supplied.get("acceptance_observable"))
+        phase_text = " ".join(str(value or "") for value in phase_parts).lower()
+        phase_markers = ("after diagnosis", "once diagnosed", "after confirming", "once confirmed", "edit site")
         if any(token in phase_text for token in ("before submit", "pre-submit", "finalize")):
             activation_phase = "pre_submission"
-        elif any(
-            token in phase_text
-            for token in (
-                "after diagnosis",
-                "once diagnosed",
-                "after confirming",
-                "once confirmed",
-                "edit site",
-            )
-        ):
+        elif any(token in phase_text for token in phase_markers):
             activation_phase = "post_diagnosis"
         else:
             activation_phase = "task_start"

@@ -25,7 +25,7 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1053,12 +1053,13 @@ def _candidate_feedback_check_sets(
 
 
 def _normalized_check_set(payload: dict[str, Any], *keys: str) -> set[str]:
-    return {
-        normalized
-        for key in keys
-        for value in _string_items(payload.get(key, []))
-        if (normalized := _normalize_cluster_text(value))
-    }
+    normalized_values = set()
+    for key in keys:
+        for value in _string_items(payload.get(key, [])):
+            normalized = _normalize_cluster_text(value)
+            if normalized:
+                normalized_values.add(normalized)
+    return normalized_values
 
 
 def _diagnosis_feedback_priority(
@@ -1275,7 +1276,7 @@ def _aggregate_structured_diagnoses(
                 "category": "member_harness" if issue_category == "member_harness" else "team_coordination",
                 "severity": str(strongest.get("severity", "medium") or "medium"),
                 "summary": str(strongest.get("summary", "") or ""),
-                "affected_cases": [str(case_id) for item in items if (case_id := item.get("case_id"))],
+                "affected_cases": [str(item["case_id"]) for item in items if item.get("case_id")],
                 "affected_components": affected_components,
                 "evidence": evidence[: max(1, evidence_limit_per_issue)],
                 "suspected_team_scope": "member" if issue_category == "member_harness" else "team_skill",
@@ -1496,22 +1497,20 @@ def _looks_like_completion_contract_issue(issue: TeamIssue) -> bool:
         json.dumps(issue.metadata, ensure_ascii=False),
     ]
     text = "\n".join(str(part).lower() for part in text_parts)
-    return any(
-        marker in text
-        for marker in (
-            "artifact",
-            "claim_task",
-            "complete",
-            "completion",
-            "deliverable",
-            "file",
-            "output",
-            "required",
-            "status",
-            "verify",
-            "verification",
-        )
+    completion_markers = (
+        "artifact",
+        "claim_task",
+        "complete",
+        "completion",
+        "deliverable",
+        "file",
+        "output",
+        "required",
+        "status",
+        "verify",
+        "verification",
     )
+    return any(marker in text for marker in completion_markers)
 
 
 def _with_attribution_target_ref(metadata: dict[str, Any], target_ref: str) -> dict[str, Any]:
@@ -1588,7 +1587,8 @@ def _string_items(value: Any) -> list[str]:
         stripped = value.strip()
         return [stripped] if stripped else []
     if isinstance(value, list):
-        return [stripped for item in value if isinstance(item, str) and (stripped := item.strip())]
+        strings = [item.strip() for item in value if isinstance(item, str)]
+        return [item for item in strings if item]
     return []
 
 
@@ -1912,14 +1912,8 @@ def _validation_events_from_result(result_path: str) -> list[dict[str, Any]]:
     for record in command_log:
         if not isinstance(record, dict):
             continue
-        output = "\n".join(
-            part
-            for part in (
-                str(record.get("stdout_excerpt") or ""),
-                str(record.get("stderr_excerpt") or ""),
-            )
-            if part
-        )
+        output_parts = (str(record.get("stdout_excerpt") or ""), str(record.get("stderr_excerpt") or ""))
+        output = "\n".join(part for part in output_parts if part)
         exit_code = record.get("exit_code")
         error = "" if exit_code in {None, 0, "0"} else f"exit_code={exit_code}"
         events.append(
@@ -1985,14 +1979,8 @@ def _case_diagnoses_validation_conflicts(
     """Validate every diagnosis while retaining its position in repair feedback."""
     conflicts: list[str] = []
     for index, diagnosis in enumerate(diagnoses, start=1):
-        conflicts.extend(
-            f"diagnosis[{index}]: {error}"
-            for error in _diagnosis_validation_conflicts(
-                diagnosis,
-                inventory,
-                verifier_inventory,
-            )
-        )
+        diagnosis_conflicts = _diagnosis_validation_conflicts(diagnosis, inventory, verifier_inventory)
+        conflicts.extend(f"diagnosis[{index}]: {error}" for error in diagnosis_conflicts)
     return conflicts
 
 
@@ -2047,16 +2035,8 @@ def _diagnosis_validation_conflicts(
             for key, value in expected_verifier.items():
                 if verifier_observations.get(key) != value:
                     errors.append(f"verifier_observations.{key} must equal {value!r}")
-        diagnosis_text = " ".join(
-            str(diagnosis.get(key) or "").lower()
-            for key in (
-                "summary",
-                "root_cause",
-                "critical_mistake",
-                "general_mechanism",
-                "recommendation",
-            )
-        )
+        diagnosis_fields = ("summary", "root_cause", "critical_mistake", "general_mechanism", "recommendation")
+        diagnosis_text = " ".join(str(diagnosis.get(key) or "").lower() for key in diagnosis_fields)
         patch_failure_claims = (
             "patch application to fail",
             "patch application failed",
@@ -2262,7 +2242,8 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 def _contains_incomplete_json_object(text: str) -> bool:
     """Return whether output contains a JSON object cut off at end of text."""
     for match in re.finditer(r'\{\s*"', str(text or "")):
-        candidate = text[match.start() :].strip()
+        start = match.start()
+        candidate = text[start:].strip()
         try:
             json.JSONDecoder().raw_decode(candidate)
             continue
@@ -2294,7 +2275,8 @@ def _contains_incomplete_json_object(text: str) -> bool:
                 if (opening, char) not in {("{", "}"), ("[", "]")}:
                     invalid_closer = True
                     break
-        if not invalid_closer and (stack or in_string or escaped):
+        incomplete = bool(stack) or in_string or escaped
+        if not invalid_closer and incomplete:
             return True
     return False
 
@@ -2326,18 +2308,16 @@ class _DiagnosisOutputFormatError(ValueError):
 def _contains_model_service_error_text(raw: str) -> bool:
     """Keep permanent service/auth failures distinct from bad model formatting."""
     normalized = " ".join(str(raw or "").lower().split())
-    return any(
-        marker in normalized
-        for marker in (
-            "error code:",
-            "invalid_api_key",
-            "authentication failed",
-            "authentication error",
-            "unauthorized",
-            "budget_exceeded",
-            "budget has been exceeded",
-        )
+    service_error_markers = (
+        "error code:",
+        "invalid_api_key",
+        "authentication failed",
+        "authentication error",
+        "unauthorized",
+        "budget_exceeded",
+        "budget has been exceeded",
     )
+    return any(marker in normalized for marker in service_error_markers)
 
 
 # ---------------------------------------------------------------------------
@@ -2417,7 +2397,7 @@ class DiagnosisAgentStrategy:
         output_dir = Path(invocation.output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        diagnosis_case_inputs = [case for case in case_inputs if not case.evaluation_passed]
+        diagnosis_case_inputs = [case for case in case_inputs if not case.evaluation_passed or case.score < 1.0]
         per_case_results = await self._per_case_diagnosis(
             diagnosis_case_inputs,
             signals,
@@ -2984,7 +2964,7 @@ def _build_analysis_ref_dict(
     core_metadata = {k: v for k, v in artifact_metadata.items() if k != "retrieved_experience"}
     return {
         "analysis_id": output_dir.name,
-        "created_at": datetime.now().astimezone().isoformat(),
+        "created_at": datetime.now(timezone.utc).astimezone().isoformat(),
         "source_eval_ref_path": invocation.eval_ref_path,
         "case_results_dir": invocation.case_results_dir,
         "case_traces_dir": invocation.case_traces_dir,
@@ -3031,8 +3011,8 @@ def _case_artifact_index(case_results_dir: str) -> dict[str, dict[str, str]]:
     for result_path in sorted(root.glob("*/result.json")):
         try:
             result = json.loads(result_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"Cannot read case evidence artifact: {result_path}") from exc
         case_id = str(result.get("case_id", "") or "").strip()
         if not case_id:
             continue

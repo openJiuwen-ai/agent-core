@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 import uuid
 from collections.abc import AsyncIterator
@@ -116,6 +117,9 @@ class TerminalBenchDockerShellOperation(BaseShellOperation):
         self._clean_shell = bool(clean_shell)
         self._runtime_environment = dict(runtime_environment or {})
         self._enforce_in_container_timeout = bool(enforce_in_container_timeout)
+
+    def command_log(self) -> list[dict[str, Any]]:
+        return self._recorder.to_list() if self._recorder is not None else []
 
     async def execute_cmd(
         self,
@@ -371,8 +375,7 @@ class TerminalBenchDockerSysOperation(SysOperation):
         return self._docker_shell_operation
 
     def command_log(self) -> list[dict[str, Any]]:
-        recorder = self._docker_shell_operation._recorder
-        return recorder.to_list() if recorder is not None else []
+        return self._docker_shell_operation.command_log()
 
 
 def build_terminal_bench_sys_operation(
@@ -458,9 +461,12 @@ def sync_container_git_patch_to_workspace(
     )
     if not diff:
         return ""
+    git_executable = shutil.which("git")
+    if not git_executable:
+        raise FileNotFoundError("git executable is required to synchronize the task patch")
     completed = subprocess.run(
         [
-            "git",
+            git_executable,
             "-C",
             str(workspace_dir.resolve()),
             "apply",

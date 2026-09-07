@@ -463,7 +463,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                     "lever_scoreboard": dict(state.get("lever_scoreboard", {})),
                                 },
                             )
-                        except Exception as exc:  # noqa: BLE001 - report failed generation without fabricating a candidate
+                        except Exception as exc:
                             member_ref = str(attempt_dir / "generation_error.yaml")
                             _write_yaml_atomic(
                                 Path(member_ref),
@@ -472,6 +472,16 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                     "candidate_generation_error": _safe_candidate_error(exc),
                                 },
                             )
+                            await emit(
+                                on_event,
+                                NodeStageEvent(
+                                    node_ref="h0",
+                                    stage=generate_stage_payload(
+                                        1, 1, "error", error=_safe_candidate_error(exc)["message"]
+                                    ),
+                                ),
+                            )
+                            raise
                         member_info = _read_yaml(member_ref)
                         generation_error = member_info.get("candidate_generation_error")
                         await emit(
@@ -680,12 +690,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 for gate in state["candidate_gates"]
                 if int(gate.get("epoch", 0) or 0) == epoch and gate.get("status") == "provisional"
             ]
-            provisional_target_case_ids = {
-                str(case_id)
-                for gate in epoch_provisional_gates
-                for case_id in gate.get("target_case_ids", [])
-                if str(case_id)
-            }
+            provisional_target_case_ids = set()
+            for gate in epoch_provisional_gates:
+                provisional_target_case_ids.update(
+                    str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)
+                )
             checkpoint = {
                 "epoch": epoch,
                 "score": full_score,
@@ -698,12 +707,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             full_failed_case_ids = sorted(case_id for case_id, score in full_case_scores.items() if score < 1.0)
             previous_best_eval_ref = str(state.get("best_eval_ref_path", "") or "")
             previous_best_case_scores = _eval_case_scores(previous_best_eval_ref) if previous_best_eval_ref else {}
-            regressed_best_case_ids = sorted(
-                case_id
-                for case_id, previous_score in previous_best_case_scores.items()
-                if case_id in set(state.get("retained_case_ids", []))
-                and full_case_scores.get(case_id, 0.0) < previous_score
-            )
+            regressed_best_case_ids = []
+            for case_id in state.get("retained_case_ids", []):
+                previous_score = previous_best_case_scores.get(case_id)
+                if previous_score is not None and full_case_scores.get(case_id, 0.0) < previous_score:
+                    regressed_best_case_ids.append(case_id)
+            regressed_best_case_ids.sort()
             failed_retention_case_ids = sorted(
                 case_id for case_id in working_retained_case_ids if full_case_scores.get(case_id, 0.0) < 1.0
             )
@@ -722,24 +731,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 )
                 for gate in epoch_provisional_gates
             ]
-            retained_gates = [
-                gate
-                for gate, selection in zip(
-                    epoch_provisional_gates,
-                    gate_selections,
-                    strict=True,
-                )
-                if selection["retained"]
-            ]
-            removed_gates = [
-                gate
-                for gate, selection in zip(
-                    epoch_provisional_gates,
-                    gate_selections,
-                    strict=True,
-                )
-                if not selection["retained"]
-            ]
+            retained_gates = []
+            removed_gates = []
+            for gate, selection in zip(epoch_provisional_gates, gate_selections, strict=True):
+                if selection["retained"]:
+                    retained_gates.append(gate)
+                else:
+                    removed_gates.append(gate)
             selected_refs = current_refs
             checkpoint_status = (
                 "verified_with_inconclusive_cases"
@@ -775,22 +773,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "failed_target_case_ids": failed_target_case_ids,
                     "failed_machine_evidence": full_failed_machine_evidence,
                     "error_case_ids": sorted(full_error_case_ids),
-                    "retained_candidate_action_ids": sorted(
-                        {
-                            str(capability.get("action_id", "") or "")
-                            for gate in retained_gates
-                            for capability in gate.get("capabilities", [])
-                            if str(capability.get("action_id", "") or "")
-                        }
-                    ),
-                    "removed_candidate_action_ids": sorted(
-                        {
-                            str(capability.get("action_id", "") or "")
-                            for gate in removed_gates
-                            for capability in gate.get("capabilities", [])
-                            if str(capability.get("action_id", "") or "")
-                        }
-                    ),
+                    "retained_candidate_action_ids": _capability_action_ids(retained_gates),
+                    "removed_candidate_action_ids": _capability_action_ids(removed_gates),
                     "selected_harness_refs_path": (selected_refs if retained_gates else epoch_start_refs),
                     "post_checkpoint_replay_performed": False,
                 }
@@ -800,9 +784,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             checkpoint["noop_initial_score_seed"] = bool(
                 not epoch_provisional_gates and checkpoint_status == "verified" and best_score is None
             )
-            if retained_gates or (
-                not epoch_provisional_gates and checkpoint_status == "verified" and best_score is None
-            ):
+            if retained_gates or checkpoint["noop_initial_score_seed"]:
                 current_refs = selected_refs
                 state["best_score"] = full_score
                 state["best_eval_ref_path"] = full_eval_ref
@@ -985,6 +967,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "score_delta": None,
             "capabilities": capabilities,
         }
+        if _eval_has_errors(source_eval_ref):
+            return {
+                **base,
+                "accepted": False,
+                "status": "inconclusive",
+                "reason": "source_gate_inconclusive_due_to_error_cases",
+            }
         if member_status not in {"success", "partial_success"}:
             return {
                 "accepted": False,
@@ -1039,24 +1028,14 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         paired_source_eval_ref = source_eval_ref
         source_case_scores = _eval_case_scores(paired_source_eval_ref)
         source_target_score = _average_case_scores(source_case_scores, target_case_ids)
-        try:
-            candidate_eval_ref = await self._evaluate(
-                cases=candidate_cases,
-                harness_refs_path=candidate_harness_refs_path,
-                output_dir=output_dir,
-                dataset=dataset,
-                node_ref=node_ref or "h0",
-                on_event=on_event,
-            )
-        except Exception as exc:  # noqa: BLE001 - preserve the public adapter's infrastructure reporting
-            return {
-                **base,
-                "accepted": False,
-                "status": "inconclusive",
-                "reason": "candidate_evaluation_failed",
-                "target_case_ids": sorted(target_case_ids),
-                "candidate_evaluation_error": _safe_candidate_error(exc),
-            }
+        candidate_eval_ref = await self._evaluate(
+            cases=candidate_cases,
+            harness_refs_path=candidate_harness_refs_path,
+            output_dir=output_dir,
+            dataset=dataset,
+            node_ref=node_ref or "h0",
+            on_event=on_event,
+        )
         skipped_target_case_ids = sorted(_skipped_case_ids(candidate_eval_ref) & target_case_ids)
         if skipped_target_case_ids:
             return {
@@ -1105,29 +1084,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         )
         candidate_non_target_score = None
         non_target_score_delta = None
-        expected_tools = sorted(
-            {
-                str(capability.get("runtime_name", ""))
-                for capability in capabilities
-                if capability.get("action_group") == "tool"
-                and capability.get("operation") in {"add", "modify"}
-                and str(capability.get("runtime_name", ""))
-            }
-        )
+        expected_tools = _expected_runtime_names(capabilities, action_group="tool")
         invoked_tools_by_case = _invoked_tool_names_by_case(candidate_eval_ref)
         pre_edit_tools_by_case, first_edit_steps_by_case = _pre_edit_invoked_names_by_case(
             candidate_eval_ref, action_group="tool"
         )
         invoked_tools = sorted({name for names in invoked_tools_by_case.values() for name in names})
-        expected_skills = sorted(
-            {
-                str(capability.get("runtime_name", ""))
-                for capability in capabilities
-                if capability.get("action_group") == "skill"
-                and capability.get("operation") in {"add", "modify"}
-                and str(capability.get("runtime_name", ""))
-            }
-        )
+        expected_skills = _expected_runtime_names(capabilities, action_group="skill")
         invoked_skills_by_case = _invoked_skill_names_by_case(candidate_eval_ref)
         pre_edit_skills_by_case, skill_first_edit_steps_by_case = _pre_edit_invoked_names_by_case(
             candidate_eval_ref, action_group="skill"
@@ -1137,26 +1100,19 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             if current is None or (step is not None and step < current):
                 first_edit_steps_by_case[case_id] = step
         invoked_skills = sorted({name for names in invoked_skills_by_case.values() for name in names})
-        later_edit_usage = {
-            group: _pre_edit_invoked_names_by_case(
-                candidate_eval_ref,
-                action_group=group,
-                allow_later_edit=True,
-            )[0]
-            for group in ("tool", "skill")
-            if any(
-                item.get("action_group") == group
-                and item.get("activation_phase") in {"post_diagnosis", "pre_submission"}
-                for item in capabilities
-            )
-        }
-        # Answer-only tasks have no edit boundary. Preserve their existing
-        # successful-usage contract rather than requiring an artificial write.
-        for group, early_usage in (("tool", pre_edit_tools_by_case), ("skill", pre_edit_skills_by_case)):
-            if group in later_edit_usage:
-                for case_id, names in early_usage.items():
-                    if case_id not in first_edit_steps_by_case:
-                        later_edit_usage[group][case_id] = set(names)
+        later_edit_groups = set()
+        for capability in capabilities:
+            if capability.get("activation_phase") in {"post_diagnosis", "pre_submission"}:
+                later_edit_groups.add(capability.get("action_group"))
+        later_edit_usage = {}
+        for group in ("tool", "skill"):
+            if group in later_edit_groups:
+                later_edit_usage[group] = _pre_edit_invoked_names_by_case(
+                    candidate_eval_ref,
+                    action_group=group,
+                    allow_later_edit=True,
+                )[0]
+
         missing_tool_invocations = _missing_capability_invocations(
             capabilities,
             action_group="tool",
@@ -2051,23 +2007,20 @@ def _compact_analysis_diagnoses(
         case_id = str(diagnosis.get("case_id", "") or "")
         if not case_id:
             continue
+        diagnosis_fields = (
+            "summary",
+            "root_cause",
+            "critical_mistake",
+            "general_mechanism",
+            "recommendation",
+            "decision_contract",
+            "target_ref",
+            "confidence",
+            "diagnosis_status",
+            "analysis_failed",
+        )
         compact.setdefault(case_id, []).append(
-            {
-                key: diagnosis.get(key)
-                for key in (
-                    "summary",
-                    "root_cause",
-                    "critical_mistake",
-                    "general_mechanism",
-                    "recommendation",
-                    "decision_contract",
-                    "target_ref",
-                    "confidence",
-                    "diagnosis_status",
-                    "analysis_failed",
-                )
-                if key in diagnosis
-            }
+            {key: diagnosis.get(key) for key in diagnosis_fields if key in diagnosis}
         )
     return compact
 
@@ -2326,11 +2279,6 @@ def _update_batch_attempt_record(
 
 def _eval_score(eval_ref_path: str | Path) -> float:
     payload = _read_yaml(eval_ref_path)
-    official_metrics = payload.get("official_metrics", {})
-    if isinstance(official_metrics, dict):
-        primary_score = _number(official_metrics.get("primary_score"))
-        if primary_score is not None:
-            return primary_score
     scores = [_number(case.get("score")) for case in payload.get("cases", []) if isinstance(case, dict)]
     numeric = [score for score in scores if score is not None]
     return sum(numeric) / len(numeric) if numeric else 0.0
@@ -2777,9 +2725,9 @@ def _pre_edit_invoked_names_by_case(
             continue
         names = names_by_case.setdefault(case_id, set())
         triggered_skills = _task_start_triggered_skill_names(case)
-        if action_group == "skill":
+        if action_group == "skill" and not allow_later_edit:
             names.update(triggered_skills)
-        elif triggered_skills:
+        elif triggered_skills and not allow_later_edit:
             names.add("skill_tool")
         kwargs = {
             "tool_names": names if action_group == "tool" else None,
@@ -2802,6 +2750,11 @@ def _pre_edit_invoked_names_by_case(
                         edit_steps.append(step)
         if edit_steps:
             first_edit_steps_by_case[case_id] = min(edit_steps)
+            if allow_later_edit and triggered_skills:
+                if action_group == "skill":
+                    names.update(triggered_skills)
+                else:
+                    names.add("skill_tool")
     return names_by_case, first_edit_steps_by_case
 
 
@@ -2846,9 +2799,10 @@ def _nonpassing_case_ids(eval_ref_path: str) -> set[str]:
         metadata = metadata if isinstance(metadata, dict) else {}
         if status == "skipped" or metadata.get("infrastructure_skip") is True:
             continue
-        explicit_passed = _eval_case_explicit_passed(case)
         status_failed = status in {"failed", "error"}
-        score_failed = explicit_passed is False or (explicit_passed is None and score is not None and score < 1.0)
+        score_failed = score is not None and score < 1.0
+        if score is None:
+            score_failed = _eval_case_explicit_passed(case) is False
         if case_id and (status_failed or score_failed):
             case_ids.add(case_id)
     return case_ids
@@ -3791,38 +3745,8 @@ def _candidate_failure_supports_repair(gate: dict[str, Any]) -> bool:
 
 
 def _rejected_capabilities(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return prior rejected actions with enough evidence for the next plan."""
-    return [
-        {
-            **dict(capability),
-            "rejection_reason": str(candidate_gate.get("reason", "")),
-            "failure_class": str(candidate_gate.get("failure_class", "")),
-            "target_confirmation": dict(
-                candidate_gate.get("target_confirmation", {})
-                if isinstance(candidate_gate.get("target_confirmation"), dict)
-                else {}
-            ),
-            "epoch_checkpoint_outcome": dict(
-                candidate_gate.get("epoch_checkpoint_outcome", {})
-                if isinstance(candidate_gate.get("epoch_checkpoint_outcome"), dict)
-                else {}
-            ),
-            "verifier_deltas_by_case": dict(
-                candidate_gate.get("verifier_deltas_by_case", {})
-                if isinstance(candidate_gate.get("verifier_deltas_by_case"), dict)
-                else {}
-            ),
-            "candidate_failure_diagnoses": dict(
-                candidate_gate.get("candidate_failure_diagnoses", {})
-                if isinstance(candidate_gate.get("candidate_failure_diagnoses"), dict)
-                else {}
-            ),
-        }
-        for candidate_gate in state["candidate_gates"]
-        if candidate_gate.get("status") == "rejected"
-        for capability in candidate_gate.get("capabilities", [])
-        if isinstance(capability, dict)
-    ]
+    """Return prior rejected actions with evidence for the next plan."""
+    return _rejected_capability_history(state["candidate_gates"])
 
 
 def _candidate_evaluation_output_dir(

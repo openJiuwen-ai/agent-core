@@ -166,7 +166,7 @@ class ModelUsageObserver:
                 "RSI model usage delivery failed; persisted calls can be reconciled"
             ) from self.delivery_error
 
-    async def record(
+    async def record(  # pylint: disable=huawei-too-many-arguments
         self,
         model: str,
         call_id: str,

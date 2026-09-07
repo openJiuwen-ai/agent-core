@@ -385,29 +385,12 @@ def project_execution_history(trace_data: Any) -> dict[str, Any]:
         for message in trace["messages"]:
             if not isinstance(message, dict) or message.get("role") in ("system", "developer"):
                 continue
-            row = {
-                key: message[key]
-                for key in (
-                    "role",
-                    "content",
-                    "message_index",
-                    "step_pointer",
-                )
-                if key in message
-            }
+            message_fields = ("role", "content", "message_index", "step_pointer")
+            row = {key: message[key] for key in message_fields if key in message}
             calls = message.get("tool_calls", [])
+            call_fields = ("name", "input", "output", "error", "step_pointer")
             row["tool_calls"] = [
-                {
-                    key: call[key]
-                    for key in (
-                        "name",
-                        "input",
-                        "output",
-                        "error",
-                        "step_pointer",
-                    )
-                    if key in call
-                }
+                {key: call[key] for key in call_fields if key in call}
                 for call in (calls if isinstance(calls, list) else [])
                 if isinstance(call, dict)
             ]

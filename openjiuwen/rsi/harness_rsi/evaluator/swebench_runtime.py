@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import ntpath
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -407,7 +408,8 @@ def _run_official_command_with_retries(
         )
         if not _is_transient_network_failure(diagnostic):
             return completed, attempt
-    assert completed is not None
+    if completed is None:
+        raise ValueError("official evaluation requires at least one attempt")
     return completed, max_attempts
 
 
@@ -763,8 +765,9 @@ def _native_path(path: Path) -> str:
     if os.name != "nt" or resolved.startswith("\\\\?\\"):
         return resolved
     if resolved.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + resolved.lstrip("\\")
-    return "\\\\?\\" + resolved
+        return ntpath.join("\\\\?\\UNC", resolved.lstrip("\\"))
+    drive, tail = ntpath.splitdrive(resolved)
+    return ntpath.join(f"\\\\?\\{drive}\\", tail.lstrip("\\"))
 
 
 def _safe_id(value: str) -> str:

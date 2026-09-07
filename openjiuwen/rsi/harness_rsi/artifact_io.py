@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,9 @@ def _io_path(path: Path) -> Path:
     if os.name != "nt" or absolute.startswith("\\\\?\\"):
         return Path(absolute)
     if absolute.startswith("\\\\"):
-        return Path("\\\\?\\UNC\\" + absolute[2:])
-    return Path("\\\\?\\" + absolute)
+        return Path(ntpath.join("\\\\?\\UNC", absolute[2:]))
+    drive, tail = ntpath.splitdrive(absolute)
+    return Path(ntpath.join(f"\\\\?\\{drive}\\", tail.lstrip("\\")))
 
 
 def read_yaml_mapping(path: str | Path) -> dict[str, Any]:
