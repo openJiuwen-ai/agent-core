@@ -56,7 +56,11 @@ DEFAULT_SEVERITY_ACTIONS: dict[Severity, list[RecoveryAction]] = {
     Severity.LOW: [RecoveryAction.OBSERVE_ONLY, RecoveryAction.INJECT_STEERING],
     Severity.MEDIUM: [RecoveryAction.REPORT_TO_USER],
     Severity.HIGH: [RecoveryAction.REPORT_TO_USER, RecoveryAction.INJECT_STEERING],
-    Severity.CRITICAL: [RecoveryAction.INJECT_STEERING, RecoveryAction.ESCALATE_USER],
+    Severity.CRITICAL: [
+        RecoveryAction.INJECT_STEERING,
+        RecoveryAction.ESCALATE_USER,
+        RecoveryAction.TERMINATE,
+    ],
 }
 
 # Kind → set of atomic ops (primary mapping source).
