@@ -171,11 +171,19 @@ def _sync_skill_registry_for_written_files(
         raise ValueError(f"skill action must declare {registry_rel} so the skill can be mounted")
 
     registry_path = action_worktree.resolve() / registry_rel
-    existing = _load_registry_values(registry_path, "skills")
+    registry = _load_yaml_manifest(registry_path) if registry_path.is_file() else []
+    existing = registry.get("skills", []) if isinstance(registry, dict) else registry
+    if not isinstance(existing, list):
+        raise ValueError("skills registry must contain a list")
     merged = list(existing)
+    mounted = {
+        str(value.get("dir", "") if isinstance(value, dict) else value).removeprefix("./")
+        for value in existing
+    }
     for addition in additions:
-        if addition not in merged:
+        if addition not in mounted:
             merged.append(addition)
+            mounted.add(addition)
 
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(

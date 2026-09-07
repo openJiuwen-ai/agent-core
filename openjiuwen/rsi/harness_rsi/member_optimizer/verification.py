@@ -532,7 +532,10 @@ def _resolve_harness_parts(harness: Any) -> Any:
 
 
 def _load_harness_plugin(integration_path: Path) -> Any:
-    """Load a legacy RSI harness directory through the Agent Core plugin API."""
+    """Finalize edited registries, then use the runtime's exact Plugin loader."""
+    from openjiuwen.rsi.harness_rsi.member_optimizer.plugin_manifest import synchronize_plugin_manifest
+
+    synchronize_plugin_manifest(integration_path)
     return load_plugin_package(find_plugin_manifest(integration_path))
 
 
