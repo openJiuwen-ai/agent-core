@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Translate single-Harness state into the shared RSI event vocabulary."""
+"""Project epoch-level Harness versions into the shared RSI event vocabulary."""
 
 from __future__ import annotations
 
@@ -20,14 +20,75 @@ def progress_event(
     *,
     total_iterations: int,
 ) -> EventProgress:
-    """Build the latest durable metric snapshot."""
+    """Count completed epochs; local candidate attempts do not advance progress."""
 
     return EventProgress(
-        iteration=len(_mapping_items(state.get("candidate_gates"))),
+        iteration=len(_mapping_items(state.get("epoch_checkpoints"))),
         total_iterations=max(0, int(total_iterations)),
         score=_number(state.get("best_score")),
         baseline=_number(state.get("baseline_score")),
         usage=None,
+    )
+
+
+def root_node_event(state: Mapping[str, Any]) -> EventNode:
+    """Expose the initial Harness without requiring an extra baseline run."""
+    return EventNode(
+        node=RsiTreeNode(
+            node_id="h0",
+            iteration=0,
+            parent_id=None,
+            type="ROOT",
+            adopted=True,
+            score=_number(state.get("baseline_score")),
+            summary="Initial Harness",
+            snapshot_artifact_id=None,
+            reason=None,
+            failure_class=None,
+            changes=[],
+            extra={"artifact_path": str(state.get("source_harness_refs_path", "") or "")},
+        )
+    )
+
+
+def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> EventNode:
+    """Expose one final Harness per epoch, not each local repair candidate."""
+    epoch = int(checkpoint["epoch"])
+    selected = str(checkpoint.get("selected_harness_refs_path", "") or "")
+    evaluated = str(checkpoint.get("harness_refs_path", "") or "")
+    before = str(checkpoint.get("before_harness_refs_path", "") or "")
+    parent_id = "h0"
+    for prior in sorted(
+        _mapping_items(state.get("epoch_checkpoints")), key=lambda item: int(item["epoch"]), reverse=True
+    ):
+        if int(prior["epoch"]) < epoch and str(prior.get("selected_harness_refs_path", "") or "") == before:
+            parent_id = f"epoch-{int(prior['epoch']):03d}"
+            break
+    adopted = bool(checkpoint.get("promotion_applied"))
+    rejected = checkpoint.get("status") == "rejected"
+    changes = [
+        change
+        for candidate in _mapping_items(state.get("candidate_gates"))
+        if adopted and int(candidate.get("epoch", 0)) == epoch and candidate.get("status") == "accepted"
+        for change in _changes(candidate.get("capabilities"))
+    ]
+    # A filtered or rolled-back Harness was not the one in the full replay.
+    score = _number(checkpoint.get("score")) if selected and selected == evaluated else None
+    return EventNode(
+        node=RsiTreeNode(
+            node_id=f"epoch-{epoch:03d}",
+            iteration=epoch,
+            parent_id=parent_id,
+            type="ADOPTED" if adopted else "REJECTED" if rejected else "UNCHANGED",
+            adopted=adopted,
+            score=score,
+            summary=_summary(changes, "No retained Harness change"),
+            snapshot_artifact_id=None,
+            reason=str(checkpoint.get("status", "") or "") if not adopted else None,
+            failure_class=None,
+            changes=changes,
+            extra={"artifact_path": selected},
+        )
     )
 
 
@@ -160,4 +221,4 @@ def _number(value: Any) -> float | None:
         return None
 
 
-__all__ = ["node_event", "parent_node_id", "progress_event"]
+__all__ = ["epoch_node_event", "root_node_event", "node_event", "parent_node_id", "progress_event"]

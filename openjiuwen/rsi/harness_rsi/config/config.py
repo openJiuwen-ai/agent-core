@@ -266,7 +266,7 @@ class AutoCoordinatingHarnessConfig:
     """Top-level standalone Harness optimization configuration."""
 
     workspace_dir: str = ""
-    max_epochs: int = 1
+    max_epochs: int = 5
     model_configs: ModelConfigs = field(default_factory=ModelConfigs)
     data_loader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
     evaluator: EvaluatorConfig = field(default_factory=EvaluatorConfig)
@@ -287,7 +287,7 @@ class AutoCoordinatingHarnessConfig:
         )
         config = cls(
             workspace_dir=str(data.get("workspace_dir", "")),
-            max_epochs=_int_value(data.get("max_epochs"), default=1),
+            max_epochs=_int_value(data.get("max_epochs"), default=5),
             model_configs=model_configs,
             data_loader=DataLoaderConfig.from_dict(_mapping(data.get("data_loader"))),
             evaluator=replace(evaluator, model_config_ref=model_configs.evaluation),

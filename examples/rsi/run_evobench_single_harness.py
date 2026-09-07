@@ -341,7 +341,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=2,
         help="Cases optimized sequentially per batch; the epoch still ends with one full-suite checkpoint.",
     )
-    parser.add_argument("--max-epochs", type=int, default=1)
+    parser.add_argument("--max-epochs", type=int, default=5)
     parser.add_argument(
         "--sibling-candidate-count",
         type=int,

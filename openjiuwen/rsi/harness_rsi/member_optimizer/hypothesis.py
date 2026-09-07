@@ -20,7 +20,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.loader import (
     resolve_team_issues,
 )
 
-_HYPOTHESIS_VERSION = 4
+_HYPOTHESIS_VERSION = 3
 
 
 def compile_optimization_hypotheses(
@@ -37,6 +37,7 @@ def compile_optimization_hypotheses(
     """
     analysis_path = Path(analysis_ref_path).expanduser().resolve()
     analysis_ref = load_analysis_ref(analysis_path)
+    analysis_ref.require_usable()
     case_inputs = {
         str(case.get("case_id", "") or ""): _public_case_input(case)
         for case in cases
@@ -95,7 +96,6 @@ def compile_optimization_hypotheses(
             attribution.get("selected_hypothesis_semantic_id", "") or ""
         ).strip()
         selected_assessment_supported = False
-        selected_assessment_verified = False
         for item in hypothesis_assessment:
             if not isinstance(item, dict):
                 continue
@@ -103,26 +103,21 @@ def compile_optimization_hypotheses(
             if hypothesis_id != selected_causal_hypothesis_id:
                 continue
             status = str(item.get("status", "") or "").strip().casefold()
-            verification_status = str(item.get("verification_status", "") or "").strip().casefold()
             selected_assessment_supported = selected_assessment_supported or status == "supported"
-            selected_assessment_verified = selected_assessment_verified or verification_status == "verified"
         evidence_status = str(attribution.get("evidence_status", "") or "").strip().casefold()
         valid_target = bool(target_ref) and target_ref.casefold() != "unassigned"
-        valid_evidence = evidence_status in {"confirmed", "supported_hypothesis"} and bool(target_case_ids)
+        # Bounded diagnosis has no second-audit status field. Preserve explicit
+        # rejections in legacy artifacts without requiring their retired schema.
+        valid_evidence = evidence_status in {"", "confirmed", "supported_hypothesis"} and bool(target_case_ids)
         selected_assessment_ready = (
-            "supported" in assessment_statuses
-            and bool(selected_causal_hypothesis_id)
-            and selected_assessment_supported
-            and selected_assessment_verified
+            "supported" in assessment_statuses and bool(selected_causal_hypothesis_id) and selected_assessment_supported
         )
-        if not valid_target or not valid_evidence or not selected_assessment_ready:
+        if not valid_target or not valid_evidence or (hypothesis_assessment and not selected_assessment_ready):
             continue
         # A supported local contributor may coexist with unresolved causal
         # alternatives outside its claimed cluster. The Analyzer keeps those
         # alternatives for audit/refinement; they must not suppress the
         # evidence-backed intervention. A confirmed diagnosis remains strict.
-        if evidence_status == "confirmed" and "unresolved" in assessment_statuses:
-            continue
         prior_experiment_assessment = (
             dict(attribution.get("prior_experiment_assessment", {}))
             if isinstance(attribution.get("prior_experiment_assessment"), dict)
@@ -240,20 +235,16 @@ def write_candidate_manifest(
 ) -> str:
     """Write optimizer-only provenance without polluting runtime resources."""
     hypotheses = load_optimization_hypotheses(hypotheses_path)
-    selected_issue_ids: set[str] = set()
-    actions: list[dict[str, Any]] = []
-    for raw_action in plan.get("actions", []):
-        if not isinstance(raw_action, dict):
-            continue
-        actions.append(raw_action)
-        for issue_id in raw_action.get("attributed_issue_ids", []):
-            normalized_issue_id = str(issue_id)
-            if normalized_issue_id:
-                selected_issue_ids.add(normalized_issue_id)
-    selected: list[dict[str, Any]] = []
-    for hypothesis in hypotheses:
-        if str(hypothesis.get("source_issue_id", "")) in selected_issue_ids:
-            selected.append(hypothesis)
+    selected_issue_ids = {
+        str(issue_id)
+        for action in plan.get("actions", [])
+        if isinstance(action, dict)
+        for issue_id in action.get("attributed_issue_ids", [])
+        if str(issue_id)
+    }
+    selected = [
+        hypothesis for hypothesis in hypotheses if str(hypothesis.get("source_issue_id", "")) in selected_issue_ids
+    ]
     manifest = {
         "version": 2,
         "status": "planned",
@@ -273,7 +264,8 @@ def write_candidate_manifest(
                     else {}
                 ),
             }
-            for action in actions
+            for action in plan.get("actions", [])
+            if isinstance(action, dict)
         ],
     }
     target = Path(output_path).expanduser().resolve()
@@ -398,22 +390,26 @@ def _decision_contract(issue: Any, attribution: dict[str, Any]) -> dict[str, Any
         "post_diagnosis",
         "pre_submission",
     }:
-        phase_parts = (
-            supplied.get("required_action"),
-            issue.recommendation,
-            supplied.get("acceptance_observable"),
-        )
-        phase_text = " ".join(str(value or "") for value in phase_parts).lower()
-        post_diagnosis_terms = (
-            "after diagnosis",
-            "once diagnosed",
-            "after confirming",
-            "once confirmed",
-            "edit site",
-        )
+        phase_text = " ".join(
+            str(value or "")
+            for value in (
+                supplied.get("required_action"),
+                issue.recommendation,
+                supplied.get("acceptance_observable"),
+            )
+        ).lower()
         if any(token in phase_text for token in ("before submit", "pre-submit", "finalize")):
             activation_phase = "pre_submission"
-        elif any(token in phase_text for token in post_diagnosis_terms):
+        elif any(
+            token in phase_text
+            for token in (
+                "after diagnosis",
+                "once diagnosed",
+                "after confirming",
+                "once confirmed",
+                "edit site",
+            )
+        ):
             activation_phase = "post_diagnosis"
         else:
             activation_phase = "task_start"

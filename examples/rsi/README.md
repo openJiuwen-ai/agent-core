@@ -13,6 +13,64 @@ replacement service interface. Dataset schemas and official evaluation
 protocols stay in adapter modules; the RSI optimization engine stays
 benchmark-neutral.
 
+## Frontend iteration limit
+
+The Harness engine accepts `IterativeSingleHarnessRequest.max_iteration`.
+One iteration is one complete epoch, including its batches and final evaluation.
+The frontend sends a positive integer, for example `{"max_iteration": 3}`.
+The service forwards it through the existing entry point:
+
+```python
+request = IterativeSingleHarnessRequest(
+    dataset_files=[suite_path],
+    harness_refs_path=harness_refs_path,
+    output_dir=run_dir,
+    max_iteration=payload.get("max_iteration"),
+)
+result = await orchestrator.run(request, on_event=on_event)
+```
+
+Omission preserves `config.max_epochs` (default 5). An explicit value overrides
+that configuration for this run only; zero, negative values, booleans, strings
+and fractional values are rejected. A resumed run keeps its original limit;
+a conflicting explicit limit is rejected. This does not change batch size,
+candidate repair budgets or the task agent's internal step limit.
+It is an upper bound: existing completion/early-stop conditions still apply.
+
+Progress `iteration` counts completed epochs and `total_iterations` is the
+effective `max_iteration`. The initial H0 node has iteration 0. Each completed
+epoch emits one further node; individual cases and candidate attempts remain
+in the run's detailed records, not additional tree nodes. If the final selected
+Harness differs from the evaluated version, its node has no score until that
+exact version is evaluated. The AgentServer HTTP handler is maintained by the
+caller; this repository provides the engine request and event contract.
+
+## Diagnosis and candidate generation
+
+The Harness engine uses the migrated experiment-side diagnosis flow: a bounded,
+read-only DeepAgent reads each failed case, its full execution history and the
+Harness declarations that produced that evaluation. A short evidence summary
+is an index, not a replacement for the original history. Tool and Rail code is
+not executed while projecting Harness declarations, and model credentials are
+not included in that projection.
+
+Per-case diagnoses are compiled into Issues deterministically, without a second
+model rewriting their attribution. The Improver receives the same required
+behavior and may generate Prompt, Skill, Tool or Rail changes permitted by the
+existing action policy. A single-case Skill is not automatically rewritten into
+a Prompt. Missing generated Prompt/Skill files are failures, not fabricated
+placeholder improvements. Candidate isolation, Plugin loading, verification and
+evaluation remain on the target branch's runtime; the legacy experiment runtime
+is not copied into this package.
+
+A failed model diagnosis is not reported as "no issues": its failure artifact
+is preserved, and resuming retries that diagnosis. Successful partial diagnoses
+remain usable. Existing batch optimization, candidate acceptance and final epoch
+evaluation are retained. This migration's unit tests validate those contracts;
+they do not establish benchmark score improvement.
+
+## Portable dataset example
+
 The Evo-Bench adapter accepts the portable task layout below:
 
 ```text
