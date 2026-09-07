@@ -6,7 +6,7 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable, Pattern, Sequence
+from typing import Iterable, NamedTuple, Pattern, Sequence
 
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+.#/-]*|[\u3400-\u9fff]+")
 
@@ -21,6 +21,17 @@ class LexicalDocument:
     body: str = ""
     aliases: tuple[str, ...] = ()
     category: str = ""
+
+
+class _DocumentFields(NamedTuple):
+    """Normalized text fields in the order used by lexical scoring."""
+
+    key: str
+    name: str
+    aliases: str
+    description: str
+    body: str
+    category: str
 
 
 @dataclass(frozen=True)
@@ -461,14 +472,14 @@ def _matched_excerpt(value: str, terms: set[str], max_chars: int) -> str:
     return _excerpt(value, 0, min(len(value), max_chars), max_chars)
 
 
-def _document_fields(document: LexicalDocument) -> tuple[str, ...]:
-    return (
-        document.key,
-        document.name,
-        "\n".join(document.aliases),
-        document.description,
-        _without_front_matter(document.body),
-        document.category,
+def _document_fields(document: LexicalDocument) -> _DocumentFields:
+    return _DocumentFields(
+        key=document.key,
+        name=document.name,
+        aliases="\n".join(document.aliases),
+        description=document.description,
+        body=_without_front_matter(document.body),
+        category=document.category,
     )
 
 
@@ -645,7 +656,7 @@ def _phrase_score(document: LexicalDocument, query: str, *, case_insensitive: bo
     alternatives = [part.strip() for part in query.split("|") if part.strip()]
     if not alternatives:
         return 0.0
-    fields = _document_fields(document)
+    fields: tuple[str, ...] = _document_fields(document)
     if case_insensitive:
         alternatives = [part.casefold() for part in alternatives]
         fields = tuple(field.casefold() for field in fields)
