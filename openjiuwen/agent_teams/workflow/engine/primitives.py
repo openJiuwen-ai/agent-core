@@ -219,12 +219,13 @@ def _top_phases(rt) -> list[tuple[str, int]] | None:
     return sorted(acc.items(), key=lambda kv: kv[1], reverse=True)[:3]
 
 
-def _check_budget(rt) -> None:
-    """Raise ``BudgetExhausted`` when either ledger has hit its ceiling.
+def _budget_exhaustion(rt) -> tuple[str, str, int, int] | None:
+    """Return ``(scope, message, spent, total)`` for whichever ledger is dry.
 
-    Two ceilings, checked once per ``agent()`` / session ``send()``, at the
-    entry gate only: a call already paid for must reach its journal record, or
-    a resume would rerun (and re-pay for) it.
+    One message format for every report of a drained ledger — the entry gate
+    (``_check_budget``) raises it, the retry loop (``_attempt_calls``) puts it
+    in the node's failure detail — so both read the same
+    ``"workflow token budget exhausted: X/Y"`` wording.
 
     Order-sensitive — **session first**: when both ledgers are dry, the
     terminal (not retryable) session reason wins. Relaunching after a session
@@ -232,25 +233,45 @@ def _check_budget(rt) -> None:
     would mislead the leader into "redesign the workflow" when raising the
     ceiling is the only way forward. A session still holding headroom never
     masks a per-run (workflow) exhaustion — that check still runs right after.
+    """
+    if rt.budget.exhausted:
+        return (
+            "session",
+            f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
+            rt.budget.spent,
+            rt.budget.total,
+        )
+    if rt.workflow_budget.exhausted:
+        return (
+            "workflow",
+            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
+            rt.workflow_budget.spent,
+            rt.workflow_budget.total,
+        )
+    return None
+
+
+def _check_budget(rt) -> None:
+    """Raise ``BudgetExhausted`` when either ledger has hit its ceiling.
+
+    Two ceilings, checked once per ``agent()`` / session ``send()``, at the
+    entry gate only: a call already paid for must reach its journal record, or
+    a resume would rerun (and re-pay for) it.
 
     This gate alone cannot hold the line — one agent's own loop can burn the
     whole budget long before it returns here. It is the backend's rails that
     stop an agent mid-loop; this stops the *next* one from starting.
     """
-    if rt.budget.exhausted:
-        raise BudgetExhausted(
-            f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
-            scope="session", spent=rt.budget.spent, total=rt.budget.total,
-            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
-            top_phases=_top_phases(rt),
-        )
-    if rt.workflow_budget.exhausted:
-        raise BudgetExhausted(
-            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
-            scope="workflow", spent=rt.workflow_budget.spent, total=rt.workflow_budget.total,
-            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
-            top_phases=_top_phases(rt),
-        )
+    ex = _budget_exhaustion(rt)
+    if ex is None:
+        return
+    scope, message, spent, total = ex
+    raise BudgetExhausted(
+        message,
+        scope=scope, spent=spent, total=total,
+        workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
+        top_phases=_top_phases(rt),
+    )
 
 
 def _branch_disambig(path: tuple) -> str:
@@ -623,7 +644,9 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     bound ``make_call`` closure. Returns a ``_BackendCallResult``: a
     backend/timeout error or schema-validation failure retries up to
     ``rt.retries`` extra times; a ``skipped`` result short-circuits to a
-    non-success with no retry.
+    non-success with no retry, and so does a failed attempt that leaves a
+    token ledger dry — the budget never refunds, so a retry can only fail
+    again (and a human turn would re-ask the person).
     """
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
@@ -647,6 +670,21 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             # backend error, etc.). Accumulate so the final failed result can
             # attribute the agent's full cost, not just the last attempt's.
             burned_tokens += getattr(e, "tokens", 0) or 0
+            # A drained ledger can only fail again — the budget never refunds,
+            # and for a human turn a retry would re-ask the person. Fail fast
+            # and surface the same message the entry gate raises, so the node's
+            # failure carries the budget root cause (the rail stops the call
+            # with a force-finish, not an exception).
+            ex = _budget_exhaustion(rt)
+            if ex is not None:
+                rt.log_sink(
+                    f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: "
+                    f"{str(e)}; no retry — {ex[1]}"
+                )
+                return _BackendCallResult(
+                    result=None, succeeded=False, error_detail=ex[1],
+                    tokens=burned_tokens if burned_tokens > 0 else None,
+                )
             rt.log_sink(
                 f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
             )
