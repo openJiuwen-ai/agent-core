@@ -3,10 +3,31 @@
 """Internal interrupt-resume matching helpers for the harness runtime."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    ToolInterruptionState,
+)
+
+InterruptResumeKind = Literal["none", "tool", "workflow"]
+
+
+def interrupt_resume_kind(content: Any, session: Any) -> InterruptResumeKind:
+    """Classify a structured input from the exact interrupt state at admission."""
+    if not isinstance(content, InteractiveInput) or session is None:
+        return "none"
+    state = session.get_state(INTERRUPTION_KEY)
+    if isinstance(state, ToolInterruptionState):
+        return "tool"
+
+    # Keep tool-only imports light; the workflow state lives in ReActAgent.
+    from openjiuwen.core.single_agent.agents.react_agent import InterruptionState
+
+    if isinstance(state, InterruptionState):
+        return "workflow"
+    return "none"
 
 
 def pending_tool_resume_ids(session: Any) -> frozenset[str]:

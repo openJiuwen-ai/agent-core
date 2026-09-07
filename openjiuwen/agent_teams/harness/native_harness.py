@@ -71,6 +71,8 @@ from openjiuwen.agent_teams.harness.control import (
 )
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
 from openjiuwen.agent_teams.harness.interrupt_resume import (
+    InterruptResumeKind,
+    interrupt_resume_kind,
     pending_tool_resume_ids,
     tool_resume_scope_ids,
 )
@@ -543,7 +545,10 @@ class NativeHarness(DeepAgent):
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
         msg = InboxMessage(seq=0, content=content, immediate=immediate)
-        await self._control.put(_CmdSend(msg=msg, ack=ack))
+        resume_kind = interrupt_resume_kind(content, self._session)
+        await self._control.put(
+            _CmdSend(msg=msg, ack=ack, resume_kind=resume_kind),
+        )
         return await ack
 
     async def abort(self, *, immediate: bool = False) -> None:
@@ -815,7 +820,7 @@ class NativeHarness(DeepAgent):
 
         phase = self._st.phase
         if phase is HarnessState.IDLE:
-            active = self._start_round(msg.content)
+            active = self._start_round(msg.content, resume_kind=cmd.resume_kind)
             await self._transition(HarnessState.RUNNING)
             await self._emit_round("started", active.round_id)
         elif phase is HarnessState.RUNNING:
@@ -827,13 +832,15 @@ class NativeHarness(DeepAgent):
             else:
                 # Single next-round source: enqueue a follow-up the round-done
                 # decision drains (FIFO across all RUNNING sends).
+                if active is not None and isinstance(msg.content, InteractiveInput):
+                    self._st.follow_up_resume_provenance.append((msg.content, cmd.resume_kind))
                 self.loop_controller.enqueue_follow_up(msg.content)
         elif phase is HarnessState.PAUSED:
             if isinstance(msg.content, InteractiveInput):
                 # An interrupt-resume payload drives its own single round; it
                 # cannot be steered into a continuation.
                 self._st.paused_query = None
-                active = self._start_round(msg.content)
+                active = self._start_round(msg.content, resume_kind=cmd.resume_kind)
             else:
                 # Warm resume + inject: continue the paused round in place and
                 # steer the new content into it (the inner loop drains steering
@@ -1188,6 +1195,19 @@ class NativeHarness(DeepAgent):
     ) -> bool:
         """Start queued follow-ups using the existing normal-settle rules."""
         follow_ups = self._drain_pending_follow_ups(session)
+        tagged_follow_ups: list[tuple[Any, InterruptResumeKind]] | None = None
+        if follow_ups is not None:
+            provenance = list(self._st.follow_up_resume_provenance)
+            self._st.follow_up_resume_provenance.clear()
+            tagged_follow_ups = []
+            for follow_up in follow_ups:
+                kind: InterruptResumeKind = "none"
+                for index, (candidate, candidate_kind) in enumerate(provenance):
+                    if candidate is follow_up:
+                        kind = candidate_kind
+                        provenance.pop(index)
+                        break
+                tagged_follow_ups.append((follow_up, kind))
         # Idempotency: drop only a tool approval that duplicates IDs consumed
         # by this tool-resume round. A generic InteractiveInput may instead be
         # a workflow resume and must not be inferred stale from its shape.
@@ -1201,30 +1221,42 @@ class NativeHarness(DeepAgent):
         # ack-before-consume TOCTOU. A follow-up whose slot is still pending
         # (prior round failed before consuming) is kept — that is a legitimate
         # retry, not a duplicate.
-        if follow_ups is not None:
-            kept = []
-            for f in follow_ups:
+        if tagged_follow_ups is not None:
+            kept: list[tuple[Any, InterruptResumeKind]] = []
+            for f, kind in tagged_follow_ups:
                 follow_up_ids = set(f.user_inputs) if isinstance(f, InteractiveInput) else set()
                 if (
-                    follow_up_ids
+                    kind == "tool"
+                    and follow_up_ids
                     and follow_up_ids.issubset(active.tool_resume_scope_ids)
                     and not self._interrupt_resume_still_pending(f, session)
                 ):
                     continue
-                kept.append(f)
-            follow_ups = kept or None
+                kept.append((f, kind))
+            tagged_follow_ups = kept or None
         # InteractiveInput must go through _start_round directly (structured
         # resume); the batch text pipeline (from_user_input(list)) would
         # str() it into a text frame, breaking the resume.
-        if follow_ups is not None and any(isinstance(f, InteractiveInput) for f in follow_ups):
-            interactive = next(f for f in follow_ups if isinstance(f, InteractiveInput))
-            nxt = self._start_round(interactive, is_follow_up=True)
+        if tagged_follow_ups is not None and any(
+            isinstance(f, InteractiveInput) for f, _ in tagged_follow_ups
+        ):
+            interactive, resume_kind = next(
+                (f, kind) for f, kind in tagged_follow_ups if isinstance(f, InteractiveInput)
+            )
+            nxt = self._start_round(
+                interactive,
+                is_follow_up=True,
+                resume_kind=resume_kind,
+            )
             await self._emit_round("started", nxt.round_id)
-            for f in follow_ups:
+            for f, kind in tagged_follow_ups:
                 if f is not interactive:
+                    if isinstance(f, InteractiveInput):
+                        self._st.follow_up_resume_provenance.append((f, kind))
                     self.loop_controller.enqueue_follow_up(f)
             return True
-        if follow_ups is not None:
+        if tagged_follow_ups is not None:
+            follow_ups = [f for f, _ in tagged_follow_ups]
             nxt = self._start_round(follow_ups, is_follow_up=True)
             await self._emit_round("started", nxt.round_id)
             return True
@@ -1262,6 +1294,7 @@ class NativeHarness(DeepAgent):
         is_follow_up: bool = False,
         failure_retry: bool = False,
         resume_continuation: bool = False,
+        resume_kind: InterruptResumeKind = "none",
     ) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
@@ -1281,6 +1314,8 @@ class NativeHarness(DeepAgent):
                 its preserved context. The inner loop then appends no user turn;
                 ``query`` is only kept as ``original_query`` so a task-plan
                 continuation can still reuse it.
+            resume_kind: Interrupt-state kind observed when ``query`` entered
+                the harness. Internal provenance only; not part of the payload.
         """
         # Invariant: an InteractiveInput is a single-round resume payload and
         # must never ride the text batch pipeline — ``InputEvent.from_user_input(list)``
@@ -1302,7 +1337,11 @@ class NativeHarness(DeepAgent):
             for q in query:
                 if q is not interactive:
                     self.loop_controller.enqueue_follow_up(q)
-            return self._start_round(interactive, is_follow_up=is_follow_up)
+            return self._start_round(
+                interactive,
+                is_follow_up=is_follow_up,
+                resume_kind=resume_kind,
+            )
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
         pre_round = capture_snapshot(self, self._session, index=0)
@@ -1311,7 +1350,11 @@ class NativeHarness(DeepAgent):
             round_id=round_id,
             task_id=task_id,
             original_query=query,
-            tool_resume_scope_ids=tool_resume_scope_ids(query, self._session),
+            tool_resume_scope_ids=(
+                tool_resume_scope_ids(query, self._session)
+                if resume_kind == "tool"
+                else frozenset()
+            ),
             deep_agent=self,
             task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=asyncio.Queue(),
@@ -1553,6 +1596,7 @@ class NativeHarness(DeepAgent):
 
     def _discard_follow_ups(self, session: Session) -> None:
         """Drop both follow-up queues when an abort ends their round."""
+        self._st.follow_up_resume_provenance.clear()
         controller = self.loop_controller
         if controller is not None:
             controller.drain_follow_up()

@@ -12,6 +12,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Union
 
+from openjiuwen.agent_teams.harness.interrupt_resume import InterruptResumeKind
 from openjiuwen.agent_teams.harness.state import InboxMessage
 
 
@@ -22,10 +23,12 @@ class _CmdSend:
     Attributes:
         msg: Wrapped inbound message.
         ack: Future resolved with the message seq id.
+        resume_kind: Exact interrupt-state kind observed before command enqueue.
     """
 
     msg: InboxMessage
     ack: asyncio.Future
+    resume_kind: InterruptResumeKind = "none"
 
 
 @dataclass(frozen=True, slots=True)

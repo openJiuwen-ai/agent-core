@@ -26,6 +26,7 @@ from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.agents.react_agent import (
     InterruptionState,
     WorkflowInterruptEntry,
@@ -68,7 +69,7 @@ def script_first_round_interrupt(fake: Any, harness: Any, observed_phases: list)
     fake.invoke = invoke
 
 
-def workflow_interruption_state() -> InterruptionState:
+def workflow_interruption_state(component_id: str = "component-1") -> InterruptionState:
     """Build the workflow state shape committed by ReActAgent."""
     return InterruptionState(
         ai_message=AssistantMessage(content="waiting for workflow input"),
@@ -81,12 +82,12 @@ def workflow_interruption_state() -> InterruptionState:
                     name="workflow-1",
                     arguments="{}",
                 ),
-                component_ids=["component-1"],
+                component_ids=[component_id],
                 workflow_execution_state=object(),
             ),
         },
         pending_workflow_id="workflow-1",
-        pending_component_id="component-1",
+        pending_component_id=component_id,
     )
 
 
@@ -131,13 +132,21 @@ async def test_stale_interactive_input_follow_up_dropped_after_slot_consumed() -
         approval = InteractiveInput()
         approval.update("call-x", {"approved": True, "feedback": "", "auto_confirm": False})
         duplicate = approval.model_copy(deep=True)
-        harness.loop_controller.enqueue_follow_up(duplicate)
 
         base_invoke = fake.invoke
+        resume_started = asyncio.Event()
+        duplicate_parked = asyncio.Event()
 
         async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            resume_started.set()
+            await asyncio.wait_for(duplicate_parked.wait(), timeout=3.0)
             result = await base_invoke(inputs, invoke_session, **kwargs)
-            invoke_session.update_state({INTERRUPTION_KEY: None})
+            # The duplicate was admitted while the tool state was current.
+            # A same-ID workflow state committed before settle must not erase
+            # that provenance and turn the old approval into workflow feedback.
+            invoke_session.update_state(
+                {INTERRUPTION_KEY: workflow_interruption_state("call-x")},
+            )
             return result
 
         fake.invoke = invoke
@@ -146,17 +155,118 @@ async def test_stale_interactive_input_follow_up_dropped_after_slot_consumed() -
         consumer = asyncio.create_task(drain_outputs(harness, collected))
         try:
             await harness.send(approval)
+            await asyncio.wait_for(resume_started.wait(), timeout=3.0)
+            await harness.send(duplicate)
+            duplicate_parked.set()
             assert await wait_for_state(harness, HarnessState.IDLE)
             # Let any unintended spurious follow-up round surface before counting.
             await asyncio.sleep(0.1)
         finally:
+            duplicate_parked.set()
             await harness.stop()
             await consumer
 
         queries = [inv.get("query") for inv in fake.invocations]
         assert queries == [approval]
+        assert isinstance(session.get_state(INTERRUPTION_KEY), InterruptionState)
         assert answer_outputs(collected) == ["done"]
         assert harness.state is HarnessState.TERMINATED
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_workflow_resume_with_tool_scope_id_collision_is_not_dropped() -> None:
+    """A stream-visible workflow reply keeps its admission-time meaning.
+
+    The active round started as a tool resume for ``component-1``. Before its
+    supervisor settle, ReAct commits and streams a workflow interrupt using the
+    same legal ID. A workflow reply sent in that real RUNNING window must not be
+    inferred to be a duplicate of the old tool approval from the shared string.
+    """
+    collision_id = "component-1"
+    tool_state = ToolInterruptionState(
+        ai_message=AssistantMessage(content="requesting approval"),
+        iteration=1,
+        interrupted_tools={
+            collision_id: ToolInterruptEntry(
+                tool_call=ToolCall(
+                    id=collision_id,
+                    type="function",
+                    name="needs_approval",
+                    arguments="{}",
+                ),
+                interrupt_requests={
+                    collision_id: InterruptRequest(message="approve?"),
+                },
+            ),
+        },
+    )
+
+    tool_approval = InteractiveInput()
+    tool_approval.update(collision_id, {"approved": True})
+    workflow_feedback = InteractiveInput()
+    workflow_feedback.update(collision_id, "continue workflow")
+
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, answer_output="done")
+        session = harness._session
+        session.update_state({INTERRUPTION_KEY: tool_state})
+
+        workflow_interrupt_visible = asyncio.Event()
+        feedback_parked = asyncio.Event()
+        base_invoke = fake.invoke
+        invocation_count = 0
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            nonlocal invocation_count
+            invocation_count += 1
+            query = inputs.get("query") if isinstance(inputs, dict) else inputs
+            if invocation_count == 1:
+                assert query == tool_approval
+                invoke_session.update_state({INTERRUPTION_KEY: workflow_interruption_state()})
+                await invoke_session.write_stream(
+                    OutputSchema(
+                        type="interaction",
+                        index=0,
+                        payload={"component_ids": [collision_id]},
+                    ),
+                )
+                workflow_interrupt_visible.set()
+                await asyncio.wait_for(feedback_parked.wait(), timeout=3.0)
+                await base_invoke(inputs, invoke_session, **kwargs)
+                return {"output": "", "result_type": "interrupt"}
+
+            assert invocation_count == 2
+            assert query == workflow_feedback
+            assert isinstance(invoke_session.get_state(INTERRUPTION_KEY), InterruptionState)
+            invoke_session.update_state({INTERRUPTION_KEY: None})
+            return await base_invoke(inputs, invoke_session, **kwargs)
+
+        fake.invoke = invoke
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send(tool_approval)
+            await asyncio.wait_for(workflow_interrupt_visible.wait(), timeout=3.0)
+            await harness.send(workflow_feedback)
+            feedback_parked.set()
+
+            deadline = asyncio.get_running_loop().time() + 3.0
+            while asyncio.get_running_loop().time() < deadline and invocation_count < 2:
+                await asyncio.sleep(0.01)
+            assert invocation_count == 2
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert session.get_state(INTERRUPTION_KEY) is None
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(session).pending_follow_ups == []
+        finally:
+            feedback_parked.set()
+            await harness.stop()
+            await consumer
     finally:
         await Runner.stop()
 

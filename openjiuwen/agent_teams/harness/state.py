@@ -14,6 +14,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.harness.interrupt_resume import InterruptResumeKind
     from openjiuwen.core.foundation.llm import BaseMessage
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -180,6 +181,8 @@ class HarnessInternalState:
             for the active round to finish.
         seq_counter: Source of monotonic InboxMessage sequence numbers.
         active: Currently running round, or None when IDLE/PAUSED/TERMINATED.
+        follow_up_resume_provenance: Non-persisted object references and their
+            admission-time kinds for structured inputs in the follow-up queue.
         paused_query: When PAUSED, the originating query of the paused round.
             ``resume()`` hands it to the continuation round as its
             ``original_query`` so a task-plan continuation can still reuse it;
@@ -194,6 +197,9 @@ class HarnessInternalState:
     pending_queue: deque[InboxMessage] = field(default_factory=deque)
     seq_counter: int = 0
     active: ActiveRound | None = None
+    follow_up_resume_provenance: list[tuple["InteractiveInput", "InterruptResumeKind"]] = field(
+        default_factory=list,
+    )
     paused_query: str | None = None
     output_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     supervisor_task: asyncio.Task | None = None
