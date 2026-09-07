@@ -27,7 +27,12 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
     ExpertTeamLauncher,
 )
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
-from openjiuwen.agent_teams.organization.schema import OrgTaskReviewStatus, OrgTaskStatus, OrganizationSpec
+from openjiuwen.agent_teams.organization.schema import (
+    ORG_TASK_REPAIRS_TASK_ID_KEY,
+    OrgTaskReviewStatus,
+    OrgTaskStatus,
+    OrganizationSpec,
+)
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
@@ -724,6 +729,7 @@ class OrganizationRuntimeManager:
                     organization_id=manager.organization_id,
                     failure_code=event.failure_code,
                     failure_reason=event.failure_reason,
+                    repairs_task_id=self._original_repairs_target(task),
                 )
                 return
             if isinstance(event, OrgTaskReviewRequestedEvent):
@@ -755,6 +761,7 @@ class OrganizationRuntimeManager:
                     parent_task_id=task.parent_task_id,
                     organization_id=manager.organization_id,
                     review_status=event.review_status,
+                    repairs_task_id=self._original_repairs_target(task),
                 )
                 return
             if event.review_status != OrgTaskReviewStatus.ACCEPTED.value:
@@ -1002,17 +1009,20 @@ class OrganizationRuntimeManager:
         parent_task_id: str,
         organization_id: str,
         review_status: str,
+        repairs_task_id: str | None = None,
     ) -> None:
         review_key = (session_id, team_id, f"repair:{child_task_id}")
         if review_key in self._scheduled_parent_reviews:
             return
         self._scheduled_parent_reviews.add(review_key)
+        target_id = repairs_task_id or child_task_id
         prompt = (
             f"Child organization task {child_task_id} was reviewed as {review_status} "
             f"in {organization_id}. Parent task {parent_task_id} cannot advance on that child. "
             "Read the child result and review verdict/required_changes, then either create at most "
             "one focused repair task with org_create_task "
-            f"(set repairs_task_id={child_task_id}; include defect report and acceptance "
+            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
+            "repair; include defect report and acceptance "
             "criteria; prefer capabilities that match the defect) or re-delegate with "
             "org_delegate_task. Do not leave the parent waiting without a repair/re-delegation "
             "decision, and do not silently reopen the rejected child task."
@@ -1060,18 +1070,21 @@ class OrganizationRuntimeManager:
         organization_id: str,
         failure_code: str,
         failure_reason: str,
+        repairs_task_id: str | None = None,
     ) -> None:
         review_key = (session_id, team_id, f"failed:{child_task_id}")
         if review_key in self._scheduled_parent_reviews:
             return
         self._scheduled_parent_reviews.add(review_key)
+        target_id = repairs_task_id or child_task_id
         prompt = (
             f"Child organization task {child_task_id} failed in {organization_id} "
             f"(failure_code={failure_code}, failure_reason={failure_reason}). "
             f"Parent task {parent_task_id} cannot advance on that child. "
             "This is not a pending review — do not call org_review_task on the failed child. "
             "Create at most one focused repair task with org_create_task "
-            f"(set repairs_task_id={child_task_id}; include the failure "
+            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
+            "repair; include the failure "
             "report and acceptance criteria) or re-delegate with org_delegate_task. "
             "Do not leave the parent waiting without a repair/re-delegation decision, and do not "
             "silently reopen the failed child task."
@@ -1082,6 +1095,15 @@ class OrganizationRuntimeManager:
             prompt=prompt,
             review_key=review_key,
         )
+
+    @staticmethod
+    def _original_repairs_target(task: Any) -> str:
+        """Return the original sibling id a new repair must target (never a repair-of-repair)."""
+        meta = getattr(task, "metadata", None) or {}
+        nested = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY) if isinstance(meta, dict) else None
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+        return str(task.task_id)
 
     def _schedule_leader_turn(
         self,

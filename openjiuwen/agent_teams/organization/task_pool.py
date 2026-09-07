@@ -411,6 +411,16 @@ class OrgTaskManager:
                             f"({parent_task_id!r}); got {repaired.parent_task_id!r}"
                         ),
                     )
+                repaired_meta = _json_loads(repaired.metadata_json, {})
+                nested = repaired_meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+                if isinstance(nested, str) and nested.strip():
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "repairs_task_id must point at the original sibling task, "
+                            f"not another repair ({repairs_target} already repairs {nested.strip()})"
+                        ),
+                    )
                 retry_gate = await self._apply_repair_retry_budget(
                     session,
                     repaired=repaired,
@@ -923,8 +933,16 @@ class OrgTaskManager:
             review = reviews.get(child.task_id)
             return review is not None and review.review_status in _SUPERSEDEABLE_REVIEW_STATUSES
 
+        def _is_repair_child(child: OrgTaskRecord) -> bool:
+            meta = _json_loads(child.metadata_json, {})
+            target = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+            return isinstance(target, str) and bool(target.strip())
+
         for child in child_rows:
             if _is_accepted(child):
+                continue
+            # Abandoned repair attempts (failed/rejected repair-of-original) do not block.
+            if _is_supersedable(child) and _is_repair_child(child):
                 continue
             if _is_supersedable(child) and any(
                 _is_accepted(repair) for repair in repairs_of.get(child.task_id, ())

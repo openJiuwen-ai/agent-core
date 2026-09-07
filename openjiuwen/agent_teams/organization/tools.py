@@ -439,10 +439,11 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                     "type": "string",
                     "description": (
                         "Optional. When creating a repair child, set to the FAILED or "
-                        "REJECTED/NEEDS_REVISION sibling this repair supersedes. "
+                        "REJECTED/NEEDS_REVISION original sibling this repair supersedes. "
                         "Only this parameter establishes the link (not metadata). "
-                        "On repeated repairs, point at the original child. Once this "
-                        "repair is ACCEPTED, the original no longer blocks parent complete."
+                        "Must point at the original child, never another repair task. "
+                        "On repeated repairs, always set repairs_task_id to that same original. "
+                        "Once an accepted repair exists, the original no longer blocks parent complete."
                     ),
                 },
                 "delegated_to_team_id": {"type": "string"},

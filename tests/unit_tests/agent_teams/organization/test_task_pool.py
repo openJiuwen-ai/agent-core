@@ -1403,6 +1403,18 @@ async def test_create_task_repairs_task_id_validation(org_manager):
     assert ok.ok
     assert ok.task.metadata["repairs_task_id"] == "child-orig"
 
+    repair_of_repair = await manager.create_task(
+        task_id="repair-of-repair",
+        parent_task_id="parent-repair-val",
+        title="Illegal nested repair",
+        description="Must target original only",
+        required_capabilities=["analysis"],
+        repairs_task_id="repair-ok",
+        created_by=creator,
+    )
+    assert not repair_of_repair.ok
+    assert "original sibling" in repair_of_repair.reason
+
     # Metadata alone is not an entry point; the key is stripped unless passed as repairs_task_id.
     via_metadata = await manager.create_task(
         task_id="repair-meta",
@@ -1702,7 +1714,7 @@ async def test_repair_without_repairs_task_id_does_not_unblock_rejected_child(or
 
 @pytest.mark.asyncio
 async def test_one_level_repair_must_point_at_original_not_intermediate(org_manager):
-    """Gate is one-level: Accepted repair of B does not supersede A; point repairs_task_id at A."""
+    """Create rejects repair-of-repair; abandoned repair attempts do not block when original is fixed."""
     manager, _ = org_manager
     parent_creator = OrgTaskCreator(
         creator_type="client",
@@ -1748,29 +1760,20 @@ async def test_one_level_repair_must_point_at_original_not_intermediate(org_mana
     await _spawn_and_reject("child-a")
     await _spawn_and_reject("child-b", repairs_task_id="child-a")
 
-    # C repairs B only — A stays blocked under one-level gate.
-    fix_b = await manager.create_task(
+    # Repair-of-repair is rejected at create time.
+    nested = await manager.create_task(
         task_id="child-c",
         parent_task_id="parent-one-level",
         title="Repair of B",
-        description="Does not free A",
+        description="Illegal chain",
         required_capabilities=["analysis"],
         repairs_task_id="child-b",
         created_by=leader_creator,
     )
-    assert fix_b.ok
-    await manager.claim_task(task_id="child-c", team_id="team-b", leader_id="leader-b")
-    assert (await manager.complete_task(task_id="child-c", team_id="team-b")).ok
-    assert (
-        await manager.review_task(
-            task_id="child-c",
-            reviewer_team_id="team-a",
-            review_status=OrgTaskReviewStatus.ACCEPTED,
-        )
-    ).ok
-    assert not await manager.can_complete_parent_task(parent_task_id="parent-one-level", team_id="team-a")
+    assert not nested.ok
+    assert "original sibling" in nested.reason
 
-    # D repairs A directly — one-level supersede unblocks parent.
+    # Second repair must target A; abandoned rejected B does not block.
     fix_a = await manager.create_task(
         task_id="child-d",
         parent_task_id="parent-one-level",
