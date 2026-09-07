@@ -3171,16 +3171,16 @@ async def test_shutdown_self_cancels_running_round_and_closes_stream():
     agent._state.team_member = None
     agent._stream_controller.stream_queue = asyncio.Queue()
 
-    cancel_calls: list[None] = []
+    cancel_calls: list[bool] = []
 
-    async def _coop_cancel() -> None:
-        cancel_calls.append(None)
+    async def _coop_cancel(*, terminal: bool = False) -> None:
+        cancel_calls.append(terminal)
 
     agent._stream_controller.cooperative_cancel = _coop_cancel
 
     await agent.shutdown_self()
 
-    assert cancel_calls == [None], "shutdown must drive the cooperative cancel path"
+    assert cancel_calls == [True], "shutdown must close resume admission before graceful abort"
     sentinel = await agent._stream_controller.stream_queue.get()
     assert sentinel is None
 

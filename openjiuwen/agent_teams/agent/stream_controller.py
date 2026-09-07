@@ -128,6 +128,8 @@ class StreamController:
         self._pending_interrupt_resumes: list[Any] = []
         self._interrupt_lock = asyncio.Lock()
         self._drain_task: Optional[asyncio.Task] = None
+        self._interrupt_resume_cancel_depth: int = 0
+        self._terminal_interrupt_resume_closed: bool = False
         # Transient-retry state (per cycle): attempts so far, and whether to
         # swallow the remaining chunks of a round that emitted a retryable
         # task_failed (reset when the next round starts).
@@ -195,6 +197,7 @@ class StreamController:
         Called once per run cycle (by coordination, after the runtime started).
         Idempotent on the forwarder task.
         """
+        self._terminal_interrupt_resume_closed = False
         harness = self._resources.harness
         if harness is None:
             return
@@ -206,6 +209,7 @@ class StreamController:
 
     async def stop(self) -> None:
         """Stop the output forwarder. The runtime unregisters its own events."""
+        self._terminal_interrupt_resume_closed = True
         drain = self._detach_pending_interrupt_resumes()
         if drain is not None and not drain.done():
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -489,24 +493,34 @@ class StreamController:
     async def cancel_agent(self) -> None:
         """Hard-cancel the in-flight round (rollback to last boundary)."""
         harness = self._resources.harness
+        self._interrupt_resume_cancel_depth += 1
         drains = [self._detach_pending_interrupt_resumes()]
         try:
             if harness is not None:
                 await harness.abort(immediate=True)
         finally:
             drains.append(self._detach_pending_interrupt_resumes())
-            await self._await_detached_interrupt_drains(drains)
+            try:
+                await self._await_detached_interrupt_drains(drains)
+            finally:
+                self._interrupt_resume_cancel_depth -= 1
 
-    async def cooperative_cancel(self) -> None:
-        """Ask the in-flight round to finish gracefully (no rollback)."""
+    async def cooperative_cancel(self, *, terminal: bool = False) -> None:
+        """Gracefully abort; terminal callers keep resume admission closed."""
         harness = self._resources.harness
+        self._interrupt_resume_cancel_depth += 1
+        if terminal:
+            self._terminal_interrupt_resume_closed = True
         drains = [self._detach_pending_interrupt_resumes()]
         try:
             if harness is not None:
                 await harness.abort(immediate=False)
         finally:
             drains.append(self._detach_pending_interrupt_resumes())
-            await self._await_detached_interrupt_drains(drains)
+            try:
+                await self._await_detached_interrupt_drains(drains)
+            finally:
+                self._interrupt_resume_cancel_depth -= 1
 
     async def pause_agent(self) -> None:
         """Pause the in-flight round at its nearest inner iteration boundary.
@@ -537,6 +551,7 @@ class StreamController:
         through :meth:`pause_agent`, which stops at a clean iteration boundary
         and keeps the round resumable.
         """
+        self._terminal_interrupt_resume_closed = True
         await self.cancel_agent()
 
     # ------------------------------------------------------------------
@@ -577,10 +592,16 @@ class StreamController:
         ``_drain_pending_interrupt_resumes`` when the round settles on the
         matching ask.
 
-        Returns ``"delivered"``, ``"queued"``, or ``"dropped"`` (stale: no
-        pending interrupt and no in-flight round).
+        Returns ``"delivered"``, ``"queued"``, or ``"dropped"`` (stale, or
+        cancel / terminal cleanup has closed resume admission).
         """
         async with self._interrupt_lock:
+            if self._terminal_interrupt_resume_closed or self._interrupt_resume_cancel_depth:
+                team_logger.info(
+                    "[{}] dropping interrupt resume during cancel or terminal cleanup",
+                    self._member_name() or "?",
+                )
+                return "dropped"
             if not self.is_valid_interrupt_resume(user_input):
                 if self.has_in_flight_round():
                     self._pending_interrupt_resumes.append(user_input)
@@ -623,6 +644,9 @@ class StreamController:
         has returned to its ``get()`` loop and can process the ``_CmdSend`` ack.
         """
         async with self._interrupt_lock:
+            if self._terminal_interrupt_resume_closed or self._interrupt_resume_cancel_depth:
+                self._pending_interrupt_resumes.clear()
+                return
             if not self._pending_interrupt_resumes:
                 return
             deliverable = None

@@ -609,6 +609,109 @@ async def test_drain_agent_task_forwards_immediate_abort() -> None:
     ("method_name", "immediate"),
     [("cancel_agent", True), ("cooperative_cancel", False)],
 )
+async def test_cancel_rejects_interrupt_resume_while_abort_is_in_progress(
+    method_name: str,
+    immediate: bool,
+) -> None:
+    runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    abort_started = asyncio.Event()
+    release_abort = asyncio.Event()
+
+    async def blocked_abort(*, immediate: bool = False) -> None:
+        runtime.abort_calls.append(immediate)
+        abort_started.set()
+        await release_abort.wait()
+
+    runtime.abort = blocked_abort
+    sc = _make_controller(runtime)
+    cancel_task = asyncio.create_task(getattr(sc, method_name)())
+    try:
+        await asyncio.wait_for(abort_started.wait(), timeout=0.5)
+
+        assert await sc.resume_interrupt(object()) == "dropped"
+        assert runtime.sent == []
+    finally:
+        release_abort.set()
+        await cancel_task
+
+    assert runtime.abort_calls == [immediate]
+    assert await sc.resume_interrupt(object()) == "delivered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_overlapping_cancels_keep_resume_closed_until_both_finish() -> None:
+    runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    abort_started = [asyncio.Event(), asyncio.Event()]
+    release_abort = [asyncio.Event(), asyncio.Event()]
+
+    async def blocked_abort(*, immediate: bool = False) -> None:
+        index = len(runtime.abort_calls)
+        runtime.abort_calls.append(immediate)
+        abort_started[index].set()
+        await release_abort[index].wait()
+
+    runtime.abort = blocked_abort
+    sc = _make_controller(runtime)
+    first = asyncio.create_task(sc.cancel_agent())
+    await asyncio.wait_for(abort_started[0].wait(), timeout=0.5)
+    second = asyncio.create_task(sc.cancel_agent())
+    await asyncio.wait_for(abort_started[1].wait(), timeout=0.5)
+    try:
+        release_abort[0].set()
+        await first
+
+        assert await sc.resume_interrupt(object()) == "dropped"
+        assert runtime.sent == []
+
+        release_abort[1].set()
+        await second
+        assert await sc.resume_interrupt(object()) == "delivered"
+    finally:
+        for event in release_abort:
+            event.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize(
+    "terminal_action",
+    ["stop", "drain_agent_task", "cooperative_cancel"],
+)
+async def test_terminal_cleanup_closes_resume_until_next_start(
+    terminal_action: str,
+) -> None:
+    runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    sc = _make_controller(runtime)
+
+    if terminal_action == "cooperative_cancel":
+        await sc.cooperative_cancel(terminal=True)
+    else:
+        await getattr(sc, terminal_action)()
+
+    assert await sc.resume_interrupt(object()) == "dropped"
+    assert runtime.sent == []
+
+    await sc.start()
+    try:
+        assert await sc.resume_interrupt(object()) == "delivered"
+    finally:
+        await sc.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize(
+    ("method_name", "immediate"),
+    [("cancel_agent", True), ("cooperative_cancel", False)],
+)
 async def test_cancel_discards_pending_interrupt_resumes_and_drain_task(
     method_name: str,
     immediate: bool,
@@ -677,6 +780,9 @@ async def test_cancel_unblocks_production_interrupt_drain_before_abort(
         assert drain.cancelled()
         assert sc._drain_task is None
         assert sc._pending_interrupt_resumes == []
+
+        runtime.send = _FakeRuntime.send.__get__(runtime)
+        assert await sc.resume_interrupt(object()) == "delivered"
     finally:
         block_send.set()
         drain.cancel()
@@ -797,12 +903,19 @@ async def test_cancel_finally_discards_resumes_queued_during_failed_abort() -> N
     assert sc._pending_interrupt_resumes == []
     assert sc._drain_task is None
 
+    runtime.abort = _FakeRuntime.abort.__get__(runtime)
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    assert await sc.resume_interrupt(object()) == "delivered"
+
 
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_pause_preserves_pending_interrupt_resumes() -> None:
     """Pause is resumable and must not inherit abort queue cleanup."""
     runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
     sc = _make_controller(runtime)
     pending = object()
     sc._pending_interrupt_resumes.append(pending)
@@ -810,6 +923,7 @@ async def test_pause_preserves_pending_interrupt_resumes() -> None:
     await sc.pause_agent()
 
     assert sc._pending_interrupt_resumes == [pending]
+    assert await sc.resume_interrupt(object()) == "delivered"
 
 
 @pytest.mark.level1

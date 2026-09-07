@@ -494,10 +494,16 @@ class TeamRuntimeManager:
             # permission-gated tool calls in one turn), or drops it when no
             # round is in flight (stale). Only the stale case surfaces the
             # unsupported_interactive_input failure that callers may recognise.
-            status = await entry.agent.resume_interrupt(payload)
-            if status == "dropped":
-                return DeliverResult.failure("unsupported_interactive_input")
-            return DeliverResult.success(None)
+            ticket = await entry.interact_gate.admit()
+            if ticket is None:
+                return DeliverResult.failure("gate_closed")
+            try:
+                status = await entry.agent.resume_interrupt(payload)
+                if status == "dropped":
+                    return DeliverResult.failure("unsupported_interactive_input")
+                return DeliverResult.success(None)
+            finally:
+                await entry.interact_gate.consume_done(ticket)
 
         try:
             external_event = (
