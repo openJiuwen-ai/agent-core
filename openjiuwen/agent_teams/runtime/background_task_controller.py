@@ -126,20 +126,28 @@ class BackgroundTaskController:
                 self._paused.pop(rid, None)
             return bool(targets)
 
-    async def stop(self, run_id: str) -> bool:
-        """Terminal stop of one run — dropped, not parked for resume."""
+    async def stop(self, run_id: str | None = None) -> bool:
+        """Terminal stop of run(s) — dropped, not parked for resume.
+
+        ``run_id=None`` stops every run across both registries: active runs are
+        aborted (reason ``stop``, the engine writes a seal record) and dropped;
+        paused runs only lose their relaunch closure — their pause record already
+        lives in the journal, so a cold-start resume still hits the cache prefix.
+        """
         async with self._lock:
-            h = self._active.get(run_id)
-            if h is not None:
+            if run_id is None:
+                active_targets = dict(self._active)
+                paused_targets = dict(self._paused)
+            else:
+                h = self._active.get(run_id)
+                active_targets = {run_id: h} if h is not None else {}
+                paused_targets = {run_id: self._paused[run_id]} if run_id in self._paused else {}
+            for rid, h in active_targets.items():
                 await self._abort_one(h, "stop")
-                self._active.pop(run_id, None)   # terminal: NOT into _paused
-                return True
-            if run_id in self._paused:
-                # Already aborted at pause time; just drop the relaunch
-                # closure so a later resume(run_id) cannot relaunch.
-                self._paused.pop(run_id, None)
-                return True
-            return False
+                self._active.pop(rid, None)   # terminal: NOT into _paused
+            for rid in paused_targets:
+                self._paused.pop(rid, None)
+            return bool(active_targets or paused_targets)
 
     def is_paused(self, run_id: str | None = None) -> bool:
         """Whether ``run_id`` (any run when None) is currently paused."""

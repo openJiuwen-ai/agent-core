@@ -187,6 +187,7 @@ async def _exec_loaded(loaded, rt: Runtime) -> Any:
             description=description,
             message=f"Workflow started, args: {args_text}",
             phases=phases,
+            script_path=rt.script_path,
             # Ledgers exist (possibly unbounded) before the run starts, so the
             # budget badges can render from the first event instead of waiting
             # for the first agent to complete.
@@ -351,6 +352,7 @@ async def run_workflow(
         abort_event=abort_event,
         agent_gate=agent_gate,
         run_id=run_id,
+        script_path=path,
     )
     # Hand the ledger to the backend: it is the only layer that sees what a call
     # really costs, so it does the accounting and the engine only reads. The
