@@ -159,6 +159,12 @@ async def prune_stale(
             text = record.get("text", "")
             if not text:
                 continue
+            logger.info(
+                "[TTSERail] dream prune before_%s rtype=%s text=%s",
+                mode,
+                rtype,
+                text,
+            )
             if mode == "delete":
                 n = await store.delete_record(text, rtype, save=False)
             else:
@@ -221,6 +227,14 @@ def _best_count_text(cluster: Sequence[Dict[str, Any]]) -> str:
     return max(cluster, key=lambda r: int(r.get("count", 0))).get("text", "")
 
 
+def _format_cluster_members(cluster: Sequence[Dict[str, Any]]) -> str:
+    """Human-readable cluster members for dream logs (full text, no truncation)."""
+    parts: List[str] = []
+    for i, record in enumerate(cluster):
+        parts.append(f"[{i}] count={int(record.get('count', 0))} text={record.get('text', '')}")
+    return " || ".join(parts)
+
+
 async def _llm_merge_cluster(
     *,
     llm: Model,
@@ -270,7 +284,21 @@ async def _apply_merge_verdict(
 
     total_count = sum(int(r.get("count", 0)) for r in cluster)
     reason = "dream_merge" if verdict.verdict == "MERGE" else "dream_rewrite"
+    logger.info(
+        "[TTSERail] dream before_%s track=%s members=%s canonical=%s llm_reason=%s",
+        verdict.verdict.lower(),
+        track,
+        _format_cluster_members(cluster),
+        canonical,
+        verdict.reason or "",
+    )
     for record in cluster:
+        logger.info(
+            "[TTSERail] dream before_retire track=%s action=%s text=%s",
+            track,
+            reason,
+            record.get("text", ""),
+        )
         await store.retire(record["text"], track, reason, save=False)
     await store.add_record_direct(track, canonical, count=max(total_count, 1), save=False)
     return verdict.verdict.lower(), (canonical, track)
@@ -320,6 +348,15 @@ async def dream_merge(
         len(clusters),
         budget,
     )
+    for idx, cluster in enumerate(clusters):
+        logger.info(
+            "[TTSERail] dream cluster track=%s idx=%s/%s size=%s members=%s",
+            track,
+            idx + 1,
+            len(clusters),
+            len(cluster),
+            _format_cluster_members(cluster),
+        )
     for cluster in clusters:
         if budget <= 0:
             break
@@ -339,6 +376,7 @@ async def dream_merge(
             continue
 
         # TIP: one rewrite retry when MERGE/REWRITE yields invalid shape.
+        effective = verdict
         action, added = await _apply_merge_verdict(
             store, track, cluster, verdict, capability_names=capability_names
         )
@@ -353,6 +391,7 @@ async def dream_merge(
                 capabilities=capabilities + "\n\nPrevious CANONICAL was invalid; rewrite as a valid TIP or KEEP_DISTINCT.",
             )
             if retry is not None:
+                effective = retry
                 action, added = await _apply_merge_verdict(
                     store, track, cluster, retry, capability_names=capability_names
                 )
@@ -366,7 +405,7 @@ async def dream_merge(
                 action,
                 track,
                 len(cluster),
-                (verdict.reason or "")[:80],
+                effective.reason or "",
             )
         else:
             kept += 1
@@ -374,7 +413,7 @@ async def dream_merge(
                 "[TTSERail] dream keep_distinct track=%s size=%s reason=%s",
                 track,
                 len(cluster),
-                (verdict.reason or "")[:80],
+                effective.reason or "",
             )
     return merged, kept, added_items
 
@@ -390,10 +429,15 @@ async def dream_purge_tips(
         reason = tip_purge_reason(text, capability_names)
         if reason is None:
             continue
+        logger.info(
+            "[TTSERail] dream before_purge tip reason=%s text=%s",
+            reason,
+            text,
+        )
         removed = await store.retire(text, "tip", reason, save=False)
         if removed:
             purged += 1
-            logger.info("[TTSERail] dream purged tip (%s): %s", reason, text[:80])
+            logger.info("[TTSERail] dream purged tip (%s): %s", reason, text)
     return purged
 
 

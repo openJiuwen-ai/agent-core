@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from typing import FrozenSet, Optional, Set, Tuple
 
+from openjiuwen.core.common.logging import logger
+
 # When <condition>: use <capability> to <action>
 _TIP_RE = re.compile(
     r"^\s*when\s+(.+?)\s*:\s*use\s+(.+?)\s+to\s+(.+?)\s*$",
@@ -76,6 +78,12 @@ def parse_tip(text: str) -> Optional[Tuple[str, str, str]]:
     condition = " ".join(match.group(1).split()).strip()
     capability = " ".join(match.group(2).split()).strip().strip("`\"'")
     action = " ".join(match.group(3).split()).strip()
+    logger.info(
+        "[TTSERail] parse_tip condition=%s capability=%s action=%s",
+        condition,
+        capability,
+        action,
+    )
     if not condition or not capability or not action:
         return None
     return condition, capability, action
