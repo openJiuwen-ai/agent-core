@@ -12,8 +12,11 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging im
     browser_agent_log_info,
     browser_agent_log_warning,
 )
+
 from ..utils.parsing import sanitize_json_schema
 from .logging_utils import summarize_tool_arguments_for_log
+
+_OWNER_CANCEL_WAIT_S = 2.0
 
 
 class BrowserMoveStdioClient(StdioClient):
@@ -169,15 +172,25 @@ class BrowserMoveStdioClient(StdioClient):
 
         self._owner_task = asyncio.create_task(self._run_owner())
 
+        startup_timeout = timeout
+        if timeout == NO_TIMEOUT and "timeout_s" in self._params:
+            startup_timeout = self._resolve_timeout(default_s=30.0)
+
         try:
-            if timeout == NO_TIMEOUT:
+            if startup_timeout == NO_TIMEOUT:
                 await self._owner_ready.wait()
             else:
-                await asyncio.wait_for(self._owner_ready.wait(), timeout=timeout)
+                await asyncio.wait_for(
+                    self._owner_ready.wait(),
+                    timeout=startup_timeout,
+                )
         except asyncio.TimeoutError:
-            logger.error(f"Stdio connection timeout")
+            logger.error("Stdio connection timeout")
             await self._force_close()
             return False
+        except asyncio.CancelledError:
+            await self._force_close_shielded()
+            raise
 
         if self._connect_exception is not None:
             await self._force_close()
@@ -202,11 +215,11 @@ class BrowserMoveStdioClient(StdioClient):
             else:
                 await asyncio.wait_for(self._owner_task, timeout=timeout)
         except asyncio.TimeoutError:
-            logger.error(f"Stdio disconnect timeout")
+            logger.error("Stdio disconnect timeout")
             await self._force_close()
             return False
         except asyncio.CancelledError:
-            logger.error(f"Stdio disconnect cancelled")
+            logger.error("Stdio disconnect cancelled")
             await self._force_close()
             raise
         except Exception as e:
@@ -216,49 +229,40 @@ class BrowserMoveStdioClient(StdioClient):
         self._owner_task = None
         return self._is_disconnected
 
-    async def _force_close(self):
-        leaked_owner_task: Optional[asyncio.Task] = None
-        if self._owner_task and not self._owner_task.done():
-            self._owner_close.set()
+    async def _force_close_shielded(self) -> None:
+        close_task = asyncio.create_task(self._force_close())
+        while not close_task.done():
             try:
-                await asyncio.wait_for(self._owner_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                self._owner_task.cancel()
-                try:
-                    await asyncio.wait_for(self._owner_task, timeout=2.0)
-                except asyncio.CancelledError:
-                    logger.warning(
-                        "Stdio client owner task was cancelled during graceful close"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Stdio client owner task close raised exception: %r", e
-                    )
-                # Owner task did not finish within cancel grace period — it may
-                # still be stuck inside _exit_stack.aclose() (e.g., subprocess
-                # stdin closure blocked). Keep a strong reference so the task
-                # object is not GC'd while we clear our handle, and surface a
-                # warning so operators can detect subprocess pipe leaks.
-                if not self._owner_task.done():
-                    leaked_owner_task = self._owner_task
-                    logger.warning(
-                        "Stdio client owner task did not terminate after cancel; "
-                        "subprocess pipe may leak. task=%r",
-                        leaked_owner_task,
-                    )
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._owner_task = None
-        self._session = None
-        self._client = None
-        self._read = None
-        self._write = None
-        # Reset the exit stack so a subsequent connect() starts fresh; the
-        # leaked owner task (if any) still holds the old stack and will run
-        # its own aclose() independently.
-        self._exit_stack = AsyncExitStack()
-        self._leaked_owner_task = leaked_owner_task
-        self._is_disconnected = True
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                continue
+        close_task.result()
+
+    async def _force_close(self) -> None:
+        owner_task = self._owner_task
+        if owner_task is None:
+            return
+
+        self._owner_close.set()
+        if not owner_task.done():
+            owner_task.cancel()
+
+        done, _ = await asyncio.wait(
+            {owner_task},
+            timeout=_OWNER_CANCEL_WAIT_S,
+        )
+        if owner_task not in done:
+            self._leaked_owner_task = owner_task
+            logger.warning(
+                "Stdio client owner task did not terminate after cancel; subprocess pipe may leak. task=%r",
+                owner_task,
+            )
+            return
+
+        try:
+            owner_task.result()
+        except (asyncio.CancelledError, Exception):
+            pass
 
     async def list_tools(self, *, timeout: float = NO_TIMEOUT) -> List[Any]:
         """List available tools via Stdio, with auto-reconnect and timeout."""
@@ -294,14 +298,10 @@ class BrowserMoveStdioClient(StdioClient):
                     if connected:
                         continue
                 logger.error(f"Stdio list_tools timed out after {effective_timeout:.1f}s")
-                raise RuntimeError(
-                    f"Stdio list_tools timed out after {effective_timeout:.1f}s"
-                ) from e
+                raise RuntimeError(f"Stdio list_tools timed out after {effective_timeout:.1f}s") from e
             except Exception as e:
                 if attempt == 0 and self._is_retryable_transport_error(e):
-                    logger.warning(
-                        f"Stdio list_tools retry after reconnect: type={type(e).__name__}, repr={e!r}"
-                    )
+                    logger.warning(f"Stdio list_tools retry after reconnect: type={type(e).__name__}, repr={e!r}")
                     connected = await self._reconnect(timeout=timeout)
                     if connected:
                         continue
@@ -365,12 +365,8 @@ class BrowserMoveStdioClient(StdioClient):
                     connected = await self._reconnect(timeout=effective_timeout)
                     if connected:
                         continue
-                logger.error(
-                    f"Tool call timed out via Stdio: tool='{tool_name}', timeout={effective_timeout:.1f}s"
-                )
-                raise RuntimeError(
-                    f"Stdio tool call timed out for '{tool_name}' after {effective_timeout:.1f}s"
-                ) from e
+                logger.error(f"Tool call timed out via Stdio: tool='{tool_name}', timeout={effective_timeout:.1f}s")
+                raise RuntimeError(f"Stdio tool call timed out for '{tool_name}' after {effective_timeout:.1f}s") from e
             except Exception as e:
                 if attempt == 0 and self._is_retryable_transport_error(e):
                     browser_agent_log_warning(
@@ -383,9 +379,7 @@ class BrowserMoveStdioClient(StdioClient):
                     f"Tool call failed via Stdio: type={type(e).__name__}, repr={e!r}",
                     exc_info=True,
                 )
-                raise RuntimeError(
-                    f"Stdio tool call failed for '{tool_name}': {type(e).__name__}: {e!r}"
-                ) from e
+                raise RuntimeError(f"Stdio tool call failed for '{tool_name}': {type(e).__name__}: {e!r}") from e
 
     async def get_tool_info(self, tool_name: str, *, timeout: float = NO_TIMEOUT) -> Optional[Any]:
         """Get specific tool info via Stdio."""
