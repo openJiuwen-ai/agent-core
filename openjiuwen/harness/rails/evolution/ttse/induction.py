@@ -93,9 +93,10 @@ async def induce_batch(
 
     Cost amortization: N tasks induce via a single LLM call instead of N.
     ``group`` is a list of per-task observations, each a dict with keys
-    ``task_id`` / ``task_prompt`` / ``traj_text`` / ``outcome``. The trajectory
-    excerpt and existing-bank text are capped (matching the reference) so the
-    prompt stays bounded as the batch / bank grows. Returns (facts, tips).
+    ``task_id`` / ``task_prompt`` / ``traj_text`` / ``outcome``. Existing-bank
+    text is still capped so the prompt stays bounded as the bank grows.
+    Trajectory excerpts are used as stored (the rail applies
+    ``batch_traj_budget`` when buffering). Returns (facts, tips).
     """
     prepared = []
     for item in group:
@@ -105,7 +106,7 @@ async def induce_batch(
             (
                 item.get("task_id", ""),
                 item.get("task_prompt", ""),
-                (item.get("traj_text") or "")[:1100],
+                item.get("traj_text") or "",
                 lbl,
             )
         )

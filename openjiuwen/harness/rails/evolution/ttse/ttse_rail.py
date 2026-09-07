@@ -315,7 +315,12 @@ class TTSERail(EvolutionRail):
                 {
                     "task_id": snapshot.get("task_id") or "",
                     "task_prompt": task_query,
-                    "traj_text": traj_text[: self._ttse_config.batch_traj_budget],
+                    "traj_text": (
+                        traj_text
+                        if not self._ttse_config.batch_traj_budget
+                        or self._ttse_config.batch_traj_budget <= 0
+                        else traj_text[: self._ttse_config.batch_traj_budget]
+                    ),
                     "outcome": outcome,
                 }
             )

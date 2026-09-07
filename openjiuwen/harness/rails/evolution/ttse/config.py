@@ -43,7 +43,8 @@ class TTSEConfig:
         top_k_facts / top_k_tips: How many rules to inject per task when a
             retrieval embedding provider is configured.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
-            Overflow keeps the tail (actions/observations), not the USER head.
+            ``None`` or ``<= 0`` means no truncation. When set, overflow keeps
+            the tail (actions/observations), not the USER head.
         inject_enabled: Inject the bank (or top-K) into the system prompt.
         inject_mode: Where FACT/TIP land. Default ``disk_catalog`` leaves a
             fixed guidance section, trails the category listing as a prompt
@@ -58,8 +59,10 @@ class TTSEConfig:
             buffered and induced together via ONE ``induce_batch`` LLM call every
             ``batch_size`` tasks (blame/retire still run per failed task). 1 =
             induce on every task (default, the reference's per-task mode).
-        batch_traj_budget: Per-task trajectory chars kept in the batch buffer
-            (each task's excerpt is capped before the single batch induce call).
+        batch_traj_budget: Per-task trajectory chars kept in the batch buffer.
+            ``None`` or ``<= 0`` means keep the full trajectory from the induce
+            flatten. When set, each task's excerpt is capped before the batch
+            induce call.
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
         detect_min_tool_calls: Min tool calls before reply-delivery detect runs.
         detect_max_output_paths: Cap on extracted write paths (artifact gate).
@@ -86,14 +89,14 @@ class TTSEConfig:
     max_tips: int = 400
     top_k_facts: int = 10
     top_k_tips: int = 10
-    traj_char_budget: int = 9000
+    traj_char_budget: Optional[int] = None
     inject_enabled: bool = True
     inject_mode: str = "disk_catalog"
     evolve_enabled: bool = True
     success_threshold: float = 0.999
     induce_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY
     batch_size: int = 1
-    batch_traj_budget: int = 1100
+    batch_traj_budget: Optional[int] = None
     consult_max_chars: int = 8000
     consult_max_rules: int = 40
     detect_min_tool_calls: int = 5

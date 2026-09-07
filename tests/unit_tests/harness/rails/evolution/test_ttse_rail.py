@@ -1103,6 +1103,7 @@ def test_trajectory_adapter_reads_openai_tool_args_and_keeps_tail():
     assert "ACTION: write_file(" in full
     assert "slides.md" in full
     assert "BRIEF_HEAD" in full
+    assert messages_to_trajectory_text(messages) == full
     cut = messages_to_trajectory_text(messages, budget=40)
     assert "write_file" in cut
     assert "BRIEF_HEAD" not in cut

@@ -163,14 +163,15 @@ def extract_final_reply(
 def messages_to_trajectory_text(
     messages: List[Any],
     *,
-    budget: Optional[int] = 9000,
+    budget: Optional[int] = None,
 ) -> str:
     """Flatten jiuwen message dicts into USER/THOUGHT/ACTION/OBSERVATION lines.
 
     System messages are skipped (they are prompt scaffolding, not behavior).
-    When ``budget`` is set and the flatten exceeds it, keep the **tail**
-    (ACTION/OBSERVATION) rather than the USER head. Accepts dict messages or
-    message objects with ``role``/``content`` attributes.
+    When ``budget`` is a positive int and the flatten exceeds it, keep the
+    **tail** (ACTION/OBSERVATION) rather than the USER head. ``None`` / ``<= 0``
+    keeps the full flatten. Accepts dict messages or message objects with
+    ``role``/``content`` attributes.
     """
     lines: List[str] = []
     for raw in messages or []:
