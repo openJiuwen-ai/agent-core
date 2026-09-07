@@ -82,22 +82,22 @@ _SUPERSEDEABLE_REVIEW_STATUSES = frozenset({
 })
 
 
-def _is_accepted_task(status: str, review: OrgTaskReviewRecord | None) -> bool:
+def _is_accepted_task(status: str, review: Any) -> bool:
     return (
         status == OrgTaskStatus.COMPLETED.value
         and review is not None
-        and review.review_status == OrgTaskReviewStatus.ACCEPTED.value
+        and str(review.review_status) == OrgTaskReviewStatus.ACCEPTED.value
     )
 
 
-def _is_supersedable_task(status: str, review: OrgTaskReviewRecord | None) -> bool:
+def _is_supersedable_task(status: str, review: Any) -> bool:
     """FAILED, or COMPLETED with REJECTED/NEEDS_REVISION — repairable / abandonable terminal."""
     if status == OrgTaskStatus.FAILED.value:
         return True
     return (
         status == OrgTaskStatus.COMPLETED.value
         and review is not None
-        and review.review_status in _SUPERSEDEABLE_REVIEW_STATUSES
+        and str(review.review_status) in _SUPERSEDEABLE_REVIEW_STATUSES
     )
 
 
@@ -549,6 +549,45 @@ class OrgTaskManager:
             rows = (await session.execute(stmt)).scalars().all()
             return [self._to_task(row) for row in rows]
 
+    async def list_tasks_created_by_team(self, *, team_id: str, limit: int = 100) -> list[OrgTask]:
+        """Tasks this team created (parent follow-ups on rebind use creator_team_id)."""
+        await self.initialize()
+        stmt = (
+            select(OrgTaskRecord)
+            .where(
+                OrgTaskRecord.organization_id == self.organization_id,
+                OrgTaskRecord.creator_team_id == team_id,
+            )
+            .order_by(OrgTaskRecord.updated_at.desc())
+            .limit(limit)
+        )
+        async with self._read() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._to_task(row) for row in rows]
+
+    async def has_accepted_or_active_repair(
+        self,
+        *,
+        parent_task_id: str,
+        repairs_target: str,
+    ) -> bool:
+        """True when repairs_target already has an accepted or still-active sibling repair."""
+        await self.initialize()
+        async with self._read() as session:
+            repair_siblings = await self._list_sibling_repairs_of(
+                session,
+                parent_task_id=parent_task_id,
+                repairs_target=repairs_target,
+            )
+            for sibling in repair_siblings:
+                review = await self._get_latest_review_row(session, sibling.task_id)
+                if _is_accepted_task(sibling.status, review):
+                    return True
+                if _is_supersedable_task(sibling.status, review):
+                    continue
+                return True
+            return False
+
     async def claim_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
         await self.initialize()
         now = get_current_time()
@@ -773,7 +812,6 @@ class OrgTaskManager:
             OrgTaskFailedEvent(
                 organization_id=self.organization_id,
                 team_id=team_id,
-                leader_id=row.assigned_leader_id,
                 task_id=task_id,
                 failure_code=code.value,
                 failure_reason=reason,
