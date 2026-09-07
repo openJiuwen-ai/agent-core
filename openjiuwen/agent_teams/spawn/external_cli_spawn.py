@@ -400,6 +400,7 @@ async def external_cli_spawn(
             codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
             codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
             codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
+            claude_turn_idle_timeout_s=cli_cfg.claude_turn_idle_timeout_s,
             external_model_config=external_model_config,
             fallback_external_model_config=fallback_external_model_config,
             promote_fallback_model=promote_fallback_model,

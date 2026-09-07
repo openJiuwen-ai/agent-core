@@ -354,11 +354,11 @@ class _RecordingTeamLogger:
         self.errors.append((message, args))
 
 
-def _ctx(member: str = "claude-1") -> TeamRuntimeContext:
+def _ctx(member: str = "claude-1", cli_agent: str = "claude") -> TeamRuntimeContext:
     return TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name=member,
-        cli_agent="claude",
+        cli_agent=cli_agent,
         team_spec=TeamSpec(team_name="ext_team", display_name="Ext", language="en"),
         db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"),
         messager_config=MessagerTransportConfig(backend="inprocess", team_name="ext_team"),
@@ -476,6 +476,7 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
             mcp_server_command=("openjiuwen-team-mcp",),
             extra_env={"EXTRA": "1"},
             system_prompt="persona",
+            claude_turn_idle_timeout_s=45.0,
         )
     finally:
         reset_session_id(token)
@@ -492,6 +493,7 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     assert options.cli_path is None
     assert options.session_id == build_claude_session_id(team_session_id="sess-1", member_name="claude-1")
     assert options.resume is None
+    assert runtime._turn_idle_timeout_s == 45.0
 
 
 @pytest.mark.asyncio
@@ -576,6 +578,30 @@ async def test_build_cli_runtime_claude_rejects_full_command_override(fake_claud
                 _ctx(),
                 command_override=("claude", "--print"),
                 mcp_server_command=("openjiuwen-team-mcp",),
+            )
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.level0
+def test_claude_sdk_runtime_rejects_non_positive_idle_timeout():
+    with pytest.raises(ValueError, match="greater than zero"):
+        ClaudeSdkRuntime(
+            member_name="claude-1",
+            options=_FakeOptions(),
+            turn_idle_timeout_s=0,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_rejects_claude_idle_timeout_for_other_backend(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="only supported for Claude SDK members"):
+            await spawn_mod.build_cli_runtime(
+                _ctx(cli_agent="generic"),
+                claude_turn_idle_timeout_s=45.0,
             )
     finally:
         reset_session_id(token)

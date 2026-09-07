@@ -145,6 +145,20 @@ def test_codex_turn_stall_policy_is_validated_and_codex_only():
         ExternalCliAgentSpec(cli_agent="generic", codex_turn_idle_retries=1)
 
 
+def test_claude_turn_stall_policy_is_validated_and_claude_only():
+    config = ExternalCliAgentSpec(
+        cli_agent="claude",
+        claude_turn_idle_timeout_s=45.0,
+    )
+    assert config.claude_turn_idle_timeout_s == 45.0
+
+    with pytest.raises(ValidationError, match="greater than 0"):
+        ExternalCliAgentSpec(cli_agent="claude", claude_turn_idle_timeout_s=0)
+
+    with pytest.raises(ValidationError, match="claude_turn_idle_timeout_s is only valid"):
+        ExternalCliAgentSpec(cli_agent="codex", claude_turn_idle_timeout_s=45.0)
+
+
 def test_unknown_backend_returns_none():
     """Unknown backend names are rejected by registry helpers."""
     assert backend_for("not-a-real-cli") is None

@@ -190,6 +190,7 @@ async def build_cli_runtime(
     codex_bypass_approvals_and_sandbox: bool = True,
     codex_turn_idle_timeout_s: float | None = None,
     codex_turn_idle_retries: int | None = None,
+    claude_turn_idle_timeout_s: float | None = None,
     external_model_config: ExternalCliModelConfig | None = None,
     fallback_external_model_config: ExternalCliModelConfig | None = None,
     promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
@@ -236,6 +237,8 @@ async def build_cli_runtime(
             one SDK turn. Every received SDK notification refreshes it.
         codex_turn_idle_retries: Optional number of same-thread retries when a
             stalled turn emitted no SDK notifications and was interrupted.
+        claude_turn_idle_timeout_s: Optional Claude-only inactivity ceiling for
+            one SDK turn. Every received SDK message refreshes it.
         external_model_config: Optional model endpoint config translated into
             backend-specific SDK options.
         fallback_external_model_config: Optional endpoint used only after an
@@ -281,6 +284,16 @@ async def build_cli_runtime(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason="Claude SDK members do not support command_override; configure cli_path instead",
             )
+        if codex_turn_idle_timeout_s is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_turn_idle_timeout_s is only supported for Codex SDK members",
+            )
+        if codex_turn_idle_retries is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_turn_idle_retries is only supported for Codex SDK members",
+            )
         if ssh_transport is None:
             base_env = strip_parent_claude_env(dict(os.environ))
         else:
@@ -318,12 +331,18 @@ async def build_cli_runtime(
             team_context_tracker=team_context_tracker,
             team_name=descriptor.team_name,
             role=ctx.role.value,
+            turn_idle_timeout_s=claude_turn_idle_timeout_s,
         )
     if ctx.cli_agent == "codex":
         if command_override is not None:
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason="Codex SDK members do not support command_override; configure cli_path instead",
+            )
+        if claude_turn_idle_timeout_s is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
             )
         if ssh_transport is not None:
             raise_error(
@@ -391,6 +410,11 @@ async def build_cli_runtime(
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="cli_path is only supported for Claude and Codex SDK members",
+        )
+    if claude_turn_idle_timeout_s is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
         )
 
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)

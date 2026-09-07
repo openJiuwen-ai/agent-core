@@ -11,16 +11,18 @@ the failure paths; the normal-stream mapping path is covered by the existing
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
-from openjiuwen.agent_teams.schema.status import MemberStatus
-
 import pytest
 
+from openjiuwen.agent_teams.external.cli_agent.claude import runtime as claude_runtime_mod
 from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from tests.test_logger import logger
 
 
@@ -88,6 +90,7 @@ def _install_fake_sdk(monkeypatch, *, messages_factory, connect_error=None) -> M
         def __init__(self, *, options, transport=None):
             self.options = options
             self.transport = transport
+            self.interrupt_count = 0
 
         async def connect(self):
             if connect_error is not None:
@@ -97,11 +100,16 @@ def _install_fake_sdk(monkeypatch, *, messages_factory, connect_error=None) -> M
             pass
 
         async def receive_response(self):
-            for message in messages_factory():
+            messages = messages_factory()
+            if hasattr(messages, "__aiter__"):
+                async for message in messages:
+                    yield message
+                return
+            for message in messages:
                 yield message
 
         async def interrupt(self):
-            pass
+            self.interrupt_count += 1
 
         async def disconnect(self):
             pass
@@ -181,13 +189,15 @@ def _build_ctx(mm, messager, sink):
     )
 
 
-def _make_runtime(sdk) -> ClaudeSdkRuntime:
+def _make_runtime(sdk: Any, *, turn_idle_timeout_s: float = 600.0) -> ClaudeSdkRuntime:
+    _ = sdk
     return ClaudeSdkRuntime(
         member_name="worker1",
         options=_FakeOptions(),
         transport=None,
         inject_mcp=False,
         member_agent_id="agent_worker1",
+        turn_idle_timeout_s=turn_idle_timeout_s,
     )
 
 
@@ -234,6 +244,66 @@ async def test_plain_textblock_does_not_trigger_failure(monkeypatch):
     assert len(mm.sent) == 0
     assert chunks
     logger.info("text surfaced as %d chunks, no failure", len(chunks))
+
+
+@pytest.mark.asyncio
+async def test_silent_message_stream_times_out_and_failed_round_returns_idle(monkeypatch):
+    async def messages():
+        await asyncio.Event().wait()
+        if False:
+            yield None
+
+    sdk = _install_fake_sdk(monkeypatch, messages_factory=messages)
+    runtime = _make_runtime(sdk, turn_idle_timeout_s=0.01)
+    mm = _FakeMessageManager()
+    runtime._reliability_ctx = _build_ctx(mm, _FakeMessager(), _StatusSink())
+    rounds: list[str] = []
+
+    async def on_round(kind: str) -> None:
+        rounds.append(kind)
+
+    await runtime.start()
+    client = runtime._client
+    assert client is not None
+
+    async def hanging_interrupt() -> None:
+        client.interrupt_count += 1
+        await asyncio.Event().wait()
+
+    client.interrupt = hanging_interrupt
+    monkeypatch.setattr(claude_runtime_mod, "_INTERRUPT_TIMEOUT_S", 0.01)
+    await runtime.subscribe(on_round=on_round)
+    await runtime.send("hi")
+    turn_task = runtime._turn_task
+    assert turn_task is not None
+
+    await asyncio.wait_for(turn_task, timeout=1.0)
+
+    assert client.interrupt_count == 1
+    assert rounds == ["started", "failed"]
+    assert runtime.state is HarnessState.IDLE
+    assert len(mm.sent) == 1
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "network_timeout"
+    assert failure.reason.sdk_error_type == "_ClaudeTurnIdleTimeout"
+
+
+@pytest.mark.asyncio
+async def test_each_claude_message_refreshes_idle_timeout(monkeypatch):
+    async def messages():
+        for content in ("one", "two", "three"):
+            await asyncio.sleep(0.12)
+            yield sdk.AssistantMessage(content=[sdk.TextBlock(content)])
+        yield sdk.ResultMessage(subtype="success")
+
+    sdk = _install_fake_sdk(monkeypatch, messages_factory=messages)
+    runtime = _make_runtime(sdk, turn_idle_timeout_s=0.2)
+    await runtime.start()
+
+    chunks = [chunk async for chunk in runtime._drive({"query": "hi"})]
+
+    assert [chunk.payload["content"] for chunk in chunks] == ["one", "two", "three"]
+    assert runtime._client.interrupt_count == 0
 
 
 @pytest.mark.asyncio

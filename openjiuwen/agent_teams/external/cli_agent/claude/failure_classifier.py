@@ -82,8 +82,10 @@ def classify_claude_exception(
     if stderr:
         message = f"{message}\nError output: {stderr}" if message else str(stderr)
 
-    # Network/stream timeout — applies to either phase.
-    if _is_timeout_exception(exc):
+    # Network/stream timeout — applies to either phase. The runtime's idle
+    # watchdog raises its own sentinel, so match it by name to avoid an
+    # import cycle (the classifier must stay runtime-independent).
+    if _is_timeout_exception(exc) or exc_type_name == "_ClaudeTurnIdleTimeout":
         return "network_timeout", ExternalRuntimeFailureReason(
             message=message,
             sdk_error_type=exc_type_name,

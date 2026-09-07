@@ -100,6 +100,15 @@ def test_classify_claude_exception_timeout_is_network_timeout():
     assert category == "network_timeout"
 
 
+def test_classify_claude_idle_watchdog_as_network_timeout():
+    idle_timeout_type = type("_ClaudeTurnIdleTimeout", (RuntimeError,), {})
+
+    category, reason = classify_claude_exception(idle_timeout_type("stream stalled"), phase="turn")
+
+    assert category == "network_timeout"
+    assert reason.sdk_error_type == "_ClaudeTurnIdleTimeout"
+
+
 def test_classify_claude_exception_unknown_is_sdk_error():
     category, reason = classify_claude_exception(ValueError("weird"), phase="turn")
     assert category == "sdk_error"

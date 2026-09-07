@@ -41,6 +41,17 @@ class _ClaudeToolMetadata:
 
 
 _MAX_FAILURE_DETAIL_CHARS = 8000
+_INTERRUPT_TIMEOUT_S = 5.0
+
+# Same rationale as the Codex idle ceiling: a Claude member's message stream
+# stays silent while a sub-agent or a long-running tool executes, and a hung
+# LLM endpoint otherwise parks the turn (and the member, stuck BUSY) forever.
+# Per-team override: ``ExternalCliAgentSpec.claude_turn_idle_timeout_s``.
+_DEFAULT_TURN_IDLE_TIMEOUT_S = 600.0
+
+
+class _ClaudeTurnIdleTimeout(RuntimeError):
+    """Signal that one Claude turn's message stream stalled past the ceiling."""
 
 
 class _ClaudeStderrTail:
@@ -88,6 +99,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         member_agent_id: str | None = None,
         team_context_tracker: Any = None,
         span_bridge: Any | None = None,
+        turn_idle_timeout_s: float = _DEFAULT_TURN_IDLE_TIMEOUT_S,
     ):
         """Bind SDK options; the SDK client is connected on start."""
         super().__init__(
@@ -95,6 +107,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
         )
+        if turn_idle_timeout_s <= 0:
+            raise ValueError("turn_idle_timeout_s must be greater than zero")
         self._options = options
         self._fallback_options = fallback_options
         self._promote_fallback_model = promote_fallback_model
@@ -102,6 +116,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         self._transport = transport
         self._inject_mcp = inject_mcp
         self._mcp_server_name = mcp_server_name
+        self._turn_idle_timeout_s = turn_idle_timeout_s
         self._sdk_mcp_tool_set: ClaudeSdkMcpToolSet | None = None
         self._client: Any | None = None
         self._abort_requested = False
@@ -317,7 +332,31 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         try:
             await client.query(text)
             chunk_index = 0
-            async for message in client.receive_response():
+            message_stream = client.receive_response().__aiter__()
+            while True:
+                try:
+                    message = await asyncio.wait_for(
+                        anext(message_stream),
+                        timeout=self._turn_idle_timeout_s,
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    # A stalled message stream otherwise parks this turn (and
+                    # the member, stuck BUSY) forever. Interrupt so the SDK
+                    # terminates the stream, then raise through the shared
+                    # failure path: classify → leader mailbox → failed round
+                    # → member settles back to READY.
+                    team_logger.warning(
+                        "[{}] claude sdk message stream silent for {}s; interrupting turn",
+                        self._member_name,
+                        self._turn_idle_timeout_s,
+                    )
+                    await self._interrupt_client(client)
+                    raise _ClaudeTurnIdleTimeout(
+                        f"Claude SDK member {self._member_name!r} message stream "
+                        f"produced no messages for {self._turn_idle_timeout_s:g}s",
+                    ) from exc
                 if self._abort_requested:
                     team_logger.debug("[{}] claude sdk turn aborted", self._member_name)
                     status = "cancelled"
@@ -511,7 +550,20 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         """Interrupt the in-flight Claude turn if the SDK client is connected."""
         self._abort_requested = True
         if self._client is not None:
-            await self._client.interrupt()
+            await self._interrupt_client(self._client)
+
+    async def _interrupt_client(self, client: Any) -> bool:
+        """Interrupt one Claude turn without allowing the SDK call to hang."""
+        try:
+            await asyncio.wait_for(client.interrupt(), timeout=_INTERRUPT_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 - optional SDK failure types vary by version
+            team_logger.warning(
+                "[{}] Claude SDK interrupt failed: {}",
+                self._member_name,
+                exc,
+            )
+            return False
+        return True
 
     async def aclose(self) -> None:
         """Disconnect the SDK client. Idempotent."""
@@ -556,6 +608,7 @@ async def build_claude_runtime(
     team_context_tracker: Any = None,
     team_name: str | None = None,
     role: str | None = None,
+    turn_idle_timeout_s: float | None = None,
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     _ = mcp_server_command
@@ -649,6 +702,9 @@ async def build_claude_runtime(
         member_agent_id=member_agent_id,
         team_context_tracker=team_context_tracker,
         span_bridge=span_bridge,
+        turn_idle_timeout_s=(
+            _DEFAULT_TURN_IDLE_TIMEOUT_S if turn_idle_timeout_s is None else turn_idle_timeout_s
+        ),
     )
 
 

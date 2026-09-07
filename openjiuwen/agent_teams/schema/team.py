@@ -352,6 +352,16 @@ class ExternalCliAgentSpec(BaseModel):
     replayed because they may already have produced external side effects.
     """
 
+    claude_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
+    """Optional Claude turn inactivity ceiling in seconds.
+
+    The runtime default is used when unset. Any SDK message (assistant /
+    user tool results / system) refreshes the timer; a turn whose message
+    stream stalls past the ceiling is interrupted and finalized as a
+    ``network_timeout`` failure so the member settles back to READY instead
+    of hanging forever.
+    """
+
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
     """Launch argv for the team MCP stdio server registered with the CLI.
     Defaults to the ``openjiuwen-team-mcp`` console-script entry."""
@@ -405,6 +415,8 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
+            raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
         if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
             raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
         return self
