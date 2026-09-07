@@ -128,6 +128,7 @@ class StreamController:
         self._pending_interrupt_resumes: list[Any] = []
         self._interrupt_lock = asyncio.Lock()
         self._drain_task: Optional[asyncio.Task] = None
+        self._drain_requested = False
         self._interrupt_resume_cancel_depth: int = 0
         self._terminal_interrupt_resume_closed: bool = False
         # Transient-retry state (per cycle): attempts so far, and whether to
@@ -229,6 +230,7 @@ class StreamController:
         send. This method contains no await, so its mutations are atomic with
         respect to other coroutines on the owning event loop.
         """
+        self._drain_requested = False
         self._pending_interrupt_resumes.clear()
         drain = self._drain_task
         self._drain_task = None
@@ -415,30 +417,18 @@ class StreamController:
         if team_member is not None and await team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
             self.close_stream()
             return
-        # A round that settled with a pending interrupt may now match a queued
-        # approval (the 2nd of N approvals emitted in one turn). Drain off the
-        # supervisor dispatch path: harness.send awaits an ack the single
-        # supervisor can only process after the current on_state callback
-        # returns, so a synchronous send here would deadlock. An approval whose
-        # ask never re-committed (turn aborted) is an orphan — drop it. The
-        # queue is mutated under _interrupt_lock to keep the invariant
-        # consistent with resume_interrupt / _drain_pending_interrupt_resumes.
-        drain_now = False
-        async with self._interrupt_lock:
-            if self._pending_interrupt_resumes:
-                if self.has_pending_interrupt():
-                    drain_now = True
-                else:
-                    self._pending_interrupt_resumes.clear()
-                    team_logger.info(
-                        "[{}] dropped orphaned queued interrupt resumes (round "
-                        "ended without re-committing their ask)",
-                        self._member_name() or "?",
-                    )
-        if drain_now and (self._drain_task is None or self._drain_task.done()):
-            # No lock here: _on_idle_settled is edge-triggered from the single
-            # supervisor thread, so two IDLE settles cannot overlap.
-            self._drain_task = asyncio.create_task(self._drain_pending_interrupt_resumes())
+        # Never wait for _interrupt_lock on the supervisor's callback path:
+        # its owner may be awaiting a send ACK from that same supervisor.
+        # Defer both delivery and orphan cleanup, checking the current runtime
+        # state after the worker acquires the lock.
+        if (
+            self._pending_interrupt_resumes
+            and not self._terminal_interrupt_resume_closed
+            and not self._interrupt_resume_cancel_depth
+        ):
+            self._drain_requested = True
+            if self._drain_task is None or self._drain_task.done():
+                self._drain_task = asyncio.create_task(self._run_pending_interrupt_resumes())
         await self._wake_mailbox_if_interrupt_cleared()
         if self._request_completion_poll is not None:
             await self._request_completion_poll()
@@ -602,29 +592,34 @@ class StreamController:
                     self._member_name() or "?",
                 )
                 return "dropped"
-            if not self.is_valid_interrupt_resume(user_input):
-                if self.has_in_flight_round():
-                    self._pending_interrupt_resumes.append(user_input)
-                    team_logger.info(
-                        "[{}] queued interrupt resume (round in flight)",
-                        self._member_name() or "?",
-                    )
-                    return "queued"
+            if self.is_valid_interrupt_resume(user_input):
+                harness = self._resources.harness
+                if harness is not None:
+                    await harness.send(user_input)
+                return "delivered"
+            if self.has_in_flight_round():
+                self._pending_interrupt_resumes.append(user_input)
                 team_logger.info(
-                    "[{}] dropping stale interrupt resume input (no pending "
-                    "interrupt, no in-flight round)",
+                    "[{}] queued interrupt resume (round in flight)",
                     self._member_name() or "?",
                 )
-                return "dropped"
-        # Lock released before harness.send: harness.send blocks on the supervisor
-        # (await ack), and holding _interrupt_lock during it deadlocks with
-        # _on_idle_settled which runs on the supervisor thread and tries to
-        # acquire the same lock. The lock only protects is_valid_interrupt_resume
-        # + _pending_interrupt_resumes (queue); harness.send doesn't touch the queue.
-        harness = self._resources.harness
-        if harness is not None:
-            await harness.send(user_input)
-        return "delivered"
+                return "queued"
+            team_logger.info(
+                "[{}] dropping stale interrupt resume input (no pending "
+                "interrupt, no in-flight round)",
+                self._member_name() or "?",
+            )
+            return "dropped"
+
+    async def _run_pending_interrupt_resumes(self) -> None:
+        """Retain IDLE notifications arriving while a previous send awaits ACK."""
+        while (
+            self._drain_requested
+            and not self._terminal_interrupt_resume_closed
+            and not self._interrupt_resume_cancel_depth
+        ):
+            self._drain_requested = False
+            await self._drain_pending_interrupt_resumes()
 
     async def _drain_pending_interrupt_resumes(self) -> None:
         """Deliver the next queued interrupt resume whose ask the round reached.
@@ -639,15 +634,24 @@ class StreamController:
         The whole pick + re-check + send runs under ``_interrupt_lock`` so a
         concurrent ``resume_interrupt`` (delivered branch) cannot start a
         competing send for the same slot while the drain is mid-flight. This is
-        safe from the supervisor deadlock that motivates deferring the drain off
-        the ``on_state`` callback: by the time this task runs, the supervisor
-        has returned to its ``get()`` loop and can process the ``_CmdSend`` ack.
+        safe because the supervisor's ``on_state`` callback never awaits this
+        task or this lock, leaving it free to process the ``_CmdSend`` ack.
         """
         async with self._interrupt_lock:
             if self._terminal_interrupt_resume_closed or self._interrupt_resume_cancel_depth:
                 self._pending_interrupt_resumes.clear()
                 return
             if not self._pending_interrupt_resumes:
+                return
+            harness = self._resources.harness
+            if harness is None or harness.state is not HarnessState.IDLE:
+                return
+            if not self.has_pending_interrupt():
+                self._pending_interrupt_resumes.clear()
+                team_logger.info(
+                    "[{}] dropped orphaned queued interrupt resumes (round ended without re-committing their ask)",
+                    self._member_name() or "?",
+                )
                 return
             deliverable = None
             remaining: list[Any] = []
@@ -666,13 +670,6 @@ class StreamController:
             # execution outside this lock, so the re-check is still meaningful.
             if not self.is_valid_interrupt_resume(deliverable):
                 self._pending_interrupt_resumes.insert(0, deliverable)
-                return
-            harness = self._resources.harness
-            if harness is None:
-                team_logger.warning(
-                    "[{}] queued interrupt resume has no harness; dropping",
-                    self._member_name() or "?",
-                )
                 return
             try:
                 await harness.send(deliverable)

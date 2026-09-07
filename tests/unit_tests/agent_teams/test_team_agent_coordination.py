@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
@@ -922,6 +923,7 @@ def _interactive_input(tool_call_id: str) -> InteractiveInput:
 def _wire_harness(agent: TeamAgent) -> MagicMock:
     harness = MagicMock()
     harness.send = AsyncMock()
+    harness.state = HarnessState.IDLE
     agent._configurator.resources.harness = harness
     return harness
 
@@ -985,19 +987,7 @@ async def test_resume_interrupt_dropped_when_stale():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_concurrent_resume_interrupts_serialize_under_lock():
-    """A delivered-branch send no longer holds ``_interrupt_lock``; a concurrent
-    approval can queue while the delivered send is still in flight.
-
-    ``resume_interrupt`` releases the lock before ``harness.send`` so the
-    supervisor's ``_on_idle_settled`` (which takes the same lock) is not
-    blocked — no hold-and-wait deadlock. The trade-off is that check-then-send
-    is no longer atomic under the lock, so ``b`` (invalid → must queue) CAN
-    enter the critical section and queue while ``a``'s send is parked. The
-    double-send-for-same-slot invariant the lock used to enforce is now
-    guaranteed downstream: the supervisor drops a stale InteractiveInput
-    follow-up in ``_on_round_done`` whose interrupt slot was already consumed
-    (see ``NativeHarness._interrupt_resume_still_pending``).
-    """
+    """Validation and send stay serialized without blocking IDLE callbacks."""
     agent = _make_leader()
     harness = _wire_harness(agent)
     sc = agent._stream_controller
@@ -1012,23 +1002,24 @@ async def test_concurrent_resume_interrupts_serialize_under_lock():
         await released.wait()
 
     harness.send = AsyncMock(side_effect=blocking_send)
-    # ``a`` is valid → delivered branch (send runs outside the lock);
-    # ``b`` is invalid → queues. Because the lock is no longer held during the
-    # send, ``b`` can acquire the lock and queue while ``a``'s send is parked.
+    # ``a`` is valid and owns the slot through send admission. ``b`` is invalid
+    # and may only queue after ``a`` releases the controller lock.
     sc.is_valid_interrupt_resume = MagicMock(side_effect=lambda x: x is a)
     sc.has_in_flight_round = MagicMock(return_value=True)
 
     task_a = asyncio.create_task(agent.resume_interrupt(a))
-    await asyncio.wait_for(parked.wait(), timeout=1.0)  # a is inside its send (lock released)
+    await asyncio.wait_for(parked.wait(), timeout=1.0)
     task_b = asyncio.create_task(agent.resume_interrupt(b))
-    await asyncio.sleep(0)  # let b acquire the lock and queue
-    assert sc._pending_interrupt_resumes == [b]  # b queued while a's send is in flight
+    await asyncio.sleep(0)
+
+    assert sc._interrupt_lock.locked()
+    assert not task_b.done()
+    assert sc._pending_interrupt_resumes == []
 
     released.set()
     await asyncio.gather(task_a, task_b)
 
-    assert a not in sc._pending_interrupt_resumes  # a was delivered, not queued
-    assert b in sc._pending_interrupt_resumes
+    assert sc._pending_interrupt_resumes == [b]
 
 
 @pytest.mark.asyncio
@@ -1125,6 +1116,7 @@ async def test_idle_settle_drops_orphans_when_no_pending_interrupt():
     sc._pending_interrupt_resumes.append(_interactive_input("call-orphan"))
     sc._state.team_member = None  # skip the db-backed shutdown guard
     await sc._on_idle_settled()
+    await sc._drain_task
 
     harness.send.assert_not_called()
     assert sc._pending_interrupt_resumes == []

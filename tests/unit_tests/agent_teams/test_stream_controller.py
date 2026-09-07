@@ -720,6 +720,7 @@ async def test_cancel_discards_pending_interrupt_resumes_and_drain_task(
     runtime = _FakeRuntime()
     sc = _make_controller(runtime)
     sc._pending_interrupt_resumes.extend([object(), object()])
+    sc._drain_requested = True
 
     drain_started = asyncio.Event()
 
@@ -735,6 +736,7 @@ async def test_cancel_discards_pending_interrupt_resumes_and_drain_task(
 
     assert runtime.abort_calls == [immediate]
     assert sc._pending_interrupt_resumes == []
+    assert sc._drain_requested is False
     assert sc._drain_task is None
     assert drain.done()
     assert drain.cancelled()

@@ -1216,16 +1216,11 @@ class NativeHarness(DeepAgent):
         # Idempotency: drop only a tool approval that duplicates IDs consumed
         # by this tool-resume round. A generic InteractiveInput may instead be
         # a workflow resume and must not be inferred stale from its shape.
-        # ``resume_interrupt``
-        # releases ``_interrupt_lock`` before ``harness.send`` (to break the
-        # hold-and-wait deadlock with ``_on_idle_settled``), so check-then-send
-        # is no longer atomic under the lock — a double-delivered approval can
-        # reach the supervisor as a second ``_CmdSend`` that parks as a follow-up
-        # while the first resume round runs. Running this filter at settle time
-        # (after the slot is definitively cleared or not) is free of the
-        # ack-before-consume TOCTOU. A follow-up whose slot is still pending
-        # (prior round failed before consuming) is kept — that is a legitimate
-        # retry, not a duplicate.
+        # A duplicate approval can also reach NativeHarness through its public
+        # send API, bypassing StreamController's per-member serialization. Run
+        # this filter at settle time, after the slot is definitively cleared or
+        # not. A follow-up whose slot is still pending (the prior round failed
+        # before consuming it) is a legitimate retry and must be kept.
         if tagged_follow_ups is not None:
             kept: list[tuple[Any, InterruptResumeKind]] = []
             for f, kind in tagged_follow_ups:
