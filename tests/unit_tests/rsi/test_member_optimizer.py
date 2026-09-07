@@ -4347,10 +4347,10 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         "scope_boundary": ["Treat __iter__ alone as sufficient."],
         "activation_phase": "task_start",
     }
-    assert hypotheses[0]["causal_coverage"]["sufficiency_status"] == "task_sufficient"
-    assert hypotheses[0]["decisive_probe"]["causal_coverage"]["counterfactual_prediction"].startswith(
-        "direct next succeeds"
-    )
+    observations = hypotheses[0]["authoritative_observations"]["metadata"]["attribution"]
+    assert observations["causal_coverage"]["sufficiency_status"] == "task_sufficient"
+    assert observations["causal_coverage"]["counterfactual_prediction"].startswith("direct next succeeds")
+    assert "causal_coverage" not in hypotheses[0]["decisive_probe"]
     assert hypotheses[0]["public_trigger"] == [
         {
             "case_id": "case_pydicom",
@@ -4387,7 +4387,7 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         ),
     ],
 )
-def test_optimization_hypothesis_rejects_unattributed_or_unresolved_issues(
+def test_optimization_hypothesis_preserves_diagnosis_without_legacy_reaudit(
     tmp_path: Path,
     attribution: dict[str, object],
     affected_cases: list[str],
@@ -4421,7 +4421,12 @@ def test_optimization_hypothesis_rejects_unattributed_or_unresolved_issues(
         output_path=tmp_path / "optimization_hypotheses.yaml",
     )
 
-    assert load_optimization_hypotheses(hypothesis_path) == []
+    hypotheses = load_optimization_hypotheses(hypothesis_path)
+    assert len(hypotheses) == 1
+    assert hypotheses[0]["authoritative_observations"]["metadata"]["attribution"] == attribution
+    assert hypotheses[0]["target_case_ids"] == affected_cases
+    expected_deficiency = "harness_deficiency" if attribution.get("target_ref") else "insufficient_evidence"
+    assert hypotheses[0]["deficiency_class"] == expected_deficiency
 
 
 def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alternative(tmp_path: Path) -> None:
@@ -4561,7 +4566,7 @@ def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None
     assert action["constraints"]["optimization_contracts"] == hypotheses
 
 
-def test_planner_binding_persists_only_supported_causal_hypotheses() -> None:
+def test_planner_binding_uses_behavior_contract_not_retired_search_state() -> None:
     plan_data = {
         "actions": [
             {
@@ -4589,10 +4594,11 @@ def test_planner_binding_persists_only_supported_causal_hypotheses() -> None:
     _bind_immutable_hypotheses(plan_data, hypotheses)
 
     constraints = plan_data["actions"][0]["constraints"]
-    assert constraints["source_causal_hypothesis_ids"] == ["h_supported"]
     contract = constraints["optimization_contracts"][0]
-    assert contract["supported_causal_hypothesis_ids"] == ["h_supported"]
-    assert contract["falsified_causal_hypothesis_ids"] == ["h_falsified"]
+    assert contract["source_issue_id"] == "issue_protocol"
+    assert contract["required_behavior"] == "Use the supported direct-call mechanism."
+    assert "source_causal_hypothesis_ids" not in constraints
+    assert "hypothesis_assessment" not in contract
     assert plan_data["metadata"]["semantic_authority"] == ("immutable_optimization_hypotheses")
 
 
