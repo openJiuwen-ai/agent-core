@@ -15,6 +15,7 @@ import pytest
 from openjiuwen.agent_teams.external.cli_agent.codex.runtime import (
     CodexSdkRuntime,
     _json_arguments,
+    _resume_thread_with_model,
     _start_thread_with_raw_events,
     _tool_result,
 )
@@ -811,7 +812,7 @@ async def test_codex_thread_start_uses_low_level_raw_event_compatibility():
     class _LowLevelClient:
         async def thread_start(self, params):
             requests.append(params)
-            return SimpleNamespace(thread=SimpleNamespace(id="thread-raw"))
+            return SimpleNamespace(thread=SimpleNamespace(id="thread-raw"), model="gpt-effective")
 
     class _HighLevelClient:
         def __init__(self):
@@ -830,19 +831,62 @@ async def test_codex_thread_start_uses_low_level_raw_event_compatibility():
         AsyncThread=lambda owner, thread_id: SimpleNamespace(owner=owner, id=thread_id),
     )
 
-    thread = await _start_thread_with_raw_events(
+    activation = await _start_thread_with_raw_events(
         client=client,
         sdk=sdk,
         options={"cwd": "/workspace", "ephemeral": False},
     )
 
     assert client.initialized is True
-    assert thread.id == "thread-raw"
+    assert activation.thread.id == "thread-raw"
+    assert activation.model == "gpt-effective"
     assert requests[0]["experimentalRawEvents"] is True
     assert requests[0]["cwd"] == "/workspace"
     assert requests[0]["ephemeral"] is False
     assert requests[0]["approvalPolicy"] == "on-request"
     assert requests[0]["approvalsReviewer"] == "auto_review"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_thread_resume_retains_effective_model():
+    pytest.importorskip("openai_codex")
+    from openai_codex.generated.v2_all import ThreadResumeParams
+
+    requests: list[tuple[str, object]] = []
+
+    class _LowLevelClient:
+        async def thread_resume(self, thread_id: str, params: object) -> object:
+            requests.append((thread_id, params))
+            return SimpleNamespace(thread=SimpleNamespace(id=thread_id), model="gpt-effective")
+
+    class _HighLevelClient:
+        def __init__(self):
+            self._client = _LowLevelClient()
+
+        async def _ensure_initialized(self) -> None:
+            pass
+
+        async def thread_resume(self, thread_id: str, **options: object) -> object:
+            raise AssertionError("the public resume method must not be used")
+
+    client = _HighLevelClient()
+    sdk = SimpleNamespace(
+        AsyncThread=lambda owner, thread_id: SimpleNamespace(owner=owner, id=thread_id),
+    )
+
+    activation = await _resume_thread_with_model(
+        client=client,
+        sdk=sdk,
+        thread_id="thread-existing",
+        options={"model": "gpt-requested", "cwd": "/workspace"},
+    )
+
+    assert activation.thread.id == "thread-existing"
+    assert activation.model == "gpt-effective"
+    assert requests[0][0] == "thread-existing"
+    assert getattr(requests[0][1], "model", None) == "gpt-requested"
+    assert isinstance(requests[0][1], ThreadResumeParams)
 
 
 @pytest.mark.parametrize(

@@ -14,9 +14,11 @@ import json
 from typing import Any, AsyncIterator, Awaitable, Callable, ContextManager, Optional
 
 from openjiuwen.agent_teams.external.cli_agent.claude.failure_classifier import (
+    classify_api_retry,
     classify_assistant_error,
     classify_claude_exception,
     classify_result_message,
+    merge_claude_failure_messages,
 )
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
 from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
@@ -281,6 +283,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             return False
         self._client = fallback_client
         self._fallback_activated = True
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.clear_model()
         team_logger.info("[external-cli] member {} activated Claude authentication fallback", self._member_name)
         return True
 
@@ -362,10 +366,10 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     status = "cancelled"
                     return
                 # Classify structured failure signals before chunk conversion.
-                # AssistantMessage.error records a pending candidate;
-                # ResultMessage.is_error finalizes it.
+                # SystemMessage.api_retry and AssistantMessage.error record a
+                # pending candidate; ResultMessage.is_error finalizes it.
                 failure_diagnostic = self._reliability_ctx is not None and self._is_failure_diagnostic_message(message)
-                finalize_payload = self._classify_sdk_message(message)
+                finalize_payload = await self._classify_sdk_message(message)
                 if finalize_payload is not None:
                     category, reason, summary = finalize_payload
                     if category == "auth_required" and chunk_index == 0 and await self._activate_auth_fallback():
@@ -458,21 +462,40 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         sdk = load_claude_sdk()
         return isinstance(message, sdk.AssistantMessage) and bool(message.error)
 
-    def _classify_sdk_message(
+    async def _classify_sdk_message(
         self,
         message: Any,
     ) -> Optional[tuple[str, Any, str]]:
         """Record a candidate or describe the Claude SDK terminal failure.
 
-        ``AssistantMessage.error`` is a candidate: recorded as pending, returns
-        ``None`` (no finalize yet). ``ResultMessage`` with ``is_error=True`` is
-        the turn terminal state: returns a ``(category, reason, summary)``
-        tuple for the caller to finalize.
+        ``SystemMessage.api_retry`` and ``AssistantMessage.error`` are
+        candidates: recorded as pending, return ``None`` (no finalize yet).
+        ``ResultMessage`` with ``is_error=True`` is the turn terminal state:
+        returns a ``(category, reason, summary)`` tuple for the caller to
+        finalize.
         """
         ctx = self._reliability_ctx
         if ctx is None:
             return None
         sdk = load_claude_sdk()
+        if isinstance(message, sdk.SystemMessage):
+            if message.subtype == "init":
+                model = message.data.get("model")
+                if isinstance(model, str):
+                    ctx.update_model(model)
+            if message.subtype == "api_retry":
+                category, reason = classify_api_retry(message.data)
+                ctx.record_pending(category=category, reason=reason)
+                attempt = _int_message_field(message.data, "attempt")
+                max_attempts = _int_message_field(message.data, "max_retries")
+                await ctx.publish_retrying(
+                    category=category,
+                    reason=reason,
+                    summary=f"{self._member_name} Claude SDK retrying: {category} ({reason.message})",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                )
+            return None
         if isinstance(message, sdk.AssistantMessage):
             if message.error:
                 category, reason = classify_assistant_error(message.error)
@@ -482,6 +505,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                         message=detail,
                         sdk_error_code=str(message.error),
                     )
+                if ctx.pending_reason is not None:
+                    reason = _merge_claude_failure_reasons(ctx.pending_reason, reason)
                 ctx.record_pending(category=category, reason=reason)
             return None
         if isinstance(message, sdk.ResultMessage) and message.is_error:
@@ -506,9 +531,11 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             return
         category, reason = classify_claude_exception(exc, phase="turn")
         if ctx.has_pending:
-            # Keep the pending structured signal; enrich reason with exc text.
+            # Keep the pending structured signal while preserving exception
+            # diagnostics such as the idle-watchdog error type.
             category = ctx.pending_category if ctx.pending_category is not None else category
-            reason = ctx.pending_reason or reason
+            if ctx.pending_reason is not None:
+                reason = _merge_claude_failure_reasons(ctx.pending_reason, reason)
         await ctx.finalize_failure(
             category=category,
             reason=reason,
@@ -622,6 +649,7 @@ async def build_claude_runtime(
     # Native Claude Code OTel spans (claude_code.llm_request) are best-effort:
     # a failure to attach only disables the augmentation.
     otel_trace_endpoint = None
+    otel_source_id = None
     attach_native_trace = getattr(span_bridge, "attach_native_trace", None)
     if ssh_transport is not None and callable(attach_native_trace):
         team_logger.info(
@@ -661,6 +689,9 @@ async def build_claude_runtime(
                 traceparent = None
         if traceparent:
             process_env.setdefault("TRACEPARENT", traceparent)
+        native_source_id = getattr(span_bridge, "native_source_id", None)
+        if callable(native_source_id):
+            otel_source_id = native_source_id()
     options = build_claude_options(
         cwd=cwd,
         add_dirs=add_dirs,
@@ -672,6 +703,7 @@ async def build_claude_runtime(
         member_name=member_name,
         resume_external_backend=resume_external_backend,
         otel_trace_endpoint=otel_trace_endpoint,
+        otel_source_id=otel_source_id,
     )
     fallback_options = None
     if external_model_config is None and fallback_external_model_config is not None:
@@ -686,6 +718,7 @@ async def build_claude_runtime(
             member_name=member_name,
             resume_external_backend=True,
             otel_trace_endpoint=otel_trace_endpoint,
+            otel_source_id=otel_source_id,
         )
     transport = None
     if ssh_transport is not None:
@@ -732,6 +765,11 @@ class _NoopClaudeSpanBridge:
     @staticmethod
     def record_cancel_reason(_: str) -> None:
         """Ignore the cancellation reason."""
+
+    @staticmethod
+    def native_source_id() -> str | None:
+        """Report no native OTel source identity."""
+        return None
 
     @staticmethod
     def tool_execution_context() -> ContextManager[None]:
@@ -788,6 +826,16 @@ def _claude_failure_summary(result: Any, reason: Any) -> str:
     return "Claude SDK turn failed"
 
 
+def _int_message_field(data: Any, field: str) -> int | None:
+    """Return one integer SDK message field without accepting booleans."""
+    if not isinstance(data, dict):
+        return None
+    value = data.get(field)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
 def _assistant_failure_detail(message: Any) -> str:
     """Extract bounded text diagnostics from a failed assistant message."""
     sdk = load_claude_sdk()
@@ -806,14 +854,7 @@ def _merge_claude_failure_reasons(
     terminal: ExternalRuntimeFailureReason,
 ) -> ExternalRuntimeFailureReason:
     """Merge assistant diagnostics with structured terminal failure fields."""
-    pending_message = pending.message.strip()
-    terminal_message = terminal.message.strip()
-    if terminal_message.lower() in {"", "unknown"}:
-        message = pending_message or terminal_message
-    elif pending_message and pending_message != pending.sdk_error_code and pending_message not in terminal_message:
-        message = f"{terminal_message}\n{pending_message}"
-    else:
-        message = terminal_message or pending_message
+    message = merge_claude_failure_messages(pending.message, terminal.message)
     return ExternalRuntimeFailureReason(
         message=message,
         sdk_error_type=terminal.sdk_error_type or pending.sdk_error_type,

@@ -31,6 +31,9 @@ _MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024
 _REQUEST_READ_TIMEOUT_S = 5.0
 _RESPONSE_WRITE_TIMEOUT_S = 2.0
 _CLOSE_TIMEOUT_S = 1.0
+# Resource attribute injected into each external CLI process so subscribers
+# can distinguish concurrent members that intentionally share one team trace.
+OTEL_RESOURCE_SOURCE_ID = "openjiuwen.agent_teams.source.id"
 
 
 def _decompress_gzip_limited(payload: bytes) -> bytes:
@@ -412,4 +415,4 @@ def get_shared_otlp_receiver() -> SharedOtlpReceiver:
     return _receiver
 
 
-__all__ = ["SharedOtlpReceiver", "get_shared_otlp_receiver"]
+__all__ = ["OTEL_RESOURCE_SOURCE_ID", "SharedOtlpReceiver", "get_shared_otlp_receiver"]

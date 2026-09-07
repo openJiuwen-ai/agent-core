@@ -10,6 +10,7 @@ import contextlib
 import inspect
 import json
 import os
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Awaitable, Callable
 
@@ -59,6 +60,14 @@ _EXTERNAL_RUNTIME_STATE_KEY = "external_runtime"
 _EXTERNAL_BACKEND_KEY = "backend"
 _EXTERNAL_SESSION_ID_KEY = "external_session_id"
 _CODEX_BACKEND = "codex"
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexThreadActivation:
+    """Thread handle plus the effective model confirmed by Codex App Server."""
+
+    thread: Any
+    model: str = ""
 
 
 class _NoopCodexSpanBridge:
@@ -319,6 +328,7 @@ class CodexSdkRuntime(CliRuntimeBase):
         original_thread_options = self._thread_options
         original_thread_id = self._thread_id
         original_persisted_thread_id = self._persisted_thread_id
+        original_model = self._reliability_ctx.model if self._reliability_ctx is not None else ""
         team_logger.info(
             "[external-cli] member {} activating Codex authentication fallback thread_id={}",
             self._member_name,
@@ -344,6 +354,8 @@ class CodexSdkRuntime(CliRuntimeBase):
         self._persisted_thread_id = original_persisted_thread_id
         self._config = self._fallback_config
         self._thread_options = dict(self._fallback_thread_options)
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.clear_model()
         try:
             await self._ensure_thread(persist=False)
             promoted = await self._promote_fallback_model()
@@ -358,6 +370,8 @@ class CodexSdkRuntime(CliRuntimeBase):
                 thread_id=original_thread_id,
                 persisted_thread_id=original_persisted_thread_id,
             )
+            if self._reliability_ctx is not None:
+                self._reliability_ctx.update_model(original_model)
             return False
         if not promoted:
             team_logger.warning(
@@ -370,6 +384,8 @@ class CodexSdkRuntime(CliRuntimeBase):
                 thread_id=original_thread_id,
                 persisted_thread_id=original_persisted_thread_id,
             )
+            if self._reliability_ctx is not None:
+                self._reliability_ctx.update_model(original_model)
             return False
         await self._persist_thread_id()
         self._fallback_activated = True
@@ -478,7 +494,12 @@ class CodexSdkRuntime(CliRuntimeBase):
             requested_thread_id = self._thread_id
             options.pop("ephemeral", None)
             try:
-                resumed_thread = await self._client.thread_resume(requested_thread_id, **options)
+                activation_result = await _resume_thread_with_model(
+                    client=self._client,
+                    sdk=self._sdk,
+                    thread_id=requested_thread_id,
+                    options=options,
+                )
             except Exception as exc:  # noqa: BLE001 - SDK errors are optional dependency types
                 team_logger.exception(
                     "[external-cli] failed to resume codex SDK thread {} for member {}",
@@ -489,16 +510,16 @@ class CodexSdkRuntime(CliRuntimeBase):
                     f"failed to resume Codex SDK thread {requested_thread_id!r}; "
                     "strict resume forbids starting a replacement thread",
                 ) from exc
-            resumed_thread_id = getattr(resumed_thread, "id", None)
+            resumed_thread_id = getattr(activation_result.thread, "id", None)
             if resumed_thread_id != requested_thread_id:
                 raise RuntimeError(
                     f"Codex SDK resumed unexpected thread {resumed_thread_id!r}; expected {requested_thread_id!r}",
                 )
-            self._thread = resumed_thread
-            activation = "resumed"
+            self._thread = activation_result.thread
+            activation_label = "resumed"
         else:
             try:
-                self._thread = await _start_thread_with_raw_events(
+                activation_result = await _start_thread_with_raw_events(
                     client=self._client,
                     sdk=self._sdk,
                     options=options,
@@ -509,14 +530,17 @@ class CodexSdkRuntime(CliRuntimeBase):
                     self._member_name,
                 )
                 raise
-            activation = "started"
+            self._thread = activation_result.thread
+            activation_label = "started"
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.update_model(activation_result.model)
         self._thread_id = self._thread.id
         if persist:
             await self._persist_thread_id()
         team_logger.info(
             "[external-cli] member {} {} codex SDK thread {}",
             self._member_name,
-            activation,
+            activation_label,
             self._thread_id,
         )
         return self._thread
@@ -685,6 +709,11 @@ class CodexSdkRuntime(CliRuntimeBase):
         """Feed one typed SDK notification into the optional OTel span bridge."""
         method = getattr(notification, "method", "")
         payload = getattr(notification, "payload", None)
+        if method == "model/rerouted":
+            to_model = _raw_notification_param(payload, "toModel")
+            if self._reliability_ctx is not None and isinstance(to_model, str):
+                self._reliability_ctx.update_model(to_model)
+            return
         if method == "rawResponseItem/completed":
             self._span_bridge.append_raw_response_item(
                 _raw_notification_param(payload, "item"),
@@ -994,7 +1023,7 @@ async def _start_thread_with_raw_events(
     client: Any,
     sdk: Any,
     options: dict[str, Any],
-) -> Any:
+) -> _CodexThreadActivation:
     """Start a thread with App Server model-response notifications enabled.
 
     Newer SDKs may expose ``experimental_raw_events`` directly. The currently
@@ -1006,9 +1035,13 @@ async def _start_thread_with_raw_events(
     parameters = signature.parameters.values()
     accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
     if "experimental_raw_events" in signature.parameters or accepts_kwargs:
-        return await thread_start(
+        thread = await thread_start(
             experimental_raw_events=True,
             **options,
+        )
+        return _CodexThreadActivation(
+            thread=thread,
+            model=str(getattr(thread, "model", "") or ""),
         )
 
     ensure_initialized = getattr(client, "_ensure_initialized", None)
@@ -1019,7 +1052,11 @@ async def _start_thread_with_raw_events(
             "[external-cli] Codex SDK does not expose experimental raw events; "
             "observability will use one llm.call proxy per turn",
         )
-        return await thread_start(**options)
+        thread = await thread_start(**options)
+        return _CodexThreadActivation(
+            thread=thread,
+            model=str(getattr(thread, "model", "") or ""),
+        )
 
     try:
         from openai_codex._approval_mode import _approval_mode_settings
@@ -1047,14 +1084,73 @@ async def _start_thread_with_raw_events(
         request["experimentalRawEvents"] = True
         await ensure_initialized()
         started = await low_level_client.thread_start(request)
-        return async_thread_type(client, started.thread.id)
+        return _CodexThreadActivation(
+            thread=async_thread_type(client, started.thread.id),
+            model=str(getattr(started, "model", "") or ""),
+        )
     except (ImportError, AttributeError, TypeError, ValueError) as exc:
         team_logger.warning(
             "[external-cli] Codex SDK raw-event compatibility path is unavailable ({}); "
             "observability will use one llm.call proxy per turn",
             exc,
         )
-        return await thread_start(**options)
+        thread = await thread_start(**options)
+        return _CodexThreadActivation(
+            thread=thread,
+            model=str(getattr(thread, "model", "") or ""),
+        )
+
+
+async def _resume_thread_with_model(
+    *,
+    client: Any,
+    sdk: Any,
+    thread_id: str,
+    options: dict[str, Any],
+) -> _CodexThreadActivation:
+    """Resume a thread and retain the effective model from App Server."""
+    low_level_client = getattr(client, "_client", None)
+    async_thread_type = getattr(sdk, "AsyncThread", None)
+    ensure_initialized = getattr(client, "_ensure_initialized", None)
+    if not callable(ensure_initialized) or low_level_client is None or async_thread_type is None:
+        thread = await client.thread_resume(thread_id, **options)
+        return _CodexThreadActivation(
+            thread=thread,
+            model=str(getattr(thread, "model", "") or ""),
+        )
+
+    try:
+        from openai_codex._approval_mode import _approval_mode_override_settings
+        from openai_codex._sandbox import _sandbox_mode
+        from openai_codex.generated.v2_all import ThreadResumeParams
+
+        wire_options = dict(options)
+        approval_mode = wire_options.pop("approval_mode", None)
+        sandbox = wire_options.pop("sandbox", None)
+        approval_policy, approvals_reviewer = _approval_mode_override_settings(approval_mode)
+        params = ThreadResumeParams(
+            thread_id=thread_id,
+            approval_policy=approval_policy,
+            approvals_reviewer=approvals_reviewer,
+            sandbox=_sandbox_mode(sandbox) if sandbox is not None else None,
+            **wire_options,
+        )
+        await ensure_initialized()
+        resumed = await low_level_client.thread_resume(thread_id, params)
+        return _CodexThreadActivation(
+            thread=async_thread_type(client, resumed.thread.id),
+            model=str(getattr(resumed, "model", "") or ""),
+        )
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        team_logger.warning(
+            "[external-cli] Codex SDK effective-model resume path is unavailable ({}); model will be unknown",
+            exc,
+        )
+        thread = await client.thread_resume(thread_id, **options)
+        return _CodexThreadActivation(
+            thread=thread,
+            model=str(getattr(thread, "model", "") or ""),
+        )
 
 
 def _raw_notification_param(payload: Any, name: str) -> Any:

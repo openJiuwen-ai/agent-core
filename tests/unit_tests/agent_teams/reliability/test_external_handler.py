@@ -41,6 +41,7 @@ def _retrying_event() -> EventMessage:
             team_name="t",
             member_name="worker1",
             agent_kind="codex",
+            model="gpt-effective",
             phase="turn",
             category="server_unavailable",
             summary="overloaded",
@@ -63,6 +64,7 @@ async def test_leader_receives_retrying_nudge(_lang):
     await handler.on_external_retry(_retrying_event())
     assert len(host.delivered) == 1
     assert "worker1" in host.delivered[0]
+    assert "模型 gpt-effective" in host.delivered[0]
     assert "server_unavailable" in host.delivered[0]
 
 

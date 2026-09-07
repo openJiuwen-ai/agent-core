@@ -16,7 +16,7 @@ import pytest
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.cli_agent import spawn as spawn_mod
 from openjiuwen.agent_teams.external.cli_agent.claude import runtime as claude_runtime_mod
-from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_session_id
+from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_session_id, claude_otel_env
 from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime
 from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import build_claude_sdk_mcp_tool_set
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
@@ -415,6 +415,74 @@ def fake_claude_sdk(monkeypatch):
     monkeypatch.setitem(sys.modules, "claude_agent_sdk._internal.transport.subprocess_cli", subprocess_module)
     monkeypatch.setitem(sys.modules, "asyncssh", asyncssh_module)
     return sdk_module
+
+
+@pytest.mark.level0
+def test_claude_otel_env_adds_source_id_without_dropping_resource_attributes() -> None:
+    env = claude_otel_env(
+        "http://127.0.0.1:4317",
+        source_id="source-1",
+        resource_attributes="service.name=custom,openjiuwen.agent_teams.source.id=old",
+    )
+
+    assert env["OTEL_RESOURCE_ATTRIBUTES"] == (
+        "service.name=custom,openjiuwen.agent_teams.source.id=source-1"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_claude_runtime_injects_native_source_id(
+    fake_claude_sdk: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NativeBridge:
+        async def attach_native_trace(self) -> str:
+            return "http://127.0.0.1:4317"
+
+        @staticmethod
+        def native_traceparent() -> str:
+            return "00-11111111111111111111111111111111-2222222222222222-01"
+
+        @staticmethod
+        def native_source_id() -> str:
+            return "source-1"
+
+    def build_native_bridge(
+        *,
+        member_name: str,
+        member_agent_id: str | None,
+        team_name: str | None,
+        session_id: str | None,
+        role: str | None,
+    ) -> _NativeBridge:
+        del member_name, member_agent_id, team_name, session_id, role
+        return _NativeBridge()
+
+    monkeypatch.setattr(claude_runtime_mod, "_build_claude_span_bridge", build_native_bridge)
+
+    runtime = await claude_runtime_mod.build_claude_runtime(
+        member_name="claude-1",
+        cwd="/project",
+        add_dirs=(),
+        env={"OTEL_RESOURCE_ATTRIBUTES": "service.name=custom"},
+        inject_mcp=False,
+        mcp_server_name="openjiuwen-team",
+        mcp_server_command=("openjiuwen-team-mcp",),
+        system_prompt=None,
+        ssh_transport=None,
+        team_session_id="sess-1",
+        resume_external_backend=False,
+    )
+
+    assert runtime._options.env["OTEL_RESOURCE_ATTRIBUTES"] == (
+        "service.name=custom,openjiuwen.agent_teams.source.id=source-1"
+    )
+    assert runtime._options.settings is not None
+    flag_settings = json.loads(runtime._options.settings)
+    assert flag_settings["env"]["OTEL_RESOURCE_ATTRIBUTES"] == (
+        "service.name=custom,openjiuwen.agent_teams.source.id=source-1"
+    )
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ def _failure_payload(**overrides) -> str:
         "team_name": "team",
         "member_name": "worker1",
         "agent_kind": "codex",
+        "model": "gpt-effective",
         "phase": "turn",
         "category": "request_rejected",
         "user_action_required": True,
@@ -63,6 +64,7 @@ def test_renders_external_runtime_failed_as_team_event(_lang):
     assert text is not None
     assert 'kind="external-runtime-failed"' in text
     assert "worker1" in text
+    assert "模型 gpt-effective" in text
     assert "request_rejected" in text
     assert "failure_id=fid-1" in text
     assert "round_id=3" in text
@@ -106,5 +108,18 @@ def test_english_render(_lang):
     assert text is not None
     assert "external-runtime-failed" in text
     assert "worker1" in text
+    assert "model gpt-effective" in text
     assert "http_status=400" in text
     assert "CLI started successfully" in text
+
+
+def test_missing_model_renders_unknown_for_backward_compatibility(_lang):
+    payload = json.loads(_failure_payload())
+    payload.pop("model")
+
+    text = MessageHandler._render_external_runtime_failed(
+        _Msg(protocol="json", content=json.dumps(payload)),
+    )
+
+    assert text is not None
+    assert "模型 &lt;unknown&gt;" in text

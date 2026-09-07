@@ -40,6 +40,7 @@ class _FakeTurnHandle:
 class _FakeThread:
     def __init__(self, turns):
         self.id = "thread-1"
+        self.model = "gpt-thread-effective"
         self._turns = list(turns)
 
     async def turn(self, prompt: str):
@@ -164,6 +165,7 @@ async def _start(runtime):
 @pytest.mark.asyncio
 async def test_codex_will_retry_publishes_retrying_event():
     notifications = [
+        _notification("model/rerouted", from_model="gpt-original", to_model="gpt-effective"),
         _notification(
             "error",
             error=SimpleNamespace(message="overloaded", codex_error_info="serverOverloaded"),
@@ -178,6 +180,8 @@ async def test_codex_will_retry_publishes_retrying_event():
     # No failed message — only a retrying event.
     assert len(mm.sent) == 0
     assert len(messager.published) == 1
+    _topic_id, event_message = messager.published[0]
+    assert event_message.get_payload().model == "gpt-effective"
     logger.info("retrying published, no failure message")
 
 
@@ -200,6 +204,7 @@ async def test_codex_turn_final_401_finalizes_auth_required():
     assert len(mm.sent) == 1
     failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
     assert failure.category == "auth_required"
+    assert failure.model == "gpt-thread-effective"
     assert failure.round_id == 5
     # In-turn failure does NOT mark ERROR; member returns to READY.
     assert sink.statuses == []

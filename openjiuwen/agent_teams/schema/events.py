@@ -578,6 +578,7 @@ class ExternalRuntimeRetryingEvent(BaseEventMessage):
     """
 
     agent_kind: ExternalRuntimeAgentKind = Field(..., description="Which SDK produced the retry")
+    model: str = Field(default="", description="Effective model confirmed by the CLI or SDK, if known")
     phase: ExternalRuntimePhase = Field(..., description="Startup or turn")
     category: ExternalRuntimeFailureCategory = Field(..., description="Failure category of the retrying error")
     summary: str = Field(..., description="One-line description for human/LLM")

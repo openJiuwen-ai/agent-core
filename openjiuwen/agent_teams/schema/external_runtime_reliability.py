@@ -82,6 +82,7 @@ class ExternalRuntimeFailure(BaseModel):
     team_name: str = Field(..., description="Team name")
     member_name: str = Field(..., description="Failing member name")
     agent_kind: ExternalRuntimeAgentKind = Field(..., description="Which SDK produced the failure")
+    model: str = Field(default="", description="Effective model confirmed by the CLI or SDK, if known")
     phase: ExternalRuntimePhase = Field(..., description="Startup or turn")
     category: ExternalRuntimeFailureCategory = Field(..., description="Failure category")
     user_action_required: bool = Field(..., description="Whether the user must act")

@@ -8,20 +8,29 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from openjiuwen.agent_teams.external.cli_agent.claude.failure_classifier import (
+    classify_api_retry,
     classify_assistant_error,
     classify_claude_exception,
     classify_result_message,
+    merge_claude_failure_messages,
 )
 from openjiuwen.agent_teams.external.cli_agent.claude.options import load_claude_sdk
 
 _SDK = load_claude_sdk()
 
 
-def _result(*, is_error: bool, api_error_status=None, errors=None):
+def _result(
+    *,
+    is_error: bool,
+    api_error_status: int | None = None,
+    errors: list[str] | None = None,
+    result: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         is_error=is_error,
         api_error_status=api_error_status,
         errors=errors,
+        result=result,
     )
 
 
@@ -64,6 +73,60 @@ def test_classify_result_message_without_api_status_degrades_to_sdk_error():
 def test_classify_result_message_records_http_status():
     _, reason = classify_result_message(_result(is_error=True, api_error_status=429))
     assert reason.http_status == 429
+
+
+def test_classify_result_message_combines_result_and_error_details():
+    _, reason = classify_result_message(
+        _result(
+            is_error=True,
+            api_error_status=429,
+            errors=["upstream quota exhausted", "unknown"],
+            result="API Error: Request rejected (429) · Budget has been exceeded",
+        ),
+    )
+
+    assert reason.message == (
+        "API Error: Request rejected (429) · Budget has been exceeded\n"
+        "upstream quota exhausted"
+    )
+
+
+def test_merge_claude_failure_messages_deduplicates_contained_text():
+    message = merge_claude_failure_messages(
+        "rate_limit",
+        "API Error: rate_limit · Budget has been exceeded",
+        "unknown",
+        "API Error: rate_limit · Budget has been exceeded",
+    )
+
+    assert message == "API Error: rate_limit · Budget has been exceeded"
+
+
+# --- classify_api_retry -------------------------------------------------
+
+
+def test_classify_api_retry_maps_status_and_preserves_retry_detail():
+    category, reason = classify_api_retry(
+        {
+            "attempt": 3,
+            "max_retries": 10,
+            "retry_delay_ms": 36500.0,
+            "error_status": 429,
+            "error": "rate_limit",
+        },
+    )
+
+    assert category == "rate_limited"
+    assert reason.http_status == 429
+    assert reason.sdk_error_code == "rate_limit"
+    assert reason.message == "rate_limit: attempt 3/10, retry in 36.500s"
+
+
+def test_classify_api_retry_falls_back_to_error_code():
+    category, reason = classify_api_retry({"error": "server_error"})
+
+    assert category == "server_unavailable"
+    assert reason.http_status is None
 
 
 # --- classify_claude_exception ------------------------------------------

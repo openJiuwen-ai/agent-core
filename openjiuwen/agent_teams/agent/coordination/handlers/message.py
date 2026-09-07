@@ -661,6 +661,7 @@ class MessageHandler(BaseCoordinationHandler):
             "reliability.external_runtime_failed",
             member_name=failure.member_name,
             agent_kind=failure.agent_kind,
+            model=failure.model or "<unknown>",
             phase=failure.phase,
             category=failure.category,
             summary=failure.summary,

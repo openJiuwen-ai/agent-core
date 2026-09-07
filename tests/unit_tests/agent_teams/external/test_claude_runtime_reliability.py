@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, AsyncIterator
 
 import pytest
 
@@ -76,15 +76,25 @@ def _install_fake_sdk(monkeypatch, *, messages_factory, connect_error=None) -> M
             self.tool_use_result = tool_use_result
 
     class SystemMessage:
-        def __init__(self, *, subtype):
+        def __init__(self, *, subtype: str, data: dict[str, Any] | None = None) -> None:
             self.subtype = subtype
+            self.data = data or {}
 
     class ResultMessage:
-        def __init__(self, *, subtype="success", is_error=False, api_error_status=None, errors=None):
+        def __init__(
+            self,
+            *,
+            subtype: str = "success",
+            is_error: bool = False,
+            api_error_status: int | None = None,
+            errors: list[str] | None = None,
+            result: str | None = None,
+        ) -> None:
             self.subtype = subtype
             self.is_error = is_error
             self.api_error_status = api_error_status
             self.errors = errors
+            self.result = result
 
     class ClaudeSDKClient:
         def __init__(self, *, options, transport=None):
@@ -307,6 +317,132 @@ async def test_each_claude_message_refreshes_idle_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_api_retry_429_then_idle_timeout_preserves_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def messages() -> AsyncIterator[Any]:
+        yield sdk.SystemMessage(
+            subtype="api_retry",
+            data={
+                "attempt": 10,
+                "max_retries": 10,
+                "error_status": 429,
+                "error": "rate_limit",
+            },
+        )
+        await asyncio.Event().wait()
+
+    sdk = _install_fake_sdk(monkeypatch, messages_factory=messages)
+    runtime = _make_runtime(sdk, turn_idle_timeout_s=0.01)
+    mm = _FakeMessageManager()
+    runtime._reliability_ctx = _build_ctx(mm, _FakeMessager(), _StatusSink())
+
+    with pytest.raises(claude_runtime_mod._ClaudeTurnIdleTimeout):
+        async for _chunk in runtime._drive({"query": "hi"}):
+            pass
+
+    assert len(mm.sent) == 1
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "rate_limited"
+    assert failure.reason.http_status == 429
+    assert failure.reason.sdk_error_code == "rate_limit"
+    assert failure.reason.sdk_error_type == "_ClaudeTurnIdleTimeout"
+    assert "rate_limit: attempt 10/10" in failure.reason.message
+    assert "produced no messages" in failure.reason.message
+
+
+@pytest.mark.asyncio
+async def test_api_retry_followed_by_success_does_not_finalize_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk = _install_fake_sdk(
+        monkeypatch,
+        messages_factory=lambda: [
+            sdk.SystemMessage(subtype="init", data={"model": "claude-effective"}),
+            sdk.SystemMessage(
+                subtype="api_retry",
+                data={
+                    "attempt": 1,
+                    "max_retries": 10,
+                    "retry_delay_ms": 36500.0,
+                    "error_status": 429,
+                    "error": "rate_limit",
+                },
+            ),
+            sdk.ResultMessage(subtype="success"),
+        ],
+    )
+    runtime = _make_runtime(sdk)
+    mm = _FakeMessageManager()
+    messager = _FakeMessager()
+    runtime._reliability_ctx = _build_ctx(mm, messager, _StatusSink())
+
+    async for _chunk in runtime._drive({"query": "hi"}):
+        pass
+
+    assert not mm.sent
+    assert len(messager.published) == 1
+    _topic_id, event_message = messager.published[0]
+    retrying = event_message.get_payload()
+    assert retrying.agent_kind == "claude"
+    assert retrying.model == "claude-effective"
+    assert retrying.category == "rate_limited"
+    assert retrying.attempt == 1
+    assert retrying.max_attempts == 10
+    assert retrying.reason.http_status == 429
+    assert "retry in 36.500s" in retrying.summary
+
+
+@pytest.mark.asyncio
+async def test_api_retry_then_error_result_finalizes_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk = _install_fake_sdk(
+        monkeypatch,
+        messages_factory=lambda: [
+            sdk.SystemMessage(subtype="init", data={"model": "claude-effective"}),
+            sdk.SystemMessage(
+                subtype="api_retry",
+                data={"attempt": 10, "max_retries": 10, "error_status": 429, "error": "rate_limit"},
+            ),
+            sdk.ResultMessage(is_error=True, api_error_status=429, errors=["too many requests"]),
+        ],
+    )
+    runtime = _make_runtime(sdk)
+    mm = _FakeMessageManager()
+    runtime._reliability_ctx = _build_ctx(mm, _FakeMessager(), _StatusSink())
+
+    async for _chunk in runtime._drive({"query": "hi"}):
+        pass
+
+    assert len(mm.sent) == 1
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "rate_limited"
+    assert failure.model == "claude-effective"
+    assert failure.reason.http_status == 429
+
+
+@pytest.mark.asyncio
+async def test_result_detail_is_preserved_without_assistant_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    detail = "API Error: Request rejected (429) · Budget has been exceeded"
+    sdk = _install_fake_sdk(
+        monkeypatch,
+        messages_factory=lambda: [
+            sdk.ResultMessage(
+                is_error=True,
+                api_error_status=429,
+                result=detail,
+            ),
+        ],
+    )
+    runtime = _make_runtime(sdk)
+    mm = _FakeMessageManager()
+    runtime._reliability_ctx = _build_ctx(mm, _FakeMessager(), _StatusSink())
+
+    async for _chunk in runtime._drive({"query": "hi"}):
+        pass
+
+    assert len(mm.sent) == 1
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "rate_limited"
+    assert failure.reason.message == detail
+
+
+@pytest.mark.asyncio
 async def test_assistant_error_then_result_combines_into_one_failure(monkeypatch):
     sdk = _install_fake_sdk(
         monkeypatch,
@@ -325,6 +461,41 @@ async def test_assistant_error_then_result_combines_into_one_failure(monkeypatch
     assert failure.category == "rate_limited"
     assert failure.reason.http_status == 429
     logger.info("combined failure category=%s http=%s", failure.category, failure.reason.http_status)
+
+
+@pytest.mark.asyncio
+async def test_retry_assistant_and_result_details_are_combined(monkeypatch: pytest.MonkeyPatch) -> None:
+    assistant_detail = "API Error: Request rejected (429) · Budget has been exceeded"
+    sdk = _install_fake_sdk(
+        monkeypatch,
+        messages_factory=lambda: [
+            sdk.SystemMessage(
+                subtype="api_retry",
+                data={"attempt": 10, "max_retries": 10, "error_status": 429, "error": "rate_limit"},
+            ),
+            sdk.AssistantMessage(content=[sdk.TextBlock(assistant_detail)], error="rate_limit"),
+            sdk.ResultMessage(
+                is_error=True,
+                api_error_status=429,
+                errors=["upstream quota exhausted"],
+                result=assistant_detail,
+            ),
+        ],
+    )
+    runtime = _make_runtime(sdk)
+    mm = _FakeMessageManager()
+    runtime._reliability_ctx = _build_ctx(mm, _FakeMessager(), _StatusSink())
+
+    async for _chunk in runtime._drive({"query": "hi"}):
+        pass
+
+    failure = ExternalRuntimeFailure.model_validate_json(mm.sent[0]["content"])
+    assert failure.category == "rate_limited"
+    assert failure.reason.http_status == 429
+    assert failure.reason.sdk_error_code == "rate_limit"
+    assert failure.reason.message.count(assistant_detail) == 1
+    assert "rate_limit: attempt 10/10" in failure.reason.message
+    assert "upstream quota exhausted" in failure.reason.message
 
 
 @pytest.mark.asyncio

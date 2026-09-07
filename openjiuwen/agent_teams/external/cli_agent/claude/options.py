@@ -25,9 +25,15 @@ _ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
 # and the enhanced-telemetry beta flag; the CLI fails silently on exporter
 # errors, so a short export interval keeps spans flowing before turn end.
 _CLAUDE_OTEL_EXPORT_INTERVAL_MS = "1000"
+_OTEL_RESOURCE_ATTRIBUTES_ENV = "OTEL_RESOURCE_ATTRIBUTES"
 
 
-def claude_otel_env(endpoint: str) -> dict[str, str]:
+def claude_otel_env(
+    endpoint: str,
+    *,
+    source_id: str | None = None,
+    resource_attributes: str | None = None,
+) -> dict[str, str]:
     """Build the env vars pointing Claude Code's OTel export at ``endpoint``.
 
     Claude Code's OTLP exporter only speaks gRPC — with ``http/protobuf`` it
@@ -39,7 +45,7 @@ def claude_otel_env(endpoint: str) -> dict[str, str]:
     anything lands in our spans, so the export stays inside our observability
     pipeline.
     """
-    return {
+    result = {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
         "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
         "OTEL_TRACES_EXPORTER": "otlp",
@@ -56,6 +62,17 @@ def claude_otel_env(endpoint: str) -> dict[str, str]:
         "no_proxy": "127.0.0.1,localhost",
         "NO_PROXY": "127.0.0.1,localhost",
     }
+    if source_id:
+        from openjiuwen.agent_teams.observability.shared_otlp import OTEL_RESOURCE_SOURCE_ID
+
+        existing = [
+            item
+            for item in str(resource_attributes or "").split(",")
+            if item and not item.startswith(f"{OTEL_RESOURCE_SOURCE_ID}=")
+        ]
+        existing.append(f"{OTEL_RESOURCE_SOURCE_ID}={source_id}")
+        result[_OTEL_RESOURCE_ATTRIBUTES_ENV] = ",".join(existing)
+    return result
 
 
 def load_claude_sdk() -> Any:
@@ -84,6 +101,7 @@ def build_claude_options(
     resume_external_backend: bool,
     external_model_config: "ExternalCliModelConfig | None" = None,
     otel_trace_endpoint: str | None = None,
+    otel_source_id: str | None = None,
 ) -> "ClaudeAgentOptions":
     """Build SDK options matching the previous Claude CLI member behavior."""
     sdk = load_claude_sdk()
@@ -96,11 +114,21 @@ def build_claude_options(
     model = None
     settings = None
     process_env = dict(env)
+    flag_env: dict[str, str] = {}
     if otel_trace_endpoint:
         # Native Claude Code spans (claude_code.llm_request etc.) exported to
         # the shared loopback receiver. ``env`` is merged on top of the
         # inherited environment by the Python SDK.
-        process_env.update(claude_otel_env(otel_trace_endpoint))
+        process_env.update(
+            claude_otel_env(
+                otel_trace_endpoint,
+                source_id=otel_source_id,
+                resource_attributes=process_env.get(_OTEL_RESOURCE_ATTRIBUTES_ENV),
+            ),
+        )
+        resource_identity = process_env.get(_OTEL_RESOURCE_ATTRIBUTES_ENV)
+        if otel_source_id and resource_identity:
+            flag_env[_OTEL_RESOURCE_ATTRIBUTES_ENV] = resource_identity
     if external_model_config is not None:
         model = external_model_config.model
         # Inject the external endpoint into the flag-settings layer (the CLI
@@ -108,13 +136,12 @@ def build_claude_options(
         # ``~/.claude/settings.json`` (user settings) after the process env,
         # which would shadow any env-var injection; the ``--settings`` source
         # sits above user/project/local settings and wins.
-        flag_env: dict[str, str] = {}
         if external_model_config.api_base:
             flag_env[_ANTHROPIC_BASE_URL_ENV] = external_model_config.api_base
         if external_model_config.api_key:
             flag_env[_ANTHROPIC_AUTH_TOKEN_ENV] = external_model_config.api_key
-        if flag_env:
-            settings = json.dumps({"env": flag_env})
+    if flag_env:
+        settings = json.dumps({"env": flag_env})
     return sdk.ClaudeAgentOptions(
         add_dirs=list(add_dirs),
         cli_path=cli_path,

@@ -80,11 +80,11 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (
-            "[三方运行时] 成员 {member_name}（{agent_kind}）正在自动重试：{category}。"
+            "[三方运行时] 成员 {member_name}（{agent_kind}，模型 {model}）正在自动重试：{category}。"
             "本轮不结束，成员状态不变，等待 SDK 后续结果。{summary}"
         ),
         "reliability.external_runtime_failed": (
-            "[三方运行时·失败] 成员 {member_name}（{agent_kind}，阶段 {phase}）最终失败："
+            "[三方运行时·失败] 成员 {member_name}（{agent_kind}，模型 {model}，阶段 {phase}）最终失败："
             "{category}。{summary} 原始错误：{reason_message} 建议处理：{suggested_action}。"
             "诊断字段：failure_id={failure_id}，round_id={round_id}，http_status={http_status}，"
             "sdk_error_type={sdk_error_type}，sdk_error_code={sdk_error_code}。{phase_guidance}"
@@ -427,11 +427,11 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (
-            "[external runtime] Member {member_name} ({agent_kind}) is auto-retrying: {category}. "
+            "[external runtime] Member {member_name} ({agent_kind}, model {model}) is auto-retrying: {category}. "
             "The round stays open and member status is unchanged; awaiting the next SDK result. {summary}"
         ),
         "reliability.external_runtime_failed": (
-            "[external runtime failed] Member {member_name} ({agent_kind}, phase {phase}) finally "
+            "[external runtime failed] Member {member_name} ({agent_kind}, model {model}, phase {phase}) finally "
             "failed: {category}. {summary} Reason: {reason_message} Suggested action: {suggested_action}. "
             "Diagnostics: failure_id={failure_id}, round_id={round_id}, http_status={http_status}, "
             "sdk_error_type={sdk_error_type}, sdk_error_code={sdk_error_code}. {phase_guidance}"

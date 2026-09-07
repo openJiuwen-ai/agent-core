@@ -45,6 +45,7 @@ class _RecordingSpan:
 
 
 _TRACE_ID = "11" * 16
+_SOURCE_ID = "source-claude-1"
 
 
 def _bridge_with_turn(monkeypatch: pytest.MonkeyPatch) -> tuple[ClaudeSpanBridge, _RecordingSpan]:
@@ -59,6 +60,8 @@ def _bridge_with_turn(monkeypatch: pytest.MonkeyPatch) -> tuple[ClaudeSpanBridge
         attribute_value_max_length=40960,
     )
     b._native_trace_enabled = True
+    b._native_source_id = _SOURCE_ID
+    b._turn_started_at_ns = 1_699_999_999_999_999_999
 
     class _Tracer:
         def start_span(self, **kwargs: Any) -> _RecordingSpan:  # noqa: ARG002
@@ -78,11 +81,13 @@ def _llm_request_event(
     *,
     request_id: str = "req-1",
     model: str = "GLM-5.3",
+    start_time_ns: int = 1_700_000_000_000_000_000,
+    source_id: str = _SOURCE_ID,
 ) -> dict[str, Any]:
     return {
         "signal": "trace",
         "name": "claude_code.llm_request",
-        "start_time_ns": 1_700_000_000_000_000_000,
+        "start_time_ns": start_time_ns,
         "end_time_ns": 1_700_000_000_250_000_000,
         "attributes": {
             "model": model,
@@ -93,19 +98,27 @@ def _llm_request_event(
         "trace_id": _TRACE_ID,
         "span_id": "aa" * 8,
         "parent_span_id": "",
+        "resource_attributes": {"openjiuwen.agent_teams.source.id": source_id},
         "status_code": 1,
         "status_message": "",
     }
 
 
-def _request_body_event(body: str, *, trace_id: str = _TRACE_ID) -> dict[str, Any]:
+def _request_body_event(
+    body: str,
+    *,
+    trace_id: str = _TRACE_ID,
+    time_ns: int = 1_700_000_000_100_000_000,
+    source_id: str = _SOURCE_ID,
+) -> dict[str, Any]:
     return {
         "signal": "log",
         "name": "claude_code.api_request_body",
-        "time_ns": 1_700_000_000_100_000_000,
+        "time_ns": time_ns,
         "attributes": {"body": body},
         "trace_id": trace_id,
         "span_id": "",
+        "resource_attributes": {"openjiuwen.agent_teams.source.id": source_id},
     }
 
 
@@ -114,6 +127,7 @@ def _response_body_event(
     *,
     request_id: str = "req-1",
     trace_id: str = _TRACE_ID,
+    source_id: str = _SOURCE_ID,
 ) -> dict[str, Any]:
     return {
         "signal": "log",
@@ -122,6 +136,7 @@ def _response_body_event(
         "attributes": {"body": body, "request_id": request_id},
         "trace_id": trace_id,
         "span_id": "",
+        "resource_attributes": {"openjiuwen.agent_teams.source.id": source_id},
     }
 
 
@@ -146,7 +161,7 @@ def test_response_body_attaches_by_request_id(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.level0
-def test_request_body_attaches_in_arrival_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_request_bodies_attach_in_event_order(monkeypatch: pytest.MonkeyPatch) -> None:
     b, _turn = _bridge_with_turn(monkeypatch)
 
     b._on_native_span(_llm_request_event(request_id="req-1"))
@@ -158,6 +173,41 @@ def test_request_body_attaches_in_arrival_order(monkeypatch: pytest.MonkeyPatch)
 
     assert first.attributes["langfuse.observation.input"] == '{"messages": [1]}'
     assert second.attributes["langfuse.observation.input"] == '{"messages": [2]}'
+
+
+@pytest.mark.level0
+def test_request_bodies_attach_by_event_time_when_exports_are_reordered(monkeypatch: pytest.MonkeyPatch) -> None:
+    b, _turn = _bridge_with_turn(monkeypatch)
+
+    b._on_native_log(_request_body_event('{"messages": [2]}', time_ns=1_700_000_000_200_000_000))
+    b._on_native_span(
+        _llm_request_event(
+            request_id="req-2",
+            start_time_ns=1_700_000_000_150_000_000,
+        ),
+    )
+    b._on_native_log(_request_body_event('{"messages": [1]}', time_ns=1_700_000_000_100_000_000))
+    b._on_native_span(_llm_request_event(request_id="req-1"))
+
+    calls = sorted(b._pending_native_calls, key=lambda pending: pending["start_ns"])
+    first = calls[0]["span"]
+    second = calls[1]["span"]
+    b._close_pending_native_calls()
+
+    assert first.attributes["langfuse.observation.input"] == '{"messages": [1]}'
+    assert second.attributes["langfuse.observation.input"] == '{"messages": [2]}'
+
+
+@pytest.mark.level0
+def test_response_body_arriving_before_span_is_retained(monkeypatch: pytest.MonkeyPatch) -> None:
+    b, _turn = _bridge_with_turn(monkeypatch)
+
+    b._on_native_log(_response_body_event('{"content": "early"}', request_id="req-1"))
+    b._on_native_span(_llm_request_event(request_id="req-1"))
+    llm = _llm_spans(b)[0]
+    b._close_pending_native_calls()
+
+    assert llm.attributes["langfuse.observation.output"] == '{"content": "early"}'
 
 
 @pytest.mark.level0
@@ -177,15 +227,34 @@ def test_foreign_trace_events_are_ignored(monkeypatch: pytest.MonkeyPatch) -> No
     b, _turn = _bridge_with_turn(monkeypatch)
     # Trace id mismatch: events from another member's trace must not attach.
     b._on_native_span(_llm_request_event())
+    llm = _llm_spans(b)[0]
     b._on_native_log(_response_body_event("{}", trace_id="ff" * 16))
     b._on_native_log(_request_body_event("{}", trace_id="ff" * 16))
     b._close_pending_native_calls()
 
-    assert b._pending_native_calls or True  # span exists, but no content attached
-    if b._pending_native_calls:
-        llm = _llm_spans(b)[0]
-        assert "langfuse.observation.output" not in llm.attributes
-        assert "langfuse.observation.input" not in llm.attributes
+    assert "langfuse.observation.output" not in llm.attributes
+    assert "langfuse.observation.input" not in llm.attributes
+
+
+@pytest.mark.level0
+def test_foreign_source_events_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    b, _turn = _bridge_with_turn(monkeypatch)
+
+    b._on_native_span(_llm_request_event(source_id="source-claude-2"))
+    b._on_native_log(_request_body_event("{}", source_id="source-claude-2"))
+    b._on_native_log(_response_body_event("{}", source_id="source-claude-2"))
+
+    assert not b._pending_native_calls
+    assert not b._pending_native_request_bodies
+
+
+@pytest.mark.level0
+def test_span_started_before_current_turn_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    b, _turn = _bridge_with_turn(monkeypatch)
+
+    b._on_native_span(_llm_request_event(start_time_ns=b._turn_started_at_ns - 1))
+
+    assert not b._pending_native_calls
 
 
 @pytest.mark.level0

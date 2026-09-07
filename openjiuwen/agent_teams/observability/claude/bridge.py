@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import json
+import time
 from typing import Any, ContextManager
+import uuid
 
 from opentelemetry import context as otel_context
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, set_span_in_context
@@ -94,6 +96,11 @@ class NoopClaudeSpanBridge:
         return None
 
     @staticmethod
+    def native_source_id() -> str | None:
+        """Report no native OTel source identity (no-op bridge)."""
+        return None
+
+    @staticmethod
     def record_native_model_span(_: dict[str, Any]) -> None:
         """Ignore one native Claude Code span (no-op bridge)."""
 
@@ -135,9 +142,13 @@ class ClaudeSpanBridge:
         self._reasoning: list[str] = []
         self._tool_records: dict[str, dict[str, Any]] = {}
         self._native_trace_enabled = False
+        self._native_source_id = uuid.uuid4().hex
         self._native_subscriber_id: int | None = None
         self._native_span_count = 0
         self._pending_native_calls: list[dict[str, Any]] = []
+        self._pending_native_request_bodies: list[dict[str, Any]] = []
+        self._pending_native_response_bodies: dict[str, str] = {}
+        self._turn_started_at_ns = 0
 
     @classmethod
     def build(
@@ -196,11 +207,14 @@ class ClaudeSpanBridge:
             span.set_attribute(LANGFUSE_SESSION_ID, self._session_id)
 
         self._turn_span = span
+        self._turn_started_at_ns = time.time_ns()
         self._config = config
         self._output = []
         self._reasoning = []
         self._tool_records = {}
         self._pending_native_calls = []
+        self._pending_native_request_bodies = []
+        self._pending_native_response_bodies = {}
 
     def record_chunk(self, chunk: OutputSchema) -> None:
         """Record one Claude runtime chunk into pending turn state."""
@@ -350,6 +364,10 @@ class ClaudeSpanBridge:
             return
         if str(event.get("trace_id") or "") != f"{context.trace_id:032x}":
             return
+        if not self._is_current_native_source(event):
+            return
+        if int(event.get("start_time_ns") or 0) < self._turn_started_at_ns:
+            return
         self.record_native_model_span(event)
 
     def _on_native_log(self, event: dict[str, Any]) -> None:
@@ -372,6 +390,10 @@ class ClaudeSpanBridge:
             return
         if str(event.get("trace_id") or "") != f"{context.trace_id:032x}":
             return
+        if not self._is_current_native_source(event):
+            return
+        if int(event.get("time_ns") or 0) < self._turn_started_at_ns:
+            return
         attributes = event.get("attributes")
         if not isinstance(attributes, dict):
             return
@@ -380,15 +402,30 @@ class ClaudeSpanBridge:
             return
         if name == _CLAUDE_API_RESPONSE_BODY_EVENT:
             request_id = str(attributes.get("request_id") or "")
+            if not request_id:
+                return
             for pending in self._pending_native_calls:
                 if pending["request_id"] == request_id and pending.get("output") is None:
                     pending["output"] = body
                     return
+            self._pending_native_response_bodies[request_id] = body
             return
-        for pending in self._pending_native_calls:
-            if pending.get("input") is None:
-                pending["input"] = body
-                return
+        self._pending_native_request_bodies.append(
+            {
+                "time_ns": int(event.get("time_ns") or 0),
+                "span_id": str(event.get("span_id") or ""),
+                "body": body,
+            },
+        )
+
+    def _is_current_native_source(self, event: dict[str, Any]) -> bool:
+        """Return whether an OTLP event came from this Claude CLI process."""
+        from openjiuwen.agent_teams.observability.shared_otlp import OTEL_RESOURCE_SOURCE_ID
+
+        resource_attributes = event.get("resource_attributes")
+        if not isinstance(resource_attributes, dict):
+            return False
+        return str(resource_attributes.get(OTEL_RESOURCE_SOURCE_ID) or "") == self._native_source_id
 
     def record_native_model_span(self, event: dict[str, Any]) -> None:
         """Emit one ``llm.call`` span from a native ``claude_code.llm_request``."""
@@ -469,19 +506,23 @@ class ClaudeSpanBridge:
         # Hold the span open: raw API body log events (request/response JSON)
         # arrive on the logs signal shortly after, and span attributes are
         # immutable once ended. finish_turn closes it after attaching them.
+        request_id = str(attributes.get("request_id") or "")
         self._pending_native_calls.append(
             {
                 "span": span,
+                "native_span_id": str(event.get("span_id") or ""),
+                "start_ns": start_ns,
                 "end_ns": end_ns,
-                "request_id": str(attributes.get("request_id") or ""),
+                "request_id": request_id,
                 "input": None,
-                "output": None,
+                "output": self._pending_native_response_bodies.pop(request_id, None),
             },
         )
         self._native_span_count += 1
 
     def _close_pending_native_calls(self) -> None:
         """Attach redacted raw bodies and close every pending llm.call span."""
+        self._match_native_request_bodies()
         config = self._config
         for pending in self._pending_native_calls:
             span = pending["span"]
@@ -498,6 +539,33 @@ class ClaudeSpanBridge:
                     )
                 span.end(end_time=pending["end_ns"])
         self._pending_native_calls = []
+        self._pending_native_request_bodies = []
+        self._pending_native_response_bodies = {}
+
+    def _match_native_request_bodies(self) -> None:
+        """Match request bodies to calls by event time, not export arrival."""
+        calls = [pending for pending in self._pending_native_calls if pending.get("input") is None]
+        bodies = sorted(self._pending_native_request_bodies, key=lambda pending: pending["time_ns"])
+        for body_record in bodies:
+            body_span_id = body_record["span_id"]
+            matching_call = None
+            if body_span_id:
+                matching_call = next(
+                    (pending for pending in calls if pending["native_span_id"] == body_span_id),
+                    None,
+                )
+            if matching_call is None:
+                eligible_calls = [pending for pending in calls if pending["start_ns"] <= body_record["time_ns"]]
+                if eligible_calls:
+                    matching_call = max(eligible_calls, key=lambda pending: pending["start_ns"])
+            if matching_call is None:
+                continue
+            matching_call["input"] = body_record["body"]
+            calls.remove(matching_call)
+
+    def native_source_id(self) -> str:
+        """Return the resource identity injected into this Claude CLI process."""
+        return self._native_source_id
 
     async def wait_for_native_observations(self, *, timeout_s: float = 1.0) -> None:
         """Allow Claude Code's batched OTel export to flush after the stream."""
@@ -558,6 +626,7 @@ class ClaudeSpanBridge:
         # enclosing turn span ends.
         self._close_pending_native_calls()
         self._turn_span = None
+        self._turn_started_at_ns = 0
         if status == "ok":
             span.set_status(Status(StatusCode.OK))
         elif status == "cancelled":
