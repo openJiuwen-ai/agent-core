@@ -15,6 +15,123 @@ from openjiuwen.rsi.schema import RsiChange, RsiTreeNode
 _PROVISIONAL_STATUSES = {"provisional"}
 
 
+def case_stage_payload(
+    case_index: int,
+    total_cases: int,
+    status: str,
+    *,
+    case_id: str | None = None,
+    score: float | None = None,
+) -> dict[str, Any]:
+    """Build a real single-harness per-case evaluation stage payload.
+
+    ``status`` mirrors the evaluator's persisted case status: ``running``,
+    ``passed``, ``failed``, ``error`` or ``skipped``.  Numeric fields stay
+    native in the engine contract so the frontend can render structured
+    progress without string parsing.
+    """
+
+    label = f"Case {case_index}/{total_cases}"
+    normalized_status = status or "running"
+    if normalized_status == "passed":
+        name = f"{label} passed"
+    elif normalized_status == "failed":
+        name = f"{label} failed"
+    elif normalized_status == "error":
+        name = f"{label} error"
+    elif normalized_status == "skipped":
+        name = f"{label} skipped"
+    else:
+        normalized_status = "running"
+        name = f"{label} evaluating"
+    if score is not None and normalized_status in {"passed", "failed"}:
+        name = f"{name} · score {_format_case_score(score)}"
+    payload: dict[str, Any] = {
+        "id": f"evaluate.case.{case_index}",
+        "name": name,
+        "status": normalized_status,
+        "case_index": case_index,
+        "total_cases": total_cases,
+    }
+    if case_id:
+        payload["case_id"] = str(case_id)
+    if score is not None:
+        payload["score"] = score
+    return payload
+
+
+def _format_case_score(score: float) -> str:
+    """Format a normalized case score for a short, human-readable stage label."""
+
+    try:
+        return f"{float(score):.2f}"
+    except (TypeError, ValueError):
+        return str(score)
+
+
+def generate_stage_payload(
+    candidate_index: int,
+    candidate_count: int,
+    status: str,
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Build a real single-harness candidate-generation stage payload."""
+
+    normalized_status = status or "running"
+    if normalized_status == "done":
+        name = f"Candidate {candidate_index}/{candidate_count} generated"
+    elif normalized_status == "error":
+        name = f"Candidate {candidate_index}/{candidate_count} generation failed"
+    else:
+        normalized_status = "running"
+        name = f"Generating candidate {candidate_index}/{candidate_count}"
+    payload: dict[str, Any] = {
+        "id": "generate.candidate",
+        "name": name,
+        "status": normalized_status,
+        "candidate_index": candidate_index,
+        "total_candidates": candidate_count,
+    }
+    if error:
+        payload["error"] = str(error)
+    return payload
+
+
+def analysis_stage_payload(
+    status: str,
+    *,
+    failed_case_count: int | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Build a failure-analysis stage payload for the current tree root.
+
+    The single-Harness control plane performs a possibly long failure-analysis
+    pass between baseline evaluation and candidate generation.  Exposing that
+    pass as a ``node.stage`` event keeps the web view from appearing idle while
+    the analyzer is still running.
+    """
+
+    normalized_status = status or "running"
+    if normalized_status == "done":
+        name = "Failure analysis completed"
+    elif normalized_status == "error":
+        name = "Failure analysis failed"
+    else:
+        normalized_status = "running"
+        name = "Analyzing failed cases"
+    payload: dict[str, Any] = {
+        "id": "analyze.failures",
+        "name": name,
+        "status": normalized_status,
+    }
+    if failed_case_count is not None:
+        payload["failed_case_count"] = int(failed_case_count)
+    if error:
+        payload["error"] = str(error)
+    return payload
+
+
 def progress_event(
     state: Mapping[str, Any],
     *,
@@ -160,4 +277,11 @@ def _number(value: Any) -> float | None:
         return None
 
 
-__all__ = ["node_event", "parent_node_id", "progress_event"]
+__all__ = [
+    "analysis_stage_payload",
+    "case_stage_payload",
+    "generate_stage_payload",
+    "node_event",
+    "parent_node_id",
+    "progress_event",
+]

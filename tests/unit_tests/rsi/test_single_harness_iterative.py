@@ -586,7 +586,9 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
 
     async def record_event(event: EngineEvent) -> None:
         persisted = yaml.safe_load((tmp_path / "run" / "single_harness_state.yaml").read_text(encoding="utf-8"))
-        if isinstance(event, EventNode):
+        # 生成阶段的临时节点先于 candidate_gates 落盘，用于承载 node.stage
+        # 阶段事件；终态 ADOPTED 节点仍必须对应已持久化的候选 gate。
+        if isinstance(event, EventNode) and event.node.type != "PROVISIONAL":
             assert any(gate.get("candidate_id") == event.node.node_id for gate in persisted["candidate_gates"])
         events.append(event)
 
@@ -639,9 +641,9 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
     assert report["published_harness_refs_path"] == str(published_refs_path)
     assert all(call["team_skill_ref_path"] == "" for call in evaluator.calls)
     node_events = [event for event in events if isinstance(event, EventNode)]
-    assert [event.node.type for event in node_events] == ["PROVISIONAL", "ADOPTED"]
-    assert node_events[0].node.node_id == node_events[1].node.node_id
-    assert node_events[1].node.adopted is True
+    assert [event.node.type for event in node_events] == ["PROVISIONAL", "PROVISIONAL", "ADOPTED"]
+    assert node_events[0].node.node_id == node_events[-1].node.node_id
+    assert node_events[-1].node.adopted is True
     assert any(isinstance(event, EventProgress) and event.score == 1.0 for event in events)
 
     call_count = len(evaluator.calls)
