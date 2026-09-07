@@ -5,6 +5,12 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .builder import TreeBuilder as TreeBuilder
     from .builder import build_tree as build_tree
+    from .one_shot import OneShotLeaf as OneShotLeaf
+    from .one_shot import OneShotSkill as OneShotSkill
+    from .one_shot import OneShotSkillTreeBuilder as OneShotSkillTreeBuilder
+    from .one_shot import OneShotTreeBuildConfig as OneShotTreeBuildConfig
+    from .one_shot import OneShotTreeBuildError as OneShotTreeBuildError
+    from .one_shot import OneShotTreeBuildResult as OneShotTreeBuildResult
     from .schema import DynamicTreeConfig as DynamicTreeConfig
     from .schema import Skill as Skill
     from .schema import SkillStatus as SkillStatus
@@ -14,6 +20,12 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DynamicTreeConfig",
+    "OneShotLeaf",
+    "OneShotSkill",
+    "OneShotSkillTreeBuilder",
+    "OneShotTreeBuildConfig",
+    "OneShotTreeBuildError",
+    "OneShotTreeBuildResult",
     "Skill",
     "SkillStatus",
     "TreeBuildConfig",
@@ -42,4 +54,30 @@ def __getattr__(name: str):
 
         builder_exports: dict[str, Any] = {"TreeBuilder": TreeBuilder, "build_tree": build_tree}
         return builder_exports[name]
+    if name in {
+        "OneShotLeaf",
+        "OneShotSkill",
+        "OneShotSkillTreeBuilder",
+        "OneShotTreeBuildConfig",
+        "OneShotTreeBuildError",
+        "OneShotTreeBuildResult",
+    }:
+        from .one_shot import (
+            OneShotLeaf,
+            OneShotSkill,
+            OneShotSkillTreeBuilder,
+            OneShotTreeBuildConfig,
+            OneShotTreeBuildError,
+            OneShotTreeBuildResult,
+        )
+
+        one_shot_exports: dict[str, Any] = {
+            "OneShotLeaf": OneShotLeaf,
+            "OneShotSkill": OneShotSkill,
+            "OneShotSkillTreeBuilder": OneShotSkillTreeBuilder,
+            "OneShotTreeBuildConfig": OneShotTreeBuildConfig,
+            "OneShotTreeBuildError": OneShotTreeBuildError,
+            "OneShotTreeBuildResult": OneShotTreeBuildResult,
+        }
+        return one_shot_exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
