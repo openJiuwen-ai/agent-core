@@ -1412,7 +1412,22 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
             # still propagates out of the branch; only real errors map to None.
             return None
 
-    return await asyncio.gather(*[branch(i, th) for i, th in enumerate(thunks)])
+    # Create branch tasks explicitly: when pause/stop cancels the engine
+    # coroutine, the gather futures being awaited are not cancelled
+    # (Task.cancel does not cancel _fut_waiter), so branches would become
+    # orphans that keep burning tokens (production 09-07: policy and
+    # competition branches ran 3s/88s past the pause). On outer
+    # cancellation, cancel every branch so CancelledError lands on each
+    # branch's current await.
+    branch_tasks = [
+        asyncio.create_task(branch(i, th)) for i, th in enumerate(thunks)
+    ]
+    try:
+        return await asyncio.gather(*branch_tasks)
+    except asyncio.CancelledError:
+        for bt in branch_tasks:
+            bt.cancel()
+        raise
 
 
 # ─────────────────────── pipeline (streaming) ───────────────────────
