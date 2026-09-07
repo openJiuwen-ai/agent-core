@@ -744,6 +744,27 @@ async def test_cancel_discards_pending_interrupt_resumes_and_drain_task(
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_await_detached_interrupt_drains_logs_background_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A detached drain failure stays non-fatal but is never silent."""
+    logged: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.agent.stream_controller.team_logger",
+        SimpleNamespace(exception=lambda *args: logged.append(args)),
+    )
+
+    async def failing_drain() -> None:
+        raise RuntimeError("drain failed")
+
+    drain = asyncio.create_task(failing_drain())
+    await StreamController._await_detached_interrupt_drains([drain])
+
+    assert logged == [("Detached interrupt resume drain failed during cleanup",)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 @pytest.mark.parametrize(
     ("method_name", "immediate"),
     [("cancel_agent", True), ("cooperative_cancel", False)],

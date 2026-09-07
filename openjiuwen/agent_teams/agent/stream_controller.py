@@ -259,7 +259,7 @@ class StreamController:
                 if current is not None and current.cancelling() > 0:
                     raise
             except Exception:
-                pass
+                team_logger.exception("Detached interrupt resume drain failed during cleanup")
 
     async def _forward_outputs(self) -> None:
         """Pump runtime.outputs() into the stream queue + observers for the cycle."""
