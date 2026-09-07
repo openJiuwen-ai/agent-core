@@ -161,6 +161,9 @@ journal 在 call-path 记录（`__call__:` 前缀）之外，新增 run 级记�
 - **pause 记录**：可恢复中断时 `_write_pause_record(rt, pause_reason)` 写
   `__run__:pause:{run_id}`（`pause_reason` = `paused` / `early_return` /
   `workflow_budget_exhausted`）。pause 记录的 run 可同 run_id resume。
+- **args 记录**（`F_110`）：首跑 `run_workflow` 时若 `args is not None` 且 `run_id` 非空写
+  `__run__:args:{run_id}`（payload `{"args": <string>}`）；冷启动 resume 无 args 时
+  `find_run_record(run_id, "args")` 读回。保证 resume 重放与首跑同路径（缓存命中），不退化全量重跑。
 
 事件语义对齐（`F_88`）：
 

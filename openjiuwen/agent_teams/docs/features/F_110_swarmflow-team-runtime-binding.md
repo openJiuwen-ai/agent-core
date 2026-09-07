@@ -12,13 +12,17 @@
 ## 背景
 
 SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑定到 team runtime：点方块 /
-切换会话 / 断连兜底都要驱动 controller 的**全量** `pause_all` / `stop_all`。现状两处缺口：
+切换会话 / 断连兜底都要驱动 controller 的**全量** `pause_all` / `stop_all`。现状三处缺口：
 
 1. `BackgroundTaskController.pause(resume)` 已支持 `run_id=None` 全量，但 `stop(run_id: str)` 仍是
    单值，嵌入层无法表达"停掉本会话全部 run"。
 2. 冷启动续跑需要"情境注入"把非终态 run 的 `script_path` 告诉 leader（`resume_id + script_path`
    发射面恢复）。`script_path` 在 tool 层已解析并进 enriched inputs + `swarmflow.launched` 回执，
    但**没进 progress 事件**，嵌入层的 `workflow_runs` 快照拿不到它。
+3. 冷启动续跑还缺 `args`：swarmflow 工具暴露 `args`（string），经 `invoke → run_background →
+   run_swarmflow → run_workflow → run(args)` 传到脚本。冷启动 advisory 模板只有
+   `resume_id + script_path`，无 args → resume 时 `run(args=None)` 与首跑 `run(args=X)` 走不同路径
+   （缓存 miss 退化全量重跑或 `args['k']` TypeError）。args 未落盘。
 
 ## 决策
 
@@ -32,6 +36,12 @@ SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑
    `Runtime.script_path`，`_exec_loaded` 的 `WORKFLOW_STARTED` 事件携带 `script_path=rt.script_path`。
    业务无关铁律不破：`script_path` 是 engine 已有的 `path` 入参，不引入 agent_teams 依赖；其它
    kind 一律 None（与 name/description 等 WORKFLOW_STARTED 专属字段一致）。
+3. **journal 新增 run 级 `__run__:args:{run_id}` 记录**。`run_workflow` 首跑时若 `args is not None`
+   且 `run_id` 非空则 `write_run_record(run_id, "args", {"args": args})`；冷启动 resume 时若
+   `args is None` 且 `run_id` 非空则 `find_run_record(run_id, "args")` 读回 `resolved_args`，再
+   `Runtime(args=resolved_args)`。轮内复活票（闭包）已天然保留 args，本记录只为跨进程冷启动补洞。
+   缓存命中准确性仍由内容寻址保证（`get_cached(ks, sig, run_id)`），args 不进键、而是经「改变
+   prompt/结构」间接影响 sig/ks——所以只要 args 一致即命中，本记录只解决"args 丢失"。
 
 ## 拒绝的方案
 
@@ -48,7 +58,9 @@ SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑
 - `test_stop_none_drops_paused_without_reaborting`：paused run 的 abort_event.reason 保持 `pause`，
   证明 stop(None) 未重新 abort（丢票不 seal）。
 - `test_workflow_started_carries_script_path`：`WORKFLOW_STARTED` 事件携带绝对 `script_path`。
-- 回归：`test_background_task_controller.py` + `test_engine.py` 全绿（29 passed）。
+- `test_cold_start_resume_recovers_args`：首跑 `args="hello"` 落 `__run__:args` 记录，第二次 resume
+  不传 args 仍恢复 `"hello"`（非 None）。
+- 回归：`test_background_task_controller.py` + `test_engine.py` 全绿（45 passed）。
 
 ## 已知遗留
 
