@@ -29,6 +29,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
     TRAJECTORY_EVENTS_FILE_NAME,
 )
 from openjiuwen.rsi.harness_rsi.schema import EvaluationCaseTraceRef
+from openjiuwen.rsi.usage import model_usage_stage
 
 _MAX_ROLE_TRAJECTORY_FILE_BYTES = 2_000_000
 _ROLE_TRAJECTORY_TAIL_BYTES = 64_000
@@ -294,6 +295,7 @@ class CaseRunner:
                 _cleanup_scratch(case_dir, runtime_home_dir)
                 reset_openjiuwen_home()
 
+    @model_usage_stage("judge")
     async def _judge(
         self,
         *,

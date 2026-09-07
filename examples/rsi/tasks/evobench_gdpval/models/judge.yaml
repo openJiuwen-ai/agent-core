@@ -1,0 +1,10 @@
+model_client_config:
+  client_provider: OpenAI
+  api_key: ${RSI_JUDGE_API_KEY}
+  api_base: ${RSI_JUDGE_API_BASE}
+  timeout: 240
+  max_retries: 20
+model_request_config:
+  model: Qwen3.7-Plus
+  temperature: 0.0
+  max_tokens: 65536

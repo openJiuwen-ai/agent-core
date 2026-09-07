@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
-from openjiuwen.rsi.schema import RsiStatus, RsiTreeNode, RsiUsage
+from openjiuwen.rsi.schema import RsiModelCall, RsiStatus, RsiTreeNode, RsiUsage
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +44,26 @@ class EventNode:
 
 
 @dataclass(frozen=True, slots=True)
+class EventUsage:
+    """Per-call raw usage delta (not a cumulative progress snapshot).
+
+    ``call_id`` remains stable in the local ledger for service-side deduplication.
+    Existing event variants retain their wire shape.
+    """
+
+    event_id: int
+    task_id: str
+    ts: str
+    call_id: str
+    model_call: RsiModelCall
+    node_ref: str | None = None
+    stage_ref: str | None = None
+    family: Literal["progress"] = field(default="progress", init=False)
+    kind: Literal["usage"] = field(default="usage", init=False)
+    event_type: Literal["progress.usage"] = field(default="progress.usage", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class NodeStageEvent:
     """A subprocess-stage transition for an existing tree node.
 
@@ -64,7 +84,7 @@ class NodeStageEvent:
 EventNodeStage: TypeAlias = NodeStageEvent
 
 
-EngineEvent: TypeAlias = EventStatus | EventProgress | EventNode | NodeStageEvent
+EngineEvent: TypeAlias = EventStatus | EventProgress | EventNode | NodeStageEvent | EventUsage
 OnEvent: TypeAlias = Callable[[EngineEvent], Awaitable[None]]
 
 # Name used by the cross-scenario engine adapter design.  Keep ``OnEvent`` as
@@ -92,6 +112,7 @@ __all__ = [
     "EventNodeStage",
     "EventProgress",
     "EventStatus",
+    "EventUsage",
     "NodeStageEvent",
     "OnEvent",
     "emit",

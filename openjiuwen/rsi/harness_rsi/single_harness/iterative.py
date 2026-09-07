@@ -17,7 +17,7 @@ import yaml
 
 from openjiuwen.rsi.events import OnEvent, emit
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
-from openjiuwen.rsi.harness_rsi.data_loader import DataLoader
+from openjiuwen.rsi.harness_rsi.data_loader import DataLoader, load_json_cases
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
     EvaluationResultAnalyzer,
 )
@@ -47,6 +47,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import (
     compile_optimization_hypotheses,
     load_optimization_hypotheses,
 )
+from openjiuwen.rsi.harness_rsi.member_optimizer.loader import load_analysis_ref
 from openjiuwen.rsi.harness_rsi.member_optimizer.path_layout import (
     MemberOptimizerPathLayout,
 )
@@ -60,10 +61,11 @@ from openjiuwen.rsi.harness_rsi.single_harness.candidate_feedback import (
     rank_candidate_proposals,
 )
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
-    node_event,
-    parent_node_id,
+    epoch_node_event,
     progress_event,
+    root_node_event,
 )
+from openjiuwen.rsi.usage import ModelUsageObserver, bind_model_usage, model_usage_stage, set_usage_node
 
 _ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail"]
 _ALLOWED_PROMPT_SURFACES = ["prompt_section"]
@@ -81,6 +83,16 @@ class IterativeSingleHarnessRequest:
     baseline_eval_ref_path: str = ""
     auto_full_baseline: bool = False
     task_id: str = ""
+    max_iteration: int | None = None
+
+    def __post_init__(self) -> None:
+        """One public iteration is one complete epoch, not an agent step."""
+        if self.max_iteration is None:
+            return
+        if isinstance(self.max_iteration, bool) or not isinstance(self.max_iteration, int):
+            raise ValueError("max_iteration must be an integer greater than or equal to 1")
+        if self.max_iteration < 1:
+            raise ValueError("max_iteration must be an integer greater than or equal to 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +161,29 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         *,
         on_event: OnEvent | None = None,
     ) -> IterativeSingleHarnessResult:
+        async with ModelUsageObserver(on_event).observe() as observer:
+            try:
+                return await self._run(request, on_event=on_event)
+            finally:
+                # Include interrupted calls even when the controller aborts.
+                # The call ledger is the reconciliation source after a crash.
+                await observer.finish_pending()
+                if observer.state is not None:
+                    directory = Path(request.output_dir).expanduser().resolve()
+                    _write_yaml_atomic(directory / "single_harness_state.yaml", observer.state)
+                    report_path = directory / "single_harness_report.yaml"
+                    if report_path.is_file():
+                        report = _read_yaml(report_path)
+                        report["usage"] = observer.state.get("usage")
+                        report["model_calls_path"] = observer.state.get("model_calls_path", "")
+                        _write_yaml_atomic(report_path, report)
+
+    async def _run(
+        self,
+        request: IterativeSingleHarnessRequest,
+        *,
+        on_event: OnEvent | None = None,
+    ) -> IterativeSingleHarnessResult:
         output_dir = Path(request.output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
         state_path = output_dir / "single_harness_state.yaml"
@@ -171,11 +206,19 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             source_harness_refs_path=source_refs,
             dataset=dataset,
         )
+        max_epochs = self.config.max_epochs if request.max_iteration is None else request.max_iteration
+        stored_limit = state.get("max_iteration")
+        if request.resume and stored_limit is not None:
+            if request.max_iteration is not None and request.max_iteration != stored_limit:
+                raise ValueError("resume max_iteration does not match the original run")
+            max_epochs = int(stored_limit)
+        state["max_iteration"] = max_epochs
         stored_task_id = str(state.get("task_id", "") or "")
         if request.resume and stored_task_id and request.task_id:
             if stored_task_id != request.task_id:
                 raise ValueError("resume task_id does not match single-harness state")
         state["task_id"] = request.task_id or stored_task_id
+        await bind_model_usage(state, output_dir)
         state["improver_policy"] = {
             "version_id": self.improver_policy.version_id,
             "policy_digest": self.improver_policy.canonical_digest,
@@ -189,16 +232,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             return _result_from_state(state, state_path, report_path)
 
         all_cases = load_cases(dataset.dataset_files)
-        total_iterations = _maximum_candidate_iterations(
-            case_count=len(all_cases),
-            max_epochs=int(self.config.max_epochs),
-            batch_size=int(self.config.data_loader.batch_size),
-            max_issue_attempts=(
-                int(self.config.member_optimizer.max_issue_attempts_per_batch)
-                or int(self.config.evaluation_result_analyzer.max_issues)
-            ),
-            sibling_candidate_count=int(self.config.member_optimizer.sibling_candidate_count),
-        )
+        total_iterations = max_epochs
         all_case_ids = {str(case.get("case_id", "") or "") for case in all_cases if str(case.get("case_id", "") or "")}
         baseline_before = str(state.get("baseline_eval_ref_path", "") or "")
         _initialize_frozen_baseline(
@@ -224,8 +258,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         baseline_after = str(state.get("baseline_eval_ref_path", "") or "")
         if baseline_after and (not resuming_existing_state or baseline_after != baseline_before):
             await emit(on_event, progress_event(state, total_iterations=total_iterations))
+        if not resuming_existing_state:
+            await emit(on_event, root_node_event(state))
+            await emit(on_event, progress_event(state, total_iterations=total_iterations))
         current_refs = str(state["best_harness_refs_path"])
-        max_epochs = int(self.config.max_epochs)
         for epoch in range(1, max_epochs + 1):
             existing_checkpoint = next(
                 (item for item in state["epoch_checkpoints"] if int(item.get("epoch", 0) or 0) == epoch),
@@ -244,6 +280,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             epoch_start_retained_case_ids = set(working_retained_case_ids)
             if all_case_ids <= working_retained_case_ids:
                 break
+            set_usage_node(f"epoch-{epoch:03d}")
             if callable(getattr(type(self.data_loader), "load_files", None)):
                 planned_batches = list(self.data_loader.load_files(request.dataset_files, epoch=epoch))
             else:
@@ -546,12 +583,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             state["candidate_gates"].append(gate)
                             if on_event is not None:
                                 _write_yaml_atomic(state_path, state)
-                                await _emit_candidate_snapshot(
-                                    on_event,
-                                    state=state,
-                                    candidate=gate,
-                                    total_iterations=total_iterations,
-                                )
+                                await emit(on_event, progress_event(state, total_iterations=total_iterations))
                             attempt_record = {
                                 "attempt_index": attempt_index,
                                 "candidate_index": int(gate.get("candidate_index", 0) or 0),
@@ -998,16 +1030,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     _update_batch_attempt_record(completed, gate)
             state["current_harness_refs_path"] = str(state["best_harness_refs_path"])
             state["working_harness_refs_path"] = str(state["best_harness_refs_path"])
+            checkpoint["before_harness_refs_path"] = epoch_start_refs
+            checkpoint["selected_harness_refs_path"] = current_refs
             _refresh_optimization_experience(state, output_dir)
             _write_yaml_atomic(state_path, state)
-            for gate in epoch_provisional_gates:
-                await _emit_candidate_snapshot(
-                    on_event,
-                    state=state,
-                    candidate=gate,
-                    total_iterations=total_iterations,
-                    include_progress=False,
-                )
+            await emit(on_event, epoch_node_event(state, checkpoint))
             await emit(on_event, progress_event(state, total_iterations=total_iterations))
 
         _refresh_optimization_experience(state, output_dir)
@@ -1017,6 +1044,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         _write_yaml_atomic(report_path, _build_report(state, dataset))
         return _result_from_state(state, state_path, report_path)
 
+    @model_usage_stage("evaluate")
     async def _evaluate(
         self,
         *,
@@ -1036,6 +1064,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
         )
 
+    @model_usage_stage("analyze")
     async def _analyze(
         self,
         *,
@@ -1046,9 +1075,19 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         prior_candidate_feedback: dict[str, Any] | None = None,
     ) -> str:
         existing = output_dir / "analysis_ref.yaml"
+        attempts = [existing, *sorted(output_dir.glob("retry_*/analysis_ref.yaml"))]
+        for path in reversed(attempts):
+            if path.is_file():
+                analysis = load_analysis_ref(path)
+                if not analysis.diagnosis_incomplete or analysis.issues:
+                    return str(path)
         if existing.is_file():
-            return str(existing)
-        return await self.analyzer.analyze(
+            # Resume retries failed diagnosis without overwriting its evidence.
+            index = 1
+            while (output_dir / f"retry_{index:03d}").exists():
+                index += 1
+            output_dir = output_dir / f"retry_{index:03d}"
+        result = await self.analyzer.analyze(
             EvaluationResultAnalysisInvocation(
                 eval_ref_path=eval_ref_path,
                 case_results_dir=str(Path(eval_ref_path).parent / "cases"),
@@ -1060,7 +1099,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 prior_candidate_feedback=dict(prior_candidate_feedback or {}),
             )
         )
+        load_analysis_ref(result).require_usable()
+        return result
 
+    @model_usage_stage("optimize")
     async def _generate_sibling_candidate_proposals(
         self,
         *,
@@ -1728,77 +1770,13 @@ def _dataset_artifact(request: IterativeSingleHarnessRequest) -> DatasetArtifact
     )
 
 
-async def _emit_candidate_snapshot(
-    on_event: OnEvent | None,
-    *,
-    state: dict[str, Any],
-    candidate: dict[str, Any],
-    total_iterations: int,
-    include_progress: bool = True,
-) -> None:
-    if on_event is None:
-        return
-    persisted_candidates = [item for item in state.get("candidate_gates", []) if isinstance(item, dict)]
-    iteration = next(
-        (index for index, item in enumerate(persisted_candidates, start=1) if item is candidate),
-        0,
-    )
-    if not iteration:
-        candidate_id = str(candidate.get("candidate_id", "") or "")
-        iteration = next(
-            (
-                index
-                for index, item in enumerate(persisted_candidates, start=1)
-                if candidate_id and str(item.get("candidate_id", "") or "") == candidate_id
-            ),
-            len(persisted_candidates) + 1,
-        )
-    await emit(
-        on_event,
-        node_event(
-            candidate,
-            iteration=iteration,
-            parent_id=parent_node_id(candidate, persisted_candidates[: max(0, iteration - 1)]),
-        ),
-    )
-    if include_progress:
-        await emit(on_event, progress_event(state, total_iterations=total_iterations))
-
-
-def _maximum_candidate_iterations(
-    *,
-    case_count: int,
-    max_epochs: int,
-    batch_size: int,
-    max_issue_attempts: int,
-    sibling_candidate_count: int,
-) -> int:
-    """Return the configured upper bound for candidate-node creation."""
-
-    safe_batch_size = max(1, batch_size)
-    planned_groups = (max(0, case_count) + safe_batch_size - 1) // safe_batch_size
-    return max(1, max_epochs) * planned_groups * max(1, max_issue_attempts) * max(1, sibling_candidate_count)
-
-
 def load_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
     """Load and validate the dataset cases accepted by this engine."""
 
     cases: list[dict[str, Any]] = []
     for dataset_file in dataset_files:
         path = Path(dataset_file).expanduser().resolve()
-        with path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-        if isinstance(data, dict) and isinstance(data.get("cases"), list):
-            raw_cases = data["cases"]
-        elif isinstance(data, dict):
-            raw_cases = [data]
-        elif isinstance(data, list):
-            raw_cases = data
-        else:
-            raise ValueError(f"dataset json must contain case mappings: {path}")
-        for index, case in enumerate(raw_cases, start=1):
-            if not isinstance(case, dict):
-                raise ValueError(f"dataset case must be a mapping: {path}#{index}")
+        for index, case in enumerate(load_json_cases(path), start=1):
             cases.append({**case, "case_path": str(path), "case_index": index})
     case_ids = [str(case.get("case_id", "") or "").strip() for case in cases]
     if any(not case_id for case_id in case_ids):
@@ -4572,6 +4550,10 @@ def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, 
         "task_id": state.get("task_id", ""),
         "mode": "single_harness_benchmark",
         "status": state["status"],
+        "max_iteration": state.get("max_iteration"),
+        "iteration": len(state["epoch_checkpoints"]),
+        "usage": state.get("usage"),
+        "model_calls_path": state.get("model_calls_path", ""),
         "dataset_id": dataset.dataset_id,
         "dataset_cases": dataset.cases,
         "allowed_action_groups": state["allowed_action_groups"],

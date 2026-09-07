@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.data_loader import load_json_cases
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     build_backend,
 )
@@ -308,19 +309,7 @@ def _load_dataset_cases(dataset_files: list[str]) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
     for dataset_file in dataset_files:
         path = Path(dataset_file).expanduser().resolve()
-        with open(path, "r", encoding="utf-8") as file:
-            data = json.load(file)
-        if isinstance(data, dict) and isinstance(data.get("cases"), list):
-            raw_cases = data["cases"]
-        elif isinstance(data, dict):
-            raw_cases = [data]
-        elif isinstance(data, list):
-            raw_cases = data
-        else:
-            raise ValueError(f"dataset json must contain case mappings: {path}")
-        for index, case in enumerate(raw_cases, start=1):
-            if not isinstance(case, dict):
-                raise ValueError(f"dataset case must be a mapping: {path}#{index}")
+        for index, case in enumerate(load_json_cases(path), start=1):
             cases.append({**case, "case_path": str(path), "case_index": index})
     return cases
 
