@@ -12,14 +12,20 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Collection, List, Optional
 
-if TYPE_CHECKING:
-    from openjiuwen.harness.deep_agent import DeepAgent
-
+from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.interaction.interaction import InteractionOutput
+from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler
+from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.state import (
+    SUB_AGENT_RESUME_INPUT_KEY,
+    is_interrupt_envelope,
+)
 from openjiuwen.core.single_agent.rail.base import (
     bind_usage_delegation,
     build_usage_delegation_attribution,
@@ -38,6 +44,9 @@ from openjiuwen.harness.subagent_lifecycle import (
     prepare_subagent_task_resources,
 )
 from openjiuwen.harness.tools.base_tool import ToolOutput
+
+if TYPE_CHECKING:
+    from openjiuwen.harness.deep_agent import DeepAgent
 
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
@@ -71,6 +80,21 @@ def _summarize_task_description(task_description: Any) -> dict[str, Any]:
     }
 
 
+def _is_interrupt_schema(chunk: Any) -> bool:
+    """Return True when ``chunk`` is one ``state`` schema of an interrupt envelope.
+
+    ``write_interrupt_to_stream`` writes those schemas out verbatim, so they
+    arrive as ``OutputSchema`` rather than the plain dicts the rest of the
+    stream loop reads.
+    """
+    if not isinstance(chunk, OutputSchema) or chunk.type != INTERACTION:
+        return False
+    payload = chunk.payload
+    if not isinstance(payload, InteractionOutput):
+        return False
+    return isinstance(payload.value, InterruptRequest)
+
+
 async def _run_subagent_with_observable_stream(
     subagent: Any,
     inputs: dict[str, Any],
@@ -83,6 +107,16 @@ async def _run_subagent_with_observable_stream(
     chunks stay inside this task tool and only the terminal answer is returned
     to the parent agent.  Third-party test/adaptor agents that only implement
     ``invoke`` retain their existing behavior.
+
+    A subagent that stops to ask the user something emits no terminal answer at
+    all: ``ReActAgent`` writes the ``state`` schemas of its interrupt envelope
+    to the stream one at a time and nothing else.  Those schemas are collected
+    here and the envelope is rebuilt from them, because a pause reconstructed
+    as an answer is an empty success reported for a question nobody was asked.
+    Only schemas carrying an ``InterruptRequest`` are collected, which is what
+    the caller's interrupt collection reads; an interaction chunk carrying
+    anything else belongs to a workflow's own interrupt protocol and is left
+    exactly as it is handled today.
     """
     invoke_kwargs = {"session": session} if session is not None else {}
     stream = getattr(subagent, "stream", None)
@@ -91,12 +125,17 @@ async def _run_subagent_with_observable_stream(
 
     output_parts: list[str] = []
     terminal_result: dict[str, Any] | None = None
+    interrupt_schemas: list[OutputSchema] = []
     async for chunk in stream(inputs, **invoke_kwargs):
         chunk_type = getattr(chunk, "type", None)
         payload = getattr(chunk, "payload", None)
         if isinstance(chunk, dict):
             chunk_type = chunk.get("type", chunk_type)
             payload = chunk.get("payload", payload)
+        if _is_interrupt_schema(chunk):
+            # Exactly what build_interrupt_result put in the envelope's ``state``.
+            interrupt_schemas.append(chunk)
+            continue
         if not isinstance(payload, dict):
             continue
         if chunk_type == "llm_output":
@@ -113,6 +152,12 @@ async def _run_subagent_with_observable_stream(
             if isinstance(content, str):
                 terminal_result["output"] = content
 
+    if terminal_result is None and interrupt_schemas:
+        # ``interrupt_ids`` are the inner ids the payloads already carry, so
+        # the rebuilt envelope is the one the subagent returned from invoke.
+        return ToolInterruptHandler.build_interrupt_result(
+            [(schema.payload.id, schema) for schema in interrupt_schemas]
+        )
     if terminal_result is None:
         terminal_result = {
             "output": "".join(output_parts),
@@ -144,6 +189,9 @@ class _SubagentInputContext:
     parent_invocation_id: str | None
     affinity_enabled: bool
     browser_query: _BrowserQueryContext | None
+    # Set only when ToolInterruptHandler is replaying this call to deliver the
+    # user's answer to a paused subagent; ``None`` on a first invocation.
+    resume_input: Any = None
 
 
 class TaskTool(Tool):
@@ -195,6 +243,7 @@ class TaskTool(Tool):
         parent_session_id: str,
         subagent_type: str,
         resume_task_id: str = "",
+        task_description: Any = "",
     ) -> str:
         normalized_type = str(subagent_type or "").strip()
         normalized_resume_id = str(resume_task_id or "").strip()
@@ -206,7 +255,15 @@ class TaskTool(Tool):
         if kv_cache_subagent_lifecycle.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
-        return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
+        # Derived from the task rather than random: a delegation that pauses
+        # for user input is re-invoked with the same arguments, and a fresh
+        # random suffix would send that replay to a brand new subagent while
+        # the interrupted one stays parked and unreachable. Distinct tasks
+        # still get distinct sessions; identical ones now share one.
+        digest = hashlib.sha256(
+            str(task_description or "").encode("utf-8", errors="ignore")
+        ).hexdigest()[:8]
+        return f"{parent_session_id}_sub_{normalized_type}_{digest}"
 
     @staticmethod
     def _extract_browser_result(result: Any, output: Any) -> dict[str, Any]:
@@ -648,8 +705,19 @@ class TaskTool(Tool):
         task_description: Any,
         context: _SubagentInputContext,
     ) -> dict[str, Any]:
+        # On a resume the answer takes the place of the task description: the
+        # subagent finds its parked interruption state under this same
+        # conversation_id and feeds the answer to handle_resume, rather than
+        # starting the original task over. The session id itself stays derived
+        # from the task description, so the replay lands where the first call
+        # did.
+        query = (
+            context.resume_input
+            if context.resume_input is not None
+            else task_description
+        )
         subagent_inputs: dict[str, Any] = {
-            "query": task_description,
+            "query": query,
             "conversation_id": context.sub_session_id,
         }
         if context.browser_query is not None:
@@ -771,7 +839,8 @@ class TaskTool(Tool):
         parent_session: Session,
         browser_query: _BrowserQueryContext | None,
         affinity_enabled: bool,
-    ) -> ToolOutput:
+        resume_input: Any = None,
+    ) -> ToolOutput | dict[str, Any]:
         succeeded = False
         child_session: Session | None = None
         parent_subject = current_execution_subject()
@@ -824,6 +893,7 @@ class TaskTool(Tool):
                         parent_invocation_id=parent_invocation_id,
                         affinity_enabled=affinity_enabled,
                         browser_query=browser_query,
+                        resume_input=resume_input,
                     ),
                 )
                 if child_session is not None:
@@ -841,6 +911,12 @@ class TaskTool(Tool):
                     session=child_session,
                 )
                 succeeded = True
+                if is_interrupt_envelope(result):
+                    # Hand the envelope back unchanged: flattening it into
+                    # ``output`` drops ``result_type`` and ``interrupt_ids``,
+                    # so the parent reports an empty success while the
+                    # subagent waits for an answer nobody is asked for.
+                    return result
                 return self._build_task_output(
                     result,
                     normalized_type=normalized_type,
@@ -886,7 +962,7 @@ class TaskTool(Tool):
                     )
                     await child_session.post_run()
 
-    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
+    async def invoke(self, inputs: Input, **kwargs) -> ToolOutput | dict[str, Any]:
         """Execute task by delegating to a subagent.
 
         Args:
@@ -894,7 +970,8 @@ class TaskTool(Tool):
             **kwargs: Additional parameters, including 'session' for parent session context.
 
         Returns:
-            subagent's final result.
+            The subagent's final result, or the raw interrupt envelope when the
+            subagent paused to ask the user something.
 
         Raises:
             ToolError: If subagent creation or execution fails.
@@ -909,6 +986,9 @@ class TaskTool(Tool):
         normalized_type, task_description, resume_task_id, browser_capabilities = (
             self._parse_invocation_inputs(inputs)
         )
+        # Present only when ToolInterruptHandler is replaying this call to
+        # deliver the user's answer to a paused subagent.
+        resume_input = inputs.get(SUB_AGENT_RESUME_INPUT_KEY)
         runtime_parent_session_id = parent_session.get_session_id()
         affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self.parent_agent)
         parent_cache_id = runtime_parent_session_id
@@ -934,6 +1014,7 @@ class TaskTool(Tool):
                 runtime_parent_session_id,
                 normalized_type,
                 str(resume_task_id or ""),
+                task_description,
             )
         except ValueError as exc:
             raise build_error(
@@ -983,6 +1064,7 @@ class TaskTool(Tool):
             parent_session=parent_session,
             browser_query=browser_query,
             affinity_enabled=affinity_enabled,
+            resume_input=resume_input,
         )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:

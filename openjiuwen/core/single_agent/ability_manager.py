@@ -37,7 +37,10 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.session.agent import create_agent_session
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPT_AUTO_CONFIRM_KEY,
+    is_interrupt_envelope,
+)
 from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 
 # Ability type definition
@@ -1272,7 +1275,7 @@ class AbilityManager:
             session: Session,
             tag=None,
             callback_context: Optional[AgentCallbackContext] = None,
-    ) -> Tuple[Any, ToolMessage]:
+    ) -> Tuple[Any, Optional[ToolMessage]]:
         tool_name = tool_call.name
 
         mcp_tool_scope = self._resolve_mcp_tool_scope(tool_name)
@@ -1473,6 +1476,14 @@ class AbilityManager:
                     tool_call,
                     error_msg,
                 ) from e
+
+        # An interrupt envelope is a pending question, not a result: emit no
+        # ToolMessage for it, as an interrupted workflow and a
+        # ToolInterruptException already do above. The answer arrives on
+        # resume under this same tool_call_id, so writing the envelope now
+        # would leave two messages sharing one id, the first the question.
+        if is_interrupt_envelope(result):
+            return result, None
 
         # Build ToolMessage for successful execution.
         content = self._build_tool_message_content(result)
