@@ -95,9 +95,10 @@ class PaperNodeExtra(BaseModel):
     # Internal-only: this node's absolute score from judge.py::score_paper,
     # used to decide whether the *next* node should adopt this one as its
     # new frontier (see orchestrator.py's _node_score/_build_node). Not part
-    # of the public spec's PaperNodeExtra table — the public
-    # RsiTreeNode.score field stays null for the paper scenario per
-    # docs/autoresearch_endpoint.md; this is a private comparison value.
+    # of the public spec's PaperNodeExtra table. orchestrator.py also mirrors
+    # this value onto the public RsiTreeNode.score field below (previously
+    # left null per docs/autoresearch_endpoint.md); _node_score still reads
+    # it from here so the comparison logic stays decoupled from that field.
     score_overall: float | None = None
     score_breakdown: dict[str, float] = Field(default_factory=dict)
 
@@ -108,6 +109,9 @@ class RsiTreeNode(BaseModel):
     parent_id: str | None
     type: Literal["root", "reporting"]
     adopted: bool
+    # The candidate's composite paper score (judge.py::score_paper's
+    # `overall`). Null for root, pending, and any node the pipeline never
+    # produced a scorable paper for (failed run, scoring error).
     score: float | None = None
     summary: str | None = None
     snapshot_artifact_id: str | None = None

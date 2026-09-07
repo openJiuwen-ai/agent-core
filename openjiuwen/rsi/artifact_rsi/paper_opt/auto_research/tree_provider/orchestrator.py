@@ -517,6 +517,7 @@ class PaperTreeOrchestrator:
             parent_id=parent_id,
             type="reporting",
             adopted=adopted,
+            score=candidate_score.overall,
             summary=terminal.summary or None,
             snapshot_artifact_id=ref.artifact_id if ref else None,
             reason=reason,
