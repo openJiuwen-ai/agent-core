@@ -36,7 +36,7 @@
   `agent()` 的 option 集合包含 `label` / `phase` / `schema` / `model` /
   `timeout` / `isolation`。`isolation` 当前只允许 `None` 或 `"worktree"`；
   engine 只校验与透传，具体隔离语义由 backend 实现。
-- **可观测性**：`Runtime` 有两个 sink。`log_sink: Callable[[str], None]`（诊断文本，默认 no-op）；`progress_sink: Callable[[WorkflowProgressEvent], None]`（结构化进度，默认 no-op）。`phase()`/`log()`/`agent()` 起止发 `WorkflowProgressEvent`；引擎不读 wall-clock（保持 resume 确定性），事件**无时间戳**——消费方在 agent_teams 层补时。
+- **可观测性**：`Runtime` 有两个 sink。`log_sink: Callable[[str], None]`（诊断文本，默认 no-op）；`progress_sink: Callable[[WorkflowProgressEvent], None]`（结构化进度，默认 no-op）。`phase()`/`log()`/`agent()` 起止发 `WorkflowProgressEvent`；引擎不读 wall-clock（保持 resume 确定性），事件**无时间戳**——消费方在 agent_teams 层补时。`WORKFLOW_STARTED` 事件额外携带 `script_path`（`run_workflow(path)` 的绝对脚本路径，供嵌入层冷启动恢复 advisory 用，见 `F_110`；其它 kind 一律 None）。
 - **嵌套 workflow 的深度守卫是 per-task，不是全局**：`workflow()` 递归封顶用 `primitives._wf_depth`（contextvar，`_MAX_WORKFLOW_DEPTH=1`），非共享 `Runtime` 计数器。
   - contextvar 随 asyncio Task 拷贝：`parallel`/`pipeline` 各分支继承父深度 → **同层并发 `workflow()` 全部放行**
   - 真递归（子流 `run()` 内再调 `workflow()`，同一 Task）→ 返回 `None` + progress `LOG`（`[wf] nested workflow depth > 1 not allowed; skipping`）
@@ -242,6 +242,12 @@ resume 稳定，真人回复仍能匹配重跑的那轮。**resume 必须恢复 
 / `run_swarmflow` / relaunch 闭包），`_relaunch` 在 launch 前 `set_session_id(原 session)`、`finally`
 复位。缺这一步 resume 会解析到空 session → 用错 journal 路径（不命中缓存、全部重跑）+ 进度事件发到
 错 topic（外部 monitor/drain 收不到）。
+
+**stop 契约（`F_110`）**：`controller.stop(run_id: str | None = None)`。单值语义不变（active →
+`_abort_one(reason="stop")` 写 seal 断根、paused → 丢复活票）。`run_id=None` 全量遍历两个注册表：
+`_active` 逐个 abort+pop（写 seal）、`_paused` 逐个 pop 且**不补 seal**（pause 记录已在 journal，
+冷启动仍可 `resume_id` 命中缓存前缀续跑）。stop 与 pause/resume 同 `_lock` 互斥；`_paused` 的清理
+是"丢票保账本"，对应嵌入层"切换/断连清扫不终止意图"的语义。
 
 **接线**：`team_runner.run_agent_team_streaming(background_task_controller=)` →
 `TeamAgent.set_background_task_controller` → `TeamHarness`（存 `_bg_controller`，`start` 跨 native
