@@ -453,7 +453,8 @@ def sanitize_model_text(value: Any) -> str:
 def _skill_aliases(metadata: Mapping[str, Any]) -> tuple[str, ...]:
     raw = metadata.get("aliases", metadata.get("alias", ()))
     values = (raw,) if isinstance(raw, str) else raw if isinstance(raw, Sequence) else ()
-    return tuple(dict.fromkeys(alias for value in values for alias in (sanitize_model_text(value),) if alias))
+    aliases = (sanitize_model_text(value) for value in values)
+    return tuple(dict.fromkeys(alias for alias in aliases if alias))
 
 
 __all__ = [

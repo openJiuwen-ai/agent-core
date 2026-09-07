@@ -185,7 +185,8 @@ class OneShotSkillTreeBuilder:
             diagnostics=diagnostics,
         )
 
-    def _build_prompt(self, skills: tuple[OneShotSkill, ...]) -> str:
+    @staticmethod
+    def _build_prompt(skills: tuple[OneShotSkill, ...]) -> str:
         sections = []
         for skill in skills:
             sections.append(f"### {skill.name}\n\n{skill.description or '（无描述）'}")

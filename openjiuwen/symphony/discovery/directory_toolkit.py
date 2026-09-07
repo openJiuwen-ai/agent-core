@@ -192,12 +192,12 @@ class InstalledSkillsDirectoryToolkit:
         category: str | None = None,
         query: str | list[str] | None = None,
         skills: list[str] | None = None,
-        limit: int | None = None,
         cursor: str | None = None,
         **values: Any,
     ) -> SkillDCICommandResult:
         """Run one serialized structured directory operation."""
 
+        limit = values.pop("limit", None)
         paths = values.pop("paths", None)
         unexpected = set(values).difference(_SKILL_INDEX_DEFAULTS)
         if unexpected:
@@ -323,7 +323,8 @@ class InstalledSkillsDirectoryToolkit:
             # Show the branch choices together; Skill candidate pages stay bounded.
             page_size = 10 if any(row.worker_id for row in rows) else max(1, len(rows))
         if page_size is not None:
-            rows = all_rows[page_offset : page_offset + page_size]
+            page_end = page_offset + page_size
+            rows = all_rows[page_offset:page_end]
             complete = complete and page_offset + len(rows) >= len(all_rows)
         result_entry_count = (
             count_value
@@ -936,12 +937,9 @@ def _fit_rows(
             if available > 3:
                 selected.append(_Row(_compact(rows[0].text, available), rows[0].worker_id))
     body_lines = [row.text for row in selected]
-    if (
-        shortened
-        and show_shortened_marker
-        and (budget is None or len("\n".join([header, "", *body_lines, _SHORTENED])) <= budget)
-    ):
-        body_lines.append(_SHORTENED)
+    if shortened and show_shortened_marker:
+        if budget is None or len("\n".join([header, "", *body_lines, _SHORTENED])) <= budget:
+            body_lines.append(_SHORTENED)
     body = "\n".join(body_lines)
     model = f"{header}\n\n{body}" if body else header
     observed = list(dict.fromkeys(row.worker_id for row in selected if row.worker_id))

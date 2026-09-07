@@ -54,9 +54,10 @@ class LexicalIndex:
             self._search_text[key] = "\n".join((*fields[:2], *document.aliases, *fields[3:]))
             self._field_tokens[key] = tuple(set(values) for values in tokens)
             # Reuse field tokens with the existing weights; category is scored separately.
-            frequencies = Counter(
-                token for values, weight in zip(tokens, (5, 5, 5, 4, 1)) for _ in range(weight) for token in values
-            )
+            frequencies: Counter[str] = Counter()
+            for values, weight in zip(tokens, (5, 5, 5, 4, 1)):
+                for token, count in Counter(values).items():
+                    frequencies[token] += count * weight
             self._frequencies[key] = frequencies
             self._lengths[key] = sum(frequencies.values())
             postings.update(frequencies.keys())
@@ -134,16 +135,14 @@ class LexicalIndex:
         )
         query_families = _query_term_families(text)
         query_tokens = tuple(dict.fromkeys(token for _, family in query_families for token in family))
-        matched = [
-            document
-            for document in scope.values()
-            if any(
-                any(token in field for token in family)
-                for _, family in query_families
-                for field in self._field_tokens[document.key]
-            )
-            or _identity_contains_query(document, text, query_tokens)
-        ]
+        query_terms = set(query_tokens)
+        matched = []
+        for document in scope.values():
+            fields = self._field_tokens[document.key]
+            if any(not query_terms.isdisjoint(field) for field in fields):
+                matched.append(document)
+            elif _identity_contains_query(document, text, query_tokens):
+                matched.append(document)
         if not matched:
             return ()
         scored: list[LexicalHit] = []
@@ -438,7 +437,8 @@ def _without_front_matter(body: str) -> str:
         return body
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
-            return "".join(lines[index + 1 :])
+            content_start = index + 1
+            return "".join(lines[content_start:])
     return body
 
 

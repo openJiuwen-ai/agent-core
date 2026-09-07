@@ -244,7 +244,10 @@ class SkillDirectoryView:
             if node is not None:
                 levels.append((node.label, _searchable_category_description(node.description)))
             path = str(PurePosixPath(path).parent)
-        return "\n".join(part for level in reversed(levels) for part in level if part)
+        parts = []
+        for level in reversed(levels):
+            parts.extend(part for part in level if part)
+        return "\n".join(parts)
 
     def _scoped_entries(
         self,
