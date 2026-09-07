@@ -38,10 +38,10 @@ from openjiuwen.symphony.observation import (
     GRAPH_EVOLUTION_INPUT_SCHEMA,
     CapabilityEvidence,
     EvidenceStrength,
+    EvolutionEdgeMetadata,
     EvolutionGraph,
     EvolutionGraphEdge,
     EvolutionGraphNode,
-    EvolutionEdgeMetadata,
     FailureDomain,
     GraphEvolutionInput,
     GraphSnapshot,
@@ -83,12 +83,13 @@ from openjiuwen.symphony.shared.fingerprint import (
 if TYPE_CHECKING:
     from openjiuwen.symphony import agent as agent
     from openjiuwen.symphony import discovery as discovery
+    from openjiuwen.symphony import flow as flow
     from openjiuwen.symphony import retrieval as retrieval
     from openjiuwen.symphony import shared as shared
 
 CapabilityInput = ParameterSpec
 CapabilityOutput = ArtifactSpec
-_LAZY_MODULES = frozenset({"agent", "discovery", "retrieval", "shared"})
+_LAZY_MODULES = frozenset({"agent", "discovery", "flow", "retrieval", "shared"})
 
 __all__ = [
     "FINGERPRINT_ARTIFACT_FILENAME",
@@ -162,6 +163,7 @@ __all__ = [
     "TraceEvidence",
     "agent",
     "discovery",
+    "flow",
     "normalize_name_key",
     "retrieval",
     "shared",
