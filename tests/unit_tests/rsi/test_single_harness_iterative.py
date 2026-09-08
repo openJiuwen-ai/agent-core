@@ -744,7 +744,9 @@ def test_max_iteration_counts_epochs_not_cases(
     assert report["iteration"] == expected
     assert report["candidate_count"] == 0
     nodes = [event.node for event in events if isinstance(event, EventNode)]
-    assert [node.iteration for node in nodes] == list(range(expected + 1))
+    final_nodes = {node.node_id: node for node in nodes}
+    assert [node.iteration for node in final_nodes.values()] == list(range(expected + 1))
+    assert len([node for node in nodes if node.type == "RUNNING"]) == expected
     progress = [event for event in events if isinstance(event, EventProgress)]
     assert progress[-1].iteration == expected
     assert all(event.total_iterations == expected for event in progress)
@@ -811,6 +813,8 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
         if isinstance(event, EventNode):
             if event.node.iteration == 0:
                 assert event.node.node_id == "h0"
+            elif event.node.type == "RUNNING":
+                assert persisted["active_epoch"] == event.node.iteration
             else:
                 assert any(item["epoch"] == event.node.iteration for item in persisted["epoch_checkpoints"])
         events.append(event)
@@ -864,10 +868,12 @@ def test_iterative_single_harness_enforces_surfaces_and_promotes(tmp_path: Path)
     assert report["published_harness_refs_path"] == str(published_refs_path)
     assert all(call["team_skill_ref_path"] == "" for call in evaluator.calls)
     node_events = [event for event in events if isinstance(event, EventNode)]
-    assert [event.node.type for event in node_events] == ["ROOT", "ADOPTED"]
-    assert [event.node.iteration for event in node_events] == [0, 1]
-    assert node_events[1].node.parent_id == "h0"
-    assert node_events[1].node.adopted is True
+    assert [event.node.type for event in node_events] == ["ROOT", "RUNNING", "ADOPTED"]
+    assert [event.node.iteration for event in node_events] == [0, 1, 1]
+    assert node_events[1].node.node_id == node_events[2].node.node_id == "epoch-001"
+    assert node_events[2].node.parent_id == "h0"
+    assert node_events[2].node.adopted is True
+    assert {event.node_ref for event in events if isinstance(event, NodeStageEvent)} == {"epoch-001"}
     assert all(
         event.total_iterations == 1 and event.iteration <= 1 for event in events if isinstance(event, EventProgress)
     )

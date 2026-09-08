@@ -7,7 +7,10 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 from openjiuwen.rsi.events import EventNode, EventProgress
 from openjiuwen.rsi.schema import RsiChange, RsiTreeNode
@@ -164,8 +167,9 @@ def root_node_event(state: Mapping[str, Any]) -> EventNode:
             reason=None,
             failure_class=None,
             changes=[],
-            extra={"artifact_path": str(state.get("source_harness_refs_path", "") or "")},
-        )
+            extra={"artifact_path": str(state.get("source_harness_refs_path", "") or ""), "iteration_unit": "epoch"},
+        ),
+        artifacts=harness_artifacts(str(state.get("source_harness_refs_path", "") or "")),
     )
 
 
@@ -183,6 +187,7 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
             parent_id = f"epoch-{int(prior['epoch']):03d}"
             break
     adopted = bool(checkpoint.get("promotion_applied"))
+    running = checkpoint.get("status") == "running"
     rejected = checkpoint.get("status") == "rejected"
     changes = []
     if adopted:
@@ -196,17 +201,55 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
             node_id=f"epoch-{epoch:03d}",
             iteration=epoch,
             parent_id=parent_id,
-            type="ADOPTED" if adopted else "REJECTED" if rejected else "UNCHANGED",
+            type="RUNNING" if running else "ADOPTED" if adopted else "REJECTED" if rejected else "UNCHANGED",
             adopted=adopted,
             score=score,
-            summary=_summary(changes, "No retained Harness change"),
+            summary=_summary(changes, "Optimizing Harness" if running else "No retained Harness change"),
             snapshot_artifact_id=None,
             reason=str(checkpoint.get("status", "") or "") if not adopted else None,
             failure_class=None,
             changes=changes,
-            extra={"artifact_path": selected},
-        )
+            extra={"artifact_path": selected, "iteration_unit": "epoch"},
+        ),
+        artifacts=harness_artifacts(selected) if not running else [],
     )
+
+
+def active_epoch_node_event(state: Mapping[str, Any]) -> EventNode | None:
+    """Use the same active epoch snapshot for live events and recovery queries."""
+    epoch = int(state.get("active_epoch", 0) or 0)
+    if not epoch or any(int(item["epoch"]) == epoch for item in _mapping_items(state.get("epoch_checkpoints"))):
+        return None
+    return epoch_node_event(state, {
+        "epoch": epoch,
+        "status": "running",
+        "before_harness_refs_path": state.get("active_epoch_before_harness_refs_path", ""),
+    })
+
+
+def harness_artifacts(refs_path: str) -> list[dict[str, str]]:
+    """Describe the refs file and its plugin directories, never the whole run."""
+    if not refs_path:
+        return []
+    artifacts = [{"role": "HARNESS_REFS", "path": refs_path, "format": "yaml"}]
+    path = Path(refs_path)
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        return artifacts
+    if not isinstance(data, dict):
+        return artifacts
+    refs = data.get("harness_refs", data)
+    if isinstance(refs, dict):
+        for raw in refs.values():
+            if not isinstance(raw, str):
+                continue
+            package = Path(raw).expanduser()
+            if not package.is_absolute():
+                package = path.parent / package
+            if package.is_dir() and (package / "harness_config.yaml").is_file():
+                artifacts.append({"role": "PRIMARY", "path": str(package.resolve()), "format": "dir"})
+    return artifacts
 
 
 def node_event(
@@ -239,7 +282,8 @@ def node_event(
             ),
             changes=changes,
             extra={"artifact_path": artifact_path} if artifact_path else {},
-        )
+        ),
+        artifacts=harness_artifacts(artifact_path),
     )
 
 
@@ -339,10 +383,12 @@ def _number(value: Any) -> float | None:
 
 
 __all__ = [
+    "active_epoch_node_event",
     "analysis_stage_payload",
     "case_stage_payload",
     "epoch_node_event",
     "generate_stage_payload",
+    "harness_artifacts",
     "root_node_event",
     "node_event",
     "parent_node_id",

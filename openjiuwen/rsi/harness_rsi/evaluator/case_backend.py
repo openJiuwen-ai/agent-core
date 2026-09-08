@@ -159,6 +159,7 @@ class SingleHarnessExecutionBackend:
             model = load_member_optimizer_model(self.config.model_config_ref)
             agent_rails = _single_harness_rails(
                 team_skill_ref_path,
+                harness_path=harness_path,
                 shell_only=bool(solver_container_name),
                 controlled_skill_name=_controlled_skill_name(case),
             )
@@ -176,7 +177,7 @@ class SingleHarnessExecutionBackend:
                     role_name,
                 ),
                 workspace=str(workspace_dir),
-                rails=agent_rails,
+                rails=[rail for rail in agent_rails if not isinstance(rail, RSISkillUseRail)],
                 enable_task_loop=False,
                 max_iterations=100,
                 language="en",
@@ -186,6 +187,11 @@ class SingleHarnessExecutionBackend:
             )
             await Runner.start()
             started = True
+            # Register through the native API before plugin discovery so the
+            # rail has its filesystem operation when reading Skill descriptions.
+            for rail in agent_rails:
+                if isinstance(rail, RSISkillUseRail):
+                    await agent.register_rail(rail)
             await agent.load_plugin(harness_path)
             find_rails = getattr(agent, "find_rails_by_type", None)
             skill_use_rails = (
@@ -303,6 +309,7 @@ def _attach_single_harness_trajectory_rail(
 def _single_harness_rails(
     team_skill_ref_path: str | Path | None,
     *,
+    harness_path: str | Path,
     shell_only: bool = False,
     controlled_skill_name: str = "",
 ) -> list[Any]:
@@ -315,15 +322,15 @@ def _single_harness_rails(
     ]
     if controlled_skill_name:
         rails.append(ControlledSkillTreatmentRail(controlled_skill_name))
-    if not team_skill_ref_path:
-        return rails
-
-    skill_dir = _resolve_skill_dir(team_skill_ref_path)
+    skill_dir = _resolve_skill_dir(team_skill_ref_path) if team_skill_ref_path else None
+    # load_plugin binds skills to an existing native rail. Register the RSI
+    # delivery adapter even for an empty H0; do not add any baseline skill.
     rails.append(
         RSISkillUseRail(
-            skills_dir=str(skill_dir.parent),
+            skills_dir=str(skill_dir.parent if skill_dir else Path(harness_path) / "skills"),
             skill_mode=RSISkillUseRail.SKILL_MODE_ALL,
-            enabled_skills=[skill_dir.name],
+            enabled_skills=[skill_dir.name] if skill_dir else None,
+            include_tools=not shell_only,
             trigger_at_task_start=True,
         )
     )

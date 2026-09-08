@@ -40,6 +40,7 @@ class EventNode:
     """A persisted complete tree-node snapshot."""
 
     node: RsiTreeNode
+    artifacts: list[dict[str, str]] = field(default_factory=list)
     event_type: Literal["node"] = field(default="node", init=False)
 
 

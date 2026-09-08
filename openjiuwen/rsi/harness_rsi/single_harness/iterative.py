@@ -57,6 +57,7 @@ from openjiuwen.rsi.harness_rsi.schema import (
     EvaluationResultAnalysisInvocation,
 )
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
+    active_epoch_node_event,
     analysis_stage_payload,
     case_stage_payload,
     epoch_node_event,
@@ -287,7 +288,14 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             epoch_start_retained_case_ids = set(working_retained_case_ids)
             if all_case_ids <= working_retained_case_ids:
                 break
-            set_usage_node(f"epoch-{epoch:03d}")
+            epoch_node_ref = f"epoch-{epoch:03d}"
+            set_usage_node(epoch_node_ref)
+            state["active_epoch"] = epoch
+            state["active_epoch_before_harness_refs_path"] = epoch_start_refs
+            _write_yaml_atomic(state_path, state)
+            active_event = active_epoch_node_event(state)
+            if active_event is not None:
+                await emit(on_event, active_event)
             if callable(getattr(type(self.data_loader), "load_files", None)):
                 planned_batches = list(self.data_loader.load_files(request.dataset_files, epoch=epoch))
             else:
@@ -340,7 +348,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     harness_refs_path=current_refs,
                     output_dir=batch_dir / "source",
                     dataset=dataset,
-                    node_ref="h0",
+                    node_ref=epoch_node_ref,
                     on_event=on_event,
                 )
                 batch_before_refs = current_refs
@@ -386,6 +394,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         eval_ref_path=attempt_source_eval_ref,
                         harness_refs_path=current_refs,
                         output_dir=analysis_dir,
+                        node_ref=epoch_node_ref,
                         source_stage=(
                             "single_harness_batch" if analysis_round_index == 1 else "single_harness_residual_repair"
                         ),
@@ -447,7 +456,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         await emit(
                             on_event,
                             NodeStageEvent(
-                                node_ref="h0",
+                                node_ref=epoch_node_ref,
                                 stage=generate_stage_payload(1, 1, "running"),
                             ),
                         )
@@ -479,7 +488,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             await emit(
                                 on_event,
                                 NodeStageEvent(
-                                    node_ref="h0",
+                                    node_ref=epoch_node_ref,
                                     stage=generate_stage_payload(
                                         1, 1, "error", error=_safe_candidate_error(exc)["message"]
                                     ),
@@ -491,7 +500,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         await emit(
                             on_event,
                             NodeStageEvent(
-                                node_ref="h0",
+                                node_ref=epoch_node_ref,
                                 stage=generate_stage_payload(
                                     1,
                                     1,
@@ -518,7 +527,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                 candidate_index=1,
                             ),
                             dataset=dataset,
-                            node_ref="h0",
+                            node_ref=epoch_node_ref,
                             on_event=on_event,
                         )
                         if member_info.get("candidate_generation_error"):
@@ -595,7 +604,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             harness_refs_path=current_refs,
                             output_dir=attempt_dir / "residual_source",
                             dataset=dataset,
-                            node_ref="h0",
+                            node_ref=epoch_node_ref,
                             on_event=on_event,
                         )
                         residual_eval_refs.append(residual_eval_ref)
@@ -685,7 +694,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 harness_refs_path=current_refs,
                 output_dir=output_dir / "evaluations" / f"e{epoch:03d}" / "full",
                 dataset=dataset,
-                node_ref="h0",
+                node_ref=epoch_node_ref,
                 on_event=on_event,
             )
             full_score = _eval_score(full_eval_ref)
@@ -831,6 +840,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     _update_batch_attempt_record(completed, gate)
             state["current_harness_refs_path"] = str(state["best_harness_refs_path"])
             state["working_harness_refs_path"] = str(state["best_harness_refs_path"])
+            state["active_epoch"] = 0
             checkpoint["before_harness_refs_path"] = epoch_start_refs
             checkpoint["selected_harness_refs_path"] = current_refs
             _refresh_optimization_experience(state, output_dir)
