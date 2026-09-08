@@ -198,6 +198,56 @@ def build_rebuild_command_prompt(
     )
 
 
+def build_rebuild_llm_direct_prompt(
+    *,
+    subject: dict[str, Any],
+    current_skill_md: str,
+    user_intent: str | None = None,
+    rebuild_context: dict[str, Any] | None = None,
+    language: str = "cn",
+) -> tuple[str, str]:
+    """Build (system, user) prompts for host-side direct LLM rebuild (no tools).
+
+    The host reads the current SKILL.md, asks the model for a full rebuilt body,
+    then writes the file itself. Do not instruct tool use.
+    """
+    del language
+    normalized_subject = normalize_subject(subject).to_payload()
+    intent = (
+        user_intent.strip()
+        if user_intent
+        else "Rebuild the skill using the deterministic context."
+    )
+    min_score = rebuild_context.get("min_score") if rebuild_context else None
+    min_score_line = f"Min score threshold: {min_score}\n" if min_score is not None else ""
+    skill_name = str(normalized_subject.get("name") or "").strip()
+    target_skill_md, _ = _resolve_rebuild_write_target(
+        rebuild_context,
+        skill_name=skill_name,
+    )
+    system = (
+        "You rebuild Skill definition files (SKILL.md). "
+        "Output ONLY the complete rebuilt SKILL.md file content, including YAML "
+        "frontmatter between --- lines and the full markdown body. "
+        "Do not wrap the output in markdown code fences. "
+        "Do not call tools, mention tools, or edit evolutions.json. "
+        "Do not include commentary before or after the file."
+    )
+    user = (
+        f"Rebuild subject {json.dumps(normalized_subject, ensure_ascii=False)}.\n"
+        f"Intent: {intent}\n"
+        f"{min_score_line}"
+        f"Target path (host will write this file): `{target_skill_md}`\n"
+        "Old version has been archived. Merge the deterministic experiences below "
+        "into the current SKILL.md. Preserve useful structure; incorporate durable "
+        "instruction changes from the experiences.\n\n"
+        f"{format_rebuild_context(rebuild_context)}\n\n"
+        "Current SKILL.md:\n"
+        f"{current_skill_md}\n"
+    )
+    return system, user
+
+
 def _format_index_lines(items: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for item in items:
@@ -220,6 +270,7 @@ def _format_index_lines(items: list[dict[str, Any]]) -> list[str]:
 __all__ = [
     "build_evolve_review_command_prompt",
     "build_rebuild_command_prompt",
+    "build_rebuild_llm_direct_prompt",
     "build_simplify_command_prompt",
     "format_complete_summary_index",
     "format_rebuild_context",
