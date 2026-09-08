@@ -107,8 +107,6 @@ class ReflectionAgent:
                 for rail in reversed(list(configured_rails())):
                     try:
                         await unregister(rail)
-                    except asyncio.CancelledError:
-                        raise
                     except Exception:
                         # Cleanup must not mask the agent result.
                         pass

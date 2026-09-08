@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
@@ -107,6 +108,19 @@ _DOMESTIC_SEARCH_DOMAINS = (
     "wanfangdata.com.cn",
 )
 _DOMESTIC_ENGINE_NAMES = frozenset({"baidu-scholar", "baidu-web", "cnki", "wanfang"})
+
+
+@dataclass(frozen=True)
+class _FreeSearchRequest:
+    """Inputs for one free-search fallback pass."""
+
+    session: aiohttp.ClientSession
+    query: str
+    max_results: int
+    timeout_seconds: int
+    proxy_url: str | None = None
+    allowed_domains: tuple[str, ...] | None = None
+    enabled_engines: frozenset[str] | tuple[str, ...] | None = None
 
 
 def _is_low_fetch_value_url(url: str) -> bool:
@@ -910,16 +924,15 @@ class WebFreeSearchTool(Tool):
         return [normalized] if normalized else []
 
     @staticmethod
-    async def _search_free(
-        session: aiohttp.ClientSession,
-        query: str,
-        max_results: int,
-        timeout_seconds: int,
-        proxy_url: str | None = None,
-        allowed_domains: tuple[str, ...] | None = None,
-        enabled_engines: frozenset[str] | tuple[str, ...] | None = None,
-    ) -> tuple[str, list[dict[str, str]]]:
+    async def _search_free(request: _FreeSearchRequest) -> tuple[str, list[dict[str, str]]]:
         """Search using multiple free search engines with best-effort fallback."""
+        session = request.session
+        query = request.query
+        max_results = request.max_results
+        timeout_seconds = request.timeout_seconds
+        proxy_url = request.proxy_url
+        allowed_domains = request.allowed_domains
+        enabled_engines = request.enabled_engines
         errors: list[str] = []
         debug_run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         best_engine = ""
@@ -1119,13 +1132,15 @@ class WebFreeSearchTool(Tool):
         try:
             async with _http.new_session() as session:
                 engine_used, rows = await WebFreeSearchTool._search_free(
-                    session,
-                    query,
-                    max_results,
-                    timeout_seconds,
-                    proxy_url=self._proxy_url,
-                    allowed_domains=self._allowed_domains,
-                    enabled_engines=self._enabled_engines,
+                    _FreeSearchRequest(
+                        session=session,
+                        query=query,
+                        max_results=max_results,
+                        timeout_seconds=timeout_seconds,
+                        proxy_url=self._proxy_url,
+                        allowed_domains=self._allowed_domains,
+                        enabled_engines=self._enabled_engines,
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001
             return f"[ERROR]: free search failed: {exc}"

@@ -776,8 +776,6 @@ class CodeImplementationAgent:
             for rail in reversed(list(configured_rails())):
                 try:
                     await unregister(rail)
-                except asyncio.CancelledError:
-                    raise
                 except Exception as exc:  # noqa: BLE001 - cleanup must continue
                     logger.warning("code agent rail cleanup failed: %s", exc)
 

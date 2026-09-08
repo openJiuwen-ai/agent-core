@@ -24,7 +24,6 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     find_harness_run_dirs,
     generated_code_dir,
     module_attempt_dir,
-    report_path,
     resolve_project_reference,
     results_dir,
     smoke_test_dir,
@@ -1331,12 +1330,13 @@ class ExperimentExecutionAdapter:
         if diagnostic.get("detail"):
             failure_excerpts.append(str(diagnostic.get("detail")))
         failure_excerpts = [item for item in _unique_paths(failure_excerpts) if item][:8]
-        explicit_retryability = [
-            item.metrics.get("retryable")
-            for item in result.variants
-            if item.process_status != "completed"
-            if isinstance(item.metrics.get("retryable"), bool)
-        ]
+        explicit_retryability: list[bool] = []
+        for variant in result.variants:
+            if variant.process_status == "completed":
+                continue
+            retryable_flag = variant.metrics.get("retryable")
+            if isinstance(retryable_flag, bool):
+                explicit_retryability.append(retryable_flag)
         retryable = not process_ok and (
             not explicit_retryability or any(explicit_retryability)
         )

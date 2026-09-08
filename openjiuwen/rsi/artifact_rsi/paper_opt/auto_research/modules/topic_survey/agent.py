@@ -189,15 +189,14 @@ class TopicSurveyAgent:
     @classmethod
     def _validate_paper_submission(cls, draft: TopicSurveyDraft) -> None:
         """Reject structurally valid surveys that contain no actual paper."""
-        paper_sources = [
-            source
-            for source in draft.sources
-            if (
-                (source.source_type == "paper" or Path(source.local_path).suffix.lower() == ".pdf")
-                and not cls._is_portal_shell_url(source.url)
-            )
-        ]
-        if not paper_sources:
+        has_paper_source = False
+        for source in draft.sources:
+            source_is_paper = source.source_type == "paper"
+            source_is_pdf = Path(source.local_path).suffix.lower() == ".pdf"
+            if (source_is_paper or source_is_pdf) and not cls._is_portal_shell_url(source.url):
+                has_paper_source = True
+                break
+        if not has_paper_source:
             raise RuntimeError(
                 "topic survey did not produce a paper source; portal home/search pages "
                 "cannot be submitted as literature evidence"
@@ -317,8 +316,6 @@ class TopicSurveyAgent:
                 for rail in reversed(list(configured_rails())):
                     try:
                         await unregister(rail)
-                    except asyncio.CancelledError:
-                        raise
                     except Exception:  # noqa: BLE001 - cleanup must not mask submission
                         _LOGGER.exception("topic survey finalizer rail cleanup failed")
 
@@ -406,8 +403,6 @@ class TopicSurveyAgent:
                     submit_tool=submit_tool,
                     request_id=request_id,
                 )
-            except asyncio.CancelledError:
-                raise
             except Exception as finalizer_error:
                 detail = run_error or submission_error
                 raise RuntimeError(
