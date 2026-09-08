@@ -13,7 +13,7 @@ from openjiuwen.core.session import get_current_session, with_session
 
 @pytest.mark.asyncio
 async def test_with_session_async_gen_aclose_from_other_task() -> None:
-    """ReAct streams spawn work in another task; aclose can run there."""
+    """Cross-Context aclose must not crash; producer Context may still leak."""
 
     @with_session()
     async def stream(session: object):
@@ -23,12 +23,44 @@ async def test_with_session_async_gen_aclose_from_other_task() -> None:
     session = object()
     agen = stream(session)
     assert await agen.__anext__() == "chunk"
+    # Token was minted in this Context; value stays until this Context ends.
+    assert get_current_session() is session
 
     async def close_elsewhere() -> None:
         await agen.aclose()
+        # Closer Context never held ``session``, so conditional fallback is a
+        # no-op (must not invent a restore of ``previous`` here).
+        assert get_current_session() is None
 
     await asyncio.create_task(close_elsewhere())
-    assert get_current_session() in (None, session)
+    # Producer Context leak is an inherent ContextVar limit across Contexts.
+    assert get_current_session() is session
+
+
+@pytest.mark.asyncio
+async def test_aclose_from_other_task_does_not_clobber_closer_session() -> None:
+    """Fallback must not overwrite a closer that already has another session."""
+    stream_session = object()
+    closer_session = object()
+
+    @with_session()
+    async def stream(session: object):
+        yield "chunk"
+        await asyncio.sleep(0)
+
+    agen = stream(stream_session)
+    assert await agen.__anext__() == "chunk"
+
+    @with_session()
+    async def close_under_other_session(session: object) -> None:
+        assert get_current_session() is session
+        await agen.aclose()
+        assert get_current_session() is session
+
+    # Run closer in a separate task so aclose cleanup uses another Context
+    # (the real disconnect / create_task(stream_process) shape).
+    await asyncio.create_task(close_under_other_session(closer_session))
+    assert get_current_session() is stream_session
 
 
 @pytest.mark.asyncio
