@@ -43,7 +43,7 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import events
 from .candidates import TREE_FILE, TREE_SCHEMA_VERSION, CandidateStore, write_tree_snapshot
@@ -488,17 +488,14 @@ class PuctEngine:
             # empty is already recorded (a failed call) or about to be
             # (`note_empty`), and both say more than "it changed no file".
             if reply.strip() and files and not edits_an_existing_file(parent_files, files):
-                # Everything it wrote landed in new paths nothing imports, so
-                # the program that runs is still the parent's. Said here, with
-                # the paths named, because the alternative is a candidate that
-                # scores exactly the parent and is recorded as a valid one.
-                written = ", ".join(sorted(set(files) - set(parent_files))) or "nothing"
-                reporter.note_failure(
-                    iteration,
-                    f"the reply wrote {written} and left every existing file alone, so the "
-                    f"program that runs is unchanged — the evaluator imports "
-                    f"{spec.entrypoint}, which was not among the files it returned",
-                )
+                # The program that runs is still the parent's, and the three
+                # ways that happens need three different fixes — so say which.
+                # They used to share one message ("the reply wrote nothing and
+                # left every existing file alone"), which sent the reader
+                # looking for files in a reply that never contained a program.
+                reporter.note_failure(iteration, _no_edit_reason(
+                    reply, files, parent_files, spec.entrypoint,
+                    reply_format.carries_program(reply)))
                 return "", "", None
             # A reply that proposed nothing merges to the parent, which
             # would be a valid program costing a full evaluation to learn
@@ -1104,6 +1101,44 @@ def _mode(spec: RunSpec) -> str:
     if mode not in ("async", "serial", "sync"):
         raise _Refusal(f"unknown search mode {mode!r}; the choices are serial / sync / async")
     return mode
+
+
+def _no_edit_reason(
+    reply: str,
+    files: Mapping[str, str],
+    parent_files: Mapping[str, str],
+    entrypoint: str,
+    carries_program: bool,
+) -> str:
+    """Why this reply changed nothing, in the terms of the fix it needs.
+
+    Three different failures wear the same "no file changed" symptom:
+
+    * **No program in the reply at all** — prose, an explanation, a plan. The
+      fix is the prompt or the model, and the reader needs to see what came
+      back instead, so a bounded excerpt goes in.
+    * **The parent handed straight back.** The fix is selection pressure or
+      prompt wording; there is nothing to look at.
+    * **Only new paths written.** The fix is in the reply's file naming, and
+      the paths say it.
+    """
+    if not carries_program:
+        excerpt = " ".join(reply.split())[:200]
+        return (
+            "the reply carried no program at all — nothing in it parsed as the "
+            f"program's source, so {entrypoint} is unchanged. It said: {excerpt!r}"
+        )
+    if dict(files) == dict(parent_files):
+        return (
+            "the reply handed back the previous program unchanged, so this "
+            "expansion measured a candidate identical to its parent"
+        )
+    written = ", ".join(sorted(set(files) - set(parent_files)))
+    return (
+        f"the reply wrote {written} and left every existing file alone, so the "
+        f"program that runs is unchanged — the evaluator imports {entrypoint}, "
+        "which was not among the files it returned"
+    )
 
 
 def _prior_exponent(options: Dict[str, Any]) -> float:

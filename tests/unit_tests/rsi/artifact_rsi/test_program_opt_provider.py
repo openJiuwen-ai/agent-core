@@ -4034,6 +4034,34 @@ def test_an_event_consumer_that_never_returns_does_not_stall_the_search(
     assert result.status in ("completed", "failed"), result
 
 
+def test_a_reply_that_changed_nothing_says_which_way_it_did_that() -> None:
+    """Three failures wear the same symptom and need three different fixes.
+
+    Measured on two AlgoTune runs: nine expansions reported "the reply wrote
+    nothing and left every existing file alone", which reads as a file-naming
+    problem and sent the reader looking for files in replies that had never
+    contained a program.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import _no_edit_reason
+
+    parent = {"solver.py": "def solve(p):\n    return p\n"}
+
+    prose = _no_edit_reason("I would start by profiling the inner loop.", parent, parent,
+                            "solver.py", carries_program=False)
+    assert "carried no program" in prose
+    assert "profiling the inner loop" in prose, "the reader needs to see what came back"
+
+    same = _no_edit_reason("```python\nx\n```", parent, parent, "solver.py", carries_program=True)
+    assert "handed back the previous program unchanged" in same
+
+    beside = _no_edit_reason("```python\nx\n```", {**parent, "helper.py": "x"}, parent,
+                             "solver.py", carries_program=True)
+    assert "wrote helper.py" in beside and "solver.py" in beside
+
+    # The excerpt is bounded: a reply of any length stays one readable line.
+    long_prose = _no_edit_reason("word " * 500, parent, parent, "solver.py", carries_program=False)
+    assert len(long_prose) < 400 and "\n" not in long_prose
+
 def test_a_zero_timeout_tally_is_not_a_timeout(tmp_path: Path) -> None:
     """A benchmark report says "Timeouts: 0%" whether or not anything timed out.
 
