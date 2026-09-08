@@ -26,6 +26,11 @@ from typing import Any, Callable
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.core.common.logging import team_logger
 
+# Upper bound on waiting for a cancelled swarmflow task to unwind. Generous:
+# unwinding may need to abort live avatar sessions and finish an in-flight
+# model call; a hung task must not wedge the team lifecycle forever.
+_UNWIND_TIMEOUT_S = 30.0
+
 
 @dataclass
 class SwarmflowRunHandle:
@@ -90,10 +95,27 @@ class BackgroundTaskController:
             await h.backend.abort_sessions()
         except Exception:
             team_logger.debug("[bg-ctl] abort_sessions failed for %s", h.run_id, exc_info=True)
+        runtime = h.native.async_tool_runtime
         try:
-            await h.native.async_tool_runtime.cancel(h.task_id)
+            await runtime.cancel(h.task_id)
         except Exception:
             team_logger.debug("[bg-ctl] cancel failed for %s", h.run_id, exc_info=True)
+        # ``cancel`` only requests cancellation; the engine writes the
+        # pause/seal record and emits the terminal progress event while the
+        # task unwinds, asynchronously. Wait for that so a caller that tears the
+        # leader harness down right after pause()/stop() does not lose it.
+        task = getattr(runtime, "_tasks", {}).get(h.task_id)
+        if task is not None and not task.done():
+            done, _ = await asyncio.wait({task}, timeout=_UNWIND_TIMEOUT_S)
+            if not done:
+                team_logger.warning(
+                    "[bg-ctl] %s unwind timed out after %ss for %s",
+                    reason, _UNWIND_TIMEOUT_S, h.run_id,
+                )
+        # The terminal progress event is published from the unwind via a
+        # fire-and-forget task (SwarmflowTool._publish → create_task); yield
+        # once so that task runs before the caller tears the messager down.
+        await asyncio.sleep(0)
 
     async def pause(self, run_id: str | None = None) -> bool:
         """Pause active run(s) — all when ``run_id`` is None, else just that one."""
