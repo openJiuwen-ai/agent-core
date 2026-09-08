@@ -176,10 +176,7 @@ def _sync_skill_registry_for_written_files(
     if not isinstance(existing, list):
         raise ValueError("skills registry must contain a list")
     merged = list(existing)
-    mounted = {
-        str(value.get("dir", "") if isinstance(value, dict) else value).removeprefix("./")
-        for value in existing
-    }
+    mounted = {str(value.get("dir", "") if isinstance(value, dict) else value).removeprefix("./") for value in existing}
     for addition in additions:
         if addition not in mounted:
             merged.append(addition)
@@ -825,6 +822,7 @@ class MemberActionExecutorAgent:
         async def call_once() -> str:
             model = load_member_optimizer_model(self._model_config_ref)
             output_budget = model.model_config.max_tokens if model.model_config else None
+            # Keep provider-specific reasoning controls from the model configuration.
             response = await model.invoke(
                 messages=[
                     {"role": "system", "content": _ACTION_EXECUTION_PROMPT},
@@ -833,7 +831,6 @@ class MemberActionExecutorAgent:
                 tools=None,
                 temperature=0.0,
                 max_tokens=output_budget if output_budget is not None else 8192,
-                extra_body={"enable_thinking": False},
             )
             if getattr(response, "finish_reason", None) == "length":
                 raise RuntimeError(

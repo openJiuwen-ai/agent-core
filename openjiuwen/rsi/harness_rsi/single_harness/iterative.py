@@ -65,6 +65,13 @@ from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     generate_stage_payload,
     progress_event,
     root_node_event,
+    source_reuse_stage_payload,
+)
+from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import (
+    evaluation_context,
+    matching_cases,
+    materialize_source,
+    stamp_evaluation,
 )
 from openjiuwen.rsi.usage import ModelUsageObserver, bind_model_usage, model_usage_stage, set_usage_node
 
@@ -247,13 +254,17 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "policy_ref": self.config.member_optimizer.improver_policy_ref,
             "explicit": self._explicit_improver_policy,
         }
+        all_cases = load_cases(dataset.dataset_files)
+        protocol_signature = self._evaluation_context(all_cases, source_refs)["signature"]
+        if request.resume and state.get("evaluation_protocol_signature", protocol_signature) != protocol_signature:
+            raise ValueError("run evaluation configuration or initial Harness changed; start a new run")
+        state["evaluation_protocol_signature"] = protocol_signature
         if request.resume and state.get("status") == "completed":
             _ensure_final_publication(state=state, output_dir=output_dir)
             _write_yaml_atomic(state_path, state)
             _write_yaml_atomic(report_path, _build_report(state, dataset))
             return _result_from_state(state, state_path, report_path)
 
-        all_cases = load_cases(dataset.dataset_files)
         total_iterations = max_epochs
         all_case_ids = {str(case.get("case_id", "") or "") for case in all_cases if str(case.get("case_id", "") or "")}
         baseline_before = str(state.get("baseline_eval_ref_path", "") or "")
@@ -365,11 +376,16 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     continue
 
                 batch_dir = output_dir / "evaluations" / f"e{epoch:03d}" / f"b{batch_index:03d}"
-                source_eval_ref = await self._evaluate(
+                source_eval_ref = await self._source_evaluation(
                     cases=batch,
                     harness_refs_path=current_refs,
                     output_dir=batch_dir / "source",
                     dataset=dataset,
+                    prior_eval_refs=[
+                        str(state.get("baseline_eval_ref_path") or ""),
+                        *[str(item["eval_ref_path"]) for item in state["epoch_checkpoints"]],
+                    ],
+                    batch_index=batch_index,
                     node_ref=epoch_node_ref,
                     on_event=on_event,
                 )
@@ -686,6 +702,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "epoch": epoch,
                     "batch_index": batch_index,
                     "source_eval_ref_path": source_eval_ref,
+                    "source_evidence": _read_yaml(Path(source_eval_ref)).get("source_evidence", {}),
                     "analysis_ref_path": analysis_ref,
                     "optimization_hypotheses_path": hypotheses_ref,
                     "analysis_ref_paths": analysis_refs,
@@ -879,6 +896,85 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         _write_yaml_atomic(report_path, _build_report(state, dataset))
         return _result_from_state(state, state_path, report_path)
 
+    def _evaluation_context(self, cases: list[dict[str, Any]], harness_refs_path: str) -> dict[str, Any]:
+        return evaluation_context(
+            harness_refs_path=harness_refs_path,
+            evaluator_config={
+                "config": self.config.evaluator,
+                "adapter": f"{type(self.evaluator).__module__}.{type(self.evaluator).__qualname__}",
+                "adapter_config": getattr(self.evaluator, "config", None),
+            },
+            cases=cases,
+        )
+
+    async def _source_evaluation(
+        self,
+        *,
+        cases: list[dict[str, Any]],
+        harness_refs_path: str,
+        output_dir: Path,
+        dataset: DatasetArtifact,
+        prior_eval_refs: list[str],
+        batch_index: int,
+        node_ref: str,
+        on_event: OnEvent | None,
+    ) -> str:
+        context = self._evaluation_context(cases, harness_refs_path)
+        existing = output_dir / "eval_ref.yaml"
+        if _eval_ref_complete(existing):
+            if _read_yaml(existing).get("evaluation_context") != context:
+                raise ValueError("source evaluation inputs changed; start a new run instead of reusing old analysis")
+            result = str(existing)
+        else:
+            selected = matching_cases(prior_eval_refs, context)
+            reused = set(selected)
+            missing = [case for case in cases if str(case["case_id"]) not in selected]
+            if not selected:
+                return await self._evaluate(
+                    cases=cases,
+                    harness_refs_path=harness_refs_path,
+                    output_dir=output_dir,
+                    dataset=dataset,
+                    node_ref=node_ref,
+                    on_event=on_event,
+                )
+            if missing:
+                fresh_ref = await self._evaluate(
+                    cases=missing,
+                    harness_refs_path=harness_refs_path,
+                    output_dir=output_dir / "fresh",
+                    dataset=dataset,
+                    node_ref=node_ref,
+                    on_event=on_event,
+                )
+                # Fresh infra failures are preserved, not replaced with older favorable scores.
+                for case in _read_yaml(Path(fresh_ref)).get("cases", []):
+                    selected[str(case["case_id"])] = (fresh_ref, case)
+            result = await materialize_source(
+                cases=cases,
+                selected=selected,
+                output_dir=output_dir,
+                harness_refs_path=harness_refs_path,
+                context=context,
+                reused_case_ids=reused,
+            )
+        provenance = _read_yaml(Path(result)).get("source_evidence", {})
+        if provenance.get("reused_case_ids"):
+            await emit(
+                on_event,
+                NodeStageEvent(
+                    node_ref=node_ref,
+                    stage=source_reuse_stage_payload(
+                        batch_index=batch_index,
+                        total_cases=len(cases),
+                        score=_eval_score(result),
+                        eval_ref_path=result,
+                        provenance=provenance,
+                    ),
+                ),
+            )
+        return result
+
     @model_usage_stage("evaluate")
     async def _evaluate(
         self,
@@ -890,9 +986,20 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         node_ref: str = "h0",
         on_event: OnEvent | None = None,
     ) -> str:
+        context = self._evaluation_context(cases, harness_refs_path)
         existing = output_dir / "eval_ref.yaml"
         if _eval_ref_complete(existing):
+            if _read_yaml(existing).get("evaluation_context") != context:
+                raise ValueError("evaluation inputs changed; use a new run to preserve existing results")
             return str(existing)
+
+        # Bind partial evaluator resumes to the same model/Judge/Harness too.
+        context_path = output_dir / "evaluation_context.yaml"
+        if context_path.is_file() and _read_yaml(context_path) != context:
+            raise ValueError("partial evaluation inputs changed; use a new run")
+        if not context_path.is_file() and any((output_dir / "cases").glob("*/result.json")):
+            raise ValueError("partial evaluation provenance missing; use a new run")
+        _write_yaml_atomic(context_path, context)
 
         async def emit_case_stage(payload: dict[str, Any]) -> None:
             await emit(
@@ -915,7 +1022,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         stage_kwargs = {"on_case_stage": emit_case_stage} if supports_stages and on_event is not None else {}
-        return await self.evaluator.evaluate_batch(
+        result = await self.evaluator.evaluate_batch(
             cases=cases,
             team_skill_ref_path="",
             harness_refs_path=harness_refs_path,
@@ -923,6 +1030,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
             **stage_kwargs,
         )
+        if context != self._evaluation_context(cases, harness_refs_path):
+            raise ValueError("evaluation inputs changed during execution; results cannot be reused")
+        stamp_evaluation(result, context)
+        return result
 
     @model_usage_stage("analyze")
     async def _analyze(

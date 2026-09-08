@@ -19,6 +19,25 @@ from openjiuwen.rsi.usage import usage_snapshot
 _PROVISIONAL_STATUSES = {"provisional"}
 
 
+def source_reuse_stage_payload(
+    *, batch_index: int, total_cases: int, score: float | None, eval_ref_path: str, provenance: dict[str, Any]
+) -> dict[str, Any]:
+    """Report evidence provenance, not a new evaluation or model usage event."""
+    reused = len(provenance["reused_case_ids"])
+    return {
+        "id": "source.reuse",
+        "name": f"Batch {batch_index}: reused {reused}/{total_cases} case results",
+        "status": "done",
+        "batch_index": batch_index,
+        "total_cases": total_cases,
+        "reused_case_count": reused,
+        "evaluated_case_count": len(provenance["evaluated_case_ids"]),
+        "score": score,
+        "eval_ref_path": eval_ref_path,
+        **provenance,
+    }
+
+
 def case_stage_payload(
     case_index: int,
     total_cases: int,
@@ -209,7 +228,19 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
             reason=str(checkpoint.get("status", "") or "") if not adopted else None,
             failure_class=None,
             changes=changes,
-            extra={"artifact_path": selected, "iteration_unit": "epoch"},
+            extra={
+                "artifact_path": selected,
+                "iteration_unit": "epoch",
+                "source_evidence": [
+                    {
+                        "batch_index": batch["batch_index"],
+                        "eval_ref_path": batch["source_eval_ref_path"],
+                        **batch["source_evidence"],
+                    }
+                    for batch in (state.get("completed_batches") or {}).values()
+                    if int(batch.get("epoch", 0)) == epoch and batch.get("source_evidence")
+                ],
+            },
         ),
         artifacts=harness_artifacts(selected) if not running else [],
     )
@@ -220,11 +251,14 @@ def active_epoch_node_event(state: Mapping[str, Any]) -> EventNode | None:
     epoch = int(state.get("active_epoch", 0) or 0)
     if not epoch or any(int(item["epoch"]) == epoch for item in _mapping_items(state.get("epoch_checkpoints"))):
         return None
-    return epoch_node_event(state, {
-        "epoch": epoch,
-        "status": "running",
-        "before_harness_refs_path": state.get("active_epoch_before_harness_refs_path", ""),
-    })
+    return epoch_node_event(
+        state,
+        {
+            "epoch": epoch,
+            "status": "running",
+            "before_harness_refs_path": state.get("active_epoch_before_harness_refs_path", ""),
+        },
+    )
 
 
 def harness_artifacts(refs_path: str) -> list[dict[str, str]]:
@@ -393,4 +427,5 @@ __all__ = [
     "node_event",
     "parent_node_id",
     "progress_event",
+    "source_reuse_stage_payload",
 ]
