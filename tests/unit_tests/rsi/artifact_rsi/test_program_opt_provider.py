@@ -4034,6 +4034,36 @@ def test_an_event_consumer_that_never_returns_does_not_stall_the_search(
     assert result.status in ("completed", "failed"), result
 
 
+def test_a_zero_timeout_tally_is_not_a_timeout(tmp_path: Path) -> None:
+    """A benchmark report says "Timeouts: 0%" whether or not anything timed out.
+
+    The classifier matches its markers against the candidate's whole error
+    text, and a benchmark-shaped evaluator writes a report rather than a
+    sentence. Measured on an AlgoTune `polynomial_real` run: twelve candidates
+    whose answers were wrong (relative error 4e-01 against a 1e-6 tolerance)
+    were every one of them labelled `timeout`, because the report's tally line
+    reads `Timeouts: 0% (0/8)`. The UI showed twelve "执行超时" over text that
+    said the answers were wrong.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.state import classify_failure
+
+    report = (
+        "Speedup: N/A\n"
+        "  Valid Solutions: 0% (0/8)\n"
+        "  Invalid Solutions: 100% (8/8)\n"
+        "  Timeouts: 0% (0/8)\n\n"
+        "Invalid Example #1:\n"
+        "  seed 0: relative error 4.285e-01 exceeds tolerance 1e-6"
+    )
+
+    assert classify_failure(report) == "unclassified"
+
+    # A tally that counted something is still a timeout, and so is a plain one.
+    assert classify_failure(report.replace("Timeouts: 0% (0/8)", "Timeouts: 25% (2/8)")) == "timeout"
+    assert classify_failure("the candidate timed out after 300s") == "timeout"
+    # The zero line alone carries no other cause, so nothing is left to classify.
+    assert classify_failure("Timeouts: 0% (0/8)") is None
+
 def test_the_cards_iterations_set_the_run_length(tmp_path: Path) -> None:
     """A task folder carries every number the run needs, the run length included.
 
