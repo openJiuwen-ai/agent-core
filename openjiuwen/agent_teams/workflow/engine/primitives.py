@@ -78,6 +78,12 @@ _current_phase: ContextVar[str | None] = ContextVar("wf_current_phase", default=
 # rather than silently truncating — a bounded fan-out keeps one call from
 # spawning an unbounded agent fleet by accident.
 _MAX_FANOUT = 4096
+# Seconds the cancel path of ``parallel()`` waits for branch tasks to actually
+# terminate before the engine unwinds (see its ``except CancelledError``). A
+# branch whose cancel is swallowed by an in-flight LLM stream would otherwise
+# hold the teardown hostage for its whole natural run; the cap bounds the drain,
+# and such a straggler dies at the abort gate on its next attempt instead.
+_BRANCH_DRAIN_TIMEOUT = 2.0
 
 
 @dataclass
@@ -664,6 +670,12 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     # consumption reaches the AGENT_FAILED event instead of being dropped.
     burned_tokens = 0
     for attempt in range(1, attempts + 1):
+        # A pause/stop may have landed while this call was queued or in flight:
+        # every attempt re-checks the abort gate before touching the backend, so
+        # a straggler (e.g. one the parallel() drain timed out on) ends with the
+        # proper WorkflowAborted instead of retrying into a torn-down backend.
+        # Outside the try — an abort is not a retryable failure.
+        _check_abort(rt)
         try:
             if timeout is not None:
                 async with asyncio.timeout(timeout):  # py3.11+
@@ -1423,10 +1435,25 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
         asyncio.create_task(branch(i, th)) for i, th in enumerate(thunks)
     ]
     try:
-        return await asyncio.gather(*branch_tasks)
+        # Shield the gather: the engine task parks on this future while the
+        # branches run, and cancelling a task parked on gather cancels the
+        # gather itself — this except would then only run once every branch
+        # has finished, and a branch whose cancel is absorbed (in-flight LLM
+        # stream) would deadlock the teardown entirely. The shield accepts the
+        # cancellation immediately, so the cancel path below always runs now.
+        return await asyncio.shield(asyncio.gather(*branch_tasks))
     except asyncio.CancelledError:
         for bt in branch_tasks:
             bt.cancel()
+        # Drain the branches before unwinding: the engine's teardown closes the
+        # backend sessions (runner.py finally: backend.aclose()), so a branch
+        # still alive here would hit "unknown session" on its next send_turn
+        # (production 09-08: pause landed while a branch was still building its
+        # avatar, and its first turn found the session row already popped).
+        # Bounded wait — a branch whose cancel is swallowed by an in-flight LLM
+        # stream must not stall teardown forever; that straggler dies at the
+        # abort gate on its next attempt (see _attempt_calls).
+        await asyncio.wait(branch_tasks, timeout=_BRANCH_DRAIN_TIMEOUT)
         raise
 
 
