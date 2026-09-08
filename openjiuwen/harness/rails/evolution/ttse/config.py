@@ -37,6 +37,9 @@ class TTSEConfig:
             ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
             (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
             and assign it here; do not put raw url/key strings on TTSEConfig.
+        embedding_max_rps: Max embedding API calls per second (cache misses only).
+            Default ``4.0`` matches ModelArts rate limits. ``<= 0`` disables
+            throttling.
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Ignored when ``embedding`` is None.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).
@@ -77,6 +80,7 @@ class TTSEConfig:
 
     store_path: str = ".ttse/bank.json"
     embedding: Optional[EmbeddingProvider] = None
+    embedding_max_rps: float = 4.0
     dedup_threshold: float = 0.88
     max_facts: int = 400
     max_tips: int = 400

@@ -149,6 +149,8 @@ class TTSERecordStore:
         # Cross-session induce/dream must serialize on the same bank object.
         self.evolution_lock = asyncio.Lock()
         self._loaded_mtime: float = 0.0
+        self._emb_rate_lock = asyncio.Lock()
+        self._emb_last_call_at: float = 0.0
         self._load_sync()
 
     # ------------------------------------------------------------------
@@ -215,6 +217,19 @@ class TTSERecordStore:
     # Embeddings (cached)
     # ------------------------------------------------------------------
 
+    async def _wait_embedding_slot(self) -> None:
+        """Space cache-miss embedding API starts to respect ``embedding_max_rps``."""
+        max_rps = self._config.embedding_max_rps
+        if max_rps is None or max_rps <= 0:
+            return
+        min_interval = 1.0 / max_rps
+        async with self._emb_rate_lock:
+            now = time.monotonic()
+            wait = self._emb_last_call_at + min_interval - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._emb_last_call_at = time.monotonic()
+
     async def _embedding_of(self, text: str) -> Optional[List[float]]:
         key = _norm(text)
         if not key:
@@ -227,6 +242,7 @@ class TTSERecordStore:
         try:
             model = getattr(self._embedding, "model", None) or getattr(self._embedding, "id", "unknown")
             logger.debug("[TTSERail] embedding model=%s text=%s", model, text[:60])
+            await self._wait_embedding_slot()
             vec = await self._embedding.embed_query(text)
         except Exception as exc:  # noqa: BLE001 - degrade to substring dedup
             logger.warning("[TTSERail] embedding failed, falling back to substring dedup: %s", exc)

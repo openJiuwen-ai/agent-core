@@ -42,8 +42,10 @@ class FakeEmbedding:
     def __init__(self, mapping: dict[str, list[float]] | None = None):
         self.mapping = mapping or {}
         self.model = "fake-emb"
+        self.call_times: list[float] = []
 
     async def embed_query(self, text: str) -> list[float]:
+        self.call_times.append(time.monotonic())
         key = " ".join(text.lower().split())
         if key in self.mapping:
             return self.mapping[key]
@@ -52,7 +54,11 @@ class FakeEmbedding:
 
 
 def _make_rail(tmp_path, llm, *, cfg=None, embedding=None) -> TTSERail:
-    config = cfg or TTSEConfig(store_path=str(tmp_path / "bank.json"), dream_enabled=True)
+    config = cfg or TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        embedding_max_rps=0,
+    )
     if embedding is not None:
         config.embedding = embedding
     return TTSERail(
@@ -226,6 +232,7 @@ async def test_dream_merge_near_duplicate_facts(tmp_path):
     cfg = TTSEConfig(
         store_path=str(tmp_path / "bank.json"),
         embedding=emb,
+        embedding_max_rps=0,
         dream_enabled=True,
         dream_min_hours=0,
         dream_min_rules=1,
@@ -280,6 +287,7 @@ async def test_dream_keep_distinct_tips(tmp_path):
     cfg = TTSEConfig(
         store_path=str(tmp_path / "bank.json"),
         embedding=emb,
+        embedding_max_rps=0,
         dream_min_hours=0,
         dream_min_rules=1,
         dream_prune_enabled=False,
@@ -534,6 +542,7 @@ async def test_run_dream_classifies_merged_canonical(tmp_path):
     cfg = TTSEConfig(
         store_path=str(tmp_path / "bank.json"),
         embedding=emb,
+        embedding_max_rps=0,
         dream_enabled=True,
         dream_min_hours=0,
         dream_min_rules=1,
@@ -552,3 +561,49 @@ async def test_run_dream_classifies_merged_canonical(tmp_path):
     assert rail._ttse_store.facts[0]["category"] == "software-engineering-devops"
     catalog = (tmp_path / "CATALOG.md").read_text(encoding="utf-8")
     assert "software-engineering-devops" in catalog
+
+
+# ----------------------------------------------------------------------
+# embedding rate limit
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_embedding_rate_limit_spaces_api_calls(tmp_path):
+    emb = FakeEmbedding()
+    max_rps = 10.0
+    store = TTSERecordStore(
+        TTSEConfig(
+            store_path=str(tmp_path / "bank.json"),
+            embedding=emb,
+            embedding_max_rps=max_rps,
+        )
+    )
+    texts = ["alpha rule", "beta rule", "gamma rule"]
+    for text in texts:
+        assert await store.embedding_of(text) is not None
+
+    assert len(emb.call_times) == 3
+    min_interval = 1.0 / max_rps
+    for prev, curr in zip(emb.call_times, emb.call_times[1:]):
+        assert curr - prev >= min_interval - 0.02
+
+
+@pytest.mark.asyncio
+async def test_embedding_cache_hit_skips_rate_limit(tmp_path):
+    emb = FakeEmbedding()
+    store = TTSERecordStore(
+        TTSEConfig(
+            store_path=str(tmp_path / "bank.json"),
+            embedding=emb,
+            embedding_max_rps=4.0,
+        )
+    )
+    first = await store.embedding_of("cached text")
+    t0 = time.monotonic()
+    second = await store.embedding_of("cached text")
+    elapsed = time.monotonic() - t0
+
+    assert first == second
+    assert len(emb.call_times) == 1
+    assert elapsed < 0.05
