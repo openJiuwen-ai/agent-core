@@ -4032,3 +4032,44 @@ def test_an_event_consumer_that_never_returns_does_not_stall_the_search(
     result = asyncio.run(drive())
 
     assert result.status in ("completed", "failed"), result
+
+
+def test_the_cards_iterations_set_the_run_length(tmp_path: Path) -> None:
+    """A task folder carries every number the run needs, the run length included.
+
+    The caller passes the folder and nothing else; `max_iterations` on the
+    request is then a placeholder the contract still requires. The card's
+    `iterations` wins over it, and a card without one changes nothing.
+    """
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, max_iterations=3)
+    _scorecard(Path(request.run_dir), iterations=12)
+
+    assert provider._spec_for(request, resumed=False).expansions == 12
+
+    _scorecard(Path(request.run_dir))
+    assert provider._spec_for(request, resumed=False).expansions == 3
+
+    _scorecard(Path(request.run_dir), iterations="lots")
+    assert provider._spec_for(request, resumed=False).expansions == 3
+
+
+def test_the_run_reports_the_cards_iterations_as_its_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`read_state` shows the length the card set, not the caller's placeholder."""
+    _no_probe(monkeypatch)
+    _no_runtime_probe(monkeypatch)
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, max_iterations=1)
+    _scorecard(Path(request.run_dir), iterations=2)
+
+    async def drive() -> object:
+        async def sink(event: object) -> None:
+            pass
+        return await provider.run(request, sink)
+
+    asyncio.run(drive())
+
+    assert provider.read_state(request.task_id).total_iterations == 2
+

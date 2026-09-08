@@ -536,6 +536,9 @@ class PuctProgramArtifactProvider:
                 )
             prepared_request = self._prepare_request(request)
             spec = self._spec_for(prepared_request, resumed=resumed)
+            # The folder's card may set the run length; the request's number
+            # is then only what the caller had to fill in.
+            state.total_iterations = spec.expansions
             execute = self._execution or self._execution_for(spec, loop)
         except (ModelConfigError, ExecutionUnavailable, ValueError, OSError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
@@ -729,7 +732,7 @@ class PuctProgramArtifactProvider:
         spec = RunSpec(
             search_id=request.task_id,
             algorithm="puct",
-            expansions=int(request.max_iterations),
+            expansions=_iterations_from(card, int(request.max_iterations)),
             workers=_workers_from(card.get("workers")),
             scorecard=card.get("scorecard", card),
             scorecard_hash=str(card.get("hash") or "sha256:inline"),
@@ -822,6 +825,80 @@ def _workers_from(value: Any) -> int:
     except (TypeError, ValueError):
         return DEFAULT_WORKERS
     return max(1, min(workers, MAX_WORKERS))
+
+
+def _iterations_from(card: Mapping[str, Any], default: int) -> int:
+    """How many expansions the run makes: the card's `iterations`, else the request's.
+
+    A task folder is meant to be complete — every number the run needs is
+    written in it, and the caller passes nothing but the folder. The contract's
+    `max_iterations` stays required, so a caller that has no number fills in
+    a placeholder and the card wins over it; a card that says nothing leaves
+    the request's number in force, which is every run before this key.
+    """
+    try:
+        iterations = int(card.get("iterations"))
+    except (TypeError, ValueError):
+        return default
+    return max(1, iterations)
+
+
+class _Bundle:
+    """A task folder as the user selects it: the seed beside its scoring.
+
+        <folder>/seed/...              the starting program (a file or a tree)
+        <folder>/run/scorecard.json    the card
+        <folder>/run/prompts/*.md      the task's prompt wording (optional)
+
+    The product contract is one folder. Resolving it belongs here and not
+    above: JiuwenSwarm hands over `artifact_path` as chosen and a fresh
+    `run_dir` of its own, and the provider used to take the folder root as the
+    program tree while demanding a card that only ever existed inside the
+    folder — "FileNotFoundError: <run_dir>/scorecard.json", with the card
+    sitting right there in `<folder>/run/`.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.seed = root / "seed"
+        self.scorecard = root / "run" / "scorecard.json"
+        self.prompts = root / "run" / "prompts"
+
+
+def _bundle_of(path: Path) -> _Bundle | None:
+    """The task folder at `path`, or None when `path` is a program.
+
+    Both halves have to be there: a `seed/` directory and `run/scorecard.json`.
+    A folder with one and not the other is not a program either, and
+    `validate_input` says which half is missing.
+    """
+    if path.is_dir() and (path / "seed").is_dir() and (path / "run" / "scorecard.json").is_file():
+        return _Bundle(path)
+    return None
+
+
+def _bundle_shaped(path: Path) -> bool:
+    """Whether `path` was meant as a task folder, complete or not."""
+    return path.is_dir() and any((path / part).exists() for part in ("seed", "run", "task.json"))
+
+
+def _prepare_run_dir(bundle: _Bundle, run_dir: Path) -> None:
+    """Put the bundle's card and prompts where the run reads them, once.
+
+    Idempotent, and one-way: nothing is ever written into the user's folder.
+    A `scorecard.json` already in `run_dir` is kept — a resumed run must not
+    have its scoring changed underneath it by a folder that was edited since.
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    target = run_dir / "scorecard.json"
+    if not target.exists():
+        shutil.copyfile(bundle.scorecard, target)
+    if bundle.prompts.is_dir():
+        (run_dir / "prompts").mkdir(exist_ok=True)
+        for source in sorted(bundle.prompts.glob("*.md")):
+            dest = run_dir / "prompts" / source.name
+            if not dest.exists():
+                shutil.copyfile(source, dest)
 
 
 def _seed_files(path: Path, entrypoint: str | None = None) -> dict[str, str]:
