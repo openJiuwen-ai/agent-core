@@ -9,6 +9,10 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
 
 class CodeImplementationInput(BaseModel):
     plan: ExperimentPlan
+    # Host-staged source artifact.  The code agent uses this copy to ground
+    # the generated implementation in the real paper/task specification
+    # instead of silently falling back to synthetic smoke-test data.
+    artifact_path: str | None = None
     # Prepended to the rendered task prompt -- lets a caller (e.g. the manager
     # pipeline's CodeImplementationAdapter) inject host-side context such as a
     # prior attempt's failure summary, without reaching into the agent's

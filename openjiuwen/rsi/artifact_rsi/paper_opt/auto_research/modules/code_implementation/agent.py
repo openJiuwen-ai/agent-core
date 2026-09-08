@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import shutil
@@ -102,6 +103,7 @@ _INVALID_METHOD_SENTINEL = "__invalid__"
 # ("choose from 'a', 'b'"), 3.12+ do not ("choose from a, b"). Split on
 # commas and strip optional quotes rather than assuming either form.
 _ARGPARSE_CHOICES_RE = re.compile(r"choose from ([^\n)]+)")
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -302,6 +304,7 @@ class CodeImplementationAgent:
         output_dir = agent_workspace / _OUTPUT_SUBDIR
         output_dir.mkdir(parents=True, exist_ok=True)
         code_dir = generated_code_dir(plan.run_id).resolve()
+        agent_artifact_path = self._stage_artifact_input(inputs.artifact_path, agent_workspace)
 
         # Only a last-resort fallback now — see _build_output, which discovers
         # the real variant list from the entry point itself rather than
@@ -309,9 +312,11 @@ class CodeImplementationAgent:
         # populated plan.baselines still works as a fallback if discovery
         # can't run at all).
         variant_names = [*plan.baselines, "proposed"]
-        task_prompt = inputs.extra_host_instructions + self._build_task_prompt(plan, design_context)
+        artifact_prompt = self._build_artifact_prompt(agent_artifact_path)
+        task_prompt = artifact_prompt + inputs.extra_host_instructions + self._build_task_prompt(
+            plan, design_context
+        )
         max_cycles = self._max_validation_cycles()
-        conversation_id = f"code_implementation-{plan.run_id}"
         smoke_root = active_artifact_dir(plan.run_id, smoke_test_dir(plan.run_id).resolve())
         smoke_root.mkdir(parents=True, exist_ok=True)
 
@@ -325,12 +330,20 @@ class CodeImplementationAgent:
         fingerprint_hits = 0
         await Runner.start()
         try:
-            agent = self._build_coding_agent(agent_workspace, run_id=plan.run_id)
             for cycle in range(1, max_cycles + 1):
-                if cycle == 1:
-                    query = task_prompt
-                else:
-                    query = self._build_validation_repair_prompt(validation)
+                # Each validation cycle gets a fresh agent/session.  A failed
+                # cycle can leave a stale tool id after a process-level Runner
+                # restart; reusing that agent would make every repair attempt
+                # fail with "Tool instance not found in resource_mgr" too.
+                agent = self._build_coding_agent(
+                    agent_workspace,
+                    run_id=plan.run_id,
+                    cycle=cycle,
+                )
+                conversation_id = f"code_implementation-{plan.run_id}-cycle-{cycle}"
+                query = task_prompt
+                if cycle > 1:
+                    query += "\n\n" + self._build_validation_repair_prompt(validation)
                 try:
                     result = await Runner.run_agent(
                         agent,
@@ -341,6 +354,8 @@ class CodeImplementationAgent:
                     )
                 except Exception as exc:  # noqa: BLE001 — keep the session for a later cycle
                     agent_message = f"{type(exc).__name__}: {exc}"
+                finally:
+                    await self._cleanup_coding_agent(agent)
 
                 candidate_hash = _hash_staged_deliverable(output_dir)
                 cycle_dir = smoke_root / f"cycle_{cycle:03d}"
@@ -372,6 +387,7 @@ class CodeImplementationAgent:
                         cycle=cycle,
                         fallback_names=variant_names,
                         log_dir=cycle_dir,
+                        artifact_path=inputs.artifact_path,
                     )
                     validation.candidate_hash = candidate_hash
                     if not validation.ok and validation.fingerprint:
@@ -395,7 +411,6 @@ class CodeImplementationAgent:
                     break
         finally:
             await shutdown_lsp()
-            await Runner.stop()
 
         if validation is not None and validation.ok:
             try:
@@ -668,10 +683,11 @@ class CodeImplementationAgent:
 
     # -- agent construction --------------------------------------------------
 
-    def _build_coding_agent(self, agent_workspace: Path, *, run_id: str):
+    def _build_coding_agent(self, agent_workspace: Path, *, run_id: str, cycle: int = 1):
         from openjiuwen.core.foundation.llm import init_model
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness.subagents import create_code_agent
+        from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
 
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.design_reference_rail import (
             DesignReferenceRail,
@@ -710,6 +726,7 @@ class CodeImplementationAgent:
             timeout=float(self._setting("timeout", "MODEL_TIMEOUT", default="300")),
         )
         module_cfg = self.config.get("code_implementation", {}) or {}
+        max_iterations = max(1, int(module_cfg.get("max_iterations", 40) or 40))
         design_root = design_dir(run_id)
         design_root.mkdir(parents=True, exist_ok=True)
         rails = with_observability(
@@ -717,6 +734,12 @@ class CodeImplementationAgent:
                 GuardedSysOperationRail(bash_deny_patterns=_GIT_DENY_PATTERNS),
                 OpenJiuwenReferenceRail(),
                 DesignReferenceRail(design_root=design_root),
+                # DeepAgent's task-loop mode deliberately sets the inner
+                # ReAct limit to sys.maxsize.  The pipeline's configured
+                # max_iterations must therefore be applied to the outer loop
+                # explicitly, otherwise a stuck tool/model session can run
+                # until the Provider's much larger watchdog fires.
+                TaskCompletionRail(max_rounds=max_iterations),
             ]
         )
         lsp_rail = _try_lsp_rail(agent_workspace)
@@ -731,13 +754,47 @@ class CodeImplementationAgent:
             system_prompt=self._render_system_prompt(),
             rails=rails,
             enable_task_loop=True,
-            max_iterations=module_cfg.get("max_iterations"),
+            max_iterations=max_iterations,
+            tool_owner_id=f"rsi-code-{run_id}-cycle-{cycle}",
             workspace=str(agent_workspace),
             # We don't use the harness's own memory/skills/todo scaffold for
             # this one-shot codegen task — skip it so agent_workspace/ only
             # contains what the agent itself actually writes.
             auto_create_workspace=False,
         )
+
+    @staticmethod
+    async def _cleanup_coding_agent(agent: Any) -> None:
+        """Release this agent's tools without stopping the process-global Runner."""
+        cleanup = getattr(agent, "cleanup_task_resources", None)
+        if callable(cleanup):
+            await cleanup()
+
+        unregister = getattr(agent, "unregister_rail", None)
+        configured_rails = getattr(agent, "configured_rails", None)
+        if callable(unregister) and callable(configured_rails):
+            for rail in reversed(list(configured_rails())):
+                try:
+                    await unregister(rail)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - cleanup must continue
+                    logger.warning("code agent rail cleanup failed: %s", exc)
+
+        ability_manager = getattr(agent, "ability_manager", None)
+        teardown = getattr(ability_manager, "teardown_tools", None)
+        if callable(teardown):
+            teardown()
+
+        sys_operation = getattr(getattr(agent, "deep_config", None), "sys_operation", None)
+        sys_operation_id = getattr(sys_operation, "id", None)
+        if sys_operation_id:
+            from openjiuwen.core.runner import Runner
+
+            try:
+                Runner.resource_mgr.remove_sys_operation(sys_operation_id)
+            except Exception as exc:  # noqa: BLE001 - cleanup must continue
+                logger.warning("code agent sys-operation cleanup failed: %s", exc)
 
     def _setting(
         self,
@@ -777,6 +834,43 @@ class CodeImplementationAgent:
         return template.format(openjiuwen_conventions=conventions, extensions_registry=registry)
 
     # -- task prompt ---------------------------------------------------------
+
+    @staticmethod
+    def _stage_artifact_input(artifact_path: str | None, agent_workspace: Path) -> Path | None:
+        """Make the host-staged source paper visible inside the coding sandbox."""
+        if not artifact_path:
+            return None
+        source = Path(artifact_path).expanduser().resolve()
+        if not source.is_file() and not source.is_dir():
+            raise FileNotFoundError(f"artifact_path does not exist: {artifact_path}")
+        destination = agent_workspace / "artifact_path"
+        if destination.exists() or destination.is_symlink():
+            if destination.is_dir() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            destination.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination / source.name)
+        return destination
+
+    @staticmethod
+    def _build_artifact_prompt(agent_artifact_path: Path | None) -> str:
+        if agent_artifact_path is None:
+            return ""
+        return (
+            "## Supplied paper input\n\n"
+            f"The real uploaded paper/task input is available inside your workspace at "
+            f"`{agent_artifact_path.name}`. Read it before implementing the experiment; "
+            "look for the supplied paper source, `paper_facts.json`, and `task_spec.json` "
+            "where present. Use only facts and constraints from this input for the smoke "
+            "case. Do not replace a missing read with synthetic fallback data, parser-only "
+            "stubs, or invented paper content. The host will expose the same input to the "
+            "generated program through `ARTIFACT_PATH` at execution time, so do not "
+            "hardcode this workspace path into the generated code.\n\n"
+        )
 
     def _build_task_prompt(self, plan: ExperimentPlan, design_context: str) -> str:
         docs_index = docs_index_path()
@@ -844,7 +938,8 @@ class CodeImplementationAgent:
             "real variants from the host and make them silently never get run or checked.\n"
             "  --smoke-test      run the same invoke/run_method path as a full run on exactly "
             "one item (synthetic context or the first dataset row), call the live model via "
-            "API_KEY/API_BASE/MODEL_NAME, write one item record plus model_call_count >= 1, "
+            "API_KEY/API_BASE/MODEL_NAME, write top-level n_questions=1, "
+            "per_question=[<one item-result object>] and model_call_count >= 1, "
             "and exit 0/1 — no full-dataset run. Parser-only stubs and dummy model replies "
             "are invalid.\n"
             "  --output <path>   write a metrics.json to this path\n\n"
@@ -1024,6 +1119,7 @@ class CodeImplementationAgent:
         cycle: int,
         fallback_names: list[str],
         log_dir: Path | None = None,
+        artifact_path: str | None = None,
     ) -> CandidateValidation:
         """Staged host validation of `output/` before any promotion."""
         smoke_dir = log_dir or active_artifact_dir(run_id, smoke_test_dir(run_id))
@@ -1088,6 +1184,7 @@ class CodeImplementationAgent:
             cycle=cycle,
             log_dir=smoke_dir,
             candidate_hash=candidate_hash,
+            artifact_path=artifact_path,
         )
 
     def _compile_staged_python(self, code_dir: Path) -> str:
@@ -1127,7 +1224,12 @@ class CodeImplementationAgent:
         cycle: int,
         log_dir: Path,
         candidate_hash: str,
+        artifact_path: str | None = None,
     ) -> CandidateValidation:
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.agent import (
+            _variant_env,
+        )
+
         variants = [
             ImplementedVariant(name=name, invocation=[sys.executable, _ENTRY_POINT, "--method", name])
             for name in variant_names
@@ -1154,6 +1256,7 @@ class CodeImplementationAgent:
                     text=True,
                     timeout=timeout,
                     check=False,
+                    env=_variant_env(artifact_path),
                 )
                 log_path.write_text(
                     f"$ {' '.join(command)}\n\n--- stdout ---\n{proc.stdout}\n"
@@ -1275,11 +1378,20 @@ class CodeImplementationAgent:
                 "The staged deliverable hash and failure fingerprint are unchanged. "
                 "Do not rerun the same check hoping it will change. Edit the failing code.\n\n"
             )
-        elif validation.repeated:
+        elif validation.repeated and validation.stage != "metrics":
             repeated_note = (
                 "This failure fingerprint has survived a changed candidate twice. "
                 "Isolate the smallest failing SDK call and inspect the exact local "
                 "OpenJiuwen reference with `openjiuwen_ref_read_file` before editing again.\n\n"
+            )
+        if validation.stage == "metrics":
+            repeated_note += (
+                "Repair the JSON written to the exact --output path above using the errors below. "
+                "For smoke, use top-level n_questions=1, per_question=[<one real item-result object>] "
+                "and model_call_count >= 1. task_records, records and item_records are accepted "
+                "aliases for per_question; a console SMOKE_OK message is not a metrics record. "
+                "Preserve real model calls and results; do not fabricate records to pass validation. "
+                "For schema/field errors, inspect the metrics writer, not SDK reference docs.\n\n"
             )
         return (
             "Host validation of `output/` failed. Do not restart the implementation. "

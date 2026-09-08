@@ -383,6 +383,7 @@ class ManagerRuntime:
         *,
         manager: ManagerAgent | None = None,
         model: Any | None = None,
+        artifact_path: str | None = None,
         registry: SubagentRegistry | None = None,
         reflection: ReflectionAgent | None = None,
         reporting: ReportingAgent | None = None,
@@ -399,6 +400,7 @@ class ManagerRuntime:
         self.registry = registry or build_registry(
             config,
             model=model,
+            artifact_path=artifact_path,
             topic_survey=topic_survey,
             experiment_design=experiment_design,
             code_implementation=code_implementation,

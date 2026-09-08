@@ -123,9 +123,16 @@ class ReportingAgent:
         background = self._read_survey_summary(inputs.survey)
 
         summary_path = self._resolve_summary_path(inputs.survey)
+        topic_config = dict(self.config.get("topic_survey") or {})
+        search_scope = str(topic_config.get("search_scope") or "").strip().lower()
+        network_enabled = search_scope != "domestic"
+        proxy_url = str(topic_config.get("web_proxy") or "").strip() or None
         bib = (
             bibliography.build_bibliography(
-                summary_path, network_timeout=float(self._pw_config.get("bibliography_timeout", 5.0))
+                summary_path,
+                network_timeout=float(self._pw_config.get("bibliography_timeout", 5.0)),
+                network_enabled=network_enabled,
+                proxy_url=proxy_url,
             )
             if summary_path is not None
             else Bibliography(bib_text="", title_to_key={}, known_keys=set())

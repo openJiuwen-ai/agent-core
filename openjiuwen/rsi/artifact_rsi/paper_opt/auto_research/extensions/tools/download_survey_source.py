@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-import aiohttp
 from bs4 import BeautifulSoup
 
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.harness.tools.web import _http
+from openjiuwen.harness.tools.web._common import _REQUEST_HEADERS, _domain_allowed
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import to_project_relative
 
@@ -38,7 +39,14 @@ class DownloadSurveySourceTool(Tool):
     the current survey's ``sources/`` folder.
     """
 
-    def __init__(self, *, download_dir: Path, project_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        download_dir: Path,
+        project_root: Path,
+        proxy_url: str | None = None,
+        allowed_domains: tuple[str, ...] | None = None,
+    ) -> None:
         super().__init__(
             ToolCard(
                 id="download_survey_source",
@@ -64,6 +72,8 @@ class DownloadSurveySourceTool(Tool):
         )
         self._download_dir = download_dir.resolve()
         self._project_root = project_root.resolve()
+        self._proxy_url = str(proxy_url or "").strip() or None
+        self._allowed_domains = allowed_domains
 
     @staticmethod
     def _pdf_candidates(html: bytes, *, base_url: str) -> list[str]:
@@ -94,18 +104,33 @@ class DownloadSurveySourceTool(Tool):
         url = str((inputs or {}).get("url", "") or "").strip()
         if not _is_http_url(url):
             return {"success": False, "error": "url must be an http(s) URL"}
+        if not _domain_allowed(url, self._allowed_domains):
+            return {
+                "success": False,
+                "error": "URL is outside the configured domestic academic source domains",
+            }
 
         filename = _safe_filename(str((inputs or {}).get("filename", "") or ""))
-        timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
         try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, allow_redirects=True) as response:
-                    if response.status >= 400:
-                        return {"success": False, "error": f"HTTP {response.status} for {url}"}
-                    body = await response.content.read()
-                    final_url = str(response.url)
-                    content_type = response.headers.get("Content-Type", "").lower()
-        except aiohttp.ClientError as exc:
+            async with _http.new_session() as session:
+                status, headers, body, final_url, _truncated = await _http.request(
+                    session,
+                    "GET",
+                    url,
+                    headers=_REQUEST_HEADERS,
+                    timeout_seconds=_TIMEOUT_SECONDS,
+                    max_bytes=None,
+                    proxy_url=self._proxy_url,
+                )
+            if status >= 400:
+                return {"success": False, "error": f"HTTP {status} for {url}"}
+            if not _domain_allowed(final_url, self._allowed_domains):
+                return {
+                    "success": False,
+                    "error": "redirected URL is outside the configured domestic academic source domains",
+                }
+            content_type = headers.get("Content-Type", "").lower()
+        except Exception as exc:  # noqa: BLE001 - surface transport errors to the agent
             return {"success": False, "error": f"download failed: {exc}"}
 
         is_pdf = "application/pdf" in content_type or body.startswith(b"%PDF-")
@@ -125,7 +150,14 @@ class DownloadSurveySourceTool(Tool):
             "bytes_downloaded": len(body),
         }
         if not is_pdf:
-            result["pdf_candidates"] = self._pdf_candidates(body, base_url=final_url)
+            candidates = self._pdf_candidates(body, base_url=final_url)
+            if self._allowed_domains:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if _domain_allowed(candidate, self._allowed_domains)
+                ]
+            result["pdf_candidates"] = candidates
         return result
 
     async def stream(self, inputs: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:

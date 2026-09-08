@@ -1043,8 +1043,9 @@ def _latest_survey_paths(state: PersistedManagerState) -> list[str]:
 class CodeImplementationAdapter:
     module: ModuleId = "code_implementation"
 
-    def __init__(self, agent: CodeImplementationAgent):
+    def __init__(self, agent: CodeImplementationAgent, *, artifact_path: str | None = None):
         self.agent = agent
+        self.artifact_path = artifact_path
 
     async def ainvoke(
         self,
@@ -1066,7 +1067,11 @@ class CodeImplementationAdapter:
         excerpt_limit = state.task_state.limits.excerpt_chars
         try:
             output: CodeImplementationOutput = await self.agent.arun(
-                CodeImplementationInput(plan=state.task_state.latest_plan, extra_host_instructions=extra)
+                CodeImplementationInput(
+                    plan=state.task_state.latest_plan,
+                    artifact_path=self.artifact_path,
+                    extra_host_instructions=extra,
+                )
             )
         except Exception as exc:  # noqa: BLE001
             log_paths, _excerpts = _code_log_artifacts(
@@ -1154,8 +1159,9 @@ class CodeImplementationAdapter:
 class ExperimentExecutionAdapter:
     module: ModuleId = "experiment_execution"
 
-    def __init__(self, agent: ExperimentExecutionAgent):
+    def __init__(self, agent: ExperimentExecutionAgent, *, artifact_path: str | None = None):
         self.agent = agent
+        self.artifact_path = artifact_path
         self._last_result: ExperimentExecutionOutput | None = None
 
     async def ainvoke(
@@ -1178,6 +1184,7 @@ class ExperimentExecutionAdapter:
                 ExperimentExecutionInput(
                     plan=state.task_state.latest_plan,
                     implementation=implementation,
+                    artifact_path=self.artifact_path,
                 ),
             )
         except Exception as exc:  # noqa: BLE001
@@ -1324,6 +1331,15 @@ class ExperimentExecutionAdapter:
         if diagnostic.get("detail"):
             failure_excerpts.append(str(diagnostic.get("detail")))
         failure_excerpts = [item for item in _unique_paths(failure_excerpts) if item][:8]
+        explicit_retryability = [
+            item.metrics.get("retryable")
+            for item in result.variants
+            if item.process_status != "completed"
+            if isinstance(item.metrics.get("retryable"), bool)
+        ]
+        retryable = not process_ok and (
+            not explicit_retryability or any(explicit_retryability)
+        )
         goal_note = bounded_text(contract.goal, 200)
         summary_bits = [
             f"process={'completed' if process_ok else 'failed'}",
@@ -1354,7 +1370,7 @@ class ExperimentExecutionAdapter:
             round_index=round_index,
             attempt=attempt,
             outcome="succeeded" if process_ok else "failed",
-            retryable=not process_ok,
+            retryable=retryable,
             summary=bounded_text(summary, 400),
             artifact_paths=artifact_paths,
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -1570,6 +1586,7 @@ def build_registry(
     config: dict[str, Any],
     *,
     model: Any | None = None,
+    artifact_path: str | None = None,
     topic_survey: TopicSurveyAgent | None = None,
     experiment_design: ExperimentDesignAgent | None = None,
     code_implementation: CodeImplementationAgent | None = None,
@@ -1590,11 +1607,13 @@ def build_registry(
         )
     if "code_implementation" in allowed:
         adapters["code_implementation"] = CodeImplementationAdapter(
-            code_implementation or CodeImplementationAgent(config, model=model)
+            code_implementation or CodeImplementationAgent(config, model=model),
+            artifact_path=artifact_path,
         )
     if "experiment_execution" in allowed:
         adapters["experiment_execution"] = ExperimentExecutionAdapter(
-            experiment_execution or ExperimentExecutionAgent(config)
+            experiment_execution or ExperimentExecutionAgent(config),
+            artifact_path=artifact_path,
         )
     if "reflection" in allowed:
         if reflection is None:

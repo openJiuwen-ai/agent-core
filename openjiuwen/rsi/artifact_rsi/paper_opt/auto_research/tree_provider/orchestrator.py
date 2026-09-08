@@ -12,9 +12,12 @@ already-public `ManagerRuntime(...).arun(...)` and reading already-public
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
+import logging
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
@@ -50,6 +53,84 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.storage i
 # that isn't (e.g. `pytest` run from the repo root).
 _PAPER_OPT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = str(_PAPER_OPT_ROOT / "configs" / "pipeline.default.yaml")
+_MISSING = object()
+_MODEL_ENV_LOCK = asyncio.Lock()
+logger = logging.getLogger(__name__)
+
+
+def _model_value(value: Any, name: str) -> Any:
+    if value is None:
+        return None
+    raw = getattr(value, name, None)
+    return getattr(raw, "value", raw)
+
+
+def _configure_for_model(config: dict[str, Any], model: Any) -> dict[str, Any]:
+    """Overlay the AgentServer-resolved model on pipeline configuration."""
+    if model is None:
+        return config
+    client = getattr(model, "model_client_config", None)
+    request_config = getattr(model, "model_config", None)
+    settings = dict(config.get("openjiuwen") or {})
+    provider = _model_value(client, "client_provider")
+    model_name = _model_value(request_config, "model_name")
+    base_url = _model_value(client, "api_base")
+    timeout = _model_value(client, "timeout")
+    if provider:
+        settings["provider"] = str(provider)
+    if model_name:
+        settings["model"] = str(model_name)
+    if base_url:
+        settings["base_url"] = str(base_url)
+    if timeout:
+        settings["timeout"] = timeout
+    config["openjiuwen"] = settings
+    return config
+
+
+@contextlib.asynccontextmanager
+async def _temporary_model_environment(
+    model: Any,
+    *,
+    task_id: str | None = None,
+) -> AsyncIterator[None]:
+    """Expose the resolved model to legacy module and child-process code."""
+    client = getattr(model, "model_client_config", None)
+    request_config = getattr(model, "model_config", None)
+    values = {
+        "API_KEY": _model_value(client, "api_key"),
+        "API_BASE": _model_value(client, "api_base"),
+        "MODEL_PROVIDER": _model_value(client, "client_provider"),
+        "MODEL_NAME": _model_value(request_config, "model_name"),
+        "MODEL_TIMEOUT": _model_value(client, "timeout"),
+    }
+    values = {
+        key: str(value)
+        for key, value in values.items()
+        if value not in (None, "")
+    }
+    if _MODEL_ENV_LOCK.locked():
+        logger.warning(
+            "[RSI] paper orchestrator waiting for the process-level model "
+            "environment lock: task=%s",
+            task_id or "<unknown>",
+        )
+    await _MODEL_ENV_LOCK.acquire()
+    try:
+        previous: dict[str, object] = {}
+        for key, value in values.items():
+            previous[key] = os.environ.get(key, _MISSING)
+            os.environ[key] = value
+        try:
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is _MISSING:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(value)
+    finally:
+        _MODEL_ENV_LOCK.release()
 
 
 def _node_id(task_id: str, round_index: int) -> str:
@@ -115,6 +196,7 @@ class PaperTreeOrchestrator:
         optimization_instruction: str | None,
         artifact_path: str | None,
         model: Any = None,
+        web_proxy: str | None = None,
         config_path: str = DEFAULT_CONFIG_PATH,
         on_event: OnEvent | None = None,
     ) -> None:
@@ -128,11 +210,16 @@ class PaperTreeOrchestrator:
         # model-backed pipeline modules. None retains standalone config/env
         # resolution without changing process-global model credentials.
         self.model = model
+        self.web_proxy = str(web_proxy or "").strip() or None
         self.config_path = config_path
         # Loaded once for the task's lifetime -- reused for both the
         # per-node ManagerRuntime call and paper scoring, instead of
         # re-reading the same YAML on every node.
         self.config = load_config(config_path)
+        topic_config = dict(self.config.get("topic_survey") or {})
+        topic_config["web_proxy"] = self.web_proxy
+        topic_config["search_scope"] = "global" if self.web_proxy else "domestic"
+        self.config["topic_survey"] = topic_config
         self.on_event = on_event
         self._task: asyncio.Task | None = None
         self._cancelled = False
@@ -338,24 +425,6 @@ class PaperTreeOrchestrator:
 
     async def _run_manager(self, seed: NodeSeed) -> TerminalReport:
         try:
-            # Every workspace_dir(run_id)-derived path the six-module
-            # pipeline writes to (survey/design/code/execution/reflection/
-            # reporting/manager state) must land under *this task's*
-            # caller-assigned run_dir, not some global/auto-detected repo
-            # root -- see docs/agent_core_rsi_migration_risks.md Risk 2.
-            # Re-set on every call (not just once at task start) so this
-            # task's node stays correct even if something else in the
-            # process changed the global root in between -- cheap
-            # self-healing given _PROJECT_ROOT is still shared mutable
-            # state, not truly per-task (see that same doc's concurrency
-            # caveat: this is not safe for two *different* tasks running
-            # concurrently in one process).
-            set_project_root(self.storage.run_dir)
-            load_project_dotenv()
-            reflection = None
-            if (self.config.get("manager") or {}).get("modules", {}).get("reflection", False):
-                reflection = ReflectionAgent(self.config, model=self.model)
-
             async def on_stage(module: str) -> None:
                 labels = {
                     "manager": "正在规划下一阶段",
@@ -376,14 +445,40 @@ class PaperTreeOrchestrator:
                         stage={"id": module, "name": labels.get(module, module)},
                     ))
 
-            runtime = ManagerRuntime(self.config, model=self.model, reflection=reflection, on_stage=on_stage)
-            return await runtime.arun(
-                topic=seed.topic,
-                research_paths=seed.research_paths or None,
-                run_id=seed.run_id,
-                objective=seed.objective,
-                constraints=seed.constraints or None,
-            )
+            async with _temporary_model_environment(self.model, task_id=self.task_id):
+                # Every workspace_dir(run_id)-derived path the six-module
+                # pipeline writes to (survey/design/code/execution/reflection/
+                # reporting/manager state) must land under *this task's*
+                # caller-assigned run_dir, not some global/auto-detected repo
+                # root -- see docs/agent_core_rsi_migration_risks.md Risk 2.
+                # Re-set on every call (not just once at task start) so this
+                # task's node stays correct even if something else in the
+                # process changed the global root in between -- cheap
+                # self-healing given _PROJECT_ROOT is still shared mutable
+                # state, not truly per-task (see that same doc's concurrency
+                # caveat: this is not safe for two *different* tasks running
+                # concurrently in one process).
+                set_project_root(self.storage.run_dir)
+                load_project_dotenv()
+                self.config = _configure_for_model(self.config, self.model)
+                reflection = None
+                if (self.config.get("manager") or {}).get("modules", {}).get("reflection", False):
+                    reflection = ReflectionAgent(self.config, model=self.model)
+
+                runtime = ManagerRuntime(
+                    self.config,
+                    model=self.model,
+                    artifact_path=self.artifact_path,
+                    reflection=reflection,
+                    on_stage=on_stage,
+                )
+                return await runtime.arun(
+                    topic=seed.topic,
+                    research_paths=seed.research_paths or None,
+                    run_id=seed.run_id,
+                    objective=seed.objective,
+                    constraints=seed.constraints or None,
+                )
         except Exception as exc:  # noqa: BLE001 -- defensive: arun() itself already
             # turns internal failures into a TerminalReport; this only
             # covers construction-time/unexpected failures outside that,

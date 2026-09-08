@@ -29,6 +29,7 @@ class ArtifactEngineRequest:
     model: Model
     max_iterations: int
     optimization_instruction: str | None
+    web_proxy: str | None = None
 
 
 def _error(code: str, message: str) -> dict[str, str]:
@@ -61,6 +62,13 @@ def validate_artifact_task_request(request: RsiTaskCreateRequest) -> ArtifactVal
             _error(
                 "ARTIFACT_TYPE_REQUIRED",
                 'artifact optimization requests must set artifact_type to "program" or "paper"',
+            )
+        )
+    if request.web_proxy and request.artifact_type != "paper":
+        errors.append(
+            _error(
+                "WEB_PROXY_UNSUPPORTED",
+                "web_proxy is supported only for paper optimization",
             )
         )
     if not _non_empty(request.name):
@@ -158,6 +166,11 @@ def build_request(
         model=model,
         max_iterations=config.max_iterations,
         optimization_instruction=(config.optimization_instruction if task.artifact_type == "paper" else None),
+        web_proxy=(
+            str(getattr(config, "web_proxy", "") or "").strip() or None
+            if task.artifact_type == "paper"
+            else None
+        ),
     )
 
 

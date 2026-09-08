@@ -15,12 +15,9 @@ vs. the current frontier) is still the orchestrator's job — see
 which uses it directly (see `paper_scoring/llm.py::StructuredCompleter`).
 When `None` (the default, e.g. in tests or manual runs), `PaperScorer`
 self-resolves its own model from `config`'s `openjiuwen`/`paper_scoring`
-blocks instead (`build_model_from_config`). This does NOT extend to the
-six-module `ManagerRuntime` pipeline `orchestrator.py::_run_manager`
-calls — only 3 of its 6 module agents have a `model=` injection seam today
-(manager/experiment_design/topic_survey), and `ManagerRuntime` itself has
-no direct pass-through parameter; that remains a separate, larger, not-yet
-addressed piece of the same architecture question.
+blocks instead (`build_model_from_config`). The tree orchestrator also
+passes a resolved model to the six-module `ManagerRuntime` pipeline and
+temporarily exports its credentials for legacy module and child-process code.
 
 Errors (missing API key, LLM/schema validation failure, LaTeX ingestion
 failure, ...) are NOT caught here — they propagate to the caller, same

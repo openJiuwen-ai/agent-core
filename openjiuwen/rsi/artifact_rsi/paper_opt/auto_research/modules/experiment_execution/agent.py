@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,16 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_exec
 # that benefits from an LLM/agent loop.
 
 _OUTPUT_FLAG = "--output"
-_ENV_DIAGNOSTIC_KEYS = ("API_KEY", "API_BASE", "MODEL_NAME", "OPENAI_API_KEY")
+_ENV_DIAGNOSTIC_KEYS = (
+    "API_KEY",
+    "API_BASE",
+    "MODEL_NAME",
+    "OPENAI_API_KEY",
+    "ARTIFACT_PATH",
+    "SUPPLIED_PAPER_DIR",
+    "PAPER_FILE",
+    "TASK_SPEC_FILE",
+)
 _SECRET_ENV_KEYS = ("API_KEY", "OPENAI_API_KEY")
 # Retried: plausibly transient (environment/infra), not the code's fault.
 # Not retried: nonzero_exit/missing_metrics/invalid_metrics are deterministic
@@ -53,10 +63,57 @@ def _decode_captured(value: str | bytes | None) -> str:
     return value
 
 
-def _variant_env() -> dict[str, str]:
+def _variant_env(artifact_path: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PYTHONFAULTHANDLER", "1")
+    if artifact_path:
+        resolved = Path(artifact_path).expanduser().resolve()
+        # Generated experiment harnesses resolve their supplied input through
+        # this stable name. Keep the more specific legacy variables below for
+        # backwards compatibility with older generated code.
+        env["ARTIFACT_PATH"] = str(resolved)
+        if resolved.is_dir():
+            env["SUPPLIED_PAPER_DIR"] = str(resolved)
+            env.pop("PAPER_FILE", None)
+            env.pop("TASK_SPEC_FILE", None)
+
+            # A directory upload commonly contains a canonical ``main.tex``
+            # alongside an offline ``task_spec.json``.  Pin both files when
+            # present so the generated harness does not scan stale extracted
+            # copies or require callers to inject a second environment value.
+            paper_candidates = (
+                resolved / "main.tex",
+                resolved / "main.md",
+                resolved / "paper" / "main.tex",
+                resolved / "paper" / "main.md",
+            )
+            task_spec_candidates = (
+                resolved / "task_spec.json",
+                resolved / "paper" / "task_spec.json",
+            )
+            paper_file = next((path for path in paper_candidates if path.is_file()), None)
+            task_spec_file = next(
+                (path for path in task_spec_candidates if path.is_file()), None
+            )
+            if paper_file is not None:
+                env["PAPER_FILE"] = str(paper_file)
+            if task_spec_file is not None:
+                env["TASK_SPEC_FILE"] = str(task_spec_file)
+        elif resolved.is_file():
+            env["PAPER_FILE"] = str(resolved)
+            env.pop("SUPPLIED_PAPER_DIR", None)
+            env.pop("TASK_SPEC_FILE", None)
+            sibling_task_spec = resolved.with_name("task_spec.json")
+            if sibling_task_spec.is_file():
+                env["TASK_SPEC_FILE"] = str(sibling_task_spec)
+        else:
+            raise FileNotFoundError(f"artifact_path does not exist: {artifact_path}")
+    else:
+        # Do not let a previous task's process-level setting leak into a
+        # create-new-paper run when no artifact was supplied for this task.
+        for name in ("ARTIFACT_PATH", "SUPPLIED_PAPER_DIR", "PAPER_FILE", "TASK_SPEC_FILE"):
+            env.pop(name, None)
     return env
 
 
@@ -246,9 +303,11 @@ def _diagnostics(
     duration_ms: int,
     metrics_state: str,
     failure_kind: str,
+    env: Mapping[str, str] | None = None,
 ) -> str:
+    child_env = env if env is not None else os.environ
     env_flags = [
-        f"{name}={'set' if os.getenv(name, '').strip() else 'missing'}"
+        f"{name}={'set' if child_env.get(name, '').strip() else 'missing'}"
         for name in _ENV_DIAGNOSTIC_KEYS
     ]
     try:
@@ -345,6 +404,14 @@ class ExperimentExecutionAgent:
         exec_cfg = self.config.get("experiment_execution", {}) or {}
         timeout = exec_cfg.get("timeout_seconds")
         max_transient_retries = int(exec_cfg.get("max_transient_retries", 1))
+        artifact_path = (
+            inputs.artifact_path
+            or exec_cfg.get("artifact_path")
+            or self.config.get("artifact_path")
+            or None
+        )
+        if artifact_path is not None:
+            artifact_path = str(artifact_path).strip() or None
 
         variant_results: list[VariantResult] = []
         notes_parts: list[str] = []
@@ -356,6 +423,7 @@ class ExperimentExecutionAgent:
                 results=results,
                 timeout=timeout,
                 max_transient_retries=max_transient_retries,
+                artifact_path=artifact_path,
             )
             variant_results.append(result)
             _mirror_artifact(
@@ -393,6 +461,7 @@ class ExperimentExecutionAgent:
         timeout: int,
         metrics_path: Path,
         expected_method: str = "",
+        artifact_path: str | None = None,
     ) -> tuple[_VariantRun, str]:
         """One subprocess attempt. Returns (run, log_section) — the section
         is this attempt's own log text, not yet written to disk; the caller
@@ -402,8 +471,10 @@ class ExperimentExecutionAgent:
         timed_out = False
         launch_error = ""
         started = time.monotonic()
+        env: dict[str, str] = {}
 
         try:
+            env = _variant_env(artifact_path)
             proc = subprocess.run(
                 command,
                 cwd=code_dir,
@@ -411,7 +482,7 @@ class ExperimentExecutionAgent:
                 text=True,
                 timeout=timeout,
                 check=False,
-                env=_variant_env(),
+                env=env,
             )
             exit_code = proc.returncode
             stdout = proc.stdout or ""
@@ -466,6 +537,7 @@ class ExperimentExecutionAgent:
             duration_ms=duration_ms,
             metrics_state=metrics_state,
             failure_kind=failure_kind,
+            env=env,
         )
         return run, log_section
 
@@ -479,6 +551,7 @@ class ExperimentExecutionAgent:
         results: Path,
         timeout: int,
         max_transient_retries: int,
+        artifact_path: str | None = None,
     ) -> tuple[VariantResult, _VariantRun]:
         """Runs variant.invocation, retrying only launch_error/timeout
         failures (see _TRANSIENT_FAILURE_KINDS) up to max_transient_retries
@@ -503,6 +576,7 @@ class ExperimentExecutionAgent:
                 timeout=timeout,
                 metrics_path=metrics_path,
                 expected_method=variant.name,
+                artifact_path=artifact_path,
             )
             log_sections.append(f"=== attempt {attempt}/{max_attempts} ===\n{section}")
             if run.failure_kind not in _TRANSIENT_FAILURE_KINDS or attempt >= max_attempts:

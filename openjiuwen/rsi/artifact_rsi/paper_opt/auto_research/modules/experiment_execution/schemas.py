@@ -16,6 +16,10 @@ class ExperimentExecutionInput(BaseModel):
     # the full CLI command for each variant; execution shouldn't need to know
     # anything about how the generated code is structured beyond that.
     implementation: CodeImplementationManifest
+    # The user-supplied artifact is part of the execution contract.  The host
+    # exposes it to the generated subprocess as an explicit paper pin instead
+    # of relying on the subprocess's inherited working directory.
+    artifact_path: str | None = None
 
 
 class VariantResult(BaseModel):

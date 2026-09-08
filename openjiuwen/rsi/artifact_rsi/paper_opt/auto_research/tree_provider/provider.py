@@ -76,6 +76,7 @@ class PaperArtifactProviderImpl:
             optimization_instruction=request.optimization_instruction,
             artifact_path=request.artifact_path,
             model=request.model,
+            web_proxy=request.web_proxy,
             on_event=on_event,
         )
         self._orchestrators[request.task_id] = orchestrator

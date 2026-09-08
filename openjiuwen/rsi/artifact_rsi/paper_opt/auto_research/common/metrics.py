@@ -60,7 +60,7 @@ _COMPLETED_RUN_STATUSES = frozenset(
         "completed_live",
     }
 )
-_ITEM_RECORD_KEYS = ("per_question", "task_records", "records")
+_ITEM_RECORD_KEYS = ("per_question", "task_records", "records", "item_records")
 _EXCEPTION_FAILURE_RE = re.compile(r"^[A-Za-z]+(?:Error|Exception)\s*:")
 _INFRA_STAGES = frozenset(
     {
@@ -441,7 +441,9 @@ def validate_smoke_live_path(metrics: dict[str, Any] | None) -> MetricsContractR
         issues.append(
             _contract_issue(
                 "smoke_missing_item_records",
-                "smoke requires at least one item record (parser-only stubs are invalid)",
+                "smoke requires at least one item record (parser-only stubs are invalid); "
+                "write a non-empty top-level `per_question` list of objects "
+                "(also accepted: `task_records`, `records`, `item_records`)",
             )
         )
 

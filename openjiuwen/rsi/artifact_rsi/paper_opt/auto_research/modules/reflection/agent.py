@@ -86,6 +86,7 @@ class ReflectionAgent:
 
         session_id = f"reflection-{plan.run_id}-{plan.revision}"
         await Runner.start()
+        agent = None
         try:
             agent = self._build_reflection_agent(workspace)
             await Runner.run_agent(
@@ -93,7 +94,38 @@ class ReflectionAgent:
                 {"query": task_prompt, "conversation_id": session_id},
             )
         finally:
-            await Runner.stop()
+            # Runner is process-global.  Stopping it here releases every
+            # agent's resource-manager tool, including agents running in a
+            # different paper task.  The server owns the Runner lifetime;
+            # this module must only finish its own invocation.
+            cleanup = getattr(agent, "cleanup_task_resources", None)
+            if callable(cleanup):
+                await cleanup()
+            unregister = getattr(agent, "unregister_rail", None)
+            configured_rails = getattr(agent, "configured_rails", None)
+            if callable(unregister) and callable(configured_rails):
+                for rail in reversed(list(configured_rails())):
+                    try:
+                        await unregister(rail)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # Cleanup must not mask the agent result.
+                        pass
+            ability_manager = getattr(agent, "ability_manager", None)
+            teardown = getattr(ability_manager, "teardown_tools", None)
+            if callable(teardown):
+                teardown()
+            sys_operation = getattr(getattr(agent, "deep_config", None), "sys_operation", None)
+            sys_operation_id = getattr(sys_operation, "id", None)
+            if sys_operation_id:
+                from openjiuwen.core.runner import Runner
+
+                try:
+                    Runner.resource_mgr.remove_sys_operation(sys_operation_id)
+                except Exception:
+                    # Cleanup must not mask the agent result.
+                    pass
 
         return ReflectionOutput(reflection=self._finalize_reflection(plan, target_path))
 
@@ -170,6 +202,7 @@ class ReflectionAgent:
             # then write" are still bounded, not unbounded exploration.
             enable_task_loop=False,
             max_iterations=int(module_cfg.get("max_iterations", 6)),
+            tool_owner_id=f"rsi-reflection-{workspace.name}",
             workspace=str(workspace),
             auto_create_workspace=False,
         )

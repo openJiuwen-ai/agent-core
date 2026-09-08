@@ -32,6 +32,7 @@ class RsiTaskCreateRequest:
     search_width: int | None
     model_refs: dict[str, str]
     max_iterations: int
+    web_proxy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

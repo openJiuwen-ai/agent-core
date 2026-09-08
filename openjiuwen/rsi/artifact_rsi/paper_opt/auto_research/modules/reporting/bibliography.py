@@ -200,7 +200,25 @@ class _EnrichedMetadata:
     doi: str | None
 
 
-def _fetch_crossref(doi: str, *, timeout: float) -> dict | None:
+def _urlopen(request, *, timeout: float, proxy_url: str | None = None):
+    """Open a metadata request with the task-scoped proxy when configured."""
+
+    import urllib.request
+
+    if proxy_url:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+        return opener.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)  # noqa: S310 - fixed metadata hosts
+
+
+def _fetch_crossref(
+    doi: str,
+    *,
+    timeout: float,
+    proxy_url: str | None = None,
+) -> dict | None:
     """One Crossref lookup for a known DOI — ported from doi2bib.py's
     ``fetch``. Returns ``None`` on any HTTP/parse failure rather than
     raising; the caller treats that identically to "no id found"."""
@@ -210,11 +228,16 @@ def _fetch_crossref(doi: str, *, timeout: float) -> dict | None:
 
     url = "https://api.crossref.org/works/" + urllib.parse.quote(doi, safe="")
     req = urllib.request.Request(url, headers={"User-Agent": "auto-research-reporting/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https host
+    with _urlopen(req, timeout=timeout, proxy_url=proxy_url) as resp:
         return _json.load(resp)["message"]
 
 
-def _fetch_arxiv(arxiv_id: str, *, timeout: float) -> dict | None:
+def _fetch_arxiv(
+    arxiv_id: str,
+    *,
+    timeout: float,
+    proxy_url: str | None = None,
+) -> dict | None:
     """One arXiv API lookup for a known id, normalized to the same
     author/issued/container-title shape ``_fetch_crossref`` returns —
     ported from doi2bib.py's ``fetch_arxiv``."""
@@ -224,7 +247,7 @@ def _fetch_arxiv(arxiv_id: str, *, timeout: float) -> dict | None:
 
     url = "http://export.arxiv.org/api/query?id_list=" + urllib.parse.quote(arxiv_id)
     req = urllib.request.Request(url, headers={"User-Agent": "auto-research-reporting/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed http host
+    with _urlopen(req, timeout=timeout, proxy_url=proxy_url) as resp:
         root = ET.fromstring(resp.read())
     ns = {"a": "http://www.w3.org/2005/Atom"}
     entry = root.find("a:entry", ns)
@@ -257,7 +280,13 @@ def _message_to_metadata(message: dict) -> _EnrichedMetadata:
     return _EnrichedMetadata(authors=authors, year=year, venue=venue, doi=message.get("DOI") or None)
 
 
-def try_enrich_from_network(url: str, *, timeout: float = 5.0) -> _EnrichedMetadata | None:
+def try_enrich_from_network(
+    url: str,
+    *,
+    timeout: float = 5.0,
+    network_enabled: bool = True,
+    proxy_url: str | None = None,
+) -> _EnrichedMetadata | None:
     """Best-effort metadata enrichment for a source URL that already
     carries an arXiv id or a DOI. Returns ``None`` (never raises) when the
     URL has neither, or when the lookup fails for any reason (offline,
@@ -267,15 +296,17 @@ def try_enrich_from_network(url: str, *, timeout: float = 5.0) -> _EnrichedMetad
     docstring for why that distinction keeps this out of the
     citation-hallucination risk live search would reopen.
     """
+    if not network_enabled:
+        return None
     arxiv_match = _ARXIV_URL_RE.search(url)
     doi_match = None if arxiv_match else _DOI_URL_RE.search(url)
     if not arxiv_match and not doi_match:
         return None
     try:
         message = (
-            _fetch_arxiv(arxiv_match.group(1), timeout=timeout)
+            _fetch_arxiv(arxiv_match.group(1), timeout=timeout, proxy_url=proxy_url)
             if arxiv_match
-            else _fetch_crossref(doi_match.group(1), timeout=timeout)
+            else _fetch_crossref(doi_match.group(1), timeout=timeout, proxy_url=proxy_url)
         )
     except Exception:  # noqa: BLE001 - best-effort network call, never fatal
         return None
@@ -293,13 +324,24 @@ class Bibliography:
     known_keys: set[str]
 
 
-def build_bibliography(summary_path: Path, *, network_timeout: float = 5.0) -> Bibliography:
+def build_bibliography(
+    summary_path: Path,
+    *,
+    network_timeout: float = 5.0,
+    network_enabled: bool = True,
+    proxy_url: str | None = None,
+) -> Bibliography:
     parsed_sources = parse_survey_sources(summary_path)
     entries: list[BibEntry] = []
     title_to_key: dict[str, str] = {}
     seen_keys: set[str] = set()
     for source in parsed_sources:
-        enriched = try_enrich_from_network(source.url, timeout=network_timeout)
+        enriched = try_enrich_from_network(
+            source.url,
+            timeout=network_timeout,
+            network_enabled=network_enabled,
+            proxy_url=proxy_url,
+        )
         if enriched is not None:
             authors, year, venue, doi = enriched.authors, enriched.year, enriched.venue, enriched.doi
         else:

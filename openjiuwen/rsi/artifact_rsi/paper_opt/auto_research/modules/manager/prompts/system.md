@@ -98,6 +98,11 @@ new `code_implementation` → `experiment_execution` → `reporting` → `DONE`.
 - After a **process-failed** execution (crash, timeout, missing metrics,
   dataset/API failure), `code_implementation` repair is next. Skip reflection
   and reporting. Do not re-run execution until a newer implementation exists.
+- If the execution report marks the failure `retryable=false` and its diagnostic
+  identifies a missing user-supplied artifact, dataset, gold file, scorer, or
+  other prerequisite, do not spend a code-repair round on it. Emit `BLOCKED`
+  with the concrete prerequisite so the caller can fix the input and retry the
+  task; only retryable execution failures should enter code repair.
 - After a smoke-test failure, repair code. Do not execute until status is
   `ready`.
 - `reporting` is the last module. A successful report completes `req-report`
