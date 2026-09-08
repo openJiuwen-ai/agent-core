@@ -34,12 +34,12 @@ A FACT must NOT contain "you should", "must do", or "in order to" — if it does
 
 A TIP is a PROCEDURAL rule about what YOU should do, written EXACTLY as:
     When <condition>: use <capability> to <action>
-where <capability> is ONE name from the Available Capabilities list (a built-in skill
-like `session-logs`, or a basic tool like `shell`, `jq`, `python3`, `grep`, `read`).
+where <capability> is ONE name copied EXACTLY from the Available Capabilities list
+(a skill or basic tool such as `bash`, `python_exec`, `grep`, `read_file`).
 Examples:
     When the task analyzes a large log file: use grep to extract matching lines first
-    When a csv task needs row counts by group: use python3 to load and group the csv
-    When you must search prior conversation history: use the `session-logs` skill
+    When a csv task needs row counts by group: use python_exec to load and group the csv
+    When you need the contents of an existing file: use read_file to inspect it before editing
 A TIP without a condition, or whose capability is not in the list, is malformed.
 
 Classify with BOTH tests:

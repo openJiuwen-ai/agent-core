@@ -41,7 +41,7 @@ from openjiuwen.harness.rails.evolution.ttse.consult import (
     parse_consult_categories,
     render_consult_result,
 )
-from openjiuwen.harness.rails.evolution.ttse.prompts import detect_judge_prompt
+from openjiuwen.harness.rails.evolution.ttse.prompts import FACT_TIP_DEFINITION, detect_judge_prompt
 from openjiuwen.harness.rails.evolution.ttse.render import DISK_CATALOG_GUIDANCE_CN
 from openjiuwen.harness.rails.evolution.ttse.trajectory_adapter import (
     count_tool_calls,
@@ -115,6 +115,15 @@ def _n_tool_messages(n: int, *, write_path: str | None = None) -> list[dict]:
 # ----------------------------------------------------------------------
 # Parsers (frozen TTSE logic)
 # ----------------------------------------------------------------------
+
+
+def test_fact_tip_definition_uses_jiuwen_capability_names():
+    """Induce examples must match BASIC_TOOLS names, not OpenClaw aliases."""
+    text = FACT_TIP_DEFINITION
+    for stale in ("python3", "`shell`", "`jq`", "session-logs"):
+        assert stale not in text, f"stale capability example still present: {stale}"
+    for name in ("python_exec", "bash", "read_file"):
+        assert name in text
 
 
 def test_parse_rules_classifies_fact_and_tip():
