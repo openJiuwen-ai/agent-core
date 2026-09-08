@@ -62,14 +62,13 @@ PRODUCT_GRAPH_TOOL_NAMES = tuple(
     name for name in LOCATE_EXAM_TOOL_NAMES if name != "submit_code_context"
 )
 
-# ACI product surface. Advanced relation tools stay registered in classic only.
+# ACI product surface. Duplicate read tools stay in classic only; focus_code
+# is the source window. Relation hops are opt-in via focus_code.include_relations.
 FOCUSED_CORE_TOOL_NAMES = (
     "resolve_symbol",
     "find_code_symbols",
     "search_source_text",
     "inspect_code_structure",
-    "read_symbol",
-    "read_code",
     "focus_code",
 )
 
@@ -125,7 +124,7 @@ def build_code_graph_profile_tools(
 
     All tools share ``context``, therefore one service, one index, and one run
     state per host agent. Product omits ``submit_code_context``; locate-exam
-    (ContextBench) includes it. ``focused`` replaces ``select_code_context``
+    (ContextBench) includes it.     ``focused`` replaces ``select_code_context`` / ``read_symbol`` / ``read_code``
     with ``focus_code`` and hides advanced relation tools.
     """
     resolved = resolve_code_graph_profile(profile)

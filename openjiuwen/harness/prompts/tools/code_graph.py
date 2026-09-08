@@ -151,9 +151,9 @@ def _focus_code_params(language: str) -> Dict[str, Any]:
             "candidate_id": {
                 "type": "string",
                 "description": (
-                    "Short id from the last search, e.g. C1"
+                    "Stable id from the last search, graph_generation:symbol_id"
                     if lang == "en"
-                    else "上一次检索返回的短 id，例如 C1"
+                    else "上一次检索返回的稳定 id，格式 graph_generation:symbol_id"
                 ),
             },
             "symbol_id": {
@@ -167,13 +167,24 @@ def _focus_code_params(language: str) -> Dict[str, Any]:
             "reason": {
                 "type": "string",
                 "description": (
-                    "Why this is the current edit target"
+                    "Optional: why this is the current edit target"
                     if lang == "en"
-                    else "为什么把这里当作当前编辑目标"
+                    else "可选：为什么把这里当作当前编辑目标"
+                ),
+            },
+            "include_relations": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional relation kinds to attach after the window. "
+                    "Default empty. Use callers, callees, importers, or impact "
+                    "only when the issue needs them."
+                    if lang == "en"
+                    else "可选关系，默认空。仅在 issue 需要调用/注册/影响分析时传入 callers/callees/importers/impact。"
                 ),
             },
         },
-        "required": ["reason"],
+        "required": [],
     }
 
 

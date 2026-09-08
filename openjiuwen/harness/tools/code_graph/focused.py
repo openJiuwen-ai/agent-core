@@ -48,6 +48,86 @@ _BUILD_DIR_MARKERS = (
 _QUERY_NOISE_TOKENS = frozenset({"def", "class", "function", "method", "async"})
 _CALLER_HINTS = ("caller", "callers", "who calls", "who call")
 _IMPORT_HINTS = ("register", "decorator", "importer", "importers", "import site")
+_IMPACT_HINTS = ("impact", "call chain", "call path", "across module")
+_RELATION_ALIASES = {
+    "callers": "called_by",
+    "called_by": "called_by",
+    "callees": "calls",
+    "calls": "calls",
+    "importers": "imported_by",
+    "imported_by": "imported_by",
+    "imports": "imports",
+    "inherits": "inherits",
+    "inherited_by": "inherited_by",
+    "impact": "impact",
+}
+
+
+def normalize_include_relations(raw: Any) -> list[str]:
+    """Map focus_code.include_relations aliases onto graph edge kinds."""
+    if raw in (None, "", []):
+        return []
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    names: list[str] = []
+    for item in values:
+        key = str(item or "").strip().lower()
+        if not key:
+            continue
+        mapped = _RELATION_ALIASES.get(key, key)
+        if mapped == "impact":
+            for extra in ("called_by", "calls", "imported_by", "inherits"):
+                if extra not in names:
+                    names.append(extra)
+            continue
+        if mapped not in names:
+            names.append(mapped)
+    return names
+
+
+def read_graph_generation(context: Any) -> str:
+    """Current workspace generation, or ``0`` if the index is not ready."""
+    try:
+        from openjiuwen.core.retrieval.code_graph.manager import get_code_graph_manager
+
+        config = getattr(context, "config", None)
+        root = getattr(context, "repo_root", None)
+        stats = get_code_graph_manager(config).stats(root, config)
+        generation = stats.get("generation_id") if isinstance(stats, dict) else None
+    except Exception:  # noqa: BLE001 — candidate ids still need a prefix
+        generation = None
+    return str(generation if generation not in (None, "") else "0")
+
+
+def sync_graph_generation(state: Any, generation_id: str) -> str:
+    """Remember the live generation. Drop stale candidate maps after a refresh."""
+    gen = str(generation_id or "0")
+    prior = str(getattr(state, "graph_generation", "") or "")
+    if prior and prior != gen:
+        focused = getattr(state, "focused_candidates", None)
+        if isinstance(focused, dict):
+            focused.clear()
+        state.current_focus = None
+    state.graph_generation = gen
+    return gen
+
+
+def candidate_generation(candidate_id: str) -> str | None:
+    text = str(candidate_id or "")
+    if ":" not in text:
+        return None
+    return text.split(":", 1)[0]
+
+
+def stable_candidate_id(generation_id: str, item: dict[str, Any]) -> str:
+    """Same symbol (or file span) keeps the same id inside one graph generation."""
+    gen = str(generation_id or "0")
+    symbol_id = str(item.get("symbol_id") or "").strip()
+    if symbol_id:
+        return f"{gen}:{symbol_id}"
+    file_path = str(item.get("file") or "").replace("\\", "/")
+    start = item.get("start_line") or 0
+    end = item.get("end_line") if item.get("end_line") not in (None, "") else start
+    return f"{gen}:span:{file_path}:{start}-{end}"
 
 
 def classify_role(file_path: str) -> str:
@@ -161,18 +241,31 @@ def summarize_hit(
 def register_focused_candidates(
     state: Any,
     items: list[dict[str, Any]],
+    *,
+    generation_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Assign stable C1..Cn ids for this run and remember them for focus_code."""
+    """Assign generation-scoped ids and remember them for focus_code."""
+    gen = sync_graph_generation(state, generation_id or getattr(state, "graph_generation", "") or "0")
     registered: list[dict[str, Any]] = []
-    for item in items[:FOCUSED_MAX_CANDIDATES]:
+    seen: set[str] = set()
+    for item in items:
         if not isinstance(item, dict):
             continue
-        state.focus_seq = int(getattr(state, "focus_seq", 0) or 0) + 1
-        candidate_id = f"C{state.focus_seq}"
         payload = dict(item)
+        candidate_id = stable_candidate_id(gen, payload)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
         payload["candidate_id"] = candidate_id
+        payload["graph_generation"] = gen
+        payload["next_action"] = {
+            "tool": "focus_code",
+            "candidate_id": candidate_id,
+        }
         state.focused_candidates[candidate_id] = payload
         registered.append(payload)
+        if len(registered) >= FOCUSED_MAX_CANDIDATES:
+            break
     return registered
 
 
@@ -231,28 +324,6 @@ def focused_next_actions(
             }
         ]
     issue_text = f"{issue} {query}".lower()
-    if any(hint in issue_text for hint in _CALLER_HINTS):
-        chosen = candidates[0]
-        symbol_id = str(chosen.get("symbol_id") or "")
-        if symbol_id:
-            return [
-                {
-                    "tool": "find_callers",
-                    "symbol_id": symbol_id,
-                    "reason": "the issue asks who calls this symbol",
-                }
-            ]
-    if any(hint in issue_text for hint in _IMPORT_HINTS):
-        chosen = candidates[0]
-        symbol_id = str(chosen.get("symbol_id") or "")
-        if symbol_id:
-            return [
-                {
-                    "tool": "find_importers",
-                    "symbol_id": symbol_id,
-                    "reason": "the issue asks about registration or imports",
-                }
-            ]
     impl = [item for item in candidates if item.get("role") == ROLE_IMPLEMENTATION]
     pool = impl or list(candidates)
     names = [str(item.get("name") or "") for item in pool]
@@ -278,13 +349,21 @@ def focused_next_actions(
                 "reason": f"see the members of {chosen.get('name') or chosen.get('file')} before focusing",
             }
         ]
-    return [
-        {
-            "tool": "focus_code",
-            "candidate_id": chosen.get("candidate_id"),
-            "reason": f"open a 50-100 line window on {chosen.get('name') or chosen.get('symbol_id')}",
-        }
-    ]
+    action: dict[str, Any] = {
+        "tool": "focus_code",
+        "candidate_id": chosen.get("candidate_id"),
+        "reason": f"open a 50-100 line window on {chosen.get('name') or chosen.get('symbol_id')}",
+    }
+    relations: list[str] = []
+    if any(hint in issue_text for hint in _CALLER_HINTS):
+        relations.append("callers")
+    if any(hint in issue_text for hint in _IMPORT_HINTS):
+        relations.append("importers")
+    if any(hint in issue_text for hint in _IMPACT_HINTS):
+        relations.append("impact")
+    if relations:
+        action["include_relations"] = relations
+    return [action]
 
 
 def focus_reminder(state: Any) -> str:
@@ -303,6 +382,7 @@ def apply_focused_observation(
     raw_items: list[dict[str, Any]],
     matched_by: list[str],
     empty_hint: str = "lexical",
+    generation_id: str | None = None,
 ) -> dict[str, Any]:
     """Replace ranked lists with summary candidates. Classic callers never enter."""
     summaries = [
@@ -310,8 +390,14 @@ def apply_focused_observation(
         for item in raw_items
         if isinstance(item, dict)
     ]
+    role_rank = {ROLE_IMPLEMENTATION: 0, ROLE_TEST: 1, ROLE_BUILD: 2}
+    summaries.sort(key=lambda item: role_rank.get(str(item.get("role") or ""), 3))
     truncated = len(summaries) > FOCUSED_MAX_CANDIDATES
-    candidates = register_focused_candidates(state, summaries)
+    candidates = register_focused_candidates(
+        state,
+        summaries,
+        generation_id=generation_id,
+    )
     groups = group_candidates(candidates)
     issue = str(getattr(getattr(state, "request", None), "query", "") or "")
     actions = focused_next_actions(query, candidates, issue=issue, empty_hint=empty_hint)
@@ -323,7 +409,7 @@ def apply_focused_observation(
         extra = "; narrow the query or path_prefix" if truncated else ""
         data["message"] = (
             f"found {len(candidates)} summary candidate(s); "
-            f"pick one with focus_code{extra}"
+            f"call focus_code on one implementation candidate{extra}"
         )
     reminder = focus_reminder(state)
     if reminder:

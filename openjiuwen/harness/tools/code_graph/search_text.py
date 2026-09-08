@@ -75,6 +75,8 @@ class SearchSourceTextTool(CodeGraphBaseTool):
         if focused:
             from openjiuwen.harness.tools.code_graph.focused import apply_focused_observation
 
+            from openjiuwen.harness.tools.code_graph.focused import read_graph_generation
+
             apply_focused_observation(
                 output.data,
                 query=query,
@@ -82,6 +84,7 @@ class SearchSourceTextTool(CodeGraphBaseTool):
                 raw_items=chunks,
                 matched_by=["exact" if match_mode == "exact" else "lexical"],
                 empty_hint="lexical" if match_mode == "exact" else "exact",
+                generation_id=read_graph_generation(self.context),
             )
             output.data["match_mode"] = match_mode
         elif "next_actions" not in output.data and not getattr(state, "is_locate_exam", False):

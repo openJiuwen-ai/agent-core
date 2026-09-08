@@ -18,6 +18,7 @@ class CodeGraphStatus(StrEnum):
     # with a full symbol_id; the graph must not pick one on its own.
     AMBIGUOUS = "AMBIGUOUS"
     STALE = "STALE"
+    STALE_CANDIDATE = "STALE_CANDIDATE"
     BUILDING = "BUILDING"
     UNAVAILABLE = "UNAVAILABLE"
     ERROR = "ERROR"

@@ -27,11 +27,13 @@ from openjiuwen.harness.tools.code_graph import (
     build_code_graph_profile_tools,
     code_graph_profile_tool_names,
 )
+from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus
 from openjiuwen.harness.tools.code_graph.focused import (
     apply_focused_observation,
     classify_role,
     focused_next_actions,
     infer_match_mode,
+    stable_candidate_id,
 )
 from openjiuwen.harness.tools.code_graph.search_code import next_actions
 from tests.unit_tests.core.retrieval.code_graph.parser_guard import skip_unless_code_graph_parser
@@ -93,6 +95,15 @@ def test_focused_product_exposes_core_and_hides_select() -> None:
     assert "focus_code" in names
     assert "select_code_context" not in names
     assert "find_callers" not in names
+    assert "read_symbol" not in names
+    assert "read_code" not in names
+
+
+def test_classic_keeps_read_tools() -> None:
+    names = code_graph_profile_tool_names(CodeGraphProfile.GRAPH)
+    assert "read_symbol" in names
+    assert "read_code" in names
+    assert "focus_code" not in names
 
 
 def test_locate_exam_never_gets_focus_code() -> None:
@@ -213,7 +224,12 @@ def test_role_grouping_keeps_tests() -> None:
         matched_by=["symbol"],
     )
     assert set(data["groups"]) == {"implementation", "test"}
-    assert data["candidates"][0]["candidate_id"] == "C1"
+    assert data["candidates"][0]["candidate_id"] == "0:a.py::impl"
+    assert data["candidates"][0]["candidate_id"] == stable_candidate_id(
+        "0",
+        {"symbol_id": "a.py::impl"},
+    )
+    assert data["candidates"][0]["next_action"]["tool"] == "focus_code"
     assert "source" not in data["candidates"][0]
     assert "body" not in data["candidates"][0]
     assert len(data["next_actions"]) == 1
@@ -248,9 +264,68 @@ def test_focused_prompt_mentions_focus_code() -> None:
         retrieval_interface="focused",
     )
     assert "focus_code" in text
+    assert "There is no read_symbol" in text
     classic = build_code_graph_profile_prompt("graph", language="en")
     assert "select_code_context" in classic
+    assert "read_symbol" in classic
     assert "focus_code" not in classic
+
+
+def test_candidate_id_is_stable_across_repeat_hits() -> None:
+    state = _state(interface="focused")
+    raw = [
+        {
+            "symbol_id": "user.py::create_user",
+            "name": "create_user",
+            "kind": "method",
+            "file": "src/user.py",
+            "start_line": 2,
+            "end_line": 4,
+        }
+    ]
+    first: dict = {}
+    second: dict = {}
+    apply_focused_observation(
+        first,
+        query="create_user",
+        state=state,
+        raw_items=raw,
+        matched_by=["symbol"],
+        generation_id="3",
+    )
+    apply_focused_observation(
+        second,
+        query="create_user again",
+        state=state,
+        raw_items=raw,
+        matched_by=["symbol"],
+        generation_id="3",
+    )
+    assert first["candidates"][0]["candidate_id"] == "3:user.py::create_user"
+    assert first["candidates"][0]["candidate_id"] == second["candidates"][0]["candidate_id"]
+
+
+def test_file_line_candidate_without_symbol() -> None:
+    state = _state(interface="focused")
+    data: dict = {}
+    apply_focused_observation(
+        data,
+        query='"header_rows missing"',
+        state=state,
+        raw_items=[
+            {
+                "file": "src/user.py",
+                "start_line": 7,
+                "end_line": 7,
+                "kind": "text",
+                "matched_line": 'ERROR_TOKEN = "header_rows missing"',
+            }
+        ],
+        matched_by=["exact_text"],
+        generation_id="2",
+    )
+    assert data["candidates"][0]["candidate_id"] == "2:span:src/user.py:7-7"
+    assert data["candidates"][0]["next_action"]["tool"] == "focus_code"
 
 
 def test_factory_builds_focus_tool(tmp_path: Path) -> None:
@@ -286,12 +361,89 @@ async def test_focus_code_opens_window(tmp_path: Path) -> None:
     candidates = search.data.get("candidates") or []
     assert candidates
     assert "candidate_id" in candidates[0]
+    assert ":" in candidates[0]["candidate_id"]
     focused = await tools["focus_code"].invoke(
-        {"candidate_id": candidates[0]["candidate_id"], "reason": "edit create_user"}
+        {"candidate_id": candidates[0]["candidate_id"]}
     )
     assert focused.success
+    assert focused.data.get("status") == "FOCUSED"
     assert focused.data.get("focused") is True
+    assert focused.data.get("supporting_evidence") == []
     assert state.selected
     assert state.current_focus is not None
     window = int(focused.data["end_line"]) - int(focused.data["start_line"]) + 1
     assert 50 <= window <= 100
+
+
+@pytest.mark.asyncio
+async def test_focus_code_handles_file_line_candidate(tmp_path: Path) -> None:
+    skip_unless_code_graph_parser()
+    repo = _repo(tmp_path / "repo")
+    state = _state(interface="focused")
+    tools = {
+        tool.card.name: tool
+        for tool in build_code_graph_profile_tools(
+            _context(repo, tmp_path, state),
+            state,
+            profile=CodeGraphProfile.GRAPH,
+            retrieval_interface="focused",
+        )
+    }
+    apply_focused_observation(
+        {},
+        query="header_rows missing",
+        state=state,
+        raw_items=[
+            {
+                "file": "src/user.py",
+                "start_line": 7,
+                "end_line": 7,
+                "kind": "text",
+                "matched_line": 'ERROR_TOKEN = "header_rows missing"',
+            }
+        ],
+        matched_by=["exact_text"],
+        generation_id=state.graph_generation or "0",
+    )
+    candidate_id = next(iter(state.focused_candidates))
+    focused = await tools["focus_code"].invoke({"candidate_id": candidate_id})
+    assert focused.success
+    assert focused.data.get("status") == "FOCUSED"
+    assert focused.data["file"].endswith("user.py")
+    assert "header_rows missing" in str(focused.data.get("source") or "")
+
+
+@pytest.mark.asyncio
+async def test_focus_code_rejects_stale_generation(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    state = _state(interface="focused")
+    tools = {
+        tool.card.name: tool
+        for tool in build_code_graph_profile_tools(
+            _context(repo, tmp_path, state),
+            state,
+            profile=CodeGraphProfile.GRAPH,
+            retrieval_interface="focused",
+        )
+    }
+    apply_focused_observation(
+        {},
+        query="create_user",
+        state=state,
+        raw_items=[
+            {
+                "symbol_id": "user.py::create_user",
+                "name": "create_user",
+                "kind": "method",
+                "file": "src/user.py",
+                "start_line": 2,
+                "end_line": 4,
+            }
+        ],
+        matched_by=["symbol"],
+        generation_id="1",
+    )
+    state.graph_generation = "2"
+    stale = await tools["focus_code"].invoke({"candidate_id": "1:user.py::create_user"})
+    assert stale.success
+    assert stale.data.get("status") == CodeGraphStatus.STALE_CANDIDATE.value

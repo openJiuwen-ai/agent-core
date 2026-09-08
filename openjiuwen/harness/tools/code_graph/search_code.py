@@ -70,12 +70,15 @@ class FindCodeSymbolsTool(CodeGraphBaseTool):
         if getattr(state, "uses_focused", False):
             from openjiuwen.harness.tools.code_graph.focused import apply_focused_observation
 
+            from openjiuwen.harness.tools.code_graph.focused import read_graph_generation
+
             apply_focused_observation(
                 output.data,
                 query=query,
                 state=state,
                 raw_items=matches,
                 matched_by=["symbol"],
+                generation_id=read_graph_generation(self.context),
             )
         elif "next_actions" not in output.data:
             if bool(getattr(state, "is_locate_exam", False)):

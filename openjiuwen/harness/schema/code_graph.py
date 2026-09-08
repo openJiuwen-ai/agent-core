@@ -407,6 +407,7 @@ class CodeGraphRunState:
     retrieval_interface: str = RETRIEVAL_INTERFACE_DEFAULT
     focused_candidates: dict[str, dict[str, Any]] = field(default_factory=dict)
     focus_seq: int = 0
+    graph_generation: str = ""
     current_focus: dict[str, Any] | None = None
 
     @property
