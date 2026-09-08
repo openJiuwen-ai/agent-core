@@ -82,11 +82,14 @@ class InboxMessage:
             resume; the supervisor starts a single-round resume for it.
         immediate: When True, inject into the active round's steering channel;
             when False, buffer until the active round finishes.
+        admitted_tool_scope_ids: Pending tool IDs observed when this structured
+            input entered the harness. Empty for text or an uncommitted slot.
     """
 
     seq: int
     content: "str | InteractiveInput"
     immediate: bool
+    admitted_tool_scope_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(slots=True)
@@ -109,6 +112,9 @@ class ActiveRound:
             ``InteractiveInput`` marks a single-round interrupt resume, which
             ``_on_round_done`` settles to IDLE rather than continuing the task
             plan with the resume payload.
+        tool_resume_scope_ids: Pending tool IDs matched when this round started.
+            Combined with inbox admission scope and current state to prove that
+            a concurrently queued tool approval is a consumed duplicate.
         deep_agent: Reference to the owning DeepAgent (the harness itself; the
             SnapshotRail reads context/state through it).
         task: The asyncio.Task running ``NativeHarness._run_round``.
@@ -153,6 +159,7 @@ class ActiveRound:
     deep_agent: "DeepAgent"
     task: asyncio.Task
     steering_queue: asyncio.Queue
+    tool_resume_scope_ids: frozenset[str] = field(default_factory=frozenset)
     graceful_abort: bool = False
     failure_retry: bool = False
     pre_round_snapshot: SafeStateSnapshot | None = None

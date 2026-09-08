@@ -168,6 +168,15 @@ PAUSED 收到 `send` 等价于「resume + 把新内容 steer 进去」——**�
 
 **2. interrupt resume（`send(InteractiveInput)`，HITL 中断恢复）**：经 `submit_round` 透传
 （executor `_extract_interactive_input` 原生 resume）；resume round 单轮语义，完成后 settle 到
-IDLE 不续 task_plan。StreamController 仅校验 `is_pending_interrupt_resume_valid` 后转发，不再
-client 侧排队。此路径与 warm resume 正交：一个 InteractiveInput round 被 pause 时不缓存其 query
-（不可 replay），PAUSED 收到 InteractiveInput 则直接起它自己的单轮 round。
+IDLE 不续 task_plan。StreamController 保存尚未 commit 目标 slot 的输入；NativeHarness 保存已经
+进入 supervisor、但在 RUNNING 阶段到达的结构化输入。后者使用独立的 `InboxMessage` FIFO，绝不
+进入字符串 steering、`LoopQueues.follow_up` 或 `DeepAgentState.pending_follow_ups`。
+该结构化队列只在当前 cycle 内有效；graceful round settle 与 terminal stop 都必须清空它，不能让
+已放弃的 resume 穿越 lifecycle boundary。
+
+settle 时以 session 中当前 interruption state 为权威：有未回答 interrupt 时只启动第一个匹配的
+结构化输入，普通文本保持原顺序等待；interrupt 清除后丢弃失去目标的结构化输入，再恢复既有文本
+batch。重复 tool approval 只有在 admission scope、active round scope 和 handler-entry 后当前 slot
+已消失三项证据同时成立时才删除；多 ID approval 按字段裁剪已消费 ID，仍 pending 的字段保留并继续
+匹配。此路径与 warm resume 正交：一个 InteractiveInput round 被 pause
+时不缓存其 query（不可 replay），PAUSED 收到 InteractiveInput 则直接起它自己的单轮 round。
