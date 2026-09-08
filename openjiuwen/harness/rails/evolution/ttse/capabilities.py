@@ -17,6 +17,8 @@ from __future__ import annotations
 import re
 from typing import Any, List, Optional, Set, Tuple
 
+from openjiuwen.core.common.logging import logger
+
 _CAP_NAME_RE = re.compile(r"`([^`]+)`")
 
 # Fallback capability set used only when the agent cannot be introspected.
@@ -48,7 +50,8 @@ async def _enumerate_tools(agent: Any) -> List[Tuple[str, str]]:
         return []
     try:
         infos = await list_info()
-    except Exception:  # noqa: BLE001 - degrade gracefully
+    except Exception as exc:  # noqa: BLE001 - degrade gracefully
+        logger.warning("[TTSERail] capability enumerate tools failed: %s", exc)
         return []
     out: List[Tuple[str, str]] = []
     for info in infos or []:
@@ -65,7 +68,8 @@ def _enumerate_skills(agent: Any) -> List[Tuple[str, str]]:
         return []
     try:
         skills = get_all()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TTSERail] capability enumerate skills failed: %s", exc)
         return []
     out: List[Tuple[str, str]] = []
     for skill in skills or []:
@@ -85,6 +89,12 @@ async def _enumerate_capabilities(agent: Optional[Any] = None) -> Tuple[List[Tup
         skills = _enumerate_skills(agent)
         tools = await _enumerate_tools(agent)
     if not skills and not tools:
+        reason = "agent is None" if agent is None else "agent exposed no tools/skills"
+        logger.warning(
+            "[TTSERail] capability fallback to BASIC_TOOLS (%s names) reason=%s",
+            len(BASIC_TOOLS),
+            reason,
+        )
         tools = list(BASIC_TOOLS)
     return skills, tools
 
@@ -117,9 +127,19 @@ async def list_capability_names(agent: Optional[Any] = None) -> Set[str]:
 def parse_capability_names_from_text(capabilities: str) -> Set[str]:
     """Extract backtick-quoted names from a rendered capabilities block."""
     if not capabilities:
+        logger.warning(
+            "[TTSERail] capability parse fallback to BASIC_TOOLS (%s names) reason=empty text",
+            len(BASIC_TOOLS),
+        )
         return {name for name, _ in BASIC_TOOLS}
     found = set(_CAP_NAME_RE.findall(capabilities))
-    return found or {name for name, _ in BASIC_TOOLS}
+    if not found:
+        logger.warning(
+            "[TTSERail] capability parse fallback to BASIC_TOOLS (%s names) reason=no backtick names",
+            len(BASIC_TOOLS),
+        )
+        return {name for name, _ in BASIC_TOOLS}
+    return found
 
 
 __all__ = [

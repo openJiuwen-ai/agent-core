@@ -517,9 +517,13 @@ class TTSERail(EvolutionRail):
         caps = capabilities if capabilities is not None else (self._last_capabilities or "")
         names = parse_capability_names_from_text(caps) if caps else set()
         if not names:
+            logger.warning(
+                "[TTSERail] dream capabilities empty; falling back to list_capability_names(None)"
+            )
             try:
                 names = await list_capability_names(None)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[TTSERail] dream capability name fallback failed: %s", exc)
                 names = set()
 
         logger.info(
