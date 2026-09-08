@@ -26,6 +26,25 @@ def mcp_model_tool_name(server_name: str, tool_name: str) -> str:
     return f"{mcp_model_tool_prefix(server_name)}{tool_name}"
 
 
+def preserve_mcp_tool_result_status(tool_result: Any, content: Any) -> Any:
+    """Carry explicit MCP failures through extraction without changing successful values."""
+    if getattr(tool_result, "isError", False) is not True:
+        return content
+
+    error = "\n\n".join(
+        text
+        for item in (getattr(tool_result, "content", None) or [])
+        if isinstance(text := getattr(item, "text", None), str) and text
+    )
+    if not error.strip():
+        error = "MCP tool reported an error."
+
+    # MCPTool.invoke passes this type through instead of hiding the status in {"result": ...}.
+    if isinstance(content, McpToolResult):
+        return content.model_copy(update={"success": False, "error": error})
+    return McpToolResult(success=False, data={"result": content}, error=error)
+
+
 def extract_mcp_tool_result_content(
     tool_result: Any,
     *,
@@ -43,10 +62,13 @@ def extract_mcp_tool_result_content(
     the result is then an ``McpToolResult`` whose ``data`` holds the text
     plus data-URL image items, which the multimodal tool-result pipeline
     delivers to the model.
+
+    Explicit MCP errors return ``McpToolResult(success=False)`` with the
+    converted content and server error text preserved.
     """
     content = getattr(tool_result, "content", None)
     if not content:
-        return None
+        return preserve_mcp_tool_result_status(tool_result, None)
 
     text_parts = []
     images = []
@@ -66,7 +88,7 @@ def extract_mcp_tool_result_content(
                     text_parts.append(f"[image content: {mime_type}, {len(str(data))} base64 chars]")
                 continue
             if len(content) == 1:
-                return data
+                return preserve_mcp_tool_result_status(tool_result, data)
             text_parts.append(str(data))
             continue
 
@@ -74,18 +96,18 @@ def extract_mcp_tool_result_content(
             dumped = item.model_dump(exclude_none=True)
             dumped.pop("data", None)
             if len(content) == 1:
-                return dumped
+                return preserve_mcp_tool_result_status(tool_result, dumped)
             text_parts.append(str(dumped))
             continue
         if len(content) == 1:
-            return str(item)
+            return preserve_mcp_tool_result_status(tool_result, str(item))
         text_parts.append(str(item))
 
     text = "\n\n".join(text_parts)
 
     if images:
         note = f"{len(images)} image(s) attached as multimodal input."
-        return McpToolResult(
+        result = McpToolResult(
             data={
                 "content": f"{text}\n\n{note}" if text else note,
                 "multimodal": [
@@ -100,7 +122,8 @@ def extract_mcp_tool_result_content(
                 ],
             }
         )
-    return text
+        return preserve_mcp_tool_result_status(tool_result, result)
+    return preserve_mcp_tool_result_status(tool_result, text)
 
 
 class McpServerConfig(BaseModel):
@@ -121,7 +144,7 @@ class McpServerConfig(BaseModel):
 
 
 class McpToolResult(BaseModel):
-    """Tool result carrying multimodal data from an MCP server.
+    """Tool result carrying failure status or multimodal data from an MCP server.
 
     Duck-type-compatible with the harness ``ToolOutput`` shape
     (``success`` / ``data`` / ``error``) so the react-agent multimodal
