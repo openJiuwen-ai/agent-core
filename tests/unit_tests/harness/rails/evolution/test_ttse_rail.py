@@ -36,7 +36,11 @@ from openjiuwen.harness.rails.evolution.ttse import (
 from openjiuwen.harness.rails.evolution.ttse.stores import reset_shared_stores, shared_store
 from openjiuwen.harness.rails.evolution.ttse.catalog import project_catalog
 from openjiuwen.harness.rails.evolution.ttse.classify import parse_assignments
-from openjiuwen.harness.rails.evolution.ttse.consult import render_consult_result
+from openjiuwen.harness.rails.evolution.ttse.consult import (
+    MAX_CONSULT_CATEGORIES,
+    parse_consult_categories,
+    render_consult_result,
+)
 from openjiuwen.harness.rails.evolution.ttse.prompts import detect_judge_prompt
 from openjiuwen.harness.rails.evolution.ttse.render import DISK_CATALOG_GUIDANCE_CN
 from openjiuwen.harness.rails.evolution.ttse.trajectory_adapter import (
@@ -932,6 +936,77 @@ async def test_consult_lists_catalog_and_opens_category(tmp_path):
     assert "trailing catalog" in unknown
     project_catalog(store)
     assert (tmp_path / "by_cat" / "documents-office-and-records" / "SUMMARY.md").is_file()
+
+
+def test_parse_consult_categories_splits_comma_list_and_json():
+    assert parse_consult_categories("documents-office-and-records") == [
+        "documents-office-and-records"
+    ]
+    assert parse_consult_categories(
+        "documents-office-and-records, software-engineering-devops"
+    ) == ["documents-office-and-records", "software-engineering-devops"]
+    assert parse_consult_categories(
+        ["documents-office-and-records", "software-engineering-devops"]
+    ) == ["documents-office-and-records", "software-engineering-devops"]
+    assert parse_consult_categories(
+        '["documents-office-and-records","other"]'
+    ) == ["documents-office-and-records", "other"]
+    assert parse_consult_categories("") == []
+
+
+@pytest.mark.asyncio
+async def test_consult_opens_multiple_categories_in_one_call(tmp_path):
+    store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
+    await store.add_fact("csv bom needed")
+    await store.add_tip("When compiling C++: use cl /utf-8")
+    await store.set_categories(
+        [
+            ("csv bom needed", "fact", "documents-office-and-records"),
+            ("When compiling C++: use cl /utf-8", "tip", "software-engineering-devops"),
+        ]
+    )
+    opened = render_consult_result(
+        store,
+        category="documents-office-and-records, software-engineering-devops",
+    )
+    assert "csv bom needed" in opened
+    assert "When compiling C++: use cl /utf-8" in opened
+    assert "`documents-office-and-records`" in opened
+    assert "`software-engineering-devops`" in opened
+
+
+@pytest.mark.asyncio
+async def test_consult_caps_categories_and_skips_unknown(tmp_path):
+    store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
+    await store.add_fact("csv bom needed")
+    await store.add_fact("go run works")
+    await store.add_fact("pptx timeout")
+    await store.set_categories(
+        [
+            ("csv bom needed", "fact", "documents-office-and-records"),
+            ("go run works", "fact", "software-engineering-devops"),
+            ("pptx timeout", "fact", "other"),
+        ]
+    )
+    mixed = render_consult_result(
+        store,
+        category="documents-office-and-records, not-a-real-id",
+    )
+    assert "csv bom needed" in mixed
+    assert "Unknown category `not-a-real-id`" in mixed
+    ids = [
+        "documents-office-and-records",
+        "software-engineering-devops",
+        "other",
+        "skill-agent-meta-workflows",
+    ]
+    assert len(ids) > MAX_CONSULT_CATEGORIES
+    capped = render_consult_result(store, category=", ".join(ids))
+    assert "csv bom needed" in capped
+    assert "go run works" in capped
+    assert "pptx timeout" in capped
+    assert "Opened the first 3 categories" in capped
+    assert "`skill-agent-meta-workflows`" in capped
 
 
 @pytest.mark.asyncio

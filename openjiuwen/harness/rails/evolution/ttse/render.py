@@ -108,7 +108,7 @@ DISK_CATALOG_GUIDANCE_CN = """\
 ## 经验目录（强制）
 
 末尾附件是经验类目和条数，不是 FACT/TIP 正文。闲聊可忽略该附件。
-非闲聊任务、在选择 skill、调用 `skill_acceleration_exec` 或动手之前：附件中若有与当前任务相关的类，必须先调用 `ttse_consult(category=该类id)`，根据返回的 FACT/TIP 再规划。不要一次打开无关类。
+非闲聊任务、在选择 skill、调用 `skill_acceleration_exec` 或动手之前：附件中若有与当前任务相关的类，必须先调用 `ttse_consult(category=该类id)`，根据返回的 FACT/TIP 再规划。相关类不止一个时，用逗号一次传入（最多 3 个）。不要打开无关类。
 附件为 `(empty)`，或没有任何相关类时，直接执行。
 不要无参调用 `ttse_consult` 再要一遍目录。
 经验是历史启发式，与当前工具证据冲突时以当前证据为准。
@@ -119,7 +119,7 @@ DISK_CATALOG_GUIDANCE_EN = """\
 ## Experience catalog (required)
 
 The trailing attachment lists experience categories and counts, not FACT/TIP bodies. Ignore it for chitchat.
-On a non-trivial task, before choosing a skill, calling `skill_acceleration_exec`, or acting: if a listed category applies, you MUST call `ttse_consult(category=<id>)` and plan from the returned FACT/TIP. Do not dump unrelated classes.
+On a non-trivial task, before choosing a skill, calling `skill_acceleration_exec`, or acting: if a listed category applies, you MUST call `ttse_consult(category=<id>)` and plan from the returned FACT/TIP. If several listed classes apply, pass them in one call as comma-separated ids (max 3). Do not dump unrelated classes.
 If the attachment is `(empty)` or none apply, proceed without it.
 Do not call `ttse_consult` with no arguments to re-list the catalog.
 These are historical heuristics; if they conflict with current tool evidence, trust the current evidence.

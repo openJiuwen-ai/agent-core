@@ -43,7 +43,7 @@ def render_catalog_markdown(counts: Dict[str, int], *, categories: Iterable[Dict
         "# TTSE catalog",
         "",
         "Business-scenario categories with learned FACT/TIP counts.",
-        "Call ttse_consult(category=<id>) to open one class.",
+        "Call ttse_consult(category=<id>) to open a class; comma-separated ids (max 3) open related classes.",
         "",
     ]
     any_row = False
