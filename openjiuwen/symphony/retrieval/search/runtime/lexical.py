@@ -47,6 +47,7 @@ class _BM25Stats:
     average_length: float
     postings: dict[str, int]
     size: int
+    cjk_size: int
 
 
 class LexicalIndex:
@@ -76,6 +77,7 @@ class LexicalIndex:
             average_length=sum(self._lengths.values()) / max(1, len(self._lengths)),
             postings=dict(postings),
             size=len(self._documents),
+            cjk_size=sum(any(not token.isascii() for token in values) for values in self._frequencies.values()),
         )
 
     def search(
@@ -150,7 +152,8 @@ class LexicalIndex:
         matched = []
         for document in scope.values():
             fields = self._field_tokens[document.key]
-            if any(not query_terms.isdisjoint(field) for field in fields):
+            # A folder's description does not make every descendant Skill a content match.
+            if any(not query_terms.isdisjoint(field) for field in fields[:-1]):
                 matched.append(document)
             elif _identity_contains_query(document, text, query_tokens):
                 matched.append(document)
@@ -195,8 +198,8 @@ class LexicalIndex:
         key: str,
         queries: Sequence[str],
         *,
-        visible_description_chars: int = 60,
-        max_chars: int = 40,
+        visible_description_chars: int = 180,
+        max_chars: int = 96,
     ) -> str:
         """Return evidence when the matching field is otherwise hidden."""
 
@@ -225,10 +228,7 @@ class LexicalIndex:
         if not body_matches:
             return ""
         body = _without_front_matter(document.body)
-        for occurrence in _WORD_RE.finditer(body):
-            if body_matches.intersection(_tokens(occurrence.group())):
-                return f"body: {_excerpt(body, occurrence.start(), occurrence.end(), max_chars)}"
-        return ""
+        return f"body: {_matched_excerpt(body, body_matches, max_chars)}"
 
 
 def compile_matcher(query: str, *, case_insensitive: bool, fixed_strings: bool):
@@ -384,7 +384,9 @@ def _term_identity_tier(document: LexicalDocument, query: str) -> int:
     if len(term) >= 2 and any(term in value for value in identities):
         return 3
     query_words = set(term.split())
-    if any(identity and identity in query_words for identity in identities):
+    # A name among task keywords is only a soft match, except single-letter
+    # identifiers (e.g. R) which the lexical tokenizer does not retain.
+    if any(len(identity) == 1 and identity in query_words for identity in identities):
         return 3
     return 4
 
@@ -466,10 +468,16 @@ def _excerpt(body: str, start: int, end: int, max_chars: int) -> str:
 
 
 def _matched_excerpt(value: str, terms: set[str], max_chars: int) -> str:
+    best, best_coverage = "", -1
     for occurrence in _WORD_RE.finditer(value):
         if terms.intersection(_tokens(occurrence.group())):
-            return _excerpt(value, occurrence.start(), occurrence.end(), max_chars)
-    return _excerpt(value, 0, min(len(value), max_chars), max_chars)
+            candidate = _excerpt(value, occurrence.start(), occurrence.end(), max_chars)
+            coverage = len(terms.intersection(_tokens(candidate)))
+            if coverage > best_coverage:
+                best, best_coverage = candidate, coverage
+            if coverage == len(terms):
+                break
+    return best or _excerpt(value, 0, min(len(value), max_chars), max_chars)
 
 
 def _document_fields(document: LexicalDocument) -> _DocumentFields:
@@ -525,10 +533,14 @@ def _surface_tokens(value: str) -> list[str]:
 
 def _query_term_families(value: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
     families: list[tuple[str, tuple[str, ...]]] = []
-    for term in _surface_terms(value):
-        variants = (term,) if re.fullmatch(r"[\u3400-\u9fff]+", term) else tuple(dict.fromkeys(_tokens(term)))
-        families.append((term, variants))
-    return tuple(families)
+    for raw in _WORD_RE.findall(str(value or "")):
+        terms = _surface_terms(raw)
+        if not raw.isascii():
+            # Overlapping CJK bigrams are parts of one query, not independent votes.
+            families.append((raw, terms))
+        else:
+            families.extend((term, tuple(dict.fromkeys(_tokens(term)))) for term in terms)
+    return tuple(dict.fromkeys(families))
 
 
 def _singular(token: str) -> str:
@@ -588,11 +600,23 @@ def _bm25_family_score(
     for raw, family in query_families:
         candidates = (raw,) if frequencies.get(raw) else family
         contributions = [
-            _bm25_contribution(token, frequencies, length, stats) for token in candidates if frequencies.get(token)
+            _bm25_contribution(
+                token,
+                frequencies,
+                length,
+                stats,
+                document_count=stats.size if token.isascii() else stats.cjk_size,
+            )
+            for token in candidates
+            if frequencies.get(token)
         ]
         if not contributions:
             continue
         contribution, information = max(contributions)
+        if not raw.isascii() and not frequencies.get(raw):
+            coverage = sum(bool(frequencies.get(token)) for token in family[1:]) / max(1, len(family) - 1)
+            contribution *= coverage
+            information *= coverage
         score += contribution
         strongest = max(strongest, information)
     return score + strongest
@@ -603,10 +627,14 @@ def _bm25_contribution(
     frequencies: Counter[str],
     length: int,
     stats: _BM25Stats,
+    *,
+    document_count: int | None = None,
 ) -> tuple[float, float]:
     frequency = frequencies[token]
     document_frequency = stats.postings.get(token, 0)
-    inverse_frequency = math.log(1 + (stats.size - document_frequency + 0.5) / (document_frequency + 0.5))
+    # English-only Skills cannot establish how distinctive a Chinese term is.
+    population = stats.size if document_count is None else document_count
+    inverse_frequency = math.log(1 + (population - document_frequency + 0.5) / (document_frequency + 0.5))
     denominator = frequency + 1.5 * (0.28 + 0.72 * length / max(stats.average_length, 1e-9))
     information = inverse_frequency * inverse_frequency
     return information * (frequency * 2.5) / denominator, information
@@ -648,7 +676,7 @@ def _field_family_score(
     identity_terms = field_tokens[0] | field_tokens[1] | field_tokens[2]
     identity_matches = sum(any(term in identity_terms for term in family) for _, family in query_families)
     identity_surface = _surface_terms("\n".join((document.key, document.name, *document.aliases)))
-    score += 16.0 * identity_matches / max(1, len(identity_surface))
+    score += 16.0 * identity_matches / max(1, len(identity_surface), len(query_families))
     return score
 
 

@@ -22,7 +22,6 @@ from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument
 from .config import DiscoverySettings
 from .models import SkillInventory, SkillRecord, inventory_from_records, sanitize_model_text
 
-
 SkillRecordsProvider = Callable[[], Iterable[SkillRecord]]
 VisibleSkillNames = set[str] | frozenset[str] | Callable[[], set[str] | frozenset[str] | None] | None
 _PINNED_INDEX_SNAPSHOT_UNSET = object()
@@ -478,10 +477,7 @@ class SkillFS:
         branches: tuple[SkillPromptBranch, ...] = ()
         omitted = 0
         if not small and self._artifact.layout == "tree":
-            directory_rows = tuple(entry for entry in self._view.children("/") if entry.kind == "dir")
-            shown = directory_rows[: self._settings.max_list_entries]
-            branches = tuple(SkillPromptBranch(entry.path, entry.label, entry.description) for entry in shown)
-            omitted = max(0, len(directory_rows) - len(shown))
+            branches, omitted = self._prompt_branches()
         return SkillPromptSnapshot(
             mode=mode,
             total_count=len(documents),
@@ -494,6 +490,30 @@ class SkillFS:
             branches=branches,
             omitted_branch_count=omitted,
         )
+
+    def _prompt_branches(self) -> tuple[tuple[SkillPromptBranch, ...], int]:
+        directories = tuple(entry for entry in self._view.children("/") if entry.kind == "dir")
+        limit = self._settings.max_list_entries
+        frontier = tuple(SkillPromptBranch(entry.path, entry.label, entry.description) for entry in directories[:limit])
+        omitted = max(0, len(directories) - len(frontier))
+        if omitted:
+            return frontier, omitted
+        while True:
+            expanded = []
+            for branch in frontier:
+                children = self._view.children(branch.path)
+                # Expose a deeper complete navigation menu, never hide direct Skills or a sibling branch.
+                if children and all(entry.kind == "dir" for entry in children):
+                    expanded.extend(
+                        SkillPromptBranch(entry.path, f"{branch.label} > {entry.label}", entry.description)
+                        for entry in children
+                    )
+                else:
+                    expanded.append(branch)
+            next_frontier = tuple(expanded)
+            if next_frontier == frontier or len(next_frontier) > limit:
+                return frontier, 0
+            frontier = next_frontier
 
     def read_body(self, record: SkillRecord) -> str:
         key = (record.worker_id, record.content_hash)
@@ -783,7 +803,10 @@ def _build_live_tree(
         overlay = RetrieverNode(
             node_id=_OVERLAY_NODE_ID,
             label=_OVERLAY_SEGMENT,
-            description="Skills installed after the pinned taxonomy was built.",
+            description=(
+                f"{len(overlay_items)} of {len(items)} Skills are not in the other categories. "
+                "Search here or omit category to search all Skills, including these."
+            ),
             items=tuple(sorted(overlay_items, key=lambda item: (item.item_id.casefold(), item.item_id))),
         )
         root = RetrieverNode(
