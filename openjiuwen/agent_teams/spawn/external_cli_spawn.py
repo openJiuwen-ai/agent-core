@@ -16,9 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
-import re
 from typing import TYPE_CHECKING, Any, Optional
-from urllib.parse import urlparse
 
 from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
@@ -35,44 +33,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
 
-# Neutral endpoint profiles that describe the wire protocol rather than a
-# distinct vendor; they must not become the CLI provider identity.
-_NEUTRAL_ENDPOINT_PROFILES = frozenset({"openai", "openai_compatible"})
-# Bare IPv4 / IPv6 addresses never carry a registrable domain; their host
-# fallback is derived from the address itself.
-_IP_HOST_RE = re.compile(r"^[0-9a-fA-F:.]+$")
-# Characters a codex TOML bare provider key allows; anything else collapses
-# to "-" so malformed api_base input still yields a clean identifier.
-_PROVIDER_NAME_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]+")
-
-
-def _sanitize_provider_name(name: str) -> str:
-    """Collapse characters outside ``[A-Za-z0-9_-]`` into ``-``."""
-    return _PROVIDER_NAME_SAFE_RE.sub("-", name).strip("-")
-
-
-def _host_provider_name(api_base: str) -> str:
-    """Derive a provider identity from an api_base host.
-
-    ``api.deepseek.com`` → ``deepseek`` (registrable domain), a bare IP such as
-    ``113.46.219.251`` → ``host-113-46-219-251``. The result only names the
-    provider table entry inside the CLI runtime config; it never routes or
-    authenticates requests.
-    """
-    raw = str(api_base or "").strip()
-    if raw and "://" not in raw:
-        raw = f"https://{raw}"
-    host = (urlparse(raw).hostname or "").lower().strip(".")
-    if not host:
-        return ""
-    if _IP_HOST_RE.match(host):
-        return _sanitize_provider_name("host-" + host)
-    labels = host.split(".")
-    # ``com.cn``-style suffixes keep the third-level label as the domain name
-    # (``dashscope.aliyuncs.com.cn`` → ``dashscope``), plain TLDs drop one
-    # (``api.deepseek.com`` → ``deepseek``).
-    registrable = labels[-2] if len(labels) >= 2 else labels[0]
-    return _sanitize_provider_name(registrable)
+_JIUWEN_EXTERNAL_PROVIDER = "jiuwen"
 
 
 def _external_cli_provider_name(client_config: Any) -> str:
@@ -85,20 +46,14 @@ def _external_cli_provider_name(client_config: Any) -> str:
     passing it through verbatim makes every external gateway look official and
     breaks the gated protocols against endpoints that do not implement them.
 
-    Priority: ``endpoint_profile`` (a dialect, not the neutral protocol
-    profile) → persisted ``vendor_key`` → the api_base host. The raw
-    ``client_provider`` survives only when no api_base is configured, which is
-    exactly the official-endpoint case where the name is accurate.
+    Every explicitly configured external endpoint is exposed to the CLI under
+    the stable ``jiuwen`` provider identity. The raw ``client_provider``
+    survives only when no api_base is configured, which is the official-endpoint
+    case where the name remains accurate.
     """
-    endpoint_profile = str(getattr(client_config, "endpoint_profile", "") or "").strip()
-    if endpoint_profile and endpoint_profile.lower() not in _NEUTRAL_ENDPOINT_PROFILES:
-        return _sanitize_provider_name(endpoint_profile) or endpoint_profile
-    vendor_key = str(getattr(client_config, "vendor_key", "") or "").strip()
-    if vendor_key:
-        return _sanitize_provider_name(vendor_key) or vendor_key
     api_base = str(getattr(client_config, "api_base", "") or "").strip()
     if api_base:
-        return _host_provider_name(api_base)
+        return _JIUWEN_EXTERNAL_PROVIDER
     return str(getattr(client_config, "client_provider", "") or "").strip()
 
 
