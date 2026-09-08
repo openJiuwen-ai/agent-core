@@ -11,8 +11,10 @@ from pathlib import Path
 
 from openjiuwen.rsi.harness_rsi.config import DataLoaderConfig
 from openjiuwen.rsi.harness_rsi.data_loader.batch_planner import BatchPlanner
+from openjiuwen.rsi.harness_rsi.data_loader.case_files import validate_dataset_files
 from openjiuwen.rsi.harness_rsi.data_loader.plan_store import BatchPlanStore
 from openjiuwen.rsi.harness_rsi.data_loader.profiler import DatasetProfiler
+from openjiuwen.rsi.harness_rsi.data_loader.reference_adapter import adapt_reference
 from openjiuwen.rsi.harness_rsi.schema import CaseMapping
 
 
@@ -81,7 +83,7 @@ class DataLoader:
         for dataset_file in dataset_files:
             for case_index, case in enumerate(load_json_cases(dataset_file), start=1):
                 loaded_case: CaseMapping = dict(case)
-                loaded_case.setdefault("case_path", str(dataset_file))
+                loaded_case["case_path"] = str(dataset_file)
                 loaded_case.setdefault("case_index", case_index)
                 cases.append(loaded_case)
 
@@ -138,7 +140,12 @@ def load_json_cases(path: Path) -> list[CaseMapping]:
         if not isinstance(case, dict):
             raise ValueError(f"dataset case must be a mapping: {path}#{index}")
         cases.append(_normalize_suite_case(case, path=path, index=index) if suite_shape else case)
-    return cases
+    if not cases:
+        raise ValueError(f"dataset cases must not be empty: {path}")
+    # Metadata-only cases remain usable by the dataset profiler. Execution and
+    # service admission require an explicit task input instead of exposing a case.
+    validate_dataset_files(cases, path.resolve().parent, require_input=False)
+    return [adapt_reference(case, path.resolve()) for case in cases]
 
 
 def _normalize_suite_case(case: Mapping[str, object], *, path: Path, index: int) -> CaseMapping:

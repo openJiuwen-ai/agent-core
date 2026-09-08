@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
+from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _is_execution_only_evaluation
 from openjiuwen.rsi.harness_rsi.evaluator.metrics_collector import MetricsCollector
 from openjiuwen.rsi.harness_rsi.member_optimizer.loader import EvalRef, resolve_candidate_roles
 
@@ -52,9 +54,9 @@ def _material_identity(value: Any, base: Path, seen: frozenset[Path] = frozenset
     if not path.is_absolute():
         path = base / path
     try:
-        if path.is_file():
+        if _io_path(path).is_file():
             path = path.resolve()
-            content = path.read_bytes()
+            content = _io_path(path).read_bytes()
             identity = {"path": str(path), "sha256": hashlib.sha256(content).hexdigest()}
             if path.suffix.lower() in {".yaml", ".yml", ".json"} and path not in seen:
                 identity["references"] = _material_identity(read_mapping(path), path.parent, seen | {path})
@@ -101,7 +103,12 @@ def evaluation_context(*, harness_refs_path: str, evaluator_config: Any, cases: 
         )
         if complete
         else "",
-        "cases": {str(case["case_id"]): _digest(_material_identity(case, Path.cwd())) for case in cases},
+        "cases": {
+            str(case["case_id"]): _digest(
+                _material_identity(case, Path(case["case_path"]).resolve().parent if case.get("case_path") else Path.cwd())
+            )
+            for case in cases
+        },
     }
 
 
@@ -154,6 +161,9 @@ def matching_cases(paths: list[str], context: dict[str, Any]) -> dict[str, tuple
                 continue
             if result.get("status") in {"error", "skipped"} or result.get("execution_status") == "error":
                 continue
+            evaluation = result.get("evaluation")
+            if isinstance(evaluation, dict) and _is_execution_only_evaluation(evaluation):
+                continue
             selected[case_id] = (path, case)
     return selected
 
@@ -175,7 +185,7 @@ async def materialize_source(
         origin, ref = selected[case_id]
         source = Path(ref["result_path"]).parent
         target = output_dir / "cases" / f"c{index:03d}"
-        shutil.copytree(source, target, dirs_exist_ok=True)
+        shutil.copytree(_io_path(source), _io_path(target), dirs_exist_ok=True)
         copied = dict(ref)
         for key in ("result_path", "trace_path", "case_path"):
             raw_path = str(ref.get(key) or "")

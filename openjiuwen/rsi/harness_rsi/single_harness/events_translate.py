@@ -197,14 +197,7 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
     epoch = int(checkpoint["epoch"])
     selected = str(checkpoint.get("selected_harness_refs_path", "") or "")
     evaluated = str(checkpoint.get("harness_refs_path", "") or "")
-    before = str(checkpoint.get("before_harness_refs_path", "") or "")
-    parent_id = "h0"
-    for prior in sorted(
-        _mapping_items(state.get("epoch_checkpoints")), key=lambda item: int(item["epoch"]), reverse=True
-    ):
-        if int(prior["epoch"]) < epoch and str(prior.get("selected_harness_refs_path", "") or "") == before:
-            parent_id = f"epoch-{int(prior['epoch']):03d}"
-            break
+    parent_id = _epoch_parent_id(state, checkpoint)
     adopted = bool(checkpoint.get("promotion_applied"))
     running = checkpoint.get("status") == "running"
     rejected = checkpoint.get("status") == "rejected"
@@ -225,7 +218,7 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
             score=score,
             summary=_summary(changes, "Optimizing Harness" if running else "No retained Harness change"),
             snapshot_artifact_id=None,
-            reason=str(checkpoint.get("status", "") or "") if not adopted else None,
+            reason=None if running or adopted else "No Harness change passed the acceptance checks",
             failure_class=None,
             changes=changes,
             extra={
@@ -244,6 +237,22 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
         ),
         artifacts=harness_artifacts(selected) if not running else [],
     )
+
+
+def _epoch_parent_id(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) -> str:
+    """Rejected/no-op epochs observe a version; they do not create that version."""
+    before = str(checkpoint.get("before_harness_refs_path", "") or "")
+    if before and before != str(state.get("source_harness_refs_path", "") or ""):
+        for prior in sorted(
+            _mapping_items(state.get("epoch_checkpoints")), key=lambda item: int(item["epoch"]), reverse=True
+        ):
+            if (
+                int(prior["epoch"]) < int(checkpoint["epoch"])
+                and prior.get("promotion_applied")
+                and str(prior.get("selected_harness_refs_path", "") or "") == before
+            ):
+                return f"epoch-{int(prior['epoch']):03d}"
+    return "h0"
 
 
 def active_epoch_node_event(state: Mapping[str, Any]) -> EventNode | None:

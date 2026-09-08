@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
@@ -21,24 +21,26 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.setup import get_config, init_observability
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.data_loader.case_files import copy_public_assets, task_input
 from openjiuwen.rsi.harness_rsi.evaluator.controlled_skill_treatment_rail import (
     CONTROLLED_SKILL_TREATMENT_CASE_KEY,
     ControlledSkillTreatmentRail,
 )
-from openjiuwen.rsi.harness_rsi.evaluator.judger import JudgeResult
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.judger import JudgeResult
+from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
+    RSISkillUseRail,
+    RSISysOperationRail,
+    run_agent_with_empty_response_recovery,
+)
 from openjiuwen.rsi.harness_rsi.evaluator.swebench_runtime import prepare_swebench_workspace
 from openjiuwen.rsi.harness_rsi.evaluator.terminal_bench_runtime import (
     TerminalBenchCommandRecorder,
     build_terminal_bench_sys_operation,
     remove_terminal_bench_container,
+    run_docker,
     start_terminal_bench_solver_container,
     sync_container_git_patch_to_workspace,
-)
-from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
-    RSISkillUseRail,
-    RSISysOperationRail,
-    run_agent_with_empty_response_recovery,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
     ROLE_TRAJECTORY_DIR_NAME,
@@ -143,6 +145,7 @@ class SingleHarnessExecutionBackend:
                     container_workspace_dir="/testbed",
                     mount_workspace=False,
                 )
+                _stage_case_assets(case, workspace_dir, solver_container_name)
                 sys_operation = build_terminal_bench_sys_operation(
                     sys_operation_id=f"sweb_single_{session_id}",
                     container_name=solver_container_name,
@@ -155,6 +158,7 @@ class SingleHarnessExecutionBackend:
                 )
             else:
                 _prepare_single_harness_workspace(case, workspace_dir)
+                _stage_case_assets(case, workspace_dir)
             workspace_before = _snapshot_workspace(workspace_dir)
             model = load_member_optimizer_model(self.config.model_config_ref)
             agent_rails = _single_harness_rails(
@@ -353,14 +357,19 @@ def _controlled_skill_name(case: dict[str, Any]) -> str:
     return ""
 
 
+def _stage_case_assets(case: dict[str, Any], workspace: Path, container_name: str = "") -> None:
+    try:
+        for relative, path in copy_public_assets(case, workspace):
+            if container_name:
+                target = PurePosixPath("/testbed") / relative
+                run_docker(["docker", "exec", container_name, "mkdir", "-p", "--", str(target.parent)], timeout=120)
+                run_docker(["docker", "cp", str(path), f"{container_name}:{target}"], timeout=120)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise EvaluationInfrastructureError(f"dataset assets could not be prepared: {exc}") from exc
+
+
 def _case_inputs(case: dict[str, Any]) -> Any:
-    for key in ("input", "inputs", "task_input", "query", "prompt"):
-        if key in case:
-            value = case[key]
-            if key == "input" and isinstance(value, dict) and set(value) == {"user_message"}:
-                return _normalize_case_input_for_backend(case, value["user_message"])
-            return _normalize_case_input_for_backend(case, value)
-    return case
+    return _normalize_case_input_for_backend(case, task_input(case))
 
 
 def _artifact_files_from_case(case: dict[str, Any], task_text: str) -> list[str]:

@@ -9,12 +9,18 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.rsi.events import EventNode, EventProgress, EventUsage, NodeStageEvent
+from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig, DataLoaderConfig, EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.evaluator import TeamEvaluator
+from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.judger import ScriptBasedJudger
 from openjiuwen.rsi.harness_rsi.schema import DatasetArtifact
 from openjiuwen.rsi.harness_rsi.single_harness import IterativeSingleHarnessRequest
 from openjiuwen.rsi.harness_rsi.single_harness.iterative import SingleHarnessIterativeOptimizationOrchestrator
 from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import matching_cases, read_mapping
 from openjiuwen.rsi.usage import record_model_usage
+from tests.unit_tests.rsi.test_evaluator import _Backend
 from tests.unit_tests.rsi.test_single_harness_iterative import _Analyzer, _Evaluator, _MemberOptimizer, _write_yaml
 
 
@@ -178,6 +184,56 @@ async def _baseline(controller, refs, cases, file, directory):
     return dataset, baseline
 
 
+def test_ungraded_h0_does_not_emit_score_or_enter_optimization(setup, tmp_path):
+    controller, refs, _cases, file = setup
+    evaluator = TeamEvaluator(EvaluatorConfig())
+    evaluator.case_runner = CaseRunner(backend=_Backend("done"), judger=ScriptBasedJudger())
+    controller.evaluator = evaluator
+    events = []
+
+    async def sink(event):
+        events.append(event)
+
+    directory = tmp_path / "run"
+    with pytest.raises(EvaluationInfrastructureError, match="no backend JudgeResult"):
+        asyncio.run(
+            controller.run(
+                IterativeSingleHarnessRequest(
+                    dataset_files=[str(file)],
+                    harness_refs_path=str(refs),
+                    output_dir=str(directory),
+                    auto_full_baseline=True,
+                ),
+                on_event=sink,
+            )
+        )
+    state = read_mapping(directory / "single_harness_state.yaml")
+    assert state["baseline_score"] is None
+    assert state["status"] != "completed"
+    assert not controller.analyzer.inputs
+    assert all(event.node.score is None for event in events if isinstance(event, EventNode))
+    assert all(event.baseline is None for event in events if isinstance(event, EventProgress))
+
+
+@pytest.mark.parametrize(
+    "method,metadata",
+    [
+        ("none", {}),
+        ("script_based", {"rule_engine_status": "backend_completed"}),
+    ],
+)
+def test_legacy_completion_grade_is_not_source_evidence(setup, tmp_path, method, metadata):
+    controller, refs, cases, file = setup
+    _dataset, baseline = asyncio.run(_baseline(controller, refs, cases, file, tmp_path / "baseline"))
+    payload = read_mapping(baseline)
+    for case in payload["cases"]:
+        path = Path(case["result_path"])
+        result = read_mapping(path)
+        result["evaluation"].update(method=method, metadata=metadata)
+        path.write_text(json.dumps(result), encoding="utf-8")
+    assert not matching_cases([baseline], payload["evaluation_context"])
+
+
 @pytest.mark.parametrize(
     "change", ["harness", "task_model", "judge_model", "trials", "input", "unstamped", "environment"]
 )
@@ -313,3 +369,34 @@ def test_completed_run_rejects_resume_after_harness_change(setup, tmp_path):
     with pytest.raises(ValueError, match="initial Harness changed"):
         asyncio.run(controller.run(replace(request, resume=True)))
     assert len(controller.evaluator.calls) == count
+
+
+def test_source_reuse_preserves_deep_evidence_paths(setup, tmp_path):
+    controller, refs, cases, file = setup
+    dataset, baseline = asyncio.run(_baseline(controller, refs, cases, file, tmp_path / "baseline"))
+    original = read_mapping(baseline)["cases"][0]
+    relative = Path("evidence") / ("a" * 90) / ("b" * 90) / ("c" * 90) / "report.json"
+    source = Path(original["result_path"]).parent / relative
+    assert len(str(source)) > 260
+    _io_path(source).parent.mkdir(parents=True, exist_ok=True)
+    _io_path(source).write_bytes(b'{"complete": true}')
+
+    output = asyncio.run(
+        controller._source_evaluation(
+            cases=cases[:1],
+            harness_refs_path=str(refs),
+            output_dir=tmp_path / "source",
+            dataset=dataset,
+            prior_eval_refs=[baseline],
+            batch_index=1,
+            node_ref="epoch-001",
+            on_event=None,
+        )
+    )
+
+    payload = read_mapping(output)
+    copied = Path(payload["cases"][0]["result_path"]).parent / relative
+    assert _io_path(copied).read_bytes() == _io_path(source).read_bytes()
+    assert payload["source_evidence"]["reused_case_ids"] == [cases[0]["case_id"]]
+    assert len(controller.evaluator.calls) == 1
+    assert not payload["cases"][0]["result_path"].startswith("\\\\?\\")

@@ -11,9 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import (
     EvaluationJudger,
     JudgeResult,
+    _comparable_response,
     _reference_answer,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.swebench_runtime import (
@@ -35,6 +37,25 @@ class ScriptBasedJudger(EvaluationJudger):
 
     method = "script_based"
 
+    def validate_case(self, case: dict[str, Any]) -> None:
+        reference = case.get("reference") or {}
+        if reference.get("rubric"):
+            raise EvaluationInfrastructureError(
+                "script_based does not evaluate reference.rubric; configure a rubric-capable judger"
+            )
+        if isinstance(case.get("swebench"), dict):
+            path = Path(str(case["swebench"].get("official_dataset_path") or ""))
+            if not path.is_file():
+                raise EvaluationInfrastructureError("SWE-bench official_dataset_path is missing")
+            return
+        if reference.get("files"):
+            raise EvaluationInfrastructureError("reference.files has no supported verifier adapter")
+        if _reference_answer(case) is None:
+            raise EvaluationInfrastructureError(
+                "script_based cannot score this case: no backend JudgeResult or reference answer. "
+                "Successful execution is not evidence of correctness."
+            )
+
     async def judge(
         self,
         *,
@@ -42,22 +63,18 @@ class ScriptBasedJudger(EvaluationJudger):
         execution_result: CaseExecutionResult,
         output_dir: str = "",
     ) -> JudgeResult:
-        if execution_result.execution_status != "passed":
-            return self._failure_result(execution_result.error)
         if execution_result.judge_result is not None:
             return execution_result.judge_result
         if isinstance(case.get("swebench"), dict):
+            if execution_result.execution_status != "passed":
+                return self._failure_result(execution_result.error)
             return _judge_swebench(case=case, execution_result=execution_result, output_dir=output_dir)
 
+        self.validate_case(case)
         expected = _reference_answer(case)
-        if expected is None:
-            return JudgeResult(
-                method=self.method,
-                score=1.0,
-                passed=True,
-                metadata={"rule_engine_status": "backend_completed"},
-            )
-        passed = execution_result.response == expected
+        if execution_result.execution_status != "passed":
+            return self._failure_result(execution_result.error)
+        passed = _comparable_response(execution_result.response, expected) == expected
         return JudgeResult(
             method=self.method,
             score=1.0 if passed else 0.0,

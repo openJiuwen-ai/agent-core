@@ -4,22 +4,20 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import ntpath
 import os
-from pathlib import Path
-from pathlib import PurePosixPath
 import shutil
 import subprocess
 import time
 import uuid
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import requests
 
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
-
 
 DEFAULT_WSL_DISTRO = "Ubuntu-24.04"
 DEFAULT_WSL_PYTHON = "python3"
@@ -41,7 +39,7 @@ DEFAULT_TRANSIENT_NETWORK_FAILURE_PATTERNS = (
 )
 _TEST_OUTPUT_EXCERPT_CHARS = 8000
 _TEST_OUTPUT_EXCERPT_HEAD_CHARS = 1500
-_DEPENDENCY_CACHE_ROOT = Path(".local/rsi/swebench_dependency_cache")
+_DEPENDENCY_CACHE_ROOT = Path.home() / ".cache/openjiuwen/rsi/swebench_dependency_cache"
 _OFFICIAL_SUPPORT_DIR = Path(__file__).with_name("_swebench_official_support")
 
 
@@ -445,7 +443,37 @@ def _bounded_infrastructure_failure_detail(
 def _dependency_cache_dir(config: dict[str, Any]) -> Path:
     repo = str(config.get("repo") or "unknown_repo").strip()
     commit = str(config.get("environment_setup_commit") or config.get("base_commit") or "unknown_commit").strip()
-    return _DEPENDENCY_CACHE_ROOT.resolve() / _safe_id(repo) / _safe_id(commit)
+    root = Path(os.environ.get("SWEBENCH_DEPENDENCY_CACHE_ROOT", "").strip() or _DEPENDENCY_CACHE_ROOT).expanduser()
+    if not root.is_absolute():
+        raise ValueError("SWEBENCH_DEPENDENCY_CACHE_ROOT must be an absolute path")
+    return root / _safe_id(repo) / _safe_id(commit)
+
+
+def _download_dependency_manifest(url: str) -> bytes | None:
+    """Retry only transient manifest downloads, without changing model routing."""
+    proxy = os.environ.get("SWEBENCH_DOWNLOAD_PROXY", "").strip()
+    options: dict[str, Any] = {"timeout": (10, 60)}
+    if proxy:
+        options["proxies"] = {"http": proxy, "https": proxy}
+    for attempt in range(3):
+        response = None
+        try:
+            response = requests.get(url, **options)
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.content
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == 2:
+                raise
+        except requests.HTTPError:
+            if response is None or response.status_code not in {429, 500, 502, 503, 504} or attempt == 2:
+                raise
+        finally:
+            if response is not None:
+                response.close()
+        time.sleep(2**attempt)
+    return None  # All terminal failures above are re-raised.
 
 
 def _cache_official_dependency_files(
@@ -488,14 +516,11 @@ def _cache_official_dependency_files(
             content = None
             if commit != str(config.get("base_commit") or "").strip():
                 # The image checkout can be newer than the official setup revision.
-                response = requests.get(
+                content = _download_dependency_manifest(
                     f"https://raw.githubusercontent.com/{repo}/{commit}/{relative.as_posix()}",
-                    timeout=(10, 60),
                 )
-                if response.status_code == 404:
+                if content is None:
                     continue
-                response.raise_for_status()
-                content = response.content
             destination.parent.mkdir(parents=True, exist_ok=True)
             if content is None:
                 shutil.copy2(source, destination)
