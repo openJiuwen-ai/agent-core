@@ -87,13 +87,39 @@ def test_build_rg_command_quotes_custom_binary_path(tmp_path: Path) -> None:
         ("py", "py"),
         ("python", "py"),
         ("ts", "ts"),
+        ("tsx", "ts"),
+        (".tsx", "ts"),
+        ("jsx", "js"),
+        ("javascript", "js"),
         ("unknownlang", "unknownlang"),
+        ("MyType", "MyType"),
+        (".CustomType", ".CustomType"),
         ("", None),
         (None, None),
     ],
 )
 def test_normalize_rg_file_type(raw: str | None, expected: str | None) -> None:
     assert GrepTool._normalize_rg_file_type(raw) == expected
+
+
+def test_resolve_rg_binary_picks_up_runtime_env_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "rg-a"
+    second = tmp_path / "rg-b"
+    for path in (first, second):
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+
+    monkeypatch.setenv("OPENJIUWEN_RG", str(first))
+    assert rg_mod.resolve_rg_binary() == str(first.resolve())
+
+    monkeypatch.setenv("OPENJIUWEN_RG", str(second))
+    assert rg_mod.resolve_rg_binary() == str(second.resolve())
+
+    monkeypatch.delenv("OPENJIUWEN_RG", raising=False)
+    # Falls through to PATH / vendor; just ensure env clear is observed.
+    assert rg_mod.resolve_rg_binary() != str(second.resolve())
 
 
 def test_build_rg_command_uses_normalized_rust_type() -> None:

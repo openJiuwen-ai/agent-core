@@ -1903,6 +1903,8 @@ class GrepTool(Tool):
 
     # Models often pass language extensions (``rs``, ``py``) as ``type``.
     # ripgrep expects type *names* (``rust``, ``py``). Map common aliases.
+    # ``tsx``/``jsx`` are not built-in rg types; ``ts``/``js`` already cover
+    # ``*.tsx`` / ``*.jsx``.
     _RG_TYPE_ALIASES: Dict[str, str] = {
         "rs": "rust",
         "rust": "rust",
@@ -1910,10 +1912,10 @@ class GrepTool(Tool):
         "python": "py",
         "js": "js",
         "javascript": "js",
+        "jsx": "js",
         "ts": "ts",
         "typescript": "ts",
-        "tsx": "tsx",
-        "jsx": "jsx",
+        "tsx": "ts",
         "go": "go",
         "golang": "go",
         "c": "c",
@@ -1945,17 +1947,24 @@ class GrepTool(Tool):
 
     @classmethod
     def _normalize_rg_file_type(cls, file_type: Optional[str]) -> Optional[str]:
-        """Map extension-style type filters to ripgrep ``--type`` names."""
+        """Map extension-style type filters to ripgrep ``--type`` names.
+
+        Known aliases are matched case-insensitively (and with an optional
+        leading ``.``). Unknown values are returned unchanged so custom
+        case-sensitive ripgrep types keep working.
+        """
         if file_type is None:
             return None
         raw = str(file_type).strip()
         if not raw:
             return None
-        key = raw.lower()
-        # Strip a leading dot if the model passed ".rs".
-        if key.startswith("."):
-            key = key[1:]
-        return cls._RG_TYPE_ALIASES.get(key, key)
+        lookup = raw.lower()
+        if lookup.startswith("."):
+            lookup = lookup[1:]
+        mapped = cls._RG_TYPE_ALIASES.get(lookup)
+        if mapped is not None:
+            return mapped
+        return raw
 
     @staticmethod
     def _split_glob_patterns(glob_value: Optional[str]) -> List[str]:
