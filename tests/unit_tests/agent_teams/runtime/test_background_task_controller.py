@@ -30,7 +30,7 @@ class _FakeNative:
 def _make_handle(run_id="wf_1", task_id="t_1"):
     return SwarmflowRunHandle(
         task_id=task_id, run_id=run_id, abort_event=AbortSignal(),
-        backend=_FakeBackend(), native=_FakeNative(), relaunch=lambda: None)
+        backend=_FakeBackend(), native=_FakeNative(), relaunch=lambda _tool=None: None)
 
 
 @pytest.mark.asyncio
@@ -69,7 +69,7 @@ async def test_resume_relaunches():
     await ctl.pause("wf_1")
     relaunched = []
     h = ctl._paused["wf_1"]
-    h.relaunch = lambda: relaunched.append(1)
+    h.relaunch = lambda _tool=None: relaunched.append(1)
     ok = await ctl.resume("wf_1")
     assert ok and relaunched == [1] and "wf_1" not in ctl._paused
 
@@ -86,7 +86,7 @@ async def test_stop_terminates_an_already_paused_run():
     relaunched = []
     ctl.register(_make_handle("wf_1"))
     await ctl.pause("wf_1")
-    ctl._paused["wf_1"].relaunch = lambda: relaunched.append(1)
+    ctl._paused["wf_1"].relaunch = lambda _tool=None: relaunched.append(1)
 
     ok = await ctl.stop("wf_1")
 
@@ -156,7 +156,7 @@ async def test_pause_waits_for_task_unwind():
 
     h = SwarmflowRunHandle(
         task_id="t_1", run_id="wf_1", abort_event=AbortSignal(),
-        backend=_FakeBackend(), native=_TaskNative(task), relaunch=lambda: None)
+        backend=_FakeBackend(), native=_TaskNative(task), relaunch=lambda _tool=None: None)
     ctl = BackgroundTaskController()
     ctl.register(h)
 
@@ -235,7 +235,7 @@ def _rec_handle(task_id, seq):
         abort_event=ev,
         backend=_RecBackend(seq),
         native=native,
-        relaunch=lambda: None,
+        relaunch=lambda _tool=None: None,
     )
     return handle, ev, native
 
@@ -264,7 +264,7 @@ def test_resume_relaunches_and_clears_paused():
     relaunched = []
     ctl = BackgroundTaskController()
     handle, _ev, _native = _rec_handle("w1", seq)
-    handle.relaunch = lambda: relaunched.append("w1")
+    handle.relaunch = lambda _tool=None: relaunched.append("w1")
     ctl.register(handle)
 
     async def scenario() -> bool:
