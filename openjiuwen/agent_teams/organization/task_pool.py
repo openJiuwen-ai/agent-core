@@ -29,12 +29,16 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
     OrgTaskReviewRequestedEvent,
     OrgTopic,
 )
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
+    ORG_TASK_REPAIRS_TASK_ID_KEY,
+    ORG_TASK_RETRY_COUNT_KEY,
+    ORG_TASK_RETRY_LIMIT_KEY,
     ORG_TASK_TERMINAL_STATUS_VALUES,
     OrgAssignment,
     OrgAssignmentType,
@@ -65,6 +69,37 @@ from openjiuwen.agent_teams.tools.database.engine import get_current_time
 
 logger = logging.getLogger(__name__)
 
+_FAILABLE_TASK_STATUSES = frozenset({
+    OrgTaskStatus.CLAIMED.value,
+    OrgTaskStatus.DELEGATED.value,
+    OrgTaskStatus.IN_PROGRESS.value,
+})
+
+# Rejected / needs-revision children may be superseded by an accepted repair sibling.
+_SUPERSEDEABLE_REVIEW_STATUSES = frozenset({
+    OrgTaskReviewStatus.REJECTED.value,
+    OrgTaskReviewStatus.NEEDS_REVISION.value,
+})
+
+
+def _is_accepted_task(status: str, review: Any) -> bool:
+    return (
+        status == OrgTaskStatus.COMPLETED.value
+        and review is not None
+        and str(review.review_status) == OrgTaskReviewStatus.ACCEPTED.value
+    )
+
+
+def _is_supersedable_task(status: str, review: Any) -> bool:
+    """FAILED, or COMPLETED with REJECTED/NEEDS_REVISION — repairable / abandonable terminal."""
+    if status == OrgTaskStatus.FAILED.value:
+        return True
+    return (
+        status == OrgTaskStatus.COMPLETED.value
+        and review is not None
+        and str(review.review_status) in _SUPERSEDEABLE_REVIEW_STATUSES
+    )
+
 
 @dataclass
 class OrgTaskOpResult:
@@ -77,6 +112,13 @@ class OrgTaskOpResult:
 # Local aliases keep call sites stable while sharing helpers with message_service.
 _json_dumps = json_dumps
 _json_loads = json_loads
+
+
+def _repairs_target_id(metadata_json: str | None) -> str | None:
+    target = _json_loads(metadata_json, {}).get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+    if isinstance(target, str) and target.strip():
+        return target.strip()
+    return None
 
 
 class OrgTaskManager:
@@ -299,6 +341,7 @@ class OrgTaskManager:
         required_capabilities: list[str] | None = None,
         output_spec: OrgTaskOutputSpec | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        repairs_task_id: str | None = None,
         delegated_to_team_id: str | None = None,
         aggregation_mode: OrgTaskAggregationMode | str | None = None,
     ) -> OrgTaskOpResult:
@@ -315,6 +358,22 @@ class OrgTaskManager:
         capabilities = list(dict.fromkeys(capability.strip() for capability in capabilities))
         task_id = task_id or f"org-task-{uuid.uuid4().hex[:12]}"
         now = get_current_time()
+        task_metadata = dict(metadata or {})
+        # Single entry: only the repairs_task_id param establishes the link.
+        task_metadata.pop(ORG_TASK_REPAIRS_TASK_ID_KEY, None)
+        repairs_target: str | None = None
+        if repairs_task_id is not None:
+            if not isinstance(repairs_task_id, str) or not repairs_task_id.strip():
+                return OrgTaskOpResult(ok=False, reason="repairs_task_id must be a non-empty string")
+            repairs_target = repairs_task_id.strip()
+            if not parent_task_id:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason="repairs_task_id requires parent_task_id (repair must be a sibling child)",
+                )
+            if repairs_target == task_id:
+                return OrgTaskOpResult(ok=False, reason="repairs_task_id cannot reference the new task itself")
+            task_metadata[ORG_TASK_REPAIRS_TASK_ID_KEY] = repairs_target
         if parent_task_id and aggregation_mode is not None:
             return OrgTaskOpResult(ok=False, reason="aggregation_mode is only allowed on root tasks")
         if aggregation_mode is not None:
@@ -363,6 +422,49 @@ class OrgTaskManager:
                         reason=f"root task root_task_id must equal task_id ({task_id!r}); got {root_task_id!r}",
                     )
                 root_task_id = task_id
+            if repairs_target is not None:
+                repaired = await session.get(OrgTaskRecord, repairs_target)
+                if repaired is None or repaired.organization_id != self.organization_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=f"repairs_task_id target not found: {repairs_target}",
+                    )
+                if repaired.parent_task_id != parent_task_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "repairs_task_id target must share the same parent_task_id "
+                            f"({parent_task_id!r}); got {repaired.parent_task_id!r}"
+                        ),
+                    )
+                repaired_meta = _json_loads(repaired.metadata_json, {})
+                nested = repaired_meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+                if isinstance(nested, str) and nested.strip():
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "repairs_task_id must point at the original sibling task, "
+                            f"not another repair ({repairs_target} already repairs {nested.strip()})"
+                        ),
+                    )
+                if not await self._is_repairable_target(session, repaired):
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "repairs_task_id target must be FAILED, or COMPLETED with latest "
+                            f"review REJECTED/NEEDS_REVISION; got status={repaired.status!r} "
+                            f"for {repairs_target}"
+                        ),
+                    )
+                repair_gate = await self._apply_repair_create_guards(
+                    session,
+                    repaired=repaired,
+                    parent_task_id=parent_task_id,
+                    repairs_target=repairs_target,
+                    now=now,
+                )
+                if repair_gate is not None:
+                    return repair_gate
             if await session.get(OrgTaskRecord, task_id) is not None:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
             aggregation_json = None
@@ -389,7 +491,7 @@ class OrgTaskManager:
                 assigned_at=now if delegated_to_team_id else None,
                 aggregation_json=aggregation_json,
                 output_spec_json=_json_dumps(spec_model.model_dump() if spec_model else None),
-                metadata_json=_json_dumps(metadata or {}),
+                metadata_json=_json_dumps(task_metadata),
             )
             session.add(row)
             await session.commit()
@@ -446,6 +548,45 @@ class OrgTaskManager:
         async with self._read() as session:
             rows = (await session.execute(stmt)).scalars().all()
             return [self._to_task(row) for row in rows]
+
+    async def list_tasks_created_by_team(self, *, team_id: str, limit: int = 100) -> list[OrgTask]:
+        """Tasks this team created (parent follow-ups on rebind use creator_team_id)."""
+        await self.initialize()
+        stmt = (
+            select(OrgTaskRecord)
+            .where(
+                OrgTaskRecord.organization_id == self.organization_id,
+                OrgTaskRecord.creator_team_id == team_id,
+            )
+            .order_by(OrgTaskRecord.updated_at.desc())
+            .limit(limit)
+        )
+        async with self._read() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._to_task(row) for row in rows]
+
+    async def has_accepted_or_active_repair(
+        self,
+        *,
+        parent_task_id: str,
+        repairs_target: str,
+    ) -> bool:
+        """True when repairs_target already has an accepted or still-active sibling repair."""
+        await self.initialize()
+        async with self._read() as session:
+            repair_siblings = await self._list_sibling_repairs_of(
+                session,
+                parent_task_id=parent_task_id,
+                repairs_target=repairs_target,
+            )
+            for sibling in repair_siblings:
+                review = await self._get_latest_review_row(session, sibling.task_id)
+                if _is_accepted_task(sibling.status, review):
+                    return True
+                if _is_supersedable_task(sibling.status, review):
+                    continue
+                return True
+            return False
 
     async def claim_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
         await self.initialize()
@@ -579,12 +720,9 @@ class OrgTaskManager:
                 OrgTaskRecord.creator_team_id == team_id,
             )
             child_rows = (await session.execute(child_stmt)).scalars().all()
-            for child in child_rows:
-                if child.status != OrgTaskStatus.COMPLETED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"child task is not completed: {child.task_id}")
-                child_review = await self._get_latest_review_row(session, child.task_id)
-                if child_review is None or child_review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"child task review is not accepted: {child.task_id}")
+            blocked_reason = await self._parent_complete_blocked_reason(session, child_rows)
+            if blocked_reason is not None:
+                return OrgTaskOpResult(ok=False, reason=blocked_reason)
             row.status = OrgTaskStatus.COMPLETED.value
             if context_model is not None:
                 row.output_context_json = _json_dumps(context_model.model_dump())
@@ -628,6 +766,59 @@ class OrgTaskManager:
             await self._publish_event(review_event)
         return OrgTaskOpResult(ok=True, task=task)
 
+    async def fail_task(
+        self,
+        *,
+        task_id: str,
+        team_id: str,
+        failure_code: OrgTaskFailureCode | str,
+        failure_reason: str,
+        output_context: OrgTaskOutputContext | dict[str, Any] | None = None,
+    ) -> OrgTaskOpResult:
+        await self.initialize()
+        reason = (failure_reason or "").strip()
+        if not reason:
+            return OrgTaskOpResult(ok=False, reason="failure_reason is required")
+        try:
+            code = OrgTaskFailureCode(failure_code)
+        except ValueError:
+            return OrgTaskOpResult(ok=False, reason=f"invalid failure_code: {failure_code!r}")
+
+        now = get_current_time()
+        context_model = self._coerce_output_context(output_context)
+        async with self._write() as session:
+            row = await session.get(OrgTaskRecord, task_id)
+            if row is None or row.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+            if row.assigned_team_id != team_id:
+                return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
+            if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
+                return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
+            if row.status not in _FAILABLE_TASK_STATUSES:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"task cannot be failed from status {row.status}: {task_id}",
+                )
+            row.status = OrgTaskStatus.FAILED.value
+            row.failure_code = code.value
+            row.failure_reason = reason
+            row.failed_at = now
+            row.updated_at = now
+            if context_model is not None:
+                row.output_context_json = _json_dumps(context_model.model_dump())
+            await session.commit()
+        task = self._to_task(row)
+        await self._publish_event(
+            OrgTaskFailedEvent(
+                organization_id=self.organization_id,
+                team_id=team_id,
+                task_id=task_id,
+                failure_code=code.value,
+                failure_reason=reason,
+            )
+        )
+        return OrgTaskOpResult(ok=True, task=task)
+
     async def list_child_tasks(self, *, parent_task_id: str, creator_team_id: str | None = None) -> list[OrgTask]:
         await self.initialize()
         stmt = select(OrgTaskRecord).where(
@@ -640,6 +831,48 @@ class OrgTaskManager:
         async with self._read() as session:
             rows = (await session.execute(stmt)).scalars().all()
             return [self._to_task(row) for row in rows]
+
+    async def list_child_task_views(
+        self,
+        *,
+        parent_task_id: str,
+        creator_team_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Direct children with brief + latest review summary (for org_view_child_tasks)."""
+        await self.initialize()
+        stmt = select(OrgTaskRecord).where(
+            OrgTaskRecord.organization_id == self.organization_id,
+            OrgTaskRecord.parent_task_id == parent_task_id,
+        )
+        if creator_team_id:
+            stmt = stmt.where(OrgTaskRecord.creator_team_id == creator_team_id)
+        stmt = stmt.order_by(OrgTaskRecord.created_at.asc())
+        async with self._read() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            views: list[dict[str, Any]] = []
+            for row in rows:
+                task = self._to_task(row)
+                payload = task.brief()
+                review_row = await self._get_latest_review_row(session, row.task_id)
+                if review_row is None:
+                    payload["review"] = None
+                else:
+                    review = self._to_review(review_row)
+                    verdict = review.verdict
+                    if isinstance(verdict, str) and len(verdict) > 200:
+                        verdict = verdict[:200]
+                    payload["review"] = {
+                        "review_id": review.review_id,
+                        "review_status": review.review_status.value,
+                        "verdict": verdict,
+                        "required_changes": list(review.required_changes or [])[:10],
+                        "updated_at": review.updated_at,
+                    }
+                repairs_target = task.metadata.get(ORG_TASK_REPAIRS_TASK_ID_KEY)
+                if isinstance(repairs_target, str) and repairs_target.strip():
+                    payload["repairs_task_id"] = repairs_target.strip()
+                views.append(payload)
+            return views
 
     async def list_pending_reviews(self, *, team_id: str, limit: int = 50) -> list[dict[str, Any]]:
         await self.initialize()
@@ -697,6 +930,26 @@ class OrgTaskManager:
             if task_row.status != OrgTaskStatus.COMPLETED.value:
                 return OrgTaskOpResult(ok=False, reason=f"task is not completed: {task_id}")
             row = await self._get_latest_review_row(session, task_id)
+            if row is not None:
+                if _is_accepted_task(task_row.status, row):
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=f"task review is final (ACCEPTED): {task_id}",
+                    )
+                if _is_supersedable_task(task_row.status, row) and task_row.parent_task_id:
+                    repair_siblings = await self._list_sibling_repairs_of(
+                        session,
+                        parent_task_id=task_row.parent_task_id,
+                        repairs_target=task_id,
+                    )
+                    if repair_siblings:
+                        return OrgTaskOpResult(
+                            ok=False,
+                            reason=(
+                                f"task review is locked after repair was created "
+                                f"({repair_siblings[0].task_id} repairs {task_id})"
+                            ),
+                        )
             if row is None:
                 row = OrgTaskReviewRecord(
                     review_id=f"org-review-{uuid.uuid4().hex[:12]}",
@@ -737,13 +990,147 @@ class OrgTaskManager:
                 OrgTaskRecord.creator_team_id == team_id,
             )
             child_rows = (await session.execute(stmt)).scalars().all()
-            for child in child_rows:
-                if child.status != OrgTaskStatus.COMPLETED.value:
-                    return False
-                review = await self._get_latest_review_row(session, child.task_id)
-                if review is None or review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
-                    return False
-            return True
+            return await self._parent_complete_blocked_reason(session, child_rows) is None
+
+    async def _parent_complete_blocked_reason(
+        self,
+        session: Any,
+        child_rows: list[OrgTaskRecord],
+    ) -> str | None:
+        """Return a block reason, or None when every direct child is accepted or one-level superseded."""
+        if not child_rows:
+            return None
+
+        reviews: dict[str, OrgTaskReviewRecord | None] = {}
+        for child in child_rows:
+            reviews[child.task_id] = await self._get_latest_review_row(session, child.task_id)
+
+        repairs_of: dict[str, list[OrgTaskRecord]] = {}
+        for child in child_rows:
+            target = _repairs_target_id(child.metadata_json)
+            if target is not None:
+                repairs_of.setdefault(target, []).append(child)
+
+        def _is_accepted(child: OrgTaskRecord) -> bool:
+            return _is_accepted_task(child.status, reviews.get(child.task_id))
+
+        def _is_supersedable(child: OrgTaskRecord) -> bool:
+            return _is_supersedable_task(child.status, reviews.get(child.task_id))
+
+        def _is_repair_child(child: OrgTaskRecord) -> bool:
+            return _repairs_target_id(child.metadata_json) is not None
+
+        for child in child_rows:
+            if _is_accepted(child):
+                continue
+            # Abandoned repair attempts (failed/rejected repair-of-original) do not block.
+            if _is_supersedable(child) and _is_repair_child(child):
+                continue
+            if _is_supersedable(child) and any(
+                _is_accepted(repair) for repair in repairs_of.get(child.task_id, ())
+            ):
+                continue
+            if _is_supersedable(child):
+                return f"child task is not superseded by an accepted repair: {child.task_id}"
+            if child.status != OrgTaskStatus.COMPLETED.value:
+                return f"child task is not completed: {child.task_id}"
+            return f"child task review is not accepted: {child.task_id}"
+        return None
+
+    async def _is_repairable_target(self, session: Any, repaired: OrgTaskRecord) -> bool:
+        """True when the target matches the parent-complete supersedeable criteria."""
+        review = await self._get_latest_review_row(session, repaired.task_id)
+        return _is_supersedable_task(repaired.status, review)
+
+    async def _list_sibling_repairs_of(
+        self,
+        session: Any,
+        *,
+        parent_task_id: str,
+        repairs_target: str,
+    ) -> list[OrgTaskRecord]:
+        """Return direct siblings whose repairs_task_id points at repairs_target."""
+        sibling_rows = (
+            await session.execute(
+                select(OrgTaskRecord).where(
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.parent_task_id == parent_task_id,
+                )
+            )
+        ).scalars().all()
+        return [
+            sibling
+            for sibling in sibling_rows
+            if _repairs_target_id(sibling.metadata_json) == repairs_target
+        ]
+
+    async def _apply_repair_create_guards(
+        self,
+        session: Any,
+        *,
+        repaired: OrgTaskRecord,
+        parent_task_id: str,
+        repairs_target: str,
+        now: int,
+    ) -> OrgTaskOpResult | None:
+        """One sibling scan: reject active/accepted repairs, then enforce retry_limit and bump count."""
+        repaired_meta = _json_loads(repaired.metadata_json, {})
+        raw_limit = repaired_meta.get(ORG_TASK_RETRY_LIMIT_KEY)
+        retry_limit: int | None = None
+        if raw_limit is not None:
+            try:
+                retry_limit = int(raw_limit)
+            except (TypeError, ValueError):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"invalid retry_limit on repaired task {repairs_target!r}: {raw_limit!r}",
+                )
+            if retry_limit < 0:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"invalid retry_limit on repaired task {repairs_target!r}: {raw_limit!r}",
+                )
+
+        repair_siblings = await self._list_sibling_repairs_of(
+            session,
+            parent_task_id=parent_task_id,
+            repairs_target=repairs_target,
+        )
+        existing = len(repair_siblings)
+        for sibling in repair_siblings:
+            review = await self._get_latest_review_row(session, sibling.task_id)
+            if _is_accepted_task(sibling.status, review):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=(
+                        f"repairs_task_id target already superseded by accepted repair "
+                        f"{sibling.task_id}: {repairs_target}"
+                    ),
+                )
+            # Abandoned repair attempts (failed / rejected) do not block a new attempt.
+            if _is_supersedable_task(sibling.status, review):
+                continue
+            return OrgTaskOpResult(
+                ok=False,
+                reason=(
+                    f"repairs_task_id target already has an active repair "
+                    f"{sibling.task_id}: {repairs_target}"
+                ),
+            )
+
+        if retry_limit is not None and existing >= retry_limit:
+            return OrgTaskOpResult(
+                ok=False,
+                reason=(
+                    f"retry_limit reached for repaired task {repairs_target}: "
+                    f"{existing}/{retry_limit}"
+                ),
+            )
+
+        repaired_meta[ORG_TASK_RETRY_COUNT_KEY] = existing + 1
+        repaired.metadata_json = _json_dumps(repaired_meta)
+        repaired.updated_at = now
+        return None
 
     async def create_summary_task(
         self,
@@ -935,6 +1322,7 @@ class OrgTaskManager:
                     OrgTaskClaimedEvent,
                     OrgTaskDelegatedEvent,
                     OrgTaskCompletedEvent,
+                    OrgTaskFailedEvent,
                     OrgTaskReviewRequestedEvent,
                     OrgTaskReviewedEvent,
                     OrgSummaryTaskCreatedEvent,

@@ -15,6 +15,9 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCreatedEvent,
     OrgTaskCompletedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskFailedEvent,
+    OrgTaskReviewedEvent,
+    OrgTaskReviewRequestedEvent,
     OrgTeamInvitedEvent,
     OrgTeamJoinedEvent,
     OrgTopic,
@@ -24,8 +27,17 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
     ExpertTeamLauncher,
 )
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
-from openjiuwen.agent_teams.organization.schema import OrgTaskStatus, OrganizationSpec
-from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+from openjiuwen.agent_teams.organization.schema import (
+    ORG_TASK_REPAIRS_TASK_ID_KEY,
+    OrgTaskFailureCode,
+    OrgTaskReviewStatus,
+    OrgTaskStatus,
+    OrganizationSpec,
+)
+from openjiuwen.agent_teams.organization.task_pool import (
+    OrgTaskManager,
+    _is_supersedable_task,
+)
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
 
@@ -65,6 +77,10 @@ _ORG_COLLABORATION_PROMPT = {
 }
 
 _LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS = 0.1
+_PARENT_RESUME_TERMINAL_STATUSES = frozenset({
+    OrgTaskStatus.COMPLETED,
+    OrgTaskStatus.FAILED,
+})
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -82,6 +98,7 @@ class OrganizationRuntimeManager:
         self._leader_turn_queues: dict[tuple[str, str], deque[object]] = {}
         self._leader_turn_workers: dict[tuple[str, str], asyncio.Task[Any]] = {}
         self._scheduled_leader_messages: set[tuple[str, str, str]] = set()
+        self._scheduled_parent_reviews: set[tuple[str, str, str]] = set()
         self._leader_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._configured_team_provider: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None
         self._team_activator: Callable[[str, str], Awaitable[str | None]] | None = None
@@ -316,6 +333,11 @@ class OrganizationRuntimeManager:
                     message_key
                     for message_key in self._scheduled_leader_messages
                     if message_key[:2] != key
+                }
+                self._scheduled_parent_reviews = {
+                    review_key
+                    for review_key in self._scheduled_parent_reviews
+                    if review_key[:2] != key
                 }
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
@@ -612,11 +634,12 @@ class OrganizationRuntimeManager:
         session_id: str,
         capabilities: set[str],
     ) -> None:
-        """Recover claimed work and discover durable matching open work.
+        """Recover claimed work, matching open work, and durable parent follow-ups.
 
         Topic delivery is intentionally best effort.  The task pool is the
         durable source of truth, so a freshly bound or recovered leader must
-        also scan matching OPEN tasks rather than relying only on past events.
+        also scan matching OPEN tasks and §7.3 parent follow-ups rather than
+        relying only on past events.
         """
 
         await self._resume_claimed_tasks(manager=manager, team_id=team_id, session_id=session_id)
@@ -638,6 +661,11 @@ class OrganizationRuntimeManager:
             capabilities=capabilities,
             completed_task_id=None,
         )
+        await self._resume_parent_followups(
+            manager=manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
 
     async def _resume_claimed_tasks(self, *, manager: Any, team_id: str, session_id: str) -> None:
         """Resume work claimed before a process or harness recovery."""
@@ -650,6 +678,97 @@ class OrganizationRuntimeManager:
                     task_id=task.task_id,
                     organization_id=manager.organization_id,
                 )
+
+    async def _resume_parent_followups(
+        self,
+        *,
+        manager: Any,
+        team_id: str,
+        session_id: str,
+    ) -> None:
+        """Rebuild §7.3 leader turns from durable task/review state after rebind.
+
+        Event delivery is best-effort; PENDING reviews, unrepaired FAILED/REJECTED
+        children, and completeable parents must be rediscovered from the task pool.
+        """
+        organization_id = manager.organization_id
+        parent_ids: set[str] = set()
+
+        for item in await manager.task_pool.list_pending_reviews(team_id=team_id):
+            task_brief = item.get("task") or {}
+            child_task_id = task_brief.get("task_id")
+            parent_task_id = task_brief.get("parent_task_id")
+            if not child_task_id or not parent_task_id:
+                continue
+            parent_ids.add(parent_task_id)
+            self._schedule_parent_review_turn(
+                team_id=team_id,
+                session_id=session_id,
+                child_task_id=child_task_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+            )
+
+        for task in await manager.task_pool.list_tasks_created_by_team(team_id=team_id):
+            if not task.parent_task_id:
+                if task.status not in _PARENT_RESUME_TERMINAL_STATUSES:
+                    parent_ids.add(task.task_id)
+                continue
+            parent_ids.add(task.parent_task_id)
+            review = await manager.task_pool.get_task_review(task.task_id)
+            if not _is_supersedable_task(task.status.value, review):
+                continue
+            if await manager.task_pool.has_accepted_or_active_repair(
+                parent_task_id=task.parent_task_id,
+                repairs_target=task.task_id,
+            ):
+                continue
+            if task.status is OrgTaskStatus.FAILED:
+                self._schedule_parent_child_failed_turn(
+                    team_id=team_id,
+                    session_id=session_id,
+                    child_task_id=task.task_id,
+                    parent_task_id=task.parent_task_id,
+                    organization_id=organization_id,
+                    failure_code=(
+                        task.failure_code.value
+                        if task.failure_code is not None
+                        else OrgTaskFailureCode.EXECUTION_FAILED.value
+                    ),
+                    failure_reason=task.failure_reason or "recovered failed child",
+                    repairs_task_id=self._original_repairs_target(task),
+                )
+                continue
+            review_status = review.review_status.value if review is not None else None
+            if review_status in {
+                OrgTaskReviewStatus.REJECTED.value,
+                OrgTaskReviewStatus.NEEDS_REVISION.value,
+            }:
+                self._schedule_parent_repair_turn(
+                    team_id=team_id,
+                    session_id=session_id,
+                    child_task_id=task.task_id,
+                    parent_task_id=task.parent_task_id,
+                    organization_id=organization_id,
+                    review_status=review_status,
+                    repairs_task_id=self._original_repairs_target(task),
+                )
+
+        for parent_task_id in parent_ids:
+            parent = await manager.task_pool.get_task(parent_task_id)
+            if parent is None or parent.status in _PARENT_RESUME_TERMINAL_STATUSES:
+                continue
+            if not await manager.task_pool.can_complete_parent_task(
+                parent_task_id=parent_task_id,
+                team_id=team_id,
+            ):
+                continue
+            self._schedule_parent_ready_turn(
+                team_id=team_id,
+                session_id=session_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+            )
 
     async def _subscribe_team_events(
         self,
@@ -689,28 +808,77 @@ class OrganizationRuntimeManager:
                     organization_id=manager.organization_id,
                 )
                 return
-            if not isinstance(event, OrgTaskCompletedEvent):
+            if isinstance(event, OrgTaskCompletedEvent):
+                # Completion is a second durable opportunity to claim matching
+                # OPEN tasks. Parent-team review wake is driven by
+                # OrgTaskReviewRequestedEvent so it aligns with PENDING review.
+                await self._schedule_matching_open_claims(
+                    manager=manager,
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    capabilities=capabilities,
+                    completed_task_id=event.task_id,
+                )
                 return
-
-            # A Team can deliberately defer a testing/integration task while
-            # its inputs are still being built.  Completion of another task is
-            # therefore a second, durable opportunity to claim every matching
-            # OPEN task instead of leaving it stranded after the first LLM
-            # decision.
-            await self._schedule_matching_open_claims(
-                manager=manager,
-                team_id=backend.team_name,
-                session_id=session_id,
-                capabilities=capabilities,
-                completed_task_id=event.task_id,
-            )
+            if isinstance(event, OrgTaskFailedEvent):
+                task = await manager.task_pool.get_task(event.task_id)
+                if task is None or not task.parent_task_id:
+                    return
+                if task.created_by.team_id != backend.team_name:
+                    return
+                self._schedule_parent_child_failed_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    child_task_id=event.task_id,
+                    parent_task_id=task.parent_task_id,
+                    organization_id=manager.organization_id,
+                    failure_code=event.failure_code,
+                    failure_reason=event.failure_reason,
+                    repairs_task_id=self._original_repairs_target(task),
+                )
+                return
+            if isinstance(event, OrgTaskReviewRequestedEvent):
+                if event.reviewer_team_id != backend.team_name:
+                    return
+                self._schedule_parent_review_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    child_task_id=event.task_id,
+                    parent_task_id=event.parent_task_id,
+                    organization_id=manager.organization_id,
+                )
+                return
+            if not isinstance(event, OrgTaskReviewedEvent):
+                return
+            if event.team_id != backend.team_name:
+                return
             task = await manager.task_pool.get_task(event.task_id)
-            if task is None or not task.parent_task_id or task.created_by.team_id != backend.team_name:
+            if task is None or not task.parent_task_id:
                 return
-            self._schedule_parent_completion_turn(
+            if event.review_status in {
+                OrgTaskReviewStatus.REJECTED.value,
+                OrgTaskReviewStatus.NEEDS_REVISION.value,
+            }:
+                self._schedule_parent_repair_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    child_task_id=event.task_id,
+                    parent_task_id=task.parent_task_id,
+                    organization_id=manager.organization_id,
+                    review_status=event.review_status,
+                    repairs_task_id=self._original_repairs_target(task),
+                )
+                return
+            if event.review_status != OrgTaskReviewStatus.ACCEPTED.value:
+                return
+            if not await manager.task_pool.can_complete_parent_task(
+                parent_task_id=task.parent_task_id,
+                team_id=backend.team_name,
+            ):
+                return
+            self._schedule_parent_ready_turn(
                 team_id=backend.team_name,
                 session_id=session_id,
-                child_task_id=task.task_id,
                 parent_task_id=task.parent_task_id,
                 organization_id=manager.organization_id,
             )
@@ -904,7 +1072,7 @@ class OrganizationRuntimeManager:
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
-    def _schedule_parent_completion_turn(
+    def _schedule_parent_review_turn(
         self,
         *,
         team_id: str,
@@ -913,20 +1081,155 @@ class OrganizationRuntimeManager:
         parent_task_id: str,
         organization_id: str,
     ) -> None:
+        review_key = (session_id, team_id, child_task_id)
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
         prompt = (
             f"Child organization task {child_task_id} completed in {organization_id}. "
-            f"Inspect its result and pending review with org_review_task, then accept or reject it. "
+            f"Inspect its result with org_review_task, then accept or reject it. "
             f"If accepted, use the child output to continue parent task {parent_task_id}. "
-            "If rejected, create at most one focused repair task for the team whose capabilities match "
-            f"the reported defect with org_create_task(parent_task_id='{parent_task_id}'); include the "
-            "child report and acceptance criteria in that task. Do not "
-            "leave the parent waiting without either accepting/rejecting the child or creating that repair. "
-            "When all direct child tasks are accepted, complete the parent task with its integrated result. "
-            "For the root task, put the user-facing final delivery in org_update_task output_context.description: "
-            "project structure, startup instructions, API contract, executed test results, and known limitations. "
-            "Also provide a concise output_abstract."
+            "If rejected, create a repair with org_create_task "
+            f"(set repairs_task_id={child_task_id} on the original sibling; never repair-of-repair; "
+            "do not org_delegate_task the rejected child). "
+            "When all direct children are accepted or superseded by an accepted repair, "
+            "complete the parent. For a root task, put the user-facing delivery in "
+            "org_update_task output_context.description and provide output_abstract."
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
+
+    def _schedule_parent_repair_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        child_task_id: str,
+        parent_task_id: str,
+        organization_id: str,
+        review_status: str,
+        repairs_task_id: str | None = None,
+    ) -> None:
+        review_key = (session_id, team_id, f"repair:{child_task_id}")
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
+        target_id = repairs_task_id or child_task_id
+        prompt = (
+            f"Child organization task {child_task_id} was reviewed as {review_status} "
+            f"in {organization_id}. Parent task {parent_task_id} cannot advance on that child. "
+            "Read the child result and review verdict/required_changes. "
+            + self._repair_create_instructions(
+                target_id=target_id,
+                report_phrase="defect report",
+                terminal_label="rejected/completed",
+            )
+        )
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
+
+    def _schedule_parent_ready_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        parent_task_id: str,
+        organization_id: str,
+    ) -> None:
+        review_key = (session_id, team_id, f"complete:{parent_task_id}")
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
+        prompt = (
+            f"All direct child tasks for parent organization task {parent_task_id} "
+            f"in {organization_id} are accepted or superseded by an accepted repair. "
+            "Integrate the child outputs and call org_update_task(action='complete') on the "
+            "parent with the final output_context and output_abstract. For a root task, put the "
+            "user-facing delivery in output_context.description."
+        )
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
+
+    def _schedule_parent_child_failed_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        child_task_id: str,
+        parent_task_id: str,
+        organization_id: str,
+        failure_code: str,
+        failure_reason: str,
+        repairs_task_id: str | None = None,
+    ) -> None:
+        review_key = (session_id, team_id, f"failed:{child_task_id}")
+        if review_key in self._scheduled_parent_reviews:
+            return
+        self._scheduled_parent_reviews.add(review_key)
+        target_id = repairs_task_id or child_task_id
+        prompt = (
+            f"Child organization task {child_task_id} failed in {organization_id} "
+            f"(failure_code={failure_code}, failure_reason={failure_reason}). "
+            f"Parent task {parent_task_id} cannot advance on that child. "
+            "This is not a pending review — do not call org_review_task on the failed child. "
+            + self._repair_create_instructions(
+                target_id=target_id,
+                report_phrase="the failure report",
+                terminal_label="failed",
+            )
+        )
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            review_key=review_key,
+        )
+
+    @staticmethod
+    def _repair_create_instructions(
+        *,
+        target_id: str,
+        report_phrase: str,
+        terminal_label: str,
+    ) -> str:
+        """Shared wake guidance for creating a repair sibling of a terminal child."""
+        return (
+            "Create a focused repair task with org_create_task "
+            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
+            f"repair; include {report_phrase} and acceptance criteria; prefer capabilities that "
+            "match the defect; if the original has retry_limit, do not exceed it). "
+            "If org_create_task fails because retry_limit is reached, do not retry create in a "
+            "loop: call org_update_task(action='failed') on the parent with failure_reason "
+            "explaining that the repair budget is exhausted, so the owning/parent team can "
+            "decide the next step or fail/terminate toward the root. Same team may "
+            "execute the repair; switching teams is optional—only if switching teams, set "
+            "delegated_to_team_id on that new repair (or org_delegate_task the new OPEN repair "
+            "only). Do not call org_delegate_task on the "
+            f"{terminal_label} child, which is terminal. "
+            "Do not leave the parent waiting without creating that repair, and do not silently "
+            f"reopen the {terminal_label} child task."
+        )
+
+    @staticmethod
+    def _original_repairs_target(task: Any) -> str:
+        """Return the original sibling id a new repair must target (never a repair-of-repair)."""
+        meta = getattr(task, "metadata", None) or {}
+        nested = meta.get(ORG_TASK_REPAIRS_TASK_ID_KEY) if isinstance(meta, dict) else None
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+        return str(task.task_id)
 
     def _schedule_leader_turn(
         self,
@@ -935,10 +1238,17 @@ class OrganizationRuntimeManager:
         session_id: str,
         prompt: str,
         message_key: tuple[str, str, str] | None = None,
+        review_key: tuple[str, str, str] | None = None,
     ) -> None:
         key = (session_id, team_id)
         queue = self._leader_turn_queues.setdefault(key, deque())
-        queue.append({"query": prompt, "_org_message_key": message_key})
+        queue.append(
+            {
+                "query": prompt,
+                "_org_message_key": message_key,
+                "_org_review_key": review_key,
+            }
+        )
         worker = self._leader_turn_workers.get(key)
         if worker is None or worker.done():
             worker = asyncio.create_task(self._drain_leader_turns(team_id, session_id))
@@ -959,16 +1269,18 @@ class OrganizationRuntimeManager:
                     await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
                     continue
                 inputs = queue.popleft()
-                message_key = (
-                    inputs.pop("_org_message_key", None)
-                    if isinstance(inputs, dict)
-                    else None
-                )
+                message_key = None
+                review_key = None
+                if isinstance(inputs, dict):
+                    message_key = inputs.pop("_org_message_key", None)
+                    review_key = inputs.pop("_org_review_key", None)
                 try:
                     await self._run_leader_turn(team_id, session_id, inputs)
                 finally:
                     if message_key is not None:
                         self._scheduled_leader_messages.discard(message_key)
+                    if review_key is not None:
+                        self._scheduled_parent_reviews.discard(review_key)
         finally:
             self._leader_turn_workers.pop(key, None)
             self._leader_turn_queues.pop(key, None)
@@ -979,6 +1291,9 @@ class OrganizationRuntimeManager:
                 message_key = inputs.get("_org_message_key")
                 if message_key is not None:
                     self._scheduled_leader_messages.discard(message_key)
+                review_key = inputs.get("_org_review_key")
+                if review_key is not None:
+                    self._scheduled_parent_reviews.discard(review_key)
         queue.clear()
 
     async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:

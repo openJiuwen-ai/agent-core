@@ -39,6 +39,12 @@ ORG_TASK_TERMINAL_STATUS_VALUES = (
     OrgTaskStatus.FAILED.value,
 )
 
+# Metadata key written by create_task(repairs_task_id=...); single create entry is the param.
+ORG_TASK_REPAIRS_TASK_ID_KEY = "repairs_task_id"
+# Optional repair-budget keys on the repaired task's metadata (enforced on create).
+ORG_TASK_RETRY_COUNT_KEY = "retry_count"
+ORG_TASK_RETRY_LIMIT_KEY = "retry_limit"
+
 
 class OrgTaskFailureCode(StrEnum):
     EXECUTION_FAILED = "EXECUTION_FAILED"
