@@ -23,7 +23,7 @@ _MIN_OUTPUT_CHARS = 512
 _MAX_OUTPUT_CHARS = 48_000
 _MAX_LINES = 5_000
 _SKILL_DESCRIPTION_CHARS = 180
-_DEFAULT_SEARCH_PAGE_SIZE = 5
+_DEFAULT_SEARCH_PAGE_SIZE = 10
 _MAX_CURSORS = 32
 _CURSOR_FOOTER_CHARS = 96
 _OPERATIONS = ("list", "search", "read")
@@ -88,13 +88,11 @@ def _tool_card(tool_id: str) -> ToolCard:
         id=tool_id,
         name=SKILL_INDEX_TOOL_NAME,
         description=(
-            "Find installed Skills when the current request needs reusable capabilities. "
-            "Browse folders with list, or keyword-search Skill text within category (omit for all Skills). "
-            "Choose the scope and next step from the results. [category] is a folder, not a Skill or file path. "
-            "Recommend only exact [skill] names, never categories. Descriptions suffice for selection; "
-            "use skill_tool only when you need instructions or will execute a Skill. "
-            "Stop when you can answer or act; do not search just to fill a recommendation quota. "
-            "No Skill is needed for steps you can handle directly."
+            "Read-only Skill catalogue, not a filesystem tool. [category] is a virtual group, "
+            "not a disk directory or Skill; counts include descendants. [skill] names a Skill; "
+            "path is its real SKILL.md for file tools, not an input here. "
+            "Calls do not change a working directory. Search returns ranked text matches, not verified capabilities. "
+            "No query translation."
         ),
         input_params={
             "type": "object",
@@ -102,14 +100,17 @@ def _tool_card(tool_id: str) -> ToolCard:
                 "operation": {
                     "type": "string",
                     "enum": list(_MODEL_OPERATIONS),
-                    "description": "list: direct entries, no query. search: keyword matches, requires query.",
+                    "description": (
+                        "list: direct subcategories and Skills. search: names, aliases, descriptions "
+                        "and SKILL.md including descendants; not other package files."
+                    ),
                 },
                 "category": {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Returned category name, or full A > B chain if ambiguous. "
-                        "Omit this field for root or all Skills; do not pass an empty string."
+                        "Scope: returned category name or A > B chain, never a disk path. "
+                        "Omit for root/global on each call."
                     ),
                 },
                 "query": {
@@ -118,16 +119,17 @@ def _tool_card(tool_id: str) -> ToolCard:
                     "minItems": 1,
                     "maxItems": 8,
                     "description": (
-                        'Search only. Always an array, even for one query: ["PDF OCR"]. '
-                        "Each string describes one capability in the language of Skill descriptions (often English). "
-                        "Batch independent capabilities in the same scope; omit this field for list."
+                        'Search only. Array even for one query: ["PDF OCR"]. '
+                        "Keep task-specific terms; use the language of Skill descriptions (often English). "
+                        "Independent queries, interleaved and deduplicated. "
+                        "Terms need not all match; no Skill matches yields category hints."
                     ),
                 },
                 "cursor": {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128,
-                    "description": "Continue using the operation and cursor shown in [next].",
+                    "description": "Copy [next] unchanged. To change query/category, omit cursor.",
                 },
             },
             "required": ["operation"],
@@ -140,10 +142,20 @@ def _tool_card(tool_id: str) -> ToolCard:
 
 
 class _DirectoryFunction(LocalFunction):
-    """Accept unambiguous legacy queries without weakening the model schema."""
+    """Explain unsupported inputs and normalize unambiguous legacy queries."""
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> Any:
         if isinstance(inputs, dict):
+            unexpected = inputs.keys() - self.card.input_params["properties"].keys()
+            if unexpected:
+                raise ValueError(
+                    f"Unknown skill_index arguments: {', '.join(sorted(unexpected))}. "
+                    "Only operation, category, query, cursor are accepted. "
+                    'Use {"operation":"list","category":"A > B"} or '
+                    '{"operation":"search","query":["keywords"],"category":"A > B"}; '
+                    "omit category for root/global. Disk paths and globs belong to file tools. "
+                    "For the next page, copy [next] unchanged."
+                )
             inputs = dict(inputs)
             category = inputs.get("category")
             if isinstance(category, str) and not category.strip():
@@ -747,7 +759,10 @@ def _list_row(entry: DirectoryEntry, *, view: str, directory: SkillDirectoryView
     indent = "  " * entry.depth if view == "tree" else ""
     if entry.kind == "dir":
         description = _directory_description(entry.description, 240)
-        detail = f"  desc: {description}" if view != "names" and description else ""
+        count = directory.skill_count(entry.path)
+        detail = f"  desc: Contains {count} skill{'s' if count != 1 else ''}. {description}".rstrip()
+        if view == "names":
+            detail = ""
         return _Row(f"{indent}- [category] {_category_from_path(directory, entry.path)}{detail}")
     record = directory.record_by_id[entry.worker_id]
     category = _skill_category(directory, entry.worker_id)
@@ -791,7 +806,8 @@ def _search_directory_row(
 ) -> _Row:
     mapping = f"  matches: {', '.join(map(str, indexes))}" if indexes else ""
     description = _directory_description(entry.description, 300)
-    detail = f"  desc: {description}" if description else ""
+    count = directory.skill_count(entry.path)
+    detail = f"  desc: Contains {count} skill{'s' if count != 1 else ''}. {description}".rstrip()
     return _Row(f"- [category] {_category_from_path(directory, entry.path)}{mapping}{detail}")
 
 
@@ -998,9 +1014,13 @@ def _summary_line(summary: Mapping[str, Any]) -> str:
     if summary.get("returned_skill_count") and not summary.get("returned_category_count"):
         return "## Skills — all names previously shown" if summary.get("previously_shown") else "## Skills"
     if summary.get("returned_category_count") and not summary.get("returned_skill_count"):
-        return "## Categories — open with list, not skill_tool"
+        return (
+            "## Category hints — matching groups, not Skills"
+            if summary.get("operation") == "search"
+            else "## Categories"
+        )
     if summary.get("returned_category_count"):
-        return "## Results — [category]: list; [skill]: skill_tool"
+        return "## Skills and category hints" if summary.get("operation") == "search" else "## Entries"
     if summary.get("operation") == "search":
         return "## Skills"
     return "## Results"
@@ -1060,7 +1080,7 @@ def _apply_simple_defaults(arguments: dict[str, Any], limit: Any) -> None:
             raise ValueError("skills are valid only for read")
         queries = _queries(arguments.get("query"), None)
         arguments["_page_size"] = (
-            result_limit if limit is not None else min(10, max(_DEFAULT_SEARCH_PAGE_SIZE, 2 * len(queries)))
+            result_limit if limit is not None else min(20, _DEFAULT_SEARCH_PAGE_SIZE * len(queries))
         )
         arguments["_page_offset"] = 0
     else:

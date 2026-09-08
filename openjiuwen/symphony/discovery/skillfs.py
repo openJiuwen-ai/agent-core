@@ -160,6 +160,7 @@ class SkillDirectoryView:
         self.record_path_by_id: dict[str, str] = {}
         self.record_id_by_meta_path: dict[str, str] = {}
         self._children: dict[str, tuple[DirectoryEntry, ...]] = {}
+        self._skill_counts: dict[str, int] = {}
         self._index_paths()
 
     @staticmethod
@@ -176,6 +177,10 @@ class SkillDirectoryView:
         if normalized not in self.node_by_path:
             raise ValueError(f"No such Skill directory: {normalized}")
         return self._children.get(normalized, ())
+
+    def skill_count(self, path: str) -> int:
+        """Count visible Skills in this category and all its descendants."""
+        return self._skill_counts[self.normalize_path(path)]
 
     def entries(
         self,
@@ -376,8 +381,10 @@ class SkillDirectoryView:
                     )
                 )
             self._children[path] = tuple(entries)
+            self._skill_counts[path] = sum(entry.kind == "skill" for entry in entries)
             for child, child_path in child_nodes:
                 visit(child, child_path)
+                self._skill_counts[path] += self._skill_counts[child_path]
 
         visit(self.root, "/")
 
