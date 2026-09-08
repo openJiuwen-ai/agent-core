@@ -15,6 +15,7 @@ from typing import Any
 from openjiuwen.harness.schema.code_graph import (
     PROMPT_MODE_LOCATE,
     PROMPT_MODE_PRODUCT,
+    RETRIEVAL_INTERFACE_DEFAULT,
     CodeGraphProfile,
     CodeGraphRetrievalInterface,
     CodeGraphRunState,
@@ -95,7 +96,7 @@ def code_graph_profile_tool_names(
     profile: Any,
     *,
     prompt_mode: str = PROMPT_MODE_PRODUCT,
-    retrieval_interface: Any = CodeGraphRetrievalInterface.CLASSIC,
+    retrieval_interface: Any = RETRIEVAL_INTERFACE_DEFAULT,
 ) -> tuple[str, ...]:
     """Tool names a profile exposes, in prompt order."""
     resolved = resolve_code_graph_profile(profile)
@@ -118,7 +119,7 @@ def build_code_graph_profile_tools(
     *,
     profile: Any = CodeGraphProfile.OFF,
     prompt_mode: str = PROMPT_MODE_PRODUCT,
-    retrieval_interface: Any = CodeGraphRetrievalInterface.CLASSIC,
+    retrieval_interface: Any = RETRIEVAL_INTERFACE_DEFAULT,
 ) -> list:
     """Instantiate the tools for one profile.
 

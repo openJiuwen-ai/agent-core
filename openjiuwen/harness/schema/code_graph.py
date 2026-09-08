@@ -29,14 +29,15 @@ class CodeGraphRetrievalInterface(StrEnum):
     ``CLASSIC`` keeps the current find_* payload and tool table.
     ``FOCUSED`` is the ACI contract: summary candidates, role groups,
     a single next action, and ``focus_code`` instead of ``select_code_context``.
-    Locate-exam mode always stays classic.
+    Product ``graph`` defaults to focused. Locate-exam mode stays classic
+    unless a caller passes classic or focused explicitly.
     """
 
     CLASSIC = "classic"
     FOCUSED = "focused"
 
 
-RETRIEVAL_INTERFACE_DEFAULT = CodeGraphRetrievalInterface.CLASSIC.value
+RETRIEVAL_INTERFACE_DEFAULT = CodeGraphRetrievalInterface.FOCUSED.value
 
 
 class LocalizationPhase(StrEnum):
@@ -103,9 +104,9 @@ def resolve_code_graph_profile(
 def resolve_code_graph_retrieval_interface(
     value: Any,
     *,
-    default: CodeGraphRetrievalInterface = CodeGraphRetrievalInterface.CLASSIC,
+    default: CodeGraphRetrievalInterface = CodeGraphRetrievalInterface.FOCUSED,
 ) -> CodeGraphRetrievalInterface:
-    """Accept ``classic`` / ``focused``. Anything else falls back to ``classic``."""
+    """Accept ``classic`` / ``focused``. Anything else falls back to ``focused``."""
     if isinstance(value, CodeGraphRetrievalInterface):
         return value
     if value is None or isinstance(value, bool):
