@@ -57,6 +57,9 @@ _CONDITION_ANCHOR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Leading filler words before a tool/skill name in the use-span.
+_CAPABILITY_SKIP_TOKENS: FrozenSet[str] = frozenset({"the", "a", "an", "skill", "tool"})
+
 
 def strip_pinned_prefix(text: str) -> Tuple[bool, str]:
     """Return (is_pinned, body) for optional ``[PINNED]`` prefix."""
@@ -66,25 +69,74 @@ def strip_pinned_prefix(text: str) -> Tuple[bool, str]:
     return False, s
 
 
-def parse_tip(text: str) -> Optional[Tuple[str, str, str]]:
-    """Parse ``When <cond>: use <cap> to <action>`` -> (condition, capability, action).
+def _capability_span(raw: str) -> str:
+    """Normalize the ``use … to`` middle segment: drop backticks/quotes, collapse space."""
+    s = (raw or "").replace("`", "").replace('"', "").replace("'", "")
+    return " ".join(s.split()).strip()
 
-    Returns ``None`` when the text does not match the required shape.
-    """
+
+def _first_capability_token(span: str) -> str:
+    """Fallback capability: first tool-like token after optional filler words."""
+    for token in span.split():
+        cleaned = token.strip(".,;:()[]{}")
+        if not cleaned:
+            continue
+        if cleaned.lower() in _CAPABILITY_SKIP_TOKENS:
+            continue
+        return cleaned
+    return ""
+
+
+def _longest_whitelist_match(span: str, capability_names: Set[str]) -> Optional[str]:
+    """Return the longest capability name that appears as a token-ish substring in ``span``."""
+    span_l = span.lower()
+    best: Optional[str] = None
+    best_len = -1
+    for name in capability_names:
+        n = (name or "").strip()
+        if not n:
+            continue
+        nl = n.lower()
+        # Word-ish boundary so ``code`` does not match ``decode``.
+        if re.search(rf"(^|[^\w]){re.escape(nl)}([^\w]|$)", span_l) and len(nl) > best_len:
+            best = n
+            best_len = len(nl)
+    return best
+
+
+def _split_tip(text: str) -> Optional[Tuple[str, str, str]]:
+    """Split TIP into (condition, capability_span, action). Span keeps full use…to middle."""
     _, body = strip_pinned_prefix(text)
     match = _TIP_RE.match(body)
     if not match:
         return None
     condition = " ".join(match.group(1).split()).strip()
-    capability = " ".join(match.group(2).split()).strip().strip("`\"'")
+    span = _capability_span(match.group(2))
     action = " ".join(match.group(3).split()).strip()
+    if not condition or not span or not action:
+        return None
+    return condition, span, action
+
+
+def parse_tip(text: str) -> Optional[Tuple[str, str, str]]:
+    """Parse ``When <cond>: use <cap> to <action>`` -> (condition, capability, action).
+
+    Capability is the first tool-like token in the use-span after stripping backticks.
+    Returns ``None`` when the text does not match the required shape.
+    """
+    split = _split_tip(text)
+    if split is None:
+        return None
+    condition, span, action = split
+    capability = _first_capability_token(span)
     logger.info(
-        "[TTSERail] parse_tip condition=%s capability=%s action=%s",
+        "[TTSERail] parse_tip condition=%s capability=%s span=%s action=%s",
         condition,
         capability,
+        span,
         action,
     )
-    if not condition or not capability or not action:
+    if not capability:
         return None
     return condition, capability, action
 
@@ -122,13 +174,16 @@ def tip_purge_reason(text: str, capability_names: Set[str]) -> Optional[str]:
 
     Reason codes: ``tip_malformed``, ``tip_unknown_capability``,
     ``tip_too_generic_condition``, ``tip_too_generic_action``, ``tip_fact_shaped``.
+
+    Capability membership uses longest whitelist match against the full use-span
+    (backticks stripped), not exact equality on the whole span.
     """
     pinned, body = strip_pinned_prefix(text)
     if pinned:
         return None
 
-    parsed = parse_tip(body)
-    if parsed is None:
+    split = _split_tip(body)
+    if split is None:
         lowered = body.lower()
         if not lowered.startswith("when") or ": use" not in lowered:
             # Declarative / non-procedural → fact-shaped or malformed.
@@ -137,9 +192,8 @@ def tip_purge_reason(text: str, capability_names: Set[str]) -> Optional[str]:
             return "tip_malformed"
         return "tip_malformed"
 
-    condition, capability, action = parsed
-    names_lower = {n.lower() for n in capability_names}
-    if capability.lower() not in names_lower:
+    condition, span, action = split
+    if _longest_whitelist_match(span, capability_names) is None:
         return "tip_unknown_capability"
     if _condition_too_generic(condition):
         return "tip_too_generic_condition"
@@ -150,13 +204,12 @@ def tip_purge_reason(text: str, capability_names: Set[str]) -> Optional[str]:
 
 def is_valid_tip_shape(text: str, capability_names: Optional[Set[str]] = None) -> bool:
     """True when text is a well-formed TIP (and capability is known if names given)."""
-    parsed = parse_tip(text)
-    if parsed is None:
+    split = _split_tip(text)
+    if split is None:
         return False
     if capability_names is None:
-        return True
-    _, capability, _ = parsed
-    return capability.lower() in {n.lower() for n in capability_names}
+        return bool(_first_capability_token(split[1]))
+    return _longest_whitelist_match(split[1], capability_names) is not None
 
 
 __all__ = [

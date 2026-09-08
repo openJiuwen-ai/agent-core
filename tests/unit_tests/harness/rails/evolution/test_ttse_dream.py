@@ -74,6 +74,20 @@ def test_parse_tip_happy_path():
     assert parsed == ("logs are large", "grep", "scan before reading")
 
 
+def test_parse_tip_strips_backticks_and_takes_first_token():
+    parsed = parse_tip(
+        "When a PDF file must be read: use `code` with pdfplumber to parse and extract the content"
+    )
+    assert parsed is not None
+    assert parsed[1] == "code"
+
+
+def test_parse_tip_skips_filler_words():
+    parsed = parse_tip("When searching history: use the `session-logs` skill to find prior turns")
+    assert parsed is not None
+    assert parsed[1] == "session-logs"
+
+
 def test_tip_purge_malformed_and_unknown_and_generic():
     names = {"grep", "bash"}
     assert tip_purge_reason("always be careful", names) == "tip_fact_shaped"
@@ -82,6 +96,29 @@ def test_tip_purge_malformed_and_unknown_and_generic():
     assert tip_purge_reason("When reading logs: use grep to check", names) == "tip_too_generic_action"
     assert tip_purge_reason("When reading large .log files: use grep to extract matches", names) is None
     assert tip_purge_reason("[PINNED] When any task: use grep to check", names) is None
+
+
+def test_tip_purge_longest_whitelist_match_on_noisy_span():
+    names = {"code", "web_search", "fetch_webpage"}
+    # Backticks + trailing junk after capability.
+    assert (
+        tip_purge_reason(
+            "When a PDF must be read: use `code` with pdfplumber to parse content",
+            names,
+        )
+        is None
+    )
+    # Long adverbial between name and "to" — still matches web_search.
+    assert (
+        tip_purge_reason(
+            "When researching a niche product: use web_search with multiple query "
+            "variations (a, b, c) to gather information",
+            names,
+        )
+        is None
+    )
+    assert tip_purge_reason("When fetching a URL: use `fetch_webpage` to get HTML", names) is None
+    assert tip_purge_reason("When coding: use decode to transform bytes", names) == "tip_unknown_capability"
 
 
 # ----------------------------------------------------------------------
