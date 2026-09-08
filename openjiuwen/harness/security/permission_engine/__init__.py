@@ -5,7 +5,7 @@
 Layout::
 
     permission_engine/
-      models.py / host.py / core.py
+      models.py / host.py / core.py / prompt_texts.py
       toolguard/     command rules, tool_policy, shell AST, matching
       fileguard/     path policy, path_extract, file_tool_specs, sensitive paths
       netguard/      fetch URL policy
@@ -22,10 +22,16 @@ from openjiuwen.harness.security.permission_engine.models import (
     PermissionResult,
     PermissionsSection,
 )
+from openjiuwen.harness.security.permission_engine.prompt_texts import (
+    ENGLISH_PERMISSION_PROMPT_TEXTS,
+    PermissionPromptTexts,
+)
 
 __all__ = [
+    "ENGLISH_PERMISSION_PROMPT_TEXTS",
     "PermissionEngine",
     "PermissionLevel",
+    "PermissionPromptTexts",
     "PermissionResult",
     "PermissionsSection",
     "ToolPermissionHost",

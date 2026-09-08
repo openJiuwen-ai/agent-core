@@ -804,7 +804,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         tool_name = tool_call.name if tool_call else ""
         tool_args = self.parse_tool_args(tool_call)
-        presentation = build_permission_ask_presentation(tool_name, tool_args, result)
+        presentation = build_permission_ask_presentation(
+            tool_name, tool_args, result, texts=self._host.prompt_texts,
+        )
         hint = self._build_always_allow_hint(tool_call)
         return render_ask_presentation_message(presentation, always_allow_hint=hint)
 
@@ -819,7 +821,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         tool_name = tool_call.name if tool_call else ""
         tool_args = self.parse_tool_args(tool_call)
-        presentation = build_permission_ask_presentation(tool_name, tool_args, result)
+        presentation = build_permission_ask_presentation(
+            tool_name, tool_args, result, texts=self._host.prompt_texts,
+        )
         return {
             "ask_category": presentation.category,
             "ask_title": presentation.title,
@@ -834,6 +838,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name or ""
         tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
+        texts = self._host.prompt_texts
 
         path_hint = ""
         for key in ("path", "file_path", "target_file", "file", "old_path", "new_path"):
@@ -854,22 +859,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
             shell_key = self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
             if shell_key:
-                return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{shell_key}`` 类调用；'
-                    f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
-                )
+                return texts.remember_command.format(command_key=shell_key)
             if auto_confirm_key:
-                return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{auto_confirm_key}`` 类调用。'
-                )
+                return texts.remember_command_session_only.format(command_key=auto_confirm_key)
             return ""
 
         if auto_confirm_key:
-            path_desc = f"在 ``{path_hint}`` 下" if path_hint else ""
-            return (
-                f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{tool_name}`` 类工具{path_desc}的调用；'
-                f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
-            )
+            path_scope = texts.path_scope.format(path_hint=path_hint) if path_hint else ""
+            return texts.remember_tool.format(tool_name=tool_name, path_scope=path_scope)
         return ""
 
 

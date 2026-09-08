@@ -27,6 +27,8 @@
 - `security/checker.py`：`ExternalDirectoryChecker`（外部路径校验）。
 - `security/host.py`：`ToolPermissionHost` / `PermissionConfirmationRequest` / `PermissionSceneHookInput`
   / `RequestPermissionConfirmationHook`。
+- `security/permission_engine/prompt_texts.py`：`PermissionPromptTexts`（内置 ASK 确认界面的
+  文案模板）/ `ENGLISH_PERMISSION_PROMPT_TEXTS`。
 - `security/factory.py`：`build_permission_interrupt_rail` 等装配。
 - `rails/security/`：`BaseSecurityRail` / `PermissionInterruptRail` / `SafetyPromptRail` /
   `SecurityRail`（决策类型见 `S_04`）。
@@ -62,6 +64,12 @@
 7. **宿主接口**：`ToolPermissionHost` 是工具的权限宿主协议；`RequestPermissionConfirmationHook`
    （`PermissionSceneHookInput` → `PermissionConfirmationResult`）是确认回调契约；
    `PermissionConfirmationRequest` 携带确认请求。
+   内置 ASK 确认界面的文案（分类标题、摘要、「记住」提示）同样经宿主注入
+   （`ToolPermissionHost.prompt_texts`）：本层不挑选语言，默认值与历来输出逐字一致，走
+   `request_permission_confirmation` 自行渲染确认界面的宿主不经过这些模板。模板的合法性在
+   `PermissionPromptTexts` 构造时按字段各自的占位符校验（见
+   `security/permission_engine/prompt_texts.py`），不在渲染时校验：`before_tool_call` 抛出的
+   非 `AbortError` 异常被回调框架吞掉、链继续，渲染期抛错等于该次调用不经权限判定即放行。
 8. **到 rail 的桥唯一**：`security/factory.py:build_permission_interrupt_rail(...)` 构造
    `PermissionInterruptRail`；`deep_agent.py` 的 `build_permission_interrupt_rail` 导入路径
    一致。安全 rail 特性（`supported_events` / 静默降级）见 `S_04` 不变量 8。
