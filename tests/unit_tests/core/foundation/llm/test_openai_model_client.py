@@ -408,9 +408,14 @@ class TestDisabledThinkingIntent:
         assert sent_call["extra_body"] == {
             "routing": "blue",
             "thinking": {"type": "disabled"},
+            "enable_thinking": False,
+            "chat_template_kwargs": {
+                "enable_thinking": False,
+                "template": "keep",
+            },
         }
-        assert sent_call["enable_thinking"] is False
-        assert sent_call["chat_template_kwargs"]["enable_thinking"] is False
+        assert "enable_thinking" not in sent_call
+        assert "chat_template_kwargs" not in sent_call
         assert sent_call["reasoning"]["enabled"] is False
         assert sent_call["reasoning_effort"] == "off"
 
