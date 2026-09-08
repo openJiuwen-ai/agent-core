@@ -32,7 +32,7 @@ OUTCOMES = {OUTCOME_SUCCESS, OUTCOME_FAILED, OUTCOME_PARTIAL}
 
 TARGET_KIND_SKILL = "skill"
 TARGET_KIND_PLUGIN = "plugin"
-SUPPORTED_TARGET_KINDS = {TARGET_KIND_SKILL, TARGET_KIND_PLUGIN}
+SUPPORTED_TARGET_KINDS = {TARGET_KIND_SKILL}
 
 VERDICT_APPROVED = "approved"
 VERDICT_REJECTED = "rejected"
@@ -68,6 +68,20 @@ def content_hash(value: Any) -> str:
     if isinstance(value, str):
         return "sha256:" + sha256_hex(value)
     return "sha256:" + sha256_hex(canonical_json(value))
+
+
+@dataclass(frozen=True)
+class CombinationCandidate:
+    """Immutable, privacy-safe display snapshot for one verified combination."""
+
+    recipe_id: str
+    version: int
+    name: str = ""
+    applicability: str = ""
+    structure: tuple[tuple[str, str, str], ...] = ()
+    execution_count: int = 0
+    success_count: int = 0
+    success_rate: float = 0.0
 
 
 @dataclass
@@ -156,12 +170,27 @@ class ExperienceRecipe:
     def content_identity(self) -> str:
         """用于变更检测：内容（非计数）发生变化时才产生新版本。"""
 
+        structure = self.combination_structure
+        nodes = structure.get("nodes") if isinstance(structure, dict) else {}
+        edges = structure.get("edges") if isinstance(structure, dict) else []
         return content_hash(
             {
-                "status": self.status,
-                "grade": self.grade,
                 "applicability": self.applicability,
-                "combination_structure": self.combination_structure,
+                "combination_structure": {
+                    "type": structure.get("type") if isinstance(structure, dict) else None,
+                    "direction": structure.get("direction") if isinstance(structure, dict) else None,
+                    "nodes": nodes,
+                    "edges": [
+                        {
+                            "source": edge.get("source"),
+                            "target": edge.get("target"),
+                            "relation": edge.get("relation"),
+                        }
+                        for edge in edges or []
+                        if isinstance(edge, dict)
+                    ],
+                    "loop_guards": structure.get("loop_guards") if isinstance(structure, dict) else None,
+                },
                 "execution_narrative": self.execution_narrative,
             }
         )

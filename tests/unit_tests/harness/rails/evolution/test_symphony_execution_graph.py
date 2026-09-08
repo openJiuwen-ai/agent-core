@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import inspect
-import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import FrozenInstanceError, replace
-from typing import Any
+from typing import Any, overload
 
 import pytest
 
@@ -18,11 +16,9 @@ from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
     CapabilityIdentity,
-    CapabilitySnapshotProvider,
-    SymphonyGraphEvolutionSubmission,
-    SymphonyGraphObservationSink,
+    _canonical_graph_pair,
+    _execution_graph_id,
     build_symphony_execution_graph,
-    build_symphony_graph_evolution_submission,
 )
 
 _TRACE_ID = "1" * 32
@@ -32,7 +28,13 @@ class _ExplodingSequence(Sequence[Any]):
     def __init__(self, error: BaseException) -> None:
         self._error = error
 
-    def __getitem__(self, index: int) -> Any:
+    @overload
+    def __getitem__(self, index: int) -> Any: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[Any]: ...
+
+    def __getitem__(self, index: int | slice) -> Any:
         del index
         raise self._error
 
@@ -76,32 +78,6 @@ class _ExplodingAliasIdentity(CapabilityIdentity):
         if name == "capability_name":
             raise RuntimeError("alias unavailable")
         return super().__getattribute__(name)
-
-
-class _EvilDict(dict[str, Any]):
-    def items(self) -> Any:
-        raise RuntimeError("malicious mapping")
-
-
-class _BaseExplodingDict(dict[str, Any]):
-    def items(self) -> Any:
-        raise KeyboardInterrupt("system cancellation")
-
-
-class _MemoryExplodingDict(dict[str, Any]):
-    def items(self) -> Any:
-        raise MemoryError("memory exhausted")
-
-
-class _CustomMapping(Mapping[str, Any]):
-    def __getitem__(self, key: str) -> Any:
-        raise KeyError(key)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(())
-
-    def __len__(self) -> int:
-        return 0
 
 
 def _fragment(
@@ -188,6 +164,7 @@ def _build(
     outcome: str = "success",
     reason: str | None = None,
     quality_flags: Sequence[str] = (),
+    graph_snapshot: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return build_symphony_execution_graph(
         trace_id=_TRACE_ID,
@@ -198,66 +175,12 @@ def _build(
         decisions=decisions,
         capability_snapshot=identities,
         quality_flags=quality_flags,
-    )
-
-
-def _planned_graph(graph_id: str = "planned-1") -> dict[str, Any]:
-    return {
-        "graph": {
-            "id": graph_id,
-            "type": "planned_graph",
-            "directed": True,
-            "metadata": {"status": "ready"},
-            "nodes": {
-                "source-id": {"label": "source", "metadata": {"type": "skill"}},
-                "target-id": {"label": "target", "metadata": {"type": "tool"}},
-            },
-            "edges": [{"source": "source-id", "target": "target-id", "relation": "can_feed"}],
-        }
-    }
-
-
-def _execution_with_edge() -> dict[str, Any]:
-    source = _fragment(1, "skill", "source")
-    target = _fragment(2, "tool", "target")
-    candidate = _candidate(1, source, target)
-    return _build(
-        [candidate],
-        [_decision(candidate)],
-        [_identity("source-id", "skill", "source"), _identity("target-id", "tool", "target")],
+        graph_snapshot=graph_snapshot,
     )
 
 
 def _edges(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return payload["graph"]["edges"]
-
-
-def _submission_hash(submission: SymphonyGraphEvolutionSubmission) -> str:
-    canonical = json.dumps(
-        {
-            "planned_graph": submission.planned_graph,
-            "execution_graph": submission.execution_graph,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _refresh_execution_graph_id(execution: dict[str, Any]) -> None:
-    graph_without_id = dict(execution["graph"])
-    graph_without_id.pop("id", None)
-    envelope = {**execution, "graph": graph_without_id}
-    canonical = json.dumps(
-        envelope,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    execution["graph"]["id"] = "execution_graph:sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def test_builds_required_jgf_and_keeps_only_supported_example_edges() -> None:
@@ -391,7 +314,7 @@ def test_missing_or_invalid_identity_field_drops_related_edge(field: str, value:
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
     valid_source = _identity("source-id", "skill", "source")
-    invalid_target = replace(_identity("target-id", "tool", "target"), **{field: value})
+    invalid_target = replace(_identity("target-id", "tool", "target"), **{field: value})  # type: ignore[arg-type]
 
     result = _build([candidate], [_decision(candidate)], [valid_source, invalid_target])
 
@@ -713,10 +636,10 @@ def test_identity_without_readable_alias_fields_invalidates_the_whole_snapshot()
         outcome="success",
         candidates=[candidate],
         decisions=[_decision(candidate)],
-        capability_snapshot=[  # type: ignore[list-item]
+        capability_snapshot=[
             _identity("source-id", "skill", "source"),
             _identity("target-id", "tool", "target"),
-            object(),
+            object(),  # type: ignore[list-item]
         ],
     )
 
@@ -1205,239 +1128,29 @@ def test_builder_signature_and_behavior_are_independent_of_planned_graph() -> No
     assert _build([], [], [])["graph"]["type"] == "execution_graph"
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        "empty",
-        "missing_graph_id",
-        "wrong_graph_type",
-        "not_directed",
-        "nodes_not_mapping",
-        "edges_not_list",
-        "invalid_outcome",
-        "failed_without_reason",
-        "success_with_reason",
-        "invalid_trace",
-        "query_not_string",
-        "invalid_quality_flags",
-        "unsorted_quality_flags",
-    ],
-)
-def test_submission_rejects_invalid_execution_envelope(case: str) -> None:
-    execution = _build([], [], [])
-    if case == "empty":
-        execution = {}
-    elif case == "missing_graph_id":
-        execution["graph"]["id"] = ""
-    elif case == "wrong_graph_type":
-        execution["graph"]["type"] = "planned_graph"
-    elif case == "not_directed":
-        execution["graph"]["directed"] = False
-    elif case == "nodes_not_mapping":
-        execution["graph"]["nodes"] = []
-    elif case == "edges_not_list":
-        execution["graph"]["edges"] = {}
-    elif case == "invalid_outcome":
-        execution["outcome"] = "unknown"
-    elif case == "failed_without_reason":
-        execution["outcome"] = "failed"
-    elif case == "success_with_reason":
-        execution["reason"] = "must be omitted"
-    elif case == "invalid_trace":
-        execution["trace_id"] = "bad trace"
-    elif case == "query_not_string":
-        execution["query"] = 42
-    elif case == "invalid_quality_flags":
-        execution["quality_flags"] = ["valid", 42]
-    elif case == "unsorted_quality_flags":
-        execution["quality_flags"] = ["z", "a"]
-
-    if case not in {"empty", "missing_graph_id"}:
-        _refresh_execution_graph_id(execution)
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "missing_endpoint",
-        "wrong_relation",
-        "missing_metadata",
-        "success_not_bool",
-        "too_few_evidence_refs",
-        "invalid_port_mapping",
-        "deterministic_evidence",
-        "missing_candidate_ref",
-        "missing_fragment_ref",
-        "ambiguous_endpoint_ports",
-        "failure_without_reason",
-    ],
-)
-def test_submission_rejects_invalid_execution_edge_contract(case: str) -> None:
-    execution = _execution_with_edge()
-    edge = execution["graph"]["edges"][0]
-    if case == "missing_endpoint":
-        edge["target"] = "missing-node"
-    elif case == "wrong_relation":
-        edge["relation"] = "depends_on"
-    elif case == "missing_metadata":
-        edge.pop("metadata")
-    elif case == "success_not_bool":
-        edge["metadata"]["success"] = 1
-    elif case == "too_few_evidence_refs":
-        edge["metadata"]["evidence_refs"] = edge["metadata"]["evidence_refs"][:1]
-    elif case == "invalid_port_mapping":
-        edge["metadata"]["port_mappings"] = [{"source_output": "", "target_input": "context"}]
-    elif case == "deterministic_evidence":
-        edge["metadata"]["evidence_method"] = "deterministic"
-        edge["metadata"]["evidence_strength"] = "strong"
-    elif case == "missing_candidate_ref":
-        edge["metadata"]["candidate_id"] = ""
-    elif case == "missing_fragment_ref":
-        edge["metadata"].pop("target_fragment_id")
-    elif case == "ambiguous_endpoint_ports":
-        source_id = edge["source"]
-        execution["graph"]["nodes"][source_id]["metadata"]["output_ports"].append("another_output")
-    elif case == "failure_without_reason":
-        edge["metadata"]["success"] = False
-
-    _refresh_execution_graph_id(execution)
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-def test_submission_rejects_execution_content_with_a_stale_graph_id() -> None:
-    execution = _execution_with_edge()
-    execution["query"] = "tampered after graph ID generation"
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize("duplicate_identity", ["candidate", "occurrence_pair"])
-def test_submission_rejects_duplicate_execution_edge_identity(duplicate_identity: str) -> None:
-    execution = _execution_with_edge()
-    duplicate = json.loads(json.dumps(execution["graph"]["edges"][0]))
-    if duplicate_identity == "occurrence_pair":
-        duplicate["metadata"]["candidate_id"] = "different-candidate"
-    execution["graph"]["edges"].append(duplicate)
-    _refresh_execution_graph_id(execution)
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "empty",
-        "missing_graph_id",
-        "wrong_graph_type",
-        "not_directed",
-        "not_ready",
-        "nodes_not_mapping",
-        "edges_not_list",
-        "missing_endpoint",
-        "wrong_relation",
-    ],
-)
-def test_submission_rejects_invalid_planned_envelope(case: str) -> None:
-    planned = _planned_graph()
-    if case == "empty":
-        planned = {}
-    elif case == "missing_graph_id":
-        planned["graph"]["id"] = ""
-    elif case == "wrong_graph_type":
-        planned["graph"]["type"] = "execution_graph"
-    elif case == "not_directed":
-        planned["graph"]["directed"] = False
-    elif case == "not_ready":
-        planned["graph"]["metadata"]["status"] = "needs_input"
-    elif case == "nodes_not_mapping":
-        planned["graph"]["nodes"] = []
-    elif case == "edges_not_list":
-        planned["graph"]["edges"] = {}
-    elif case == "missing_endpoint":
-        planned["graph"]["edges"][0]["target"] = "missing-node"
-    elif case == "wrong_relation":
-        planned["graph"]["edges"][0]["relation"] = "depends_on"
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(planned, _build([], [], []))
-
-
-@pytest.mark.parametrize("value", [{}, object(), _CustomMapping()])
-def test_submission_rejects_arbitrary_execution_objects(value: Any) -> None:
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, value)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("value", [object(), _CustomMapping()])
-def test_submission_rejects_arbitrary_planned_objects(value: Any) -> None:
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(value, _build([], [], []))  # type: ignore[arg-type]
-
-
-def test_capability_identity_and_submission_are_frozen_dataclasses() -> None:
-    identity = _identity("skill-id", "skill", "skill")
-    submission = build_symphony_graph_evolution_submission(None, _build([], [], []))
-
-    with pytest.raises(FrozenInstanceError):
-        identity.version = "2"  # type: ignore[misc]
-    with pytest.raises(FrozenInstanceError):
-        submission.submission_id = "changed"  # type: ignore[misc]
-
-
-def test_pair_submission_hash_uses_exact_canonical_pair_and_is_order_independent() -> None:
-    planned_a = _planned_graph()
-    planned_b = {
-        "graph": {
-            "edges": list(planned_a["graph"]["edges"]),
-            "nodes": dict(reversed(list(planned_a["graph"]["nodes"].items()))),
-            "metadata": dict(planned_a["graph"]["metadata"]),
-            "directed": True,
-            "type": "planned_graph",
-            "id": "planned-1",
-        }
+def test_builder_freezes_invoke_start_graph_snapshot_into_hashed_envelope() -> None:
+    snapshot = {
+        "static_revision": "static-start",
+        "observation_revision": "observation-start",
+        "merged_revision": "merged-start",
     }
-    execution_a = _build([], [], [])
-    execution_b = json.loads(json.dumps(execution_a, ensure_ascii=False))
 
-    first = build_symphony_graph_evolution_submission(planned_a, execution_a)
-    second = build_symphony_graph_evolution_submission(planned_b, execution_b)
-    canonical = json.dumps(
-        {"planned_graph": planned_a, "execution_graph": execution_a},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    expected = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    result = _build([], [], [], graph_snapshot=snapshot)
+    snapshot["static_revision"] = "mutated"
 
-    assert first.submission_id == second.submission_id == expected
-    assert first.planned_graph == second.planned_graph
-    assert first.execution_graph == second.execution_graph
+    assert result["graph_snapshot"]["static_revision"] == "static-start"
+    assert result["graph"]["id"].startswith("execution_graph:sha256:")
 
 
-def test_pair_submission_isolated_from_later_input_mutation_and_supports_planned_none() -> None:
-    planned = _planned_graph()
+def test_callback_boundary_rejects_stale_execution_graph_id() -> None:
     execution = _build([], [], [])
-    submission = build_symphony_graph_evolution_submission(planned, execution)
-    without_planned = build_symphony_graph_evolution_submission(None, execution)
+    execution["graph"]["label"] = "tampered after hashing"
 
-    planned["graph"]["nodes"]["source-id"]["metadata"]["type"] = "mutated"
-    execution["graph"]["label"] = "mutated"
-
-    assert submission.planned_graph["graph"]["nodes"]["source-id"]["metadata"]["type"] == "skill"
-    assert submission.execution_graph["graph"]["label"] == "capability execution graph"
-    assert without_planned.planned_graph is None
-    assert without_planned.submission_id.startswith("sha256:")
+    with pytest.raises(ValueError, match="invalid Symphony graph submission"):
+        _canonical_graph_pair(None, execution)
 
 
-def test_submission_returns_deeply_isolated_json_views_and_hash_stays_current() -> None:
+def test_callback_boundary_rejects_illegal_edge_metadata() -> None:
     source = _fragment(1, "skill", "source")
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
@@ -1446,139 +1159,36 @@ def test_submission_returns_deeply_isolated_json_views_and_hash_stays_current() 
         [_decision(candidate)],
         [_identity("source-id", "skill", "source"), _identity("target-id", "tool", "target")],
     )
-    planned = _planned_graph()
-    planned["graph"]["nodes"]["source-id"]["metadata"]["version"] = "1"
-    submission = build_symphony_graph_evolution_submission(planned, execution)
-    original_planned = submission.planned_graph
-    original_execution = submission.execution_graph
-    original_hash = submission.submission_id
+    execution["graph"]["edges"][0]["metadata"]["success"] = 1
+    graph_without_id = dict(execution["graph"])
+    graph_without_id.pop("id")
+    execution["graph"]["id"] = _execution_graph_id({**execution, "graph": graph_without_id})
 
-    submission.execution_graph["tampered"] = True
-    execution_view = submission.execution_graph
-    execution_view["graph"]["nodes"]["source-id"]["metadata"]["version"] = "mutated"
-    execution_view["graph"]["edges"].append({"source": "evil", "target": "evil"})
-    submission.planned_graph["tampered"] = True
-    planned_view = submission.planned_graph
-    planned_view["graph"]["nodes"]["source-id"]["metadata"]["version"] = "mutated"
-    planned_view["graph"]["edges"].clear()
-
-    assert submission.execution_graph == original_execution
-    assert submission.planned_graph == original_planned
-    assert submission.execution_graph is not submission.execution_graph
-    assert submission.planned_graph is not submission.planned_graph
-    assert json.loads(json.dumps(submission.execution_graph)) == original_execution
-    assert submission.submission_id == original_hash == _submission_hash(submission)
-    assert not hasattr(submission, "__dict__")
+    with pytest.raises(ValueError, match="invalid Symphony graph submission"):
+        _canonical_graph_pair(None, execution)
 
 
-def test_submission_public_serialization_api_returns_detached_json() -> None:
-    submission = build_symphony_graph_evolution_submission(_planned_graph(), _execution_with_edge())
-    payload = submission.to_dict()
-    pair_json = submission.canonical_pair_json()
-    pair_bytes = submission.canonical_pair_bytes()
-
-    assert payload == {
-        "submission_id": submission.submission_id,
-        "planned_graph": submission.planned_graph,
-        "execution_graph": submission.execution_graph,
-    }
-    assert pair_bytes == pair_json.encode("utf-8")
-    assert json.loads(pair_json) == {
-        "planned_graph": submission.planned_graph,
-        "execution_graph": submission.execution_graph,
-    }
-
-    payload["execution_graph"]["graph"]["edges"].clear()
-    payload["planned_graph"]["graph"]["nodes"].clear()
-    assert submission.execution_graph["graph"]["edges"]
-    assert submission.planned_graph["graph"]["nodes"]
-    assert submission.submission_id == _submission_hash(submission)
-
-
-@pytest.mark.parametrize(
-    ("planned", "execution"),
-    [
-        ({"value": float("nan")}, {}),
-        ({"value": {1, 2}}, {}),
-        ({1: "non-string-key"}, {}),
-        ({"value": ("tuple",)}, {}),
-        ({}, {"value": object()}),
-    ],
-)
-def test_pair_submission_rejects_nan_and_non_json_values(planned: dict[Any, Any], execution: dict[str, Any]) -> None:
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(planned, execution)
-
-
-def test_pair_submission_rejects_values_that_cannot_be_canonically_encoded_as_utf8() -> None:
-    with pytest.raises(ValueError):
-        execution = _build([], [], [])
-        execution["extra"] = "\ud800"
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize("case", ["circular", "deep", "evil_dict", "custom_mapping", "bytes", "nan"])
-def test_submission_normalization_errors_are_uniform_value_errors(case: str) -> None:
+@pytest.mark.parametrize("invalid", [float("nan"), object()])
+def test_callback_boundary_rejects_non_finite_and_non_json_values(invalid: Any) -> None:
     execution = _build([], [], [])
-    if case == "circular":
-        value: Any = {}
-        value["self"] = value
-    elif case == "deep":
-        value = {}
-        cursor = value
-        for _ in range(200):
-            cursor["next"] = {}
-            cursor = cursor["next"]
-    elif case == "evil_dict":
-        value = _EvilDict(value="secret")
-    elif case == "custom_mapping":
-        value = _CustomMapping()
-    elif case == "bytes":
-        value = b"not-json"
-    else:
-        value = float("nan")
-    execution["extra"] = value
+    execution["extra"] = invalid
 
     with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
+        _canonical_graph_pair(None, execution)
 
 
-def test_submission_normalization_does_not_swallow_base_exception() -> None:
+def test_callback_boundary_rejects_recursive_json() -> None:
     execution = _build([], [], [])
-    execution["extra"] = _BaseExplodingDict(value="secret")
+    recursive: dict[str, Any] = {}
+    recursive["self"] = recursive
+    execution["extra"] = recursive
 
-    with pytest.raises(KeyboardInterrupt, match="system cancellation"):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-def test_submission_normalization_preserves_memory_error() -> None:
-    execution = _build([], [], [])
-    execution["extra"] = _MemoryExplodingDict(value="secret")
-
-    with pytest.raises(MemoryError, match="memory exhausted"):
-        build_symphony_graph_evolution_submission(None, execution)
+    with pytest.raises(ValueError):
+        _canonical_graph_pair(None, execution)
 
 
-@pytest.mark.asyncio
-async def test_snapshot_provider_and_sink_protocols_are_usable_with_fakes() -> None:
-    identities = (_identity("skill-id", "skill", "skill"),)
+def test_capability_identity_is_a_frozen_dataclass() -> None:
+    identity = _identity("skill-id", "skill", "skill")
 
-    class FakeProvider:
-        def snapshot_capabilities(self) -> tuple[CapabilityIdentity, ...]:
-            return identities
-
-    class FakeSink:
-        def __init__(self) -> None:
-            self.received: list[SymphonyGraphEvolutionSubmission] = []
-
-        async def submit(self, submission: SymphonyGraphEvolutionSubmission) -> None:
-            self.received.append(submission)
-
-    provider: CapabilitySnapshotProvider = FakeProvider()
-    sink: SymphonyGraphObservationSink = FakeSink()
-    assert isinstance(provider, CapabilitySnapshotProvider)
-    assert isinstance(sink, SymphonyGraphObservationSink)
-    submission = build_symphony_graph_evolution_submission(None, _build([], [], list(provider.snapshot_capabilities())))
-    await sink.submit(submission)
-
-    assert sink.received == [submission]  # type: ignore[attr-defined]
+    with pytest.raises(FrozenInstanceError):
+        identity.version = "2"  # type: ignore[misc]

@@ -22,15 +22,12 @@ from openjiuwen.symphony.flow.models import (
     VERDICT_NEEDS_HUMAN_REVIEW,
     VERDICT_REJECTED,
     VERDICTS,
+    CombinationCandidate,
     ExperienceRecipe,
     InstallPreparation,
     RecipeEvidence,
     ReviewCheck,
     ReviewResult,
-)
-from openjiuwen.symphony.flow.observation import (
-    SymphonyFlowObservationSink,
-    build_symphony_flow_observation_sink,
 )
 from openjiuwen.symphony.flow.packager import (
     CapabilityPackager,
@@ -41,17 +38,20 @@ from openjiuwen.symphony.flow.render import (
     UnsupportedTargetException,
     render_package,
 )
-from openjiuwen.symphony.flow.review import PackageReviewGate
+from openjiuwen.symphony.flow.review import LLMPackageReviewAgent, PackageReviewAgent, PackageReviewGate
 from openjiuwen.symphony.flow.store import FlowStore
 
 __all__ = [
     "CapabilityPackager",
+    "CombinationCandidate",
     "DistillReport",
     "ExperienceRecipe",
     "FlowStore",
     "InstallPreparation",
+    "LLMPackageReviewAgent",
     "PACKAGE_SCHEMA_VERSION",
     "PackageReviewGate",
+    "PackageReviewAgent",
     "RECIPE_GRADES",
     "RECIPE_GRADE_CANDIDATE",
     "RECIPE_GRADE_VERIFIED",
@@ -68,7 +68,6 @@ __all__ = [
     "SkillAdapter",
     "SUPPORTED_TARGET_KINDS",
     "SymphonyFlowEngine",
-    "SymphonyFlowObservationSink",
     "TARGET_KIND_PLUGIN",
     "TARGET_KIND_SKILL",
     "UnsupportedTargetException",
@@ -77,5 +76,4 @@ __all__ = [
     "VERDICT_NEEDS_HUMAN_REVIEW",
     "VERDICT_REJECTED",
     "render_package",
-    "build_symphony_flow_observation_sink",
 ]

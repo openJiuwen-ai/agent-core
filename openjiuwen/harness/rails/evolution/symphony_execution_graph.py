@@ -16,7 +16,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 from unicodedata import category as unicode_category
 
@@ -66,74 +66,6 @@ class CapabilitySnapshotProvider(Protocol):
         ...
 
 
-@dataclass(frozen=True, init=False, slots=True)
-class SymphonyGraphEvolutionSubmission:
-    """Deeply immutable canonical planned/execution graph pair.
-
-    ``planned_graph`` and ``execution_graph`` return detached JSON-compatible
-    views on every read.  Mutating a returned mapping or nested list therefore
-    cannot change later reads or invalidate ``submission_id``.
-    """
-
-    submission_id: str
-    _canonical_pair_json: str = field(repr=False)
-
-    def __init__(
-        self,
-        planned_graph: dict[str, Any] | None,
-        execution_graph: dict[str, Any],
-    ) -> None:
-        canonical_pair = _canonical_graph_pair(planned_graph, execution_graph)
-        object.__setattr__(
-            self,
-            "submission_id",
-            f"sha256:{hashlib.sha256(canonical_pair.encode('utf-8')).hexdigest()}",
-        )
-        object.__setattr__(self, "_canonical_pair_json", canonical_pair)
-
-    @property
-    def planned_graph(self) -> dict[str, Any] | None:
-        """Return a detached planned-graph JSON view, if one was captured."""
-
-        return json.loads(self._canonical_pair_json)["planned_graph"]
-
-    @property
-    def execution_graph(self) -> dict[str, Any]:
-        """Return a detached execution-graph JSON view."""
-
-        return json.loads(self._canonical_pair_json)["execution_graph"]
-
-    def canonical_pair_json(self) -> str:
-        """Return the immutable canonical pair JSON used for hashing."""
-
-        return self._canonical_pair_json
-
-    def canonical_pair_bytes(self) -> bytes:
-        """Return the canonical UTF-8 bytes used to derive ``submission_id``."""
-
-        return self._canonical_pair_json.encode("utf-8")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a detached sink payload; do not JSON-encode this object directly."""
-
-        pair = json.loads(self._canonical_pair_json)
-        return {
-            "submission_id": self.submission_id,
-            "planned_graph": pair["planned_graph"],
-            "execution_graph": pair["execution_graph"],
-        }
-
-
-@runtime_checkable
-class SymphonyGraphObservationSink(Protocol):
-    """Asynchronous sink contract; Rail owns failure isolation."""
-
-    async def submit(self, submission: SymphonyGraphEvolutionSubmission) -> None:
-        """Accept one completed graph-evolution submission."""
-
-        ...
-
-
 def build_symphony_execution_graph(
     *,
     trace_id: str,
@@ -144,6 +76,7 @@ def build_symphony_execution_graph(
     capability_snapshot: Sequence[CapabilityIdentity],
     reason: str | None = None,
     quality_flags: Sequence[str] = (),
+    graph_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic JGF execution graph from observed edge decisions.
 
@@ -233,6 +166,11 @@ def build_symphony_execution_graph(
     flags = _normalized_quality_flags(quality_flags)
     if flags:
         envelope_for_id["quality_flags"] = list(flags)
+    if graph_snapshot is not None:
+        normalized_snapshot = _normalized_graph_snapshot(graph_snapshot)
+        if normalized_snapshot is None:
+            return {}
+        envelope_for_id["graph_snapshot"] = normalized_snapshot
     try:
         graph_id = _execution_graph_id(envelope_for_id)
     except (TypeError, ValueError):
@@ -244,15 +182,6 @@ def build_symphony_execution_graph(
         **graph_without_id,
     }
     return result
-
-
-def build_symphony_graph_evolution_submission(
-    planned_graph: dict[str, Any] | None,
-    execution_graph: dict[str, Any],
-) -> SymphonyGraphEvolutionSubmission:
-    """Build a deeply immutable pair with a canonical SHA-256 identity."""
-
-    return SymphonyGraphEvolutionSubmission(planned_graph, execution_graph)
 
 
 @dataclass(frozen=True)
@@ -632,6 +561,24 @@ def _validated_trace_id(value: Any) -> str | None:
     return value
 
 
+def _normalized_graph_snapshot(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    output: dict[str, str] = {}
+    for field_name in ("static_revision", "observation_revision"):
+        normalized = _nonempty_text(value.get(field_name))
+        if normalized is None:
+            return None
+        output[field_name] = normalized
+    merged_revision = value.get("merged_revision")
+    if merged_revision is not None:
+        normalized = _nonempty_text(merged_revision)
+        if normalized is None:
+            return None
+        output["merged_revision"] = normalized
+    return output
+
+
 def _canonical_graph_pair(
     planned_graph: dict[str, Any] | None,
     execution_graph: dict[str, Any],
@@ -743,6 +690,8 @@ def _validate_execution_envelope(envelope: Any) -> None:
             or flags != sorted(set(flags))
         ):
             raise ValueError("execution_graph.quality_flags must be sorted unique strings")
+    if "graph_snapshot" in envelope and _normalized_graph_snapshot(envelope["graph_snapshot"]) is None:
+        raise ValueError("execution_graph.graph_snapshot is invalid")
 
     graph = envelope.get("graph")
     nodes, edges = _validate_graph_shell(graph, "execution_graph")
@@ -917,8 +866,5 @@ def _execution_graph_id(envelope_without_graph_id: Mapping[str, Any]) -> str:
 __all__ = [
     "CapabilityIdentity",
     "CapabilitySnapshotProvider",
-    "SymphonyGraphEvolutionSubmission",
-    "SymphonyGraphObservationSink",
     "build_symphony_execution_graph",
-    "build_symphony_graph_evolution_submission",
 ]
