@@ -8,7 +8,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
-from typing import List, Any, Union, Optional, Tuple, Dict, Iterable
+from typing import List, Any, Union, Optional, Tuple, Dict, Iterable, Callable
 
 import anyio
 from pydantic import BaseModel
@@ -292,10 +292,63 @@ class AbilityManager:
         return bool(getattr(tool_card, "parallel_safe", True))
 
     @classmethod
+    def _ensure_tool_task(
+            cls,
+            awaitable: Any,
+            *,
+            tool_call: Optional[ToolCall] = None,
+            on_task_started: Optional[Callable[[asyncio.Task], None]] = None,
+    ) -> asyncio.Task:
+        """Wrap an awaitable as a Task only when it is about to run.
+
+        Eager ``create_task`` for an entire tool batch would start every call
+        immediately and break resource serialization / ``parallel_safe=False``
+        barriers. Callers that need abort-time cancel tracking can pass
+        ``on_task_started`` to observe each Task when it is first scheduled.
+        """
+        if isinstance(awaitable, asyncio.Task):
+            task = awaitable
+        else:
+            name = (
+                f"tool:{tool_call.name}:{tool_call.id}"
+                if tool_call is not None
+                else None
+            )
+            task = (
+                asyncio.create_task(awaitable, name=name)
+                if name
+                else asyncio.create_task(awaitable)
+            )
+        if on_task_started is not None:
+            on_task_started(task)
+        return task
+
+    @classmethod
+    async def _await_tool_task(
+            cls,
+            awaitable: Any,
+            *,
+            tool_call: Optional[ToolCall] = None,
+            on_task_started: Optional[Callable[[asyncio.Task], None]] = None,
+    ) -> Any:
+        """Start (if needed) and await one tool task, mapping exceptions to values."""
+        task = cls._ensure_tool_task(
+            awaitable,
+            tool_call=tool_call,
+            on_task_started=on_task_started,
+        )
+        try:
+            return await task
+        except BaseException as exc:  # Match gather(return_exceptions=True).
+            return exc
+
+    @classmethod
     async def _execute_resource_ordered_tool_tasks(
             cls,
             tool_calls: List[ToolCall],
             tasks: List[Any],
+            *,
+            on_task_started: Optional[Callable[[asyncio.Task], None]] = None,
     ) -> List[Any]:
         """Run independent resources concurrently and each resource in order."""
         lanes: Dict[str, List[int]] = {}
@@ -308,10 +361,13 @@ class AbilityManager:
         async def _run_lane(indices: List[int]) -> List[Tuple[int, Any]]:
             lane_results: List[Tuple[int, Any]] = []
             for index in indices:
-                try:
-                    result = await tasks[index]
-                except BaseException as exc:  # Match gather(return_exceptions=True).
-                    result = exc
+                # Delay Task creation until this lane is ready for the call so
+                # earlier same-resource work actually blocks later starts.
+                result = await cls._await_tool_task(
+                    tasks[index],
+                    tool_call=tool_calls[index],
+                    on_task_started=on_task_started,
+                )
                 lane_results.append((index, result))
             return lane_results
 
@@ -330,6 +386,8 @@ class AbilityManager:
             tool_calls: List[ToolCall],
             tasks: List[Any],
             tool_cards: Optional[Dict[str, ToolCard]] = None,
+            *,
+            on_task_started: Optional[Callable[[asyncio.Task], None]] = None,
     ) -> List[Any]:
         """Run parallel-safe tools concurrently and non-safe tools exclusively.
 
@@ -338,6 +396,10 @@ class AbilityManager:
         order while different resources can overlap. A non-parallel-safe tool
         forms a single-call barrier: earlier safe calls finish before it starts,
         and later calls wait until it completes.
+
+        Awaitables are scheduled as Tasks only when execution is permitted, so
+        barrier / resource-order semantics control start time, not merely wait
+        order. Optional ``on_task_started`` records each Task for abort cleanup.
         """
         results: List[Any] = [None] * len(tasks)
         batch_call_indices: List[int] = []
@@ -348,6 +410,7 @@ class AbilityManager:
             batch_results = await cls._execute_resource_ordered_tool_tasks(
                 [tool_calls[index] for index in batch_call_indices],
                 [tasks[index] for index in batch_call_indices],
+                on_task_started=on_task_started,
             )
             for index, result in zip(batch_call_indices, batch_results):
                 results[index] = result
@@ -359,10 +422,11 @@ class AbilityManager:
                 continue
 
             await _flush_parallel_batch()
-            try:
-                results[index] = await tasks[index]
-            except BaseException as exc:  # Match gather(return_exceptions=True).
-                results[index] = exc
+            results[index] = await cls._await_tool_task(
+                tasks[index],
+                tool_call=single_tool_call,
+                on_task_started=on_task_started,
+            )
 
         await _flush_parallel_batch()
         return results
@@ -1035,25 +1099,17 @@ class AbilityManager:
         scheduled_tasks: List[asyncio.Task] = []
         try:
             if parallel_tool_calls:
-                # Schedule as Tasks (not bare coroutines) so parallel lane
-                # gathers cancel children cleanly without aliasing the waiter.
-                scheduled_tasks = [
-                    asyncio.create_task(
-                        coro,
-                        name=(
-                            f"tool:{tool_calls[i].name}:"
-                            f"{tool_calls[i].id}"
-                        ),
-                    )
-                    for i, coro in enumerate(call_coros)
-                ]
                 # Preserve parallelism across independent resources while executing
                 # calls for the same file in model-emitted order. Tools marked as
                 # non-parallel-safe execute as exclusive barriers within the turn.
+                # Tasks are created lazily when a call is allowed to start so
+                # resource / parallel_safe barriers control start time; started
+                # Tasks are tracked for abort-time cancel without waiter aliasing.
                 results = await self._execute_parallel_tool_tasks(
                     tool_calls,
-                    scheduled_tasks,
+                    call_coros,
                     tool_cards=self._tools,
+                    on_task_started=scheduled_tasks.append,
                 )
             else:
                 # Execute all tool calls in sequence (do not pre-schedule).

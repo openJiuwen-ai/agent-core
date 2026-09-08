@@ -2806,8 +2806,8 @@ class DeepAgent(BaseAgent):
             raise
         finally:
             # Stall aclose / GeneratorExit does not raise CancelledError, so
-            # CancelledError-only teardown left _stream_process and parallel
-            # tool gathers pending ("Task was destroyed but it is pending").
+            # CancelledError-only teardown left _stream_process, parallel tool
+            # gathers, and SubagentControl caches pending.
             if not task.done():
                 try:
                     await self._cancel_session_deep_tasks(
@@ -2816,6 +2816,16 @@ class DeepAgent(BaseAgent):
                 except Exception:
                     logger.debug(
                         "deep task cancel during stream close failed",
+                        exc_info=True,
+                    )
+                try:
+                    await self._release_session_subagent_controls(
+                        session,
+                        reason="stream_cancelled",
+                    )
+                except Exception:
+                    logger.debug(
+                        "subagent control release during stream close failed",
                         exc_info=True,
                     )
                 try:
