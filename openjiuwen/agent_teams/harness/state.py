@@ -84,12 +84,16 @@ class InboxMessage:
             when False, buffer until the active round finishes.
         admitted_tool_scope_ids: Pending tool IDs observed when this structured
             input entered the harness. Empty for text or an uncommitted slot.
+        admitted_workflow_slot: Workflow and component IDs awaiting a workflow
+            reply when this input entered the harness. None for non-workflow
+            input.
     """
 
     seq: int
     content: "str | InteractiveInput"
     immediate: bool
     admitted_tool_scope_ids: frozenset[str] = field(default_factory=frozenset)
+    admitted_workflow_slot: tuple[str, str] | None = None
 
 
 @dataclass(slots=True)

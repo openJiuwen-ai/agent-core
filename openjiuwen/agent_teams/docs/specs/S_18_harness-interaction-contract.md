@@ -1,6 +1,6 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-07-31
+最近一次修订日期：2026-09-08
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -8,6 +8,8 @@ TeamHarness/StreamController）的决策见 [[F_28_native-harness-team-adoption]
 `add_rail` 委派见 [[F_39_swarmflow-e2e-hardening]]；pause / abort / resume 的 inner-iteration
 级语义与原地续跑见 [[F_60_native-harness-pause-abort-resume]]；跨 stop/start 的冷恢复续跑见
 [[F_61_cold-resume-across-stop-start]]。
+structured interrupt resume 的队列与匹配边界见
+[[F_75_idle-trigger-interrupt-resume-deadlock]]。
 
 ## 两层契约
 
@@ -180,3 +182,17 @@ batch。重复 tool approval 只有在 admission scope、active round scope 和 
 已消失三项证据同时成立时才删除；多 ID approval 按字段裁剪已消费 ID，仍 pending 的字段保留并继续
 匹配。此路径与 warm resume 正交：一个 InteractiveInput round 被 pause
 时不缓存其 query（不可 replay），PAUSED 收到 InteractiveInput 则直接起它自己的单轮 round。
+
+TeamHarness gate 与 NativeHarness settle 共用同一个 state-aware matcher：
+
+- `ToolInterruptionState` 只接受非空 keyed IDs，且 IDs 必须是当前 pending tool request IDs 的子集；
+- workflow `InterruptionState` 接受 `raw_inputs is not None`，或 keyed input 包含当前
+  `pending_component_id`；空字符串、空 list 等合法 raw 值不能按 truthiness 拒绝；
+- 未知或空 state 一律 invalid。workflow 匹配不生成 tool admission scope，即使 component ID
+  与 tool request ID 同名也不能继承 tool duplicate provenance。
+
+ReAct 消费 raw workflow input 时新建 keyed `InteractiveInput`，把 raw value 原样映射到当前
+component；不在带 `raw_inputs` 的调用方对象上调用 `update()`，也不把非字符串值强制转成文本。
+NativeHarness 在 workflow reply admission 时记录当时的 workflow ID 与 component ID；queued workflow
+reply 只在该二元 slot 仍为 current 时匹配，不能在 workflow 推进后自动回答下一 component，不能回答
+另一个使用同名 component 的 workflow，也不能被重解释为同 ID 的 tool interrupt。

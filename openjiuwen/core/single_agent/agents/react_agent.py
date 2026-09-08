@@ -1927,6 +1927,11 @@ class ReActAgent(BaseAgent):
         """Build an InteractiveInput from user feedback and component IDs."""
         from openjiuwen.core.session import InteractiveInput
         if isinstance(user_query, InteractiveInput):
+            if user_query.raw_inputs is not None:
+                interactive_input = InteractiveInput()
+                for comp_id in component_ids:
+                    interactive_input.update(comp_id, user_query.raw_inputs)
+                return interactive_input
             provided_ids = set(user_query.user_inputs.keys())
             fallback = next(iter(user_query.user_inputs.values()), "") if provided_ids else ""
             for comp_id in component_ids:

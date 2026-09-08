@@ -9,6 +9,10 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from openjiuwen.agent_teams.harness.interrupt_resume import (
+    matches_pending_interrupt,
+    tool_resume_scope_ids,
+)
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner import Runner
@@ -18,6 +22,10 @@ from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPTION_KEY,
     ToolInterruptEntry,
     ToolInterruptionState,
+)
+from openjiuwen.core.single_agent.agents.react_agent import (
+    InterruptionState,
+    WorkflowInterruptEntry,
 )
 from tests.unit_tests.agent_teams.harness.fixtures import (
     drain_outputs,
@@ -54,6 +62,65 @@ def _approval(*request_ids: str) -> InteractiveInput:
     for request_id in request_ids:
         value.update(request_id, {"approved": True})
     return value
+
+
+def _workflow_state(
+    component_id: str = "component-1",
+    workflow_id: str = "workflow-1",
+) -> InterruptionState:
+    return InterruptionState(
+        ai_message=AssistantMessage(content="workflow input required"),
+        iteration=1,
+        interrupted_workflows={
+            workflow_id: WorkflowInterruptEntry(
+                tool_call=ToolCall(
+                    id=workflow_id,
+                    type="function",
+                    name="workflow_tool",
+                    arguments="{}",
+                ),
+                component_ids=[component_id],
+                workflow_execution_state={},
+            )
+        },
+        pending_workflow_id=workflow_id,
+        pending_component_id=component_id,
+    )
+
+
+@pytest.mark.level1
+@pytest.mark.parametrize("raw_value", ["", [], {"approved": False}])
+def test_workflow_raw_input_matches_pending_component(raw_value: Any) -> None:
+    assert matches_pending_interrupt(
+        InteractiveInput(raw_inputs=raw_value),
+        _workflow_state(),
+    )
+
+
+@pytest.mark.level1
+def test_workflow_keyed_input_matches_only_pending_component() -> None:
+    matching = InteractiveInput()
+    matching.update("component-1", "answer")
+    mismatched = InteractiveInput()
+    mismatched.update("component-2", "answer")
+
+    state = _workflow_state()
+    assert matches_pending_interrupt(matching, state)
+    assert not matches_pending_interrupt(mismatched, state)
+
+
+@pytest.mark.level1
+def test_workflow_match_does_not_create_tool_admission_scope() -> None:
+    candidate = InteractiveInput()
+    candidate.update("shared-id", "answer")
+    session = type(
+        "WorkflowSession",
+        (),
+        {"get_state": lambda self, key: _workflow_state("shared-id")},
+    )()
+
+    assert matches_pending_interrupt(candidate, session.get_state(INTERRUPTION_KEY))
+    assert tool_resume_scope_ids(candidate, session) == frozenset()
 
 
 async def _wait_for_invocations(fake: Any, count: int) -> None:
@@ -179,6 +246,7 @@ async def test_structured_resume_precedes_text_across_reinterrupt(
         ]
     finally:
         await Runner.stop()
+
 
 @pytest.mark.asyncio
 @pytest.mark.level1
@@ -359,5 +427,223 @@ async def test_partially_consumed_multi_id_approval_keeps_pending_fields() -> No
         second_query = fake.invocations[1]["query"]
         assert isinstance(second_query, InteractiveInput)
         assert second_query.user_inputs == {"call-2": {"approved": True}}
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize(
+    ("next_workflow_id", "next_component_id"),
+    [
+        ("workflow-1", "component-2"),
+        ("workflow-2", "component-1"),
+    ],
+)
+async def test_queued_raw_workflow_reply_stays_bound_to_admission_slot(
+    next_workflow_id: str,
+    next_component_id: str,
+) -> None:
+    """A duplicate raw reply must not answer a different workflow slot."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness)
+        session = harness.loop_session
+        session.update_state({INTERRUPTION_KEY: _workflow_state("component-1")})
+        first = InteractiveInput(raw_inputs="first answer")
+        duplicate = InteractiveInput(raw_inputs="duplicate first answer")
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        base_invoke = fake.invoke
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            first_entered.set()
+            await release_first.wait()
+            result = await base_invoke(inputs, invoke_session, **kwargs)
+            invoke_session.update_state(
+                {
+                    INTERRUPTION_KEY: _workflow_state(
+                        next_component_id,
+                        next_workflow_id,
+                    )
+                }
+            )
+            return result
+
+        fake.invoke = invoke
+        collected: list[Any] = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send(first)
+            await asyncio.wait_for(first_entered.wait(), timeout=3.0)
+            await harness.send(duplicate)
+            release_first.set()
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            await asyncio.sleep(0.05)
+            assert [item["query"] for item in fake.invocations] == [first]
+            assert len(harness._st.pending_queue) == 1
+            queued = harness._st.pending_queue[0]
+            assert queued.content == duplicate
+            assert queued.admitted_workflow_slot == (
+                "workflow-1",
+                "component-1",
+            )
+        finally:
+            release_first.set()
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize(
+    ("next_workflow_id", "next_component_id"),
+    [
+        ("workflow-1", "component-2"),
+        ("workflow-2", "component-1"),
+    ],
+)
+async def test_queued_keyed_workflow_reply_stays_bound_to_admission_slot(
+    next_workflow_id: str,
+    next_component_id: str,
+) -> None:
+    """A queued keyed reply cannot be retargeted to another workflow slot."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness)
+        session = harness.loop_session
+        session.update_state({INTERRUPTION_KEY: _workflow_state("component-1")})
+        first = _approval("component-1")
+        queued_reply = _approval("component-1")
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        base_invoke = fake.invoke
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            first_entered.set()
+            await release_first.wait()
+            result = await base_invoke(inputs, invoke_session, **kwargs)
+            invoke_session.update_state(
+                {
+                    INTERRUPTION_KEY: _workflow_state(
+                        next_component_id,
+                        next_workflow_id,
+                    )
+                }
+            )
+            return result
+
+        fake.invoke = invoke
+        collected: list[Any] = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send(first)
+            await asyncio.wait_for(first_entered.wait(), timeout=3.0)
+            await harness.send(queued_reply)
+            release_first.set()
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            await asyncio.sleep(0.05)
+            assert [item["query"] for item in fake.invocations] == [first]
+            assert [message.content for message in harness._st.pending_queue] == [queued_reply]
+            if next_workflow_id == "workflow-2":
+                assert harness._st.pending_queue[0].admitted_workflow_slot == (
+                    "workflow-1",
+                    "component-1",
+                )
+        finally:
+            release_first.set()
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_queued_keyed_workflow_retry_starts_for_same_admission_slot() -> None:
+    """A keyed reply retries as its original structured object for the same slot."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness)
+        session = harness.loop_session
+        session.update_state({INTERRUPTION_KEY: _workflow_state("component-1")})
+        first = _approval("component-1")
+        retry = _approval("component-1")
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        base_invoke = fake.invoke
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            if not fake.invocations:
+                first_entered.set()
+                await release_first.wait()
+            return await base_invoke(inputs, invoke_session, **kwargs)
+
+        fake.invoke = invoke
+        collected: list[Any] = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send(first)
+            await asyncio.wait_for(first_entered.wait(), timeout=3.0)
+            await harness.send(retry)
+            release_first.set()
+            await _wait_for_invocations(fake, 2)
+            assert await wait_for_state(harness, HarnessState.IDLE)
+        finally:
+            release_first.set()
+            await harness.stop()
+            await consumer
+
+        second_query = fake.invocations[1]["query"]
+        assert isinstance(second_query, InteractiveInput)
+        assert second_query == retry
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_keyed_workflow_admission_does_not_match_tool_with_same_id() -> None:
+    """Workflow provenance prevents a keyed reply from becoming a tool reply."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness)
+        session = harness.loop_session
+        session.update_state({INTERRUPTION_KEY: _workflow_state("shared-id")})
+        first = _approval("shared-id")
+        queued_reply = _approval("shared-id")
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        base_invoke = fake.invoke
+
+        async def invoke(inputs: Any, invoke_session: Any, **kwargs: Any) -> dict:
+            first_entered.set()
+            await release_first.wait()
+            result = await base_invoke(inputs, invoke_session, **kwargs)
+            invoke_session.update_state({INTERRUPTION_KEY: _tool_state("shared-id")})
+            return result
+
+        fake.invoke = invoke
+        collected: list[Any] = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send(first)
+            await asyncio.wait_for(first_entered.wait(), timeout=3.0)
+            await harness.send(queued_reply)
+            release_first.set()
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            await asyncio.sleep(0.05)
+            assert [item["query"] for item in fake.invocations] == [first]
+            assert [message.content for message in harness._st.pending_queue] == [queued_reply]
+        finally:
+            release_first.set()
+            await harness.stop()
+            await consumer
     finally:
         await Runner.stop()

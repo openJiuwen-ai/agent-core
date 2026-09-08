@@ -93,3 +93,18 @@ async def test_resume_handler_entry_consumes_interruption_state(
         )
 
     assert session.get_state(INTERRUPTION_KEY) is None
+
+
+@pytest.mark.level1
+@pytest.mark.parametrize("raw_value", ["", [], {"approved": False}])
+def test_build_workflow_input_copies_raw_value_without_mutating_caller(raw_value: Any) -> None:
+    agent, _ = _agent_and_session()
+    original = InteractiveInput(raw_inputs=raw_value)
+
+    converted = agent._build_interactive_input(original, ["component-1"])
+
+    assert converted is not original
+    assert converted.raw_inputs is None
+    assert converted.user_inputs == {"component-1": raw_value}
+    assert original.raw_inputs == raw_value
+    assert original.user_inputs == {}

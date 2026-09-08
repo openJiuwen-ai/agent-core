@@ -63,3 +63,22 @@ self-shutdown use a terminal latch that is reset only by the next cycle's
 `resume_interrupt()` completes, while StreamController's closure remains the
 teardown guard because Runner finalization currently begins before the gate is
 closed.
+
+## Workflow Interrupt Inputs
+
+TeamHarness admission and NativeHarness settlement use one matcher over the
+actual interruption state. Tool interrupts require a non-empty keyed subset of
+pending request IDs. Workflow interrupts accept a raw value, including falsey
+values, or keyed input containing the current component ID. Unknown state is
+rejected, and workflow matches never acquire tool duplicate provenance even
+when IDs happen to be equal.
+
+ReAct converts a raw workflow reply into a new keyed `InteractiveInput` for the
+current component. It preserves the raw value without string conversion and
+does not mutate the caller's raw-bearing object.
+
+NativeHarness also records the pending workflow and component IDs when a
+workflow reply is admitted. Queue settlement requires that exact slot to still
+be current, so a duplicate reply cannot be reinterpreted as feedback for
+another component, a different workflow that uses the same component ID, or a
+tool interrupt with the same ID.

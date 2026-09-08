@@ -72,9 +72,10 @@ from openjiuwen.agent_teams.harness.control import (
 )
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
 from openjiuwen.agent_teams.harness.interrupt_resume import (
-    matches_pending_interrupt,
+    matches_admitted_interrupt,
     pending_tool_resume_ids,
     tool_resume_scope_ids,
+    workflow_resume_slot,
 )
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.snapshot_rail import (
@@ -544,11 +545,20 @@ class NativeHarness(DeepAgent):
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
+        interrupt_state = (
+            self._session.get_state(INTERRUPTION_KEY)
+            if self._session is not None
+            else None
+        )
         msg = InboxMessage(
             seq=0,
             content=content,
             immediate=immediate,
             admitted_tool_scope_ids=tool_resume_scope_ids(content, self._session),
+            admitted_workflow_slot=workflow_resume_slot(
+                content,
+                interrupt_state,
+            ),
         )
         await self._control.put(_CmdSend(msg=msg, ack=ack))
         return await ack
@@ -823,6 +833,7 @@ class NativeHarness(DeepAgent):
             content=cmd.msg.content,
             immediate=cmd.msg.immediate,
             admitted_tool_scope_ids=cmd.msg.admitted_tool_scope_ids,
+            admitted_workflow_slot=cmd.msg.admitted_workflow_slot,
         )
 
         phase = self._st.phase
@@ -1213,7 +1224,11 @@ class NativeHarness(DeepAgent):
             selected: InboxMessage | None = None
             remaining: list[InboxMessage] = []
             for message in self._st.pending_queue:
-                if selected is None and matches_pending_interrupt(message.content, current_state):
+                if selected is None and matches_admitted_interrupt(
+                    message.content,
+                    current_state,
+                    message.admitted_workflow_slot,
+                ):
                     selected = message
                 else:
                     remaining.append(message)
