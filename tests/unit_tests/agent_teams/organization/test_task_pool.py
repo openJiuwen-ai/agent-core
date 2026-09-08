@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManag
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
     OrgAssignmentType,
+    OrgSummaryExecutionStatus,
     OrgTaskAggregationMode,
     OrgTaskCreator,
     OrgTaskEventRecord,
@@ -2774,3 +2775,105 @@ async def test_drain_leader_turns_waits_until_running_team_pauses(active_organiz
     assert key not in org_runtime._leader_turn_queues
     assert key not in org_runtime._leader_turn_workers
     assert len(sleep_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_summary_task_is_framework_owned_and_waiting_for_sources(org_manager):
+    manager, _ = org_manager
+    summary = await manager.create_summary_task(
+        task_id="summary-built",
+        title="Summary",
+        description="Integrate.",
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-root",
+            organization_id="org-1",
+            team_id="team-root",
+        ),
+    )
+    assert summary.ok
+    task = summary.task
+    assert task.status is OrgTaskStatus.WAITING_SOURCES
+    assert task.parent_task_id is None
+    assert task.root_task_id == "summary-built"
+    assert task.task_type == "organization.summary"
+    assert task.required_capabilities == ["summary"]
+    assert task.aggregation is not None
+    assert task.aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+    assert task.aggregation.summary_task_id == "summary-built"
+    assert task.aggregation.final_output_task_id == "summary-built"
+
+
+@pytest.mark.asyncio
+async def test_summary_sources_ready_only_when_all_required_complete_and_accepted(org_manager):
+    manager, _ = org_manager
+    await manager.create_task(
+        task_id="src-1",
+        title="S1",
+        description="d",
+        required_capabilities=["a"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="c", organization_id="org-1"),
+    )
+    await manager.create_task(
+        task_id="src-2",
+        title="S2",
+        description="d",
+        required_capabilities=["a"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="c", organization_id="org-1"),
+    )
+    summary = await manager.create_summary_task(
+        task_id="summary-ready",
+        title="Summary",
+        description="Integrate.",
+        created_by=OrgTaskCreator(creator_type="team_leader", creator_id="leader-root", organization_id="org-1", team_id="team-root"),
+    )
+    assert summary.ok
+    # No sources bound yet.
+    verdict = await manager.evaluate_summary_sources(summary_task_id="summary-ready")
+    assert not verdict["ready"]
+    # Attach fails because a source is not COMPLETED yet.
+    attach = await manager.attach_summary_sources(
+        summary_task_id="summary-ready", source_task_ids=["src-1", "src-2"]
+    )
+    assert not attach.ok
+
+    for task_id, team_id in (("src-1", "team-a"), ("src-2", "team-b")):
+        await manager.claim_task(task_id=task_id, team_id=team_id)
+        await manager.complete_task(task_id=task_id, team_id=team_id, output_abstract="out")
+
+    attach = await manager.attach_summary_sources(
+        summary_task_id="summary-ready", source_task_ids=["src-1", "src-2"]
+    )
+    assert attach.ok
+    verdict = await manager.evaluate_summary_sources(summary_task_id="summary-ready")
+    assert verdict["ready"]
+
+
+@pytest.mark.asyncio
+async def test_summary_execution_lifecycle(org_manager):
+    manager, _ = org_manager
+    execution = await manager.create_summary_execution(
+        root_task_id="root-1", summary_task_id="summary-1"
+    )
+    assert execution.status is OrgSummaryExecutionStatus.PROVISIONING
+    assert execution.summary_team_id is None
+
+    running = await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    assert running is not None
+    assert running.status is OrgSummaryExecutionStatus.RUNNING
+    assert running.summary_team_id == "team-summary"
+
+    listed = await manager.list_summary_executions(root_task_id="root-1")
+    assert [e.execution_id for e in listed] == [execution.execution_id]
+    assert await manager.list_summary_executions(root_task_id="root-nope") == []
+
+    released = await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RELEASED,
+        released_at=1234,
+    )
+    assert released is not None and released.released_at == 1234

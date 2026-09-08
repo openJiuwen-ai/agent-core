@@ -39,6 +39,8 @@ from openjiuwen.agent_teams.organization.events import (
 )
 from openjiuwen.agent_teams.organization.message_service import OrgMessageService
 from openjiuwen.agent_teams.organization.schema import (
+    ORG_SUMMARY_CAPABILITY,
+    ORG_SUMMARY_TASK_TYPE,
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
     ORG_TASK_REPAIRS_TASK_ID_KEY,
     ORG_TASK_RETRY_COUNT_KEY,
@@ -52,6 +54,9 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgLeaderMessageReceiptRecord,
     OrgLeaderMessageRecord,
     OrgLeaderRecord,
+    OrgSummaryExecution,
+    OrgSummaryExecutionStatus,
+    OrgSummaryExecutionRecord,
     OrgTask,
     OrgTaskAggregationConfig,
     OrgTaskAggregationMode,
@@ -1619,29 +1624,27 @@ class OrgTaskManager:
         description: str,
         created_by: OrgTaskCreator,
         task_id: str | None = None,
+        root_task_id: str | None = None,
         source_task_ids: list[str] | None = None,
         output_spec: OrgTaskOutputSpec | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> OrgTaskOpResult:
-        result = await self.create_task(
+        task_id = task_id or f"org-task-{uuid.uuid4().hex[:12]}"
+        # a Summary Task is framework-owned and independent of the child tree:
+        # parent_task_id stays None, root_task_id points at the organizational
+        # root whose SUMMARY_TEAM result this task produces.
+        result = await self._build_summary_task(
             task_id=task_id,
             title=title,
             description=description,
-            task_type="organization.summary",
-            required_capabilities=["summary"],
+            created_by=created_by,
+            root_task_id=root_task_id or task_id,
+            source_task_ids=source_task_ids,
             output_spec=output_spec,
             metadata=metadata,
-            created_by=created_by,
         )
         if not result.ok or result.task is None:
             return result
-        if source_task_ids:
-            attach = await self.attach_summary_sources(
-                summary_task_id=result.task.task_id,
-                source_task_ids=source_task_ids,
-            )
-            if not attach.ok:
-                return attach
         await self._publish_event(
             OrgSummaryTaskCreatedEvent(
                 organization_id=self.organization_id,
@@ -1651,6 +1654,106 @@ class OrgTaskManager:
             )
         )
         return result
+
+    async def _build_summary_task(
+        self,
+        *,
+        task_id: str,
+        title: str,
+        description: str,
+        created_by: OrgTaskCreator,
+        root_task_id: str,
+        source_task_ids: list[str] | None,
+        output_spec: OrgTaskOutputSpec | dict[str, Any] | None,
+        metadata: dict[str, Any] | None,
+    ) -> OrgTaskOpResult:
+        """Create the framework-owned Summary Task row (WAITING_SOURCES, SUMMARY_TEAM)."""
+        await self.initialize()
+        now = get_current_time()
+        spec_model = self._coerce_output_spec(output_spec)
+        aggregation = OrgTaskAggregationConfig(
+            mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+            summary_task_id=task_id,
+            final_output_task_id=task_id,
+        )
+        async with self._write() as session:
+            if await session.get(OrgTaskRecord, task_id) is not None:
+                return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
+            row = OrgTaskRecord(
+                task_id=task_id,
+                organization_id=self.organization_id,
+                parent_task_id=None,
+                root_task_id=root_task_id,
+                creator_type=created_by.creator_type,
+                creator_id=created_by.creator_id,
+                creator_team_id=created_by.team_id,
+                status=OrgTaskStatus.WAITING_SOURCES.value,
+                created_at=now,
+                updated_at=now,
+                title=title,
+                description=description,
+                task_type=ORG_SUMMARY_TASK_TYPE,
+                required_capabilities_json=_json_dumps([ORG_SUMMARY_CAPABILITY]),
+                assignment_type=OrgAssignmentType.UNASSIGNED.value,
+                aggregation_json=_json_dumps(aggregation.model_dump()),
+                output_spec_json=_json_dumps(spec_model.model_dump() if spec_model else None),
+                metadata_json=_json_dumps(dict(metadata or {})),
+            )
+            session.add(row)
+            await session.commit()
+            if source_task_ids:
+                attached = await self._attach_summary_sources(
+                    session,
+                    summary_task_id=task_id,
+                    source_task_ids=source_task_ids,
+                    organization_id=self.organization_id,
+                    now=now,
+                )
+                if attached is not None:
+                    return attached
+                await session.commit()
+        task = self._to_task(row)
+        return OrgTaskOpResult(ok=True, task=task)
+
+    @staticmethod
+    async def _attach_summary_sources(
+        session: Any,
+        *,
+        summary_task_id: str,
+        source_task_ids: list[str],
+        organization_id: str,
+        now: int,
+        source_role: str | None = None,
+        required: bool = True,
+    ) -> OrgTaskOpResult | None:
+        """Validate one batch of source tasks inside an open write session.
+
+        Returns None on success, or an OrgTaskOpResult error on the first failure.
+        """
+        for source_task_id in source_task_ids:
+            source = await session.get(OrgTaskRecord, source_task_id)
+            if source is None or source.organization_id != organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"source task not found: {source_task_id}")
+            if source.status != OrgTaskStatus.COMPLETED.value:
+                return OrgTaskOpResult(ok=False, reason=f"source task is not completed: {source_task_id}")
+            review = await OrgTaskManager._get_latest_review_row(session, source_task_id)
+            if review is not None and review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
+                return OrgTaskOpResult(ok=False, reason=f"source task review is not accepted: {source_task_id}")
+            existing = await session.get(OrgTaskSourceRecord, (summary_task_id, source_task_id))
+            if existing is None:
+                session.add(
+                    OrgTaskSourceRecord(
+                        summary_task_id=summary_task_id,
+                        source_task_id=source_task_id,
+                        source_role=source_role,
+                        required=required,
+                        created_at=now,
+                    )
+                )
+            else:
+                existing.source_role = source_role
+                existing.required = required
+        return None
 
     async def attach_summary_sources(
         self,
@@ -1666,31 +1769,19 @@ class OrgTaskManager:
             summary = await session.get(OrgTaskRecord, summary_task_id)
             if summary is None or summary.organization_id != self.organization_id:
                 return OrgTaskOpResult(ok=False, reason=f"summary task not found: {summary_task_id}")
-            if summary.task_type != "organization.summary":
+            if summary.task_type != ORG_SUMMARY_TASK_TYPE:
                 return OrgTaskOpResult(ok=False, reason=f"task is not a summary task: {summary_task_id}")
-            for source_task_id in source_task_ids:
-                source = await session.get(OrgTaskRecord, source_task_id)
-                if source is None or source.organization_id != self.organization_id:
-                    return OrgTaskOpResult(ok=False, reason=f"source task not found: {source_task_id}")
-                if source.status != OrgTaskStatus.COMPLETED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"source task is not completed: {source_task_id}")
-                review = await self._get_latest_review_row(session, source_task_id)
-                if review is not None and review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"source task review is not accepted: {source_task_id}")
-                existing = await session.get(OrgTaskSourceRecord, (summary_task_id, source_task_id))
-                if existing is None:
-                    session.add(
-                        OrgTaskSourceRecord(
-                            summary_task_id=summary_task_id,
-                            source_task_id=source_task_id,
-                            source_role=source_role,
-                            required=required,
-                            created_at=now,
-                        )
-                    )
-                else:
-                    existing.source_role = source_role
-                    existing.required = required
+            attached = await self._attach_summary_sources(
+                session,
+                summary_task_id=summary_task_id,
+                source_task_ids=source_task_ids,
+                organization_id=self.organization_id,
+                now=now,
+                source_role=source_role,
+                required=required,
+            )
+            if attached is not None:
+                return attached
             await session.commit()
         await self._publish_event(
             OrgSummarySourcesUpdatedEvent(
@@ -1736,6 +1827,98 @@ class OrgTaskManager:
                     }
                 )
             return {"summary_task": self._to_task(summary).model_dump(), "source_tasks": sources}
+
+    async def evaluate_summary_sources(self, *, summary_task_id: str) -> dict[str, Any]:
+        """Judge whether a Summary Task may start: every required source COMPLETED + ACCEPTED.
+
+        Returns {"ready": bool, "source_failed": source_task_id | None, "reason": str}.
+        """
+        await self.initialize()
+        async with self._read() as session:
+            summary = await session.get(OrgTaskRecord, summary_task_id)
+            if summary is None or summary.organization_id != self.organization_id:
+                return {"ready": False, "source_failed": None, "reason": f"summary task not found: {summary_task_id}"}
+            if summary.task_type != ORG_SUMMARY_TASK_TYPE:
+                return {"ready": False, "source_failed": None, "reason": f"task is not a summary task: {summary_task_id}"}
+            stmt = select(OrgTaskSourceRecord).where(OrgTaskSourceRecord.summary_task_id == summary_task_id)
+            source_rows = (await session.execute(stmt)).scalars().all()
+            for source_row in source_rows:
+                source = await session.get(OrgTaskRecord, source_row.source_task_id)
+                if source is None or source.organization_id != self.organization_id:
+                    return {"ready": False, "source_failed": source_row.source_task_id, "reason": f"source task not found: {source_row.source_task_id}"}
+                if source_row.required and source.status != OrgTaskStatus.COMPLETED.value:
+                    return {"ready": False, "source_failed": source_row.source_task_id, "reason": f"source task is not completed: {source_row.source_task_id}"}
+                review = await self._get_latest_review_row(session, source_row.source_task_id)
+                if review is not None and review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
+                    return {"ready": False, "source_failed": source_row.source_task_id, "reason": f"source task review is not accepted: {source_row.source_task_id}"}
+            if not source_rows:
+                return {"ready": False, "source_failed": None, "reason": "no sources bound to summary task"}
+            return {"ready": True, "source_failed": None, "reason": ""}
+
+    async def create_summary_execution(
+        self,
+        *,
+        root_task_id: str,
+        summary_task_id: str,
+        execution_id: str | None = None,
+    ) -> OrgSummaryExecution:
+        """Persist a new Summary Team instance in PROVISIONING for the given Summary Task."""
+        await self.initialize()
+        execution_id = execution_id or f"summary-exec-{uuid.uuid4().hex[:12]}"
+        now = get_current_time()
+        record = OrgSummaryExecutionRecord(
+            execution_id=execution_id,
+            organization_id=self.organization_id,
+            root_task_id=root_task_id,
+            summary_task_id=summary_task_id,
+            status=OrgSummaryExecutionStatus.PROVISIONING.value,
+            created_at=now,
+        )
+        async with self._write() as session:
+            session.add(record)
+            await session.commit()
+        return self._to_summary_execution(record)
+
+    async def list_summary_executions(
+        self,
+        *,
+        root_task_id: str | None = None,
+        summary_task_id: str | None = None,
+    ) -> list[OrgSummaryExecution]:
+        """List Summary Team instances, optionally filtered by root or summary task."""
+        await self.initialize()
+        stmt = select(OrgSummaryExecutionRecord).where(
+            OrgSummaryExecutionRecord.organization_id == self.organization_id
+        )
+        if root_task_id is not None:
+            stmt = stmt.where(OrgSummaryExecutionRecord.root_task_id == root_task_id)
+        if summary_task_id is not None:
+            stmt = stmt.where(OrgSummaryExecutionRecord.summary_task_id == summary_task_id)
+        async with self._read() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._to_summary_execution(row) for row in rows]
+
+    async def update_summary_execution(
+        self,
+        *,
+        execution_id: str,
+        status: OrgSummaryExecutionStatus,
+        summary_team_id: str | None = None,
+        released_at: int | None = None,
+    ) -> OrgSummaryExecution | None:
+        """Transition a SummaryExecution status (and optionally bind/release its team)."""
+        await self.initialize()
+        async with self._write() as session:
+            row = await session.get(OrgSummaryExecutionRecord, execution_id)
+            if row is None or row.organization_id != self.organization_id:
+                return None
+            row.status = status.value
+            if summary_team_id is not None:
+                row.summary_team_id = summary_team_id
+            if released_at is not None:
+                row.released_at = released_at
+            await session.commit()
+            return self._to_summary_execution(row)
 
     async def _publish_task_created(self, task: OrgTask) -> None:
         await self._publish_event(
@@ -1930,6 +2113,19 @@ class OrgTaskManager:
             source_role=row.source_role,
             required=row.required,
             created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _to_summary_execution(row: OrgSummaryExecutionRecord) -> OrgSummaryExecution:
+        return OrgSummaryExecution(
+            execution_id=row.execution_id,
+            organization_id=row.organization_id,
+            root_task_id=row.root_task_id,
+            summary_task_id=row.summary_task_id,
+            summary_team_id=row.summary_team_id,
+            status=OrgSummaryExecutionStatus(row.status),
+            created_at=row.created_at,
+            released_at=row.released_at,
         )
 
     @staticmethod
