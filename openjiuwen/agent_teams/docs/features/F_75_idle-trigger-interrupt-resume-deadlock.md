@@ -82,3 +82,16 @@ workflow reply is admitted. Queue settlement requires that exact slot to still
 be current, so a duplicate reply cannot be reinterpreted as feedback for
 another component, a different workflow that uses the same component ID, or a
 tool interrupt with the same ID.
+
+## Runtime Crash Settlement
+
+A round-driver crash is settled against the interruption state stored in the
+session, not only the failed round result. A committed interrupt is authoritative:
+the original query is not replayed, a matching structured reply may start, and
+ordinary text remains queued behind the interrupt.
+
+Without an interrupt, an ordinary query has one replay attempt. A structured
+query crash or a second crash during that replay does not consume another retry;
+NativeHarness instead runs the same structured-first follow-up arbitration and
+then becomes idle when no input can start. Crash settlement never continues the
+task plan.

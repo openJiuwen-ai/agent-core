@@ -1136,6 +1136,18 @@ class NativeHarness(DeepAgent):
         if runtime_crashed:
             self._reset_coordinator()
             death_reason = cmd.error
+            current_interrupt = session.get_state(INTERRUPTION_KEY)
+            if current_interrupt is not None:
+                logger.warning(
+                    "[NativeHarness] round_id=%s died abnormally (%s); "
+                    "settling the committed interrupt instead of replaying its query",
+                    cmd.round_id,
+                    death_reason,
+                )
+                if await self._start_pending_follow_up_round(active, session):
+                    return
+                await self._transition(HarnessState.IDLE)
+                return
             replayable = not isinstance(active.original_query, InteractiveInput)
             if replayable and not active.failure_retry:
                 logger.warning(
@@ -1154,6 +1166,8 @@ class NativeHarness(DeepAgent):
                 death_reason,
                 " again after a retry" if active.failure_retry else "",
             )
+            if await self._start_pending_follow_up_round(active, session):
+                return
             await self._transition(HarnessState.IDLE)
             return
 

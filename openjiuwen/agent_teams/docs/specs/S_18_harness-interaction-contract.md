@@ -196,3 +196,9 @@ component；不在带 `raw_inputs` 的调用方对象上调用 `update()`，也�
 NativeHarness 在 workflow reply admission 时记录当时的 workflow ID 与 component ID；queued workflow
 reply 只在该二元 slot 仍为 current 时匹配，不能在 workflow 推进后自动回答下一 component，不能回答
 另一个使用同名 component 的 workflow，也不能被重解释为同 ID 的 tool interrupt。
+
+**runtime crash 结算**：round driver 异常退出后，NativeHarness 先读取 session 中当前的
+interruption state。有已提交 interrupt 时不重放原 query，而是执行同一套 structured-first
+仲裁；匹配的 `InteractiveInput` 可继续，普通文本仍留在 interrupt 后。无 interrupt 的普通 query
+只允许重放一次。`InteractiveInput` round 崩溃或重放 round 再次崩溃时不再重放已消费输入，直接
+仲裁 queued follow-up；没有可启动输入时进入 IDLE。runtime crash 不继续 task plan。
