@@ -75,13 +75,24 @@ def _repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_unknown_interface_falls_back_to_classic() -> None:
-    assert resolve_code_graph_retrieval_interface("nope") == CodeGraphRetrievalInterface.CLASSIC
+def test_unknown_interface_falls_back_to_focused() -> None:
+    assert resolve_code_graph_retrieval_interface("nope") == CodeGraphRetrievalInterface.FOCUSED
+    assert resolve_code_graph_retrieval_interface(None) == CodeGraphRetrievalInterface.FOCUSED
+    assert resolve_code_graph_retrieval_interface("classic") == CodeGraphRetrievalInterface.CLASSIC
     assert resolve_code_graph_retrieval_interface("focused") == CodeGraphRetrievalInterface.FOCUSED
 
 
+def test_default_product_graph_is_focused() -> None:
+    assert code_graph_profile_tool_names(CodeGraphProfile.GRAPH) == FOCUSED_CORE_TOOL_NAMES
+
+
 def test_classic_tool_table_unchanged() -> None:
-    assert code_graph_profile_tool_names(CodeGraphProfile.GRAPH) == PRODUCT_GRAPH_TOOL_NAMES
+    assert (
+        code_graph_profile_tool_names(
+            CodeGraphProfile.GRAPH, retrieval_interface="classic"
+        )
+        == PRODUCT_GRAPH_TOOL_NAMES
+    )
     assert "focus_code" not in PRODUCT_GRAPH_TOOL_NAMES
     assert "select_code_context" in PRODUCT_GRAPH_TOOL_NAMES
 
@@ -100,7 +111,9 @@ def test_focused_product_exposes_core_and_hides_select() -> None:
 
 
 def test_classic_keeps_read_tools() -> None:
-    names = code_graph_profile_tool_names(CodeGraphProfile.GRAPH)
+    names = code_graph_profile_tool_names(
+        CodeGraphProfile.GRAPH, retrieval_interface="classic"
+    )
     assert "read_symbol" in names
     assert "read_code" in names
     assert "focus_code" not in names
@@ -265,10 +278,14 @@ def test_focused_prompt_mentions_focus_code() -> None:
     )
     assert "focus_code" in text
     assert "There is no read_symbol" in text
-    classic = build_code_graph_profile_prompt("graph", language="en")
+    classic = build_code_graph_profile_prompt(
+        "graph", language="en", retrieval_interface="classic"
+    )
     assert "select_code_context" in classic
     assert "read_symbol" in classic
     assert "focus_code" not in classic
+    default_prompt = build_code_graph_profile_prompt("graph", language="en")
+    assert "focus_code" in default_prompt
 
 
 def test_candidate_id_is_stable_across_repeat_hits() -> None:
