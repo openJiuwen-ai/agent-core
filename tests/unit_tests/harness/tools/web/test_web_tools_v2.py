@@ -14,7 +14,7 @@ from openjiuwen.harness.tools.web import (
     is_free_search_enabled,
     is_paid_search_enabled,
 )
-from openjiuwen.harness.tools.web._common import _resolve_proxy
+from openjiuwen.harness.tools.web._common import _domain_allowed, _resolve_proxy
 from openjiuwen.harness.tools.web._decode import _decode_response_text
 from openjiuwen.harness.tools.web._http import _read_capped
 
@@ -33,7 +33,18 @@ class _RequestRecorder:
         self.handler = handler
         self.calls: list[dict] = []
 
-    async def __call__(self, session, method, url, *, headers=None, json_body=None, timeout_seconds, max_bytes=None):
+    async def __call__(
+        self,
+        session,
+        method,
+        url,
+        *,
+        headers=None,
+        json_body=None,
+        timeout_seconds,
+        max_bytes=None,
+        proxy_url=None,
+    ):
         self.calls.append(
             {
                 "method": method,
@@ -42,6 +53,7 @@ class _RequestRecorder:
                 "json_body": json_body,
                 "timeout_seconds": timeout_seconds,
                 "max_bytes": max_bytes,
+                "proxy_url": proxy_url,
             }
         )
         return self.handler(method, url, json_body)
@@ -76,6 +88,19 @@ def _patch_request(monkeypatch, handler):
     recorder = _RequestRecorder(handler)
     monkeypatch.setattr(_REQUEST_PATCH_TARGET, recorder)
     return recorder
+
+
+def test_domain_allowlist_is_subdomain_aware():
+    allowed = ("cnki.net", "scholar.baidu.com")
+    assert _domain_allowed("https://www.cnki.net/article", allowed)
+    assert _domain_allowed("https://sub.scholar.baidu.com/paper", allowed)
+    assert not _domain_allowed("https://cnki.net.example.org/article", allowed)
+    assert not _domain_allowed("https://example.org/article", allowed)
+
+
+def test_explicit_proxy_takes_precedence_over_environment(monkeypatch):
+    monkeypatch.setenv("WEB_PROXY_URL", "http://env-proxy:8080")
+    assert _resolve_proxy("https://example.org", "http://task-proxy:7890") == "http://task-proxy:7890"
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +158,64 @@ async def test_free_invoke_bing_fallback_success(monkeypatch):
 
     assert "Free search results (Bing)" in result
     assert "Bing Result 1" in result
+
+
+@pytest.mark.asyncio
+async def test_free_domestic_search_uses_academic_portals_without_global_engines(monkeypatch):
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+    cnki_html = """
+    <html><body>
+      <a class="fz14" href="/kcms2/article/abstract?v=paper-1">国内论文标题</a>
+      <p>国内论文摘要和研究方法</p>
+    </body></html>
+    """
+
+    def handler(method, url, body):
+        if "xueshu.baidu.com" in url:
+            return _resp(403, b"blocked", final_url=url)
+        if "www.baidu.com" in url:
+            return _resp(403, b"blocked", final_url=url)
+        if "kns.cnki.net" in url:
+            return _resp(
+                200,
+                cnki_html.encode("utf-8"),
+                final_url="https://kns.cnki.net/kns8s/defaultresult/index?kw=test",
+            )
+        raise AssertionError(f"unexpected request: {url}")
+
+    recorder = _patch_request(monkeypatch, handler)
+    tool = WebFreeSearchTool(
+        language="cn",
+        allowed_domains=("scholar.baidu.com", "xueshu.baidu.com", "cnki.net", "wanfangdata.com.cn"),
+    )
+    result = await tool.invoke({"query": "国内论文", "max_results": 5})
+
+    assert "Free search results (CNKI)" in result
+    assert "国内论文标题" in result
+    assert "https://kns.cnki.net/kcms2/article/abstract?v=paper-1" in result
+    assert all("duckduckgo.com" not in call["url"] for call in recorder.calls)
+    assert all("bing.com" not in call["url"] for call in recorder.calls)
+
+
+@pytest.mark.asyncio
+async def test_free_search_explicit_engines_override_process_defaults(monkeypatch):
+    monkeypatch.setenv("FREE_SEARCH_DDG_ENABLED", "false")
+    monkeypatch.setenv("FREE_SEARCH_BING_ENABLED", "false")
+    bing_html = """
+    <html><main aria-label="Search Results">
+      <li class="b_algo">
+        <h2><a href="https://example.com/paper">Configured engine result</a></h2>
+      </li>
+    </main></html>
+    """
+    recorder = _patch_request(monkeypatch, lambda method, url, body: _resp(200, bing_html.encode("utf-8")))
+    tool = WebFreeSearchTool(language="cn", enabled_engines=("bing",))
+    result = await tool.invoke({"query": "test query", "max_results": 5})
+
+    assert "Free search results (Bing)" in result
+    assert "Configured engine result" in result
+    assert any("bing.com" in call["url"] for call in recorder.calls)
 
 
 @pytest.mark.asyncio
@@ -233,6 +316,25 @@ def test_ddg_snippet_not_misaligned():
     assert rows[0]["snippet"] == "S1"
     assert rows[1]["snippet"] == ""
     assert rows[2]["snippet"] == "S3"
+
+
+def test_domestic_parser_ignores_portal_navigation_links():
+    from openjiuwen.harness.tools.web.free_search import _parse_domestic_search_html
+
+    html = """
+    <a href="https://c.wanfangdata.com.cn/thesis">学位论文</a>
+    <a href="https://www.wanfangdata.com.cn/Customer">客户服务</a>
+    <a class="title" href="https://d.wanfangdata.com.cn/thesis/T1">真实论文标题</a>
+    """
+    rows = _parse_domestic_search_html(
+        html,
+        10,
+        base_url="https://s.wanfangdata.com.cn/paper?q=test",
+        source="wanfang",
+        allowed_domains=("wanfangdata.com.cn",),
+    )
+
+    assert [row["url"] for row in rows] == ["https://d.wanfangdata.com.cn/thesis/T1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -615,6 +717,40 @@ async def test_fetch_http_error_uses_fetch_scoped_message(monkeypatch):
     assert "[ERROR]: failed to fetch webpage:" in result
     assert "web page fetch failed" in result
     assert "search engine" not in result
+
+
+@pytest.mark.asyncio
+async def test_fetch_domestic_scope_rejects_outside_url_before_network(monkeypatch):
+    recorder = _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(200, b"should not be requested"),
+    )
+    tool = WebFetchWebpageTool(language="cn", allowed_domains=("cnki.net",))
+
+    result = await tool.invoke({"url": "https://arxiv.org/abs/2305.20050"})
+
+    assert "outside the configured domestic academic source domains" in result
+    assert recorder.calls == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_domestic_scope_does_not_fallback_to_external_reader(monkeypatch):
+    recorder = _patch_request(
+        monkeypatch,
+        lambda method, url, body: _resp(
+            403,
+            b"blocked",
+            headers={"Content-Type": "text/html"},
+            final_url="https://kns.cnki.net/kcms2/article/abstract?v=paper-1",
+        ),
+    )
+    tool = WebFetchWebpageTool(language="cn", allowed_domains=("cnki.net",))
+
+    result = await tool.invoke({"url": "https://kns.cnki.net/kcms2/article/abstract?v=paper-1"})
+
+    assert "reader proxy fallback is disabled" in result
+    assert len(recorder.calls) == 1
+    assert "r.jina.ai" not in recorder.calls[0]["url"]
 
 
 def test_raise_fetch_http_error_code_and_threshold():
