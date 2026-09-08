@@ -22,7 +22,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.downlo
 )
 
 # These domains are used only when a task explicitly selects ``domestic``
-# search scope.  A missing task-scoped proxy does not select this allowlist:
+# search scope. A missing task-scoped proxy does not select this allowlist:
 # proxy configuration controls transport, while source selection stays global
 # and the agent is reminded to prefer directly downloadable sources.
 DOMESTIC_SOURCE_DOMAINS = (

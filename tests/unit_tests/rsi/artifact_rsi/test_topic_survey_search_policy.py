@@ -10,7 +10,6 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.ag
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
     SurveySource,
     TopicSurveyDraft,
-    TopicSurveyInput,
 )
 
 
@@ -58,38 +57,29 @@ def test_topic_survey_proxy_only_changes_transport(web_proxy):
 
 def test_topic_survey_without_proxy_reminds_agent_to_find_downloadable_sources():
     agent = TopicSurveyAgent({"topic_survey": {}})
-    query = agent._build_survey_query(
-        TopicSurveyInput(topic="retrieval systems"),
-        relative_download_dir="data/sources",
-    )
+    query = agent._apply_source_policy("BASE QUERY")
 
-    assert "same global search, fetch, and download workflow" in query
+    assert "No task proxy is configured" in query
     assert "directly accessible and downloadable" in query
     assert "skip it and search for another accessible source" in query
 
 
-def test_topic_survey_with_proxy_keeps_same_query_workflow_without_no_proxy_hint():
+def test_topic_survey_with_proxy_keeps_same_workflow_without_no_proxy_hint():
     agent = TopicSurveyAgent(
         {"topic_survey": {"web_proxy": "http://proxy.example.test:7890"}}
     )
-    query = agent._build_survey_query(
-        TopicSurveyInput(topic="retrieval systems"),
-        relative_download_dir="data/sources",
-    )
+    query = agent._apply_source_policy("BASE QUERY")
 
-    assert "Search for relevant papers and authoritative webpages" in query
-    assert "same global search, fetch, and download workflow" not in query
+    assert query == "BASE QUERY"
 
 
 def test_topic_survey_explicit_domestic_scope_remains_supported():
     agent = TopicSurveyAgent({"topic_survey": {"search_scope": "domestic"}})
 
     assert agent._search_scope() == "domestic"
-    query = agent._build_survey_query(
-        TopicSurveyInput(topic="retrieval systems"),
-        relative_download_dir="data/sources",
+    assert "explicitly configured domestic academic sources" in agent._apply_source_policy(
+        "BASE QUERY"
     )
-    assert "explicitly configured domestic academic sources" in query
 
 
 def test_topic_survey_rejects_domestic_portal_home_as_paper():
