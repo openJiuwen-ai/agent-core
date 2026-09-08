@@ -16,6 +16,7 @@ from openjiuwen.harness.goal.schema import (
     GoalAssessment,
     GoalAssessmentStatus,
     GoalOperationError,
+    GoalRecord,
     GoalStatus,
 )
 from openjiuwen.harness.goal.store import SessionGoalStore
@@ -608,3 +609,121 @@ async def test_pause_then_complete_assessment_overrides_paused() -> None:
     assert completed.last_assessment is not None
     assert completed.last_stop_reason == "completed"
     assert harness.events.next_work() is None
+
+
+async def _apply_blocked(
+    harness: ManagerHarness,
+    goal_id: str,
+    revision: int,
+    evidence: str,
+    *,
+    same: bool | None = None,
+) -> GoalRecord | None:
+    return await harness.manager.apply_assessment(
+        goal_id=goal_id,
+        revision=revision,
+        assessment=GoalAssessment(
+            status=GoalAssessmentStatus.BLOCKED,
+            evidence=evidence,
+            blocking_same_as_previous=same,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_blocked_audit_requires_n_consecutive_same_blockers() -> None:
+    """Same blocker must repeat blocked_threshold (default 3) times to confirm."""
+    harness = ManagerHarness()
+    goal = await harness.manager.set("write a report")
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+
+    first = await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    assert first is not None
+    assert first.status is GoalStatus.ACTIVE
+    assert first.last_assessment is not None
+    assert first.last_assessment.status is GoalAssessmentStatus.CONTINUE  # 降级
+    assert first.blocking_history == ["no token"]
+
+    second = await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    assert second is not None
+    assert second.status is GoalStatus.ACTIVE
+    assert second.blocking_history == ["no token", "no token"]
+
+    third = await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    assert third is not None
+    assert third.status is GoalStatus.BLOCKED
+    assert third.last_stop_reason == "blocked"
+    assert third.blocking_history == ["no token", "no token", "no token"]
+
+
+@pytest.mark.asyncio
+async def test_blocked_audit_different_blocker_resets_count() -> None:
+    """A different blocker resets the consecutive-same count to 1."""
+    harness = ManagerHarness()
+    goal = await harness.manager.set("write a report")
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+
+    await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    second = await _apply_blocked(harness, goal.goal_id, goal.revision, "disk full", same=False)
+    assert second is not None
+    assert second.status is GoalStatus.ACTIVE
+    assert second.blocking_history == ["disk full"]
+
+    third = await _apply_blocked(harness, goal.goal_id, goal.revision, "disk full", same=True)
+    assert third is not None
+    assert third.status is GoalStatus.ACTIVE
+    assert third.blocking_history == ["disk full", "disk full"]
+
+
+@pytest.mark.asyncio
+async def test_blocked_audit_missing_signal_treated_as_same() -> None:
+    """When the assessor omits blocking_same_as_previous (None), treat as same."""
+    harness = ManagerHarness()
+    goal = await harness.manager.set("write a report")
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+
+    await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=None)
+    second = await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=None)
+    assert second is not None
+    assert second.blocking_history == ["no token", "no token"]
+
+
+@pytest.mark.asyncio
+async def test_non_blocked_assessment_clears_blocking_history() -> None:
+    """A continue/complete assessment clears the accumulated blocking history."""
+    harness = ManagerHarness()
+    goal = await harness.manager.set("write a report")
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+
+    await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    continued = await harness.manager.apply_assessment(
+        goal_id=goal.goal_id,
+        revision=goal.revision,
+        assessment=GoalAssessment(
+            status=GoalAssessmentStatus.CONTINUE,
+            evidence="still working",
+        ),
+    )
+    assert continued is not None
+    assert continued.status is GoalStatus.ACTIVE
+    assert continued.blocking_history == []
+
+
+@pytest.mark.asyncio
+async def test_resume_after_blocked_clears_blocking_history() -> None:
+    """Resuming a blocked goal starts a fresh blocked audit (history cleared)."""
+    harness = ManagerHarness()
+    goal = await harness.manager.set("write a report")
+    await harness.manager.begin_attempt(goal_id=goal.goal_id, revision=goal.revision)
+
+    final = await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    final = await _apply_blocked(harness, goal.goal_id, goal.revision, "no token", same=True)
+    assert final is not None
+    assert final.status is GoalStatus.BLOCKED
+    assert final.blocking_history == ["no token", "no token", "no token"]
+
+    resumed = await harness.manager.resume()
+    assert resumed is not None
+    assert resumed.status is GoalStatus.ACTIVE
+    assert resumed.blocking_history == []

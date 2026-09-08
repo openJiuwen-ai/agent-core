@@ -8,9 +8,9 @@ TaskCompletionRail can consume it after the round ends.
 """
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
+from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.core.foundation.tool import Input, Output, Tool
 from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
 from openjiuwen.harness.prompts.tools import build_tool_card
@@ -18,7 +18,7 @@ from openjiuwen.harness.prompts.tools import build_tool_card
 if TYPE_CHECKING:
     from openjiuwen.harness.goal.manager import GoalManager
 
-logger = logging.getLogger(__name__)
+logger = LazyLogger(lambda: LogManager.get_logger("goal"))
 
 
 class GoalReportSink:
@@ -58,8 +58,19 @@ class GoalReportSink:
         revision: int,
         attempt_index: int,
     ) -> None:
-        """Reset the sink for a new attempt."""
-        self._report = None
+        """Reset the sink for a new attempt.
+
+        Preserve an unconsumed terminal report. In the host loop a permission
+        interrupt can end a round after COMPLETE/BLOCKED was submitted but
+        before the interrupt path finalizes it; the next round's begin_attempt
+        must not drop that report, or the goal stays ACTIVE and the task loop
+        re-drives a finished goal forever. Only clear non-terminal/empty sinks.
+        """
+        if self._report is None or self._report.status not in (
+            GoalAssessmentStatus.COMPLETE,
+            GoalAssessmentStatus.BLOCKED,
+        ):
+            self._report = None
         self._session_id = session_id
         self._goal_id = goal_id
         self._revision = revision

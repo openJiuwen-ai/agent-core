@@ -13,7 +13,6 @@ from openjiuwen.harness.goal.schema import (
     GoalAssessmentStatus,
     GoalRecord,
 )
-from openjiuwen.harness.prompts.sections.goal import build_goal_protocol_section
 
 
 def test_goal_task_query_first_attempt() -> None:
@@ -82,3 +81,27 @@ def test_transcript_assessor_prompt_uses_attempt_context() -> None:
     assert "tests passed" in prompt
     assert "<agent_report>" not in prompt
     assert "<final_output>" not in prompt
+
+
+def test_transcript_assessor_prompt_injects_blocking_history() -> None:
+    prompt = build_transcript_assessor_prompt(
+        "objective",
+        "instruction",
+        "context",
+        "cn",
+        blocking_history=["no token", "no token"],
+    )
+    assert "<blocking_history>" in prompt
+    assert "- Attempt 1: no token" in prompt
+    assert "- Attempt 2: no token" in prompt
+
+
+def test_transcript_assessor_prompt_empty_blocking_history_omits_block() -> None:
+    prompt = build_transcript_assessor_prompt(
+        "objective",
+        "instruction",
+        "context",
+        "cn",
+        blocking_history=[],
+    )
+    assert "<blocking_history>" not in prompt

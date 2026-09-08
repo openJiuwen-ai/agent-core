@@ -261,7 +261,8 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         '  "status": "continue | complete | blocked",\n'
         '  "evidence": "判断依据；complete/blocked 时须为面向用户的详细报告",\n'
         '  "remaining_work": "status=continue 时填写剩余缺口，否则可为空字符串",\n'
-        '  "next_instruction": "status=continue 时填写下一次最具体、可执行的动作，否则可为空字符串"\n'
+        '  "next_instruction": "status=continue 时填写下一次最具体、可执行的动作，否则可为空字符串",\n'
+        '  "blocking_same_as_previous": "仅 status=blocked 时填写：true/false，表示当前阻塞是否与 <blocking_history> 中的历史阻塞为同一根本原因"\n'
         "}\n\n"
         "评估规则：\n"
         "1. 先从目标和当前指令中提取必须满足的交付物、验收条件和可验证结果。\n"
@@ -278,7 +279,13 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         "不能只写一句结论。报告应覆盖：目标完成/阻塞结论、关键交付物或阻塞原因、"
         "上下文中的关键事实与依据；complete 时应完整收录产物正文或等价可核对内容"
         "（禁止仅用「见上文 / 如上 / 已给出」指代）；blocked 时应写清缺什么、为何无法继续、"
-        "用户或环境需提供什么才能解除阻塞。"
+        "用户或环境需提供什么才能解除阻塞。\n"
+        "11. 阻塞审计：系统会累计“相同阻塞”连续出现达到阈值（默认3次）才最终确认 blocked。"
+        "当 <blocking_history> 存在时，判断当前阻塞是否与历史阻塞为同一根本原因："
+        "是则 output 字段 blocking_same_as_previous=true，否则 false。"
+        "对真实持续阻塞仍应输出 status=blocked（供系统计数），"
+        "但不要因为任务难、慢、不确定或需要澄清就报 blocked。"
+        "若 <blocking_history> 为空，说明这是首次阻塞，blocking_same_as_previous 填 false 即可。"
     ),
     "en": (
         "You are a Goal completion assessor. Judge goal status only from the objective, "
@@ -290,7 +297,9 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         '  "status": "continue | complete | blocked",\n'
         '  "evidence": "Basis for the judgment; for complete/blocked must be a detailed user-facing report",\n'
         '  "remaining_work": "Gaps to fill when status=continue, else empty string",\n'
-        '  "next_instruction": "Most specific actionable step for status=continue, else empty string"\n'
+        '  "next_instruction": "Most specific actionable step for status=continue, else empty string",\n'
+        '  "blocking_same_as_previous": "Only when status=blocked: true/false, whether the '
+        'current blocker shares the same root cause as the <blocking_history> entries"\n'
         "}\n\n"
         "Assessment rules:\n"
         "1. Extract deliverables, acceptance criteria, and verifiable results "
@@ -319,7 +328,16 @@ TRANSCRIPT_ASSESSOR_SYSTEM: Dict[str, str] = {
         "or equivalent verifiable content in full (do not substitute with "
         "\"see above / as shown earlier / already given\"). For blocked, state "
         "what is missing, why progress cannot continue, and what the user or "
-        "environment must provide to unblock."
+        "environment must provide to unblock.\n"
+        "11. Blocked audit: the system only finalizes BLOCKED after the SAME "
+        "blocking condition has repeated at least a threshold of consecutive "
+        "attempts (default 3). When <blocking_history> is present, judge whether "
+        "the current blocker shares the same root cause as the prior entries: "
+        "if yes output blocking_same_as_previous=true, else false. Still report "
+        "a genuine persistent blocker as status=blocked (the system counts it), "
+        "but never report blocked merely because the work is hard, slow, "
+        "uncertain, or would benefit from clarification. If <blocking_history> "
+        "is absent this is the first blocker; set blocking_same_as_previous=false."
     ),
 }
 
@@ -329,6 +347,7 @@ def build_transcript_assessor_prompt(
     current_instruction: str,
     attempt_context: str,
     language: str = "cn",
+    blocking_history: Optional[list[str]] = None,
 ) -> str:
     """Build the user prompt for the transcript assessor.
 
@@ -337,18 +356,26 @@ def build_transcript_assessor_prompt(
         current_instruction: The instruction for this attempt.
         attempt_context: The model context produced by this attempt.
         language: ``"cn"`` or ``"en"``.
+        blocking_history: Optional list of evidence strings from prior blocked
+            attempts (the blocked audit). When non-empty it is injected as a
+            ``<blocking_history>`` block so the assessor can judge whether the
+            current blocker is the same root cause (see the blocked audit rule).
 
     Returns:
         User message for the assessor model.
     """
-    _ = language
-    return "\n\n".join(
-        [
-            f"<objective>\n{objective}\n</objective>",
-            f"<current_instruction>\n{current_instruction}\n</current_instruction>",
-            f"<attempt_context>\n{attempt_context}\n</attempt_context>",
-        ]
-    )
+    parts = [
+        f"<objective>\n{objective}\n</objective>",
+        f"<current_instruction>\n{current_instruction}\n</current_instruction>",
+    ]
+    if blocking_history:
+        history_lines = "\n".join(
+            f"- Attempt {index}: {block}"
+            for index, block in enumerate(blocking_history, start=1)
+        )
+        parts.append(f"<blocking_history>\n{history_lines}\n</blocking_history>")
+    parts.append(f"<attempt_context>\n{attempt_context}\n</attempt_context>")
+    return "\n\n".join(parts)
 
 
 __all__ = [
