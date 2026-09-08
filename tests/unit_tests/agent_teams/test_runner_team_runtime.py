@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 from typing import (
@@ -1433,6 +1434,86 @@ class TestTeamRuntimeManagerInteract:
         )
         assert result.ok is False
         assert result.reason == "gate_closed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_interactive_input_is_rejected_by_closed_gate(self):
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+        from openjiuwen.core.session import InteractiveInput
+
+        manager = TeamRuntimeManager()
+        team_name = "interactive_drained"
+        session_id = "s1"
+
+        class _Agent:
+            team_backend = None
+
+            def __init__(self) -> None:
+                self.resume_calls = 0
+
+            async def resume_interrupt(self, _payload):
+                self.resume_calls += 1
+                return "delivered"
+
+        agent = _Agent()
+        await _activate_pool_entry(manager, team_name, session_id, agent)
+        entry = await manager.pool.get(team_name)
+        assert entry is not None
+        await entry.interact_gate.close_and_drain()
+
+        result = await manager.interact(
+            InteractiveInput(raw_inputs="continue"),
+            team_name=team_name,
+            session_id=session_id,
+        )
+
+        assert result.ok is False
+        assert result.reason == "gate_closed"
+        assert agent.resume_calls == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_interactive_input_holds_gate_ticket_until_resume_finishes(self):
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+        from openjiuwen.core.session import InteractiveInput
+
+        manager = TeamRuntimeManager()
+        team_name = "interactive_inflight"
+        session_id = "s1"
+        resume_started = asyncio.Event()
+        release_resume = asyncio.Event()
+
+        class _Agent:
+            team_backend = None
+
+            async def resume_interrupt(self, _payload):
+                resume_started.set()
+                await release_resume.wait()
+                return "delivered"
+
+        await _activate_pool_entry(manager, team_name, session_id, _Agent())
+        entry = await manager.pool.get(team_name)
+        assert entry is not None
+        interact_task = asyncio.create_task(
+            manager.interact(
+                InteractiveInput(raw_inputs="continue"),
+                team_name=team_name,
+                session_id=session_id,
+            )
+        )
+        await asyncio.wait_for(resume_started.wait(), timeout=0.5)
+        close_task = asyncio.create_task(entry.interact_gate.close_and_drain())
+        try:
+            await asyncio.sleep(0)
+            assert entry.interact_gate.inflight == 1
+            assert not close_task.done()
+        finally:
+            release_resume.set()
+
+        result = await interact_task
+        await close_task
+        assert result.ok is True
+        assert entry.interact_gate.inflight == 0
 
     @pytest.mark.asyncio
     @pytest.mark.level0

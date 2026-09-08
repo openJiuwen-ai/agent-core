@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/worktree/`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-07-28 |
-| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md |
+| 最近一次修订日期 | 2026-09-08 |
+| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_75_idle-trigger-interrupt-resume-deadlock.md |
 
 ## 范围 / 边界
 
@@ -323,11 +323,11 @@ class StreamController:
 
     # cycle 生命周期（由 CoordinationKernel 调，非 round 级）
     async def start(self) -> None: ...   # subscribe(on_state, on_round) + 起 _forward_outputs task
-    async def stop(self) -> None: ...    # 停 forwarder task
+    async def stop(self) -> None: ...    # 关闭 interrupt resume 准入并停 forwarder task
 
     # 转发给 runtime
     async def cancel_agent(self) -> None: ...        # harness.abort(immediate=True)
-    async def cooperative_cancel(self) -> None: ...  # harness.abort(immediate=False)
+    async def cooperative_cancel(self, *, terminal: bool = False) -> None: ...
     async def pause_agent(self) -> None: ...         # harness.pause()
     async def resume_agent(self, *, query: str | None = None) -> None: ...  # harness.resume(query=)
     async def drain_agent_task(self) -> None: ...    # == cancel_agent()
@@ -355,6 +355,11 @@ class StreamController:
 - `drain_agent_task` 就是 `cancel_agent`：`stop` / `destroy` 用它把 round 直接丢弃。
   **lifecycle *pause* 绝不能走这里**，必须走 `pause_agent`，否则 round 不是被暂停
   而是被销毁（见 [[F_60]]）。
+- cancel 在调用 `harness.abort()` 前同步关闭 interrupt resume 准入、清空 pending
+  approval 并 detach owned drain worker。non-terminal cancel 只有在 runtime 的真实
+  `IDLE` callback 到达后才重新开放；graceful abort 的 ACK 不是 round settle 边界。
+  caller cancellation 和重叠 cancel 都不能提前开放。`stop()`、`drain_agent_task()`
+  与 `cooperative_cancel(terminal=True)` 的关闭状态持续到下一次 `start()`。
 - **transient retry 在 forwarder 里就地消化，不再 raise**：`_handle_retry` 检出
   `task_failed` chunk（`[code] ...` 前缀，`_ERROR_CODE_PATTERN` 解析）后，若
   `code ∈ _RETRYABLE_ERROR_CODES`（当前 `{181001}`）且 `_retry_attempt <
@@ -417,9 +422,9 @@ def reset_session_id(token: Token[str]) -> None: ...
 
 **没有 round 级字段**——round 状态一律直读 `harness.state`，本层不缓存
 （`is_agent_running()` / `has_in_flight_round()` 都是 `harness.state is RUNNING`）。
-曾经的 `agent_task` / `streaming_active` / `pending_inputs` /
-`pending_interrupt_resumes` / `_cancel_requested` 随 [[F_28]] 一并删除：
-单 supervisor 模型下 runtime 自己序列化输入、自己管 round，本层再存一份必然漂移。
+曾经的 `agent_task` / `streaming_active` / `pending_inputs` / `_cancel_requested`
+随 [[F_28]] 一并删除。`_pending_interrupt_resumes` 是例外：它只持有目标 interrupt
+尚未 commit 的 structured approval，不保存普通 round input，也不驱动 round。
 
 | 字段 | 类型 | 生命周期 |
 |---|---|---|
@@ -428,6 +433,10 @@ def reset_session_id(token: Token[str]) -> None: ...
 | `_chunk_observers` | `list[ChunkObserver]` | inprocess teammate fan-out 注入；observer 抛异常自动 `remove_chunk_observer` |
 | `_retry_attempt` | `int` | transient-retry 计数；`start()` 每个 cycle 重置为 0（见不变量 12）|
 | `_swallow_failed_round` | `bool` | 命中可重试错误后吞掉该 round 剩余 chunk；`start()` 与每个 round 的 `started` 事件都清零 |
+| `_pending_interrupt_resumes` | `list[Any]` | cycle-local structured approval；由单 drain worker 在匹配 interrupt commit 后一次投递一个，abort/stop 时清空 |
+| `_interrupt_resume_cancel_depth` | `int` | 正在执行的 cancel 数；大于 0 时关闭 resume 准入，覆盖重叠 cancel |
+| `_interrupt_resume_waiting_for_idle` | `bool` | cancel 已发出但被取消 round 尚未报告真实 IDLE；不能以 abort ACK 清除 |
+| `_terminal_interrupt_resume_closed` | `bool` | stop/shutdown/drain 的终止闩锁；仅下一 cycle 的 `start()` 清除 |
 
 ### 状态机：两个维度，都由 runtime 事件驱动
 

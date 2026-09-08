@@ -8,7 +8,9 @@ import asyncio
 import pytest
 
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from openjiuwen.agent_teams.harness.state import InboxMessage
 from tests.unit_tests.agent_teams.harness.fixtures import (
     aborted_markers,
     drain_outputs,
@@ -188,5 +190,76 @@ async def test_immediate_abort_no_completed_round_clears_to_baseline() -> None:
         finally:
             await harness.stop()
             await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("immediate", [True, False])
+async def test_abort_discards_structured_and_text_follow_ups(immediate: bool) -> None:
+    """Abort owns every queue that can restart the cancelled round."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, sleep_seconds=0.15)
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("running")
+            await wait_invoke_running(fake)
+            await harness.send(InteractiveInput(raw_inputs="structured"))
+            await harness.send("transient text")
+            state = harness.load_state(harness.loop_session)
+            state.pending_follow_ups.append("persisted text")
+            harness.save_state(harness.loop_session, state)
+
+            await harness.abort(immediate=immediate)
+            if not immediate:
+                # Graceful ACK precedes settlement. Inputs arriving in that
+                # interval still belong to the cancelled round.
+                await harness.send(InteractiveInput(raw_inputs="late structured"))
+                await harness.send("late text")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+
+            assert list(harness._st.pending_queue) == []
+            assert harness.loop_controller.drain_follow_up() == []
+            assert harness.load_state(harness.loop_session).pending_follow_ups == []
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("phase", [HarnessState.IDLE, HarnessState.PAUSED])
+async def test_abort_discards_stranded_queues_without_active_round(
+    phase: HarnessState,
+) -> None:
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        await start_harness(harness)
+        harness._st.phase = phase
+        harness._st.pending_queue.append(
+            InboxMessage(
+                seq=1,
+                content=InteractiveInput(raw_inputs="stranded structured"),
+                immediate=False,
+            )
+        )
+        harness.loop_controller.enqueue_follow_up("transient text")
+        state = harness.load_state(harness.loop_session)
+        state.pending_follow_ups.append("persisted text")
+        harness.save_state(harness.loop_session, state)
+
+        await harness.abort(immediate=True)
+
+        assert list(harness._st.pending_queue) == []
+        assert harness.loop_controller.drain_follow_up() == []
+        assert harness.load_state(harness.loop_session).pending_follow_ups == []
+        await harness.stop()
     finally:
         await Runner.stop()

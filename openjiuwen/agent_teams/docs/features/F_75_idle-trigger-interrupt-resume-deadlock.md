@@ -41,3 +41,25 @@ preparation and clears it at `_handle_resume()` entry.
 For a queued reply containing multiple IDs, suppression is field-granular. IDs
 that are proven consumed are removed from a copied `InteractiveInput`; fields
 that remain pending stay eligible for the next resume round.
+
+## Abort and Teardown
+
+Abort owns every queue that could restart the cancelled round. NativeHarness
+discards structured inputs, transient text follow-ups, and persisted text
+follow-ups for hard abort, graceful abort, and already-idle or paused aborts.
+Graceful abort discards once when intent is accepted and again at settlement so
+inputs arriving between the early ACK and the actual IDLE transition cannot
+escape into a new round.
+
+StreamController closes resume admission synchronously before its first await,
+detaches its owned drain worker, and clears pending approvals. Non-terminal
+cancel remains closed until the cancelled round reports IDLE; overlapping or
+caller-cancelled requests cannot reopen it early. Stop, lifecycle drain, and
+self-shutdown use a terminal latch that is reset only by the next cycle's
+`start()`.
+
+`TeamRuntimeManager.interact()` applies the existing `InteractGate` to
+`InteractiveInput` as well as ordinary messages. The ticket remains held until
+`resume_interrupt()` completes, while StreamController's closure remains the
+teardown guard because Runner finalization currently begins before the gate is
+closed.

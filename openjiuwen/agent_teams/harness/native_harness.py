@@ -876,17 +876,24 @@ class NativeHarness(DeepAgent):
           the loop exits at the following model-call boundary.
         """
         phase = self._st.phase
+        session = self._session
         if phase is HarnessState.IDLE:
+            if session is not None:
+                self._discard_follow_ups(session)
             self._ack(cmd.ack, None)
             return
         if phase is HarnessState.PAUSED:
             self._st.paused_query = None
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             self._ack(cmd.ack, None)
             return
 
         active = self._st.active
         if active is None:
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             self._ack(cmd.ack, None)
             return
@@ -903,6 +910,8 @@ class NativeHarness(DeepAgent):
                 active.last_iter_snapshot or active.pre_round_snapshot,
             )
             self._reset_coordinator()
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._emit_round_aborted(active.round_id, "abort")
             await self._emit_round("aborted", active.round_id)
             self._st.active = None
@@ -913,6 +922,8 @@ class NativeHarness(DeepAgent):
             # without starting a continuation. (The legacy coordinator.request_abort
             # never reached the inner loop, which does not read ``is_aborted``.)
             active.graceful_abort = True
+            if session is not None:
+                self._discard_follow_ups(session)
             if phase is HarnessState.PAUSING:
                 # It was cooperatively pausing; it is now a graceful abort.
                 await self._transition(HarnessState.RUNNING)
@@ -1097,7 +1108,7 @@ class NativeHarness(DeepAgent):
         # Graceful abort: the round finished; the user asked to stop. Drop any
         # queued follow-ups and go IDLE.
         if was_graceful:
-            self._drain_follow_ups_discard(session)
+            self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1137,6 +1148,7 @@ class NativeHarness(DeepAgent):
 
         result_type = (cmd.result or {}).get("result_type")
         if coordinator.is_aborted:
+            self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1535,8 +1547,8 @@ class NativeHarness(DeepAgent):
         st.pending_follow_ups.extend(new_follow_ups)
         self.save_state(session, st)
 
-    def _drain_follow_ups_discard(self, session: Session) -> None:
-        """Drop all queued follow-ups (LoopQueues + state) on graceful stop."""
+    def _discard_follow_ups(self, session: Session) -> None:
+        """Drop structured, transient text, and persisted text follow-ups."""
         self._st.pending_queue.clear()
         controller = self.loop_controller
         if controller is not None:
