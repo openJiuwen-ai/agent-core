@@ -1984,6 +1984,45 @@ def _case_diagnoses_validation_conflicts(
     return conflicts
 
 
+def _verifier_test_ids_match(observed: Any, expected: list[str], failure_output: str) -> bool:
+    """Match report IDs, allowing only uniquely corroborated truncated names."""
+    if not isinstance(observed, list) or any(not isinstance(item, str) for item in observed):
+        return False
+    if len(observed) != len(expected):
+        return False
+    if observed == expected:
+        return True
+
+    # Some verifier reports retain only the first whitespace-delimited token.
+    # A shared prefix alone is not evidence: require a unique FAILED log record.
+    failures: dict[str, set[str]] = {}
+    for line in failure_output.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) == 2 and fields[0] == "FAILED":
+            body = fields[1]
+            failures.setdefault(body.split(maxsplit=1)[0], set()).add(body)
+
+    for name, reported in zip(observed, expected):
+        if name == reported:
+            continue
+        if "[" not in reported or reported.endswith("]"):
+            return False
+        records = failures.get(reported, set())
+        if len(records) != 1:
+            return False
+        record = next(iter(records))
+        # Normalize control-character representations only when log-grounded.
+        escaped = name
+        for character, escape in (("\n", r"\n"), ("\r", r"\r"), ("\t", r"\t")):
+            escaped = escaped.replace(character, escape).replace("\\" + escape, escape)
+        if not any(
+            variant.endswith("]") and (record == variant or record.startswith(variant + " - "))
+            for variant in {name, escaped}
+        ):
+            return False
+    return True
+
+
 def _diagnosis_validation_conflicts(
     diagnosis: dict[str, Any],
     inventory: dict[str, Any],
@@ -2033,7 +2072,17 @@ def _diagnosis_validation_conflicts(
                 "failed_pass_to_pass_tests": verifier_inventory.get("failed_pass_to_pass_tests", []),
             }
             for key, value in expected_verifier.items():
-                if verifier_observations.get(key) != value:
+                observed = verifier_observations.get(key)
+                matches = (
+                    _verifier_test_ids_match(
+                        observed,
+                        value,
+                        str(verifier_inventory.get("verifier_failure_output_excerpt") or ""),
+                    )
+                    if isinstance(value, list)
+                    else observed == value
+                )
+                if not matches:
                     errors.append(f"verifier_observations.{key} must equal {value!r}")
         diagnosis_fields = ("summary", "root_cause", "critical_mistake", "general_mechanism", "recommendation")
         diagnosis_text = " ".join(str(diagnosis.get(key) or "").lower() for key in diagnosis_fields)
