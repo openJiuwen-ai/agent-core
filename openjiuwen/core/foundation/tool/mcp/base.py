@@ -31,11 +31,12 @@ def preserve_mcp_tool_result_status(tool_result: Any, content: Any) -> Any:
     if getattr(tool_result, "isError", False) is not True:
         return content
 
-    error = "\n\n".join(
-        text
-        for item in (getattr(tool_result, "content", None) or [])
-        if isinstance(text := getattr(item, "text", None), str) and text
-    )
+    error_parts = []
+    for item in (getattr(tool_result, "content", None) or []):
+        text = getattr(item, "text", None)
+        if isinstance(text, str) and text:
+            error_parts.append(text)
+    error = "\n\n".join(error_parts)
     if not error.strip():
         error = "MCP tool reported an error."
 
