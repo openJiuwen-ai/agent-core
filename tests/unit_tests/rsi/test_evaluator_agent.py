@@ -114,6 +114,14 @@ def test_missing_or_invalid_contract_fails_preflight(reference):
         LlmAsJudgeJudger(_config()).validate_case({"input": "Task", "reference": reference})
 
 
+@pytest.mark.parametrize("field", ["id", "description"])
+@pytest.mark.parametrize("value", [None, "", "   ", 42, False, []])
+def test_invalid_behavior_identity_is_a_validation_error(field, value):
+    item = {"id": "criterion", "description": "Check the response", field: value}
+    with pytest.raises(ValueError, match=f"behavior {field} must be a non-empty string"):
+        scoring_contract({"reference": {"required_behaviors": [item]}})
+
+
 @pytest.mark.parametrize(
     "defect",
     [

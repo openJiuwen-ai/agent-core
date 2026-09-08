@@ -33,7 +33,8 @@ def _normalize_items(raw: Any, *, forbidden: bool = False) -> list[dict[str, Any
         item.setdefault("id", item.get("description", f"behavior_{index}"))
         item.setdefault("description", item["id"])
         for key in ("id", "description"):
-            if not isinstance(item[key], str) or not item[key].strip():
+            field_value = item.get(key)
+            if not isinstance(field_value, str) or not field_value.strip():
                 raise ValueError(f"behavior {key} must be a non-empty string")
         if forbidden:
             item["penalty"] = finite_number(item.get("penalty", 0.3), minimum=0, maximum=1, name="penalty")
