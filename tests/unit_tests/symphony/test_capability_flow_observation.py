@@ -1,137 +1,40 @@
+"""Runtime graph-to-flow submission contract tests."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-import openjiuwen.symphony.flow.observation as observation_module
-from openjiuwen.symphony.flow.engine import SymphonyFlowEngine
-from openjiuwen.symphony.flow.observation import (
-    SymphonyFlowObservationSink,
-    build_symphony_flow_observation_sink,
-)
-from openjiuwen.symphony.orchestration import SymphonyFlowConfig
+from openjiuwen.symphony import CombinationCandidate, EvolutionSubmitResult, SymphonyRuntime
+from openjiuwen.symphony.observation import ObservationReceipt
 
 
-class FakeFlowEngine:
-    def __init__(self) -> None:
-        self.payloads: list[dict[str, object]] = []
-        self.distill_calls = 0
-
-    def ingest(self, payload: dict[str, object]) -> bool:
-        self.payloads.append(payload)
-        return True
-
-    async def distill(self) -> None:
-        self.distill_calls += 1
-
-
-@pytest.mark.asyncio
-async def test_sink_ingests_execution_graph_only() -> None:
-    engine = FakeFlowEngine()
-    sink = SymphonyFlowObservationSink(engine)  # type: ignore[arg-type]
-    execution_graph = {
-        "trace_id": "trace-1",
-        "outcome": "success",
+def _planned_graph(*, include_snapshot: bool = True) -> dict:
+    value = {
         "graph": {
-            "nodes": {"skill:a": {}, "skill:b": {}, "skill:c": {}},
-            "edges": [
-                {
-                    "source": "skill:a",
-                    "target": "skill:b",
-                    "metadata": {"success": True},
-                },
-                {
-                    "source": "skill:b",
-                    "target": "skill:c",
-                    "metadata": {"success": False},
-                },
-            ],
-        },
+            "id": "plan-1",
+            "type": "planned_graph",
+            "directed": True,
+            "nodes": {},
+            "edges": [],
+        }
     }
-
-    await sink.submit(
-        SimpleNamespace(
-            planned_graph={"nodes": {"skill:planned": {}}},
-            execution_graph=execution_graph,
-        )
-    )
-
-    assert len(engine.payloads) == 1
-    assert engine.payloads[0]["graph"]["edges"] == [execution_graph["graph"]["edges"][0]]
-    assert set(engine.payloads[0]["graph"]["nodes"]) == {"skill:a", "skill:b"}
-    assert engine.distill_calls == 1
+    if include_snapshot:
+        value["graph_snapshot"] = {
+            "static_revision": "static-1",
+            "observation_revision": "observation-1",
+            "merged_revision": "merged-1",
+        }
+    return value
 
 
-@pytest.mark.asyncio
-async def test_sink_ignores_empty_execution_graph() -> None:
-    engine = FakeFlowEngine()
-    sink = SymphonyFlowObservationSink(engine)  # type: ignore[arg-type]
-
-    await sink.submit(SimpleNamespace(execution_graph={}))
-    await sink.submit(SimpleNamespace(execution_graph=None))
-
-    assert engine.payloads == []
-
-
-@pytest.mark.asyncio
-async def test_sink_ignores_failed_outcome_and_graph_without_success_edges() -> None:
-    engine = FakeFlowEngine()
-    sink = SymphonyFlowObservationSink(engine)  # type: ignore[arg-type]
-    graph = {
-        "nodes": {"skill:a": {}, "skill:b": {}},
-        "edges": [
-            {
-                "source": "skill:a",
-                "target": "skill:b",
-                "metadata": {"success": False},
-            }
-        ],
-    }
-
-    await sink.submit(SimpleNamespace(execution_graph={"outcome": "failed", "graph": graph}))
-    await sink.submit(SimpleNamespace(execution_graph={"outcome": "success", "graph": graph}))
-
-    assert engine.payloads == []
-    assert engine.distill_calls == 0
-
-
-def test_factory_disabled_returns_none(tmp_path) -> None:
-    config = SymphonyFlowConfig(enabled=False)
-
-    assert build_symphony_flow_observation_sink(tmp_path / "flow", config=config) is None
-
-
-def test_factory_reuses_engine_for_same_flow_dir(tmp_path) -> None:
-    first = build_symphony_flow_observation_sink(tmp_path / "flow")
-    second = build_symphony_flow_observation_sink(tmp_path / "flow")
-
-    assert first is not None
-    assert second is not None
-    assert first.engine is second.engine
-
-
-def test_factory_engine_initialization_failure_returns_none(monkeypatch, tmp_path) -> None:
-    class BrokenFlowEngine:
-        def __init__(self, *args, **kwargs) -> None:
-            del args, kwargs
-            raise OSError("flow store unavailable")
-
-    monkeypatch.setattr(observation_module, "SymphonyFlowEngine", BrokenFlowEngine)
-
-    assert build_symphony_flow_observation_sink(tmp_path / "flow") is None
-
-
-@pytest.mark.asyncio
-async def test_sink_persists_normalized_execution_graph_and_is_idempotent(
-    tmp_path,
-) -> None:
-    engine = SymphonyFlowEngine(tmp_path / "flow")
-    sink = SymphonyFlowObservationSink(engine)
-    payload = {
+def _execution_graph(*, outcome: str = "success", include_snapshot: bool = True) -> dict:
+    value = {
         "trace_id": "trace-1",
-        "query": "q",
-        "outcome": "success",
+        "query": "summarize",
+        "outcome": outcome,
         "graph": {
             "id": "execution-1",
             "type": "execution_graph",
@@ -139,11 +42,23 @@ async def test_sink_persists_normalized_execution_graph_and_is_idempotent(
             "nodes": {
                 "skill:a": {
                     "label": "skill",
-                    "metadata": {"version": "1"},
+                    "metadata": {
+                        "capability_type": "skill",
+                        "version": "v1",
+                        "content_hash": "sha256:a",
+                        "input_ports": ["query"],
+                        "output_ports": ["text"],
+                    },
                 },
                 "skill:b": {
                     "label": "skill",
-                    "metadata": {"version": "1"},
+                    "metadata": {
+                        "capability_type": "skill",
+                        "version": "v1",
+                        "content_hash": "sha256:b",
+                        "input_ports": ["text"],
+                        "output_ports": ["summary"],
+                    },
                 },
             },
             "edges": [
@@ -151,61 +66,274 @@ async def test_sink_persists_normalized_execution_graph_and_is_idempotent(
                     "source": "skill:a",
                     "target": "skill:b",
                     "relation": "can_feed",
-                    "metadata": {"success": True},
+                    "metadata": {
+                        "success": True,
+                        "port_mappings": [{"source_output": "text", "target_input": "text"}],
+                        "evidence_refs": ["trace-1#span=1", "trace-1#span=2"],
+                    },
                 }
             ],
         },
     }
+    if include_snapshot:
+        value["graph_snapshot"] = {
+            "static_revision": "static-start",
+            "observation_revision": "observation-start",
+            "merged_revision": "merged-start",
+        }
+    return value
 
-    await sink.submit(SimpleNamespace(execution_graph=payload))
-    await sink.submit(SimpleNamespace(execution_graph=payload))
 
-    assert len(engine.store.read_evidence()) == 1
+def _runtime(graph_engine: object, flow_engine: object | None) -> SymphonyRuntime:
+    runtime = object.__new__(SymphonyRuntime)
+    runtime.graph_engine = graph_engine
+    runtime.flow_engine = flow_engine  # type: ignore[assignment]
+    runtime.graph_scope_id = "workspace:test"
+    return runtime
 
 
 @pytest.mark.asyncio
-async def test_default_demo_thresholds_create_verified_recipe_from_one_trace(
-    tmp_path,
-) -> None:
-    sink = build_symphony_flow_observation_sink(tmp_path / "flow")
-    assert sink is not None
-    payload = {
-        "trace_id": "trace-single-demo",
-        "query": "q",
-        "outcome": "success",
-        "graph": {
-            "id": "execution-single-demo",
-            "type": "execution_graph",
-            "directed": True,
-            "nodes": {
-                "skill:a": {"label": "skill", "metadata": {"version": "1"}},
-                "skill:b": {"label": "skill", "metadata": {"version": "1"}},
-            },
-            "edges": [
-                {
-                    "source": "skill:a",
-                    "target": "skill:b",
-                    "relation": "can_feed",
-                    "metadata": {"success": True},
-                }
-            ],
-        },
-    }
+@pytest.mark.parametrize("receipt_status", ["accepted", "audit_only", "duplicate"])
+async def test_runtime_submits_graph_then_projects_success_edges_to_flow(receipt_status: str) -> None:
+    receipt = ObservationReceipt(
+        evidence_id="execution-1",
+        graph_scope_id="workspace:test",
+        sequence=1,
+        status=receipt_status,
+    )
+    captured = []
 
-    await sink.submit(
-        SimpleNamespace(
-            submission_id="submission-demo",
-            planned_graph=None,
-            execution_graph=payload,
-        )
+    def submit_observation(value):
+        captured.append(value)
+        return receipt
+
+    graph_engine = SimpleNamespace(submit_observation=submit_observation)
+    flow_engine = SimpleNamespace(submit=AsyncMock(return_value=(CombinationCandidate("recipe-1", 1),)))
+    runtime = _runtime(graph_engine, flow_engine)
+
+    result = await runtime.submit_evolution(
+        _planned_graph(),
+        _execution_graph(),
+        session_id="session-1",
+        capture_mode="agent",
     )
 
-    recipe_ids = sink.engine.list_recipes()
-    assert len(recipe_ids) == 1
-    recipe = sink.engine.get_recipe(recipe_ids[0])
-    assert recipe is not None
-    assert recipe.status == "active"
-    assert recipe.grade == "verified"
-    packages = sink.engine.store.list_packages()
-    assert len(packages) == 1
-    assert packages[0]["target_kind"] == "skill"
+    assert result == EvolutionSubmitResult(receipt, (CombinationCandidate("recipe-1", 1),))
+    submitted = flow_engine.submit.await_args.args[0]
+    assert submitted["graph"]["id"] == "execution-1"
+    assert len(submitted["graph"]["edges"]) == 1
+    assert captured[0].evidence_id == "execution-1"
+
+
+@pytest.mark.asyncio
+async def test_runtime_builds_canonical_graph_observation() -> None:
+    captured = []
+    receipt = ObservationReceipt(
+        evidence_id="execution-1",
+        graph_scope_id="workspace:test",
+        sequence=1,
+        status="accepted",
+    )
+
+    def submit(value):
+        captured.append(value)
+        return receipt
+
+    runtime = _runtime(SimpleNamespace(submit_observation=submit), None)
+    result = await runtime.submit_evolution(
+        _planned_graph(),
+        _execution_graph(),
+        session_id="session-1",
+        capture_mode="team",
+    )
+
+    assert result.graph_receipt is receipt
+    assert result.new_candidates == ()
+    value = captured[0]
+    assert value.evidence_id == "execution-1"
+    assert value.graph_scope_id == "workspace:test"
+    assert value.trace.session_id == "session-1"
+    assert value.trace.capture_mode == "team"
+    assert value.task.task_cluster_id is None
+    assert value.graph_snapshot.static_revision == "static-1"
+    assert set(value.capabilities) == {"skill:a", "skill:b"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_execution_start_snapshot_when_plan_has_none() -> None:
+    captured = []
+
+    def submit(value):
+        captured.append(value)
+        return ObservationReceipt(
+            evidence_id="execution-1",
+            graph_scope_id="workspace:test",
+            sequence=1,
+            status="duplicate",
+        )
+
+    graph_engine = SimpleNamespace(submit_observation=submit)
+    runtime = _runtime(graph_engine, None)
+
+    await runtime.submit_evolution(
+        _planned_graph(include_snapshot=False),
+        _execution_graph(),
+        session_id="session-1",
+        capture_mode="agent",
+    )
+
+    assert captured[0].graph_snapshot.static_revision == "static-start"
+
+
+@pytest.mark.asyncio
+async def test_runtime_fails_closed_without_any_invoke_start_snapshot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    graph_engine = SimpleNamespace(submit_observation=Mock())
+    runtime = _runtime(graph_engine, None)
+
+    result = await runtime.submit_evolution(
+        None,
+        _execution_graph(include_snapshot=False),
+        session_id="session-1",
+        capture_mode="agent",
+    )
+
+    assert result == EvolutionSubmitResult(None, ())
+    assert "ValueError" in caplog.text
+    graph_engine.submit_observation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_invalid_capture_mode(caplog: pytest.LogCaptureFixture) -> None:
+    graph_engine = SimpleNamespace(submit_observation=Mock())
+    runtime = _runtime(graph_engine, None)
+
+    result = await runtime.submit_evolution(
+        _planned_graph(),
+        _execution_graph(),
+        session_id="session-1",
+        capture_mode="invalid",  # type: ignore[arg-type]
+    )
+
+    assert result == EvolutionSubmitResult(None, ())
+    assert "ValueError" in caplog.text
+    graph_engine.submit_observation.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_graph_failure_prevents_flow_submission(caplog: pytest.LogCaptureFixture) -> None:
+    flow_engine = SimpleNamespace(submit=AsyncMock())
+
+    def fail(value):
+        del value
+        raise RuntimeError("boom")
+
+    runtime = _runtime(SimpleNamespace(submit_observation=fail), flow_engine)
+
+    result = await runtime.submit_evolution(
+        _planned_graph(),
+        _execution_graph(),
+        session_id="session-1",
+        capture_mode="agent",
+    )
+
+    assert result == EvolutionSubmitResult(None, ())
+    assert "RuntimeError" in caplog.text
+    assert "boom" not in caplog.text
+    flow_engine.submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_success_task_does_not_enter_flow() -> None:
+    receipt = ObservationReceipt(
+        evidence_id="execution-1",
+        graph_scope_id="workspace:test",
+        sequence=1,
+        status="accepted",
+    )
+    flow_engine = SimpleNamespace(submit=AsyncMock())
+    runtime = _runtime(
+        SimpleNamespace(submit_observation=lambda value: receipt),
+        flow_engine,
+    )
+
+    result = await runtime.submit_evolution(
+        None,
+        _execution_graph(outcome="partial"),
+        session_id="session-1",
+        capture_mode="agent",
+    )
+
+    assert result.new_candidates == ()
+    flow_engine.submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_flow_failure_isolated_after_graph_receipt(caplog: pytest.LogCaptureFixture) -> None:
+    receipt = ObservationReceipt(
+        evidence_id="execution-1",
+        graph_scope_id="workspace:test",
+        sequence=1,
+        status="accepted",
+    )
+    flow_engine = SimpleNamespace(submit=AsyncMock(side_effect=RuntimeError("private")))
+    runtime = _runtime(SimpleNamespace(submit_observation=lambda value: receipt), flow_engine)
+
+    result = await runtime.submit_evolution(
+        _planned_graph(),
+        _execution_graph(),
+        session_id="session-1",
+        capture_mode="agent",
+    )
+
+    assert result == EvolutionSubmitResult(receipt, ())
+    assert "RuntimeError" in caplog.text
+    assert "private" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_runtime_aclose_closes_flow_before_graph_and_isolates_flow_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    order: list[str] = []
+
+    async def close_flow() -> None:
+        order.append("flow")
+        raise RuntimeError("private")
+
+    graph_engine = SimpleNamespace(close=Mock(side_effect=lambda: order.append("graph")))
+    runtime = _runtime(graph_engine, SimpleNamespace(close=close_flow))
+
+    await runtime.aclose()
+
+    assert order == ["flow", "graph"]
+    assert "RuntimeError" in caplog.text
+    assert "private" not in caplog.text
+
+
+def test_runtime_sync_close_requires_aclose_when_flow_is_configured() -> None:
+    graph_engine = SimpleNamespace(close=Mock())
+    runtime = _runtime(graph_engine, SimpleNamespace(close=AsyncMock()))
+
+    with pytest.raises(RuntimeError, match="aclose"):
+        runtime.close()
+
+    graph_engine.close.assert_not_called()
+
+
+def test_runtime_exposes_invoke_start_snapshot_provider() -> None:
+    snapshot = SimpleNamespace(
+        static_revision="static-start",
+        observation_revision="observation-start",
+        merged_revision="merged-start",
+    )
+    runtime = _runtime(SimpleNamespace(get_snapshot=Mock(return_value=snapshot)), None)
+
+    result = runtime.capture_graph_snapshot()
+
+    assert result == {
+        "static_revision": "static-start",
+        "observation_revision": "observation-start",
+        "merged_revision": "merged-start",
+    }

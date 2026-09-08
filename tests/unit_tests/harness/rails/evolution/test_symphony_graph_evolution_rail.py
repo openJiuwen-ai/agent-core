@@ -38,6 +38,13 @@ from openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail import (
 )
 
 
+def _graph_snapshot() -> dict[str, str]:
+    return {
+        "static_revision": "static-start",
+        "observation_revision": "observation-start",
+    }
+
+
 def _span(
     name: str,
     span_id: int,
@@ -171,9 +178,15 @@ async def test_input_is_frozen_and_invoke_start_freezes_model_depth_and_snapshot
     model_b = SimpleNamespace(invoke=AsyncMock())
     identity = CapabilityIdentity("skill:a", "skill", "a", "v1", "sha256:a", ("in",), ("out",))
     provider = SimpleNamespace(snapshot_capabilities=lambda: [identity])
+    graph_snapshot = {
+        "static_revision": "static-start",
+        "observation_revision": "observation-start",
+        "merged_revision": "merged-start",
+    }
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
         capability_snapshot_provider=provider,
+        graph_snapshot_provider=lambda: graph_snapshot,
         edge_evaluator_llm=model_a,
         edge_search_max_depth=7,
     )
@@ -188,6 +201,9 @@ async def test_input_is_frozen_and_invoke_start_freezes_model_depth_and_snapshot
     assert prepared.edge_evaluator_llm is model_a
     assert prepared.edge_search_max_depth == 7
     assert prepared.capability_snapshot == (identity,)
+    assert prepared.graph_snapshot["static_revision"] == "static-start"
+    graph_snapshot["static_revision"] = "mutated"
+    assert prepared.graph_snapshot["static_revision"] == "static-start"
     with pytest.raises(FrozenInstanceError):
         prepared.query = "changed"  # type: ignore[misc]
     capture = rail._current_capture()
@@ -206,6 +222,23 @@ def test_constructor_rejects_bool_depth_and_clamps_negative_depth() -> None:
         edge_search_max_depth=-2,
     )
     assert rail._edge_search_max_depth == 0
+
+
+def test_constructor_requires_graph_snapshot_provider_for_submission() -> None:
+    with pytest.raises(ValueError, match="graph_snapshot_provider"):
+        SymphonyGraphEvolutionRail(
+            trajectory_span_processor=TrajectorySpanProcessor(),
+            submit_evolution=AsyncMock(),
+        )
+
+
+def test_prepared_input_rejects_invalid_capture_mode() -> None:
+    with pytest.raises(ValueError, match="capture_mode"):
+        SymphonyGraphEvolutionInput(
+            trajectory=_trajectory(),
+            messages=(),
+            capture_mode="invalid",  # type: ignore[arg-type]
+        )
 
 
 def test_constructor_validates_trajectory_history_limit() -> None:
@@ -767,10 +800,11 @@ async def test_rail_preserves_repeated_skill_occurrences() -> None:
 
 @pytest.mark.asyncio
 async def test_private_invoke_history_is_bounded_and_reports_truncation() -> None:
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
     )
     ctx = _ctx()
     await rail.before_invoke(ctx)
@@ -791,8 +825,8 @@ async def test_private_invoke_history_is_bounded_and_reports_truncation() -> Non
     assert len(tuple(iter_spans(prepared.trajectory))) == 200
     assert "truncated_trace" in prepared.quality_flags
     await rail.run_evolution(prepared)
-    submission = sink.submit.await_args.args[0]
-    assert "truncated_trace" in submission.execution_graph["quality_flags"]
+    execution_graph = callback.await_args.args[1]
+    assert "truncated_trace" in execution_graph["quality_flags"]
     rail._unsubscribe_capture(capture)
 
 
@@ -1018,10 +1052,11 @@ async def test_team_callbacks_route_by_root_trace_and_root_loss_only_cleans(
 ) -> None:
     roots = {"value": _root(11)}
     monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = TeamSymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
         async_evolution=False,
     )
     ctx = _ctx()
@@ -1033,7 +1068,7 @@ async def test_team_callbacks_route_by_root_trace_and_root_loss_only_cleans(
     roots["value"] = None
     await rail.after_invoke(ctx)
     assert capture.subscription not in rail._active_captures
-    sink.submit.assert_not_awaited()
+    callback.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1042,10 +1077,11 @@ async def test_detached_team_root_loss_cleans_unique_session_without_submission(
 ) -> None:
     roots = {"value": _root(13)}
     monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = TeamSymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
         async_evolution=False,
     )
     ctx = _ctx()
@@ -1053,7 +1089,7 @@ async def test_detached_team_root_loss_cleans_unique_session_without_submission(
     assert len(rail._active_captures) == 1
     roots["value"] = None
     await Context().run(asyncio.create_task, rail.after_invoke(ctx))
-    sink.submit.assert_not_awaited()
+    callback.assert_not_awaited()
     assert not rail._active_captures
     assert not rail._symphony_states
 
@@ -1170,10 +1206,12 @@ async def test_snapshot_failure_marks_quality_and_before_exception_cleans() -> N
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
         capability_snapshot_provider=provider,
+        graph_snapshot_provider=lambda: (_ for _ in ()).throw(RuntimeError("private")),
     )
     ctx = _ctx()
     prepared = await _prepare(rail, ctx)
-    assert prepared.quality_flags == ("capability_snapshot_error",)
+    assert set(prepared.quality_flags) == {"capability_snapshot_error", "graph_snapshot_error"}
+    assert prepared.graph_snapshot is None
     capture = rail._current_capture()
     assert capture is not None
     rail._unsubscribe_capture(capture)
@@ -1237,7 +1275,7 @@ async def test_after_invoke_session_resolution_error_still_cleans_capture() -> N
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_sends_every_candidate_to_frozen_model_and_sink(
+async def test_run_evolution_sends_every_candidate_to_frozen_model_and_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fragment_a = SymphonyExecutionFragment("a", "skill", "a", "trace", "1", "root", ("1",), 0)
@@ -1261,11 +1299,12 @@ async def test_run_evolution_sends_every_candidate_to_frozen_model_and_sink(
         return (judged,)
 
     monkeypatch.setattr(rail_module, "evaluate_symphony_edge_candidates", evaluate)
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     llm = SimpleNamespace(invoke=AsyncMock())
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
     )
     prepared = SymphonyGraphEvolutionInput(
         trajectory=_trajectory(),
@@ -1279,14 +1318,21 @@ async def test_run_evolution_sends_every_candidate_to_frozen_model_and_sink(
         outcome="success",
         reason=None,
         trace_id="trace",
+        graph_snapshot={
+            "static_revision": "static-start",
+            "observation_revision": "observation-start",
+            "merged_revision": "merged-start",
+        },
         edge_evaluator_llm=llm,
     )
     await rail.run_evolution(prepared)
     assert seen["llm"] is llm
     assert seen["candidates"] == (candidate,)
-    submission = sink.submit.await_args.args[0]
-    assert submission.execution_graph["graph"]["edges"]
-    assert submission.execution_graph["graph"]["nodes"]["skill:a"]["metadata"]["output_ports"] == ["out"]
+    execution_graph = callback.await_args.args[1]
+    assert execution_graph["graph"]["edges"]
+    assert execution_graph["graph_snapshot"]["static_revision"] == "static-start"
+    assert execution_graph["graph"]["nodes"]["skill:a"]["metadata"]["output_ports"] == ["out"]
+    assert callback.await_args.kwargs == {"session_id": "unknown", "capture_mode": "agent"}
 
 
 @pytest.mark.asyncio
@@ -1312,8 +1358,12 @@ async def test_no_relation_decision_is_excluded_but_submission_is_kept(
         return (no_relation,)
 
     monkeypatch.setattr(rail_module, "evaluate_symphony_edge_candidates", evaluate)
-    sink = SimpleNamespace(submit=AsyncMock())
-    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor(), observation_sink=sink)
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+    )
     await rail.run_evolution(
         SymphonyGraphEvolutionInput(
             trajectory=_trajectory(),
@@ -1326,16 +1376,17 @@ async def test_no_relation_decision_is_excluded_but_submission_is_kept(
             edge_evaluator_llm=SimpleNamespace(invoke=AsyncMock()),
         )
     )
-    assert sink.submit.await_args.args[0].execution_graph["graph"]["edges"] == []
+    assert callback.await_args.args[1]["graph"]["edges"] == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", [None, SimpleNamespace(invoke=AsyncMock(side_effect=RuntimeError("boom")))])
 async def test_no_model_or_model_failure_still_submits_empty_graph(model: object | None) -> None:
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
     )
     prepared = SymphonyGraphEvolutionInput(
         trajectory=_trajectory(),
@@ -1347,20 +1398,21 @@ async def test_no_model_or_model_failure_still_submits_empty_graph(model: object
         edge_evaluator_llm=model,  # type: ignore[arg-type]
     )
     await rail.run_evolution(prepared)
-    submission = sink.submit.await_args.args[0]
-    assert submission.execution_graph["graph"]["edges"] == []
+    execution_graph = callback.await_args.args[1]
+    assert execution_graph["graph"]["edges"] == []
 
 
 @pytest.mark.asyncio
-async def test_consumer_and_sink_failures_are_isolated(caplog: pytest.LogCaptureFixture) -> None:
+async def test_consumer_and_callback_failures_are_isolated(caplog: pytest.LogCaptureFixture) -> None:
     async def broken_consumer(value: SymphonyGraphEvolutionInput) -> None:
         del value
         raise RuntimeError("consumer-secret")
 
-    sink = SimpleNamespace(submit=AsyncMock(side_effect=RuntimeError("sink-secret")))
+    callback = AsyncMock(side_effect=RuntimeError("callback-secret"))
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
         input_consumer=broken_consumer,
     )
     prepared = SymphonyGraphEvolutionInput(
@@ -1371,15 +1423,19 @@ async def test_consumer_and_sink_failures_are_isolated(caplog: pytest.LogCapture
         trace_id="trace",
     )
     await rail.run_evolution(prepared)
-    sink.submit.assert_awaited_once()
+    callback.assert_awaited_once()
     assert "consumer-secret" not in caplog.text
-    assert "sink-secret" not in caplog.text
+    assert "callback-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_residual_invalid_planned_graph_is_omitted_without_losing_submission() -> None:
-    sink = SimpleNamespace(submit=AsyncMock())
-    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor(), observation_sink=sink)
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+    )
     invalid = _ready_graph("invalid")
     del invalid["graph"]["id"]
     prepared = SymphonyGraphEvolutionInput(
@@ -1391,9 +1447,9 @@ async def test_residual_invalid_planned_graph_is_omitted_without_losing_submissi
         trace_id="trace",
     )
     await rail.run_evolution(prepared)
-    submission = sink.submit.await_args.args[0]
-    assert submission.planned_graph is None
-    assert submission.execution_graph["graph"]["edges"] == []
+    call = callback.await_args
+    assert call.args[0] is None
+    assert call.args[1]["graph"]["edges"] == []
 
 
 @pytest.mark.asyncio
@@ -1420,17 +1476,21 @@ async def test_candidate_probe_is_bounded_and_truncation_is_reported(
         )
 
     monkeypatch.setattr(rail_module, "build_symphony_edge_candidates", candidates)
-    sink = SimpleNamespace(submit=AsyncMock())
-    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor(), observation_sink=sink)
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+    )
     await rail.run_evolution(
         SymphonyGraphEvolutionInput(
             trajectory=_trajectory(), messages=(), outcome="success", reason=None, trace_id="trace"
         )
     )
     assert seen["max_candidates"] == 65
-    submission = sink.submit.await_args.args[0]
-    assert submission.execution_graph["quality_flags"] == ["edge_candidates_truncated"]
-    assert submission.execution_graph["graph"]["edges"] == []
+    execution_graph = callback.await_args.args[1]
+    assert execution_graph["quality_flags"] == ["edge_candidates_truncated"]
+    assert execution_graph["graph"]["edges"] == []
 
 
 def test_summary_redacts_binary_and_bounds_values() -> None:

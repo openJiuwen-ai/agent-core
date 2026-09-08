@@ -4,7 +4,7 @@
 
 The rails in this module own only the production side of the graph-evolution
 contract: capture one invoke, infer and model-judge occurrence edges, build a
-JGF execution graph, and hand the immutable planned/execution pair to a sink.
+JGF execution graph, and hand detached planned/execution graphs to a callback.
 Runtime graph aggregation and experience generation are intentionally outside
 this module.
 """
@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from openjiuwen.agent_evolving.trajectory.messages import DEFAULT_EVOLUTION_MESSAGE_FIELDS
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
@@ -62,15 +62,35 @@ from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
     CapabilityIdentity,
     CapabilitySnapshotProvider,
     ExecutionOutcome,
-    SymphonyGraphObservationSink,
+    _canonical_graph_pair,
     build_symphony_execution_graph,
-    build_symphony_graph_evolution_submission,
 )
 from openjiuwen.symphony.interfaces.llm import SymphonyLLM
+from openjiuwen.symphony.observation import GraphSnapshotRef
 
 _COMPOSE_TOOL_NAME = "symphony_compose_graph"
 _MAX_EDGE_CANDIDATES = 64
 _CANDIDATE_PROBE_LIMIT = _MAX_EDGE_CANDIDATES + 1
+
+CaptureMode: TypeAlias = Literal["agent", "team"]
+GraphSnapshotProvider: TypeAlias = Callable[[], Mapping[str, Any]]
+
+
+@runtime_checkable
+class SymphonyEvolutionSubmitCallback(Protocol):
+    """Runtime callback receiving one detached graph pair and invoke metadata."""
+
+    async def __call__(
+        self,
+        planned_graph: dict[str, Any] | None,
+        execution_graph: dict[str, Any],
+        *,
+        session_id: str,
+        capture_mode: CaptureMode,
+    ) -> Any:
+        """Submit one invocation without exposing Rail-internal state."""
+
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -81,15 +101,20 @@ class SymphonyGraphEvolutionInput(PreparedEvolutionInput):
     execution_fragments: tuple[SymphonyExecutionFragment, ...] = ()
     execution_continuities: tuple[tuple[int, Trajectory], ...] = ()
     capability_snapshot: tuple[CapabilityIdentity, ...] = ()
+    graph_snapshot: dict[str, str] | None = None
     query: str = ""
     outcome: ExecutionOutcome = "partial"
     reason: str | None = "invoke_result_unverified"
     trace_id: str = "unknown"
     session_id: str = "unknown"
-    capture_mode: Literal["agent", "team"] = "agent"
+    capture_mode: CaptureMode = "agent"
     quality_flags: tuple[str, ...] = ()
     edge_evaluator_llm: SymphonyLLM | None = field(default=None, repr=False, compare=False)
     edge_search_max_depth: int = 3
+
+    def __post_init__(self) -> None:
+        if self.capture_mode not in {"agent", "team"}:
+            raise ValueError("capture_mode must be agent or team")
 
 
 @dataclass(frozen=True)
@@ -108,10 +133,11 @@ class _SymphonyInvokeState:
     member_id: str | None
     team_id: str | None
     trace_id: str | None
-    capture_mode: Literal["agent", "team"]
+    capture_mode: CaptureMode
     edge_evaluator_llm: SymphonyLLM | None
     edge_search_max_depth: int
     capability_snapshot: tuple[CapabilityIdentity, ...] = ()
+    graph_snapshot: dict[str, str] | None = None
     planned_graph: dict[str, Any] | None = None
     increments: list[Trajectory] = field(default_factory=list)
     increment_continuities: list[int] = field(default_factory=list)
@@ -167,8 +193,7 @@ def _ready_planned_graph(tool_result: Any) -> dict[str, Any] | None:
         decisions=(),
         capability_snapshot=(),
     )
-    # Keep strict JSON and planned-JGF validation in the submission contract.
-    build_symphony_graph_evolution_submission(detached, validation_execution)
+    _canonical_graph_pair(detached, validation_execution)
     return detached
 
 
@@ -186,8 +211,9 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         *,
         trajectory_span_processor: TrajectorySpanProcessor,
         capability_snapshot_provider: CapabilitySnapshotProvider | None = None,
+        graph_snapshot_provider: GraphSnapshotProvider | None = None,
         edge_evaluator_llm: SymphonyLLM | None = None,
-        observation_sink: SymphonyGraphObservationSink | None = None,
+        submit_evolution: SymphonyEvolutionSubmitCallback | None = None,
         input_consumer: Callable[[SymphonyGraphEvolutionInput], Awaitable[None]] | None = None,
         async_evolution: bool = True,
         edge_search_max_depth: int = 3,
@@ -202,14 +228,19 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             getattr(capability_snapshot_provider, "snapshot_capabilities", None)
         ):
             raise TypeError("capability_snapshot_provider must provide snapshot_capabilities")
-        if observation_sink is not None and not callable(getattr(observation_sink, "submit", None)):
-            raise TypeError("observation_sink must provide submit")
+        if graph_snapshot_provider is not None and not callable(graph_snapshot_provider):
+            raise TypeError("graph_snapshot_provider must be callable")
+        if submit_evolution is not None and not callable(submit_evolution):
+            raise TypeError("submit_evolution must be callable")
+        if submit_evolution is not None and graph_snapshot_provider is None:
+            raise ValueError("graph_snapshot_provider is required when submit_evolution is configured")
         if input_consumer is not None and not callable(input_consumer):
             raise TypeError("input_consumer must be callable")
         if isinstance(edge_search_max_depth, bool) or not isinstance(edge_search_max_depth, int):
             raise TypeError("edge_search_max_depth must be an integer")
         self._capability_snapshot_provider = capability_snapshot_provider
-        self._observation_sink = observation_sink
+        self._graph_snapshot_provider = graph_snapshot_provider
+        self._submit_evolution = submit_evolution
         self._input_consumer = input_consumer
         self._edge_evaluator_llm: SymphonyLLM | None = None
         self.update_edge_evaluator_llm(edge_evaluator_llm)
@@ -218,8 +249,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         self._symphony_states_lock = threading.RLock()
 
     @property
-    def observation_sink(self) -> SymphonyGraphObservationSink | None:
-        return self._observation_sink
+    def submit_evolution(self) -> SymphonyEvolutionSubmitCallback | None:
+        return self._submit_evolution
 
     @property
     def input_consumer(self) -> Callable[[SymphonyGraphEvolutionInput], Awaitable[None]] | None:
@@ -373,6 +404,19 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 raise
             except Exception:
                 self._remember_quality(state, ({"code": "capability_snapshot_error"},))
+        graph_snapshot_provider = self._graph_snapshot_provider
+        if graph_snapshot_provider is not None:
+            try:
+                value = graph_snapshot_provider()
+                if hasattr(value, "model_dump"):
+                    value = value.model_dump(mode="json")
+                snapshot = GraphSnapshotRef.model_validate(deepcopy(value)).model_dump(mode="json")
+                with state.lock:
+                    state.graph_snapshot = snapshot
+            except MemoryError:
+                raise
+            except Exception:
+                self._remember_quality(state, ({"code": "graph_snapshot_error"},))
 
     def _unsubscribe_capture(self, capture: _InvokeCapture) -> None:
         try:
@@ -740,7 +784,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         ctx: AgentCallbackContext,
     ) -> bool:
         del trigger_point, ctx
-        return self._observation_sink is not None or self._input_consumer is not None
+        return self._submit_evolution is not None or self._input_consumer is not None
 
     async def _prepare_evolution_input(
         self,
@@ -778,6 +822,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         with state.lock:
             planned_graph = deepcopy(state.planned_graph)
             snapshot = tuple(deepcopy(state.capability_snapshot))
+            graph_snapshot = deepcopy(state.graph_snapshot)
             quality = tuple(state.quality_codes)
             llm = state.edge_evaluator_llm
             depth = state.edge_search_max_depth
@@ -789,6 +834,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             execution_fragments=tuple(fragments),
             execution_continuities=tuple(continuities),
             capability_snapshot=snapshot,
+            graph_snapshot=graph_snapshot,
             query=query,
             outcome=outcome,
             reason=reason,
@@ -811,7 +857,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                     "[SymphonyGraphEvolutionRail] input consumer failed (%s)",
                     type(exc).__name__,
                 )
-        if self._observation_sink is None:
+        if self._submit_evolution is None:
             return
 
         candidates_probe = build_symphony_edge_candidates(
@@ -843,10 +889,12 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             candidates=candidates,
             decisions=decisions,
             capability_snapshot=prepared.capability_snapshot,
+            graph_snapshot=prepared.graph_snapshot,
             quality_flags=tuple(sorted(flags)),
         )
+        planned_graph = prepared.planned_graph
         try:
-            submission = build_symphony_graph_evolution_submission(prepared.planned_graph, execution_graph)
+            _canonical_graph_pair(planned_graph, execution_graph)
         except MemoryError:
             raise
         except Exception as exc:
@@ -855,7 +903,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 type(exc).__name__,
             )
             try:
-                submission = build_symphony_graph_evolution_submission(None, execution_graph)
+                _canonical_graph_pair(None, execution_graph)
+                planned_graph = None
             except MemoryError:
                 raise
             except Exception as fallback_exc:
@@ -865,10 +914,15 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 )
                 return
         try:
-            await self._observation_sink.submit(submission)
+            await self._submit_evolution(
+                deepcopy(planned_graph),
+                deepcopy(execution_graph),
+                session_id=prepared.session_id,
+                capture_mode=prepared.capture_mode,
+            )
         except Exception as exc:
             logger.warning(
-                "[SymphonyGraphEvolutionRail] observation sink failed (%s)",
+                "[SymphonyGraphEvolutionRail] evolution submission failed (%s)",
                 type(exc).__name__,
             )
 
@@ -942,6 +996,7 @@ def _detach_prepared_input(prepared: SymphonyGraphEvolutionInput) -> SymphonyGra
             (index, Trajectory.from_otlp(trajectory.to_otlp())) for index, trajectory in prepared.execution_continuities
         ),
         capability_snapshot=prepared.capability_snapshot,
+        graph_snapshot=deepcopy(prepared.graph_snapshot),
         query=prepared.query,
         outcome=prepared.outcome,
         reason=prepared.reason,
@@ -1038,6 +1093,9 @@ class TeamSymphonyGraphEvolutionRail(_TeamTrajectoryCaptureMixin, SymphonyGraphE
 
 
 __all__ = [
+    "CaptureMode",
+    "GraphSnapshotProvider",
+    "SymphonyEvolutionSubmitCallback",
     "SymphonyGraphEvolutionInput",
     "SymphonyGraphEvolutionRail",
     "TeamSymphonyGraphEvolutionRail",
