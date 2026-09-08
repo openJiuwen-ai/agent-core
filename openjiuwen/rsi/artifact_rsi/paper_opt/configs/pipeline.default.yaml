@@ -64,11 +64,11 @@ topic_survey:
   # Retrieval is best-effort.  If a public endpoint keeps hanging, finalize
   # the sources already downloaded instead of consuming the Provider watchdog.
   timeout_seconds: 900
-  # Optional task-scoped HTTP(S) proxy for global sources such as arXiv and
-  # publisher pages. When omitted, retrieval is restricted to domestic
-  # academic portals (Baidu Scholar, CNKI, and Wanfang).
+  # Optional task-scoped HTTP(S) proxy for literature search, publisher pages,
+  # and downloads. With or without it, retrieval uses the same global toolset;
+  # without one, the agent is instructed to prefer directly downloadable sources.
   # web_proxy: "http://127.0.0.1:7890"
-  # search_scope: global  # Explicitly use domestic or global; omitted = auto.
+  # search_scope: global  # Explicitly use domestic or global; omitted = global.
   include_paid_search: true
   free_search:
     duckduckgo: true

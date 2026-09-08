@@ -218,7 +218,13 @@ class PaperTreeOrchestrator:
         self.config = load_config(config_path)
         topic_config = dict(self.config.get("topic_survey") or {})
         topic_config["web_proxy"] = self.web_proxy
-        topic_config["search_scope"] = "global" if self.web_proxy else "domestic"
+        # A task proxy changes the network route, not the research workflow.
+        # Keep an explicitly configured domestic scope intact for deployments
+        # that still need it, but make the normal paper path global with or
+        # without a task-scoped proxy.
+        configured_scope = str(topic_config.get("search_scope") or "").strip().lower()
+        if configured_scope not in {"domestic", "global"}:
+            topic_config["search_scope"] = "global"
         self.config["topic_survey"] = topic_config
         self.on_event = on_event
         self._task: asyncio.Task | None = None

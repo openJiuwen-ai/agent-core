@@ -39,6 +39,13 @@ AGENT_CARD_ID = "topic-survey-agent"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "system.md"
 _FINALIZER_TIMEOUT_SECONDS = 180.0
 _SOURCE_EXCERPT_CHARS = 6000
+_NO_PROXY_SOURCE_HINT = (
+    " No task proxy is configured. Use the same global search, fetch, and download "
+    "workflow, but prefer sources whose webpages and full-text PDF/HTML are directly "
+    "accessible and downloadable. If a source is blocked, requires unavailable "
+    "authentication, or fails to download, skip it and search for another accessible "
+    "source; do not repeatedly retry the same inaccessible source."
+)
 _DOMESTIC_PORTAL_ROOT_PATHS = {
     "",
     "/",
@@ -107,11 +114,12 @@ class TopicSurveyAgent:
 
     def _search_scope(self) -> str:
         """Resolve the task's domestic/global search policy once."""
-        proxy_url = str(self._survey_config.get("web_proxy") or "").strip()
         configured_scope = str(self._survey_config.get("search_scope") or "").strip().lower()
         if configured_scope in {"domestic", "global"}:
             return configured_scope
-        return "global" if proxy_url else "domestic"
+        # A proxy is only a transport option.  When no explicit scope is set,
+        # keep the same global search/fetch/download workflow in both cases.
+        return "global"
 
     def _create_agent(
         self,
@@ -329,25 +337,12 @@ class TopicSurveyAgent:
             ]
         )
 
-    async def asurvey(self, inputs: TopicSurveyInput) -> ResearchBrief:
-        free_search_engines = self._configure_web_search()
-        directory = survey_directory(inputs.topic)
-        download_dir = directory / "sources"
-        download_dir.mkdir(parents=True, exist_ok=True)
-        request_id = f"topic-survey:{directory.name}"
-        submit_tool = SubmitTopicSurveyTool()
-        submit_tool.reset(request_id=request_id)
-        agent = self._create_agent(
-            download_dir=download_dir,
-            submit_tool=submit_tool,
-            free_search_engines=free_search_engines,
-        )
-
-        from openjiuwen.core.runner import Runner
-        from openjiuwen.core.session.agent import Session
-
-        session = Session(session_id=request_id, card=getattr(agent, "card", None))
-        relative_download_dir = to_project_relative(download_dir, root=self._root)
+    def _build_survey_query(
+        self,
+        inputs: TopicSurveyInput,
+        *,
+        relative_download_dir: str,
+    ) -> str:
         query = (
             f"TOPIC: {inputs.topic}\n"
             f"MAX_PAPERS: {inputs.max_papers}\n"
@@ -368,10 +363,37 @@ class TopicSurveyAgent:
         )
         if self._search_scope() == "domestic":
             query += (
-                " No task proxy is configured: use only the domestic academic sources "
-                "allowed by the registered tools (Baidu Scholar, CNKI, Wanfang and their "
+                " Use only the explicitly configured domestic academic sources allowed "
+                "by the registered tools (Baidu Scholar, CNKI, Wanfang and their "
                 "subdomains); do not retry global search engines or unrelated domains."
             )
+        elif not str(self._survey_config.get("web_proxy") or "").strip():
+            query += _NO_PROXY_SOURCE_HINT
+        return query
+
+    async def asurvey(self, inputs: TopicSurveyInput) -> ResearchBrief:
+        free_search_engines = self._configure_web_search()
+        directory = survey_directory(inputs.topic)
+        download_dir = directory / "sources"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        request_id = f"topic-survey:{directory.name}"
+        submit_tool = SubmitTopicSurveyTool()
+        submit_tool.reset(request_id=request_id)
+        agent = self._create_agent(
+            download_dir=download_dir,
+            submit_tool=submit_tool,
+            free_search_engines=free_search_engines,
+        )
+
+        from openjiuwen.core.runner import Runner
+        from openjiuwen.core.session.agent import Session
+
+        session = Session(session_id=request_id, card=getattr(agent, "card", None))
+        relative_download_dir = to_project_relative(download_dir, root=self._root)
+        query = self._build_survey_query(
+            inputs,
+            relative_download_dir=relative_download_dir,
+        )
         run_error: Exception | None = None
         try:
             await session.pre_run(inputs={"query": query, "conversation_id": request_id})

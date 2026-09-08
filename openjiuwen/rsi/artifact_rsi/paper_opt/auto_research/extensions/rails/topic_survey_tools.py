@@ -21,9 +21,10 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.downlo
     DownloadSurveySourceTool,
 )
 
-# Without a task-scoped proxy the survey deliberately stays on academic
-# sources that are commonly reachable from mainland networks.  This is a
-# policy boundary enforced by the tools, not merely a prompt suggestion.
+# These domains are used only when a task explicitly selects ``domestic``
+# search scope.  A missing task-scoped proxy does not select this allowlist:
+# proxy configuration controls transport, while source selection stays global
+# and the agent is reminded to prefer directly downloadable sources.
 DOMESTIC_SOURCE_DOMAINS = (
     "scholar.baidu.com",
     "xueshu.baidu.com",

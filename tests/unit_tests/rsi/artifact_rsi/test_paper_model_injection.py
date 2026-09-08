@@ -49,6 +49,24 @@ async def test_orchestrator_passes_optimizer_to_all_modules(tmp_path, monkeypatc
     assert instance.registry.get("experiment_execution").artifact_path == str(tmp_path)
 
 
+@pytest.mark.parametrize("web_proxy", [None, "http://proxy.example.test:7890"])
+def test_orchestrator_uses_global_search_scope_with_or_without_proxy(
+    tmp_path, monkeypatch, web_proxy
+):
+    monkeypatch.setattr(module, "set_project_root", lambda path: None)
+    orchestrator = module.PaperTreeOrchestrator(
+        task_id=f"scope-{bool(web_proxy)}",
+        run_dir=str(tmp_path),
+        max_iterations=1,
+        optimization_instruction=None,
+        artifact_path=None,
+        web_proxy=web_proxy,
+    )
+
+    assert orchestrator.config["topic_survey"]["search_scope"] == "global"
+    assert orchestrator.config["topic_survey"]["web_proxy"] == web_proxy
+
+
 def test_variant_env_pins_uploaded_paper(tmp_path, monkeypatch):
     paper_dir = tmp_path / "paper"
     paper_dir.mkdir()
