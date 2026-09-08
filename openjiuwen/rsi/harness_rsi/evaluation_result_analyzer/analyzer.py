@@ -772,6 +772,8 @@ def _summarize_evaluation_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
                 {
                     "id": entry.get("id", ""),
                     "score": entry.get("score"),
+                    "description": entry.get("description", ""),
+                    "weight": entry.get("weight"),
                     "reason": _truncate_text(entry.get("reason", ""), _TEXT_SNIPPET_CHARS),
                     "failure_reason": _truncate_text(entry.get("failure_reason", ""), _TEXT_SNIPPET_CHARS),
                     "missing_capability": _truncate_text(entry.get("missing_capability", ""), _TEXT_SNIPPET_CHARS),
@@ -807,6 +809,9 @@ def _summarize_evaluation_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         result["quality_gap_score_ceiling"] = parsed.get("quality_gap_score_ceiling")
     if "overall_score" in parsed:
         result["overall_score"] = parsed.get("overall_score")
+    for key in ("base_score", "penalty_mode", "total_deduction"):
+        if key in parsed:
+            result[key] = parsed[key]
     return result
 
 
@@ -906,6 +911,8 @@ def _compact_judge_dimensions(value: Any) -> dict[str, Any]:
     for key in ("low_score_behaviors", "avg_behavior_score", "behavior_count", "pass_count", "fail_count"):
         if key in value:
             result[key] = value.get(key)
+    if "triggered_forbidden_behaviors" in value:
+        result["triggered_forbidden_behaviors"] = value["triggered_forbidden_behaviors"]
     per_behavior_scores = value.get("per_behavior_scores")
     if isinstance(per_behavior_scores, dict):
         result["per_behavior_scores"] = {str(key): score for key, score in list(per_behavior_scores.items())[:12]}

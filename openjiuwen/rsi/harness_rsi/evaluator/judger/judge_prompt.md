@@ -11,6 +11,10 @@ Evaluation policy:
   invent extra requirements, quality dimensions, business rules or score caps.
 - Score each supplied behavior independently. Use the supplied rubric, not
   expectations associated with a dataset name, filename or task category.
+- When reference_answer_role is "reference", the answer is supporting material,
+  not an additional scoring item. It may be less detailed than the rubric;
+  matching it does not automatically satisfy omitted rubric requirements.
+  Never add a reference_answer criterion unless that ID was supplied.
 - For a reference answer, compare meaning and correctness while respecting
   output-format constraints explicitly stated by the task. Mere formatting
   differences are not errors unless the task requires that format.
@@ -29,6 +33,9 @@ Evaluation policy:
   incorrect work, which should receive a valid low score.
 - Return every supplied behavior and forbidden ID exactly once. Do not add IDs.
   Weights, penalties, final score and pass/fail are computed by the caller.
+- A forbidden criterion describes a defect: triggered=true means the defect
+  occurred, not that the response avoided it. Report each defect independently.
+  Do not fold its deduction into positive scores or invent weights/penalties.
 - Do not diagnose root causes, propose Harness changes or generate training data.
 
 Return only JSON, no Markdown. Successful evaluation:

@@ -7,6 +7,7 @@ import json
 import math
 from typing import Any
 
+from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _reference_answer
 from openjiuwen.rsi.harness_rsi.evaluator.requirement_results import requirement_results_contract
 
@@ -53,9 +54,15 @@ def _unique_ids(items: list[dict[str, Any]]) -> None:
 
 def scoring_contract(case: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Accept answer/rubric and retain the old required/forbidden behavior format."""
+    case = normalize_grading_case(case)
     reference = case.get("reference", {})
     if not isinstance(reference, dict):
         raise ValueError("reference must be an object")
+    answer_role = reference.get("answer_role", "criterion")
+    if answer_role not in {"criterion", "reference"}:
+        raise ValueError("reference.answer_role must be criterion or reference")
+    if reference.get("penalty_mode", "ceiling") not in {"ceiling", "subtract"}:
+        raise ValueError("reference.penalty_mode must be ceiling or subtract")
     behaviors = _normalize_items(reference.get("required_behaviors", []))
     rubric = reference.get("rubric", [])
     if not isinstance(rubric, list):
@@ -64,7 +71,7 @@ def scoring_contract(case: dict[str, Any]) -> tuple[list[dict[str, Any]], list[d
         if not isinstance(text, str) or not text.strip():
             raise ValueError("reference.rubric must contain non-empty strings")
         behaviors.append({"id": f"rubric_{index:03d}", "description": text, "weight": 1.0})
-    if _reference_answer(case) is not None:
+    if _reference_answer(case) is not None and answer_role == "criterion":
         behaviors.insert(
             0,
             {
@@ -113,32 +120,49 @@ def _required_text(item: dict[str, Any], key: str) -> str:
 
 
 def score_judge_output(
-    parsed: dict[str, Any], behaviors: list[dict[str, Any]], forbidden: list[dict[str, Any]]
+    parsed: dict[str, Any],
+    behaviors: list[dict[str, Any]],
+    forbidden: list[dict[str, Any]],
+    *,
+    penalty_mode: str = "ceiling",
 ) -> tuple[float, dict[str, Any], dict[str, Any]]:
     """Validate complete coverage before applying trusted weights and penalties."""
     _required_text(parsed, "overall_reason")
+    if penalty_mode not in {"ceiling", "subtract"}:
+        raise ValueError("penalty_mode must be ceiling or subtract")
     results = _result_items(parsed.get("behaviors"), behaviors, "behaviors")
     hits = _result_items(parsed.get("forbidden_hits", []), forbidden, "forbidden_hits")
-    for result in results:
+    for result, criterion in zip(results, behaviors):
         result["score"] = finite_number(result.get("score"), minimum=0, maximum=1, name="score")
         _required_text(result, "reason")
         _required_text(result, "evidence")
+        result["description"] = criterion["description"]
+        result["weight"] = criterion["weight"]
     for hit, criterion in zip(hits, forbidden):
         if not isinstance(hit.get("triggered"), bool):
             raise ValueError("forbidden triggered must be a boolean")
         _required_text(hit, "reason")
         _required_text(hit, "evidence")
         hit["penalty"] = criterion["penalty"]
+        hit["description"] = criterion["description"]
     total_weight = sum(item["weight"] for item in behaviors)
     score = sum(result["score"] * item["weight"] for result, item in zip(results, behaviors)) / total_weight
+    base_score = score
     penalties = [hit["penalty"] for hit in hits if hit["triggered"]]
     if penalties:
-        # Preserve the legacy ceiling: do not penalize the same defect twice.
-        score = min(score, 1.0 - max(penalties))
+        if penalty_mode == "subtract":
+            score = max(0.0, score - math.fsum(penalties))
+        else:
+            # Existing callers retain the legacy ceiling, not cumulative deductions.
+            score = min(score, 1.0 - max(penalties))
     dimensions = compute_dimensions(results)
+    dimensions["triggered_forbidden_behaviors"] = [hit["id"] for hit in hits if hit["triggered"]]
     normalized = {
         "overall_reason": parsed["overall_reason"],
         "overall_score": score,
+        "base_score": base_score,
+        "penalty_mode": penalty_mode,
+        "total_deduction": base_score - score,
         "behaviors": results,
         "forbidden_hits": hits,
         "dimensions": dimensions,

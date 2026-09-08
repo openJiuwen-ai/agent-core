@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import EvaluationJudger, JudgeResult
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import prepare_judge_workspace, write_judge_json
@@ -58,6 +59,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
         output_dir: str = "",
     ) -> JudgeResult:
         self.validate_case(case)
+        case = normalize_grading_case(case)
         if execution_result.execution_status != "passed":
             return self._failure_result(execution_result.error)
         if not output_dir:
@@ -77,7 +79,13 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 forbidden=forbidden,
             )
             async with asyncio.timeout(self._config.judge_timeout_sec):
-                return await self._evaluate(workspace, judge_dir, behaviors, forbidden)
+                return await self._evaluate(
+                    workspace,
+                    judge_dir,
+                    behaviors,
+                    forbidden,
+                    penalty_mode=case.get("reference", {}).get("penalty_mode", "ceiling"),
+                )
         except EvaluationInfrastructureError as exc:
             write_judge_json(judge_dir / "error.json", {"error_type": type(exc).__name__, "message": str(exc)})
             raise
@@ -91,6 +99,8 @@ class LlmAsJudgeJudger(EvaluationJudger):
         judge_dir: Path,
         behaviors: list[dict[str, Any]],
         forbidden: list[dict[str, Any]],
+        *,
+        penalty_mode: str = "ceiling",
     ) -> JudgeResult:
         prompt = "Read request.json and the relevant evidence files, then return the complete evaluation JSON."
         # One structural retry, on the same evidence and contract, never selecting a better score.
@@ -111,7 +121,12 @@ class LlmAsJudgeJudger(EvaluationJudger):
                     raise EvaluationInfrastructureError(f"LLM evaluation unavailable: {parsed.get('reason', '')}")
                 if parsed.get("status", "completed") != "completed":
                     raise ValueError("invalid judge status")
-                score, normalized, requirements = score_judge_output(parsed, behaviors, forbidden)
+                score, normalized, requirements = score_judge_output(
+                    parsed,
+                    behaviors,
+                    forbidden,
+                    penalty_mode=penalty_mode,
+                )
             except (ValueError, TypeError) as exc:
                 if attempt:
                     raise EvaluationInfrastructureError(f"Unusable LLM evaluation; inspect {judge_dir}") from exc

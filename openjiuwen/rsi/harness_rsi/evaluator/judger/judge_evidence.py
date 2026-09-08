@@ -70,6 +70,8 @@ def prepare_judge_workspace(
             "task": task_input(case),
             "response": response,
             "reference_answer": _reference_answer(case),
+            "reference_answer_role": reference.get("answer_role", "criterion"),
+            "penalty_mode": reference.get("penalty_mode", "ceiling"),
             "behaviors": behaviors,
             "forbidden_behaviors": forbidden,
             "evidence_files": inventory,
