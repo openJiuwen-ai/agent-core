@@ -114,7 +114,7 @@ def test_build_judger_supports_deterministic_methods() -> None:
         ExactMatchJudger,
     )
     with pytest.raises(ValueError, match="unsupported evaluation_method"):
-        build_judger(EvaluatorConfig(evaluation_method="llm-as-judge"))
+        build_judger(EvaluatorConfig(evaluation_method="unknown-judge"))
 
 
 @pytest.mark.asyncio

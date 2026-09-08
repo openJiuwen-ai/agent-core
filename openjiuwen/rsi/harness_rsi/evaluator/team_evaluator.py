@@ -111,6 +111,7 @@ class TeamEvaluator:
             cases=cases,
             team_skill_ref_path=team_skill_ref_path,
             harness_refs_path=harness_refs_path,
+            evaluator_config=self.config,
         )
         manifest_path = eval_dir / _EVALUATION_INPUT_FILE
         can_resume_cases = _stored_evaluation_fingerprint(manifest_path) == input_fingerprint
@@ -233,6 +234,7 @@ def _evaluation_input_fingerprint(
     cases: list[dict[str, Any]],
     team_skill_ref_path: str,
     harness_refs_path: str,
+    evaluator_config: EvaluatorConfig | None = None,
 ) -> str:
     payload = {
         "cases": cases,
@@ -240,6 +242,10 @@ def _evaluation_input_fingerprint(
         "team_skill": _path_identity(team_skill_ref_path),
         "harness_refs": _path_identity(harness_refs_path),
     }
+    if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
+        from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
+
+        payload["evaluator"] = _material_identity(evaluator_config, Path.cwd())
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

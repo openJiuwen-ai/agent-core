@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.harness.resources import load_plugin_package
 from openjiuwen.rsi.events import EventStatus, NodeStageEvent, OnEvent, emit
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
 from openjiuwen.rsi.harness_rsi.data_loader import DataLoader, load_json_cases
@@ -52,6 +53,10 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import (
 from openjiuwen.rsi.harness_rsi.member_optimizer.loader import load_analysis_ref
 from openjiuwen.rsi.harness_rsi.member_optimizer.path_layout import (
     MemberOptimizerPathLayout,
+)
+from openjiuwen.rsi.harness_rsi.member_optimizer.plugin_manifest import (
+    prepare_plugin_registries,
+    synchronize_plugin_manifest,
 )
 from openjiuwen.rsi.harness_rsi.schema import (
     DatasetArtifact,
@@ -3171,6 +3176,9 @@ def _materialize_checkpoint_filtered_harness(
                 )
             role_dir = staging_root / "harnesses" / _checkpoint_role_dir_name(str(role))
             shutil.copytree(source, role_dir)
+            # Seed H0 declarations before composing; syncing a delta-only
+            # registry would otherwise erase the baseline capabilities.
+            prepare_plugin_registries(role_dir)
             staged_roles[str(role)] = role_dir
 
         retained_records: list[dict[str, str]] = []
@@ -3228,6 +3236,12 @@ def _materialize_checkpoint_filtered_harness(
                         "target_path": target_rel,
                     }
                 )
+
+        for role_dir in staged_roles.values():
+            synchronize_plugin_manifest(role_dir)
+            manifest = role_dir / "manifest.json"
+            if manifest.is_file():
+                load_plugin_package(manifest)
 
         if selection_root.exists():
             shutil.rmtree(selection_root)
@@ -3423,10 +3437,17 @@ def _checkpoint_copy_manifest_entries(
     target_rel: str,
     runtime_name: str,
 ) -> None:
-    if not source.is_file():
+    native_manifest = source.parent.parent / "manifest.json"
+    if native_manifest.is_file():
+        # Published native candidates need not carry RSI's editable sidecars.
+        source_data = json.loads(native_manifest.read_text(encoding="utf-8"))
+        native_key = "prompt_sections" if list_key == "sections" else list_key
+        source_entries = source_data.get(native_key, [])
+    elif source.is_file():
+        source_data = yaml.safe_load(source.read_text(encoding="utf-8"))
+        source_entries = source_data.get(list_key, []) if isinstance(source_data, dict) else source_data
+    else:
         return
-    source_data = yaml.safe_load(source.read_text(encoding="utf-8"))
-    source_entries = source_data.get(list_key, []) if isinstance(source_data, dict) else source_data
     if not isinstance(source_entries, list):
         source_entries = [source_entries]
 
@@ -3447,7 +3468,7 @@ def _checkpoint_copy_manifest_entries(
                 target_rel,
                 exact_only=True,
             )
-            for key in ("file", "file_path", "path")
+            for key in ("file", "file_path", "path", "dir")
         )
 
     selected = [entry for entry in source_entries if matches(entry)]
@@ -3471,9 +3492,12 @@ def _checkpoint_copy_manifest_entries(
         destination_data = {list_key: destination_entries}
     if not isinstance(destination_entries, list):
         destination_entries = [destination_entries]
-    for entry in selected:
-        if entry not in destination_entries:
-            destination_entries.append(entry)
+    position = next(
+        (index for index, entry in enumerate(destination_entries) if matches(entry)),
+        len(destination_entries),
+    )
+    destination_entries = [entry for entry in destination_entries if not matches(entry)]
+    destination_entries[position:position] = selected
     destination_data[list_key] = destination_entries
     _write_yaml_atomic(destination, destination_data)
 
@@ -3561,7 +3585,7 @@ def _checkpoint_remove_manifest_entries(
                 target_rel,
                 exact_only=exact_only,
             )
-            for key in ("file", "file_path", "path")
+            for key in ("file", "file_path", "path", "dir")
         )
 
     data[list_key] = [entry for entry in entries if not matches(entry)]
@@ -3743,6 +3767,7 @@ def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, 
 
 def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> None:
     """Copy the best gated harness to the stable standalone publish location."""
+    output_dir = output_dir.expanduser().resolve()
     accepted_gates = [
         gate for gate in state.get("candidate_gates", []) if gate.get("accepted") and gate.get("status") == "accepted"
     ]
@@ -3754,8 +3779,17 @@ def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> Non
     existing_ref = Path(str(state.get("published_harness_refs_path", "") or ""))
     if existing_ref.is_file():
         _validate_single_harness_refs(str(existing_ref))
-        state["publication_status"] = "published"
-        return
+        existing_packages = [
+            (existing_ref.parent / str(raw_path)).expanduser().resolve()
+            for raw_path in _read_yaml(existing_ref).get("harness_refs", {}).values()
+        ]
+        if (
+            existing_ref.resolve().is_relative_to(output_dir)
+            and existing_packages
+            and all(path.is_dir() and path.is_relative_to(output_dir) for path in existing_packages)
+        ):
+            state["publication_status"] = "published"
+            return
 
     best_refs_path = Path(str(state["best_harness_refs_path"])).expanduser().resolve()
     best_payload = _read_yaml(best_refs_path)
@@ -3764,7 +3798,9 @@ def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> Non
         raise RuntimeError("Cannot publish final single harness: best refs contain no harness_refs")
 
     member_output_root = output_dir / "member_optimizations"
-    path_layout = MemberOptimizerPathLayout.from_output_root(member_output_root)
+    # Optimizer worktrees may use a short sibling mh/ directory. Final
+    # packages must stay inside run/ to satisfy the install boundary.
+    path_layout = MemberOptimizerPathLayout(output_root=member_output_root, runtime_root=output_dir / "published")
     published_refs: dict[str, str] = {}
     for role, raw_source in sorted(harness_refs.items()):
         source = Path(str(raw_source)).expanduser().resolve()
@@ -3772,12 +3808,16 @@ def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> Non
             raise RuntimeError(
                 f"Cannot publish final single harness role '{role}': source package does not exist: {source}"
             )
-        path_layout.write_role_mapping(str(role))
         destination = path_layout.current_harness_dir(str(role))
         staging = destination.with_name(f"{destination.name}.publish_tmp")
+        if not all(path.resolve().is_relative_to(output_dir) for path in (destination, staging)):
+            raise RuntimeError("Cannot publish final single harness outside its run directory")
+        path_layout.write_role_mapping(str(role))
         if staging.exists():
             shutil.rmtree(staging)
         shutil.copytree(source, staging)
+        if (staging / "manifest.json").is_file():
+            load_plugin_package(staging / "manifest.json")
         if destination.exists():
             shutil.rmtree(destination)
         staging.replace(destination)
