@@ -41,6 +41,11 @@ class OrgEvent:
     TASK_REVIEWED = "org_task_reviewed"
     SUMMARY_TASK_CREATED = "org_summary_task_created"
     SUMMARY_SOURCES_UPDATED = "org_summary_sources_updated"
+    SUMMARY_PROVISIONED = "org_summary_provisioned"
+    SUMMARY_PROVISION_FAILED = "org_summary_provision_failed"
+    SUMMARY_SOURCES_READY = "org_summary_sources_ready"
+    SUMMARY_SOURCE_FAILED = "org_summary_source_failed"
+    SUMMARY_COMPLETED = "org_summary_completed"
     LEADER_MESSAGE = "org_leader_message"
     TEAM_INVITED = "org_team_invited"
     TEAM_JOINED = "org_team_joined"
@@ -141,6 +146,43 @@ class OrgSummarySourcesUpdatedEvent(BaseOrgEvent):
     summary_task_id: str
 
 
+class OrgSummaryProvisionedEvent(BaseOrgEvent):
+    """Published after a dynamic Summary Team is created and can receive the task."""
+
+    root_task_id: str
+    summary_task_id: str
+    summary_team_id: str
+
+
+class OrgSummaryProvisionFailedEvent(BaseOrgEvent):
+    """Published when Summary Team create/start/recover fails."""
+
+    root_task_id: str
+    summary_task_id: str
+    failure_reason: str
+
+
+class OrgSummarySourcesReadyEvent(BaseOrgEvent):
+    """Published when all required summary sources are ready to aggregate."""
+
+    summary_task_id: str
+
+
+class OrgSummarySourceFailedEvent(BaseOrgEvent):
+    """Published when a required summary source task has failed."""
+
+    summary_task_id: str
+    source_task_id: str
+    failure_reason: str
+
+
+class OrgSummaryCompletedEvent(BaseOrgEvent):
+    """Published after the Summary Task reaches COMPLETED."""
+
+    root_task_id: str
+    summary_task_id: str
+
+
 class OrgLeaderMessageEvent(BaseOrgEvent):
     """Published after a leader-to-leader message row is persisted."""
 
@@ -176,6 +218,11 @@ _EVENT_TYPE_MAP: dict[str, type[BaseOrgEvent]] = {
     OrgEvent.TASK_REVIEWED: OrgTaskReviewedEvent,
     OrgEvent.SUMMARY_TASK_CREATED: OrgSummaryTaskCreatedEvent,
     OrgEvent.SUMMARY_SOURCES_UPDATED: OrgSummarySourcesUpdatedEvent,
+    OrgEvent.SUMMARY_PROVISIONED: OrgSummaryProvisionedEvent,
+    OrgEvent.SUMMARY_PROVISION_FAILED: OrgSummaryProvisionFailedEvent,
+    OrgEvent.SUMMARY_SOURCES_READY: OrgSummarySourcesReadyEvent,
+    OrgEvent.SUMMARY_SOURCE_FAILED: OrgSummarySourceFailedEvent,
+    OrgEvent.SUMMARY_COMPLETED: OrgSummaryCompletedEvent,
     OrgEvent.LEADER_MESSAGE: OrgLeaderMessageEvent,
     OrgEvent.TEAM_INVITED: OrgTeamInvitedEvent,
     OrgEvent.TEAM_JOINED: OrgTeamJoinedEvent,
@@ -221,6 +268,11 @@ __all__ = [
     "OrgTaskFailedEvent",
     "OrgTaskReviewedEvent",
     "OrgTaskReviewRequestedEvent",
+    "OrgSummaryCompletedEvent",
+    "OrgSummaryProvisionFailedEvent",
+    "OrgSummaryProvisionedEvent",
+    "OrgSummarySourceFailedEvent",
+    "OrgSummarySourcesReadyEvent",
     "OrgSummarySourcesUpdatedEvent",
     "OrgSummaryTaskCreatedEvent",
     "OrgTopic",

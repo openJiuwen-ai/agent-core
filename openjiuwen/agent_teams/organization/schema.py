@@ -22,12 +22,18 @@ ORG_STATIC_TABLE_NAMES = (
     "org_task_event",
     "org_task_review",
     "org_task_source",
+    "org_summary_execution",
 )
+
+# Framework Summary Task markers (SUMMARY_TEAM path; Task Pool wires these in later MRs).
+ORG_SUMMARY_TASK_TYPE = "organization.summary"
+ORG_SUMMARY_CAPABILITY = "summary"
 
 
 class OrgTaskStatus(StrEnum):
     OPEN = "OPEN"
     DELEGATED = "DELEGATED"
+    WAITING_SOURCES = "WAITING_SOURCES"
     CLAIMED = "CLAIMED"
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
@@ -214,6 +220,28 @@ class OrgTaskSource(BaseModel):
     created_at: int
 
 
+class OrgSummaryExecutionStatus(StrEnum):
+    PROVISIONING = "PROVISIONING"
+    WAITING_SOURCES = "WAITING_SOURCES"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    RELEASED = "RELEASED"
+
+
+class OrgSummaryExecution(BaseModel):
+    """Durable record for an on-demand Summary Team instance."""
+
+    execution_id: str
+    organization_id: str
+    root_task_id: str
+    summary_task_id: str
+    summary_team_id: str | None = None
+    status: OrgSummaryExecutionStatus = OrgSummaryExecutionStatus.PROVISIONING
+    created_at: int
+    released_at: int | None = None
+
+
 class OrgLeaderHandle(BaseModel):
     organization_id: str
     team_id: str
@@ -359,6 +387,19 @@ class OrgTaskSourceRecord(SQLModel, table=True):
     created_at: int
 
 
+class OrgSummaryExecutionRecord(SQLModel, table=True):
+    __tablename__ = "org_summary_execution"
+
+    execution_id: str = SQLField(primary_key=True)
+    organization_id: str = SQLField(index=True)
+    root_task_id: str = SQLField(index=True)
+    summary_task_id: str = SQLField(index=True)
+    summary_team_id: str | None = SQLField(default=None, index=True)
+    status: str = SQLField(index=True)
+    created_at: int
+    released_at: int | None = None
+
+
 def default_root_aggregation(task_id: str) -> OrgTaskAggregationConfig:
     """Return the default HIERARCHICAL aggregation config for a root task."""
 
@@ -382,6 +423,8 @@ __all__ = [
     "OrgUnclaimedTaskPolicy",
     "OrgUnclaimedTaskState",
     "ORG_STATIC_TABLE_NAMES",
+    "ORG_SUMMARY_CAPABILITY",
+    "ORG_SUMMARY_TASK_TYPE",
     "ORG_TASK_LEGACY_STATUS_FAILURE_CODES",
     "ORG_TASK_TERMINAL_STATUS_VALUES",
     "OrgAssignment",
@@ -393,6 +436,9 @@ __all__ = [
     "OrgLeaderMessageReceiptRecord",
     "OrgLeaderRecord",
     "OrganizationSpec",
+    "OrgSummaryExecution",
+    "OrgSummaryExecutionRecord",
+    "OrgSummaryExecutionStatus",
     "OrgTask",
     "OrgTaskAggregationConfig",
     "OrgTaskAggregationMode",
