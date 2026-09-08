@@ -245,14 +245,8 @@ async def test_canonical_swe_uses_the_same_official_verifier(tmp_path, monkeypat
     assert all(result.method == "swebench_official" for result in results)
 
 
-def test_exported_swe_packet_survives_relocation(tmp_path):
-    from examples.rsi.convert_swebench_dataset import convert
-
-    _, config = _swe_packet(tmp_path / "original")
-    legacy = _write_json(tmp_path / "legacy.json", {"cases": [{
-        "case_id": "repo-1", "input": "Fix a regression", "swebench": config,
-    }]})
-    result = convert(legacy, tmp_path / "export")
+def test_canonical_swe_packet_survives_relocation(tmp_path):
+    result, config = _swe_packet(tmp_path / "original")
     raw = json.loads(result.read_text())
     assert set(raw["cases"][0]) == {"case_id", "input", "assets", "reference"}
     target = tmp_path / "relocated" / "cases.json"
@@ -266,8 +260,6 @@ def test_exported_swe_packet_survives_relocation(tmp_path):
     assert {key: value for key, value in relocated.items() if key != "official_dataset_path"} == {
         key: value for key, value in config.items() if key != "official_dataset_path"
     }
-    with pytest.raises(ValueError, match="already exists"):
-        convert(legacy, tmp_path / "export")
 
 
 @pytest.mark.asyncio

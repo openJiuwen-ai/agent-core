@@ -13,26 +13,6 @@ replacement service interface. Dataset schemas and official evaluation
 protocols stay in adapter modules; the RSI optimization engine stays
 benchmark-neutral.
 
-## Scoring requirements
-
-Execution completion is not a correctness grade. The default `script-based`
-judger requires a backend-provided `JudgeResult`, official SWE-bench metadata,
-or an explicit answer in `reference.answer`, `reference.expected_output`,
-`reference_answer`, or `expected_output`. `exact_match` also requires an answer.
-`expected_files` or an output filename alone does not validate file contents.
-
-For open-ended tasks, use the benchmark's evaluator or inject an
-`EvaluationJudger` through `CaseRunner`; the direct engine does not automatically
-select an LLM judge just because a model configuration exists. Missing grading
-evidence raises `EvaluationInfrastructureError`, leaves `evaluation_error.json`,
-and does not publish a baseline score or feed a fabricated failure to Analyzer.
-Existing request/event fields and native plugin loading are unchanged.
-
-Older `backend_completed`/`method=none` scores are invalid evaluation evidence.
-They are rejected by result aggregation and case-evidence reuse. Preserve those
-runs for diagnosis, but use a new run with a real evaluator rather than resuming
-an already-completed run with a completion-only baseline.
-
 ## SWE-bench verifier on Windows
 
 The Windows verifier runs the official SWE-bench harness in WSL. Configure the
@@ -49,18 +29,6 @@ variables. Explicit case metadata `swebench.wsl_distro` and
 `swebench.python_path` takes precedence. With no overrides the defaults remain
 `Ubuntu-24.04` and `python3`. WSL overrides do not affect native Linux execution.
 Dataset validation alone does not verify this interpreter or Docker access.
-
-Dependency manifests are cached by repository and setup commit in
-`~/.cache/openjiuwen/rsi/swebench_dependency_cache`, independent of the service
-working directory. To keep using an existing cache, set
-`SWEBENCH_DEPENDENCY_CACHE_ROOT` to its absolute root before starting the service.
-Completed revision caches are reused without downloading again.
-
-Host-side manifest downloads honor the standard Requests proxy settings. An
-optional `SWEBENCH_DOWNLOAD_PROXY` overrides the proxy for these downloads only,
-not model calls or WSL processes. Transient connection/time-out and HTTP
-429/500/502/503/504 failures get at most three attempts, with 1 and 2 second
-backoff. Failed downloads do not publish a complete-cache marker.
 
 ## Frontend iteration limit
 
@@ -114,14 +82,6 @@ H0 uses iteration 0 and does not consume `max_iteration`. The root node is emitt
 before evaluation so per-case stages can be displayed while H0 is running.
 Resuming a completed baseline reuses its persisted evaluation; subsequent Harness
 scores never overwrite the frozen baseline.
-
-Epoch node parents describe Harness inheritance, not execution order. A rejected
-or unchanged epoch does not become the parent of the next attempt: attempts
-starting from H0 point to `h0` (mapped to `ROOT` by AgentServer), and attempts
-starting from an adopted Harness point to the epoch that adopted that version.
-Live events and recovered tree queries use the same projection. Existing
-`score`, `adopted`, and `reason`/`failure_reason` fields remain unchanged in shape;
-an unretained change is not automatically labeled a score-comparison rejection.
 
 ## Model calls and token usage
 
@@ -250,42 +210,3 @@ uv run python examples/rsi/run_single_harness.py evobench optimize `
 ```
 
 Use `evobench optimize --help` to inspect adapter-specific options.
-
-## Common case fields (direct engine / AgentServer)
-
-Pass a dataset JSON path as before. Keep declared files beside it when moving
-or distributing a dataset packet:
-
-```json
-{"cases": [{"case_id": "sum", "input": "Compute 1+2; reply with only the number.", "assets": [], "reference": {"answer": "3"}}]}
-```
-
-`case_id` and `input` are required for execution. `assets` lists public files;
-`reference.files` lists private grading files. Paths are relative to the JSON,
-must exist and cannot escape its directory. AgentServer snapshots both sets,
-but only public assets are copied into the solver workspace. Task input never
-falls back to the whole case. This is a delivery boundary, not an OS sandbox.
-File content hashes participate in resume checks and evaluation evidence reuse.
-
-The built-in `script-based` judger supports explicit reference answers and the
-existing official SWE verifier. `exact-match` supports reference answers only.
-Both compare answer text exactly, unwrapping the native final-answer transport
-envelope without trimming or rewriting its content. Generic `reference.rubric`
-and arbitrary private-file grading are not implemented by these judgers and
-fail before Task Agent execution rather than receiving a completion-only score.
-The separate Evo-Bench adapter above retains its own grading implementation.
-
-Legacy datasets remain supported. Export legacy SWE JSON into the four-field
-format without losing its verifier and environment options:
-
-```powershell
-python examples/rsi/convert_swebench_dataset.py old_cases.json new_dataset
-```
-
-`new_dataset` must not exist. Submit `new_dataset/cases.json`; distribute the
-whole directory. Each private `verifier.json` contains
-`{"adapter": "swebench_official", "config": {...}}`, retaining the original
-SWE configuration with a packet-relative `official_dataset_path`. Both this
-manifest and its official record must be listed in `reference.files`. The
-loader verifies matching instance IDs and reconstructs the existing runtime
-input; neither optimization policy nor official test scoring changes.
