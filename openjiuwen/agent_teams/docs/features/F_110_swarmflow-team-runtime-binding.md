@@ -45,28 +45,18 @@ SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑
    上下文，改为 `await messager.publish`，使「task done ⟹ 事件已投递」成为契约，controller 无需
    知道 `_publish` 内部有几层 create_task；顺带消除 CancelledError 分支里无引用 publish task
    可能被 GC 的隐患。`_build_progress_message` 抽出共享构造。best-effort：总线已关只 debug 不抛。
-6. **复活票 relaunch 落在「发起 resume 的工具」所在 harness，而非捕获的旧 harness**。team 层
-   pause 会 stop leader harness，RESUME_FROM_PAUSE 重建新 harness + 新 SwarmflowTool。复活票
-   （`_make_relaunch` 闭包）捕获的是 launch 时的旧工具，其 `_parent_agent` 指向已 stopped 的旧
-   harness；leader 在新 harness 上调 `swarmflow(action=resume)` 若沿用旧闭包，resumed 协程会挂在
-   死 harness 的 async_tool_runtime 上——能跑、能发进度（messager 是 team 级），但完成回灌
-   `_inject_async_completion → send()` 命中 stopped harness 被跳过，leader 永远不知道 workflow 完成
-   （不汇报、不静止、无 team.idle、方块不熄）。实测：`completion injection skipped` 紧随
-   `workflow_completed`。修法：`SwarmflowRunHandle.relaunch: Callable[[tool | None], None]`，
-   `controller.resume(run_id, *, tool=None)` 把发起方工具交给闭包，闭包用 `(tool or self)._relaunch`
-   ——语义通道（leader 经新工具）落在活 harness；机械通道（树视图按钮，无工具在手）回退到捕获工具，
-   本就只在同 harness 内有效（设计约束）。"进程内可信" 的复活票边界因此收紧为 "harness 内可信 +
-   跨 harness 由发起方补齐"。
-2. **`WorkflowProgressEvent.script_path: str | None = None`**。`run_workflow(path)` 把 `path` 写入
-   `Runtime.script_path`，`_exec_loaded` 的 `WORKFLOW_STARTED` 事件携带 `script_path=rt.script_path`。
-   业务无关铁律不破：`script_path` 是 engine 已有的 `path` 入参，不引入 agent_teams 依赖；其它
-   kind 一律 None（与 name/description 等 WORKFLOW_STARTED 专属字段一致）。
-3. **journal 新增 run 级 `__run__:args:{run_id}` 记录**。`run_workflow` 首跑时若 `args is not None`
-   且 `run_id` 非空则 `write_run_record(run_id, "args", {"args": args})`；冷启动 resume 时若
-   `args is None` 且 `run_id` 非空则 `find_run_record(run_id, "args")` 读回 `resolved_args`，再
-   `Runtime(args=resolved_args)`。轮内复活票（闭包）已天然保留 args，本记录只为跨进程冷启动补洞。
-   缓存命中准确性仍由内容寻址保证（`get_cached(ks, sig, run_id)`），args 不进键、而是经「改变
-   prompt/结构」间接影响 sig/ks——所以只要 args 一致即命中，本记录只解决"args 丢失"。
+6. **复活票 = 纯数据；执行宿主 = 当前 cycle 的 launcher（`set_launcher`）**。team 层 pause 经
+   `kernel.finalize_round` 销毁 leader NativeHarness（**cycle 级**：每轮 stream 退出即销毁、
+   `TeamHarness.start` 重建），`TeamToolRail` 随之重建 SwarmflowTool。controller 注册表是 **session
+   级**——票据若捕获 launch 时的工具/harness，跨一次 pause 必然悬空：resumed 协程挂在死 harness，
+   能跑、能发进度（messager 是 team 级），但完成回灌 `_inject_async_completion → send()` 命中
+   TERMINATED 被吞，leader 永远不知完成（不汇报、无 team.idle、方块不熄；实测 `completion injection
+   skipped` 紧随 `workflow_completed`）。修法：`SwarmflowRunHandle` 去掉 `relaunch` 闭包，只存
+   `inputs + session_id`；`BackgroundTaskController.set_launcher(tool)` 由每个 cycle 的新
+   SwarmflowTool 在 `__init__` 登记（`_native.background_task_controller` 在 rail build 前已 attach，
+   构造时可达）；`resume()` 用当前 launcher 的 `_relaunch(h.inputs, h.session_id)`，无 launcher 时
+   保留票据返回 False。按钮/语义两路统一，无 per-call 参数。曾尝试 `resume(run_id, tool=self)` +
+   `(tool or self)._relaunch` 闭包（已回退）——只修了语义通道，按钮路径无工具在手仍落死 harness。
 
 ## 拒绝的方案
 
