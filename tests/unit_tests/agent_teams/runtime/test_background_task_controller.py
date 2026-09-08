@@ -120,6 +120,53 @@ async def test_stop_sets_abort_reason_stop():
 
 
 @pytest.mark.asyncio
+async def test_pause_waits_for_task_unwind():
+    """pause() must not return until the cancelled task has actually unwound.
+
+    The engine writes the pause record and emits WORKFLOW_PAUSED while unwinding
+    (in the task's finally), which happens asynchronously after task.cancel().
+    An embedder that tears the leader harness down right after pause() would
+    otherwise lose that event.
+    """
+    unwound = []
+
+    async def _slow_unwind():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # Simulate the engine's multi-step teardown before the record lands.
+            for _ in range(5):
+                await asyncio.sleep(0)
+            unwound.append("record-written")
+            raise
+
+    task = asyncio.create_task(_slow_unwind())
+    await asyncio.sleep(0)
+
+    class _TaskRT:
+        def __init__(self, t):
+            self._tasks = {"t_1": t}
+        async def cancel(self, task_id):
+            self._tasks[task_id].cancel()
+            return True
+
+    class _TaskNative:
+        def __init__(self, t):
+            self.async_tool_runtime = _TaskRT(t)
+
+    h = SwarmflowRunHandle(
+        task_id="t_1", run_id="wf_1", abort_event=AbortSignal(),
+        backend=_FakeBackend(), native=_TaskNative(task), relaunch=lambda: None)
+    ctl = BackgroundTaskController()
+    ctl.register(h)
+
+    await ctl.pause("wf_1")
+
+    assert task.done()
+    assert unwound == ["record-written"]
+
+
+@pytest.mark.asyncio
 async def test_stop_none_stops_all_active_and_paused():
     ctl = BackgroundTaskController()
     ctl.register(_make_handle("wf_1"))
