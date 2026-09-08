@@ -11,6 +11,7 @@ from openjiuwen.harness.rails.evolution.approval_runtime import EvolutionApprova
 from openjiuwen.harness.rails.evolution.commands import (
     build_evolve_review_command_prompt,
     build_rebuild_command_prompt,
+    build_rebuild_llm_direct_prompt,
     build_simplify_command_prompt,
 )
 from openjiuwen.harness.rails.evolution.configuration import (
@@ -82,6 +83,7 @@ __all__ = [
     "TeamInsightBuffer",
     "TeamInsightEntry",
     "build_rebuild_command_prompt",
+    "build_rebuild_llm_direct_prompt",
     "build_simplify_command_prompt",
     "build_skill_approval_event",
     "build_evolution_review_agent_config",
