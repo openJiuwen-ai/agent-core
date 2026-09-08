@@ -41,7 +41,7 @@ class SwarmflowRunHandle:
     abort_event: AbortSignal  # engine Runtime.abort_event for THIS run
     backend: Any  # TeamWorkerBackend → abort_sessions()
     native: Any  # leader NativeHarness → async_tool_runtime.cancel
-    relaunch: Callable[[], None]  # re-launch run_background with the SAME inputs
+    relaunch: Callable[[Any], None]  # re-launch run_background with the SAME inputs on the given tool (None → the launching tool)
 
 
 class BackgroundTaskController:
@@ -133,12 +133,18 @@ class BackgroundTaskController:
                 self._active.pop(rid, None)
             return bool(targets)
 
-    async def resume(self, run_id: str | None = None) -> bool:
+    async def resume(self, run_id: str | None = None, *, tool: Any = None) -> bool:
         """Resume paused run(s) — all when ``run_id`` is None, else just that one.
 
-        The relaunch closure re-invokes ``run_background`` with the SAME inputs;
+        The relaunch ticket re-invokes ``run_background`` with the SAME inputs;
         the journal path is unchanged, so the completed prefix is a cache hit and
         only the interrupted call reruns live.
+
+        ``tool`` is the SwarmflowTool issuing the resume. The ticket captured
+        the tool that launched the run, whose harness may since have been
+        stopped and rebuilt by a team pause/resume cycle; relaunching on the
+        issuing tool keeps the run on the live harness. ``None`` (no tool in
+        hand, e.g. the tree-view button) relaunches on the captured tool.
         """
         async with self._lock:
             if run_id is None:
@@ -150,7 +156,7 @@ class BackgroundTaskController:
                 targets = {run_id: h}
             for rid, h in targets.items():
                 try:
-                    h.relaunch()
+                    h.relaunch(tool)
                 except Exception:
                     team_logger.debug("[bg-ctl] relaunch failed for %s", rid, exc_info=True)
                 self._paused.pop(rid, None)

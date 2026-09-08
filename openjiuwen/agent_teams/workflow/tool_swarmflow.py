@@ -368,7 +368,9 @@ class SwarmflowTool(AsyncTool):
         op = ops.get(action)
         if op is None:
             return ToolOutput(success=False, error=f"unknown action {action!r}")
-        ok = await op(resume_id)
+        # Resume relaunches on THIS tool's harness (the live one), not on the
+        # harness captured when the run was first launched — see _make_relaunch.
+        ok = await (op(resume_id, tool=self) if action == "resume" else op(resume_id))
         return ToolOutput(
             success=ok,
             data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"},
@@ -517,7 +519,7 @@ class SwarmflowTool(AsyncTool):
                     abort_event=abort_event,
                     backend=backend,
                     native=self._parent_agent,
-                    relaunch=lambda: self._relaunch(inputs, session_id),
+                    relaunch=self._make_relaunch(inputs, session_id),
                 )
             )
 
@@ -675,6 +677,25 @@ class SwarmflowTool(AsyncTool):
                 controller.deregister(run_id)
             if self._governor is not None:
                 await self._governor.release_workflow(ticket)
+
+    def _make_relaunch(
+        self, inputs: dict[str, Any], session_id: str
+    ) -> Callable[["SwarmflowTool | None"], None]:
+        """Build the resume ticket registered with the controller.
+
+        The ticket takes the tool that is *issuing* the resume. Team pause stops
+        the leader harness and RESUME_FROM_PAUSE rebuilds it — a new harness and
+        a new ``SwarmflowTool`` — so ``self`` (captured at launch) may be bound
+        to a dead harness by the time resume arrives. Relaunching on the issuing
+        tool keeps the resumed run (and its completion injection) on the live
+        harness; ``None`` (control-plane resume with no tool in hand, e.g. the
+        tree-view button) falls back to ``self``.
+        """
+
+        def _relaunch(tool: "SwarmflowTool | None") -> None:
+            (tool or self)._relaunch(inputs, session_id)
+
+        return _relaunch
 
     def _relaunch(self, inputs: dict[str, Any], session_id: str) -> None:
         """Re-launch the paused swarmflow with the SAME inputs (resume path).
