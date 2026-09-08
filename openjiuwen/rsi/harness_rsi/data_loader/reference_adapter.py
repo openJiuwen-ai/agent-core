@@ -23,7 +23,7 @@ def adapt_reference(case: dict[str, Any], dataset_path: Path) -> dict[str, Any]:
             continue
         try:
             payload = json.loads(_io_path(path).read_text(encoding="utf-8"))
-        except (ValueError, UnicodeError) as exc:
+        except ValueError as exc:
             raise ValueError(f"invalid reference JSON: {path.name}") from exc
         if isinstance(payload, dict) and "adapter" in payload:
             declarations.append(payload)

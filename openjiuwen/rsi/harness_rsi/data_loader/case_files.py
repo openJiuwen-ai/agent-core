@@ -56,10 +56,9 @@ def resolve_dataset_file(base: Path, value: str) -> Path:
     """Reject absolute paths, traversal, ADS and escaping links on every OS."""
     normalized = value.replace("\\", "/")
     relative = Path(normalized)
-    if (
-        not normalized or relative.is_absolute() or PureWindowsPath(value).drive
-        or ":" in normalized or any(part in {"", ".", ".."} for part in normalized.split("/"))
-    ):
+    if not normalized or relative.is_absolute() or PureWindowsPath(value).drive:
+        raise ValueError(f"dataset file must be a relative path within the dataset: {value}")
+    if ":" in normalized or any(part in {"", ".", ".."} for part in normalized.split("/")):
         raise ValueError(f"dataset file must be a relative path within the dataset: {value}")
     root = base.resolve()
     resolved = (root / relative).resolve()

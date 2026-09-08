@@ -18,7 +18,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger import ScriptBasedJudger
 from openjiuwen.rsi.harness_rsi.schema import DatasetArtifact
 from openjiuwen.rsi.harness_rsi.single_harness import IterativeSingleHarnessRequest
 from openjiuwen.rsi.harness_rsi.single_harness.iterative import SingleHarnessIterativeOptimizationOrchestrator
-from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import matching_cases, read_mapping
+from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _harness_identity, matching_cases, read_mapping
 from openjiuwen.rsi.usage import record_model_usage
 from tests.unit_tests.rsi.test_evaluator import _Backend
 from tests.unit_tests.rsi.test_single_harness_iterative import _Analyzer, _Evaluator, _MemberOptimizer, _write_yaml
@@ -342,16 +342,41 @@ def test_resume_cannot_charge_old_results_to_changed_model(setup, tmp_path):
     assert len(controller.evaluator.calls) == 1
 
 
-def test_latest_infra_failure_does_not_fall_back_to_older_favorable_result(setup, tmp_path):
+@pytest.mark.parametrize("invalid_result", [
+    {"status": "error"},
+    {"metadata": {"infrastructure_skip": True}},
+    {"score": None},
+    {"score": "0.5"},
+    {"score": float("nan")},
+    {"score": float("inf")},
+    {"score": float("-inf")},
+])
+def test_latest_invalid_result_does_not_fall_back_to_older_favorable_result(setup, tmp_path, invalid_result):
     controller, refs, cases, file = setup
     _, baseline = asyncio.run(_baseline(controller, refs, cases, file, tmp_path / "baseline"))
     _, latest = asyncio.run(_baseline(controller, refs, cases, file, tmp_path / "full"))
     payload = read_mapping(latest)
-    payload["cases"][0]["status"] = "error"
+    payload["cases"][0].update(invalid_result)
     _write_yaml(Path(latest), payload)
     selected = matching_cases([baseline, latest], controller._evaluation_context(cases, str(refs)))
     assert set(selected) == {"b"}
     assert selected["b"][0] == latest
+
+
+def test_harness_identity_excludes_caches_but_tracks_package_files(tmp_path):
+    (tmp_path / "harness.yaml").write_text("name: baseline\n", encoding="utf-8")
+    skill = tmp_path / "skills" / "check.md"
+    skill.parent.mkdir()
+    skill.write_text("Original behavior", encoding="utf-8")
+    before = _harness_identity(str(tmp_path))
+    for relative in (".git/config", "__pycache__/cached.py", ".pytest_cache/state", "skills/a.pyc", "skills/b.pyo"):
+        ignored = tmp_path / relative
+        ignored.parent.mkdir(parents=True, exist_ok=True)
+        ignored.write_text("ignored", encoding="utf-8")
+    assert _harness_identity(str(tmp_path)) == before
+    assert list(before["files"]) == ["harness.yaml", "skills/check.md"]
+    skill.write_text("Changed behavior", encoding="utf-8")
+    assert _harness_identity(str(tmp_path)) != before
 
 
 def test_completed_run_rejects_resume_after_harness_change(setup, tmp_path):

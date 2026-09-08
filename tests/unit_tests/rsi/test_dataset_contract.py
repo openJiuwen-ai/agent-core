@@ -71,10 +71,28 @@ def test_missing_input_never_exposes_private_case():
     assert task_input({"question": "legacy task", "reference": {"answer": "secret"}}) == "legacy task"
 
 
-@pytest.mark.parametrize("value", ["../private.txt", "/tmp/a", "D:/data/a", "C:a", "a:stream", "a/../b", "a//b"])
+@pytest.mark.parametrize("value", [
+    "", ".", "./a", "../private.txt", "/tmp/a", "D:/data/a", "C:a", "a:stream", "a/../b", "a//b", "a/",
+    "a\\..\\b", "\\\\server\\share\\a",
+])
 def test_paths_cannot_escape_packet(tmp_path, value):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must be a relative path"):
         resolve_dataset_file(tmp_path, value)
+
+
+@pytest.mark.parametrize("value", ["assets/data.json", "assets\\data.json"])
+def test_relative_dataset_paths_remain_valid(tmp_path, value):
+    _packet(tmp_path)
+    assert resolve_dataset_file(tmp_path, value) == (tmp_path / "assets/data.json").resolve()
+
+
+@pytest.mark.parametrize("content, error_type", [(b"{", json.JSONDecodeError), (b"\xff", UnicodeDecodeError)])
+def test_invalid_reference_json_preserves_cause(tmp_path, content, error_type):
+    source = _packet(tmp_path)
+    (tmp_path / "references/private.json").write_bytes(content)
+    with pytest.raises(ValueError, match="invalid reference JSON: private.json") as error:
+        load_cases([str(source)])
+    assert isinstance(error.value.__cause__, error_type)
 
 
 def test_private_files_cannot_be_public_even_in_other_cases(tmp_path):
@@ -269,6 +287,11 @@ def test_canonical_swe_packet_survives_relocation(tmp_path):
     ({"output": "149", "result_type": "answer"}, "150", 0.0),
     ({"output": "150\n", "result_type": "answer"}, "150", 0.0),
     ({"output": "150", "result_type": "error"}, "150", 0.0),
+    ({"output": 150, "result_type": "answer"}, "150", 0.0),
+    ({"result_type": "answer"}, "150", 0.0),
+    ({"output": "150"}, "150", 0.0),
+    (None, "150", 0.0),
+    (150, 150, 1.0),
     ({"output": "150"}, {"output": "150"}, 1.0),
 ])
 async def test_native_answer_envelope_keeps_exact_scoring(judger_type, response, expected, score):

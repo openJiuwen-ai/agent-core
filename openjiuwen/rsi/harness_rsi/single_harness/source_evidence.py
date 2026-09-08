@@ -72,15 +72,17 @@ def _harness_identity(raw_path: str) -> Any:
     if not path.is_dir():
         return _material_identity(raw_path, Path.cwd())
     # Only the immutable package is recursive, not model workspace/output dirs.
+    files = {}
+    for item in sorted(path.rglob("*")):
+        if not item.is_file():
+            continue
+        relative = item.relative_to(path)
+        if _IGNORED.intersection(relative.parts) or item.suffix in {".pyc", ".pyo"}:
+            continue
+        files[relative.as_posix()] = _material_identity(str(item), path)
     return {
         "path": str(path.resolve()),
-        "files": {
-            item.relative_to(path).as_posix(): _material_identity(str(item), path)
-            for item in sorted(path.rglob("*"))
-            if item.is_file()
-            and not _IGNORED.intersection(item.relative_to(path).parts)
-            and item.suffix not in {".pyc", ".pyo"}
-        },
+        "files": files,
     }
 
 
@@ -105,7 +107,9 @@ def evaluation_context(*, harness_refs_path: str, evaluator_config: Any, cases: 
         else "",
         "cases": {
             str(case["case_id"]): _digest(
-                _material_identity(case, Path(case["case_path"]).resolve().parent if case.get("case_path") else Path.cwd())
+                _material_identity(
+                    case, Path(case["case_path"]).resolve().parent if case.get("case_path") else Path.cwd()
+                )
             )
             for case in cases
         },
@@ -143,12 +147,9 @@ def matching_cases(paths: list[str], context: dict[str, Any]) -> dict[str, tuple
             seen.add(case_id)
             metadata = case.get("metadata") or {}
             score = case.get("score")
-            if (
-                case.get("status") not in {"passed", "failed"}
-                or metadata.get("infrastructure_skip")
-                or not isinstance(score, (int, float))
-                or not math.isfinite(score)
-            ):
+            if case.get("status") not in {"passed", "failed"} or metadata.get("infrastructure_skip"):
+                continue
+            if not isinstance(score, (int, float)) or not math.isfinite(score):
                 continue
             if not all(str(case.get(key, "")) and Path(case[key]).is_file() for key in ("result_path", "trace_path")):
                 continue

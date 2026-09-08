@@ -28,7 +28,9 @@ class ExactMatchJudger(EvaluationJudger):
     def validate_case(self, case: dict[str, Any]) -> None:
         reference = case.get("reference") or {}
         if reference.get("rubric") or reference.get("files") or case.get("swebench"):
-            raise EvaluationInfrastructureError("exact_match only supports reference answers, not rubric or file grading")
+            raise EvaluationInfrastructureError(
+                "exact_match only supports reference answers, not rubric or file grading"
+            )
         if _reference_answer(case) is None:
             raise EvaluationInfrastructureError("exact_match cannot score this case: a reference answer is required")
 

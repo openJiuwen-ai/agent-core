@@ -55,8 +55,9 @@ class EvaluationJudger(ABC):
 
 def _comparable_response(response: Any, expected: Any) -> Any:
     """Unwrap only the native final-answer envelope, not arbitrary task JSON."""
-    if (isinstance(expected, str) and isinstance(response, dict)
-            and response.get("result_type") == "answer" and isinstance(response.get("output"), str)):
+    if not isinstance(expected, str) or not isinstance(response, dict):
+        return response
+    if response.get("result_type") == "answer" and isinstance(response.get("output"), str):
         return response["output"]
     return response
 
