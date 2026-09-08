@@ -11,8 +11,11 @@ from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus, status_
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.code_graph._base import CodeGraphBaseTool, CodeGraphToolContext
 from openjiuwen.harness.tools.code_graph.focused import (
+    candidate_generation,
     format_focus_display,
     focus_line_window,
+    normalize_include_relations,
+    read_graph_generation,
 )
 from openjiuwen.harness.tools.code_graph.select_context import SelectCodeContextTool
 
@@ -28,8 +31,9 @@ class FocusCodeTool(CodeGraphBaseTool):
         if state is None:
             return ToolOutput(success=False, error="focus_code requires Code Graph run state")
         reason = str(inputs.get("reason") or "").strip()
-        if not reason:
-            return ToolOutput(success=False, error="reason is required")
+        stale = self._stale_candidate(state, inputs)
+        if stale is not None:
+            return stale
         evidence = self._lookup_candidate(state, inputs)
         if evidence is None:
             return ToolOutput(
@@ -46,26 +50,34 @@ class FocusCodeTool(CodeGraphBaseTool):
         symbol_id = str(evidence.get("symbol_id") or "").strip()
         if symbol_id:
             state.candidates.setdefault(symbol_id, dict(evidence))
-        select_inputs = {
-            "symbol_id": symbol_id,
-            "file": str(evidence.get("file") or ""),
-            "start_line": evidence.get("start_line"),
-            "end_line": evidence.get("end_line"),
-            "name": str(evidence.get("name") or ""),
-            "kind": str(evidence.get("kind") or ""),
-            "reason": reason,
-            "confidence": inputs.get("confidence"),
-            "evidence_id": str(evidence.get("evidence_id") or ""),
-        }
-        selected = await SelectCodeContextTool(self.context).invoke(select_inputs)
-        if not selected.success:
-            return selected
-        payload = dict(selected.data or {})
-        if str(payload.get("status") or "") in {CodeGraphStatus.ERROR.value, CodeGraphStatus.PARTIAL.value}:
-            return selected
-        file_path = str(payload.get("file") or evidence.get("file") or "")
-        start = int(payload.get("start_line") or evidence.get("start_line") or 1)
-        end = int(payload.get("end_line") or evidence.get("end_line") or start)
+        file_path = str(evidence.get("file") or "")
+        start = int(evidence.get("start_line") or 1)
+        end = int(evidence.get("end_line") or start)
+        payload: dict[str, Any] = {}
+        if symbol_id:
+            select_inputs = {
+                "symbol_id": symbol_id,
+                "file": file_path,
+                "start_line": evidence.get("start_line"),
+                "end_line": evidence.get("end_line"),
+                "name": str(evidence.get("name") or ""),
+                "kind": str(evidence.get("kind") or ""),
+                "reason": reason or "focus candidate",
+                "confidence": inputs.get("confidence"),
+                "evidence_id": str(evidence.get("evidence_id") or ""),
+            }
+            selected = await SelectCodeContextTool(self.context).invoke(select_inputs)
+            if not selected.success:
+                return selected
+            payload = dict(selected.data or {})
+            if str(payload.get("status") or "") in {
+                CodeGraphStatus.ERROR.value,
+                CodeGraphStatus.PARTIAL.value,
+            }:
+                return selected
+            file_path = str(payload.get("file") or file_path)
+            start = int(payload.get("start_line") or start)
+            end = int(payload.get("end_line") or end)
         matched = evidence.get("start_line")
         try:
             matched_line = int(matched) if matched not in (None, "") else start
@@ -78,17 +90,12 @@ class FocusCodeTool(CodeGraphBaseTool):
             matched_line=matched_line,
             file_len=file_len,
         )
-        source = ""
-        try:
-            service = await self._service()
-            read = await service.read_code(file_path, start_line=window_start, end_line=window_end)
-        except Exception as exc:  # noqa: BLE001 — still keep the selected target
-            read = {"message": str(exc)}
-        if isinstance(read, dict):
-            source = str(read.get("content") or read.get("source") or read.get("text") or "")
-            if not source and isinstance(read.get("lines"), list):
-                source = "\n".join(str(line) for line in read["lines"])
-        supporting = await self._supporting_evidence(str(payload.get("symbol_id") or evidence.get("symbol_id") or ""))
+        source = await self._read_window(file_path, window_start, window_end)
+        relations = normalize_include_relations(inputs.get("include_relations"))
+        supporting = await self._supporting_evidence(
+            str(payload.get("symbol_id") or evidence.get("symbol_id") or ""),
+            relations,
+        )
         candidate_id = str(evidence.get("candidate_id") or inputs.get("candidate_id") or "")
         role = str(evidence.get("role") or "implementation")
         symbol = str(payload.get("symbol_id") or evidence.get("symbol_id") or payload.get("name") or "")
@@ -112,10 +119,16 @@ class FocusCodeTool(CodeGraphBaseTool):
             source=source,
             supporting=supporting,
         )
+        next_actions = [
+            "Edit this implementation if it matches the issue",
+            "Otherwise focus one different candidate",
+        ]
+        if relations:
+            next_actions.append("Use the requested relations only if the window is still insufficient")
         return ToolOutput(
             success=True,
             data={
-                "status": "COMPLETE",
+                "status": "FOCUSED",
                 "focused": True,
                 "phase": state.phase,
                 "selected_count": len(state.selected),
@@ -129,16 +142,37 @@ class FocusCodeTool(CodeGraphBaseTool):
                 "source": source,
                 "supporting_evidence": supporting,
                 "display": display,
-                "next_actions": [
-                    {
-                        "action": "edit",
-                        "reason": (
-                            "Edit this implementation, or call focus_code on another "
-                            "candidate if the evidence proves this target is wrong."
-                        ),
-                    }
-                ],
+                "target": {
+                    "candidate_id": candidate_id,
+                    "symbol_id": symbol,
+                    "file": file_path,
+                    "start_line": window_start,
+                    "end_line": window_end,
+                    "source": source,
+                },
+                "next_actions": next_actions,
             },
+        )
+
+    def _stale_candidate(self, state: Any, inputs: dict[str, Any]) -> ToolOutput | None:
+        candidate_id = str(inputs.get("candidate_id") or "").strip()
+        stamped = candidate_generation(candidate_id)
+        if stamped is None:
+            return None
+        current = str(getattr(state, "graph_generation", "") or "") or read_graph_generation(self.context)
+        if not current or stamped == current:
+            return None
+        return ToolOutput(
+            success=True,
+            data=status_payload(
+                CodeGraphStatus.STALE_CANDIDATE,
+                message="candidate belongs to a previous graph generation; search again",
+                extra={
+                    "candidate_id": candidate_id,
+                    "candidate_generation": stamped,
+                    "graph_generation": current,
+                },
+            ),
         )
 
     @staticmethod
@@ -162,14 +196,29 @@ class FocusCodeTool(CodeGraphBaseTool):
                 return payload
         return None
 
-    async def _supporting_evidence(self, symbol_id: str) -> list[str]:
-        if not symbol_id:
+    async def _read_window(self, file_path: str, start: int, end: int) -> str:
+        if not file_path:
+            return ""
+        try:
+            service = await self._service()
+            read = await service.read_code(file_path, start_line=start, end_line=end)
+        except Exception as exc:  # noqa: BLE001 — still keep the selected target
+            return str(exc)
+        if not isinstance(read, dict):
+            return ""
+        source = str(read.get("content") or read.get("source") or read.get("text") or "")
+        if not source and isinstance(read.get("lines"), list):
+            source = "\n".join(str(line) for line in read["lines"])
+        return source
+
+    async def _supporting_evidence(self, symbol_id: str, relations: list[str]) -> list[str]:
+        if not symbol_id or not relations:
             return []
         try:
             service = await self._service()
             payload = await service.expand_related(
                 symbol_id,
-                relations=("inherits", "calls", "called_by"),
+                relations=tuple(relations),
                 depth=1,
                 limit=4,
             )

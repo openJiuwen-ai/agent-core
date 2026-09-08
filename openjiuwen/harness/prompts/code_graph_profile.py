@@ -149,44 +149,41 @@ submit_code_context 会生成 <PATCH_CONTEXT>，不要自己打标签。
 
 GRAPH_FOCUSED_PROFILE_PROMPT_EN = """\
 Code Graph (profile: graph, retrieval_interface: focused):
-Search returns short candidates. Do not read every hit. Focus, then edit.
+Locate a few candidates, then focus_code, then edit.
 
-1. Named class / function / method: resolve_symbol, then focus_code.
-2. Unknown name: find_code_symbols (at most 5 summaries). Pick one candidate.
-3. Exact literals (quoted text, errors, config keys, decorators):
-   search_source_text with match_mode=exact. Use match_mode=lexical for
-   natural-language behaviour. auto chooses for you.
-4. Results are grouped: implementation / test / build. Edit implementation
-   unless the issue is about tests or packaging.
-5. Call focus_code(candidate_id) to open a 50-100 line window. That is the
-   edit target. Do not keep searching the same query.
-6. inspect_code_structure for a large class before focusing a method.
-7. After a focused window, edit the current source and run the relevant tests.
-   There is no select_code_context or submit tool.
-8. Relation tools (find_callers, find_importers, ...) are not on the default
-   table. Only use them when the issue itself asks about callers or registration.
-9. If a tool returns UNAVAILABLE, graph tools come off and grep/glob return.
-   A single ERROR is not that: narrow the query or read_file.
+1. First use resolve_symbol, find_code_symbols, or search_source_text
+   to get a short candidate list.
+2. Once a credible implementation candidate appears, call focus_code next.
+   Do not reword the same search.
+3. If the focused source matches the issue, edit that implementation and
+   run tests.
+4. If the focused window is clearly wrong, either focus a different
+   candidate, or request relations once with
+   focus_code(include_relations=["callers"|"importers"|"impact"]).
+5. read_file is only for non-code assets, unindexed files, or when graph
+   tools return UNAVAILABLE. Do not use bash for grep/cat discovery before
+   editing; after editing, bash is for tests.
+6. The patch does not have to stay inside the focused window. Multi-file
+   edits need call, import, or impact evidence.
+7. inspect_code_structure for a large class before focusing a method.
+   There is no read_symbol, read_code, select_code_context, or submit tool.
 """
 
 GRAPH_FOCUSED_PROFILE_PROMPT_CN = """\
 Code Graph（profile: graph，retrieval_interface: focused）：
-检索只返回摘要候选。不要把每条命中都读完。先聚焦，再编辑。
+先定位少量候选，再 focus_code，再编辑。
 
-1. 已知类/函数/方法：resolve_symbol，然后 focus_code。
-2. 不知道精确名：find_code_symbols（最多 5 条摘要），选一个候选。
-3. 精确字面量（引号文本、报错、配置键、decorator）：
-   search_source_text，match_mode=exact。自然语言行为用 lexical。auto 会代选。
-4. 结果按 implementation / test / build 分组。默认改 implementation，
-   除非 issue 本身要求改测试或打包。
-5. 用 focus_code(candidate_id) 打开 50–100 行窗口，这就是编辑目标。
-   不要对同一查询反复搜索。
-6. 大类先 inspect_code_structure，再聚焦具体方法。
-7. 聚焦后改当前源码并跑相关测试。没有 select_code_context，也没有 submit。
-8. find_callers / find_importers 等不在默认工具表。只有 issue 明确问调用者
-   或注册时才用。
-9. 若返回 UNAVAILABLE，图工具会摘掉并恢复 grep/glob。单次 ERROR 不是这种
-   失败：缩小查询或改用 read_file。
+1. 先用 resolve_symbol、find_code_symbols 或 search_source_text 拿到短候选。
+2. 一旦出现可信的 implementation 候选，下一步调用 focus_code。
+   不要对同一目标换措辞重复搜索。
+3. focused 源码与 issue 一致时，编辑该实现并跑测试。
+4. 窗口明显不匹配时：再 focus 另一个候选，或通过
+   focus_code(include_relations=...) 做一次有目的的关系验证。
+5. read_file 只用于非代码资产、未索引文件或图工具 UNAVAILABLE。
+   编辑前不要用 bash 做 grep/cat 式发现；编辑后 bash 用于测试。
+6. 补丁不必严格限制在 focused 窗口。多文件修改需要调用、注册或影响证据。
+7. 大类先 inspect_code_structure，再聚焦方法。
+   没有 read_symbol / read_code / select_code_context / submit。
 """
 
 GRAPH_PROFILE_PROMPT: Dict[str, str] = {
