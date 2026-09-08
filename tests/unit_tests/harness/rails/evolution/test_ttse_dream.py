@@ -88,6 +88,17 @@ def test_parse_tip_skips_filler_words():
     assert parsed[1] == "session-logs"
 
 
+def test_parse_tip_accepts_fullwidth_colon():
+    parsed = parse_tip(
+        "When 估值请求只包含公司名而缺少上市状态、行业或财务数据：use ask_user to 先向用户收集这些信息"
+    )
+    assert parsed == (
+        "估值请求只包含公司名而缺少上市状态、行业或财务数据",
+        "ask_user",
+        "先向用户收集这些信息",
+    )
+
+
 def test_tip_purge_malformed_and_unknown_and_generic():
     names = {"grep", "bash"}
     assert tip_purge_reason("always be careful", names) == "tip_fact_shaped"
@@ -96,6 +107,18 @@ def test_tip_purge_malformed_and_unknown_and_generic():
     assert tip_purge_reason("When reading logs: use grep to check", names) == "tip_too_generic_action"
     assert tip_purge_reason("When reading large .log files: use grep to extract matches", names) is None
     assert tip_purge_reason("[PINNED] When any task: use grep to check", names) is None
+
+
+def test_tip_purge_fullwidth_colon_not_malformed():
+    names = {"ask_user", "grep"}
+    assert (
+        tip_purge_reason(
+            "When 估值请求只包含公司名而缺少上市状态、行业或财务数据：use ask_user to "
+            "先向用户收集这些信息，再决定安装哪个估值技能",
+            names,
+        )
+        is None
+    )
 
 
 def test_tip_purge_longest_whitelist_match_on_noisy_span():
@@ -150,7 +173,7 @@ async def test_legacy_bank_migration_sets_last_injected(tmp_path):
 
 @pytest.mark.asyncio
 async def test_prune_stale_ttl(tmp_path):
-    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"), dream_ttl_days=90, dream_prune_mode="retire")
+    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"), dream_ttl_days=90)
     store = TTSERecordStore(cfg)
     now = time.time()
     old = _new_record("old fact", now=now - 91 * 86400)
@@ -161,7 +184,7 @@ async def test_prune_stale_ttl(tmp_path):
     pf, pt = await prune_stale(store, cfg, now=now)
     assert pf == 1 and pt == 0
     assert store.facts_texts() == ["fresh fact"]
-    assert store.retired[0]["reason"] == "ttl_90d_no_inject"
+    assert store.retired == []
 
 
 @pytest.mark.asyncio
@@ -242,7 +265,8 @@ async def test_dream_merge_near_duplicate_facts(tmp_path):
     assert result.merged_clusters >= 1
     assert len(rail._ttse_store.facts) == 1
     assert rail._ttse_store.facts[0]["count"] >= 6
-    assert any(r["reason"] == "dream_merge" for r in rail._ttse_store.retired)
+    assert "grader" in rail._ttse_store.facts[0]["text"].lower()
+    assert rail._ttse_store.retired == []
 
 
 @pytest.mark.asyncio
@@ -312,6 +336,7 @@ async def test_dream_purge_bad_tips(tmp_path):
     )
     assert result.purged_tips == 1
     assert rail._ttse_store.tips_texts() == ["When logs are large: use grep to extract matches"]
+    assert rail._ttse_store.retired == []
 
 
 # ----------------------------------------------------------------------
@@ -463,7 +488,6 @@ async def test_run_dream_projects_catalog_after_prune(tmp_path):
         dream_min_hours=0,
         dream_min_rules=100,
         dream_ttl_days=90,
-        dream_prune_mode="retire",
         dream_purge_tips_enabled=False,
     )
     rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)

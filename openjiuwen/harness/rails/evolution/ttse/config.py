@@ -69,9 +69,8 @@ class TTSEConfig:
         dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates.
         dream_cluster_min_size: Min cluster size to consider for merge.
         dream_max_llm_merges: Cap LLM merge calls per dream run.
-        dream_ttl_days: Retire rules not injected for this many days.
+        dream_ttl_days: Delete rules not injected for this many days.
         dream_prune_enabled: Enable TTL prune pass.
-        dream_prune_mode: ``retire`` (default) or ``delete``.
         dream_purge_tips_enabled: Enable deterministic low-quality TIP purge.
         dream_state_path: Optional path for dream-state.json; derived from store_path when empty.
     """
@@ -110,7 +109,6 @@ class TTSEConfig:
     dream_max_llm_merges: int = 10
     dream_ttl_days: int = 90
     dream_prune_enabled: bool = True
-    dream_prune_mode: str = "retire"  # or "delete"
     dream_purge_tips_enabled: bool = True
     dream_state_path: str = ""
 

@@ -69,6 +69,11 @@ def strip_pinned_prefix(text: str) -> Tuple[bool, str]:
     return False, s
 
 
+def _normalize_tip_punctuation(text: str) -> str:
+    """Map fullwidth colon to ASCII so ``When <cond>: use …`` still parses."""
+    return (text or "").replace("：", ":")
+
+
 def _capability_span(raw: str) -> str:
     """Normalize the ``use … to`` middle segment: drop backticks/quotes, collapse space."""
     s = (raw or "").replace("`", "").replace('"', "").replace("'", "")
@@ -107,6 +112,7 @@ def _longest_whitelist_match(span: str, capability_names: Set[str]) -> Optional[
 def _split_tip(text: str) -> Optional[Tuple[str, str, str]]:
     """Split TIP into (condition, capability_span, action). Span keeps full use…to middle."""
     _, body = strip_pinned_prefix(text)
+    body = _normalize_tip_punctuation(body)
     match = _TIP_RE.match(body)
     if not match:
         return None
@@ -170,7 +176,7 @@ def _action_too_generic(action: str) -> bool:
 
 
 def tip_purge_reason(text: str, capability_names: Set[str]) -> Optional[str]:
-    """Return a retire reason code, or ``None`` if the TIP should be kept.
+    """Return a purge/delete reason code, or ``None`` if the TIP should be kept.
 
     Reason codes: ``tip_malformed``, ``tip_unknown_capability``,
     ``tip_too_generic_condition``, ``tip_too_generic_action``, ``tip_fact_shaped``.
@@ -181,6 +187,7 @@ def tip_purge_reason(text: str, capability_names: Set[str]) -> Optional[str]:
     pinned, body = strip_pinned_prefix(text)
     if pinned:
         return None
+    body = _normalize_tip_punctuation(body)
 
     split = _split_tip(body)
     if split is None:

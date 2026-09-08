@@ -3,7 +3,7 @@
 """Auto-dream: TTSE bank hygiene (TTL prune, soft-cluster merge, TIP purge).
 
 Runs offline from the user turn: prune stale rules, LLM-merge near-duplicates
-within each track, then deterministically retire low-quality TIPs.
+within each track, then deterministically delete low-quality TIPs.
 """
 
 from __future__ import annotations
@@ -142,12 +142,11 @@ async def prune_stale(
     *,
     now: Optional[float] = None,
 ) -> Tuple[int, int]:
-    """Retire/delete rules not injected within ``dream_ttl_days``."""
+    """Delete rules not injected within ``dream_ttl_days``."""
     if not config.dream_prune_enabled:
         return 0, 0
     ts = now if now is not None else time.time()
     ttl = float(config.dream_ttl_days) * SECONDS_PER_DAY
-    mode = (config.dream_prune_mode or "retire").lower()
     pruned_facts = 0
     pruned_tips = 0
 
@@ -160,15 +159,11 @@ async def prune_stale(
             if not text:
                 continue
             logger.info(
-                "[TTSERail] dream prune before_%s rtype=%s text=%s",
-                mode,
+                "[TTSERail] dream prune before_delete rtype=%s text=%s",
                 rtype,
                 text,
             )
-            if mode == "delete":
-                n = await store.delete_record(text, rtype, save=False)
-            else:
-                n = await store.retire(text, rtype, "ttl_90d_no_inject", save=False)
+            n = await store.delete_record(text, rtype, save=False)
             removed += n
         return removed
 
@@ -176,16 +171,14 @@ async def prune_stale(
     pruned_tips = await _prune_track("tip", store.tips)
     if pruned_facts or pruned_tips:
         logger.info(
-            "[TTSERail] dream prune done mode=%s ttl_days=%s pruned_facts=%s pruned_tips=%s",
-            mode,
+            "[TTSERail] dream prune done ttl_days=%s pruned_facts=%s pruned_tips=%s",
             config.dream_ttl_days,
             pruned_facts,
             pruned_tips,
         )
     else:
         logger.debug(
-            "[TTSERail] dream prune idle mode=%s ttl_days=%s",
-            mode,
+            "[TTSERail] dream prune idle ttl_days=%s",
             config.dream_ttl_days,
         )
     return pruned_facts, pruned_tips
@@ -294,13 +287,23 @@ async def _apply_merge_verdict(
     )
     for record in cluster:
         logger.info(
-            "[TTSERail] dream before_retire track=%s action=%s text=%s",
+            "[TTSERail] dream before_delete track=%s action=%s text=%s",
             track,
             reason,
             record.get("text", ""),
         )
-        await store.retire(record["text"], track, reason, save=False)
-    await store.add_record_direct(track, canonical, count=max(total_count, 1), save=False)
+        await store.delete_record(record["text"], track, save=False)
+    merged_count = max(total_count, 1)
+    await store.add_record_direct(track, canonical, count=merged_count, save=False)
+    logger.info(
+        "[TTSERail] dream after_%s track=%s members=%s canonical=%s count=%s llm_reason=%s",
+        verdict.verdict.lower(),
+        track,
+        _format_cluster_members(cluster),
+        canonical,
+        merged_count,
+        verdict.reason or "",
+    )
     return verdict.verdict.lower(), (canonical, track)
 
 
@@ -422,7 +425,7 @@ async def dream_purge_tips(
     store: TTSERecordStore,
     capability_names: Set[str],
 ) -> int:
-    """Deterministically retire malformed / unknown / over-generic TIPs."""
+    """Deterministically delete malformed / unknown / over-generic TIPs."""
     purged = 0
     for record in list(store.tips):
         text = record.get("text", "")
@@ -434,7 +437,7 @@ async def dream_purge_tips(
             reason,
             text,
         )
-        removed = await store.retire(text, "tip", reason, save=False)
+        removed = await store.delete_record(text, "tip", save=False)
         if removed:
             purged += 1
             logger.info("[TTSERail] dream purged tip (%s): %s", reason, text)
