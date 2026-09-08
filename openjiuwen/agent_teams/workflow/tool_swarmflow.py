@@ -107,6 +107,13 @@ class SwarmflowTool(AsyncTool):
         self._human_base_spec = human_base_spec
         self._governor = concurrency_governor
         self._budget = budget
+        # Each leader NativeHarness build creates a fresh SwarmflowTool (the
+        # team tool rail is per-harness). Register as the controller's relaunch
+        # host so paused runs resume on THIS cycle's harness, not the one that
+        # launched them (which a team pause has since torn down).
+        controller = getattr(parent_agent, "background_task_controller", None)
+        if controller is not None and hasattr(controller, "set_launcher"):
+            controller.set_launcher(self)
         # Four script sources mirror the reference tool's surface
         # (script_path / script / name / resume_id). "At least one" is enforced
         # in ``invoke`` rather than via JSON-Schema ``required`` because the rule
@@ -368,9 +375,7 @@ class SwarmflowTool(AsyncTool):
         op = ops.get(action)
         if op is None:
             return ToolOutput(success=False, error=f"unknown action {action!r}")
-        # Resume relaunches on THIS tool's harness (the live one), not on the
-        # harness captured when the run was first launched — see _make_relaunch.
-        ok = await (op(resume_id, tool=self) if action == "resume" else op(resume_id))
+        ok = await op(resume_id)
         return ToolOutput(
             success=ok,
             data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"},
@@ -519,7 +524,8 @@ class SwarmflowTool(AsyncTool):
                     abort_event=abort_event,
                     backend=backend,
                     native=self._parent_agent,
-                    relaunch=self._make_relaunch(inputs, session_id),
+                    inputs=inputs,
+                    session_id=session_id,
                 )
             )
 
@@ -678,27 +684,13 @@ class SwarmflowTool(AsyncTool):
             if self._governor is not None:
                 await self._governor.release_workflow(ticket)
 
-    def _make_relaunch(
-        self, inputs: dict[str, Any], session_id: str
-    ) -> Callable[["SwarmflowTool | None"], None]:
-        """Build the resume ticket registered with the controller.
-
-        The ticket takes the tool that is *issuing* the resume. Team pause stops
-        the leader harness and RESUME_FROM_PAUSE rebuilds it — a new harness and
-        a new ``SwarmflowTool`` — so ``self`` (captured at launch) may be bound
-        to a dead harness by the time resume arrives. Relaunching on the issuing
-        tool keeps the resumed run (and its completion injection) on the live
-        harness; ``None`` (control-plane resume with no tool in hand, e.g. the
-        tree-view button) falls back to ``self``.
-        """
-
-        def _relaunch(tool: "SwarmflowTool | None") -> None:
-            (tool or self)._relaunch(inputs, session_id)
-
-        return _relaunch
-
     def _relaunch(self, inputs: dict[str, Any], session_id: str) -> None:
         """Re-launch the paused swarmflow with the SAME inputs (resume path).
+
+        Called by the controller through :meth:`BackgroundTaskController.set_launcher`
+        — always on the current cycle's tool, never the one that launched the
+        run — so the resumed run and its completion injection land on the live
+        leader harness.
 
         A fresh task id + a new background task; the journal path is unchanged
         (same team / session / name), so the completed prefix is a cache hit and

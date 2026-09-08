@@ -34,14 +34,23 @@ _UNWIND_TIMEOUT_S = 30.0
 
 @dataclass
 class SwarmflowRunHandle:
-    """Control handles for one live swarmflow run (registered at launch)."""
+    """Control handles for one live swarmflow run (registered at launch).
+
+    ``inputs`` / ``session_id`` are the resume ticket: pure data, no reference
+    to the tool or harness that launched the run. The leader NativeHarness is
+    run-cycle scoped (torn down at every round end, rebuilt next cycle) while
+    this registry is session scoped, so anything captured from the launching
+    cycle would dangle after a pause. The controller relaunches through the
+    *current* cycle's launcher instead (see :meth:`set_launcher`).
+    """
 
     task_id: str
     run_id: str  # workflow run_id — registry key for per-run pause/resume/stop
     abort_event: AbortSignal  # engine Runtime.abort_event for THIS run
     backend: Any  # TeamWorkerBackend → abort_sessions()
     native: Any  # leader NativeHarness → async_tool_runtime.cancel
-    relaunch: Callable[[Any], None]  # re-launch run_background with the SAME inputs on the given tool (None → the launching tool)
+    inputs: dict[str, Any]  # the SAME inputs run_background was launched with
+    session_id: str  # session contextvar to restore on relaunch
 
 
 class BackgroundTaskController:
@@ -56,6 +65,17 @@ class BackgroundTaskController:
         self._active: dict[str, SwarmflowRunHandle] = {}   # keyed by run_id
         self._paused: dict[str, SwarmflowRunHandle] = {}  # keyed by run_id
         self._lock = asyncio.Lock()
+        self._launcher: Any = None  # the current cycle's SwarmflowTool
+
+    def set_launcher(self, tool: Any) -> None:
+        """Register the SwarmflowTool of the current run cycle.
+
+        Every leader NativeHarness build creates a fresh SwarmflowTool (the
+        team tool rail is per-harness); the newest one is the only valid
+        relaunch host, so each registers itself here on construction.
+        """
+        self._launcher = tool
+        team_logger.info("[bg-ctl] launcher set ctl=%x tool=%x", id(self), id(tool))
 
     def register(self, handle: SwarmflowRunHandle) -> None:
         """Register a live run's control handles (called at launch)."""
@@ -133,18 +153,14 @@ class BackgroundTaskController:
                 self._active.pop(rid, None)
             return bool(targets)
 
-    async def resume(self, run_id: str | None = None, *, tool: Any = None) -> bool:
+    async def resume(self, run_id: str | None = None) -> bool:
         """Resume paused run(s) — all when ``run_id`` is None, else just that one.
 
-        The relaunch ticket re-invokes ``run_background`` with the SAME inputs;
-        the journal path is unchanged, so the completed prefix is a cache hit and
-        only the interrupted call reruns live.
-
-        ``tool`` is the SwarmflowTool issuing the resume. The ticket captured
-        the tool that launched the run, whose harness may since have been
-        stopped and rebuilt by a team pause/resume cycle; relaunching on the
-        issuing tool keeps the run on the live harness. ``None`` (no tool in
-        hand, e.g. the tree-view button) relaunches on the captured tool.
+        Relaunches ``run_background`` with the ticket's SAME inputs through the
+        registered launcher (the current cycle's SwarmflowTool); the journal
+        path is unchanged, so the completed prefix is a cache hit and only the
+        interrupted call reruns live. No launcher (no live leader harness) is a
+        no-op that leaves the ticket parked.
         """
         async with self._lock:
             if run_id is None:
@@ -154,9 +170,15 @@ class BackgroundTaskController:
                 if h is None:
                     return False
                 targets = {run_id: h}
+            launcher = self._launcher
+            if launcher is None:
+                team_logger.warning(
+                    "[bg-ctl] resume run_id=%s: no launcher registered; ticket kept", run_id,
+                )
+                return False
             for rid, h in targets.items():
                 try:
-                    h.relaunch(tool)
+                    launcher._relaunch(h.inputs, h.session_id)
                 except Exception:
                     team_logger.debug("[bg-ctl] relaunch failed for %s", rid, exc_info=True)
                 self._paused.pop(rid, None)
