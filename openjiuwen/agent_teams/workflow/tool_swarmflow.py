@@ -521,9 +521,7 @@ class SwarmflowTool(AsyncTool):
                 )
             )
 
-        def _publish(progress: Any) -> None:
-            if messager is None:
-                return
+        def _build_progress_message(progress: Any) -> tuple[str, EventMessage]:
             if progress.kind == "workflow_started":
                 name_box["name"] = progress.name
                 name_box["description"] = progress.description
@@ -561,12 +559,33 @@ class SwarmflowTool(AsyncTool):
                 payload=team_event.model_dump(),
                 sender_id="swarmflow",  # non-leader sender so kernel does not self-filter
             )
-            topic = TeamTopic.TEAM.build(session_id, team_name)
+            return TeamTopic.TEAM.build(session_id, team_name), message
+
+        def _publish(progress: Any) -> None:
+            """Mid-run progress sink: fire-and-forget so the engine never blocks."""
+            if messager is None:
+                return
+            topic, message = _build_progress_message(progress)
             try:
                 team_logger.debug("[swarmflow] workflow progress message: {}", message)
                 asyncio.create_task(messager.publish(topic_id=topic, message=message))
             except RuntimeError:
                 team_logger.debug("[swarmflow] no running loop to publish workflow progress")
+
+        async def _publish_terminal(progress: Any) -> None:
+            """Terminal status publish: awaited, so delivery is complete when the
+            unwind finishes. The controller returns the moment this task is done
+            and the embedder then tears the leader harness (and its bus) down —
+            a merely-scheduled publish would land on the closed bus and the
+            Monitor card would stay 'running'. Best-effort: a dead bus must
+            not mask the run's own outcome."""
+            if messager is None:
+                return
+            topic, message = _build_progress_message(progress)
+            try:
+                await messager.publish(topic_id=topic, message=message)
+            except Exception:  # noqa: BLE001 - teardown races must not surface here
+                team_logger.debug("[swarmflow] terminal progress publish skipped", exc_info=True)
 
         observer = WorkflowObserver(on_event=_publish)
         completion_ctx[_OBSERVER_CTX_KEY] = observer
@@ -598,7 +617,7 @@ class SwarmflowTool(AsyncTool):
                 msg = self._format_early_return(exc.reply, exc.edit_hints, run_id=run_id)
                 # Resumable pause (edit & re-run under the same run_id): flip
                 # the Monitor card to paused, then surface the edit guidance.
-                _publish(
+                await _publish_terminal(
                     WorkflowProgressEvent(
                         kind=ProgressKind.WORKFLOW_PAUSED,
                         message="workflow paused for script edit",
@@ -609,7 +628,7 @@ class SwarmflowTool(AsyncTool):
                 # A control-state change, not a leader failure: announce it on
                 # the team topic BEFORE surfacing the stopped message, so the
                 # Monitor can flip the workflow card to stopped.
-                _publish(
+                await _publish_terminal(
                     WorkflowProgressEvent(
                         kind=ProgressKind.WORKFLOW_STOPPED,
                         message="workflow stopped",
@@ -623,7 +642,7 @@ class SwarmflowTool(AsyncTool):
             # async-tool runtime treats it as a silent cancellation (no completion
             # injected) — matching the cancel the controller triggers as pause's
             # third step.
-            _publish(
+            await _publish_terminal(
                 WorkflowProgressEvent(
                     kind=ProgressKind.WORKFLOW_PAUSED,
                     message="workflow paused",
@@ -636,7 +655,7 @@ class SwarmflowTool(AsyncTool):
             # reason. External cancels (signal unset) stay silent.
             if abort_event.is_set():
                 if abort_event.reason == "stop":
-                    _publish(
+                    await _publish_terminal(
                         WorkflowProgressEvent(
                             kind=ProgressKind.WORKFLOW_STOPPED,
                             message="workflow stopped",
@@ -644,7 +663,7 @@ class SwarmflowTool(AsyncTool):
                     )
                     raise BackendError(self._format_stopped(run_id=run_id)) from exc
                 # pause (default reason): silent cancel, controller relaunches on resume.
-                _publish(
+                await _publish_terminal(
                     WorkflowProgressEvent(
                         kind=ProgressKind.WORKFLOW_PAUSED,
                         message="workflow paused",

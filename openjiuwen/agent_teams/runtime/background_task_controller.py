@@ -112,10 +112,6 @@ class BackgroundTaskController:
                     "[bg-ctl] %s unwind timed out after %ss for %s",
                     reason, _UNWIND_TIMEOUT_S, h.run_id,
                 )
-        # The terminal progress event is published from the unwind via a
-        # fire-and-forget task (SwarmflowTool._publish → create_task); yield
-        # once so that task runs before the caller tears the messager down.
-        await asyncio.sleep(0)
 
     async def pause(self, run_id: str | None = None) -> bool:
         """Pause active run(s) — all when ``run_id`` is None, else just that one."""
