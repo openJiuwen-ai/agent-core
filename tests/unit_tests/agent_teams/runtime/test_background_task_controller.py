@@ -30,7 +30,7 @@ class _FakeNative:
 def _make_handle(run_id="wf_1", task_id="t_1"):
     return SwarmflowRunHandle(
         task_id=task_id, run_id=run_id, abort_event=AbortSignal(),
-        backend=_FakeBackend(), native=_FakeNative(), relaunch=lambda _tool=None: None)
+        backend=_FakeBackend(), native=_FakeNative(), inputs={}, session_id="s")
 
 
 @pytest.mark.asyncio
@@ -62,16 +62,51 @@ async def test_stop_is_terminal_not_in_paused():
     assert "wf_1" not in ctl._paused
 
 
+class _FakeLauncher:
+    """Stand-in for the current cycle's SwarmflowTool."""
+
+    def __init__(self):
+        self.relaunched: list[tuple[dict, str]] = []
+
+    def _relaunch(self, inputs, session_id):
+        self.relaunched.append((inputs, session_id))
+
+
 @pytest.mark.asyncio
-async def test_resume_relaunches():
+async def test_resume_relaunches_via_registered_launcher():
     ctl = BackgroundTaskController()
     ctl.register(_make_handle("wf_1"))
     await ctl.pause("wf_1")
-    relaunched = []
-    h = ctl._paused["wf_1"]
-    h.relaunch = lambda _tool=None: relaunched.append(1)
+    launcher = _FakeLauncher()
+    ctl.set_launcher(launcher)
     ok = await ctl.resume("wf_1")
-    assert ok and relaunched == [1] and "wf_1" not in ctl._paused
+    assert ok and launcher.relaunched == [({}, "s")] and "wf_1" not in ctl._paused
+
+
+@pytest.mark.asyncio
+async def test_resume_uses_the_newest_launcher_not_the_launching_one():
+    """A pause/resume cycle rebuilds the leader harness and its SwarmflowTool.
+
+    The ticket carries only data; the controller must relaunch on whichever
+    tool registered last (the live cycle), never on the one that launched.
+    """
+    ctl = BackgroundTaskController()
+    old, new = _FakeLauncher(), _FakeLauncher()
+    ctl.set_launcher(old)
+    ctl.register(_make_handle("wf_1"))
+    await ctl.pause("wf_1")
+    ctl.set_launcher(new)  # harness rebuilt → new tool registers itself
+    await ctl.resume("wf_1")
+    assert old.relaunched == [] and new.relaunched == [({}, "s")]
+
+
+@pytest.mark.asyncio
+async def test_resume_without_launcher_keeps_ticket():
+    ctl = BackgroundTaskController()
+    ctl.register(_make_handle("wf_1"))
+    await ctl.pause("wf_1")
+    assert await ctl.resume("wf_1") is False
+    assert "wf_1" in ctl._paused  # parked until a launcher exists
 
 
 @pytest.mark.asyncio
@@ -83,18 +118,18 @@ async def test_stop_unknown_returns_false():
 @pytest.mark.asyncio
 async def test_stop_terminates_an_already_paused_run():
     ctl = BackgroundTaskController()
-    relaunched = []
+    launcher = _FakeLauncher()
+    ctl.set_launcher(launcher)
     ctl.register(_make_handle("wf_1"))
     await ctl.pause("wf_1")
-    ctl._paused["wf_1"].relaunch = lambda _tool=None: relaunched.append(1)
 
     ok = await ctl.stop("wf_1")
 
     assert ok is True
     assert "wf_1" not in ctl._paused
-    # dropping the relaunch closure means a later resume must not relaunch.
+    # dropping the ticket means a later resume must not relaunch.
     resumed = await ctl.resume("wf_1")
-    assert resumed is False and relaunched == []
+    assert resumed is False and launcher.relaunched == []
 
 
 @pytest.mark.asyncio
@@ -156,7 +191,7 @@ async def test_pause_waits_for_task_unwind():
 
     h = SwarmflowRunHandle(
         task_id="t_1", run_id="wf_1", abort_event=AbortSignal(),
-        backend=_FakeBackend(), native=_TaskNative(task), relaunch=lambda _tool=None: None)
+        backend=_FakeBackend(), native=_TaskNative(task), inputs={}, session_id="s")
     ctl = BackgroundTaskController()
     ctl.register(h)
 
@@ -235,7 +270,7 @@ def _rec_handle(task_id, seq):
         abort_event=ev,
         backend=_RecBackend(seq),
         native=native,
-        relaunch=lambda _tool=None: None,
+        inputs={}, session_id="s",
     )
     return handle, ev, native
 
@@ -259,12 +294,12 @@ def test_pause_runs_three_steps_in_order_and_parks_for_resume():
 
 
 def test_resume_relaunches_and_clears_paused():
-    """resume(): relaunch every parked run with its remembered closure."""
+    """resume(): relaunch every parked run through the registered launcher."""
     seq = []
-    relaunched = []
+    launcher = _FakeLauncher()
     ctl = BackgroundTaskController()
+    ctl.set_launcher(launcher)
     handle, _ev, _native = _rec_handle("w1", seq)
-    handle.relaunch = lambda _tool=None: relaunched.append("w1")
     ctl.register(handle)
 
     async def scenario() -> bool:
@@ -274,7 +309,7 @@ def test_resume_relaunches_and_clears_paused():
     resumed = asyncio.run(scenario())
 
     assert resumed is True
-    assert relaunched == ["w1"]
+    assert launcher.relaunched == [({}, "s")]
     assert ctl.is_paused() is False
 
 
