@@ -56,14 +56,15 @@ def encode_span_to_otlp_json(span: ReadableSpan) -> bytes:
     return _encode_readable_span(span)
 
 
-def encode_recording_span_snapshot_to_otlp_json(span: Any) -> bytes:
-    """Encode the current state of one recording span without an end time.
+def snapshot_readable_span(span: Any) -> ReadableSpan:
+    """Freeze the current state of one recording span into a ReadableSpan.
 
-    The result deliberately has OTLP JSON shape for the local trajectory data
-    plane, but it is not an ended span export. Mutable SDK containers are copied
-    before encoding so an asynchronous consumer never observes later mutation.
+    Mutable SDK containers are copied so an asynchronous consumer never observes
+    later mutation. This is roughly two orders of magnitude cheaper than encoding
+    the span, which lets a caller on a latency-sensitive thread hand the frozen
+    span downstream and let the consumer pay for encoding on its own thread.
     """
-    snapshot = ReadableSpan(
+    return ReadableSpan(
         name=str(span.name),
         context=span.context,
         parent=span.parent,
@@ -77,10 +78,19 @@ def encode_recording_span_snapshot_to_otlp_json(span: Any) -> bytes:
         end_time=None,
         instrumentation_scope=getattr(span, "instrumentation_scope", None),
     )
-    return _encode_readable_span(snapshot)
+
+
+def encode_recording_span_snapshot_to_otlp_json(span: Any) -> bytes:
+    """Encode the current state of one recording span without an end time.
+
+    The result deliberately has OTLP JSON shape for the local trajectory data
+    plane, but it is not an ended span export.
+    """
+    return _encode_readable_span(snapshot_readable_span(span))
 
 
 __all__ = [
     "encode_recording_span_snapshot_to_otlp_json",
     "encode_span_to_otlp_json",
+    "snapshot_readable_span",
 ]
