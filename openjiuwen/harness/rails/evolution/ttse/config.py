@@ -30,9 +30,9 @@ class TTSEConfig:
     Attributes:
         store_path: JSON path for the shared FACT/TIP bank (created on first write).
         embedding: Optional embedding provider. When set, dedup uses cosine
-            similarity (semantic) and retrieval injects the top-K most relevant
-            rules. When ``None``, dedup falls back to substring matching and the
-            whole bank is injected (the reference's legacy mode).
+            similarity (semantic). When ``None``, dedup falls back to substring
+            matching. FACT/TIP are disclosed via ``ttse_consult``, not dumped
+            into the system prompt.
             Callers typically construct
             ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
             (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
@@ -40,18 +40,12 @@ class TTSEConfig:
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Ignored when ``embedding`` is None.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).
-        top_k_facts / top_k_tips: How many rules to inject per task when a
-            retrieval embedding provider is configured.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
             ``None`` or ``<= 0`` means no truncation. When set, overflow keeps
             the tail (actions/observations), not the USER head.
-        inject_enabled: Inject the bank (or top-K) into the system prompt.
-        inject_mode: Where FACT/TIP land. Default ``disk_catalog`` leaves a
-            fixed guidance section, trails the category listing as a prompt
-            attachment, and exposes ``ttse_consult(category=)`` for FACT/TIP.
-            ``legacy_system`` keeps the P:45 body (FACT/TIP dumped into the
-            system prompt). ``trailing_attach`` is accepted but currently
-            falls back to ``legacy_system``.
+        inject_enabled: Inject catalog guidance into the system prompt and
+            expose ``ttse_consult``. The category listing is trailed as a
+            prompt attachment; FACT/TIP bodies are not dumped into P:45.
         evolve_enabled: Run induction after each task to grow the bank.
         success_threshold: Score >= this counts as success (Slice 3 gating).
         induce_llm_policy: LLM invocation policy for induce/blame/synthesize.
@@ -87,11 +81,8 @@ class TTSEConfig:
     dedup_threshold: float = 0.88
     max_facts: int = 400
     max_tips: int = 400
-    top_k_facts: int = 10
-    top_k_tips: int = 10
     traj_char_budget: Optional[int] = None
     inject_enabled: bool = True
-    inject_mode: str = "disk_catalog"
     evolve_enabled: bool = True
     success_threshold: float = 0.999
     induce_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY
@@ -129,13 +120,6 @@ class TTSEConfig:
             return self.dream_state_path
         directory = os.path.dirname(self.store_path) or ".ttse"
         return os.path.join(directory, "dream-state.json")
-
-    def is_disk_catalog(self) -> bool:
-        """True when FACT/TIP are disclosed via ``ttse_consult``, not P:45.
-
-        The category listing is trailed as a prompt attachment; P:45 is guidance only.
-        """
-        return str(self.inject_mode or "").strip() == "disk_catalog"
 
 
 __all__ = ["TTSEConfig"]

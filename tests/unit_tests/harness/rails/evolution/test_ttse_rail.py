@@ -4,7 +4,7 @@
 
 The frozen TTSE algorithm is exercised end-to-end with a scripted LLM:
 FACT/TIP induction, the fail path (blame -> retire -> synthesize -> induce),
-top-K injection wiring, store dedup/persistence, success detection, and the
+store dedup/persistence, success detection, catalog inject, and the
 configure/unconfigure API.
 """
 
@@ -76,15 +76,13 @@ class ScriptedLLM:
 def _make_rail(tmp_path, llm, *, cfg=None, success_detector=None) -> TTSERail:
     """Induce/blame regression helper: inject TrajectoryErrorSuccessDetector by default.
 
-    Production default is SignalBasedSuccessDetector + ``disk_catalog``. Existing
-    rail tests rely on ``ttse_score`` / no-error defaults and pin
-    ``legacy_system`` so classify LLM calls do not pollute induce/blame counts.
+    Production default is SignalBasedSuccessDetector. Classify runs after bank
+    writes; scripted handlers that do not match the assignment prompt return NONE.
     """
     return TTSERail(
         llm=llm,
         model="dummy-model",
-        ttse_config=cfg
-        or TTSEConfig(store_path=str(tmp_path / "bank.json"), inject_mode="legacy_system"),
+        ttse_config=cfg or TTSEConfig(store_path=str(tmp_path / "bank.json")),
         success_detector=success_detector
         if success_detector is not None
         else TrajectoryErrorSuccessDetector(),
@@ -277,7 +275,7 @@ async def test_rail_success_path_induces_without_blame(tmp_path):
     await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
     assert rail._ttse_store.facts_texts() == ["success fact"]
     assert rail._ttse_store.retired == []
-    assert len(llm.calls) == 1  # induce only
+    assert len(llm.calls) == 2  # induce + classify
 
 
 @pytest.mark.asyncio
@@ -308,7 +306,7 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     assert "F1 bad fact" not in rail._ttse_store.facts_texts()
     assert "lesson fact" in rail._ttse_store.facts_texts()
     assert any("grep" in t for t in rail._ttse_store.tips_texts())
-    assert len(llm.calls) == 3  # blame -> synthesize -> induce
+    assert len(llm.calls) == 5  # blame -> synth -> classify tip -> induce -> classify fact
 
 
 @pytest.mark.asyncio
@@ -337,89 +335,24 @@ async def test_rail_blame_none_does_not_retire(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# Injection (before_model_call adds the TTSE_FACTS_TIPS section)
+# Injection (before_model_call adds catalog guidance, not the rule body)
 # ----------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_before_model_call_injects_whole_bank_section(tmp_path):
-    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"))
-    await rail._ttse_store.add_fact("injected fact")
-    await rail._ttse_store.add_tip("injected tip")
-
-    builder = SystemPromptBuilder()
-    ctx = SimpleNamespace(
-        inputs=SimpleNamespace(
-            system_prompt_builder=builder,
-            query="some query",
-            messages=[{"role": "user", "content": "some query"}],
-        )
-    )
-    await rail.before_model_call(ctx)
-
-    assert builder.has_section(SectionName.TTSE_FACTS_TIPS)
-    section = builder.get_section(SectionName.TTSE_FACTS_TIPS)
-    text = section.content["cn"]
-    assert "injected fact" in text
-    assert "injected tip" in text
-
-
-@pytest.mark.asyncio
-async def test_injection_per_invoke_cache_hits_same_query(tmp_path):
-    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"))
-    await rail._ttse_store.add_fact("cached fact")
-    body1 = await rail._resolve_injection_body("same query")
-    body2 = await rail._resolve_injection_body("same query")
-    assert body1 == body2
-    assert "cached fact" in body1
-
-
 class _MockEmbedding:
-    """Deterministic EmbeddingProvider for top-K injection tests."""
-
-    def __init__(self):
-        self.calls: list[str] = []
+    """Deterministic EmbeddingProvider for constructor wiring tests."""
 
     async def embed_query(self, text: str):
-        self.calls.append(text)
-        # Axis-aligned vectors so cosine ranking is stable.
-        table = {
-            "login bug": [1.0, 0.0, 0.0],
-            "relevant fact about login": [0.9, 0.1, 0.0],
-            "unrelated weather tip": [0.0, 1.0, 0.0],
-            "another login tip": [0.8, 0.2, 0.0],
-        }
-        return table.get(text, [0.0, 0.0, 1.0])
+        return [1.0, 0.0, 0.0]
 
     async def embed_documents(self, texts: list[str]):
         return [await self.embed_query(t) for t in texts]
 
 
 @pytest.mark.asyncio
-async def test_injection_uses_top_k_when_config_embedding_set(tmp_path):
+async def test_constructor_embedding_syncs_to_config(tmp_path):
     provider = _MockEmbedding()
-    cfg = TTSEConfig(
-        store_path=str(tmp_path / "bank.json"),
-        embedding=provider,
-        top_k_facts=1,
-        top_k_tips=1,
-    )
-    rail = TTSERail(llm=ScriptedLLM(lambda p: "NONE"), model="m", ttse_config=cfg)
-    await rail._ttse_store.add_fact("relevant fact about login")
-    await rail._ttse_store.add_fact("unrelated weather tip")
-    await rail._ttse_store.add_tip("another login tip")
-
-    body = await rail._resolve_injection_body("login bug")
-    assert "relevant fact about login" in body
-    assert "unrelated weather tip" not in body
-    assert "another login tip" in body
-    assert "login bug" in provider.calls
-
-
-@pytest.mark.asyncio
-async def test_constructor_embedding_syncs_to_config_and_enables_retrieval(tmp_path):
-    provider = _MockEmbedding()
-    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"), top_k_facts=1, top_k_tips=1)
+    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"))
     rail = TTSERail(
         llm=ScriptedLLM(lambda p: "NONE"),
         model="m",
@@ -428,14 +361,6 @@ async def test_constructor_embedding_syncs_to_config_and_enables_retrieval(tmp_p
     )
     assert rail._ttse_config.embedding is provider
     assert rail._ttse_store.has_embedding_provider()
-    await rail._ttse_store.add_fact("relevant fact about login")
-    await rail._ttse_store.add_tip("another login tip")
-    await rail._ttse_store.add_tip("unrelated weather tip")
-
-    body = await rail._resolve_injection_body("login bug")
-    assert "relevant fact about login" in body
-    assert "another login tip" in body
-    assert "unrelated weather tip" not in body
 
 
 # ----------------------------------------------------------------------
@@ -524,9 +449,7 @@ async def test_induce_batch_parses_rules():
 async def test_rail_batch_induce_amortizes_to_one_call(tmp_path):
     """With batch_size=2, two tasks induce via a SINGLE LLM call."""
     llm = ScriptedLLM(lambda p: "[FACT] batch fact" if "BATCH" in p else "NONE")
-    cfg = TTSEConfig(
-        store_path=str(tmp_path / "b.json"), batch_size=2, inject_mode="legacy_system"
-    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), batch_size=2)
     rail = _make_rail(tmp_path, llm, cfg=cfg)
     snap = {
         "messages": [{"role": "user", "content": "q"}],
@@ -537,7 +460,7 @@ async def test_rail_batch_induce_amortizes_to_one_call(tmp_path):
     assert llm.calls == []  # not induced yet
     assert rail._ttse_store.facts_texts() == []
     await rail._run_ttse_induction(None, ctx=None, snapshot=snap)  # buffer 2/2 -> flush
-    assert len(llm.calls) == 1  # ONE induce_batch call for both tasks
+    assert len(llm.calls) == 2  # induce_batch + classify
     assert rail._ttse_store.facts_texts() == ["batch fact"]
 
 
@@ -553,9 +476,7 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
         return "NONE"
 
     llm = ScriptedLLM(handler)
-    cfg = TTSEConfig(
-        store_path=str(tmp_path / "b.json"), batch_size=2, inject_mode="legacy_system"
-    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), batch_size=2)
     rail = _make_rail(tmp_path, llm, cfg=cfg)
     await rail._ttse_store.add_fact("F1 bad fact")
     await rail._ttse_store.add_fact("F2 keeper")
@@ -575,16 +496,14 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
         "ttse_task_query": "q2",
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=ok_snap)  # buffer 2/2 -> flush
-    assert len(llm.calls) == 2  # blame + one induce_batch (synthesize short-circuits: 1 rule)
+    assert len(llm.calls) == 3  # blame + induce_batch + classify
     assert "lesson" in rail._ttse_store.facts_texts()
 
 
 @pytest.mark.asyncio
 async def test_rail_flush_induces_partial_buffer(tmp_path):
     llm = ScriptedLLM(lambda p: "[FACT] flushed fact" if "BATCH" in p else "NONE")
-    cfg = TTSEConfig(
-        store_path=str(tmp_path / "b.json"), batch_size=5, inject_mode="legacy_system"
-    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), batch_size=5)
     rail = _make_rail(tmp_path, llm, cfg=cfg)
     snap = {
         "messages": [{"role": "user", "content": "q"}],
@@ -595,9 +514,9 @@ async def test_rail_flush_induces_partial_buffer(tmp_path):
     assert rail._ttse_store.facts_texts() == []
     await rail.flush()
     assert rail._ttse_store.facts_texts() == ["flushed fact"]
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2  # induce_batch + classify
     await rail.flush()  # empty buffer -> no-op
-    assert len(llm.calls) == 1
+    assert len(llm.calls) == 2
 
 
 # ----------------------------------------------------------------------
@@ -893,14 +812,8 @@ def test_detect_tool_error_signals_skips_data_fetch_tools():
 
 
 # ----------------------------------------------------------------------
-# disk_catalog: default inject_mode (guidance section, post-write classify, consult)
+# disk_catalog inject: guidance section, post-write classify, consult
 # ----------------------------------------------------------------------
-
-
-def test_default_inject_mode_is_disk_catalog():
-    cfg = TTSEConfig()
-    assert cfg.inject_mode == "disk_catalog"
-    assert cfg.is_disk_catalog() is True
 
 
 def _disk_catalog_cfg(tmp_path) -> TTSEConfig:
@@ -927,24 +840,6 @@ async def test_disk_catalog_injects_guidance_not_rule_body(tmp_path):
     assert text.strip() == DISK_CATALOG_GUIDANCE_CN.strip()
     assert "PresentBench grades slides.md" not in text
     assert "documents-office-and-records" not in text
-
-
-@pytest.mark.asyncio
-async def test_legacy_mode_does_not_classify_after_induce(tmp_path):
-    llm = ScriptedLLM(lambda p: "[FACT] success fact" if "extracting" in p else "NONE")
-    rail = _make_rail(
-        tmp_path,
-        llm,
-        cfg=TTSEConfig(store_path=str(tmp_path / "bank.json"), inject_mode="legacy_system"),
-    )
-    snap = {
-        "messages": [{"role": "user", "content": "do task"}, {"role": "assistant", "content": "done"}],
-        "ttse_capabilities": "- grep",
-        "ttse_task_query": "do task",
-    }
-    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
-    assert len(llm.calls) == 1
-    assert "category" not in rail._ttse_store.facts[0]
 
 
 @pytest.mark.asyncio

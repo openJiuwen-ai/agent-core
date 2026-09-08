@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""``ttse_consult``: one read-only tool for the disk_catalog inject mode.
+"""``ttse_consult``: one read-only tool for FACT/TIP catalog disclosure.
 
 ``category=<id>`` → that class's FACT + TIP. No-arg still lists the catalog
 (compat / missing attachment) but the live prompt already trails the listing.

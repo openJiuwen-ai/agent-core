@@ -43,13 +43,11 @@ from .induction import blame, induce, induce_batch, synthesize
 from .render import (
     DISK_CATALOG_GUIDANCE_CN,
     DISK_CATALOG_GUIDANCE_EN,
-    build_section_text,
     rules_numbered,
 )
 
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
-from .retrieval import retrieve_top_k
 from .stores import TTSERecordStore
 from .success import SignalBasedSuccessDetector, SuccessDetector, SuccessOutcome
 from .trajectory_adapter import messages_to_trajectory_text
@@ -80,11 +78,6 @@ class TTSERail(EvolutionRail):
             model=model,
             config=self._ttse_config,
         )
-        # Per-invoke injection cache (query -> rendered section body).
-        self._inj_query: Optional[str] = None
-        self._inj_body: Optional[str] = None
-        # Debounce bank saves after inject timestamp updates (once per resolve).
-        self._inject_dirty: bool = False
         # Serializes the whole bank-mutating reflection (blame/retire/synth/induce)
         # and Auto-dream so concurrent background jobs don't interleave.
         self._evolution_lock = asyncio.Lock()
@@ -117,12 +110,12 @@ class TTSERail(EvolutionRail):
         super().uninit(agent)
 
     def sync_inject_mode(self) -> None:
-        """Register or drop ``ttse_consult`` after a live yaml flag change."""
+        """Register or drop ``ttse_consult`` after a live ``inject_enabled`` change."""
         if self._agent is not None:
             self._sync_consult_tool(self._agent)
 
     def _sync_consult_tool(self, agent) -> None:
-        want = bool(self._ttse_config.inject_enabled and self._ttse_config.is_disk_catalog())
+        want = bool(self._ttse_config.inject_enabled)
         have = bool(self._consult_tools)
         if want and not have:
             tools = create_ttse_consult_tools(
@@ -142,9 +135,6 @@ class TTSERail(EvolutionRail):
         self._unregister_runtime_tools(agent, self._consult_tools)
         self._consult_tools = []
         logger.info("[TTSERail] unregistered %s", TTSE_CONSULT_TOOL_NAME)
-
-    def _is_disk_catalog(self) -> bool:
-        return bool(self._ttse_config.is_disk_catalog())
 
     # ------------------------------------------------------------------
     # Snapshot enrichment: capture agent state while ctx is still alive
@@ -381,8 +371,7 @@ class TTSERail(EvolutionRail):
         )
         if new_tip and await self._ttse_store.add_tip(new_tip):
             logger.info("[TTSERail] synthesized resolving TIP: %s", new_tip[:80])
-            if self._is_disk_catalog():
-                await self._classify_added_rules([(new_tip, "tip")])
+            await self._classify_added_rules([(new_tip, "tip")])
 
     async def _blame_and_resolve(self, task_query: str, traj_text: str, capabilities: str) -> None:
         """Per-task fail path: blame -> retire -> synthesize (before induce)."""
@@ -401,7 +390,7 @@ class TTSERail(EvolutionRail):
             if await self._ttse_store.add_tip(tip):
                 added += 1
                 added_items.append((tip, "tip"))
-        if added_items and self._is_disk_catalog():
+        if added_items:
             await self._classify_added_rules(added_items)
         return added
 
@@ -420,8 +409,6 @@ class TTSERail(EvolutionRail):
             logger.warning("[TTSERail] category assignment skipped: %s", exc)
 
     async def _maybe_project_catalog(self) -> None:
-        if not self._is_disk_catalog():
-            return
         try:
             await asyncio.to_thread(project_catalog, self._ttse_store)
         except Exception as exc:  # noqa: BLE001
@@ -551,7 +538,7 @@ class TTSERail(EvolutionRail):
                     state=state,
                 )
                 if not result.skipped:
-                    if result.added_items and self._is_disk_catalog():
+                    if result.added_items:
                         await self._classify_added_rules(result.added_items)
                     await self._maybe_project_catalog()
             except Exception as exc:  # noqa: BLE001
@@ -570,38 +557,17 @@ class TTSERail(EvolutionRail):
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
         if builder is None:
             return
-
-        if self._is_disk_catalog():
-            builder.add_section(
-                PromptSection(
-                    name=SectionName.TTSE_FACTS_TIPS,
-                    content={
-                        "cn": DISK_CATALOG_GUIDANCE_CN,
-                        "en": DISK_CATALOG_GUIDANCE_EN,
-                    },
-                    priority=45,
-                )
-            )
-            await self._attach_disk_catalog(ctx)
-            return
-
-        query = self._extract_query(ctx)
-        body = await self._resolve_injection_body(query)
-        if self._inject_dirty:
-            await self._ttse_store.save()
-            self._inject_dirty = False
-        if not body:
-            # Bank empty (or retrieval found nothing): drop any stale section.
-            if builder.has_section(SectionName.TTSE_FACTS_TIPS):
-                builder.remove_section(SectionName.TTSE_FACTS_TIPS)
-            return
         builder.add_section(
             PromptSection(
                 name=SectionName.TTSE_FACTS_TIPS,
-                content={"cn": body, "en": body},
+                content={
+                    "cn": DISK_CATALOG_GUIDANCE_CN,
+                    "en": DISK_CATALOG_GUIDANCE_EN,
+                },
                 priority=45,
             )
         )
+        await self._attach_disk_catalog(ctx)
 
     async def _attach_disk_catalog(self, ctx: AgentCallbackContext) -> None:
         """Trail the category listing as a HISTORY prompt-attachment (not SYSTEM)."""
@@ -655,82 +621,6 @@ class TTSERail(EvolutionRail):
             if sid:
                 return str(sid)
         return None
-
-    async def _resolve_injection_body(self, query: str) -> str:
-        """Compute (and per-invoke cache) the section body for ``query``.
-
-        Within one invoke the query is constant across model steps, so the
-        retrieval result is cached and re-embedded only when the query changes.
-        """
-        if query and query == self._inj_query and self._inj_body is not None:
-            return self._inj_body
-        body = await self._build_injection_body_async(query)
-        self._inj_query = query or None
-        self._inj_body = body or None
-        return body
-
-    def _mark_injected(self, facts: list, tips: list) -> None:
-        """Refresh display clock for records actually written into the prompt."""
-        records = [r for r in list(facts) + list(tips) if isinstance(r, dict)]
-        if not records:
-            return
-        if self._ttse_store.mark_injected(records):
-            self._inject_dirty = True
-
-    async def _build_injection_body_async(self, query: str) -> str:
-        """Top-K retrieval when an embedding provider is configured."""
-        if not self._ttse_store.has_embedding_provider():
-            body = self._build_injection_body()
-            logger.info(
-                "[TTSERail] injection without embedding (whole bank) facts=%s tips=%s",
-                len(self._ttse_store.facts_records()),
-                len(self._ttse_store.tips_records()),
-            )
-            return body
-        retrieved = await retrieve_top_k(
-            query,
-            self._ttse_store,
-            k_facts=self._ttse_config.top_k_facts,
-            k_tips=self._ttse_config.top_k_tips,
-        )
-        if retrieved is None:
-            body = self._build_injection_body()
-            logger.info(
-                "[TTSERail] injection fallback to whole bank facts=%s tips=%s",
-                len(self._ttse_store.facts_records()),
-                len(self._ttse_store.tips_records()),
-            )
-            return body
-        facts, tips = retrieved
-        if not facts and not tips:
-            logger.info("[TTSERail] embedding recall empty; skip TTSE section")
-            return ""
-        self._log_injected_rules(facts, tips, retrieved=True)
-        self._mark_injected(facts, tips)
-        return build_section_text(facts, tips, retrieved=True)
-
-    @staticmethod
-    def _log_injected_rules(facts: list, tips: list, *, retrieved: bool) -> None:
-        """Log the concrete FACT/TIP texts selected for prompt injection."""
-        mode = "embedding top-K" if retrieved else "whole bank"
-        if facts:
-            for idx, record in enumerate(facts, start=1):
-                text = record.get("text", record) if isinstance(record, dict) else str(record)
-                logger.info("[TTSERail] inject fact %s/%s (%s): %s", idx, len(facts), mode, text)
-        if tips:
-            for idx, record in enumerate(tips, start=1):
-                text = record.get("text", record) if isinstance(record, dict) else str(record)
-                logger.info("[TTSERail] inject tip %s/%s (%s): %s", idx, len(tips), mode, text)
-        if not facts and not tips:
-            logger.info("[TTSERail] inject %s: no facts or tips selected", mode)
-
-    def _build_injection_body(self) -> str:
-        """Whole-bank render (count-sorted). Used when no embedding provider."""
-        facts = self._ttse_store.facts_records()
-        tips = self._ttse_store.tips_records()
-        self._log_injected_rules(facts, tips, retrieved=False)
-        self._mark_injected(facts, tips)
-        return build_section_text(facts, tips, retrieved=False)
 
     # ------------------------------------------------------------------
     # Query extraction helpers

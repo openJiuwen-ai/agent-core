@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Unit tests for TTSE Auto-dream (prune / merge / purge / inject clock)."""
+"""Unit tests for TTSE Auto-dream (prune / merge / purge)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from typing import Callable
 
 import pytest
 
-from openjiuwen.harness.prompts.builder import SystemPromptBuilder
-from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.evolution.ttse import TTSEConfig, TTSERail, TTSERecordStore
 from openjiuwen.harness.rails.evolution.ttse.dream import (
     DreamState,
@@ -111,59 +109,6 @@ async def test_legacy_bank_migration_sets_last_injected(tmp_path):
     assert rec["count"] == 2
     assert rec["last_injected_at"] is not None
     assert rec["created_at"] is not None
-
-
-@pytest.mark.asyncio
-async def test_injection_updates_last_injected_at(tmp_path):
-    rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"))
-    await rail._ttse_store.add_fact("injected fact")
-    await rail._ttse_store.add_tip("When reading logs: use grep to extract matches")
-    before = rail._ttse_store.facts[0].get("last_injected_at")
-    assert before is None
-
-    builder = SystemPromptBuilder()
-    ctx = SimpleNamespace(
-        inputs=SimpleNamespace(system_prompt_builder=builder, query="q", is_follow_up=False),
-        agent=None,
-        extra={},
-    )
-    await rail.before_model_call(ctx)
-    assert builder.has_section(SectionName.TTSE_FACTS_TIPS)
-    assert rail._ttse_store.facts[0]["last_injected_at"] is not None
-    assert rail._ttse_store.facts[0]["inject_hits"] == 1
-    assert rail._ttse_store.tips[0]["inject_hits"] == 1
-
-
-@pytest.mark.asyncio
-async def test_top_k_miss_does_not_update_unselected(tmp_path):
-    emb = FakeEmbedding(
-        {
-            "login fact": [1.0, 0.0],
-            "weather fact": [0.0, 1.0],
-            "login bug": [1.0, 0.0],
-        }
-    )
-    cfg = TTSEConfig(
-        store_path=str(tmp_path / "bank.json"),
-        embedding=emb,
-        top_k_facts=1,
-        top_k_tips=0,
-    )
-    rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg, embedding=emb)
-    await rail._ttse_store.add_fact("login fact")
-    await rail._ttse_store.add_fact("weather fact")
-    body = await rail._resolve_injection_body("login bug")
-    assert "login fact" in body
-    assert "weather fact" not in body
-    by_text = {r["text"]: r for r in rail._ttse_store.facts}
-    assert by_text["login fact"]["inject_hits"] == 1
-    assert by_text["weather fact"]["inject_hits"] == 0
-    assert by_text["weather fact"]["last_injected_at"] is None
-
-
-# ----------------------------------------------------------------------
-# prune TTL
-# ----------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -477,7 +422,6 @@ async def test_after_task_iteration_schedules_dream(tmp_path):
 async def test_run_dream_projects_catalog_after_prune(tmp_path):
     cfg = TTSEConfig(
         store_path=str(tmp_path / "bank.json"),
-        inject_mode="disk_catalog",
         dream_enabled=True,
         dream_min_hours=0,
         dream_min_rules=100,
@@ -528,7 +472,6 @@ async def test_run_dream_classifies_merged_canonical(tmp_path):
 
     cfg = TTSEConfig(
         store_path=str(tmp_path / "bank.json"),
-        inject_mode="disk_catalog",
         embedding=emb,
         dream_enabled=True,
         dream_min_hours=0,

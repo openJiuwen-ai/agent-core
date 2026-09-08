@@ -8,7 +8,7 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 * I/O is async via :func:`asyncio.to_thread` with an atomic ``tmp`` + ``os.replace``.
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
   is configured, falling back to the reference's substring dedup otherwise.
-* Embeddings are cached by normalized text so retrieval (Slice 2) reuses them.
+* Embeddings are cached by normalized text so dedup and Auto-dream reuse them.
 * Records carry display/TTL metadata (``created_at``, ``updated_at``,
   ``last_injected_at``, ``inject_hits``) for Auto-dream prune.
 """
@@ -174,11 +174,11 @@ class TTSERecordStore:
         return vec or None
 
     async def embedding_of(self, text: str) -> Optional[List[float]]:
-        """Public cached embedding accessor (reused by retrieval)."""
+        """Public cached embedding accessor (reused by Auto-dream)."""
         return await self._embedding_of(text)
 
     def has_embedding_provider(self) -> bool:
-        """Whether semantic retrieval/dedup is enabled (a provider is configured)."""
+        """Whether semantic dedup is enabled (a provider is configured)."""
         return self._embedding is not None
 
     async def _find_duplicate(self, text: str, store: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
