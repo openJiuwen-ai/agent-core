@@ -34,12 +34,17 @@ SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑
    单值 `stop(run_id)` 语义不变。
 4. **`_abort_one` 等待 task 真正 unwind（pause/stop 返回即记录已落、事件已发）**。
    `async_tool_runtime.cancel()` 只请求取消，engine 在 task 解栈的 finally 里才写 pause/seal 记录并
-   经 `_publish` 发 `WORKFLOW_PAUSED/STOPPED`。嵌入层若在 pause() 返回后立即拆 leader harness
+   发 `WORKFLOW_PAUSED/STOPPED`。嵌入层若在 pause() 返回后立即拆 leader harness
    （Runner.pause 停 EventBus/TeamMonitor），事件会发到已关闭的总线上、快照停在 running（实测：
    controller.pause 后 390ms 才发出 workflow_paused，此时 monitor 已停）。故第三步 cancel 后
-   `asyncio.wait({task}, timeout=_UNWIND_TIMEOUT_S=30)` 等 task done，再 `sleep(0)` 一次让
-   `_publish` 的 fire-and-forget `create_task` 跑完（inprocess messager 是同步投递）。超时只告警不阻塞。
+   `asyncio.wait({task}, timeout=_UNWIND_TIMEOUT_S=30)` 等 task done。超时只告警不阻塞。
    附带 `[bg-ctl] register/deregister/pause/stop` INFO 诊断（含 controller 实例 id 与注册表大小）。
+5. **终态 progress 投递下沉为 awaited（`SwarmflowTool._publish_terminal`）**。`_publish` 是同步
+   sink（engine `progress_sink` 契约），用 `create_task` fire-and-forget——中途进度正确（不能阻塞
+   engine）。但 `run_background` except 分支里的 5 处终态 publish（PAUSED/STOPPED）本就在 async
+   上下文，改为 `await messager.publish`，使「task done ⟹ 事件已投递」成为契约，controller 无需
+   知道 `_publish` 内部有几层 create_task；顺带消除 CancelledError 分支里无引用 publish task
+   可能被 GC 的隐患。`_build_progress_message` 抽出共享构造。best-effort：总线已关只 debug 不抛。
 2. **`WorkflowProgressEvent.script_path: str | None = None`**。`run_workflow(path)` 把 `path` 写入
    `Runtime.script_path`，`_exec_loaded` 的 `WORKFLOW_STARTED` 事件携带 `script_path=rt.script_path`。
    业务无关铁律不破：`script_path` 是 engine 已有的 `path` 入参，不引入 agent_teams 依赖；其它
