@@ -45,6 +45,18 @@ SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑
    上下文，改为 `await messager.publish`，使「task done ⟹ 事件已投递」成为契约，controller 无需
    知道 `_publish` 内部有几层 create_task；顺带消除 CancelledError 分支里无引用 publish task
    可能被 GC 的隐患。`_build_progress_message` 抽出共享构造。best-effort：总线已关只 debug 不抛。
+6. **复活票 relaunch 落在「发起 resume 的工具」所在 harness，而非捕获的旧 harness**。team 层
+   pause 会 stop leader harness，RESUME_FROM_PAUSE 重建新 harness + 新 SwarmflowTool。复活票
+   （`_make_relaunch` 闭包）捕获的是 launch 时的旧工具，其 `_parent_agent` 指向已 stopped 的旧
+   harness；leader 在新 harness 上调 `swarmflow(action=resume)` 若沿用旧闭包，resumed 协程会挂在
+   死 harness 的 async_tool_runtime 上——能跑、能发进度（messager 是 team 级），但完成回灌
+   `_inject_async_completion → send()` 命中 stopped harness 被跳过，leader 永远不知道 workflow 完成
+   （不汇报、不静止、无 team.idle、方块不熄）。实测：`completion injection skipped` 紧随
+   `workflow_completed`。修法：`SwarmflowRunHandle.relaunch: Callable[[tool | None], None]`，
+   `controller.resume(run_id, *, tool=None)` 把发起方工具交给闭包，闭包用 `(tool or self)._relaunch`
+   ——语义通道（leader 经新工具）落在活 harness；机械通道（树视图按钮，无工具在手）回退到捕获工具，
+   本就只在同 harness 内有效（设计约束）。"进程内可信" 的复活票边界因此收紧为 "harness 内可信 +
+   跨 harness 由发起方补齐"。
 2. **`WorkflowProgressEvent.script_path: str | None = None`**。`run_workflow(path)` 把 `path` 写入
    `Runtime.script_path`，`_exec_loaded` 的 `WORKFLOW_STARTED` 事件携带 `script_path=rt.script_path`。
    业务无关铁律不破：`script_path` 是 engine 已有的 `path` 入参，不引入 agent_teams 依赖；其它
