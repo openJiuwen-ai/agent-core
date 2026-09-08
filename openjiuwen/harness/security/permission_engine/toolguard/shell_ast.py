@@ -29,6 +29,278 @@ _COMMAND_SUBSTITUTION_RE = re.compile(r"`|\$\(")
 _PROCESS_SUBSTITUTION_RE = re.compile(r"[<>]\(")
 _HEREDOC_RE = re.compile(r"<<<?")
 _PARAM_EXPANSION_RE = re.compile(r"\$\{")
+_SHELL_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+@dataclass(frozen=True, slots=True)
+class _ShellArgSyntax:
+    """Parser-owned facts needed to interpret one normalized shell argv item."""
+
+    static: bool
+    expand_user: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ShellLexeme:
+    value: str
+    syntax: _ShellArgSyntax
+    control: bool = False
+    assignment_prefix: bool = False
+
+
+def _tilde_expansion_eligible(raw: str) -> bool:
+    if not raw.startswith("~"):
+        return False
+    prefix = raw.split("/", 1)[0]
+    return not any(char in prefix for char in {'"', "'", "\\"})
+
+
+def _unsupported_tilde_expansion(raw: str) -> bool:
+    if not _tilde_expansion_eligible(raw):
+        return False
+    prefix = raw.split("/", 1)[0]
+    return prefix.startswith("~-") or (prefix.startswith("~+") and prefix != "~+")
+
+
+def _normalize_posix_shell_word(raw: str) -> tuple[str, _ShellArgSyntax] | None:
+    """Normalize one POSIX shell word without evaluating dynamic expansion."""
+
+    output: list[str] = []
+    single_quoted = False
+    double_quoted = False
+    syntax_static = True
+    expand_user = _tilde_expansion_eligible(raw)
+    if _unsupported_tilde_expansion(raw):
+        syntax_static = False
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if single_quoted:
+            if char == "'":
+                single_quoted = False
+            else:
+                output.append(char)
+            index += 1
+            continue
+        if double_quoted:
+            if char == '"':
+                double_quoted = False
+                index += 1
+                continue
+            if char == "\\" and index + 1 < len(raw):
+                escaped = raw[index + 1]
+                if escaped in {'$', '`', '"', "\\"}:
+                    output.append(escaped)
+                    index += 2
+                    continue
+                if escaped == "\n":
+                    index += 2
+                    continue
+                output.append(char)
+                index += 1
+                continue
+            if char in {"$", "`"}:
+                syntax_static = False
+            output.append(char)
+            index += 1
+            continue
+        if char == "'":
+            single_quoted = True
+            index += 1
+            continue
+        if char == '"':
+            double_quoted = True
+            index += 1
+            continue
+        if char == "\\":
+            if index + 1 >= len(raw):
+                return None
+            escaped = raw[index + 1]
+            if escaped != "\n":
+                output.append(escaped)
+            index += 2
+            continue
+        if char in {"$", "`", "*", "?", "[", "{"}:
+            syntax_static = False
+        output.append(char)
+        index += 1
+    if single_quoted or double_quoted:
+        return None
+    return "".join(output), _ShellArgSyntax(
+        static=syntax_static,
+        expand_user=expand_user,
+    )
+
+
+def _normalize_windows_shell_word(raw: str) -> tuple[str, _ShellArgSyntax]:
+    """Preserve the previous non-POSIX token value behavior conservatively."""
+
+    quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}
+    value = raw[1:-1] if quoted else raw
+    single_quoted = quoted and raw[0] == "'"
+    static = single_quoted or not any(char in value for char in "$`*?[{")
+    return value, _ShellArgSyntax(
+        static=static,
+        expand_user=not quoted and value.startswith("~"),
+    )
+
+
+def _normalize_shell_word(raw: str) -> tuple[str, _ShellArgSyntax] | None:
+    if os.name == "nt":
+        return _normalize_windows_shell_word(raw)
+    return _normalize_posix_shell_word(raw)
+
+
+def _lex_windows_shell_words(text: str) -> tuple[_ShellLexeme, ...] | None:
+    try:
+        lexer = shlex.shlex(text, posix=False, punctuation_chars="();&|<>")
+        lexer.commenters = ""
+        raw_tokens = tuple(lexer)
+    except ValueError:
+        return None
+    punctuation = frozenset("();&|<>")
+    lexemes: list[_ShellLexeme] = []
+    for raw in raw_tokens:
+        if not raw:
+            continue
+        control = all(char in punctuation for char in raw)
+        if control:
+            lexemes.append(
+                _ShellLexeme(
+                    value=raw,
+                    syntax=_ShellArgSyntax(False, False),
+                    control=True,
+                )
+            )
+            continue
+        value, syntax = _normalize_windows_shell_word(raw)
+        lexemes.append(
+            _ShellLexeme(
+                value=value,
+                syntax=syntax,
+                assignment_prefix=bool(_SHELL_ASSIGNMENT_RE.match(raw)),
+            )
+        )
+    return tuple(lexemes)
+
+
+def _lex_shell_words(text: str) -> tuple[_ShellLexeme, ...] | None:
+    """Conservatively lex shell words and operators for parser fallback use."""
+
+    if os.name == "nt":
+        return _lex_windows_shell_words(text)
+
+    lexemes: list[_ShellLexeme] = []
+    raw_word: list[str] = []
+    single_quoted = False
+    double_quoted = False
+    escaped = False
+    word_started = False
+    punctuation = frozenset("();&|<>")
+
+    def flush_word() -> bool:
+        nonlocal word_started
+        if not word_started:
+            return True
+        raw = "".join(raw_word)
+        normalized = _normalize_shell_word(raw)
+        if normalized is None:
+            return False
+        value, syntax = normalized
+        lexemes.append(
+            _ShellLexeme(
+                value=value,
+                syntax=syntax,
+                assignment_prefix=bool(_SHELL_ASSIGNMENT_RE.match(raw)),
+            )
+        )
+        raw_word.clear()
+        word_started = False
+        return True
+
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            raw_word.append(char)
+            word_started = True
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and not single_quoted:
+            raw_word.append(char)
+            word_started = True
+            escaped = True
+            index += 1
+            continue
+        if char == "'" and not double_quoted:
+            raw_word.append(char)
+            word_started = True
+            single_quoted = not single_quoted
+            index += 1
+            continue
+        if char == '"' and not single_quoted:
+            raw_word.append(char)
+            word_started = True
+            double_quoted = not double_quoted
+            index += 1
+            continue
+        if single_quoted or double_quoted:
+            raw_word.append(char)
+            word_started = True
+            index += 1
+            continue
+        if char.isspace():
+            if not flush_word():
+                return None
+            if char in {"\n", "\r"}:
+                lexemes.append(
+                    _ShellLexeme(
+                        value=";",
+                        syntax=_ShellArgSyntax(static=False, expand_user=False),
+                        control=True,
+                    )
+                )
+            index += 1
+            continue
+        if char in punctuation:
+            if not flush_word():
+                return None
+            end = index + 1
+            while end < len(text) and text[end] in punctuation:
+                end += 1
+            lexemes.append(
+                _ShellLexeme(
+                    value=text[index:end],
+                    syntax=_ShellArgSyntax(static=False, expand_user=False),
+                    control=True,
+                )
+            )
+            index = end
+            continue
+        raw_word.append(char)
+        word_started = True
+        index += 1
+    if escaped or single_quoted or double_quoted:
+        return None
+    if not flush_word():
+        return None
+    return tuple(lexemes)
+
+
+def _executable_shell_lexemes(
+    lexemes: tuple[_ShellLexeme, ...],
+) -> tuple[_ShellLexeme, ...]:
+    """Remove consecutive, syntactically certain assignment prefixes."""
+
+    index = 0
+    while (
+        index < len(lexemes)
+        and not lexemes[index].control
+        and lexemes[index].assignment_prefix
+    ):
+        index += 1
+    return lexemes[index:]
 
 
 @dataclass(frozen=True)
@@ -89,22 +361,46 @@ def parse_shell_for_permission(command: str) -> ShellAstParseResult:
         - parse_unavailable: parser backend unavailable or command cannot be
           safely analyzed by the conservative fallback
     """
+    result, _argv_syntax = _parse_shell_for_permission_details(command)
+    return result
+
+
+def _parse_shell_for_permission_details(
+    command: str,
+) -> tuple[ShellAstParseResult, tuple[tuple[_ShellArgSyntax, ...], ...]]:
+    """Return the public parse result plus private argv syntax provenance."""
+
     from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
         canonicalize_shell_command_for_permission,
     )
 
     text = canonicalize_shell_command_for_permission((command or "").strip())
     if not text:
-        return ShellAstParseResult(kind="simple", backend="fallback")
+        return ShellAstParseResult(kind="simple", backend="fallback"), ()
 
     parser = _get_tree_sitter_bash_parser()
     if parser is not None:
         try:
-            return _parse_with_tree_sitter(text, parser)
+            argv_syntax: list[tuple[_ShellArgSyntax, ...]] = []
+            result = _parse_with_tree_sitter(
+                text,
+                parser,
+                argv_syntax_out=argv_syntax,
+            )
+            return result, tuple(argv_syntax)
         except Exception:  # pragma: no cover - defensive logging path
             logger.warning("[PermissionEngine] permission.shell_ast.parse_failed fallback=true", exc_info=True)
 
-    return _parse_with_conservative_fallback(text)
+    result = _parse_with_conservative_fallback(text)
+    lexemes = _lex_shell_words(text)
+    if lexemes is None or any(lexeme.control for lexeme in lexemes):
+        return result, tuple(
+            tuple(_ShellArgSyntax(False, False) for _ in subcommand.argv)
+            for subcommand in result.subcommands
+        )
+    executable = _executable_shell_lexemes(lexemes)
+    syntax = tuple(lexeme.syntax for lexeme in executable)
+    return result, (syntax,) if result.subcommands else ()
 
 
 def _get_tree_sitter_bash_parser() -> Any | None:
@@ -141,16 +437,27 @@ def _parse_with_conservative_fallback(command: str) -> ShellAstParseResult:
             reason="tree-sitter backend unavailable and fallback detected shell structure",
             backend="fallback",
         )
-    try:
-        argv = tuple(shlex.split(command, posix=(os.name != "nt")))
-    except ValueError:
+    lexemes = _lex_shell_words(command)
+    if lexemes is None or any(lexeme.control for lexeme in lexemes):
         return ShellAstParseResult(
             kind="parse_unavailable",
             flags=flags,
             reason="fallback lexer failed to tokenize command safely",
             backend="fallback",
         )
-    subcommand = ShellSubcommand(text=command, argv=argv, source_span=(0, len(command)))
+    executable = _executable_shell_lexemes(lexemes)
+    if not executable:
+        return ShellAstParseResult(
+            kind="simple",
+            flags=flags,
+            backend="fallback",
+        )
+    argv = tuple(lexeme.value for lexeme in executable)
+    subcommand = ShellSubcommand(
+        text=command,
+        argv=argv,
+        source_span=(0, len(command)),
+    )
     return ShellAstParseResult(
         kind="simple",
         subcommands=(subcommand,),
@@ -195,7 +502,12 @@ def _collect_operator_markers(command: str) -> tuple[str, ...]:
     return tuple(markers)
 
 
-def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
+def _parse_with_tree_sitter(
+    command: str,
+    parser: Any,
+    *,
+    argv_syntax_out: list[tuple[_ShellArgSyntax, ...]] | None = None,
+) -> ShellAstParseResult:
     source = command.encode("utf-8")
     tree = parser.parse(source)
     root = getattr(tree, "root_node", None)
@@ -242,22 +554,23 @@ def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
         text = _node_text(node, source).strip()
         if not text:
             continue
-        try:
-            argv = tuple(shlex.split(text, posix=(os.name != "nt")))
-        except ValueError:
+        normalized_argv = _normalized_argv_for_command(node, source)
+        if normalized_argv is None:
             argv = ()
-        redirects = tuple(
-            _node_text(child, source).strip()
-            for child in getattr(node, "children", [])
-            if child is not None and "redirect" in str(getattr(child, "type", ""))
-        )
+            argv_syntax = ()
+        else:
+            argv = tuple(value for value, _syntax in normalized_argv)
+            argv_syntax = tuple(syntax for _value, syntax in normalized_argv)
+        redirects = _redirects_for_command(node, source)
+        if argv_syntax_out is not None:
+            argv_syntax_out.append(argv_syntax)
         subcommands.append(
             ShellSubcommand(
                 text=text,
                 argv=argv,
                 redirects=redirects,
                 source_span=(int(node.start_byte), int(node.end_byte)),
-                parent_operators=flags.operators,
+                parent_operators=_parent_operators_for_command(node),
             )
         )
 
@@ -275,6 +588,70 @@ def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
         flags=flags,
         backend="tree-sitter",
     )
+
+
+def _normalized_argv_for_command(
+    node: Any,
+    source: bytes,
+) -> tuple[tuple[str, _ShellArgSyntax], ...] | None:
+    raw_argv: list[str] = []
+    field_name_for_child = getattr(node, "field_name_for_child", lambda _index: None)
+    for index, child in enumerate(getattr(node, "children", [])):
+        if child is not None and field_name_for_child(index) in {"name", "argument"}:
+            raw_argv.append(_node_text(child, source))
+    normalized: list[tuple[str, _ShellArgSyntax]] = []
+    for raw in raw_argv:
+        word = _normalize_shell_word(raw)
+        if word is None:
+            return None
+        normalized.append(word)
+    return tuple(normalized)
+
+
+def _redirects_for_command(node: Any, source: bytes) -> tuple[str, ...]:
+    """Return redirect nodes structurally attached to one command."""
+
+    redirects: list[str] = []
+    cursor = node
+    while cursor is not None:
+        if str(getattr(cursor, "type", "")) == "redirected_statement":
+            for child in getattr(cursor, "children", []):
+                child_type = str(getattr(child, "type", ""))
+                if child is not None and child_type in {
+                    "file_redirect",
+                    "heredoc_redirect",
+                }:
+                    text = _node_text(child, source).strip()
+                    if text and text not in redirects:
+                        redirects.append(text)
+        parent = getattr(cursor, "parent", None)
+        if parent is None or str(getattr(parent, "type", "")) not in {
+            "list",
+            "pipeline",
+            "redirected_statement",
+        }:
+            break
+        cursor = parent
+    return tuple(redirects)
+
+
+def _parent_operators_for_command(node: Any) -> tuple[str, ...]:
+    """Return only operators in structural ancestors of one command."""
+
+    operators: list[str] = []
+    cursor = getattr(node, "parent", None)
+    while cursor is not None:
+        cursor_type = str(getattr(cursor, "type", ""))
+        if cursor_type not in {"list", "pipeline", "redirected_statement"}:
+            break
+        if cursor_type in {"list", "pipeline"}:
+            for child in getattr(cursor, "children", []):
+                child_type = str(getattr(child, "type", ""))
+                if child_type in {";", "&&", "||", "|", "|&", "&"}:
+                    if child_type not in operators:
+                        operators.append(child_type)
+        cursor = getattr(cursor, "parent", None)
+    return tuple(operators)
 
 
 def _downgrade_fd_only_redirect_flags(
