@@ -60,8 +60,9 @@ def test_topic_survey_without_proxy_reminds_agent_to_find_downloadable_sources()
     query = agent._apply_source_policy("BASE QUERY")
 
     assert "No task proxy is configured" in query
-    assert "directly accessible and downloadable" in query
-    assert "skip it and search for another accessible source" in query
+    assert "If access or download fails, assume the user has not configured a proxy" in query
+    assert "Look for another accessible source" in query
+    assert "do not repeatedly retry the same source" in query
 
 
 def test_topic_survey_with_proxy_keeps_same_workflow_without_no_proxy_hint():

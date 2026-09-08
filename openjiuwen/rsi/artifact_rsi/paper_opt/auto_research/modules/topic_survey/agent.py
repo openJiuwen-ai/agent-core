@@ -41,10 +41,9 @@ _FINALIZER_TIMEOUT_SECONDS = 180.0
 _SOURCE_EXCERPT_CHARS = 6000
 _NO_PROXY_SOURCE_HINT = (
     " No task proxy is configured. Use the same global search, fetch, and download "
-    "workflow, but prefer sources whose webpages and full-text PDF/HTML are directly "
-    "accessible and downloadable. If a source is blocked, requires unavailable "
-    "authentication, or fails to download, skip it and search for another accessible "
-    "source; do not repeatedly retry the same inaccessible source."
+    "workflow. If access or download fails, assume the user has not configured a "
+    "proxy. Look for another accessible source, and do not repeatedly retry the "
+    "same source."
 )
 _DOMESTIC_PORTAL_ROOT_PATHS = {
     "",
