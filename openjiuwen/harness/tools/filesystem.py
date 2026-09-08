@@ -386,7 +386,8 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         parsed = json.loads(text[start:end])
-    except (json.JSONDecodeError, TypeError, ValueError):
+    except (TypeError, ValueError):
+        # JSONDecodeError is a ValueError subclass; do not list both (G.ERR.09).
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -422,6 +423,15 @@ def _looks_like_plain_file_path(value: Any) -> bool:
     return _overlong_path_error(stripped) is None
 
 
+def _should_prefer_nested_content(nested_content: Any, current_content: Any) -> bool:
+    """Whether nested JSON ``content`` should replace the outer field."""
+    if not isinstance(nested_content, str):
+        return False
+    if not isinstance(current_content, str) or not current_content.strip():
+        return True
+    return len(nested_content) > len(current_content)
+
+
 def _coerce_file_tool_inputs(inputs: Any) -> Dict[str, Any]:
     """Unwrap nested / stringified write_file payloads into a normal args dict.
 
@@ -454,14 +464,8 @@ def _coerce_file_tool_inputs(inputs: Any) -> Dict[str, Any]:
 
     if isinstance(nested, dict) and _looks_like_plain_file_path(nested.get("file_path")):
         out["file_path"] = nested["file_path"]
-        nested_content = nested.get("content")
-        current_content = out.get("content")
-        if isinstance(nested_content, str) and (
-            not isinstance(current_content, str)
-            or not current_content.strip()
-            or len(nested_content) > len(current_content)
-        ):
-            out["content"] = nested_content
+        if _should_prefer_nested_content(nested.get("content"), out.get("content")):
+            out["content"] = nested["content"]
         for key in ("old_string", "new_string", "replace_all"):
             if key in nested and key not in out:
                 out[key] = nested[key]
