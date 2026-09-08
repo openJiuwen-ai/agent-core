@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -16,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from openjiuwen.rsi.events import NodeStageEvent, OnEvent, emit
+from openjiuwen.rsi.events import EventStatus, NodeStageEvent, OnEvent, emit
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
 from openjiuwen.rsi.harness_rsi.data_loader import DataLoader, load_json_cases
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
@@ -69,6 +70,13 @@ from openjiuwen.rsi.usage import ModelUsageObserver, bind_model_usage, model_usa
 
 _ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail"]
 _ALLOWED_PROMPT_SURFACES = ["prompt_section"]
+
+
+def _raise_if_cancelled() -> None:
+    """Cooperatively abort a running orchestrator when its task is cancelled."""
+    task = asyncio.current_task()
+    if task is not None and task.cancelling() > 0:
+        raise asyncio.CancelledError()
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +175,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             try:
                 return await self._run(request, on_event=on_event)
             finally:
+                # A worker-initiated termination cancels the running
+                # orchestrator coroutine.  Persist a durable ``terminated``
+                # state so restarts/recovery do not resurrect this run.
+                cancelled = asyncio.current_task().cancelling() > 0
+                if cancelled and observer.state is not None:
+                    observer.state["status"] = "terminated"
                 # Include interrupted calls even when the controller aborts.
                 # The call ledger is the reconciliation source after a crash.
                 await observer.finish_pending()
@@ -178,7 +192,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         report = _read_yaml(report_path)
                         report["usage"] = observer.state.get("usage")
                         report["model_calls_path"] = observer.state.get("model_calls_path", "")
+                        report["status"] = observer.state.get("status", report.get("status"))
                         _write_yaml_atomic(report_path, report)
+                if cancelled:
+                    try:
+                        await emit(on_event, EventStatus(status="terminated"))
+                    except Exception:  # noqa: BLE001 - delivery failure must not mask termination
+                        pass
 
     async def _run(
         self,
@@ -271,6 +291,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             await emit(on_event, progress_event(state, total_iterations=total_iterations))
         current_refs = str(state["best_harness_refs_path"])
         for epoch in range(1, max_epochs + 1):
+            _raise_if_cancelled()
             existing_checkpoint = next(
                 (item for item in state["epoch_checkpoints"] if int(item.get("epoch", 0) or 0) == epoch),
                 None,
@@ -306,6 +327,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             )
             _write_yaml_atomic(state_path, state)
             for batch_index, planned_batch in enumerate(batches, start=1):
+                _raise_if_cancelled()
                 batch_key = f"epoch_{epoch:03d}:batch_{batch_index:03d}"
                 completed = state["completed_batches"].get(batch_key)
                 if request.resume and isinstance(completed, dict):
@@ -384,6 +406,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 )
 
                 while active_cases and attempt_index < max_repair_rounds:
+                    _raise_if_cancelled()
                     analysis_round_index += 1
                     analysis_dir = (
                         batch_dir / "analysis"
@@ -444,6 +467,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
 
                     refresh_residual_analysis = False
                     for issue_id, issue_signature in issue_queue:
+                        _raise_if_cancelled()
                         if attempt_index >= max_repair_rounds:
                             break
                         attempt_index += 1
