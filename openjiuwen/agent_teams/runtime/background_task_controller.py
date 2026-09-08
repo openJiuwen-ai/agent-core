@@ -55,6 +55,10 @@ class BackgroundTaskController:
     def register(self, handle: SwarmflowRunHandle) -> None:
         """Register a live run's control handles (called at launch)."""
         self._active[handle.run_id] = handle
+        team_logger.info(
+            "[bg-ctl] register run_id=%s task_id=%s ctl=%x active=%d paused=%d",
+            handle.run_id, handle.task_id, id(self), len(self._active), len(self._paused),
+        )
 
     def deregister(self, run_id: str) -> None:
         """Drop a run's handles (called in the launcher's finally; idempotent)."""
@@ -63,6 +67,10 @@ class BackgroundTaskController:
         # must NOT clear it, or resume(run_id) would report not_found and the
         # leader would start a fresh run instead of resuming the paused prefix.
         self._active.pop(run_id, None)
+        team_logger.info(
+            "[bg-ctl] deregister run_id=%s ctl=%x active=%d paused=%d",
+            run_id, id(self), len(self._active), len(self._paused),
+        )
 
     async def _abort_one(self, h: SwarmflowRunHandle, reason: str) -> None:
         """Abort one run in three steps, in this order (correctness-critical).
@@ -97,6 +105,10 @@ class BackgroundTaskController:
                 if h is None:
                     return False
                 targets = {run_id: h}
+            team_logger.info(
+                "[bg-ctl] pause run_id=%s ctl=%x targets=%s active=%d paused=%d",
+                run_id, id(self), sorted(targets), len(self._active), len(self._paused),
+            )
             for rid, h in targets.items():
                 await self._abort_one(h, "pause")
                 self._paused[rid] = h
@@ -142,6 +154,10 @@ class BackgroundTaskController:
                 h = self._active.get(run_id)
                 active_targets = {run_id: h} if h is not None else {}
                 paused_targets = {run_id: self._paused[run_id]} if run_id in self._paused else {}
+            team_logger.info(
+                "[bg-ctl] stop run_id=%s ctl=%x active_targets=%s paused_targets=%s",
+                run_id, id(self), sorted(active_targets), sorted(paused_targets),
+            )
             for rid, h in active_targets.items():
                 await self._abort_one(h, "stop")
                 self._active.pop(rid, None)   # terminal: NOT into _paused
