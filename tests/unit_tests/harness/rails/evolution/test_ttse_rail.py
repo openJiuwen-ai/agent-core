@@ -33,6 +33,7 @@ from openjiuwen.harness.rails.evolution.ttse import (
     configure_ttse_evolution,
     unconfigure_ttse_evolution,
 )
+from openjiuwen.harness.rails.evolution.ttse.stores import reset_shared_stores, shared_store
 from openjiuwen.harness.rails.evolution.ttse.catalog import project_catalog
 from openjiuwen.harness.rails.evolution.ttse.classify import parse_assignments
 from openjiuwen.harness.rails.evolution.ttse.consult import render_consult_result
@@ -248,6 +249,33 @@ async def test_store_persistence_roundtrip(tmp_path):
     s2 = TTSERecordStore(cfg)  # reload from disk
     assert s2.facts_texts() == ["persisted fact"]
     assert s2.tips_texts() == ["persisted tip"]
+
+
+def test_shared_store_same_path_is_one_object(tmp_path):
+    reset_shared_stores()
+    path = str(tmp_path / "bank.json")
+    a = shared_store(TTSEConfig(store_path=path))
+    b = shared_store(TTSEConfig(store_path=path))
+    assert a is b
+    reset_shared_stores()
+
+
+@pytest.mark.asyncio
+async def test_two_rails_same_path_do_not_wipe_each_others_rules(tmp_path):
+    """Stale per-session snapshots used to save() over the whole bank."""
+    reset_shared_stores()
+    path = str(tmp_path / "bank.json")
+    cfg = TTSEConfig(store_path=path)
+    rail_a = TTSERail(llm=ScriptedLLM(lambda p: "NONE"), model="m", ttse_config=cfg)
+    await rail_a._ttse_store.add_fact("chinese excel fact")
+    rail_b = TTSERail(llm=ScriptedLLM(lambda p: "NONE"), model="m", ttse_config=TTSEConfig(store_path=path))
+    assert rail_b._ttse_store is rail_a._ttse_store
+    await rail_b._ttse_store.add_tip("chinese csv tip")
+    assert "chinese excel fact" in rail_b._ttse_store.facts_texts()
+    reloaded = TTSERecordStore(TTSEConfig(store_path=path))
+    assert reloaded.facts_texts() == ["chinese excel fact"]
+    assert reloaded.tips_texts() == ["chinese csv tip"]
+    reset_shared_stores()
 
 
 # ----------------------------------------------------------------------

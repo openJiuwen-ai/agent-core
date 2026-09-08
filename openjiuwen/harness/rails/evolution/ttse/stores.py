@@ -19,6 +19,7 @@ import asyncio
 import json
 import math
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -85,6 +86,50 @@ def _migrate_record(record: Dict[str, Any], default_ts: float) -> Dict[str, Any]
     return record
 
 
+def _store_key(store_path: str) -> str:
+    """Normalize a bank path so every session hits the same registry slot."""
+    path = str(store_path or "").strip()
+    if not path:
+        return ""
+    return os.path.normcase(os.path.abspath(path))
+
+
+_SHARED_STORES: Dict[str, "TTSERecordStore"] = {}
+_SHARED_STORES_GUARD = threading.Lock()
+
+
+def shared_store(
+    config: TTSEConfig,
+    *,
+    embedding: Optional[EmbeddingProvider] = None,
+) -> "TTSERecordStore":
+    """Return the process-wide bank for ``config.store_path``.
+
+    Each web session used to construct its own ``TTSERecordStore`` and only
+    load disk at init. ``save()`` then dumped that stale snapshot and wiped
+    rules induced by other sessions. One store per path keeps induce/consult
+    on the same lists.
+    """
+    key = _store_key(config.store_path)
+    if not key:
+        return TTSERecordStore(config, embedding=embedding)
+    with _SHARED_STORES_GUARD:
+        store = _SHARED_STORES.get(key)
+        if store is None:
+            store = TTSERecordStore(config, embedding=embedding)
+            _SHARED_STORES[key] = store
+            logger.info("[TTSERail] shared bank attached path=%s", key)
+        elif embedding is not None and store._embedding is None:
+            store._embedding = embedding
+        return store
+
+
+def reset_shared_stores() -> None:
+    """Drop the process-wide bank cache (tests)."""
+    with _SHARED_STORES_GUARD:
+        _SHARED_STORES.clear()
+
+
 class TTSERecordStore:
     """In-memory FACT/TIP bank with JSON persistence and semantic dedup."""
 
@@ -101,11 +146,23 @@ class TTSERecordStore:
         self.retired: List[Dict[str, Any]] = []  # [{"text","rtype","reason","retired_at_task"}]
         self._emb_cache: Dict[str, List[float]] = {}
         self._lock = asyncio.Lock()
+        # Cross-session induce/dream must serialize on the same bank object.
+        self.evolution_lock = asyncio.Lock()
+        self._loaded_mtime: float = 0.0
         self._load_sync()
 
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
+
+    def _disk_mtime(self) -> float:
+        path = self._config.store_path
+        if not path or not os.path.exists(path):
+            return 0.0
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
 
     def _load_sync(self) -> None:
         path = self._config.store_path
@@ -121,8 +178,18 @@ class TTSERecordStore:
             self.facts = [_migrate_record(dict(r), default_ts) for r in data.get("facts", [])]
             self.tips = [_migrate_record(dict(r), default_ts) for r in data.get("tips", [])]
             self.retired = list(data.get("retired", []))
+            self._loaded_mtime = default_ts
         except (OSError, ValueError) as exc:
             logger.warning("[TTSERail] bank load failed at %s: %s", path, exc)
+
+    def reload_if_disk_newer(self) -> bool:
+        """Reload when another process wrote ``bank.json`` (mtime moved)."""
+        mtime = self._disk_mtime()
+        if mtime <= 0 or mtime <= float(self._loaded_mtime or 0.0):
+            return False
+        logger.info("[TTSERail] reloading bank from disk mtime=%s path=%s", mtime, self._config.store_path)
+        self._load_sync()
+        return True
 
     async def save(self) -> None:
         await asyncio.to_thread(self._save_blocking)
@@ -140,6 +207,7 @@ class TTSERecordStore:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
             os.replace(tmp, path)
+            self._loaded_mtime = self._disk_mtime()
         except OSError as exc:
             logger.warning("[TTSERail] bank save failed at %s: %s", path, exc)
 
@@ -456,4 +524,12 @@ class TTSERecordStore:
         return {"facts": len(self.facts), "tips": len(self.tips), "retired": len(self.retired)}
 
 
-__all__ = ["TTSERecordStore", "_cosine", "_norm", "_new_record", "_migrate_record"]
+__all__ = [
+    "TTSERecordStore",
+    "shared_store",
+    "reset_shared_stores",
+    "_cosine",
+    "_norm",
+    "_new_record",
+    "_migrate_record",
+]

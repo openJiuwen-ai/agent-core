@@ -48,7 +48,7 @@ from .render import (
 
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
-from .stores import TTSERecordStore
+from .stores import shared_store
 from .success import SignalBasedSuccessDetector, SuccessDetector, SuccessOutcome
 from .trajectory_adapter import messages_to_trajectory_text
 
@@ -71,7 +71,7 @@ class TTSERail(EvolutionRail):
         self._ttse_config = ttse_config or TTSEConfig()
         resolved = embedding if embedding is not None else self._ttse_config.embedding
         self._ttse_config.embedding = resolved
-        self._ttse_store = TTSERecordStore(self._ttse_config, embedding=resolved)
+        self._ttse_store = shared_store(self._ttse_config, embedding=resolved)
         # Pluggable success detector gates the blame/synthesize pass.
         self._success_detector = success_detector or SignalBasedSuccessDetector(
             llm=llm,
@@ -80,7 +80,8 @@ class TTSERail(EvolutionRail):
         )
         # Serializes the whole bank-mutating reflection (blame/retire/synth/induce)
         # and Auto-dream so concurrent background jobs don't interleave.
-        self._evolution_lock = asyncio.Lock()
+        # Lock lives on the shared store so two sessions cannot wipe each other.
+        self._evolution_lock = self._ttse_store.evolution_lock
         # Batch induce buffer: when batch_size > 1, per-task observations collect
         # here and induce as ONE call every batch_size tasks (cost amortization).
         # All access is inside _evolution_lock, so it stays race-free.
@@ -270,6 +271,7 @@ class TTSERail(EvolutionRail):
             return
 
         async with self._evolution_lock:
+            self._ttse_store.reload_if_disk_newer()
             if self._ttse_config.batch_size <= 1:
                 # Per-task mode (reference ``learn``): induce on EVERY task.
                 # success -> tactics; fail -> blame/retire/synthesize -> induce.
@@ -451,6 +453,7 @@ class TTSERail(EvolutionRail):
         if not self._batch_buffer:
             return
         async with self._evolution_lock:
+            self._ttse_store.reload_if_disk_newer()
             if not self._batch_buffer:
                 return
             await self._flush_batch(self._last_capabilities or await render_capabilities(None))
@@ -527,6 +530,7 @@ class TTSERail(EvolutionRail):
         )
         state = load_dream_state(self._ttse_config.resolved_dream_state_path())
         async with self._evolution_lock:
+            self._ttse_store.reload_if_disk_newer()
             try:
                 result, _ = await run_dream_pass(
                     self._ttse_store,
