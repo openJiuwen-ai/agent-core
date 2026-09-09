@@ -9,6 +9,7 @@ from openjiuwen.harness.task_loop.loop_coordinator import (
 from openjiuwen.harness.schema.stop_condition import (
     CustomPredicateEvaluator,
     MaxRoundsEvaluator,
+    NoProgressAnswerEvaluator,
     TimeoutEvaluator,
     TokenBudgetEvaluator,
 )
@@ -116,4 +117,56 @@ def test_negative_tokens_ignored() -> None:
     coord.reset()
     coord.add_token_usage(-50)
     coord.add_token_usage(0)
+    assert coord.should_continue() is True
+
+
+def test_no_progress_answer_evaluator_stops_after_short_answers() -> None:
+    """Repeated short answer results stop task-loop mode."""
+    coord = LoopCoordinator(
+        evaluators=[
+            NoProgressAnswerEvaluator(
+                max_consecutive_empty_answers=3,
+                min_answer_chars=80,
+            )
+        ]
+    )
+    coord.reset()
+
+    for _ in range(2):
+        coord.set_last_result({"output": "", "result_type": "answer"})
+        coord.increment_iteration()
+        assert coord.should_continue() is True
+
+    coord.set_last_result({"output": "still stuck", "result_type": "answer"})
+    coord.increment_iteration()
+
+    assert coord.should_continue() is False
+    assert coord.stop_reason == "NoProgressAnswerEvaluator"
+
+
+def test_no_progress_answer_evaluator_allows_meaningful_answer() -> None:
+    """Meaningful no-tool final answers are not treated as no-progress."""
+    coord = LoopCoordinator(
+        evaluators=[
+            NoProgressAnswerEvaluator(
+                max_consecutive_empty_answers=2,
+                min_answer_chars=20,
+            )
+        ]
+    )
+    coord.reset()
+
+    coord.set_last_result({"output": "", "result_type": "answer"})
+    coord.increment_iteration()
+    assert coord.should_continue() is True
+
+    coord.set_last_result({
+        "output": "This is enough content to count as progress.",
+        "result_type": "answer",
+    })
+    coord.increment_iteration()
+    assert coord.should_continue() is True
+
+    coord.set_last_result({"output": "", "result_type": "answer"})
+    coord.increment_iteration()
     assert coord.should_continue() is True

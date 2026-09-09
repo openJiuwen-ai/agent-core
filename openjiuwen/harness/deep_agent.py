@@ -69,6 +69,10 @@ from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
 from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.schema.stop_condition import (
+    NoProgressAnswerEvaluator,
+    StopConditionEvaluator,
+)
 from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
@@ -2272,6 +2276,46 @@ class DeepAgent(BaseAgent):
             )
         return await self._react_agent.invoke(effective_inputs, session)
 
+    def _build_task_loop_evaluators(self) -> List[StopConditionEvaluator]:
+        """Build stop evaluators for the outer task loop."""
+        evaluators = (
+            self._task_completion_rail.build_evaluators()
+            if self._task_completion_rail is not None
+            else []
+        )
+        guard_cfg = (
+            self._deep_config.task_loop_no_progress_guard
+            if self._deep_config is not None
+            else None
+        )
+        if isinstance(guard_cfg, dict):
+            guard_enabled = bool(guard_cfg.get("enabled", False))
+            max_consecutive_empty_answers = guard_cfg.get(
+                "max_consecutive_empty_answers",
+                3,
+            )
+            min_answer_chars = guard_cfg.get("min_answer_chars", 80)
+        else:
+            guard_enabled = bool(getattr(guard_cfg, "enabled", False))
+            max_consecutive_empty_answers = getattr(
+                guard_cfg,
+                "max_consecutive_empty_answers",
+                3,
+            )
+            min_answer_chars = getattr(
+                guard_cfg,
+                "min_answer_chars",
+                80,
+            )
+        if guard_enabled:
+            evaluators.append(
+                NoProgressAnswerEvaluator(
+                    max_consecutive_empty_answers=max_consecutive_empty_answers,
+                    min_answer_chars=min_answer_chars,
+                )
+            )
+        return evaluators
+
     async def _setup_task_loop(
         self,
         session: Session,
@@ -2296,11 +2340,7 @@ class DeepAgent(BaseAgent):
         ):
             coordinator = self._loop_coordinator
             if coordinator is None:
-                evaluators = (
-                    self._task_completion_rail.build_evaluators()
-                    if self._task_completion_rail is not None
-                    else []
-                )
+                evaluators = self._build_task_loop_evaluators()
                 coordinator = LoopCoordinator(evaluators=evaluators)
                 self._loop_coordinator = coordinator
             coordinator.reset()
@@ -2310,11 +2350,7 @@ class DeepAgent(BaseAgent):
         if self._loop_controller is not None:
             await self._force_cleanup_controller()
 
-        evaluators = (
-            self._task_completion_rail.build_evaluators()
-            if self._task_completion_rail is not None
-            else []
-        )
+        evaluators = self._build_task_loop_evaluators()
         coordinator = LoopCoordinator(evaluators=evaluators)
         coordinator.reset()
 
@@ -2625,9 +2661,24 @@ class DeepAgent(BaseAgent):
         try:
             current_query = modified.query
             outer_round = 0
+            max_outer_rounds = 50
 
             while coordinator.should_continue():
                 outer_round += 1
+                if outer_round > max_outer_rounds:
+                    self._log_loop(
+                        f"round={outer_round} exceeded max_outer_rounds={max_outer_rounds}, forcing stop"
+                    )
+                    yield {
+                        "output": (
+                            "Task loop stopped after exceeding the maximum number of "
+                            f"outer rounds ({max_outer_rounds}). This usually indicates "
+                            "the model is not making observable progress."
+                        ),
+                        "result_type": "error",
+                        "stop_reason": "MaxOuterRounds",
+                    }
+                    break
                 # Drain new follow-ups, merge into state buffer
                 new_follow_ups = controller.drain_follow_up()
                 _state = self.load_state(session)
@@ -2703,6 +2754,18 @@ class DeepAgent(BaseAgent):
                 self._log_loop(
                     f"loop stopped by: {stop_reason}"
                 )
+                if stop_reason == "NoProgressAnswerEvaluator":
+                    yield {
+                        "output": (
+                            "Task loop stopped after repeated empty or "
+                            "near-empty no-tool answers. This indicates "
+                            "the model is not making observable progress."
+                        ),
+                        "result_type": "error",
+                        "stop_reason": stop_reason,
+                    }
+                # Note: MaxOuterRounds yields its own error result inside the loop,
+                # so no additional yield is needed here.
         finally:
             # Clear stop_condition_state so the next invoke starts fresh.
             _state = self.load_state(session)

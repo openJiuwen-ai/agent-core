@@ -116,6 +116,8 @@ async (page) => {
     const selectedFilters = [];
     const selectedCandidates = Array.from(document.querySelectorAll(
       'input:checked,select,[aria-selected="true"],[aria-checked="true"],' +
+      '[aria-current="true"],[data-state="active"],[data-state="selected"],' +
+      '[role="tab"].active,[role="tab"].selected,' +
       '[class*="filter" i] .selected,[class*="filter" i] .active,' +
       '[class*="facet" i] .selected,[class*="facet" i] .active,' +
       '[class*="sort" i] .selected,[class*="sort" i] .active,' +
@@ -129,10 +131,14 @@ async (page) => {
         element.getAttribute('class') || '',
         element.getAttribute('role') || '',
         element.getAttribute('aria-label') || '',
+        element.getAttribute('data-state') || '',
+        element.innerText || element.textContent || '',
         element.parentElement?.getAttribute('class') || '',
       ].join(' '), 300).toLowerCase();
-      const nativeSelected = element.matches('input:checked,select,[aria-checked="true"]');
-      const filterContext = /(filter|facet|sort|order|price|rating|score|star|category|筛选|排序|价格|评分|星级|分类)/.test(descriptor);
+      const nativeSelected = element.matches(
+        'input:checked,select,[aria-checked="true"],[aria-selected="true"],[aria-current="true"]'
+      );
+      const filterContext = /(filter|facet|sort|order|price|rating|score|star|category|筛选|排序|价格|评分|星级|分类|销量|综合|最新)/.test(descriptor);
       if (!nativeSelected && !filterContext) return;
       let value = compact(
         element.getAttribute('aria-label') || element.innerText || element.textContent || element.value || ''
@@ -141,7 +147,16 @@ async (page) => {
         value = Array.from(element.selectedOptions || []).map((option) => compact(option.text || option.value)).join('|');
       }
       if (!value) return;
-      selectedFilters.push({ key: elementKey(element, index), value });
+      const selectionSource =
+        element.getAttribute('aria-selected') === 'true' ? 'aria-selected' :
+        element.getAttribute('aria-checked') === 'true' ? 'aria-checked' :
+        element.getAttribute('aria-current') === 'true' ? 'aria-current' :
+        ['active', 'selected'].includes(String(element.getAttribute('data-state') || '').toLowerCase())
+          ? 'data-state' :
+          /(?:^|\s)(?:active|selected)(?:\s|$)/i.test(String(element.getAttribute('class') || ''))
+            ? 'class' :
+            element.matches('input:checked,select') ? 'native' : 'semantic-context';
+      selectedFilters.push({ key: elementKey(element, index), value, source: selectionSource });
     });
 
     let resultCount = null;
@@ -156,19 +171,45 @@ async (page) => {
       resultCount = Number(match[0]);
       break;
     }
-    if (resultCount === null) {
-      const resultCandidates = new Set();
-      for (const selector of [
-        'main article', 'main [role="article"]', 'main [role="row"]',
-        '[data-testid*="result" i]', '[data-test*="result" i]',
-        '[class*="search-result" i]', '[class*="result-item" i]'
-      ]) {
-        document.querySelectorAll(selector).forEach((element) => {
-          if (visible(element)) resultCandidates.add(element);
-        });
-      }
-      if (resultCandidates.size > 0) resultCount = resultCandidates.size;
+    const resultCandidates = new Set();
+    for (const selector of [
+      'main article', 'main [role="article"]', 'main [role="row"]',
+      '[data-testid*="result" i]', '[data-test*="result" i]',
+      '[class*="search-result" i]', '[class*="result-item" i]'
+    ]) {
+      document.querySelectorAll(selector).forEach((element) => {
+        if (visible(element)) resultCandidates.add(element);
+      });
     }
+    if (resultCount === null && resultCandidates.size > 0) resultCount = resultCandidates.size;
+    const firstResult = Array.from(resultCandidates)[0];
+    const firstResultText = firstResult ? compact(firstResult.innerText || firstResult.textContent || '', 240) : '';
+
+    const actionFeedback = [];
+    const feedbackCandidates = Array.from(document.querySelectorAll(
+      '[role="status"],[role="alert"],[aria-live]:not([aria-live="off"]),[class*="toast" i]'
+    )).slice(0, 40);
+    feedbackCandidates.forEach((element, index) => {
+      if (!visible(element)) return;
+      const value = compact(element.innerText || element.textContent || element.getAttribute('aria-label') || '', 240);
+      if (!value || !/(added|cart|basket|success|completed|已加入|购物车|成功|完成)/i.test(value)) return;
+      actionFeedback.push({ key: `feedback:${index}`, value });
+    });
+
+    const commerceState = [];
+    const commerceCandidates = Array.from(document.querySelectorAll(
+      '[aria-label*="cart" i],[aria-label*="basket" i],[title*="cart" i],[title*="购物车" i],' +
+      '[class*="cart-count" i],[class*="cart-num" i],[data-testid*="cart" i]'
+    )).slice(0, 40);
+    commerceCandidates.forEach((element, index) => {
+      if (!visible(element)) return;
+      const value = compact(
+        element.getAttribute('aria-label') || element.getAttribute('title') || element.innerText || element.textContent || '',
+        160
+      );
+      if (!value || !/\d/.test(value)) return;
+      commerceState.push({ key: elementKey(element, index), value });
+    });
 
     return {
       page_position: pagePosition,
@@ -176,6 +217,9 @@ async (page) => {
         form_values: formValues.slice(0, 32),
         selected_filters: selectedFilters.slice(0, 32),
         result_count: resultCount,
+        first_result_text: firstResultText,
+        action_feedback: actionFeedback.slice(0, 4),
+        commerce_state: commerceState.slice(0, 8),
       },
     };
   });
@@ -541,12 +585,48 @@ async (page) => {{
         return 'calendar_date';
       }}
       const sortAncestor = /(sort|order|sort-list|sort-tabs)/.test(ancestor) || /\u6392\u5e8f/.test(ancestor);
-      if ((role === 'tab' || /(sort-item|sort-option|sort-tab)/.test(own)) && sortAncestor) return 'sort_tab';
+      const sortLabel = /(?:^|\s)(sales?|volume|price|latest|newest|relevance|comprehensive)(?:\s|$)/.test(own) ||
+        /(\u9500\u91cf|\u4ef7\u683c|\u6700\u65b0|\u7efc\u5408|\u8bc4\u5206)/.test(own);
+      if ((role === 'tab' || /(sort-item|sort-option|sort-tab)/.test(own)) && (sortAncestor || sortLabel)) return 'sort_tab';
       const ratingAncestor = /(rating|score|star|rating-filter)/.test(ancestor) || /\u8bc4\u5206|\u661f\u7ea7/.test(ancestor);
       if ((role === 'option' || /(rating-item|rating-option|star-item)/.test(own)) && ratingAncestor) return 'rating_filter';
       if (role === 'tab') return 'tab';
       if (role === 'option') return 'option';
       return '';
+    }};
+
+    const selectionSourceFromUrl = (el, kind) => {{
+      if (!['sort', 'sort_tab', 'sort_option', 'rating_filter'].includes(String(kind || ''))) return '';
+      let current;
+      try {{
+        current = new URL(window.location.href);
+      }} catch (_error) {{
+        return '';
+      }}
+      const anchor = el.closest && el.closest('a[href]');
+      if (anchor) {{
+        try {{
+          const candidate = new URL(anchor.href, current.href);
+          if (candidate.origin === current.origin && candidate.pathname === current.pathname) {{
+            const candidateEntries = [...candidate.searchParams.entries()];
+            if (
+              candidateEntries.length > 0 &&
+              candidateEntries.every(([key, value]) => current.searchParams.get(key) === value)
+            ) return 'url';
+          }}
+        }} catch (_error) {{
+          // Fall through to data-value matching.
+        }}
+      }}
+      const candidateValues = [
+        el.getAttribute('data-value'),
+        el.getAttribute('data-sort'),
+        el.getAttribute('data-order'),
+        el.getAttribute('value')
+      ].filter(Boolean).map((value) => String(value).trim().toLowerCase());
+      const currentValues = [...current.searchParams.values()]
+        .map((value) => String(value).trim().toLowerCase());
+      return candidateValues.some((value) => currentValues.includes(value)) ? 'url-param' : '';
     }};
 
     const queryAliases = (value) => {{
@@ -706,6 +786,13 @@ async (page) => {{
       const clickable = Boolean(
         actionable && enabled && selectorHint && matchCount === 1
       );
+      const selectedSource =
+        el.getAttribute('aria-selected') === 'true' ? 'aria-selected' :
+        el.getAttribute('aria-checked') === 'true' ? 'aria-checked' :
+        el.getAttribute('aria-current') === 'true' ? 'aria-current' :
+        ['active', 'selected', 'checked'].includes(String(el.getAttribute('data-state') || '').toLowerCase()) ? 'data-state' :
+        /(^|\\s)(active|selected|checked)(\\s|$)/i.test(className) ? 'class' :
+        selectionSourceFromUrl(el, kind);
 
       const candidate = {{
         tag,
@@ -722,11 +809,8 @@ async (page) => {{
         placeholder: normalize(placeholder),
         href: normalize(el.getAttribute('href') || '', 180),
         disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-        selected: Boolean(
-          el.getAttribute('aria-selected') === 'true' ||
-          el.getAttribute('aria-checked') === 'true' ||
-          /(^|\\s)(active|selected|checked)(\\s|$)/i.test(className)
-        ),
+        selected: Boolean(selectedSource),
+        selected_source: selectedSource,
         visible: true,
         enabled,
         actionable,
@@ -1736,18 +1820,42 @@ async (page) => {
       );
     };
 
-    const extractSortState = (rootText, root) => extractMetricField(
-      rootText,
-      root,
-      [
+    const extractSortState = (rootText, root) => {
+      const selectors = [
         '[role="tab"][aria-selected="true"]',
+        '[role="tab"][aria-current="true"]',
+        '[role="tab"][data-state="active"]',
+        '[role="tab"].active',
+        '[role="tab"].selected',
         '[aria-current="true"][class*="sort" i]',
         '[class*="sort" i][class*="active" i]',
         '[class*="sort" i][class*="selected" i]'
-      ],
-      ['sort', 'sort state', 'sort order', '排序', '排序状态', '排序方式'],
-      /(?:sort(?:ed)?(?: by)?|排序(?:状态|方式)?)\s*[:：]?\s*[^\n|·•,，;；]{2,80}/i
-    );
+      ];
+      const semanticLabel = /(?:sales?|volume|price|latest|newest|relevance|comprehensive|销量|价格|最新|综合|评分)/i;
+      for (const candidate of Array.from(document.querySelectorAll(selectors.join(','))).slice(0, 40)) {
+        if (!visible(candidate)) continue;
+        const value = textOf(candidate, 120) || normalize(candidate.getAttribute('aria-label') || '', 120);
+        const context = normalize([
+          candidate.getAttribute('class') || '',
+          candidate.parentElement?.getAttribute('class') || '',
+          value
+        ].join(' '), 300);
+        if (!semanticLabel.test(context)) continue;
+        return {
+          value,
+          selector_hint: buildSelectorHint(candidate),
+          raw_text: value,
+          status: value ? 'present' : 'missing'
+        };
+      }
+      return extractMetricField(
+        rootText,
+        root,
+        [],
+        ['sort', 'sort state', 'sort order', '排序', '排序状态', '排序方式'],
+        /(?:sort(?:ed)?(?: by)?|排序(?:状态|方式)?)\s*[:：]?\s*[^\n|·•,，;；]{2,80}/i
+      );
+    };
 
     const extractSource = (rootText, root, primaryLink) => {
       const sourceEl = findFirst(root, mergeSelectors(

@@ -165,6 +165,33 @@ async def test_subagent_spawn_requires_subagent_type_and_task_description() -> N
 
 
 @pytest.mark.asyncio
+async def test_subagent_spawn_rejects_type_reserved_for_sync_tool() -> None:
+    parent = _parent()
+    tool = SubagentSpawnTool(
+        ToolCard(id="subagent_spawn", name="subagent_spawn", description="spawn"),
+        parent,
+        allowed_subagent_types={"explore_agent"},
+    )
+    session = Session(session_id="parent_sess")
+
+    with patch(
+        "openjiuwen.harness.tools.subagent.subagent_tools.get_subagent_control"
+    ) as get_control:
+        with pytest.raises(Exception, match="not available through subagent_spawn"):
+            await tool.invoke(
+                {
+                    "subagent_type": "browser_agent",
+                    "task_description": "browse",
+                    "display_name": "Browser",
+                    "role": "browser operator",
+                },
+                session=session,
+            )
+
+    get_control.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_subagent_spawn_browser_capabilities_validation() -> None:
     tool = _spawn_tool()
     session = Session(session_id="parent_sess")
@@ -326,10 +353,14 @@ async def test_subagent_list_returns_capacity_and_rows() -> None:
         ToolCard(id="subagent_list", name="subagent_list", description="list"),
         parent,
     )
-    control = SimpleNamespace(
-        capacity=lambda: {"used": 1, "max": 10},
-        describe_live=lambda: [{"subagent_id": "sub1", "status": "closed"}],
-    )
+    list_data = {
+        "capacity": {"used": 1, "max": 10},
+        "subagents": [{"subagent_id": "sub1", "status": "idle"}],
+        "live_subagents": [{"subagent_id": "sub1", "status": "idle"}],
+        "closed_subagents": [],
+        "summary": {"live_count": 1, "closed_count": 0},
+    }
+    control = SimpleNamespace(describe_list=lambda: list_data)
     session = Session(session_id="parent_sess")
 
     with patch(
@@ -338,8 +369,7 @@ async def test_subagent_list_returns_capacity_and_rows() -> None:
     ):
         result = await tool.invoke({}, session=session)
 
-    assert result.data["capacity"] == {"used": 1, "max": 10}
-    assert result.data["subagents"][0]["subagent_id"] == "sub1"
+    assert result.data == list_data
 
 
 @pytest.mark.asyncio

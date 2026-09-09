@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -518,6 +519,148 @@ def test_compact_rpc_wrapper_is_transparent_to_probe_parsing() -> None:
     assert runtime._unwrap_mcp_text_result(raw) == ('{"ok":true,"elements":[]}')
 
 
+@pytest.mark.parametrize(
+    ("result", "timed_out"),
+    [
+        ("### Error\nlocator click timed out after 2500ms", True),
+        ({"content": [{"type": "text", "text": "Error: element is not actionable"}]}, False),
+        ({"ok": False, "error": "MCP request failed"}, False),
+        (
+            {
+                "ok": True,
+                "status": "completed",
+                "steps": [{"index": 1, "op": "click", "ok": False, "error": "not actionable"}],
+            },
+            False,
+        ),
+    ],
+)
+def test_tool_result_classifier_rejects_transport_error_shapes(result, timed_out: bool) -> None:
+    outcome = BrowserAgentRuntime.classify_tool_result(result)
+
+    assert outcome["success"] is False
+    assert outcome["timed_out"] is timed_out
+
+
+def test_direct_mcp_target_id_is_resolved_and_runtime_fields_are_removed() -> None:
+    runtime = _make_bare_runtime()
+    payload = {
+        "elements": [
+            {
+                "selector_hint": "#search",
+                "selector_hint_validated": True,
+                "match_count": 1,
+                "visible": True,
+                "enabled": True,
+                "actionable": True,
+                "clickable": True,
+                "role": "textbox",
+                "text": "Search",
+            }
+        ]
+    }
+    runtime._ensure_page_state().register_interactives(payload)
+    target_id = payload["elements"][0]["target_id"]
+    rail = BrowserRuntimeRail(runtime)
+
+    normalized = rail._normalize_playwright_ref_args(
+        "mcp_playwright-official_browser_click",
+        {"target_id": target_id, "generation_id": "g0"},
+    )
+
+    assert normalized == {"target": "#search", "element": "Search"}
+
+
+def test_evaluate_runtime_field_contract_is_not_forwarded_to_mcp() -> None:
+    rail = BrowserRuntimeRail(_make_bare_runtime())
+
+    normalized = rail._normalize_playwright_ref_args(
+        "mcp_playwright-official_browser_evaluate",
+        {
+            "target": "document",
+            "element": "page",
+            "function": "() => ({profileName: 'Alice'})",
+            "field": "author",
+            "fields": ["author", "comments"],
+        },
+    )
+
+    assert normalized == {
+        "target": "document",
+        "element": "page",
+        "function": "() => ({profileName: 'Alice'})",
+    }
+
+
+def test_direct_mcp_target_is_refreshed_when_runtime_identity_is_unique() -> None:
+    runtime = _make_bare_runtime()
+    first = {
+        "elements": [
+            {
+                "selector_hint": "#sales-sort",
+                "selector_hint_validated": True,
+                "match_count": 1,
+                "actionable": True,
+                "clickable": True,
+                "text": "Sales",
+            }
+        ]
+    }
+    runtime._ensure_page_state().register_interactives(first)
+    stale_target_id = first["elements"][0]["target_id"]
+    runtime._advance_page_generation()
+    current = {
+        "elements": [
+            {
+                "selector_hint": "#sales-sort",
+                "selector_hint_validated": True,
+                "match_count": 1,
+                "actionable": True,
+                "clickable": True,
+                "text": "Sales",
+            }
+        ]
+    }
+    runtime._ensure_page_state().register_interactives(current)
+    rail = BrowserRuntimeRail(runtime)
+
+    normalized = rail._normalize_playwright_ref_args(
+        "mcp_playwright-official_browser_click",
+        {"target_id": stale_target_id, "generation_id": "g0"},
+    )
+
+    assert normalized == {"target": "#sales-sort", "element": "Sales"}
+
+
+def test_primary_link_target_is_rewritten_to_direct_navigation() -> None:
+    runtime = _make_bare_runtime()
+    payload = {
+        "cards": [
+            {
+                "title": "Result",
+                "primary_link": "https://example.test/item/1",
+                "region": "main_result",
+                "kind": "product",
+            }
+        ]
+    }
+    runtime._ensure_page_state().register_cards(payload)
+    target_id = payload["cards"][0]["primary_link_target_id"]
+    rail = BrowserRuntimeRail(runtime)
+    ctx = AgentCallbackContext(
+        agent=MagicMock(),
+        inputs=ToolCallInputs(
+            tool_name="mcp_playwright-official_browser_click",
+            tool_args={"target_id": target_id, "generation_id": "g0"},
+        ),
+    )
+
+    _run(rail.before_tool_call(ctx))
+
+    assert ctx.inputs.tool_name == "mcp_playwright-official_browser_navigate"
+    assert ctx.inputs.tool_args == {"url": "https://example.test/item/1"}
+
+
 def test_phase_plan_uses_explicit_completion_conditions_and_large_budgets() -> None:
     state = BrowserRuntimeRail._build_phase_state("Compare products, apply filters, and complete the checkout form")
 
@@ -533,6 +676,28 @@ def test_phase_plan_uses_explicit_completion_conditions_and_large_budgets() -> N
     assert state["phases"]["filtering"]["budget"] == 20
     assert state["phases"]["extraction"]["budget"] == 20
     assert all(phase["completion_condition"] for phase in state["phases"].values())
+    assert BrowserRuntimeRail._build_phase_state("对比两个页面的信息")["task_type"] == "complex"
+
+
+def test_shared_deadline_bounds_each_invocation_without_forcing_a_resume() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    rail = BrowserRuntimeRail(runtime)
+    session = _FakeSession()
+
+    for task, expected_budget in (
+        ("Extract the title", 240.0),
+        ("Compare two products", 600.0),
+    ):
+        state = BrowserRuntimeRail._build_phase_state(task)
+        session.update_state({"__browser_phase_budget_state__": state})
+        ctx = AgentCallbackContext(agent=MagicMock(), session=session)
+
+        remaining = rail._bind_shared_task_deadline(ctx, session, state)
+
+        assert state["deadline_budget_s"] == expected_budget
+        assert 0 < remaining <= expected_budget
+        assert remaining > expected_budget - 1.0
+        assert remaining < 720.0
 
 
 def test_known_url_must_be_navigated_before_selector_exploration() -> None:
@@ -672,7 +837,7 @@ def test_semantic_loop_marks_current_phase_replan_required() -> None:
     updated = session.get_state("__browser_phase_budget_state__")
     assert updated["semantic_revision"] == 4
     assert updated["replan_count"] == 0
-    assert updated["field_coverage"] == ["price", "title"]
+    assert updated["field_coverage"] == []
     assert updated["status"] == "replan_required"
     assert updated["replan_required"] is True
     assert updated["failed_strategies"] == []
@@ -819,6 +984,7 @@ def test_comparison_evidence_requires_distinct_bilibili_sort_slots() -> None:
         "value": "Latest result",
         "source": "https://search.bilibili.com/all?keyword=Python&order=pubdate",
         "generation": "g3",
+        "status": "present",
     }
     assert BrowserRuntimeRail._missing_completion_requirements(state) == []
 
@@ -957,12 +1123,179 @@ def test_evaluate_result_becomes_compact_evidence_before_action_windowing() -> N
     task_state = session.get_state("__browser_phase_budget_state__")
     evidence = task_state["structured_evidence"][0]
     assert evidence["kind"] == "targeted_evaluate"
-    assert evidence["values"] == {"title": "Example", "count": "3"}
+    assert evidence["values"] == {"title": "Example"}
     assert evidence["generation_id"] == "g4"
     action = task_state["recent_actions"][0]
     assert action["semantic_delta"] == "evidence_added"
     assert function not in action["target_summary"]
     assert "expression_sha256" in action["target_summary"]
+
+
+def test_targeted_evaluate_maps_only_requested_fields_with_provenance() -> None:
+    state = BrowserRuntimeRail._build_phase_state(
+        "返回文章作者、评论数和当前排序状态"
+    )
+
+    BrowserRuntimeRail._record_structured_evidence(
+        state,
+        {
+            "ok": True,
+            "generation_id": "g7",
+            "result": {
+                "profileName": "Alice",
+                "comRaw": "还没有评论",
+                "saleTabSelected": True,
+                "unrelatedCount": 99,
+            },
+        },
+        tool_name="browser_evaluate",
+        tool_args={
+            "target": ".article-author",
+            "_runtime_evidence_fields": ["author", "comments", "sort_state"],
+        },
+    )
+
+    evidence = state["structured_evidence"][0]
+    assert evidence["values"] == {
+        "author": "Alice",
+        "comments": "0",
+        "sort_state": "销量",
+    }
+    assert evidence["field_status"] == {
+        "author": "present",
+        "comments": "present",
+        "sort_state": "present",
+    }
+    assert "unrelatedCount" not in evidence["values"]
+    assert evidence["provenance"]["author"] == {
+        "source": "browser_evaluate",
+        "selector": ".article-author",
+        "raw_text": "Alice",
+        "generation_id": "g7",
+    }
+
+
+def test_ambiguous_evaluate_alias_requires_explicit_target_contract() -> None:
+    state = BrowserRuntimeRail._build_phase_state("返回文章作者")
+
+    BrowserRuntimeRail._record_structured_evidence(
+        state,
+        {"ok": True, "result": {"profileName": "Toolbar Account"}},
+        tool_name="browser_evaluate",
+        tool_args={"target": "document"},
+    )
+
+    assert state["structured_evidence"] == []
+    assert state["field_coverage"] == []
+
+
+def test_missing_evaluate_value_closes_slot_as_unavailable() -> None:
+    state = BrowserRuntimeRail._build_phase_state("返回商品评分")
+
+    BrowserRuntimeRail._record_structured_evidence(
+        state,
+        {"ok": True, "generation_id": "g3", "result": {"productRating": None}},
+        tool_name="browser_evaluate",
+        tool_args={"target": ".product-rating"},
+    )
+
+    assert BrowserRuntimeRail._missing_evidence_slots(state) == []
+    assert BrowserRuntimeRail._unavailable_evidence_slots(state) == [
+        {
+            "entity": "product",
+            "variant": "default",
+            "field": "product_rating",
+            "status": "missing",
+        }
+    ]
+    assert state["evidence_slots"][0]["source"] == "browser_evaluate"
+    assert state["evidence_slots"][0]["generation"] == "g3"
+
+
+def test_interactive_probe_sort_evidence_keeps_selection_source() -> None:
+    evidence = BrowserRuntimeRail._interactive_probe_evidence(
+        {
+            "generation_id": "g5",
+            "elements": [
+                {
+                    "target_id": "t_g5_sort_1",
+                    "generation_id": "g5",
+                    "kind": "sort_tab",
+                    "region": "sort",
+                    "text": "销量",
+                    "selected": True,
+                    "selected_source": "url-param",
+                    "actionable": True,
+                }
+            ],
+        }
+    )
+
+    assert evidence["values"] == {"sort_state": "销量"}
+    assert evidence["provenance"]["sort_state"] == {
+        "source": "browser_probe_interactives",
+        "selector": "t_g5_sort_1",
+        "raw_text": "销量",
+        "generation_id": "g5",
+        "selection_source": "url-param",
+    }
+
+
+def test_probe_contract_exposes_result_count_and_bounds_conflict_fallback() -> None:
+    session = _FakeSession()
+    state = BrowserRuntimeRail._build_phase_state("返回前3条搜索结果")
+    session.update_state({"__browser_phase_budget_state__": state})
+    first = {
+        "observed_count": 1,
+        "generation_id": "g1",
+        "cards": [
+            {
+                "title": "Result",
+                "primary_link": "https://example.test/1",
+                "region": "main_result",
+                "kind": "result",
+                "is_ad": False,
+            }
+        ],
+        "page_state": {},
+    }
+    second = {
+        "observed_count": 0,
+        "generation_id": "g1",
+        "cards": [
+            {
+                "title": "Result",
+                "primary_link": "https://example.test/1",
+                "region": "sponsored_result",
+                "kind": "promotion",
+                "is_ad": True,
+            }
+        ],
+        "page_state": {},
+    }
+
+    BrowserRuntimeRail._enrich_probe_result_contract(
+        session,
+        SimpleNamespace(tool_msg=None),
+        "browser_probe_cards",
+        first,
+    )
+    BrowserRuntimeRail._enrich_probe_result_contract(
+        session,
+        SimpleNamespace(tool_msg=None),
+        "browser_probe_cards",
+        second,
+    )
+
+    assert first["requested_count"] == 3
+    assert first["page_state"] == {"requested_count": 3, "observed_count": 1}
+    assert second["diagnostics"]["classification_conflict"] is True
+    assert second["diagnostics"]["recommended_fallback"] == "one_precise_probe"
+    assert second["diagnostics"]["precise_fallback_remaining"] == 0
+    assert second["page_state"]["classification_conflict"] is True
+    assert session.get_state("__browser_phase_budget_state__")[
+        "probe_classification_fallback_count"
+    ] == 1
 
 
 def test_generation_or_selector_changes_do_not_create_new_semantic_evidence() -> None:
@@ -1336,6 +1669,38 @@ def test_new_structured_evidence_recovers_pending_replan_trial() -> None:
     assert updated["replan_trial_pending"] is False
 
 
+def test_partial_batch_keeps_successful_extraction_without_marking_batch_success() -> None:
+    session = _FakeSession()
+    state = BrowserRuntimeRail._build_phase_state("Extract the title and price")
+    session.update_state({"__browser_phase_budget_state__": state})
+
+    result = BrowserRuntimeRail._record_phase_result(
+        session,
+        "browser_batch_interact",
+        {
+            "steps": [
+                {"op": "extract_text", "field": "title"},
+                {"op": "extract_text", "field": "price"},
+            ]
+        },
+        {
+            "ok": False,
+            "status": "partial",
+            "steps": [
+                {"index": 0, "op": "extract_text", "ok": True},
+                {"index": 1, "op": "extract_text", "ok": False, "error": "not found"},
+            ],
+            "extracted": {"title": "Verified title"},
+        },
+    )
+
+    updated = session.get_state("__browser_phase_budget_state__")
+    assert result["success"] is False
+    assert result["evidence_added"] is True
+    assert "title" in updated["field_coverage"]
+    assert "price" not in updated["field_coverage"]
+
+
 def test_price_interval_ignores_evaluate_script_numbers() -> None:
     assert BrowserRuntimeRail._price_interval_signature(
         "browser_evaluate",
@@ -1413,6 +1778,55 @@ def test_required_fields_use_requested_output_clause_not_operation_preconditions
     ) == ["high_temperature", "low_temperature"]
     assert BrowserRuntimeRail._infer_required_fields("查询美元兑人民币并返回汇率") == ["exchange_rate"]
     assert BrowserRuntimeRail._infer_required_fields("搜索 Python 视频，返回播放量") == ["views"]
+    assert BrowserRuntimeRail._infer_required_fields("打开淘宝把蓝牙耳机加入购物车") == []
+
+
+def test_cart_action_feedback_is_sufficient_completion_evidence() -> None:
+    state = BrowserRuntimeRail._build_phase_state("打开淘宝把蓝牙耳机加入购物车")
+    BrowserWorkingContextStore._merge_semantic_evidence(
+        state,
+        {
+            "semantic_state": {
+                "url": "https://item.taobao.com/item.htm?id=1",
+                "generation_id": "g1",
+                "action_feedback": [{"value": "已加入购物车"}],
+            }
+        },
+    )
+    session = _FakeSession()
+    session.update_state({"__browser_phase_budget_state__": state})
+
+    BrowserRuntimeRail._apply_worker_progress_to_task_state(
+        session,
+        {"status": "completed"},
+        "商品已加入购物车。",
+    )
+
+    updated = session.get_state("__browser_phase_budget_state__")
+    assert updated["status"] == "completed"
+    assert updated["terminal_reason"] == "runtime_completion_validated"
+    assert updated["structured_evidence"][-1]["fields"] == ["action_confirmation"]
+
+
+def test_large_evaluate_observation_is_bounded() -> None:
+    rail = BrowserRuntimeRail(MagicMock(spec=BrowserAgentRuntime))
+    tool_message = ToolMessage(
+        content=json.dumps({"value": "x" * 20_000}),
+        tool_call_id="evaluate-1",
+    )
+    inputs = SimpleNamespace(tool_msg=tool_message)
+    tool_result = {"ok": True, "value": "x" * 20_000}
+
+    rail._compact_large_observation_message(
+        inputs,
+        "mcp_playwright-official_browser_evaluate",
+        tool_result,
+    )
+
+    payload = json.loads(tool_message.content)
+    assert len(tool_message.content) <= 12_000
+    assert payload["observation"] == "bounded_browser_tool_result"
+    assert payload["original_chars"] > 20_000
 
 
 def test_comprehensive_and_latest_create_distinct_title_slots_without_compare_word() -> None:
@@ -1475,6 +1889,8 @@ def test_unfinished_text_tool_intent_retries_once_in_same_task() -> None:
     _run(rail.after_model_call(ctx))
 
     assert ctx.has_pending_steering() is True
+    assert ctx.consume_model_continue_request() is True
+    assert ctx.consume_model_continue_request() is False
     assert session.get_state("__browser_phase_budget_state__")["model_protocol_retry_count"] == 1
     assert ctx.consume_force_finish() is None
 
@@ -1482,6 +1898,61 @@ def test_unfinished_text_tool_intent_retries_once_in_same_task() -> None:
     finish = ctx.consume_force_finish()
     assert finish is not None
     assert finish.result["authoritative_browser_result"]["terminal_reason"] == "model_tool_protocol_error"
+
+
+def test_invocation_slice_returns_retryable_partial_with_shared_time_remaining() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.service = MagicMock()
+    state = BrowserRuntimeRail._build_phase_state("比较两个商品并返回标题和价格")
+    state["structured_evidence"] = [{"fields": ["price"], "values": {"price": "100"}}]
+    session = _FakeSession()
+    session.update_state({"__browser_phase_budget_state__": state})
+    ctx = AgentCallbackContext(agent=MagicMock(), session=session)
+    rail = BrowserRuntimeRail(runtime)
+    rail._bind_shared_task_deadline(ctx, session, state)
+    shared_deadline = state["deadline_at"]
+    ctx.extra["__browser_invocation_deadline__"] = runtime_module.time.monotonic() - 1
+
+    assert rail._finish_if_task_deadline_exhausted(ctx, session, state) is True
+
+    finish = ctx.consume_force_finish()
+    assert finish is not None
+    result = finish.result["authoritative_browser_result"]
+    assert result["status"] == "partial"
+    assert result["retryable"] is True
+    assert result["terminal_reason"] == "task_invocation_slice_exhausted"
+    assert state["deadline_at"] == shared_deadline
+    assert state["deadline_remaining_s"] > 0
+
+
+def test_resume_keeps_shared_deadline_and_gets_a_fresh_invocation_slice() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.reset_semantic_task = MagicMock()
+    rail = BrowserRuntimeRail(runtime)
+    state = BrowserRuntimeRail._build_phase_state("Compare two products and return their prices")
+    state.update(
+        {
+            "status": "partial",
+            "terminal_reason": "task_invocation_slice_exhausted",
+            "blockers": ["task_invocation_slice_exhausted"],
+            "structured_evidence": [{"fields": ["price"], "values": {"price": "100"}}],
+        }
+    )
+    session = _FakeSession()
+    session.update_state({"__browser_phase_budget_state__": state})
+    first_ctx = AgentCallbackContext(agent=MagicMock(), session=session)
+    rail._bind_shared_task_deadline(first_ctx, session, state)
+    shared_deadline = state["deadline_at"]
+
+    resumed = rail._resume_task_state(session, state, "Collect the missing second price")
+    second_ctx = AgentCallbackContext(agent=MagicMock(), session=session)
+    second_remaining = rail._bind_shared_task_deadline(second_ctx, session, resumed)
+
+    assert resumed["deadline_at"] == shared_deadline
+    assert resumed["resume_count"] == 1
+    assert "task_invocation_slice_exhausted" not in resumed["blockers"]
+    assert second_remaining > 0
+    assert second_ctx.extra["__browser_invocation_deadline__"] > runtime_module.time.monotonic()
 
 
 def test_structured_resume_preserves_original_slots_and_evidence() -> None:
@@ -1588,7 +2059,7 @@ def test_before_model_call_skips_dynamic_progress_without_attachment_manager() -
     _run(rail.before_model_call(ctx))
 
     prompt = builder.build()
-    assert "<browser_progress>{...}</browser_progress>" in prompt
+    assert "<browser_progress>{...}</browser_progress>" not in prompt
     assert "Opened home page" not in prompt
     assert not builder.has_section("browser_progress_continuation")
 
@@ -1642,7 +2113,7 @@ def test_before_model_call_initializes_runtime_task_state_without_progress_attac
     _run(rail.before_model_call(ctx))
 
     prompt = builder.build()
-    assert "<browser_progress>{...}</browser_progress>" in prompt
+    assert "<browser_progress>{...}</browser_progress>" not in prompt
     task_state = session.get_state("__browser_phase_budget_state__")
     assert task_state["goal"] == "continue checkout"
     assert task_state["status"] == "in_progress"
@@ -1690,6 +2161,64 @@ def test_after_tool_call_records_browser_tool_progress() -> None:
     assert session.get_state("__browser_subagent_progress_state__")["recent_tool_steps"]
 
 
+def test_after_tool_call_does_not_advance_state_for_string_mcp_error() -> None:
+    runtime = _make_bare_runtime()
+    session = _FakeSession()
+    session.update_state(
+        {"__browser_phase_budget_state__": BrowserRuntimeRail._build_phase_state("Open the result")}
+    )
+    tool_message = ToolMessage(tool_call_id="failed-click", content="")
+    ctx = AgentCallbackContext(
+        agent=MagicMock(),
+        session=session,
+        inputs=ToolCallInputs(
+            tool_name="mcp_playwright-official_browser_click",
+            tool_args={"target": "e4"},
+            tool_result="### Error\nElement is not actionable",
+            tool_msg=tool_message,
+        ),
+    )
+    rail = BrowserRuntimeRail(runtime)
+
+    _run(rail.after_tool_call(ctx))
+
+    assert ctx.inputs.tool_result["ok"] is False
+    assert tool_message.metadata["success"] is False
+    assert tool_message.metadata["executed"] is True
+    assert tool_message.metadata["state_changed"] is False
+    state = session.get_state("__browser_phase_budget_state__")
+    assert state["recent_actions"][-1]["outcome_status"] == "failed"
+    assert state["field_coverage"] == []
+
+
+def test_after_tool_call_marks_mutating_timeout_as_ambiguous_for_reconciliation() -> None:
+    runtime = _make_bare_runtime()
+    session = _FakeSession()
+    session.update_state(
+        {"__browser_phase_budget_state__": BrowserRuntimeRail._build_phase_state("Open the result")}
+    )
+    tool_message = ToolMessage(tool_call_id="timeout-click", content="")
+    ctx = AgentCallbackContext(
+        agent=MagicMock(),
+        session=session,
+        inputs=ToolCallInputs(
+            tool_name="mcp_playwright-official_browser_click",
+            tool_args={"target": "e4"},
+            tool_result="Error: click timed out after 2500ms",
+            tool_msg=tool_message,
+        ),
+    )
+    rail = BrowserRuntimeRail(runtime)
+
+    _run(rail.after_tool_call(ctx))
+
+    assert tool_message.metadata["success"] is False
+    assert tool_message.metadata["state_changed"] is True
+    state = session.get_state("__browser_phase_budget_state__")
+    assert state["recent_actions"][-1]["outcome_status"] == "ambiguous"
+    assert state["recent_actions"][-1]["semantic_delta"] == "awaiting_observation"
+
+
 def test_after_invoke_rewrites_max_iteration_with_failure_summary() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
     runtime.service = MagicMock()
@@ -1722,6 +2251,34 @@ def test_after_invoke_rewrites_max_iteration_with_failure_summary() -> None:
     assert result["output"].startswith("Failure summary for continuation:")
     assert result["failure_summary"].startswith("Failure summary for continuation:")
     assert result["progress_state"]["status"] == "partial"
+
+
+def test_after_invoke_renders_authoritative_max_iteration_result() -> None:
+    runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.service = MagicMock()
+    runtime.service._progress_by_session = {}
+    session = _FakeSession()
+    state = BrowserRuntimeRail._build_phase_state("Return the product title and price")
+    state["field_coverage"] = ["title"]
+    state["structured_evidence"] = [
+        {"fields": ["title"], "values": {"title": "Keyboard"}}
+    ]
+    session.update_state({"__browser_phase_budget_state__": state})
+    result = {"output": MAX_ITERATION_MESSAGE, "result_type": "error"}
+    ctx = AgentCallbackContext(
+        agent=MagicMock(),
+        session=session,
+        inputs=InvokeInputs(query="Return product title and price", result=result),
+    )
+
+    _run(BrowserRuntimeRail(runtime).after_invoke(ctx))
+
+    authoritative = result["authoritative_browser_result"]
+    assert authoritative["status"] == "partial"
+    assert authoritative["terminal_reason"] == "max_iterations_reached"
+    assert "price" in authoritative["missing_fields"]
+    assert "max_iterations_reached" in authoritative["blockers"]
+    assert result["error"] == "browser_task_incomplete"
 
 
 def test_after_invoke_promotes_completed_progress_block() -> None:

@@ -467,6 +467,28 @@ async def test_is_evictable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_claimed_turn_is_active_while_waiting_for_concurrency_slot() -> None:
+    semaphore = asyncio.Semaphore(0)
+    instance, _, _ = _make_instance(semaphore=semaphore)
+    await instance.start_worker()
+    await instance.enqueue(UserInputOp(query="waiting", task_id="t1"))
+
+    async def wait_until_worker_claims_turn() -> None:
+        while instance.current_task_id is None:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_until_worker_claims_turn(), timeout=1.0)
+
+    assert instance._ops.empty()
+    assert instance._current_run is None
+    assert instance.has_active_turn() is True
+
+    semaphore.release()
+    await asyncio.wait_for(instance._ops.join(), timeout=1.0)
+    await instance.shutdown("test_cleanup")
+
+
+@pytest.mark.asyncio
 async def test_subscribe_status_wait_for_final() -> None:
     instance, _, _ = _make_instance()
     await instance.start_worker()

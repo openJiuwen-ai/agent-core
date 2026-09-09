@@ -27,6 +27,7 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context import (
     BROWSER_TASK_STATE_KEY,
     BROWSER_TOOL_MEMORY_METADATA_KEY,
+    BROWSER_WORKING_CONTEXT_STATE_KEY,
     BROWSER_WORKING_MEMORY_RECORD_BEGIN,
     BROWSER_WORKING_MEMORY_RECORD_END,
     BrowserWorkingContextStore,
@@ -160,6 +161,11 @@ def _inject(
     window = ContextWindow(context_messages=list(context.messages))
     _, rendered = _run(processor.on_get_context_window(context, window))
     return rendered
+
+
+def _working_context_payload(prompt: str) -> tuple[str, dict[str, Any]]:
+    body = prompt.split("\n", 2)[2].rsplit("\n</browser_working_context>", 1)[0]
+    return body, json.loads(body)
 
 
 def test_model_memory_survives_and_internal_update_is_not_user_facing() -> None:
@@ -536,14 +542,16 @@ def test_processor_guidance_defines_each_working_memory_field() -> None:
     processor = BrowserWorkingContextProcessor(BrowserWorkingContextProcessorConfig(language="en"))
     prompt = _inject(processor, _FakeContext(_FakeSession())).context_messages[-1].content
 
-    assert "runtime-maintained browser task context" in prompt
-    assert "field coverage, blockers, evidence, and recent actions as authoritative" in prompt
-    assert "Do not rewrite or echo this context" in prompt
-    assert '"key_facts"' in prompt
-    assert '"important_information"' in prompt
+    assert "Runtime-owned browser context" in prompt
+    assert "Requirements, evidence, blockers, status, and recent semantic changes are authoritative" in prompt
+    assert "do not echo this context" in prompt
+    assert '"runtime_directive":"continue"' in prompt
+    assert '"request":{"kind":"initial"' in prompt
+    assert '"key_facts"' not in prompt
+    assert '"important_information"' not in prompt
     assert '"task_list"' not in prompt
-    assert BROWSER_WORKING_MEMORY_RECORD_BEGIN in prompt
-    assert BROWSER_WORKING_MEMORY_RECORD_END in prompt
+    assert BROWSER_WORKING_MEMORY_RECORD_BEGIN not in prompt
+    assert BROWSER_WORKING_MEMORY_RECORD_END not in prompt
     assert "<browser_context_update>" not in prompt
 
 
@@ -555,14 +563,53 @@ def test_processor_renders_chinese_guidance_with_stable_schema_keys() -> None:
 
     prompt = _inject(processor, context).context_messages[-1].content
 
-    assert "这是由 runtime 维护的浏览器任务上下文" in prompt
-    assert "不要重写或复述这些内容" in prompt
-    assert BROWSER_WORKING_MEMORY_RECORD_BEGIN in prompt
-    assert BROWSER_WORKING_MEMORY_RECORD_END in prompt
+    assert "这是 runtime 维护的浏览器上下文" in prompt
+    assert "不要复述上下文" in prompt
+    assert BROWSER_WORKING_MEMORY_RECORD_BEGIN not in prompt
+    assert BROWSER_WORKING_MEMORY_RECORD_END not in prompt
     assert "<browser_context_update>" not in prompt
     assert '"task_list"' not in prompt
-    assert '"key_facts"' in prompt
-    assert '"important_information"' in prompt
+    assert '"runtime_directive":"continue"' in prompt
+
+
+def test_working_context_is_valid_json_within_configured_limit() -> None:
+    config = BrowserWorkingContextProcessorConfig(max_prompt_chars=2_000)
+    session = _FakeSession()
+    store = BrowserWorkingContextStore(config)
+    store.begin_request(session, "Follow up " + ("q" * 2_000))
+    session.update_state(
+        {
+            BROWSER_TASK_STATE_KEY: {
+                "task_id": "bounded-task",
+                "goal": "g" * 2_000,
+                "status": "in_progress",
+                "required_evidence_slots": [
+                    {"entity": f"entity-{index}", "variant": "default", "field": f"field-{index}"}
+                    for index in range(20)
+                ],
+                "evidence_slots": [
+                    {
+                        "entity": f"entity-{index}",
+                        "variant": "default",
+                        "field": f"field-{index}",
+                        "status": "present",
+                        "value": "v" * 1_000,
+                        "source": "https://example.test/" + ("s" * 1_000),
+                    }
+                    for index in range(20)
+                ],
+                "blockers": ["b" * 1_000 for _ in range(10)],
+                "recent_actions": [{"semantic_delta": "d" * 1_000} for _ in range(10)],
+            }
+        }
+    )
+
+    prompt = _inject(BrowserWorkingContextProcessor(config), _FakeContext(session)).context_messages[-1].content
+    body, payload = _working_context_payload(prompt)
+
+    assert len(body) <= config.max_prompt_chars
+    assert payload["request"]["text"].startswith("Follow up")
+    assert payload["task"]["task_id"] == "bounded-task"
 
 
 def test_history_limit_discards_old_steps_without_local_compaction() -> None:
@@ -652,7 +699,7 @@ def test_follow_up_and_new_agent_instance_reuse_completed_session_memory() -> No
     )
     assert "Now check its tracking link" in prompt
     assert "Order 123 is shipped." in prompt
-    assert "runtime-maintained" in prompt
+    assert "Runtime-owned" in prompt
 
 
 def test_inner_model_boundary_restores_and_reconciles_follow_up_when_outer_session_is_absent() -> None:
@@ -812,9 +859,9 @@ def test_checkpointed_state_is_restored_by_a_reconstructed_agent_session() -> No
         .context_messages[-1]
         .content
     )
-    assert '"kind": "follow_up"' in prompt
+    assert '"kind":"follow_up"' in prompt
     assert "Order 123 was found." in prompt
-    assert '"model_notes": {' in prompt
+    assert '"model_notes":{' in prompt
 
 
 def test_retained_values_are_length_bounded() -> None:
@@ -883,6 +930,50 @@ def test_processor_replaces_only_its_own_ephemeral_message() -> None:
     assert "<browser_working_context>" in rendered.context_messages[0].content
 
 
+def test_processor_runtime_projection_ignores_legacy_model_memory() -> None:
+    processor = BrowserWorkingContextProcessor(
+        BrowserWorkingContextProcessorConfig(runtime_projection_only=True)
+    )
+    session = _FakeSession()
+    session.update_state(
+        {
+            BROWSER_WORKING_CONTEXT_STATE_KEY: {
+                "active_request": "stale request",
+                "current": {
+                    "key_facts": ["stale model fact"],
+                    "important_information": ["stale model note"],
+                },
+                "one_step_content": [
+                    {
+                        "tool_name": "browser_evaluate",
+                        "durable_content": "stale tool evidence",
+                    }
+                ],
+            },
+            BROWSER_TASK_STATE_KEY: {
+                "task_id": "task-runtime",
+                "goal": "Return the current page title",
+                "status": "in_progress",
+                "required_fields": ["title"],
+                "field_coverage": [],
+                "structured_evidence": [],
+                "blockers": [],
+                "recent_actions": [],
+            },
+        }
+    )
+    context = _FakeContext(session)
+
+    rendered = _inject(processor, context)
+    _, payload = _working_context_payload(rendered.context_messages[-1].content)
+
+    assert payload["request"]["text"] == "Return the current page title"
+    assert "model_notes" not in payload
+    assert "retained_tool_evidence" not in payload
+    assert "next_tool_result" not in payload
+    assert session.get_state(BROWSER_WORKING_CONTEXT_STATE_KEY)["one_step_content"]
+
+
 def test_processor_projects_runtime_task_state_before_current_page_state() -> None:
     config = BrowserWorkingContextProcessorConfig()
     processor = BrowserWorkingContextProcessor(config)
@@ -938,7 +1029,152 @@ def test_processor_projects_runtime_task_state_before_current_page_state() -> No
 
     assert rendered.context_messages[-1] is current_state
     prompt = rendered.context_messages[-2].content
-    assert '"runtime_directive": "replan_before_browser_action"' in prompt
-    assert '"field_coverage": [' in prompt
-    assert '"semantic_delta": "no_progress"' in prompt
+    assert '"runtime_directive":"replan_before_browser_action"' in prompt
+    assert '"requirements":{' in prompt
+    assert '"field":"price"' in prompt
+    assert '"semantic_delta":"no_progress"' in prompt
     assert "script_exploration" in prompt
+
+
+def test_semantic_observation_closes_sort_evidence_before_replan_gate() -> None:
+    session = _FakeSession()
+    session.update_state(
+        {
+            BROWSER_TASK_STATE_KEY: {
+                "task_id": "sort-task",
+                "goal": "按销量排序并返回第一条商品标题",
+                "status": "replan_required",
+                "current_phase": "filtering",
+                "phases": {
+                    "filtering": {
+                        "status": "replan_required",
+                        "attempts": 2,
+                        "budget": 20,
+                    },
+                    "extraction": {"status": "pending", "attempts": 0, "budget": 20},
+                },
+                "required_fields": ["sort_state", "title"],
+                "required_evidence_slots": [
+                    {"entity": "product", "variant": "default", "field": "sort_state"}
+                ],
+                "field_coverage": [],
+                "structured_evidence": [],
+                "evidence_slots": [],
+                "blockers": [],
+                "replan_required": True,
+                "replan_trial_pending": True,
+                "trial_strategy": "click sales sort",
+                "recent_actions": [
+                    {
+                        "seq": 2,
+                        "phase": "filtering",
+                        "action_class": "filtering",
+                        "outcome": "timeout",
+                        "outcome_status": "ambiguous",
+                        "semantic_delta": "pending",
+                    }
+                ],
+            }
+        }
+    )
+    progress = {
+        "revision": 1,
+        "progress": "progress",
+        "observable_progress": True,
+        "changed_fields": ["url", "selected_filters", "first_result_text"],
+        "semantic_state": {
+            "generation_id": "g4",
+            "url": "https://shop.example/search?sort=sales",
+            "selected_filters": [{"key": "sort", "value": "销量从高到低"}],
+            "first_result_text": "Mechanical Keyboard 1000 sold",
+        },
+    }
+
+    recovered = BrowserWorkingContextStore.sync_semantic_progress(session, progress)
+
+    state = session.get_state(BROWSER_TASK_STATE_KEY)
+    assert recovered is True
+    assert "sort_state" in state["field_coverage"]
+    assert state["evidence_slots"][0]["value"] == "销量从高到低"
+    assert state["evidence_slots"][0]["generation"] == "g4"
+    assert state["recent_actions"][-1]["outcome_status"] == "success_after_observation"
+    assert state["phases"]["filtering"]["status"] == "completed"
+    assert state["replan_required"] is False
+
+
+def test_changed_first_result_confirms_successful_sort_click() -> None:
+    session = _FakeSession()
+    session.update_state(
+        {
+            BROWSER_TASK_STATE_KEY: {
+                "task_id": "sort-fallback",
+                "goal": "按销量排序",
+                "status": "in_progress",
+                "required_fields": ["sort_state"],
+                "field_coverage": [],
+                "structured_evidence": [],
+                "evidence_slots": [],
+                "required_evidence_slots": [],
+                "recent_actions": [
+                    {
+                        "outcome_status": "success",
+                        "semantic_delta": "pending",
+                        "target_summary": json.dumps(
+                            {
+                                "tool": "browser_click",
+                                "target_id": "t-sort-sales",
+                                "element": "销量优先",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                ],
+            }
+        }
+    )
+
+    BrowserWorkingContextStore.sync_semantic_progress(
+        session,
+        {
+            "revision": 1,
+            "progress": "progress",
+            "observable_progress": True,
+            "changed_fields": ["first_result_text"],
+            "semantic_state": {
+                "generation_id": "g5",
+                "url": "https://shop.example/search",
+                "first_result_text": "Top selling keyboard",
+                "selected_filters": [],
+            },
+        },
+    )
+
+    state = session.get_state(BROWSER_TASK_STATE_KEY)
+    evidence = state["structured_evidence"][-1]
+    assert evidence["values"]["sort_state"] == "销量"
+    assert evidence["provenance"]["sort_state"]["selection_source"] == "first_result_change"
+    assert evidence["provenance"]["sort_state"]["selector"] == "t-sort-sales"
+
+
+def test_changed_first_result_does_not_confirm_an_unrelated_click() -> None:
+    state = {
+        "recent_actions": [
+            {
+                "outcome_status": "success",
+                "target_summary": json.dumps(
+                    {
+                        "tool": "browser_click",
+                        "target_id": "t-product",
+                        "element": "Mechanical Keyboard",
+                    }
+                ),
+            }
+        ]
+    }
+
+    inferred = BrowserWorkingContextStore._sort_from_changed_results(
+        state,
+        {"changed_fields": ["first_result_text"]},
+    )
+
+    assert inferred is None

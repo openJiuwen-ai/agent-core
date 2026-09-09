@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-09-03 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -60,6 +60,15 @@
    同步构造，`S_01` 不变量 3）；`enable_subagent_runtime` 时才进 `S_10` 的异步控制面。
 8. **manifest 侧预设与 `subagents/` 预设同源**：`S_12` 的 `build_*_subagent` 是
    `subagents/` 预设的 catalog 注册形态；二者共享 `SubAgentSpec` 装配语义，不新造预设。
+9. **browser 上下文权威边界**：runtime 以 requested evidence slots、已解析 evidence 和
+   blockers 计算任务状态；模型负责策略与自然语言结果，不负责维护第二套进度 JSON。模型可见
+   PageState 与 WorkingContext 必须先按结构裁剪后序列化，保持合法 JSON。offload 保存可恢复的
+   有界旧结果；预截断的完整原始观察仅在显式开启 raw audit 时进入审计层。PageState 的
+   `page_blockers` 仅表示页面启发式信号，不能直接覆盖 runtime 的权威任务终态。
+10. **browser 观察采用统一窗口**：Probe、snapshot、find、evaluate 先由 runtime 提取证据并将
+    当前结果限制在 12 KB 内，再统一交给 `ToolResultWindowProcessor`；模型只保留最近一个有界结果，
+    并发只读结果的合并结构由 PageState 提供。WorkingContext 默认只投影 runtime 权威状态，
+    不再要求模型维护第二份记忆。
 
 ## 接口契约
 

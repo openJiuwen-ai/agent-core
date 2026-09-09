@@ -19,7 +19,7 @@ The server starts on http://127.0.0.1:3003/sse
 
 Note:
     - If you prefer to use the official Playwright MCP server (Node.js):
-        npx @playwright/mcp@latest --port 3003
+        npx @playwright/mcp@0.0.78 --port 3003
       Then connect with PlaywrightClient using the SSE URL.
     - This Python implementation shows a lightweight alternative using
       playwright-python and fastmcp.

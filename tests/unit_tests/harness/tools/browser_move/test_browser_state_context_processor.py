@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -85,6 +86,58 @@ def _window_message(window: ContextWindow, name: str) -> UserMessage:
     message = matches[0]
     assert isinstance(message, UserMessage)
     return message
+
+
+def test_rendered_browser_state_is_valid_json_within_configured_limit() -> None:
+    config = BrowserStateContextProcessorConfig(provider=AsyncMock(), max_dom_chars=2_000)
+    processor = BrowserStateContextProcessor(config)
+    state = _state("https://bounded.example/" + ("u" * 2_000))
+    state["page_state"]["interactives"] = [
+        {
+            "target_id": f"t_g0_{index}",
+            "generation_id": "g0",
+            "role": "button",
+            "text": "x" * 1_000,
+        }
+        for index in range(40)
+    ]
+    state["semantic_state"] = {
+        "form_values": {f"field-{index}": "v" * 1_000 for index in range(20)},
+        "blockers": ["b" * 1_000 for _ in range(20)],
+    }
+
+    prompt = processor._format_state_text(state)
+    body = prompt.split("\n", 2)[2].rsplit("\n</browser_state>", 1)[0]
+    payload = json.loads(body)
+
+    assert len(body) <= config.max_dom_chars
+    assert payload["truncated"] is True
+    assert payload["page_state"]["generation_id"] == "g0"
+
+
+def test_rendered_browser_state_omits_task_progress_duplicates() -> None:
+    processor = BrowserStateContextProcessor(
+        BrowserStateContextProcessorConfig(provider=AsyncMock())
+    )
+    state = _state("https://shop.example/search")
+    state["semantic_state"] = {
+        "result_count": 10,
+        "field_coverage": ["title"],
+        "blockers": ["login required"],
+    }
+    state["page_state"]["field_coverage"] = ["title"]
+    state["page_state"]["blockers"] = ["login required"]
+
+    prompt = processor._format_state_text(state)
+    body = prompt.split("\n", 2)[2].rsplit("\n</browser_state>", 1)[0]
+    payload = json.loads(body)
+
+    assert payload["semantic_state"]["result_count"] == 10
+    assert "field_coverage" not in payload["semantic_state"]
+    assert "blockers" not in payload["semantic_state"]
+    assert "field_coverage" not in payload["page_state"]
+    assert "blockers" not in payload["page_state"]
+    assert payload["page_state"]["page_blockers"] == ["login required"]
 
 
 def test_completed_parallel_calls_form_one_refresh_action_group() -> None:
@@ -196,6 +249,85 @@ async def test_denied_browser_action_reuses_cached_state_without_observation() -
     )
 
 
+@pytest.mark.asyncio
+async def test_failed_mutation_without_state_change_reuses_cached_state() -> None:
+    provider = AsyncMock()
+    provider.capture_browser_state.return_value = _state("https://example.test/current")
+    engine = ContextEngine()
+    context = await engine.create_context(
+        "browser-failed-mutation-test",
+        processors=[
+            (
+                "BrowserStateContextProcessor",
+                BrowserStateContextProcessorConfig(provider=provider),
+            )
+        ],
+    )
+    await context.add_messages(UserMessage(content="click the result"))
+    initial_window = await context.get_context_window()
+    await context.add_messages(
+        [
+            AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="failed", type="function", name="browser_click", arguments="{}")],
+            ),
+            ToolMessage(
+                tool_call_id="failed",
+                content='{"ok":false,"executed":true,"state_changed":false}',
+                metadata={"success": False, "executed": True, "state_changed": False},
+            ),
+        ]
+    )
+
+    failed_window = await context.get_context_window()
+
+    assert provider.capture_browser_state.await_count == 1
+    assert _window_message(failed_window, "current_browser_state") is _window_message(
+        initial_window,
+        "current_browser_state",
+    )
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_timeout_refreshes_state_once_for_reconciliation() -> None:
+    provider = AsyncMock()
+    provider.capture_browser_state.return_value = _state("https://example.test/current")
+    reconciled = _state("https://example.test/next")
+    reconciled["reconciliation_only"] = True
+    provider.capture_reconciliation_browser_state.return_value = reconciled
+    engine = ContextEngine()
+    context = await engine.create_context(
+        "browser-timeout-reconcile-test",
+        processors=[
+            (
+                "BrowserStateContextProcessor",
+                BrowserStateContextProcessorConfig(provider=provider),
+            )
+        ],
+    )
+    await context.add_messages(UserMessage(content="click the result"))
+    await context.get_context_window()
+    await context.add_messages(
+        [
+            AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="timeout", type="function", name="browser_click", arguments="{}")],
+            ),
+            ToolMessage(
+                tool_call_id="timeout",
+                content='{"ok":false,"executed":true,"state_changed":true,"timed_out":true}',
+                metadata={"success": False, "executed": True, "state_changed": True},
+            ),
+        ]
+    )
+
+    window = await context.get_context_window()
+
+    assert provider.capture_browser_state.await_count == 1
+    provider.capture_reconciliation_browser_state.assert_awaited_once()
+    assert "https://example.test/next" in _window_message(window, "current_browser_state").content
+
+
 async def _add_completed_browser_action(
     context,
     *,
@@ -244,9 +376,9 @@ async def test_processor_reuses_cached_browser_state_without_navigation() -> Non
     assert state_message.metadata[PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY] is True
     assert "https://first.example" in state_message.content
     assert "https://other.example" in state_message.content
-    assert '"scroll_y": 400' in state_message.content
+    assert '"scroll_y":400' in state_message.content
     assert '"page_change"' not in state_message.content
-    assert '"target_id": "t_g0_1"' in state_message.content
+    assert '"target_id":"t_g0_1"' in state_message.content
     assert "[ref=e7]" not in state_message.content
     assert "image_url" not in state_message.content
     assert all(message.name != "browser_state_progress" for message in window.context_messages)
@@ -545,7 +677,7 @@ async def test_processor_injects_explicit_unavailable_state_without_stale_image(
     assert len(window.context_messages) == 1
     state_content = _window_message(window, "current_browser_state").content
     assert "browser disconnected" in state_content
-    assert '"page_state": {}' in state_content
+    assert '"page_state":{}' in state_content
     assert "image_url" not in state_content
     assert processor._page_change == "unknown"
 
@@ -613,6 +745,40 @@ async def test_runtime_combines_snapshot_with_page_metadata() -> None:
     target = runtime._ensure_page_state().resolve_target(generation_id="g0", ref="e3")
     assert target is not None
     assert target.locator == {"ref": "e3"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_timeout_reconciliation_skips_full_snapshot() -> None:
+    runtime = object.__new__(BrowserAgentRuntime)
+    runtime._page_generation = 0
+    runtime._reference_generations = {}
+    runtime._selector_primary_links = {}
+    runtime._last_observed_url = "https://example.test/current"
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._call_playwright_tool = AsyncMock()
+    runtime._call_playwright_run_code_unsafe = AsyncMock(
+        return_value={
+            "ok": True,
+            "url": "https://example.test/next",
+            "title": "Next",
+            "tabs": [],
+            "page_position": {},
+            "semantic_state": {
+                "form_values": [],
+                "selected_filters": [{"key": "sort", "value": "sales"}],
+                "result_count": 10,
+            },
+        }
+    )
+
+    state = await runtime.capture_reconciliation_browser_state(action_group_id="timeout-group")
+
+    runtime._call_playwright_tool.assert_not_awaited()
+    runtime._call_playwright_run_code_unsafe.assert_awaited_once()
+    assert state["ok"] is True
+    assert state["reconciliation_only"] is True
+    assert state["url"] == "https://example.test/next"
+    assert state["semantic_progress"]["action_group_id"] == "timeout-group"
 
 
 @pytest.mark.asyncio

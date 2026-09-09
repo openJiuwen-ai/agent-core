@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolCard, ToolExposure, ToolInfo
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
@@ -23,8 +24,8 @@ from openjiuwen.harness.prompts.sections.progressive_tool_rail import (
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.harness.tools.tool_discovery.bm25 import BM25ToolIndex
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.tool_discovery.bm25 import BM25ToolIndex
 from openjiuwen.harness.tools.tool_discovery.tool_call import ToolCallTool
 from openjiuwen.harness.tools.tool_discovery.tool_search import (
     DEFAULT_TOOL_SEARCH_LIMIT,
@@ -505,6 +506,8 @@ class ProgressiveToolRail(DeepAgentRail):
                 session=session,
                 parallel_tool_calls=False,
             )
+        except ToolInterruptException:
+            raise
         except Exception as exc:
             return ToolOutput(success=False, error=str(exc))
         finally:
@@ -517,6 +520,9 @@ class ProgressiveToolRail(DeepAgentRail):
             )
 
         target_result, target_message = results[0]
+        if isinstance(target_result, ToolInterruptException):
+            raise target_result
+
         target_success = getattr(target_result, "success", None)
         if target_success is False:
             return ToolOutput(

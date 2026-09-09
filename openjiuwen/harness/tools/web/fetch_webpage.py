@@ -185,7 +185,13 @@ class WebFetchWebpageTool(Tool):
         timeout_seconds: int,
         byte_cap: int,
     ) -> dict[str, Any]:
-        """Fetch webpage content, falling back to the jina.ai reader on 401/403/429."""
+        """Fetch webpage content, falling back to the jina.ai reader when the
+        direct GET is blocked or returns a JS-rendered shell.
+
+        Hard blocks (401/403/429) and paywalls (499) go straight to the reader.
+        A 202 soft-block, or an HTML body with no extractable text (a JS shell),
+        also falls back — the reader renders the page server-side.
+        """
         status, headers, body, final_url, truncated = await _http.request(
             session,
             "GET",
@@ -194,7 +200,7 @@ class WebFetchWebpageTool(Tool):
             timeout_seconds=timeout_seconds,
             max_bytes=byte_cap,
         )
-        if status in {401, 403, 429}:
+        if status in {202, 401, 403, 429, 499}:
             return await WebFetchWebpageTool._fetch_via_jina_reader(session, url, timeout_seconds, byte_cap)
         _raise_fetch_http_error(url, status, body)
 
@@ -204,6 +210,10 @@ class WebFetchWebpageTool(Tool):
 
         if "html" in content_type.lower():
             title, text = WebFetchWebpageTool._extract_main_text_from_html(text)
+            # A JS-rendered page returns an HTML shell with no extractable text;
+            # only fall back when there actually was a body to render.
+            if not title.strip() and not text.strip() and body:
+                return await WebFetchWebpageTool._fetch_via_jina_reader(session, url, timeout_seconds, byte_cap)
         else:
             text = re.sub(r"\s+", " ", text).strip()
 

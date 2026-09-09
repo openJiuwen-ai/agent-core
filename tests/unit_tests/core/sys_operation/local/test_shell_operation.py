@@ -477,6 +477,27 @@ def test_extract_abs_paths_windows_unquoted(monkeypatch):
     assert any(str(p) == r"D:\git\read_only_dir" for p in paths)
 
 
+def test_check_command_safety_no_builtin_overlap_with_engine():
+    op = _make_shell_op(restrict=False)
+    for command in (
+        "rm -rf /tmp/foo",
+        "shutdown -h now",
+        "reboot",
+        "diskpart",
+        "mkfs.ext4 /dev/sda",
+        r"reg delete HKLM\Software\Test",
+        r"Remove-Item C:\foo -Recurse -Force",
+    ):
+        assert op._check_command_safety(command) is None, command
+
+
+def test_check_command_safety_honors_custom_patterns():
+    op = _make_shell_op(restrict=False)
+    op._run_config.dangerous_patterns = [r"rm\s+-rf"]
+    assert op._check_command_safety("rm -rf /tmp/x") == r"rm\s+-rf"
+    assert op._check_command_safety("echo ok") is None
+
+
 def test_check_shell_sandbox_disabled(tmp_path):
     """When restrict_to_sandbox=False the check always passes."""
     op = _make_shell_op(restrict=False)

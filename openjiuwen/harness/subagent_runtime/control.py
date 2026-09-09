@@ -131,6 +131,7 @@ class SubagentControl:
         self._activity_ready: set[tuple[str, str]] = set()
         self._pending_activities: dict[tuple[str, str], list[SubagentActivity]] = {}
         self._hydrated = False
+        self._merged_records_marker: tuple[int, int] | None = None
         self._activity_emitter: ActivityEmitter | None = None
         self._transcript_emitter: TranscriptEmitter | None = None
         if self._config.enable_activity_stream and self._parent_session is not None:
@@ -364,6 +365,31 @@ class SubagentControl:
             )
         return rows
 
+    def describe_closed(self) -> list[dict[str, Any]]:
+        """Return external status payloads for closed subagents resumable via resume."""
+        return [
+            self._closed_record_to_payload(record, self._parent_session_id)
+            for record in self._closed_records.values()
+        ]
+
+    def describe_list(self) -> dict[str, Any]:
+        """Return a unified list view separating live and closed subagents."""
+        self.merge_persisted_records()
+        live = self.describe_live()
+        closed = self.describe_closed()
+        return {
+            "capacity": self.capacity(),
+            # Compatibility alias for clients predating live_subagents.
+            # New callers should consume live_subagents explicitly.
+            "subagents": live,
+            "live_subagents": live,
+            "closed_subagents": closed,
+            "summary": {
+                "live_count": len(live),
+                "closed_count": len(closed),
+            },
+        }
+
     async def emit_status_update(
         self,
         subagent_id: str,
@@ -411,7 +437,7 @@ class SubagentControl:
         """Restore a closed or evicted subagent from checkpointer without enqueueing work."""
         existing = self._manager.find(subagent_id)
         if existing is not None and not existing.is_closed():
-            status = existing.agent_status()
+            status = await self._finalize_resume_idle(subagent_id, existing)
             return ResumeResult(
                 status=status,
                 restored=False,
@@ -419,6 +445,9 @@ class SubagentControl:
             )
 
         record = self._closed_records.get(subagent_id)
+        if record is None:
+            self.merge_persisted_records()
+            record = self._closed_records.get(subagent_id)
         if record is None:
             raise_subagent_not_found(subagent_id)
 
@@ -444,7 +473,9 @@ class SubagentControl:
 
         self._closed_records.pop(subagent_id, None)
         restored = self._manager.find(subagent_id)
-        status = restored.agent_status() if restored is not None else SubagentStatus.pending_init()
+        if restored is None:
+            return ResumeResult(status=SubagentStatus.pending_init(), restored=True)
+        status = await self._finalize_resume_idle(subagent_id, restored)
         return ResumeResult(status=status, restored=True)
 
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus:
@@ -462,39 +493,67 @@ class SubagentControl:
         closed: list[str] = []
         for sid in list(self._manager.list_ids()):
             try:
-                await self._evict_from_memory(sid, reason=reason)
+                await self._evict_from_memory(sid, reason=reason, persist=False)
             except Exception:
                 logger.warning("[SubagentControl] cancel_all failed: sid=%s", sid)
                 self._registry.release(sid)
             closed.append(sid)
-        self.flush()
+        await self.persist()
         return closed
+
+    def _ingest_persisted_record(self, sid: str, raw: dict[str, Any]) -> None:
+        if self._manager.find(sid) is not None:
+            return
+        record = SubagentRecord.from_dict(raw)
+        if record.closed_at_ms is None:
+            fallback_ms = record.updated_at_ms or record.created_at_ms
+            record = SubagentRecord(
+                subagent_id=record.subagent_id,
+                subagent_type=record.subagent_type,
+                display_name=record.display_name,
+                role=record.role,
+                task_description=record.task_description,
+                created_at_ms=record.created_at_ms,
+                updated_at_ms=record.updated_at_ms or fallback_ms,
+                closed_at_ms=fallback_ms,
+                closed_reason="parent_ended",
+            )
+        self._closed_records[sid] = record
+
+    def set_parent_session(self, session: Any | None) -> None:
+        """Rebind this control to the live parent Session for the same session id."""
+        if session is not self._parent_session:
+            self._merged_records_marker = None
+        self._parent_session = session
+
+    def _merge_persisted_record_bucket(self, bucket: dict[str, Any]) -> None:
+        session = self._parent_session
+        if session is None:
+            return
+        marker = (id(session), int(bucket.get("revision") or 0))
+        if marker == self._merged_records_marker:
+            return
+        records = bucket.get("records") or {}
+        if not isinstance(records, dict):
+            return
+        for sid, raw in records.items():
+            if isinstance(raw, dict):
+                self._ingest_persisted_record(sid, raw)
+        self._merged_records_marker = marker
+
+    def merge_persisted_records(self) -> None:
+        """Merge subagent records from the parent session bucket into closed view."""
+        if self._parent_session is None:
+            return
+        bucket = read_subagent_bucket(self._parent_session)
+        self._merge_persisted_record_bucket(bucket)
 
     def hydrate(self) -> None:
         """Load persisted subagent records and turns from the parent session."""
         if self._hydrated or self._parent_session is None:
             return
         bucket = read_subagent_bucket(self._parent_session)
-        records = bucket.get("records") or {}
-        if isinstance(records, dict):
-            for sid, raw in records.items():
-                if not isinstance(raw, dict):
-                    continue
-                record = SubagentRecord.from_dict(raw)
-                if record.closed_at_ms is None:
-                    fallback_ms = record.updated_at_ms or record.created_at_ms
-                    record = SubagentRecord(
-                        subagent_id=record.subagent_id,
-                        subagent_type=record.subagent_type,
-                        display_name=record.display_name,
-                        role=record.role,
-                        task_description=record.task_description,
-                        created_at_ms=record.created_at_ms,
-                        updated_at_ms=record.updated_at_ms or fallback_ms,
-                        closed_at_ms=fallback_ms,
-                        closed_reason="parent_ended",
-                    )
-                self._closed_records[sid] = record
+        self._merge_persisted_record_bucket(bucket)
 
         turns = bucket.get("turns") or {}
         if isinstance(turns, dict):
@@ -568,6 +627,22 @@ class SubagentControl:
         except Exception as exc:
             logger.warning("[SubagentControl] flush failed: %s", exc)
 
+    async def persist(self) -> None:
+        """Write the subagent bucket to the parent session and checkpoint."""
+        self.flush()
+        session = self._parent_session
+        if session is None:
+            return
+        commit = getattr(session, "commit", None)
+        if not callable(commit):
+            return
+        try:
+            result = commit()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.warning("[SubagentControl] persist failed: %s", exc)
+
     def snapshot(
         self,
         *,
@@ -608,7 +683,13 @@ class SubagentControl:
             cursor=next_cursor,
         )
 
-    async def _evict_from_memory(self, subagent_id: str, *, reason: str) -> None:
+    async def _evict_from_memory(
+        self,
+        subagent_id: str,
+        *,
+        reason: str,
+        persist: bool = True,
+    ) -> None:
         metadata = self._registry.find_metadata(subagent_id)
         if metadata is not None and metadata.closed_at_ms is None:
             metadata.closed_at_ms = time.time() * 1000
@@ -616,7 +697,10 @@ class SubagentControl:
         if metadata is not None:
             self._store_closed_record(metadata, close_reason=reason)
         self._registry.release(subagent_id)
-        self.flush()
+        if persist:
+            await self.persist()
+        else:
+            self.flush()
 
     async def _acquire_slot(self) -> SpawnReservation:
         try:
@@ -957,6 +1041,34 @@ class SubagentControl:
             metadata.closed_at_ms = None
         elif is_instance_closed(status) and metadata.closed_at_ms is None:
             metadata.closed_at_ms = metadata.updated_at_ms
+
+    async def _finalize_resume_idle(
+        self,
+        subagent_id: str,
+        instance: Any,
+    ) -> SubagentStatus:
+        """Expose a quiescent restored instance as idle.
+
+        ``has_active_turn`` includes an op already claimed by the worker while
+        it waits for the shared concurrency slot, so a genuinely pending or
+        running turn is never normalized to completed here.
+        """
+        status = instance.agent_status()
+        if instance.has_active_turn():
+            return status
+        if status.kind not in {
+            SubagentStatusKind.PENDING_INIT,
+            SubagentStatusKind.RUNNING,
+        }:
+            return status
+        idle_status = SubagentStatus.completed()
+        await instance.status.set(idle_status)
+        metadata = self._registry.find_metadata(subagent_id)
+        if metadata is not None:
+            self._touch_metadata_timestamps(metadata, status=idle_status)
+        await self.emit_status_update(subagent_id)
+        self.flush()
+        return idle_status
 
     async def _handle_instance_status_changed(
         self,

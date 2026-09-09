@@ -198,6 +198,7 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
+    "**/harness/resources/*.yaml",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
     "symphony/README.md",
@@ -229,6 +230,7 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
+select = ["E", "F", "I", "ASYNC"]
 # E203 (whitespace before ':') intentionally allowed everywhere: ``ruff
 # format`` (Black style) inserts a space before ``:`` in slices that contain
 # non-trivial expressions (e.g. ``s[len(prefix) :]``), and Black's official

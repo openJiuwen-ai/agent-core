@@ -99,6 +99,7 @@ class SubagentInstance:
         self._ops: asyncio.Queue[SubagentOp] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
         self._current_run: asyncio.Task[None] | None = None
+        self._turn_claimed = False
         self._running_semaphore = running_semaphore
         self._interrupt_requested = False
         self._closed = False
@@ -160,6 +161,13 @@ class SubagentInstance:
         kind = self.status.current().kind
         return kind in {SubagentStatusKind.PENDING_INIT, SubagentStatusKind.RUNNING}
 
+    def has_active_turn(self) -> bool:
+        """Return True when a user-input turn is queued or currently executing."""
+        if self._turn_claimed or not self._ops.empty():
+            return True
+        run = self._current_run
+        return run is not None and not run.done()
+
     async def _set_status(self, status: SubagentStatus) -> None:
         await self.status.set(status)
         if self._on_status_changed is not None:
@@ -177,32 +185,38 @@ class SubagentInstance:
                 self._ops.task_done()
 
     async def _handle_user_input(self, op: UserInputOp) -> None:
+        # Claim the turn before waiting for the shared concurrency slot. During
+        # that wait the op is no longer queued and _current_run does not exist
+        # yet, so both signals alone would incorrectly report the instance idle.
+        self._turn_claimed = True
         self.current_task_id = op.task_id
-
-        async with self._running_semaphore:
-            self._interrupt_requested = False
-            await self._set_status(SubagentStatus.running())
-            self._current_run = asyncio.create_task(self._run_one_turn(op))
-            try:
-                if self._turn_timeout_s and self._turn_timeout_s > 0:
-                    await asyncio.wait_for(self._current_run, timeout=self._turn_timeout_s)
-                else:
-                    await self._current_run
-            except asyncio.TimeoutError:
-                await self._on_turn_timeout()
-            except asyncio.CancelledError as exc:
-                await self._on_turn_cancelled(exc)
-            except Exception as exc:
-                logger.warning(
-                    "[SubagentInstance] turn failed: subagent_id=%s error=%s",
-                    self.subagent_id,
-                    exc,
-                    exc_info=True,
-                )
-                if not self.status.current().is_final():
-                    await self._set_status(SubagentStatus.errored(str(exc)))
-            finally:
-                self._current_run = None
+        try:
+            async with self._running_semaphore:
+                self._interrupt_requested = False
+                await self._set_status(SubagentStatus.running())
+                self._current_run = asyncio.create_task(self._run_one_turn(op))
+                try:
+                    if self._turn_timeout_s and self._turn_timeout_s > 0:
+                        await asyncio.wait_for(self._current_run, timeout=self._turn_timeout_s)
+                    else:
+                        await self._current_run
+                except asyncio.TimeoutError:
+                    await self._on_turn_timeout()
+                except asyncio.CancelledError as exc:
+                    await self._on_turn_cancelled(exc)
+                except Exception as exc:
+                    logger.warning(
+                        "[SubagentInstance] turn failed: subagent_id=%s error=%s",
+                        self.subagent_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    if not self.status.current().is_final():
+                        await self._set_status(SubagentStatus.errored(str(exc)))
+                finally:
+                    self._current_run = None
+        finally:
+            self._turn_claimed = False
 
     async def _on_turn_timeout(self) -> None:
         if not self.status.current().is_final():

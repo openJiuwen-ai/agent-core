@@ -20,7 +20,7 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 )
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.schema.agent_mode import AgentMode
-from openjiuwen.harness.security.permission_engine.models import PermissionsSection
+from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
@@ -161,6 +161,15 @@ class AudioModelConfig:
 
 
 @dataclass
+class TaskLoopNoProgressGuardConfig:
+    """Guard repeated empty/near-empty no-tool answers in task-loop mode."""
+
+    enabled: bool = True
+    max_consecutive_empty_answers: int = 3
+    min_answer_chars: int = 20
+
+
+@dataclass
 class DeepAgentConfig:
     """Runtime configuration for DeepAgent.
 
@@ -220,7 +229,7 @@ class DeepAgentConfig:
         enable_plan_mode: Whether to enable plan mode.
         permissions: Tool permission policy dict (enabled, tools, rules, …); when
             enabled, DeepAgent mounts PermissionInterruptRail automatically.
-            常见键结构见 :class:`openjiuwen.harness.security.permission_engine.models.PermissionsSection`。
+            常见键结构见 :class:`openjiuwen.harness.security.models.PermissionsSection`。
         permission_host: Optional ToolPermissionHost callbacks (YAML path,
             workspace, hot-reload snapshot, hosted confirmation).
         parallel_tool_calls: Whether or not tool calls are executed in parallel
@@ -284,6 +293,15 @@ class DeepAgentConfig:
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
+
+    # Task-loop no-progress guard: stop repeated short answer rounds.
+    task_loop_no_progress_guard: TaskLoopNoProgressGuardConfig = field(
+        default_factory=lambda: TaskLoopNoProgressGuardConfig()
+    )
+
+    # Skill budget: gently truncate skill prompts by dropping whole low-ranked skills.
+    skill_budget_max_skills: Optional[int] = None
+    skill_budget_max_total_chars: Optional[int] = None
 
 
 @dataclass

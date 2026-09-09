@@ -133,6 +133,93 @@ BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
         "domains": ["csdn.net"],
         "task_aliases": ["csdn"],
         "evidence_entity": "article",
+        "semantic_rules": {
+            "non_result_rules": [
+                {
+                    "region": "resource",
+                    "kind": "download_resource",
+                    "link_patterns": [r"download\.csdn\.net", r"/download/", r"/resource/"],
+                    "selector_patterns": [r"download", r"resource"],
+                },
+                {
+                    "region": "commercial_module",
+                    "kind": "commercial_module",
+                    "link_patterns": [r"edu\.csdn\.net", r"mall\.csdn\.net"],
+                    "selector_patterns": [
+                        r"commercial",
+                        r"elasticcommercialinsert",
+                        r"recommend-ad",
+                        r"(?:^|[-_ ])ad(?:$|[-_ ])",
+                    ],
+                    "text_patterns": [r"付费下载|会员下载|资源下载|课程推荐|会员专享"],
+                },
+            ],
+            "natural_result_kind": "result",
+            "natural_result_requirements": {
+                "require_primary_link": True,
+                "required_link_patterns": [
+                    r"blog\.csdn\.net/[^/?#]+/article/details/",
+                    r"blog\.csdn\.net/[^/?#]+/article/",
+                ],
+            },
+        },
+    },
+    {
+        "id": "google_search",
+        "domains": ["google.com", "google.com.sg", "google.com.hk", "google.co.uk"],
+        "task_aliases": ["google", "谷歌"],
+        "evidence_entity": "search_result",
+        "semantic_rules": {
+            "non_result_rules": [
+                {
+                    "region": "sponsored_result",
+                    "kind": "promotion",
+                    "is_ad": True,
+                    "selector_patterns": [r"(?:^|[-_ ])ads?(?:$|[-_ ])", r"commercial-unit"],
+                    "text_patterns": [
+                        r"(?:^|\s)Sponsored(?:\s|$)",
+                        r"(?:^|\s)Ad(?:\s|$)",
+                        r"(?:^|\s)广告(?:\s|$)",
+                        r"赞助",
+                    ],
+                },
+                {
+                    "region": "ai_overview",
+                    "kind": "ai_overview",
+                    "selector_patterns": [r"ai-overview", r"m-x-content", r"wob-ai"],
+                    "text_patterns": [r"AI Overview", r"AI 概览", r"AI 摘要"],
+                },
+                {
+                    "region": "question_module",
+                    "kind": "people_also_ask",
+                    "selector_patterns": [r"related-question", r"people-also-ask"],
+                    "text_patterns": [r"People also ask", r"其他用户还问", r"大家还在问"],
+                },
+                {
+                    "region": "related",
+                    "kind": "related_links",
+                    "selector_patterns": [r"related-search", r"bres"],
+                    "text_patterns": [r"Related (?:links|searches)", r"相关链接", r"相关搜索"],
+                },
+                {
+                    "region": "commercial_module",
+                    "kind": "commercial_module",
+                    "text_patterns": [r"Shopping", r"Google Play", r"App Store", r"购物"],
+                    "link_patterns": [r"google\.[^/]+/shopping", r"play\.google\.com", r"apps\.apple\.com"],
+                },
+                {
+                    "region": "sidebar",
+                    "kind": "knowledge_panel",
+                    "selector_patterns": [r"knowledge-panel", r"kp-wholepage", r"rhs"],
+                },
+            ],
+            "natural_result_kind": "result",
+            "natural_result_requirements": {
+                "require_primary_link": True,
+                "exclude_profile_domains": True,
+                "redirect_query_params": ["q", "url"],
+            },
+        },
     },
     {
         "id": "douban",
@@ -241,6 +328,58 @@ def _matches_any(value: Any, patterns: Any) -> bool:
     return False
 
 
+def _natural_result_exclusion(
+    profile: Mapping[str, Any],
+    rules: Mapping[str, Any],
+    href: str,
+) -> str:
+    requirements = rules.get("natural_result_requirements")
+    if not isinstance(requirements, Mapping):
+        return ""
+    reason = ""
+    if requirements.get("require_primary_link") and not href:
+        reason = "missing_primary_link"
+    if not href:
+        return reason
+    if not reason and requirements.get("required_link_patterns") and not _matches_any(
+        href,
+        requirements.get("required_link_patterns"),
+    ):
+        reason = "primary_link_not_natural"
+    if not reason and _matches_any(href, requirements.get("excluded_link_patterns")):
+        reason = "primary_link_excluded"
+    if reason or not requirements.get("exclude_profile_domains"):
+        return reason
+    return _profile_navigation_exclusion(profile, requirements, href)
+
+
+def _profile_navigation_exclusion(
+    profile: Mapping[str, Any],
+    requirements: Mapping[str, Any],
+    href: str,
+) -> str:
+    try:
+        parsed = urlparse(href)
+    except ValueError:
+        return "invalid_primary_link"
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    redirected_href = next(
+        (
+            str(query.get(str(parameter), "")).strip()
+            for parameter in requirements.get("redirect_query_params") or []
+            if str(query.get(str(parameter), "")).strip().startswith(("http://", "https://"))
+        ),
+        "",
+    )
+    if redirected_href:
+        try:
+            parsed = urlparse(redirected_href)
+        except ValueError:
+            return "invalid_redirect_link"
+    link_host = (parsed.hostname or "").lower()
+    return "profile_navigation_link" if _domain_matches(link_host, profile.get("domains")) else ""
+
+
 def profile_detail_link_key(profile: Mapping[str, Any] | None, value: Any) -> str:
     """Return a stable entity key for a profile-defined detail link."""
     detail = _semantic_rules(profile).get("detail_link")
@@ -272,6 +411,87 @@ def profile_detail_link_key(profile: Mapping[str, Any] | None, value: Any) -> st
     return f"{prefix}:{identifier}" if identifier else f"{host}{parsed.path}".lower()
 
 
+def _card_semantic_inputs(card: Mapping[str, Any]) -> tuple[str, str, str]:
+    href = str(card.get("primary_link") or card.get("href") or "")[:500]
+    title = " ".join(str(card.get("title") or "").split())[:240]
+    preview = " ".join(str(card.get("text_preview") or "").split())[:500]
+    badges = " ".join(
+        " ".join(str(item or "").split())[:100]
+        for item in (card.get("semantic_badges") or [])
+    )
+    selector = " ".join(
+        (
+            str(card.get("selector_hint") or "")[:500],
+            str(card.get("class_name") or "")[:300],
+        )
+    )
+    return href, f"{title} {preview} {badges}", selector
+
+
+def _matching_non_result_semantics(
+    rules: Mapping[str, Any],
+    *,
+    href: str,
+    card_text: str,
+    selector: str,
+    is_ad: bool,
+) -> tuple[str, str, bool] | None:
+    for non_result_rule in rules.get("non_result_rules") or []:
+        if not isinstance(non_result_rule, Mapping):
+            continue
+        pattern_groups = (
+            (href, non_result_rule.get("link_patterns")),
+            (card_text, non_result_rule.get("text_patterns")),
+            (selector, non_result_rule.get("selector_patterns")),
+        )
+        configured_groups = [patterns for _, patterns in pattern_groups if patterns]
+        if not configured_groups:
+            continue
+        if not any(_matches_any(value, patterns) for value, patterns in pattern_groups if patterns):
+            continue
+        return (
+            str(non_result_rule.get("region") or "non_result"),
+            str(non_result_rule.get("kind") or "non_result"),
+            bool(non_result_rule.get("is_ad", is_ad)),
+        )
+    return None
+
+
+def _profile_card_semantics(
+    card: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    rules: Mapping[str, Any],
+    *,
+    href: str,
+    card_text: str,
+    region: str,
+    kind: str,
+    is_ad: bool,
+) -> tuple[str, str, bool]:
+    semantics: tuple[str, str, bool] | None = None
+    if _matches_any(href, rules.get("paid_link_patterns")):
+        semantics = ("sponsored_result", "paid_column", True)
+    elif _matches_any(card_text, rules.get("activity_text_patterns")):
+        semantics = ("activity", "activity", True)
+    elif _matches_any(card_text, rules.get("promotion_text_patterns")):
+        semantics = ("sponsored_result", "promotion", True)
+    detail_key = profile_detail_link_key(profile, href)
+    detail = rules.get("detail_link")
+    if semantics is None and detail_key and isinstance(detail, Mapping):
+        semantics = ("main_result", str(detail.get("kind") or kind), is_ad)
+    if semantics is None:
+        natural_kind = str(rules.get("natural_result_kind") or "").strip()
+        excluded_kinds = {"account", "hot_search", "sidebar"}
+        is_natural_result = region == "main_result" and kind not in excluded_kinds and not is_ad
+        exclusion = _natural_result_exclusion(profile, rules, href) if is_natural_result else ""
+        if exclusion:
+            card["classification_reason"] = exclusion
+            semantics = ("non_result", "navigation_link", is_ad)
+        elif natural_kind and is_natural_result:
+            semantics = ("main_result", natural_kind, False)
+    return semantics or (region, kind, is_ad)
+
+
 def apply_site_card_semantics(
     card: Mapping[str, Any],
     *,
@@ -285,33 +505,26 @@ def apply_site_card_semantics(
     rules = _semantic_rules(profile)
     if not rules:
         return region, kind, is_ad
-    href = str(card.get("primary_link") or card.get("href") or "")[:500]
-    title = " ".join(str(card.get("title") or "").split())[:240]
-    preview = " ".join(str(card.get("text_preview") or "").split())[:500]
-    badges = " ".join(
-        " ".join(str(item or "").split())[:100]
-        for item in (card.get("semantic_badges") or [])
+    href, card_text, selector = _card_semantic_inputs(card)
+    non_result = _matching_non_result_semantics(
+        rules,
+        href=href,
+        card_text=card_text,
+        selector=selector,
+        is_ad=is_ad,
     )
-
-    if _matches_any(href, rules.get("paid_link_patterns")):
-        return "sponsored_result", "paid_column", True
-    if _matches_any(f"{title} {badges}", rules.get("activity_text_patterns")):
-        return "activity", "activity", True
-    if _matches_any(f"{badges} {preview}", rules.get("promotion_text_patterns")):
-        return "sponsored_result", "promotion", True
-
-    detail_key = profile_detail_link_key(profile, href)
-    detail = rules.get("detail_link")
-    if detail_key and isinstance(detail, Mapping):
-        return "main_result", str(detail.get("kind") or kind), is_ad
-
-    natural_kind = str(rules.get("natural_result_kind") or "").strip()
-    is_natural_result = (
-        region == "main_result" and kind not in {"account", "hot_search", "sidebar"} and not is_ad
+    if non_result is not None:
+        return non_result
+    return _profile_card_semantics(
+        card,
+        profile,
+        rules,
+        href=href,
+        card_text=card_text,
+        region=region,
+        kind=kind,
+        is_ad=is_ad,
     )
-    if natural_kind and is_natural_result:
-        return "main_result", natural_kind, False
-    return region, kind, is_ad
 
 
 def normalize_site_card_fields(card: Dict[str, Any], *, host: str) -> None:

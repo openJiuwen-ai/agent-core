@@ -219,7 +219,7 @@ There is no dedicated headless setting — headless is a launch argument of whic
 
 | Driver | How to run headless |
 |---|---|
-| Playwright-launched | Add `--headless` to `PLAYWRIGHT_MCP_ARGS`, e.g. `PLAYWRIGHT_MCP_ARGS="-y @playwright/mcp@latest --headless"`. Default is headed. |
+| Playwright-launched | Add `--headless` to `PLAYWRIGHT_MCP_ARGS`, e.g. `PLAYWRIGHT_MCP_ARGS="-y @playwright/mcp@0.0.78 --headless"`. Default is headed. |
 | Managed | Add the Chrome flag to `BROWSER_MANAGED_ARGS`, e.g. `BROWSER_MANAGED_ARGS="--headless=new"`. Default is headed. |
 | Remote | Determined by how the remote Chrome was started. |
 | Extension | Always headed — it is a user's real browser. |
@@ -300,7 +300,7 @@ Resolved browser runtime settings, stored in `SubAgentConfig.factory_kwargs` and
 - **api_key** (str): Model API key.
 - **api_base** (str): Model API base URL.
 - **model_name** (str): Model name for the nested browser worker.
-- **mcp_cfg** (McpServerConfig): Playwright MCP server configuration (stdio; command defaults to `npx -y @playwright/mcp@latest` with the full capability list enabled via `--caps=`).
+- **mcp_cfg** (McpServerConfig): Playwright MCP server configuration (stdio; command defaults to `npx -y @playwright/mcp@0.0.78` with the full capability list enabled via `--caps=`).
 - **guardrails** ([BrowserRunGuardrails](#class-openjiuwenharnesstoolsbrowser_moveplaywright_runtimeconfigbrowserrunguardrails)): Run guardrails.
 - **instance** ([BrowserInstanceConfig](#class-openjiuwenharnesstoolsbrowser_moveplaywright_runtimeconfigbrowserinstanceconfig), optional): Per-instance browser identity.
 
@@ -394,7 +394,7 @@ Model and provider settings resolve from the `Model` object when it carries a cl
 
 | Group | Environment variables (defaults) |
 |---|---|
-| Playwright MCP | `PLAYWRIGHT_MCP_COMMAND` (`npx`), `PLAYWRIGHT_MCP_ARGS` (`-y @playwright/mcp@latest`; add flags such as `--headless`, `--viewport-size`, `--proxy-server`, `--isolated` here), `PLAYWRIGHT_MCP_TIMEOUT_S`, `PLAYWRIGHT_MCP_ENV_JSON`, `PLAYWRIGHT_MCP_BROWSER`, `PLAYWRIGHT_MCP_DEVICE`, `PLAYWRIGHT_BROWSERS_PATH`, `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` |
+| Playwright MCP | `PLAYWRIGHT_MCP_COMMAND` (`npx`), `PLAYWRIGHT_MCP_ARGS` (`-y @playwright/mcp@0.0.78`; add flags such as `--headless`, `--viewport-size`, `--proxy-server`, `--isolated` here), `PLAYWRIGHT_MCP_TIMEOUT_S`, `PLAYWRIGHT_MCP_ENV_JSON`, `PLAYWRIGHT_MCP_BROWSER`, `PLAYWRIGHT_MCP_DEVICE`, `PLAYWRIGHT_BROWSERS_PATH`, `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` |
 | Working directory | `PLAYWRIGHT_RUNTIME_MCP_CWD` / `BROWSER_RUNTIME_MCP_CWD` (default: current working directory; `screenshots/`, `artifacts/`, and `.browser-profiles/` live under it) |
 | Driver selection | `BROWSER_DRIVER` (`remote` \| `managed` \| `extension`; default `remote`), `PLAYWRIGHT_MCP_CDP_ENDPOINT` / `PLAYWRIGHT_CDP_URL`, `PLAYWRIGHT_MCP_CDP_HEADERS`, `PLAYWRIGHT_MCP_CDP_TIMEOUT`, `PLAYWRIGHT_MCP_EXTENSION` (+ `_TOKEN`) |
 | Managed Chrome | `BROWSER_MANAGED_HOST` (`127.0.0.1`), `BROWSER_MANAGED_PORT` (`9333`), `BROWSER_MANAGED_USER_DATA_DIR`, `BROWSER_MANAGED_BINARY`, `BROWSER_MANAGED_ARGS` (add `--headless=new` here for headless managed Chrome), `BROWSER_MANAGED_KILL_EXISTING`, `BROWSER_PROFILE_NAME`, `BROWSER_PROFILE_STORE_PATH` |

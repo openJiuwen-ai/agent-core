@@ -4,14 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import ntpath
 import os
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.harness.personal_context.config import (
+    DEFAULT_MAX_PAGES_PER_DIRECTORY,
+    DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
+)
+from openjiuwen.harness.personal_context.path_safety import (
+    SEMANTIC_NAME_MAX_CHARS,
+    assert_existing_chain_is_plain,
+    is_reparse_point,
+    resolve_context_relative_path,
+    semantic_context_segment_is_safe,
+)
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.filesystem import (
@@ -28,6 +40,10 @@ _MAX_SEARCH_FILES = 5_000
 _MAX_FILE_BYTES = 2 * 1024 * 1024
 _MAX_CONTEXT_LINES = 20
 _VCS_DIRECTORIES = frozenset({".git", ".svn", ".hg", ".bzr", ".jj", ".sl"})
+_DIRECTORY_STATS_UNAVAILABLE_GUIDANCE = "目录统计暂不可用；请先使用 list_files 确认目录内容。"
+_CONTEXT_ROOT_GUIDANCE = "这里只能保留 description.md 和目录。"
+_CONTEXT_NEAR_CAPACITY_GUIDANCE = "该目录接近建议上限，优先考虑其他目录或拆分子目录。"
+_CONTEXT_AT_CAPACITY_GUIDANCE = "该目录已达到建议上限，不要继续放入普通页面；请选择其他目录或建立子目录。"
 _FILE_TYPE_GLOBS: dict[str, tuple[str, ...]] = {
     "json": ("*.json",),
     "markdown": ("*.md", "*.mdx"),
@@ -40,12 +56,247 @@ _FILE_TYPE_GLOBS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _extended_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path(ntpath.join("\\\\?\\UNC", absolute[2:]))
+    drive, tail = ntpath.splitdrive(absolute)
+    namespace_root = f"\\\\?\\{drive}\\"
+    return Path(ntpath.join(namespace_root, tail.lstrip("\\/")))
+
+
+def _path_exists(path: Path) -> bool:
+    return _extended_path(path).exists()
+
+
+def _path_is_file(path: Path) -> bool:
+    return _extended_path(path).is_file()
+
+
+def _path_is_dir(path: Path) -> bool:
+    return _extended_path(path).is_dir()
+
+
+def _path_is_link_or_reparse(path: Path) -> bool:
+    target = _extended_path(path)
+    return path.is_symlink() or is_reparse_point(path) or target.is_symlink() or is_reparse_point(target)
+
+
+def _directory_entries(path: Path) -> list[Path]:
+    return [path / entry.name for entry in _extended_path(path).iterdir()]
+
+
 def _is_within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
     except ValueError:
         return False
     return True
+
+
+def _new_context_path_error(
+    sandbox: Path,
+    value: object,
+    *,
+    path_kind: str = "file",
+) -> str | None:
+    """Validate a not-yet-created user-visible Context path without mutating disk."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    root = sandbox.absolute()
+    raw = value.strip()
+    candidate_value = Path(raw)
+    if candidate_value.is_absolute():
+        candidate = candidate_value.absolute()
+    else:
+        if "\\" in raw:
+            return None
+        pure = PurePosixPath(raw)
+        if pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            return None
+        candidate = root.joinpath(*pure.parts)
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not relative.parts or relative.parts[0].casefold() != "context":
+        return None
+    if _path_exists(candidate):
+        return None
+    context_parts = relative.parts[1:]
+    if not context_parts:
+        return None
+    if path_kind == "file" and len(context_parts) == 1 and context_parts[0].casefold() != "description.md":
+        return "ordinary Markdown pages cannot be placed directly under context/"
+
+    context_root = root / "context"
+    current = context_root
+    for segment in context_parts[:-1]:
+        current /= segment
+        if _path_is_dir(current) and not _path_is_link_or_reparse(current):
+            continue
+        if not semantic_context_segment_is_safe(segment, markdown_file=False):
+            prefix = PurePosixPath(*current.relative_to(context_root).parts).as_posix()
+            return (
+                "candidate Context directory name must be portable and at most "
+                f"{SEMANTIC_NAME_MAX_CHARS} Unicode characters: {prefix}"
+            )
+
+    leaf = context_parts[-1]
+    if leaf.casefold() == "description.md":
+        return None
+    markdown_file = path_kind == "file"
+    if not semantic_context_segment_is_safe(leaf, markdown_file=markdown_file):
+        kind = "Markdown file stem" if markdown_file else "directory name"
+        relative_label = PurePosixPath(*context_parts).as_posix()
+        return (
+            f"candidate Context {kind} must be portable and at most "
+            f"{SEMANTIC_NAME_MAX_CHARS} Unicode characters: {relative_label}"
+        )
+    return None
+
+
+def _make_personal_context_write_file_tool(
+    operation: SysOperation,
+    sandbox: Path,
+) -> LocalFunction:
+    delegate = WriteFileTool(operation, "en")
+
+    async def write_file(**inputs: Any) -> ToolOutput:
+        error = _new_context_path_error(sandbox, inputs.get("file_path"))
+        if error is not None:
+            return ToolOutput(success=False, error=error)
+        return await delegate.invoke(inputs)
+
+    return LocalFunction(card=delegate.card, func=write_file)
+
+
+def _make_personal_context_edit_file_tool(
+    operation: SysOperation,
+    sandbox: Path,
+) -> LocalFunction:
+    delegate = EditFileTool(operation, "en")
+
+    async def edit_file(**inputs: Any) -> ToolOutput:
+        error = _new_context_path_error(sandbox, inputs.get("file_path"))
+        if error is not None:
+            return ToolOutput(success=False, error=error)
+        return await delegate.invoke(inputs)
+
+    return LocalFunction(card=delegate.card, func=edit_file)
+
+
+def _safe_relative_directory(sandbox: Path, directory: Path) -> str:
+    """Return a sandbox-relative label without exposing an absolute path."""
+
+    try:
+        root = sandbox.expanduser().resolve(strict=False)
+        candidate = directory.expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        return candidate.resolve(strict=False).relative_to(root).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return "."
+
+
+def _directory_snapshot(
+    sandbox: Path,
+    directory: Path,
+    *,
+    max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
+    max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
+) -> dict[str, Any]:
+    """Count only direct children and return safe Agent-facing guidance."""
+
+    relative_directory = _safe_relative_directory(sandbox, directory)
+    try:
+        root = sandbox.expanduser().resolve(strict=True)
+        candidate = directory.expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        if _path_is_link_or_reparse(candidate):
+            raise OSError("directory is linked")
+        resolved = candidate.absolute()
+        if not _is_within(resolved, root):
+            raise OSError("directory is unavailable")
+        assert_existing_chain_is_plain(resolved, stop=root)
+        if not _path_is_dir(resolved):
+            raise OSError("directory is unavailable")
+        entries = _directory_entries(resolved)
+        direct_directories = 0
+        direct_files = 0
+        ordinary_markdown = 0
+        for entry in entries:
+            if _path_is_link_or_reparse(entry):
+                direct_files += 1
+                continue
+            if _path_is_dir(entry):
+                direct_directories += 1
+                continue
+            if _path_is_file(entry):
+                direct_files += 1
+                if entry.suffix.casefold() == ".md" and entry.name.casefold() != "description.md":
+                    ordinary_markdown += 1
+
+        context_root = (root / "context").resolve(strict=False)
+        page_state = (
+            "full"
+            if ordinary_markdown >= max_pages_per_directory
+            else "near_limit"
+            if ordinary_markdown >= max(1, (max_pages_per_directory * 4 + 4) // 5)
+            else "normal"
+        )
+        subdirectory_state = (
+            "full"
+            if direct_directories >= max_subdirectories_per_directory
+            else "near_limit"
+            if direct_directories >= max(1, (max_subdirectories_per_directory * 4 + 4) // 5)
+            else "normal"
+        )
+        if resolved == context_root:
+            guidance_parts = [_CONTEXT_ROOT_GUIDANCE]
+            if subdirectory_state == "full":
+                guidance_parts.append("根目录的子目录数已达到上限，请选择已有目录或先重新分组。")
+            elif subdirectory_state == "near_limit":
+                guidance_parts.append("根目录的子目录数接近上限，优先使用已有目录或拆分层级。")
+            guidance = "".join(guidance_parts)
+        elif _is_within(resolved, context_root):
+            guidance_parts = []
+            if page_state == "full":
+                guidance_parts.append(_CONTEXT_AT_CAPACITY_GUIDANCE)
+            elif page_state == "near_limit":
+                guidance_parts.append(_CONTEXT_NEAR_CAPACITY_GUIDANCE)
+            if subdirectory_state == "full":
+                guidance_parts.append("该目录的子目录数已达到上限，请选择其他父目录或先重新分组。")
+            elif subdirectory_state == "near_limit":
+                guidance_parts.append("该目录的子目录数接近上限，优先使用其他父目录或拆分层级。")
+            guidance = "".join(guidance_parts)
+        else:
+            guidance = ""
+        return {
+            "relative_directory": relative_directory,
+            "direct_directory_count": direct_directories,
+            "direct_file_count": direct_files,
+            "ordinary_markdown_count": ordinary_markdown,
+            "max_pages_per_directory": max_pages_per_directory,
+            "remaining_page_capacity": max(0, max_pages_per_directory - ordinary_markdown),
+            "page_capacity_state": page_state,
+            "max_subdirectories_per_directory": max_subdirectories_per_directory,
+            "remaining_subdirectory_capacity": max(0, max_subdirectories_per_directory - direct_directories),
+            "subdirectory_capacity_state": subdirectory_state,
+            "guidance": guidance,
+        }
+    except (OSError, RuntimeError, ValueError):
+        return {
+            "relative_directory": relative_directory,
+            "stats_unavailable": True,
+            "guidance": _DIRECTORY_STATS_UNAVAILABLE_GUIDANCE,
+        }
 
 
 def _resolve_search_path(sandbox: Path, value: object) -> Path:
@@ -319,19 +570,177 @@ def _make_bounded_grep_tool(sandbox: Path) -> LocalFunction:
     return LocalFunction(card=card, func=grep)
 
 
+def _assert_markdown_move_tree(source: Path) -> str:
+    if _path_is_link_or_reparse(source):
+        raise ValueError("Context move source contains a link or reparse point")
+    if _path_is_file(source):
+        if source.suffix.casefold() != ".md":
+            raise ValueError("Context move supports only Markdown files")
+        return "file"
+    if not _path_is_dir(source):
+        raise ValueError("Context move source is not a regular file or directory")
+
+    pending = [source]
+    while pending:
+        directory = pending.pop()
+        if _path_is_link_or_reparse(directory):
+            raise ValueError("Context move source contains a link or reparse point")
+        try:
+            entries = _directory_entries(directory)
+        except OSError as exc:
+            raise ValueError("Context move source tree is unavailable") from exc
+        for entry in entries:
+            if _path_is_link_or_reparse(entry):
+                raise ValueError("Context move source contains a link or reparse point")
+            if _path_is_dir(entry):
+                pending.append(entry)
+            elif not _path_is_file(entry) or entry.suffix.casefold() != ".md":
+                raise ValueError("Context move directory may contain only directories and Markdown files")
+    return "directory"
+
+
+def _move_context_path(
+    sandbox: Path,
+    inputs: dict[str, Any],
+    *,
+    max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
+    max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
+) -> ToolOutput:
+    try:
+        sandbox_root = sandbox.resolve(strict=True)
+        context_path = sandbox_root / "context"
+        if context_path.is_symlink() or is_reparse_point(context_path):
+            raise ValueError("candidate Context root contains a link or reparse point")
+        context_root = context_path.resolve(strict=True)
+        if not context_root.is_dir() or not _is_within(context_root, sandbox_root):
+            raise ValueError("candidate Context root is unavailable")
+        source = resolve_context_relative_path(context_root, inputs.get("source_path"), must_exist=True)
+        destination = resolve_context_relative_path(context_root, inputs.get("destination_path"), must_exist=False)
+        source_relative = source.relative_to(context_root).as_posix()
+        destination_relative = destination.relative_to(context_root).as_posix()
+        source_kind = _assert_markdown_move_tree(source)
+        semantic_error = _new_context_path_error(
+            sandbox_root,
+            f"context/{destination_relative}",
+            path_kind=source_kind,
+        )
+        if semantic_error is not None:
+            raise ValueError(semantic_error)
+        if source_relative == "description.md" or destination_relative == "description.md":
+            raise ValueError("root description.md cannot be moved or replaced")
+        if _path_exists(destination) or _path_is_link_or_reparse(destination):
+            raise ValueError("Context move destination already exists")
+        destination_parent = destination.parent
+        if not _path_is_dir(destination_parent) or _path_is_link_or_reparse(destination_parent):
+            raise ValueError("Context move destination parent is not a directory")
+
+        if source_kind == "file" and destination.suffix.casefold() != ".md":
+            raise ValueError("Markdown files must keep the .md extension")
+        if source_kind == "directory" and destination.is_relative_to(source):
+            raise ValueError("Context directory cannot be moved into its own subtree")
+        if source_kind == "file" and destination_parent == context_root:
+            raise ValueError("ordinary Markdown pages cannot be placed directly under context/")
+        if destination_parent != source.parent:
+            if source_kind == "file":
+                ordinary_page_counts = []
+                for matched_entry in _directory_entries(destination_parent):
+                    if not (_path_is_file(matched_entry)):
+                        continue
+                    if _path_is_link_or_reparse(matched_entry):
+                        continue
+                    if matched_entry.suffix.casefold() != ".md":
+                        continue
+                    if matched_entry.name.casefold() == "description.md":
+                        continue
+                    ordinary_page_counts.append(1)
+                ordinary_pages = sum(ordinary_page_counts)
+                if ordinary_pages >= max_pages_per_directory:
+                    raise ValueError("Context destination directory has reached its Markdown page capacity")
+            else:
+                child_directories = sum(
+                    1
+                    for entry in _directory_entries(destination_parent)
+                    if _path_is_dir(entry) and not _path_is_link_or_reparse(entry)
+                )
+                if child_directories >= max_subdirectories_per_directory:
+                    raise ValueError("Context destination directory has reached its subdirectory capacity")
+
+        os.replace(_extended_path(source), _extended_path(destination))
+    except ValueError as exc:
+        return ToolOutput(success=False, error=str(exc))
+    except OSError:
+        return ToolOutput(success=False, error="Context path could not be moved")
+    return ToolOutput(
+        success=True,
+        data={
+            "source_path": source_relative,
+            "destination_path": destination_relative,
+            "kind": source_kind,
+            "links_rewritten": False,
+        },
+    )
+
+
+def _make_move_path_tool(
+    sandbox: Path,
+    *,
+    max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
+    max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
+) -> LocalFunction:
+    async def move_path(**inputs: Any) -> ToolOutput:
+        return await asyncio.to_thread(
+            _move_context_path,
+            sandbox,
+            inputs,
+            max_pages_per_directory=max_pages_per_directory,
+            max_subdirectories_per_directory=max_subdirectories_per_directory,
+        )
+
+    return LocalFunction(
+        card=ToolCard(
+            id="personal_context_move_path",
+            name="move_path",
+            description=(
+                "Move or rename one Markdown file or directory inside candidate context/. "
+                "Paths are POSIX paths relative to context/, destination must not exist, and links are not rewritten."
+            ),
+            input_params={
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string"},
+                    "destination_path": {"type": "string"},
+                },
+                "required": ["source_path", "destination_path"],
+                "additionalProperties": False,
+            },
+            parallel_safe=False,
+            idempotent=False,
+        ),
+        func=move_path,
+    )
+
+
 def make_personal_context_file_tools(
     operation: SysOperation,
     sandbox: Path,
+    *,
+    max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
+    max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
 ) -> list[Tool | ToolCard]:
     """Return the exact model-visible file tool set for PersonalContext."""
 
     return [
         ReadFileTool(operation, "en", enable_image_multimodal=False),
-        WriteFileTool(operation, "en"),
-        EditFileTool(operation, "en"),
+        _make_personal_context_write_file_tool(operation, sandbox),
+        _make_personal_context_edit_file_tool(operation, sandbox),
         GlobTool(operation, "en"),
         ListDirTool(operation, "en"),
         _make_bounded_grep_tool(sandbox),
+        _make_move_path_tool(
+            sandbox,
+            max_pages_per_directory=max_pages_per_directory,
+            max_subdirectories_per_directory=max_subdirectories_per_directory,
+        ),
     ]
 
 

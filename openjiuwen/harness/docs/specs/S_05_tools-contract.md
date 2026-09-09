@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-09-07 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -41,8 +41,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 2. **工具注册走 `DeepAgent` / rail 的卡片机制**：工具以 `Tool | ToolCard` 形态存在，
    `card.name` 是身份（`_tool_identity` / `ability_manager.get(name)` 强校验）；新增工具
    不得复用已有 card.name。卸载先校验 card 身份（见 `S_04` 不变量 7）。
-3. **工具发现**：`tool_discovery/` 提供 `ToolSearchTool` + bm25 检索（`tool_discovery/bm25.py`），
-   是工具搜索的唯一入口；`ListSkillTool` / `SkillTool`（`tools/skills/`）负责技能类工具。
+3. **工具发现**：`tool_discovery/` 提供 `ToolSearchTool` + bm25 检索
+   （`tool_discovery/bm25.py`）以及固定的 `ToolCallTool` 包装器。模型先搜索并授权 deferred
+   工具，再经 `tool_call` 交给原 `AbilityManager` 生命周期执行；`ListSkillTool` /
+   `SkillTool`（`tools/skills/`）负责技能类工具。
 4. **工具分组簇**：
    - web：`create_web_tools()`（fetch / free_search / paid_search）+ `WebFreeSearchTool` /
      `WebFetchWebpageTool`；`is_free_search_enabled()` / `is_paid_search_enabled()` 门控。
@@ -76,6 +78,12 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 8. **工具装载顺序**：`create_deep_agent` / `DeepAgentConfig.tools` 进 `ability_manager`；
    rail init 再动态加工具（`SysOperationRail` 100 先铺文件系统/shell 工具，见 `S_04`
    梯队 100）。工具分批装载的时序语义由 rail priority 保证。
+9. **Browser 默认工具面保持紧凑**：默认只暴露常用 Playwright primitive、两类 Probe、
+   Batch 和受限 offload recall。诊断、取消、custom-action discovery、拖放及其他低频能力
+   通过显式 capability 启用；runtime 内部 transport 工具不进入模型工具面。
+10. **Browser 可恢复错误不消耗模型回合**：generation 刷新、单步骤 Batch primitive 改写、
+    primary link 导航、Probe JSON 一次重试和新标签页 URL 等待由 runtime 确定性处理；只有
+    无法唯一解析目标或页面语义确实不充分时才把紧凑错误返回模型。
 
 ## 接口契约
 
@@ -128,7 +136,10 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 
 错误 / 返回语义：
 
-- 工具错误一律以 `ToolOutput(success=False, error=...)` 返回，不抛异常。
+- 可恢复的工具错误一律以 `ToolOutput(success=False, error=...)` 返回，不抛裸异常。
+  `ToolInterruptException` 属于用户交互控制流，所有工具包装层必须原样传播，具体契约见
+  `S_04`。经包装层进入中断状态的 deferred 工具在 resume 时重新执行原 wrapper call，
+  由 wrapper 在保留的搜索授权下再次分发 target；审批请求仍使用 target call ID。
 - `get_or_create_plan_slug` 缺 workspace_root → 抛；plan 文件路径经 `resolve_plan_file_path`
   固定解析（`<workspace_root>/<slug>/plan.md` 形态，实际以 `agent_mode_tools.py` 为准）。
 - `WorktreeManager` 操作失败抛 `GitError` / `WorktreeLockTimeout`（`tools/worktree/`）。

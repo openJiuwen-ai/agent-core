@@ -16,6 +16,10 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import (
+    package_builtin_rules_enabled,
+)
+
 logger = logging.getLogger(__name__)
 
 _SENSITIVE_PATHS_CACHE: tuple[str, float, list[dict[str, Any]]] | None = None
@@ -168,6 +172,8 @@ def merge_package_sensitive_paths(
 ) -> dict[str, Any]:
     """Merge package sensitive paths into ``file_guard.paths`` when enabled."""
     cfg = deepcopy(permissions) if isinstance(permissions, dict) else {}
+    if not package_builtin_rules_enabled(cfg):
+        return cfg
     fg = cfg.get("file_guard")
     fg_enabled = isinstance(fg, dict) and bool(fg.get("enabled"))
     should_inject = inject if inject is not None else fg_enabled

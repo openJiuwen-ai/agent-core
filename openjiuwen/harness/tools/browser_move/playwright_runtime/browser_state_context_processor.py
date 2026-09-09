@@ -100,7 +100,7 @@ class BrowserStateContextProcessorConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: Any = Field(exclude=True, repr=False)
-    max_dom_chars: int = Field(default=40_000, gt=0)
+    max_dom_chars: int = Field(default=12_000, ge=2_000)
 
 
 @ContextEngine.register_processor()
@@ -142,11 +142,14 @@ class BrowserStateContextProcessor(ContextProcessor):
         del kwargs
         source_messages = context.get_messages() if context is not None else context_window.context_messages
         action_group_id, refresh_tool_call_ids, observation_only = self._completed_state_action_group(source_messages)
+        reconciliation_only = self._requires_reconciliation(source_messages, refresh_tool_call_ids)
         should_refresh = self._cached_state is None or bool(
             action_group_id and action_group_id not in self._seen_action_group_ids
         )
         if should_refresh:
-            if observation_only and action_group_id:
+            if reconciliation_only and action_group_id:
+                captured_state = await self._capture_reconciliation_state(action_group_id=action_group_id)
+            elif observation_only and action_group_id:
                 captured_state = await self._capture_compact_state(action_group_id=action_group_id)
             else:
                 captured_state = await self._capture_state(action_group_id=action_group_id or "initial")
@@ -209,36 +212,22 @@ class BrowserStateContextProcessor(ContextProcessor):
     ) -> tuple[str, set[str], bool]:
         """Return one completed browser group, merging concurrent read-only observations."""
 
-        completed_call_ids = {
-            str(message.tool_call_id)
-            for message in messages
-            if isinstance(message, ToolMessage) and message.tool_call_id
-        }
-        executed_call_ids = {
-            str(message.tool_call_id)
-            for message in messages
-            if isinstance(message, ToolMessage) and message.tool_call_id and cls._tool_message_was_executed(message)
-        }
+        completed_call_ids, tool_messages, executed_call_ids = cls._completed_tool_message_index(messages)
         refresh_tool_call_ids: set[str] = set()
         latest_group_id = ""
         latest_observation_only = False
         for message in messages:
             if not isinstance(message, AssistantMessage):
                 continue
-            tool_calls = list(message.tool_calls or [])
-            call_ids = [str(tool_call.id) for tool_call in tool_calls if tool_call.id]
-            if not call_ids or not all(call_id in completed_call_ids for call_id in call_ids):
+            group = cls._classify_completed_action_group(
+                list(message.tool_calls or []),
+                completed_call_ids=completed_call_ids,
+                executed_call_ids=executed_call_ids,
+                tool_messages=tool_messages,
+            )
+            if group is None:
                 continue
-            group_refresh_ids: set[str] = set()
-            group_observation_ids: set[str] = set()
-            for tool_call in tool_calls:
-                call_id = str(tool_call.id or "")
-                if not call_id or call_id not in executed_call_ids:
-                    continue
-                if cls._is_refresh_tool_name(tool_call.name):
-                    group_refresh_ids.add(call_id)
-                if cls._is_observation_tool_name(tool_call.name):
-                    group_observation_ids.add(call_id)
+            call_ids, group_refresh_ids, group_observation_ids = group
             group_browser_ids = group_refresh_ids | group_observation_ids
             if not group_browser_ids:
                 continue
@@ -246,6 +235,64 @@ class BrowserStateContextProcessor(ContextProcessor):
             latest_group_id = hashlib.sha256("\x1f".join(call_ids).encode("utf-8")).hexdigest()[:16]
             latest_observation_only = not group_refresh_ids and bool(group_observation_ids)
         return latest_group_id, refresh_tool_call_ids, latest_observation_only
+
+    @classmethod
+    def _requires_reconciliation(
+        cls,
+        messages: list[BaseMessage],
+        refresh_tool_call_ids: set[str],
+    ) -> bool:
+        for message in messages:
+            if not isinstance(message, ToolMessage):
+                continue
+            if str(message.tool_call_id or "") not in refresh_tool_call_ids:
+                continue
+            if cls._tool_message_changed_state(message) and not cls._tool_message_succeeded(message):
+                return True
+        return False
+
+    @classmethod
+    def _classify_completed_action_group(
+        cls,
+        tool_calls: list[Any],
+        *,
+        completed_call_ids: set[str],
+        executed_call_ids: set[str],
+        tool_messages: dict[str, ToolMessage],
+    ) -> tuple[list[str], set[str], set[str]] | None:
+        call_ids = [str(tool_call.id) for tool_call in tool_calls if tool_call.id]
+        if not call_ids or not all(call_id in completed_call_ids for call_id in call_ids):
+            return None
+        mutation_ids: set[str] = set()
+        observation_ids: set[str] = set()
+        for tool_call in tool_calls:
+            call_id = str(tool_call.id or "")
+            if not call_id or call_id not in executed_call_ids:
+                continue
+            tool_message = tool_messages.get(call_id)
+            if cls._is_refresh_tool_name(tool_call.name) and cls._tool_message_changed_state(tool_message):
+                mutation_ids.add(call_id)
+            if cls._is_observation_tool_name(tool_call.name) and cls._tool_message_succeeded(tool_message):
+                observation_ids.add(call_id)
+        return call_ids, mutation_ids, observation_ids
+
+    @classmethod
+    def _completed_tool_message_index(
+        cls,
+        messages: list[BaseMessage],
+    ) -> tuple[set[str], dict[str, ToolMessage], set[str]]:
+        tool_messages = {
+            str(message.tool_call_id): message
+            for message in messages
+            if isinstance(message, ToolMessage) and message.tool_call_id
+        }
+        completed_call_ids = set(tool_messages)
+        executed_call_ids = {
+            call_id
+            for call_id, message in tool_messages.items()
+            if cls._tool_message_was_executed(message)
+        }
+        return completed_call_ids, tool_messages, executed_call_ids
 
     @staticmethod
     def _tool_message_was_executed(message: ToolMessage) -> bool:
@@ -259,6 +306,42 @@ class BrowserStateContextProcessor(ContextProcessor):
             except (TypeError, ValueError):
                 payload = None
             if isinstance(payload, dict) and (payload.get("denied") is True or payload.get("executed") is False):
+                return False
+        return True
+
+    @staticmethod
+    def _tool_message_changed_state(message: ToolMessage | None) -> bool:
+        if message is None:
+            return False
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        if metadata.get("state_changed") is False:
+            return False
+        content = message.content
+        if isinstance(content, str):
+            try:
+                payload = json.loads(content)
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("state_changed") is False:
+                return False
+        return True
+
+    @staticmethod
+    def _tool_message_succeeded(message: ToolMessage | None) -> bool:
+        if message is None:
+            return False
+        metadata = message.metadata if isinstance(message.metadata, dict) else {}
+        if metadata.get("success") is False:
+            return False
+        content = message.content
+        if isinstance(content, str):
+            try:
+                payload = json.loads(content)
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict) and (
+                payload.get("ok") is False or payload.get("success") is False
+            ):
                 return False
         return True
 
@@ -342,6 +425,22 @@ class BrowserStateContextProcessor(ContextProcessor):
                 state["page_position"] = self._cached_state.get("page_position") or {}
         return state
 
+    async def _capture_reconciliation_state(self, *, action_group_id: str) -> Dict[str, Any]:
+        capture = getattr(self.config.provider, "capture_reconciliation_browser_state", None)
+        if not callable(capture):
+            return await self._capture_state(action_group_id=action_group_id)
+        try:
+            state = await capture(action_group_id=action_group_id)
+        except Exception as exc:
+            browser_agent_log_warning(
+                "[BrowserStateContextProcessor] browser state reconciliation failed: %s",
+                exc,
+            )
+            return await self._capture_state(action_group_id=action_group_id)
+        if not isinstance(state, dict):
+            return await self._capture_state(action_group_id=action_group_id)
+        return state
+
     def _classify_page_change(self, state: Dict[str, Any]) -> str:
         """Compare a successful capture with the previous successful capture."""
         if not bool(state.get("ok")):
@@ -393,7 +492,7 @@ class BrowserStateContextProcessor(ContextProcessor):
         if not isinstance(page_state, dict):
             page_state = {}
 
-        state_header = {
+        state_header = self._fit_state_header({
             "ok": bool(state.get("ok")),
             "error": state.get("error"),
             "url": state.get("url") or "",
@@ -403,7 +502,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             "semantic_state": state.get("semantic_state") or {},
             "dom_error": state.get("dom_error"),
             "page_state": page_state,
-        }
+        })
         return (
             "<browser_state>\n"
             "This observation was captured initially or after the latest detected browser mutation and "
@@ -411,9 +510,121 @@ class BrowserStateContextProcessor(ContextProcessor):
             "tool completes; element references may become stale if the page changes independently. "
             "Change status is provided separately after this compact observation. Raw AX/Card data is "
             "available only in the browser audit trace.\n"
-            f"{json.dumps(state_header, ensure_ascii=False, indent=2)}\n"
+            f"{json.dumps(state_header, ensure_ascii=False, separators=(',', ':'))}\n"
             "</browser_state>"
         )
+
+    def _fit_state_header(self, value: Dict[str, Any]) -> Dict[str, Any]:
+        """Bound browser state structurally so the rendered JSON stays valid."""
+
+        payload = json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        page_state = payload.get("page_state")
+        semantic_state = payload.get("semantic_state")
+        if isinstance(semantic_state, dict):
+            semantic_state.pop("field_coverage", None)
+            semantic_state.pop("blockers", None)
+        if isinstance(page_state, dict) and page_state:
+            page_state.pop("field_coverage", None)
+            page_blockers = page_state.pop("blockers", None)
+            if page_blockers:
+                page_state["page_blockers"] = page_blockers
+            page_state["interactives"] = list(page_state.get("interactives") or [])[:20]
+            page_state["cards"] = list(page_state.get("cards") or [])[:8]
+        payload["tabs"] = list(payload.get("tabs") or [])[:6]
+        if self._serialized_size(payload) <= self.config.max_dom_chars:
+            return payload
+
+        if isinstance(page_state, dict):
+            collections = (
+                page_state.get("interactives"),
+                page_state.get("cards"),
+            )
+            while self._serialized_size(payload) > self.config.max_dom_chars:
+                largest = max(
+                    (items for items in collections if isinstance(items, list) and items),
+                    key=lambda items: len(json.dumps(items, ensure_ascii=False, default=str)),
+                    default=None,
+                )
+                if largest is None:
+                    break
+                largest.pop()
+
+        if self._serialized_size(payload) <= self.config.max_dom_chars:
+            payload["truncated"] = True
+            return payload
+
+        semantic_state = payload.get("semantic_state")
+        if isinstance(semantic_state, dict):
+            compact_semantic = {}
+            for key in (
+                "url",
+                "form_values",
+                "selected_filters",
+                "result_count",
+                "first_result_text",
+            ):
+                value = semantic_state.get(key)
+                if value not in (None, "", [], {}):
+                    compact_semantic[key] = value
+            for key in ("form_values", "selected_filters"):
+                values = compact_semantic.get(key)
+                if isinstance(values, dict):
+                    compact_semantic[key] = {
+                        str(item_key)[:80]: str(item_value)[:160]
+                        for item_key, item_value in list(values.items())[:8]
+                    }
+                elif isinstance(values, list):
+                    compact_semantic[key] = [str(item)[:160] for item in values[:8]]
+            if "first_result_text" in compact_semantic:
+                compact_semantic["first_result_text"] = str(compact_semantic["first_result_text"])[:300]
+            payload["semantic_state"] = compact_semantic
+        payload["tabs"] = payload["tabs"][:3]
+        payload["truncated"] = True
+        if self._serialized_size(payload) <= self.config.max_dom_chars:
+            return payload
+
+        compact_page = {
+            key: page_state.get(key)
+            for key in ("page_id", "generation_id")
+            if isinstance(page_state, dict) and page_state.get(key) not in (None, "", [], {})
+        }
+        if isinstance(page_state, dict):
+            for key, limit in (("url", 600), ("title", 200)):
+                if page_state.get(key) not in (None, ""):
+                    compact_page[key] = str(page_state[key])[:limit]
+        fallback = {
+            "ok": payload.get("ok"),
+            "error": payload.get("error"),
+            "url": str(payload.get("url") or "")[:1_000],
+            "title": str(payload.get("title") or "")[:300],
+            "tabs": payload.get("tabs") or [],
+            "semantic_state": payload.get("semantic_state") or {},
+            "dom_error": payload.get("dom_error"),
+            "page_state": compact_page,
+            "truncated": True,
+        }
+        if self._serialized_size(fallback) <= self.config.max_dom_chars:
+            return fallback
+        final_semantic: Dict[str, Any] = {}
+        fallback_semantic = fallback.get("semantic_state")
+        if isinstance(fallback_semantic, dict):
+            if fallback_semantic.get("url"):
+                final_semantic["url"] = str(fallback_semantic["url"])[:400]
+            if fallback_semantic.get("result_count") not in (None, ""):
+                final_semantic["result_count"] = fallback_semantic["result_count"]
+        return {
+            "ok": payload.get("ok"),
+            "error": str(payload.get("error") or "")[:300] or None,
+            "url": str(payload.get("url") or "")[:600],
+            "title": str(payload.get("title") or "")[:200],
+            "semantic_state": final_semantic,
+            "page_state": compact_page,
+            "truncated": True,
+        }
+
+    @staticmethod
+    def _serialized_size(value: Dict[str, Any]) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
 
     @staticmethod
     def _is_browser_state_message(message: BaseMessage) -> bool:

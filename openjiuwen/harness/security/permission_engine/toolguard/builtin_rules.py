@@ -5,6 +5,9 @@
 Engine evaluation consumes effective ``rules`` only. Do not call these loaders
 from ``evaluate_tiered_policy``. Each YAML entry carries default ``action``;
 this module copies it and does not map ``severity``.
+
+``package_builtin_rules_enabled`` is the host switch for the whole package
+YAML (command rules, sensitive_paths, net_urls). Missing values default True.
 """
 
 from __future__ import annotations
@@ -20,6 +23,26 @@ logger = logging.getLogger(__name__)
 
 _COMMAND_RULES_CACHE: tuple[str, float, list[dict[str, Any]]] | None = None
 _VALID_ACTIONS = frozenset({"ask", "deny", "allow"})
+_FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
+_TRUE_STRINGS = frozenset({"true", "1", "yes", "on"})
+
+
+def package_builtin_rules_enabled(permissions: dict[str, Any] | None) -> bool:
+    """Whether to inject package command rules, sensitive_paths, and net_urls."""
+    if not isinstance(permissions, dict):
+        return True
+    value = permissions.get("package_builtin_rules")
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _FALSE_STRINGS:
+            return False
+        if lowered in _TRUE_STRINGS:
+            return True
+    return True
 
 
 def _package_rules_yaml_path() -> Path:
@@ -99,6 +122,8 @@ def inline_package_command_rules(
 ) -> dict[str, Any]:
     """Copy package command rules into effective ``rules`` using YAML ``action``."""
     cfg = deepcopy(permissions) if isinstance(permissions, dict) else {}
+    if not package_builtin_rules_enabled(cfg):
+        return cfg
     existing = cfg.get("rules") if isinstance(cfg.get("rules"), list) else []
     user_rules = [
         dict(r)
@@ -122,4 +147,5 @@ __all__ = [
     "get_package_builtin_rules_path",
     "inline_package_command_rules",
     "load_package_command_rules",
+    "package_builtin_rules_enabled",
 ]

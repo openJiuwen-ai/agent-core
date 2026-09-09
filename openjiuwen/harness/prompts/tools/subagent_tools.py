@@ -50,8 +50,20 @@ SUBAGENT_WAIT_DESCRIPTION: Dict[str, str] = {
 }
 
 SUBAGENT_LIST_DESCRIPTION: Dict[str, str] = {
-    "cn": "列出当前父会话下存活的子代理及容量占用情况。",
-    "en": "List live subagents and current capacity usage for the parent session.",
+    "cn": (
+        "列出当前父会话下的子代理与容量占用。"
+        "subagents / live_subagents 为存活实例（可 send_input）；"
+        "closed_subagents 为已关闭、可 subagent_resume 的实例；"
+        "summary 给出 live_count / closed_count。"
+        "向用户汇报时须以本次返回为准，勿凭对话历史臆造列表。"
+    ),
+    "en": (
+        "List subagents and capacity for the parent session. "
+        "subagents / live_subagents are live instances (send_input eligible); "
+        "closed_subagents are closed instances restorable via subagent_resume; "
+        "summary provides live_count / closed_count. "
+        "Report only what this call returns—do not reconstruct the roster from chat history."
+    ),
 }
 
 SUBAGENT_SEND_INPUT_DESCRIPTION: Dict[str, str] = {

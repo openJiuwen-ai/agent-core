@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -337,6 +338,20 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "required"):
             await tool.invoke({"subagent_type": "code"}, session=session)
 
+    async def test_task_tool_rejects_type_reserved_for_runtime(self) -> None:
+        parent_agent = SimpleNamespace(create_subagent=lambda *_args, **_kwargs: None)
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+            allowed_subagent_types={"browser_agent"},
+        )
+
+        with self.assertRaisesRegex(Exception, "not available through task_tool"):
+            await tool.invoke(
+                {"subagent_type": "code", "task_description": "run task"},
+                session=Session(session_id="parent_session"),
+            )
+
     async def test_task_tool_creates_fresh_browser_model_session(self) -> None:
         called_inputs: dict[str, str] = {}
 
@@ -452,6 +467,25 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             parent_agent=parent_agent,
         )
         resume_id = "parent_session_sub_browser_agent_1234abcd"
+        parent_session = Session(session_id="parent_session")
+        started_at = time.time()
+        parent_session.update_state(
+            {
+                "__browser_query_delegation_state__": {
+                    "original-query": {
+                        "query_id": "original-query",
+                        "sub_session_id": resume_id,
+                        "status": "partial",
+                        "retryable": True,
+                        "resume_count": 0,
+                        "started_at": started_at,
+                        "deadline_at": started_at + 600,
+                        "budget_s": 600.0,
+                        "browser_result": browser_result,
+                    }
+                }
+            }
+        )
 
         with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
             result = await tool.invoke(
@@ -461,18 +495,108 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                     "browser_capabilities": [],
                     "resume_task_id": resume_id,
                 },
-                session=Session(session_id="parent_session"),
+                session=parent_session,
             )
 
         self.assertTrue(result.success)
         self.assertEqual(called_inputs["conversation_id"], resume_id)
-        self.assertEqual(
-            called_inputs["run_context"],
-            {"browser_resume": True, "resume_task_id": resume_id},
-        )
+        run_context = called_inputs["run_context"]
+        self.assertTrue(run_context["browser_resume"])
+        self.assertEqual(run_context["resume_task_id"], resume_id)
+        self.assertEqual(run_context["browser_query_id"], "original-query")
+        self.assertEqual(run_context["browser_query_started_at"], started_at)
+        self.assertEqual(run_context["browser_query_deadline_at"], started_at + 600)
         self.assertTrue(result.data["retryable"])
         self.assertEqual(result.data["browser_result"], browser_result)
         self.assertEqual(result.data["resume_context"]["missing_fields"], ["product_rating"])
+
+    async def test_browser_query_allows_only_one_focused_resume_with_shared_deadline(self) -> None:
+        calls: list[dict[str, object]] = []
+        partial_result = {
+            "status": "partial",
+            "retryable": True,
+            "missing_fields": ["product_rating"],
+            "missing_slots": [
+                {"entity": "product", "variant": "default", "field": "product_rating"}
+            ],
+            "blockers": [],
+            "evidence": [{"field": "title", "value": "Keyboard"}],
+            "recommended_recovery": "read_product_rating_on_current_page",
+        }
+        completed_result = {
+            "status": "completed",
+            "retryable": False,
+            "missing_fields": [],
+            "missing_slots": [],
+            "blockers": [],
+            "evidence": [
+                {"field": "title", "value": "Keyboard"},
+                {"field": "product_rating", "value": "4.8"},
+            ],
+        }
+
+        class FakeSubAgent:
+            card = AgentCard(name="browser_agent", description="browser", id="browser_id")
+
+            async def invoke(self, invoke_inputs: dict[str, object]) -> dict[str, object]:
+                calls.append(dict(invoke_inputs))
+                browser_result = partial_result if len(calls) == 1 else completed_result
+                return {
+                    "output": "browser result",
+                    "authoritative_browser_result": browser_result,
+                }
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+        session = Session(session_id="parent_session")
+
+        with patch(
+            "openjiuwen.harness.tools.subagent.task_tool.current_usage_invocation_id",
+            return_value="main-query-1",
+        ):
+            first = await tool.invoke(
+                {
+                    "subagent_type": "browser_agent",
+                    "task_description": "Search Taobao and return title and product rating",
+                    "browser_capabilities": [],
+                },
+                session=session,
+            )
+            second = await tool.invoke(
+                {
+                    "subagent_type": "browser_agent",
+                    "task_description": "Try the whole Taobao search again with another selector",
+                    "browser_capabilities": [],
+                },
+                session=session,
+            )
+            third = await tool.invoke(
+                {
+                    "subagent_type": "browser_agent",
+                    "task_description": "Verify everything one more time",
+                    "browser_capabilities": [],
+                },
+                session=session,
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(first.data["query_id"], "main-query-1")
+        self.assertIn("Collect only these unresolved evidence slots", calls[1]["query"])
+        self.assertNotIn("whole Taobao search", calls[1]["query"])
+        self.assertEqual(calls[0]["conversation_id"], calls[1]["conversation_id"])
+        self.assertFalse(calls[0]["run_context"]["browser_resume"])
+        self.assertTrue(calls[1]["run_context"]["browser_resume"])
+        self.assertEqual(
+            calls[0]["run_context"]["browser_query_deadline_at"],
+            calls[1]["run_context"]["browser_query_deadline_at"],
+        )
+        self.assertEqual(second.data["browser_result"]["status"], "completed")
+        self.assertEqual(third.data["code"], "browser_query_resume_not_allowed")
 
 
 class TestTaskToolSync(unittest.TestCase):
@@ -493,6 +617,19 @@ class TestTaskToolSync(unittest.TestCase):
         self.assertEqual(
             AbilityManager._resolve_call_timeout(tools[0].card),
             DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+        )
+
+    def test_create_task_tool_propagates_allowed_subagent_types(self) -> None:
+        tools = create_task_tool(
+            parent_agent=SimpleNamespace(deep_config=None),
+            available_agents="browser_agent",
+            language="cn",
+            allowed_subagent_types={"browser_agent"},
+        )
+
+        self.assertEqual(
+            tools[0]._allowed_subagent_types,
+            frozenset({"browser_agent"}),
         )
 
     def test_general_purpose_subagent_inherits_parent_mcps(self) -> None:
