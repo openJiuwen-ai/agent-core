@@ -12,6 +12,7 @@ class _FakeController:
     async def pause(self, run_id): self.calls.append(("pause", run_id)); return True
     async def resume(self, run_id): self.calls.append(("resume", run_id)); return True
     async def stop(self, run_id): self.calls.append(("stop", run_id)); return True
+    def is_paused(self, run_id=None): return False
 
 
 def _make_tool(controller):
@@ -128,3 +129,45 @@ async def test_resume_on_unregistered_run_still_reports_not_found():
     out = await tool.invoke({"resume_id": "wf_cold", "action": "resume"})
     assert not out.success and out.data["status"] == "not_found"
     assert tool._messager.published == []
+
+
+@pytest.mark.asyncio
+async def test_stop_on_paused_run_announces_stopped():
+    """A paused run has already unwound: the controller only drops its ticket
+    and the engine never emits WORKFLOW_STOPPED. The tool must announce it so
+    the embedder's card closes — same as the cold-start case, but here the
+    controller reports success.
+    """
+    from openjiuwen.agent_teams.context import set_session_id
+
+    class _Ctl(_FakeController):
+        def __init__(self):
+            super().__init__(); self.paused = {"wf_p"}
+        def is_paused(self, run_id=None):
+            return run_id in self.paused
+        async def stop(self, run_id):
+            self.calls.append(("stop", run_id)); return self.paused.discard(run_id) is None and run_id == "wf_p"
+
+    ctl = _Ctl()
+    tool = _make_tool(ctl)
+    tool._messager = _RecMessager()
+    tool._team_name = "t"
+    set_session_id("s1")
+
+    out = await tool.invoke({"resume_id": "wf_p", "action": "stop"})
+
+    assert out.success
+    (_topic, msg), = tool._messager.published
+    assert msg.payload["kind"] == "workflow_stopped" and msg.payload["run_id"] == "wf_p"
+
+
+@pytest.mark.asyncio
+async def test_stop_on_active_run_does_not_double_announce():
+    """An active run's stop is announced by the engine while it unwinds."""
+    class _Ctl(_FakeController):
+        def is_paused(self, run_id=None): return False
+    tool = _make_tool(_Ctl())
+    tool._messager = _RecMessager()
+    tool._team_name = "t"
+    out = await tool.invoke({"resume_id": "wf_a", "action": "stop"})
+    assert out.success and tool._messager.published == []
