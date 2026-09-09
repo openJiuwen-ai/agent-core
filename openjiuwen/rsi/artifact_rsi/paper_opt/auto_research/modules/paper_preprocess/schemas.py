@@ -26,12 +26,19 @@ class LatexPaperDocument(BaseModel):
     paper_dir: str
     main_tex_path: str
     expanded_tex: str
+    # Best-effort: may be "" when the source paper doesn't declare one
+    # (or uses a form validate_latex_paper's regexes don't recognize) --
+    # see that function's docstring for why this is non-fatal.
     title: str
     abstract: str
     sections: list[PaperSection] = Field(default_factory=list)
     bibliography_paths: list[str] = Field(default_factory=list)
     figure_paths: list[str] = Field(default_factory=list)
     source_files: list[str] = Field(default_factory=list)
+    # Non-fatal issues validate_latex_paper noted while reading this paper
+    # (missing preamble markers, unresolved figures/citations, skipped
+    # includes, ...) -- diagnostic only, nothing downstream gates on this.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PaperPreprocessInput(BaseModel):
