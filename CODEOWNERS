@@ -42,3 +42,8 @@
 /openjiuwen/harness/prompts/report.py @renquanjia
 /openjiuwen/harness/prompts/prompt_attachment_manager.py @renquanjia
 /openjiuwen/harness/prompts/sanitize.py @renquanjia
+
+
+/openjiuwen/agent_teams/ @liutao_1998
+/openjiuwen/agent_evolving/ @xinyang_bali
+/openjiuwen/harness/rails/evolution/ @xinyang_bali
