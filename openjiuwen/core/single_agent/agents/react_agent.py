@@ -1816,6 +1816,7 @@ class ReActAgent(BaseAgent):
         Returns interrupt result dict if still waiting, or None to continue ReAct loop.
         """
         if isinstance(interruption_state, ToolInterruptionState):
+            self._hitl_handler.clear(session)
             resume_ctx = ResumeContext(
                 state=interruption_state,
                 user_input=user_input,
@@ -1827,6 +1828,7 @@ class ReActAgent(BaseAgent):
             )
             return await self._hitl_handler.handle_resume(resume_ctx)
 
+        self._clear_interruption_state(session)
         resume_iteration = interruption_state.iteration
         logger.info(f"Resuming ReAct from iteration {resume_iteration + 1}")
 
@@ -1925,6 +1927,11 @@ class ReActAgent(BaseAgent):
         """Build an InteractiveInput from user feedback and component IDs."""
         from openjiuwen.core.session import InteractiveInput
         if isinstance(user_query, InteractiveInput):
+            if user_query.raw_inputs is not None:
+                interactive_input = InteractiveInput()
+                for comp_id in component_ids:
+                    interactive_input.update(comp_id, user_query.raw_inputs)
+                return interactive_input
             provided_ids = set(user_query.user_inputs.keys())
             fallback = next(iter(user_query.user_inputs.values()), "") if provided_ids else ""
             for comp_id in component_ids:
@@ -2075,10 +2082,6 @@ class ReActAgent(BaseAgent):
                 hitl_state = self._hitl_handler.load(session)
                 interruption_state = hitl_state or self._load_interruption_state(session)
                 if interruption_state is not None:
-                    if hitl_state is not None:
-                        self._hitl_handler.clear(session)
-                    else:
-                        self._clear_interruption_state(session)
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
 

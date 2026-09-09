@@ -54,6 +54,7 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentCallbackEvent,
@@ -70,6 +71,12 @@ from openjiuwen.agent_teams.harness.control import (
     _CmdStop,
 )
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
+from openjiuwen.agent_teams.harness.interrupt_resume import (
+    matches_admitted_interrupt,
+    pending_tool_resume_ids,
+    tool_resume_scope_ids,
+    workflow_resume_slot,
+)
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.snapshot_rail import (
     COOPERATIVE_STOP_TYPE,
@@ -538,7 +545,21 @@ class NativeHarness(DeepAgent):
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        msg = InboxMessage(seq=0, content=content, immediate=immediate)
+        interrupt_state = (
+            self._session.get_state(INTERRUPTION_KEY)
+            if self._session is not None
+            else None
+        )
+        msg = InboxMessage(
+            seq=0,
+            content=content,
+            immediate=immediate,
+            admitted_tool_scope_ids=tool_resume_scope_ids(content, self._session),
+            admitted_workflow_slot=workflow_resume_slot(
+                content,
+                interrupt_state,
+            ),
+        )
         await self._control.put(_CmdSend(msg=msg, ack=ack))
         return await ack
 
@@ -807,7 +828,13 @@ class NativeHarness(DeepAgent):
     async def _on_send(self, cmd: _CmdSend) -> None:
         """Route a send according to current phase."""
         seq = self._st.next_seq()
-        msg = InboxMessage(seq=seq, content=cmd.msg.content, immediate=cmd.msg.immediate)
+        msg = InboxMessage(
+            seq=seq,
+            content=cmd.msg.content,
+            immediate=cmd.msg.immediate,
+            admitted_tool_scope_ids=cmd.msg.admitted_tool_scope_ids,
+            admitted_workflow_slot=cmd.msg.admitted_workflow_slot,
+        )
 
         phase = self._st.phase
         if phase is HarnessState.IDLE:
@@ -816,7 +843,11 @@ class NativeHarness(DeepAgent):
             await self._emit_round("started", active.round_id)
         elif phase is HarnessState.RUNNING:
             active = self._st.active
-            if msg.immediate and active is not None:
+            if isinstance(msg.content, InteractiveInput):
+                # Structured resumes retain their type and admission metadata;
+                # they are never text steering or List[str] follow-ups.
+                self._st.pending_queue.append(msg)
+            elif msg.immediate and active is not None:
                 # Steer the active round via the shared steering queue that the
                 # executor drains before the next inner model call.
                 self._push_steer(msg.content)
@@ -856,17 +887,24 @@ class NativeHarness(DeepAgent):
           the loop exits at the following model-call boundary.
         """
         phase = self._st.phase
+        session = self._session
         if phase is HarnessState.IDLE:
+            if session is not None:
+                self._discard_follow_ups(session)
             self._ack(cmd.ack, None)
             return
         if phase is HarnessState.PAUSED:
             self._st.paused_query = None
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             self._ack(cmd.ack, None)
             return
 
         active = self._st.active
         if active is None:
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             self._ack(cmd.ack, None)
             return
@@ -883,6 +921,8 @@ class NativeHarness(DeepAgent):
                 active.last_iter_snapshot or active.pre_round_snapshot,
             )
             self._reset_coordinator()
+            if session is not None:
+                self._discard_follow_ups(session)
             await self._emit_round_aborted(active.round_id, "abort")
             await self._emit_round("aborted", active.round_id)
             self._st.active = None
@@ -893,6 +933,8 @@ class NativeHarness(DeepAgent):
             # without starting a continuation. (The legacy coordinator.request_abort
             # never reached the inner loop, which does not read ``is_aborted``.)
             active.graceful_abort = True
+            if session is not None:
+                self._discard_follow_ups(session)
             if phase is HarnessState.PAUSING:
                 # It was cooperatively pausing; it is now a graceful abort.
                 await self._transition(HarnessState.RUNNING)
@@ -1077,7 +1119,7 @@ class NativeHarness(DeepAgent):
         # Graceful abort: the round finished; the user asked to stop. Drop any
         # queued follow-ups and go IDLE.
         if was_graceful:
-            self._drain_follow_ups_discard(session)
+            self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1094,6 +1136,18 @@ class NativeHarness(DeepAgent):
         if runtime_crashed:
             self._reset_coordinator()
             death_reason = cmd.error
+            current_interrupt = session.get_state(INTERRUPTION_KEY)
+            if current_interrupt is not None:
+                logger.warning(
+                    "[NativeHarness] round_id=%s died abnormally (%s); "
+                    "settling the committed interrupt instead of replaying its query",
+                    cmd.round_id,
+                    death_reason,
+                )
+                if await self._start_pending_follow_up_round(active, session):
+                    return
+                await self._transition(HarnessState.IDLE)
+                return
             replayable = not isinstance(active.original_query, InteractiveInput)
             if replayable and not active.failure_retry:
                 logger.warning(
@@ -1112,27 +1166,28 @@ class NativeHarness(DeepAgent):
                 death_reason,
                 " again after a retry" if active.failure_retry else "",
             )
+            if await self._start_pending_follow_up_round(active, session):
+                return
             await self._transition(HarnessState.IDLE)
             return
 
         result_type = (cmd.result or {}).get("result_type")
-        if result_type == "interrupt" or coordinator.is_aborted:
+        if coordinator.is_aborted:
+            self._discard_follow_ups(session)
             await self._transition(HarnessState.IDLE)
             return
 
-        # Decision priority (matches _run_task_loop):
-        #   follow-up (external immediate=False sends) > remaining task-plan task.
-        follow_ups = self._drain_pending_follow_ups(session)
-        if follow_ups is not None:
-            nxt = self._start_round(follow_ups, is_follow_up=True)
-            await self._emit_round("started", nxt.round_id)
+        # A matching structured resume outranks text while any interrupt is
+        # outstanding. Once the interrupt clears, stale structured messages are
+        # discarded and the existing text batch semantics resume.
+        if await self._start_pending_follow_up_round(active, session):
             return
 
         # A resume round has single-round semantics: it must not continue the
         # task plan using its InteractiveInput query (that would re-resume an
         # already-cleared interrupt). Settle to IDLE; any follow-up queued above
         # still ran first.
-        if is_resume:
+        if is_resume or result_type == "interrupt":
             await self._transition(HarnessState.IDLE)
             return
 
@@ -1146,6 +1201,70 @@ class NativeHarness(DeepAgent):
 
         await self._transition(HarnessState.IDLE)
 
+    async def _start_pending_follow_up_round(
+        self,
+        active: ActiveRound,
+        session: Session,
+    ) -> bool:
+        """Start one eligible structured resume, otherwise the text batch."""
+        current_state = session.get_state(INTERRUPTION_KEY)
+        current_tool_ids = pending_tool_resume_ids(current_state)
+
+        retained: list[InboxMessage] = []
+        for message in self._st.pending_queue:
+            resume_ids = frozenset(message.content.user_inputs)
+            active_scope_duplicate = (
+                bool(message.admitted_tool_scope_ids)
+                and bool(resume_ids)
+                and resume_ids.issubset(active.tool_resume_scope_ids)
+            )
+            if active_scope_duplicate:
+                remaining_inputs = {
+                    key: value
+                    for key, value in message.content.user_inputs.items()
+                    if key in current_tool_ids
+                }
+                if not remaining_inputs:
+                    continue
+                if len(remaining_inputs) != len(message.content.user_inputs):
+                    message.content = message.content.model_copy(
+                        update={"user_inputs": remaining_inputs}
+                    )
+            retained.append(message)
+        self._st.pending_queue.clear()
+        self._st.pending_queue.extend(retained)
+
+        if current_state is not None:
+            selected: InboxMessage | None = None
+            remaining: list[InboxMessage] = []
+            for message in self._st.pending_queue:
+                if selected is None and matches_admitted_interrupt(
+                    message.content,
+                    current_state,
+                    message.admitted_workflow_slot,
+                ):
+                    selected = message
+                else:
+                    remaining.append(message)
+            self._st.pending_queue.clear()
+            self._st.pending_queue.extend(remaining)
+            if selected is None:
+                self._persist_new_text_follow_ups(session)
+                return False
+            nxt = self._start_round(selected.content, is_follow_up=True)
+            await self._emit_round("started", nxt.round_id)
+            return True
+
+        # No resume target remains. Structured messages are cycle-local and
+        # cannot be reinterpreted as ordinary input.
+        self._st.pending_queue.clear()
+        follow_ups = self._drain_pending_follow_ups(session)
+        if follow_ups is None:
+            return False
+        nxt = self._start_round(follow_ups, is_follow_up=True)
+        await self._emit_round("started", nxt.round_id)
+        return True
+
     async def _on_stop(self, cmd: _CmdStop) -> None:
         """Terminal cleanup: cancel active round, transition TERMINATED.
 
@@ -1157,6 +1276,7 @@ class NativeHarness(DeepAgent):
         if active is not None:
             await self._hard_cancel_round(active)
             self._st.active = None
+        self._st.pending_queue.clear()
         self._st.paused_query = None
         await self._transition(HarnessState.TERMINATED)
         self._ack(cmd.ack, None)
@@ -1206,6 +1326,7 @@ class NativeHarness(DeepAgent):
             round_id=round_id,
             task_id=task_id,
             original_query=query,
+            tool_resume_scope_ids=tool_resume_scope_ids(query, self._session),
             deep_agent=self,
             task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=asyncio.Queue(),
@@ -1445,8 +1566,19 @@ class NativeHarness(DeepAgent):
         self.save_state(session, st)
         return batch
 
-    def _drain_follow_ups_discard(self, session: Session) -> None:
-        """Drop all queued follow-ups (LoopQueues + state) on graceful stop."""
+    def _persist_new_text_follow_ups(self, session: Session) -> None:
+        """Move transient text follow-ups into the existing checkpoint state."""
+        controller = self.loop_controller
+        new_follow_ups = controller.drain_follow_up() if controller is not None else []
+        if not new_follow_ups:
+            return
+        st = self.load_state(session)
+        st.pending_follow_ups.extend(new_follow_ups)
+        self.save_state(session, st)
+
+    def _discard_follow_ups(self, session: Session) -> None:
+        """Drop structured, transient text, and persisted text follow-ups."""
+        self._st.pending_queue.clear()
         controller = self.loop_controller
         if controller is not None:
             controller.drain_follow_up()

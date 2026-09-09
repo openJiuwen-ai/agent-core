@@ -599,6 +599,139 @@ async def test_drain_agent_task_forwards_immediate_abort() -> None:
     assert runtime.abort_calls == [True]
 
 
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_graceful_cancel_keeps_resume_closed_until_actual_idle() -> None:
+    runtime = _FakeRuntime()
+    runtime.state = HarnessState.RUNNING
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    sc = _make_controller(runtime)
+
+    await sc.cooperative_cancel()
+
+    assert await sc.resume_interrupt(object()) == "dropped"
+    runtime.state = HarnessState.IDLE
+    await sc._on_idle_settled()
+    assert await sc.resume_interrupt(object()) == "delivered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_overlapping_cancels_keep_resume_closed_until_both_finish() -> None:
+    runtime = _FakeRuntime()
+    runtime.state = HarnessState.RUNNING
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    started = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+
+    async def blocked_abort(*, immediate: bool = False) -> None:
+        index = len(runtime.abort_calls)
+        runtime.abort_calls.append(immediate)
+        started[index].set()
+        await release[index].wait()
+
+    runtime.abort = blocked_abort
+    sc = _make_controller(runtime)
+    first = asyncio.create_task(sc.cancel_agent())
+    await started[0].wait()
+    second = asyncio.create_task(sc.cooperative_cancel())
+    await started[1].wait()
+    try:
+        runtime.state = HarnessState.IDLE
+        await sc._on_idle_settled()
+        release[0].set()
+        await first
+        assert await sc.resume_interrupt(object()) == "dropped"
+        release[1].set()
+        await second
+        assert await sc.resume_interrupt(object()) == "delivered"
+    finally:
+        for event in release:
+            event.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancelled_caller_does_not_reopen_resume_before_idle() -> None:
+    runtime = _FakeRuntime()
+    runtime.state = HarnessState.RUNNING
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    abort_started = asyncio.Event()
+
+    async def blocked_abort(*, immediate: bool = False) -> None:
+        runtime.abort_calls.append(immediate)
+        abort_started.set()
+        await asyncio.Event().wait()
+
+    runtime.abort = blocked_abort
+    sc = _make_controller(runtime)
+    cancel = asyncio.create_task(sc.cooperative_cancel())
+    await abort_started.wait()
+    cancel.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancel
+
+    assert await sc.resume_interrupt(object()) == "dropped"
+    runtime.state = HarnessState.IDLE
+    await sc._on_idle_settled()
+    assert await sc.resume_interrupt(object()) == "delivered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_terminal_cancel_keeps_resume_closed_until_next_start() -> None:
+    runtime = _FakeRuntime()
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    sc = _make_controller(runtime)
+
+    await sc.cooperative_cancel(terminal=True)
+    await sc._on_idle_settled()
+    assert await sc.resume_interrupt(object()) == "dropped"
+
+    await sc.start()
+    try:
+        assert await sc.resume_interrupt(object()) == "delivered"
+    finally:
+        await sc.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_detaches_blocked_interrupt_drain_before_abort() -> None:
+    runtime = _FakeRuntime()
+    runtime.state = HarnessState.IDLE
+    runtime._pending_interrupt = True
+    runtime.is_pending_interrupt_resume_valid = lambda _: True
+    send_started = asyncio.Event()
+
+    async def blocked_send(content: Any, *, immediate: bool = False) -> None:
+        runtime.sent.append((content, immediate))
+        send_started.set()
+        await asyncio.Event().wait()
+
+    runtime.send = blocked_send
+    sc = _make_controller(runtime)
+    sc._pending_interrupt_resumes.append(object())
+    drain = asyncio.create_task(sc._drain_pending_interrupt_resumes())
+    sc._drain_task = drain
+    await send_started.wait()
+    try:
+        await asyncio.wait_for(sc.cancel_agent(), timeout=0.5)
+
+        assert drain.cancelled()
+        assert sc._drain_task is None
+        assert sc._pending_interrupt_resumes == []
+        assert runtime.abort_calls == [True]
+    finally:
+        drain.cancel()
+        await asyncio.gather(drain, return_exceptions=True)
+
+
 @pytest.mark.level1
 def test_is_agent_running_reflects_runtime_phase() -> None:
     runtime = _FakeRuntime()

@@ -35,8 +35,8 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+from openjiuwen.agent_teams.harness.interrupt_resume import matches_pending_interrupt
 from openjiuwen.agent_teams.harness.native_harness import NativeHarness
 from openjiuwen.agent_teams.harness.state import HarnessState
 
@@ -360,23 +360,11 @@ class TeamHarness:
 
     def is_pending_interrupt_resume_valid(self, user_input: Any) -> bool:
         """Return True if ``user_input`` matches the pending interrupt requests."""
-        if not isinstance(user_input, InteractiveInput):
-            return False
         session = self._interrupt_session()
         if session is None:
             return False
         state = session.get_state(INTERRUPTION_KEY)
-        if state is None:
-            return False
-        interrupted = getattr(state, "interrupted_tools", {}) or {}
-        pending_ids: set = set()
-        for entry in interrupted.values():
-            requests = getattr(entry, "interrupt_requests", {}) or {}
-            pending_ids.update(requests.keys())
-        if not pending_ids:
-            return False
-        resume_ids = set(user_input.user_inputs.keys())
-        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+        return matches_pending_interrupt(user_input, state)
 
     def _interrupt_session(self) -> Optional[Any]:
         if self._native is None:

@@ -129,7 +129,9 @@ class StreamController:
         self._interrupt_lock = asyncio.Lock()
         self._drain_task: Optional[asyncio.Task] = None
         self._drain_requested = False
-        self._interrupt_stopped = False
+        self._interrupt_resume_cancel_depth = 0
+        self._interrupt_resume_waiting_for_idle = False
+        self._terminal_interrupt_resume_closed = False
         # Transient-retry state (per cycle): attempts so far, and whether to
         # swallow the remaining chunks of a round that emitted a retryable
         # task_failed (reset when the next round starts).
@@ -200,7 +202,8 @@ class StreamController:
         harness = self._resources.harness
         if harness is None:
             return
-        self._interrupt_stopped = False
+        self._interrupt_resume_waiting_for_idle = False
+        self._terminal_interrupt_resume_closed = False
         self._retry_attempt = 0
         self._swallow_failed_round = False
         await harness.subscribe(on_state=self._map_state, on_round=self._map_round)
@@ -209,25 +212,51 @@ class StreamController:
 
     async def stop(self) -> None:
         """Stop the output forwarder. The runtime unregisters its own events."""
-        # Cancel the owned sender before acquiring the lock it may hold while
-        # waiting for the runtime's acknowledgement. Late IDLE events must not
-        # schedule a replacement during teardown.
-        self._interrupt_stopped = True
-        self._drain_requested = False
-        drain = self._drain_task
-        self._drain_task = None
-        if drain is not None and not drain.done():
-            drain.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await drain
-        async with self._interrupt_lock:
-            self._pending_interrupt_resumes.clear()
+        self._terminal_interrupt_resume_closed = True
+        drain = self._detach_pending_interrupt_resumes()
+        await self._await_detached_interrupt_drains([drain])
         task = self._forward_task
         self._forward_task = None
         if task is not None and not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+
+    def _interrupt_resume_closed(self) -> bool:
+        return (
+            self._terminal_interrupt_resume_closed
+            or self._interrupt_resume_waiting_for_idle
+            or self._interrupt_resume_cancel_depth > 0
+        )
+
+    def _detach_pending_interrupt_resumes(self) -> asyncio.Task | None:
+        """Synchronously clear approvals and detach their owned drain."""
+        self._drain_requested = False
+        self._pending_interrupt_resumes.clear()
+        drain = self._drain_task
+        self._drain_task = None
+        if drain is not None and drain is not asyncio.current_task() and not drain.done():
+            drain.cancel()
+        return drain
+
+    @staticmethod
+    async def _await_detached_interrupt_drains(drains: list[asyncio.Task | None]) -> None:
+        """Reap detached workers without hiding cancellation of this caller."""
+        current = asyncio.current_task()
+        if current is not None and current.cancelling() > 0:
+            return
+        seen: set[asyncio.Task] = set()
+        for drain in drains:
+            if drain is None or drain is current or drain in seen:
+                continue
+            seen.add(drain)
+            try:
+                await drain
+            except asyncio.CancelledError:
+                if current is not None and current.cancelling() > 0:
+                    raise
+            except Exception:
+                team_logger.exception("Detached interrupt resume drain failed during cleanup")
 
     async def _forward_outputs(self) -> None:
         """Pump runtime.outputs() into the stream queue + observers for the cycle."""
@@ -374,6 +403,7 @@ class StreamController:
 
     async def _on_idle_settled(self) -> None:
         """Round chain ended (runtime IDLE): close on teardown, else poll/wake."""
+        self._interrupt_resume_waiting_for_idle = False
         if self._state.team_cleaned:
             team_logger.info(
                 "[{}] team_cleaned set; closing stream",
@@ -389,7 +419,7 @@ class StreamController:
         # its owner may be awaiting a send ACK from that same supervisor.
         # Defer both delivery and orphan cleanup, checking the current runtime
         # state after the worker acquires the lock.
-        if self._pending_interrupt_resumes and not self._interrupt_stopped:
+        if self._pending_interrupt_resumes and not self._interrupt_resume_closed():
             self._drain_requested = True
             if self._drain_task is None or self._drain_task.done():
                 self._drain_task = asyncio.create_task(self._run_pending_interrupt_resumes())
@@ -446,15 +476,35 @@ class StreamController:
 
     async def cancel_agent(self) -> None:
         """Hard-cancel the in-flight round (rollback to last boundary)."""
-        harness = self._resources.harness
-        if harness is not None:
-            await harness.abort(immediate=True)
+        await self._cancel_with_interrupt_closure(immediate=True)
 
-    async def cooperative_cancel(self) -> None:
-        """Ask the in-flight round to finish gracefully (no rollback)."""
+    async def cooperative_cancel(self, *, terminal: bool = False) -> None:
+        """Gracefully abort; terminal callers remain closed until next start."""
+        await self._cancel_with_interrupt_closure(immediate=False, terminal=terminal)
+
+    async def _cancel_with_interrupt_closure(
+        self,
+        *,
+        immediate: bool,
+        terminal: bool = False,
+    ) -> None:
         harness = self._resources.harness
-        if harness is not None:
-            await harness.abort(immediate=False)
+        self._interrupt_resume_cancel_depth += 1
+        self._interrupt_resume_waiting_for_idle = True
+        if terminal:
+            self._terminal_interrupt_resume_closed = True
+        drains = [self._detach_pending_interrupt_resumes()]
+        try:
+            if harness is not None:
+                await harness.abort(immediate=immediate)
+        finally:
+            drains.append(self._detach_pending_interrupt_resumes())
+            try:
+                await self._await_detached_interrupt_drains(drains)
+            finally:
+                if harness is None or harness.state in (HarnessState.IDLE, HarnessState.TERMINATED):
+                    self._interrupt_resume_waiting_for_idle = False
+                self._interrupt_resume_cancel_depth -= 1
 
     async def pause_agent(self) -> None:
         """Pause the in-flight round at its nearest inner iteration boundary.
@@ -485,7 +535,7 @@ class StreamController:
         through :meth:`pause_agent`, which stops at a clean iteration boundary
         and keeps the round resumable.
         """
-        await self.cancel_agent()
+        await self._cancel_with_interrupt_closure(immediate=True, terminal=True)
 
     # ------------------------------------------------------------------
     # Interrupt-resume queries (forwarded to the runtime)
@@ -529,7 +579,7 @@ class StreamController:
         pending interrupt and no in-flight round).
         """
         async with self._interrupt_lock:
-            if self._interrupt_stopped:
+            if self._interrupt_resume_closed():
                 return "dropped"
             if self.is_valid_interrupt_resume(user_input):
                 harness = self._resources.harness
@@ -552,7 +602,7 @@ class StreamController:
 
     async def _run_pending_interrupt_resumes(self) -> None:
         """Retain IDLE notifications arriving while a previous send awaits ACK."""
-        while self._drain_requested and not self._interrupt_stopped:
+        while self._drain_requested and not self._interrupt_resume_closed():
             self._drain_requested = False
             await self._drain_pending_interrupt_resumes()
 
@@ -573,7 +623,7 @@ class StreamController:
         task or this lock, leaving it free to process the ``_CmdSend`` ack.
         """
         async with self._interrupt_lock:
-            if self._interrupt_stopped or not self._pending_interrupt_resumes:
+            if self._interrupt_resume_closed() or not self._pending_interrupt_resumes:
                 return
             harness = self._resources.harness
             if harness is None or harness.state is not HarnessState.IDLE:

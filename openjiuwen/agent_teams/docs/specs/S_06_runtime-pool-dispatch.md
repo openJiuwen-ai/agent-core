@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/runtime/`、`openjiuwen/core/runner/team_runner.py`（`_resolve_team_agent_spec` 入参归一化） |
-| 最近一次修订日期 | 2026-07-14 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`、`F_06_name-old-session-recover.md` |
+| 最近一次修订日期 | 2026-09-08 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`、`F_06_name-old-session-recover.md`、`F_75_idle-trigger-interrupt-resume-deadlock.md` |
 
 ## 范围 / 边界
 
@@ -45,7 +45,7 @@
    - `force=True` 等价于"先 stop_team 再做"，没有第三种语义。
 9. **gate 与 run cycle 对齐**：每个 `ActiveTeam` 自带一个 `InteractGate`；`run_agent_team*` 退出 `finally` 先调 `finalize`（pause vs stop 决策 + pool 状态同步），再调 `_close_team_interact_gate`（manager 暴露 pool 让 Runner 直接拿 gate 调 `close_and_drain`）；`RESUME_FROM_PAUSE` 在 `_apply_action` 中调 `gate.reset()` 让下个 cycle 重新放行。
 10. **gate 状态机单调**：`InteractGate` 在一个 cycle 内只能 `OPEN → CLOSING → DRAINED`；`reset()` 只在新 cycle 开始时调用，调用前必须确保上一 cycle 的 ticket 不再被持有。
-11. **interact 必经 gate**：`manager.interact` 始终先 `admit` 拿 ticket，后 `consume_done` 释放；ticket 与 gate 的引用绑定，跨 gate 的 ticket 静默忽略，避免误释放。
+11. **interact 必经 gate**：普通消息和 `InteractiveInput` 都必须先 `admit` 拿 ticket，后 `consume_done` 释放；structured resume 的 ticket 持有到 `resume_interrupt()` 完成。gate closed 时两类输入都返回 `gate_closed`。ticket 与 gate 的引用绑定，跨 gate 的 ticket 静默忽略，避免误释放。
 12. **finalize 决策权归 manager**：leader run cycle 的 pause vs stop 决策由 `TeamRuntimeManager.finalize` 拥有（`shutdown_requested or lifecycle != "persistent"` → stop+`pool.remove`；否则 pause+`state=PAUSED`）。`CoordinationKernel.finalize_round` 不再做该决策——外部 `stop_team` 不会被 stream finally 路径上的隐式 re-pause 静默盖掉。
 13. **finalize_member 决策权归 manager，且它是 graceful 退场写 `SHUTDOWN` 的那个人**：teammate / human-agent run cycle 的 pause vs stop 由 `TeamRuntimeManager.finalize_member` 拥有。`team_member` 持久化状态属于 `_MEMBER_FINALIZED_STATUSES`（`STOPPED` / `PAUSED` / `SHUTDOWN` —— **不含 `SHUTDOWN_REQUESTED`**）时跳过写状态，只 tear down kernel，避免覆盖 leader 的 `_mark_live_teammates` 标记或 `shutdown_self` 写下的 `SHUTDOWN`。否则按**当前状态**（不是 lifecycle）分流：`SHUTDOWN_REQUESTED` → `stop_coordination` + 写 `SHUTDOWN`；其余 → `pause_coordination` + 写 `READY`。`SHUTDOWN_REQUESTED` **必须**留在 finalized 集之外——它一旦被当成"外部已写好终态"，跑完末轮的成员就永远停在 `SHUTDOWN_REQUESTED`，`clean_team` 的全员 SHUTDOWN 前置条件再也不成立。
 14. **db_config 单一来源**：`release_session` / `delete_team` 走 `resolve_team_session_release_info` 从 session checkpoint 的任一 team bucket 解析出 `db_config`；不依赖外部传入，避免调用方传错 DB。
@@ -281,7 +281,7 @@ class TeamRuntimeManager:
 - `activate` 返回 `TeamRuntimeActivation`；REJECT 类 action 不抛异常，由调用方据 `action.kind` 决定是否对外报错。`activate` 内部如果发现 cross-session 的 stale `pool_entry`，会先 `await stop_team(...)` 拆掉再 dispatch；这一步不暴露给调用方。
 - `finalize` / `finalize_member`：在 `Runner.run_agent_team*` / member 路径的 `finally` 上调用，本身不抛——内部异常以 `team_logger.warning` 落盘，避免淹没 stream 里的真实错误。pool entry 不存在 / 已被外部 `stop_team` 拆掉 → no-op。
 - `pause` / `stop_team` / `register_human_agent_inbound` / `interact`：未命中 `(team_name, session_id)` 的 entry → 返回 `False` / `DeliverResult.failure("not_active")`，不抛。
-- `interact` 在 gate closed 时返回 `DeliverResult.failure("gate_closed")`。
+- `interact` 在 gate closed 时返回 `DeliverResult.failure("gate_closed")`；该规则同样适用于直接进入 interrupt resume 路径的 `InteractiveInput`。
 - `delete_team(force=False)` / `release_session(force=False)` 在 pool 仍有相关 entry 时 `raise_error(StatusCode.AGENT_TEAM_BUSY_INVALID, ...)`；`force=True` 在内部调 `stop_team` 后续做。
 - `resolve_team_session_release_info` 找不到任何 team bucket 时返回 `None`；找到 bucket 但 `db_config` 解析全部失败时 `raise RuntimeError`（这种状态属于 checkpoint 损坏，不是业务错）。
 
