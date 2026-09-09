@@ -37,9 +37,16 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     TurnLifecycleEvent,
     UsageUpdatedEvent,
+    UserInputRequest,
+    UserInputResponse,
 )
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig, CodexHarnessProvider, CodexModelConfig
-from openjiuwen.harness_providers.codex.options import codex_mcp_config_overrides, codex_model_config_overrides
+from openjiuwen.harness_providers.codex.harness import USER_INPUT_METHOD, _answers_from_response
+from openjiuwen.harness_providers.codex.options import (
+    USER_INPUT_FEATURE_OVERRIDE,
+    codex_mcp_config_overrides,
+    codex_model_config_overrides,
+)
 from tests.test_logger import logger
 
 
@@ -407,6 +414,100 @@ async def test_steer_before_the_sdk_handle_exists_is_queued(monkeypatch: pytest.
     assert terminal.kind is TurnEventKind.FINISHED
     assert state.handles[0].steers == ["early"]
     await harness.stop()
+
+
+def _user_input_params(handle: _FakeHandle, *, questions: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "itemId": "ask-1",
+        "threadId": handle.thread_id,
+        "turnId": handle.id,
+        "isBlocking": True,
+        "questions": questions,
+    }
+
+
+_COLOR_QUESTIONS: list[dict[str, Any]] = [
+    {
+        "id": "favorite_color",
+        "header": "Color",
+        "question": "Which color?",
+        "isOther": True,
+        "isSecret": False,
+        "options": [{"label": "teal", "description": "Blue-green."}, {"label": "red", "description": "Warm."}],
+    },
+    {"id": "reason", "header": "Reason", "question": "Why?"},
+]
+
+
+@pytest.mark.asyncio
+async def test_request_user_input_routes_to_the_host_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+    requests: list[Any] = []
+
+    class _Handler:
+        async def handle(self, request: Any) -> Any:
+            requests.append(request)
+            return UserInputResponse(
+                request_id=request.request_id,
+                status=InteractionResponseStatus.COMPLETED,
+                content={"answers": {"favorite_color": "teal", "Why?": ["calm", "cool"]}},
+            )
+
+        async def cancel(self, request_id: str, *, reason: Any = None) -> None:
+            _ = request_id, reason
+
+    async def _ask(handle: _FakeHandle) -> Any:
+        client = state.clients[0]
+        approval_handler = client._client._sync._approval_handler
+        assert approval_handler is not None
+        loop = asyncio.get_running_loop()
+        answer = await loop.run_in_executor(
+            None, approval_handler, USER_INPUT_METHOD, _user_input_params(handle, questions=_COLOR_QUESTIONS)
+        )
+        assert answer == {"answers": {"favorite_color": {"answers": ["teal"]}, "reason": {"answers": ["calm", "cool"]}}}
+        return _turn_completed(handle.id, _Status.completed)
+
+    state.scripts.append([_ask])
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context(interactions=_Handler(), host_capabilities=frozenset({HostCapability.USER_INPUT})))
+    assert USER_INPUT_FEATURE_OVERRIDE in state.configs[0].kwargs["config_overrides"]
+    receipt = await harness.send(HarnessInput(content="ask me"))
+    terminal = _terminal(await _turn(harness, receipt.turn_id))
+    assert terminal.kind is TurnEventKind.FINISHED
+    request = requests[0]
+    logger.info("codex user input request: %s", request)
+    assert isinstance(request, UserInputRequest)
+    assert request.request_id == "codex-ask:ask-1"
+    assert request.turn_id == receipt.turn_id
+    assert request.prompt == "Color: Which color?\n  - teal: Blue-green.\n  - red: Warm.\nReason: Why?"
+    assert request.choices == ("teal", "red")
+    assert request.provider_data["tool_name"] == "request_user_input"
+    assert request.provider_data["is_blocking"] is True
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_user_input_is_answered_empty_without_a_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    # No USER_INPUT capability: the feature flag stays off and the handler is
+    # not installed, so a stray request is answered with no answers.
+    await harness.start(_context())
+    assert USER_INPUT_FEATURE_OVERRIDE not in state.configs[0].kwargs["config_overrides"]
+    assert state.clients[0]._client._sync._approval_handler is None
+    answer = harness._approval_handler(USER_INPUT_METHOD, {"itemId": "x", "questions": _COLOR_QUESTIONS})
+    assert answer == {"answers": {}}
+    await harness.stop()
+
+
+def test_user_input_answer_normalization() -> None:
+    questions = _COLOR_QUESTIONS
+    assert _answers_from_response("teal", questions) == {"favorite_color": ["teal"]}
+    assert _answers_from_response(["teal", "calm"], questions) == {"favorite_color": ["teal"], "reason": ["calm"]}
+    assert _answers_from_response({"answer": "red"}, questions) == {"favorite_color": ["red"]}
+    assert _answers_from_response({"Which color?": "red", "unknown": "x"}, questions) == {"favorite_color": ["red"]}
+    assert _answers_from_response({"answers": {"reason": {"answers": ["a", "b"]}}}, questions) == {"reason": ["a", "b"]}
+    assert _answers_from_response(None, questions) == {}
 
 
 def _auth_failure(turn_id: str) -> Any:

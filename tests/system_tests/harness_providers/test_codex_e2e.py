@@ -13,10 +13,11 @@ import pytest
 
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec, PromptSectionSpec
-from openjiuwen.harness_protocol import HarnessInput, HarnessProtocol, TurnEventKind
+from openjiuwen.harness_protocol import HarnessInput, HarnessProtocol, HostCapability, TurnEventKind
 from openjiuwen.harness_providers import build_harness_context, create_harness
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig, CodexModelConfig
 from tests.system_tests.harness_providers._contract import (
+    RecordingUserInputHandler,
     answer_text,
     collect_turn,
     make_context,
@@ -26,6 +27,7 @@ from tests.system_tests.harness_providers._contract import (
     run_steer_turn,
     run_text_turn,
     run_tool_turn,
+    run_user_input_turn,
     terminal_of,
 )
 from tests.system_tests.harness_providers.conftest import requires_codex
@@ -48,9 +50,15 @@ def _config_values(workdir: Path) -> dict[str, object]:
     return values
 
 
-def _harness(workdir: Path) -> CodexHarness:
+def _harness(workdir: Path, *, config_overrides: tuple[str, ...] = ()) -> CodexHarness:
     harness = CodexHarness(
-        CodexHarnessConfig(cwd=str(workdir), codex_bin=_CODEX_BIN, bypass_approvals_and_sandbox=True, model=_MODEL)
+        CodexHarnessConfig(
+            cwd=str(workdir),
+            codex_bin=_CODEX_BIN,
+            bypass_approvals_and_sandbox=True,
+            model=_MODEL,
+            config_overrides=config_overrides,
+        )
     )
     assert isinstance(harness, HarnessProtocol)
     return harness
@@ -74,6 +82,16 @@ async def test_abort_terminates_the_active_turn(workdir: Path) -> None:
 
 async def test_steer_targets_the_active_turn(workdir: Path) -> None:
     await run_steer_turn(_harness(workdir), make_context(cwd=str(workdir)))
+
+
+async def test_request_user_input_routes_to_the_host(workdir: Path) -> None:
+    handler = RecordingUserInputHandler("teal")
+    context = make_context(
+        cwd=str(workdir),
+        host_capabilities=frozenset({HostCapability.USER_INPUT}),
+        interactions=handler,
+    )
+    await run_user_input_turn(_harness(workdir), context, handler, tool_hint="request_user_input")
 
 
 async def test_checkpoint_resumes_the_thread(workdir: Path) -> None:

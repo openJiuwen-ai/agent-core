@@ -320,13 +320,24 @@ class RecordingUserInputHandler:
         self.cancelled.append((request_id, reason))
 
 
-async def run_user_input_turn(harness: HarnessProtocol, context: HarnessContext, handler: RecordingUserInputHandler) -> None:
-    """A turn that asks the user a question routed through the host handler."""
+async def run_user_input_turn(
+    harness: HarnessProtocol,
+    context: HarnessContext,
+    handler: RecordingUserInputHandler,
+    *,
+    tool_hint: str = "ask-user",
+) -> None:
+    """A turn that asks the user a question routed through the host handler.
+
+    Args:
+        tool_hint: How the prompt names the provider's question tool; models
+            only reach for it reliably when addressed by their own tool name.
+    """
     await harness.start(context)
     receipt = await harness.send(
         HarnessInput(
             content=(
-                "You must ask me a question before answering: use your ask-user tool to ask me for my favorite "
+                f"You must ask me a question before answering: use your {tool_hint} tool to ask me for my favorite "
                 "color. After I answer, reply with exactly 'COLOR: ' followed by the color I gave you."
             )
         )
