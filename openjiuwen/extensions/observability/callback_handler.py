@@ -1369,7 +1369,8 @@ class OtelCallbackHandler:
         if is_error:
             rec.record_tool_error(tool_name, agent_id)
 
-    def _accumulate_llm_usage(self, state: LlmSpanState) -> None:
+    @staticmethod
+    def _accumulate_llm_usage(state: LlmSpanState) -> None:
         """Add one LLM call's final token/cost facts to the trace rollup."""
         try:
             attributes = getattr(state.span, "attributes", None) or {}
@@ -1390,7 +1391,8 @@ class OtelCallbackHandler:
         except Exception as exc:
             logger.warning("otel: llm usage accumulation failed - {}", exc)
 
-    def _accumulate_tool_usage(self, span: Span, *, is_error: bool) -> None:
+    @staticmethod
+    def _accumulate_tool_usage(span: Span, *, is_error: bool) -> None:
         """Add one tool call's outcome fact to the trace rollup."""
         try:
             trace_id = getattr(getattr(span, "context", None), "trace_id", None)
