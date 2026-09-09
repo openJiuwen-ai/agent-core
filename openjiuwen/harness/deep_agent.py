@@ -2081,9 +2081,22 @@ class DeepAgent(BaseAgent):
         self._registered_rails.append(rail)
 
     async def _run_single_round_invoke(
-        self, ctx: AgentCallbackContext, session: Optional[Session]
+        self,
+        ctx: AgentCallbackContext,
+        session: Optional[Session],
+        *,
+        streaming: bool = False,
     ) -> Dict[str, Any]:
-        """Invoke inner ReActAgent exactly once."""
+        """Invoke inner ReActAgent exactly once.
+
+        Args:
+            ctx: Callback context carrying the normalized invocation inputs.
+            session: Session shared with the long-lived interaction.
+            streaming: Whether model chunks should be written to the session stream.
+
+        Returns:
+            The completed ReAct invocation result.
+        """
         modified = ctx.inputs
         if not isinstance(modified, InvokeInputs):
             raise build_error(
@@ -2097,10 +2110,14 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
-        return await self._react_agent.invoke(
-            self._to_effective_inputs(modified),
-            session,
-        )
+        effective_inputs = self._to_effective_inputs(modified)
+        if streaming:
+            return await self._react_agent.invoke(
+                effective_inputs,
+                session,
+                _streaming=True,
+            )
+        return await self._react_agent.invoke(effective_inputs, session)
 
     async def _setup_task_loop(
         self,
@@ -3005,7 +3022,9 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
                 if is_resume_input:
-                    result = await self._run_single_round_invoke(ctx, session)
+                    result = await self._run_single_round_invoke(
+                        ctx, session, streaming=True
+                    )
                 else:
                     await controller.submit_round(
                         session,
