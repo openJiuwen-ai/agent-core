@@ -146,6 +146,12 @@ class LLMRetryRail(DeepAgentRail):
 
         if self._is_model_call_failed_exception(ctx.exception):
             await self._request_retry_or_reset(ctx, "model_call_failed")
+            return
+
+        # 兼容兜底：其余任何模型调用异常（如未命中上面 marker 的 APIStatusError
+        # 408/429/5xx 等瞬态或未知错误）统一按 model_call_failed 重试；
+        # 重试耗尽后异常照常上抛，透传/rewind 行为不变。
+        await self._request_retry_or_reset(ctx, "model_call_failed")
 
     def _append_and_check(self, state: Dict[str, str], field_name: str, text: str) -> None:
         tail = (state.get(field_name, "") + text)[-self.repeat_window_chars:]
