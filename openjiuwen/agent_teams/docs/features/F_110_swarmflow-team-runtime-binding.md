@@ -57,13 +57,15 @@
    构造时可达）；`resume()` 用当前 launcher 的 `_relaunch(h.inputs, h.session_id)`，无 launcher 时
    保留票据返回 False。按钮/语义两路统一，无 per-call 参数。曾尝试 `resume(run_id, tool=self)` +
    `(tool or self)._relaunch` 闭包（已回退）——只修了语义通道，按钮路径无工具在手仍落死 harness。
-7. **`action="stop"` 对 controller 未持有的 run 退化为「宣告 stopped」**。冷启动后注册表为空，
-   但嵌入层快照仍把 run 列为 paused 并交给 leader 裁决（恢复 / 停止）；若 stop 只认注册表，
-   leader 的「停止」在冷启动场景是假的。`_control_run` 在 `controller.stop` 未命中时调
-   `_announce_stopped(run_id)`：向 team topic 发一条 `WORKFLOW_STOPPED` progress 事件让 Monitor
-   卡片落终态，并返回 success。**不写 journal seal**——pause 记录仍在，手动 `resume_id +
-   script_path` 仍可续（与决策 1 的「丢票不 seal」一致）。resume 无此退化：没有票据
-   就没有可重放的 inputs，只能报 not_found 让 leader 走发射面。
+7. **`action="stop"` 对已解栈的 run 由工具「宣告 stopped」**。paused run 在 pause 时已 unwind，
+   引擎不会再为它发 `WORKFLOW_STOPPED`——无论 controller 仍持票（丢票返回 True）还是冷启动无票
+   （返回 False）。若只靠引擎事件，leader 的「停止」在这两种场景下前端都不落终态（实测：持票
+   stop 返回 success 但卡片停在 paused）。`_control_run` 在 stop 前记下 `controller.is_paused`，
+   满足「曾 paused 或未命中」即调 `_announce_stopped(run_id)`：向 team topic 发一条
+   `WORKFLOW_STOPPED` progress 事件让 Monitor 卡片落终态。active run 不宣告（引擎 unwind 时自己
+   发，重复会双重终态）。**不写 journal seal**——pause 记录仍在，手动 `resume_id + script_path`
+   仍可续（与决策 1 的「丢票不 seal」一致）。resume 无此退化：没有票据就没有可重放的 inputs，
+   只能报 not_found 让 leader 走发射面。
 
 ## 拒绝的方案
 
@@ -82,8 +84,9 @@
 - `test_workflow_started_carries_script_path`：`WORKFLOW_STARTED` 事件携带绝对 `script_path`。
 - `test_cold_start_resume_recovers_args`：首跑 `args="hello"` 落 `__run__:args` 记录，第二次 resume
   不传 args 仍恢复 `"hello"`（非 None）。
-- `test_stop_on_unregistered_run_announces_stopped_without_seal`：controller.stop 未命中时 team topic
-  收到 `workflow_stopped`（含 run_id），工具返回 success；resume 未命中仍 not_found、不发事件。
+- `test_stop_on_unregistered_run_announces_stopped_without_seal` / `test_stop_on_paused_run_announces_stopped`：
+  controller.stop 未命中或命中 paused 票据时 team topic 收到 `workflow_stopped`（含 run_id）；
+  `test_stop_on_active_run_does_not_double_announce`：active run 不宣告；resume 未命中仍 not_found。
 - 回归：`test_background_task_controller.py` + `test_engine.py` 全绿（45 passed）；workflow 全套 268 passed。
 
 ## 已知遗留
