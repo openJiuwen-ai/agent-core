@@ -73,6 +73,7 @@ from openjiuwen.symphony.observation import GraphSnapshotRef
 _COMPOSE_TOOL_NAME = "symphony_compose_graph"
 _MAX_EDGE_CANDIDATES = 64
 _CANDIDATE_PROBE_LIMIT = _MAX_EDGE_CANDIDATES + 1
+_OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
 
 CaptureMode: TypeAlias = Literal["agent", "team"]
 GraphSnapshotProvider: TypeAlias = Callable[[], Mapping[str, Any]]
@@ -588,7 +589,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 value = attrs.get(key)
                 if not isinstance(value, str) or not value.strip() or value.strip()[0] not in "[{":
                     continue
-                if value.lstrip().startswith("[ERROR]:"):
+                stripped = value.strip()
+                if stripped.startswith("[ERROR]:") or _OBSERVABILITY_TRUNCATED_SUFFIX.search(stripped):
                     continue
                 if not _is_structured_tool_payload(value):
                     issues.append(MappingProxyType({"code": "tool_payload_json_error", "attribute": key}))

@@ -293,7 +293,7 @@ async def test_non_ready_planned_graph_status_is_not_marked_invalid(status: str)
 
 
 @pytest.mark.asyncio
-async def test_legacy_and_framework_error_text_are_accepted_but_malformed_splits_continuity() -> None:
+async def test_legacy_framework_error_and_truncated_text_are_accepted_but_malformed_splits() -> None:
     rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor())
     ctx = _ctx()
     await rail.before_invoke(ctx)
@@ -314,11 +314,24 @@ async def test_legacy_and_framework_error_text_are_accepted_but_malformed_splits
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert not issues
     rail.trajectory_span_processor.on_end(
-        _span("tool.call", 4, attributes={semconv.GEN_AI_TOOL_OUTPUT: "{'broken': ]"})
+        _span(
+            "tool.call",
+            4,
+            attributes={
+                semconv.GEN_AI_TOOL_OUTPUT: (
+                    '{"success": true, "data": {"skill_content": "large...<truncated 16270 chars>'
+                )
+            },
+        )
+    )
+    _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
+    assert not issues
+    rail.trajectory_span_processor.on_end(
+        _span("tool.call", 5, attributes={semconv.GEN_AI_TOOL_OUTPUT: "{'broken': ]"})
     )
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert {issue["code"] for issue in issues} == {"tool_payload_json_error"}
-    rail.trajectory_span_processor.on_end(_span("llm.call", 5))
+    rail.trajectory_span_processor.on_end(_span("llm.call", 6))
     rail._drain_for_hook(ctx)
     prepared = await rail._prepare_evolution_input(_trajectory(), ctx)
     assert prepared is not None
