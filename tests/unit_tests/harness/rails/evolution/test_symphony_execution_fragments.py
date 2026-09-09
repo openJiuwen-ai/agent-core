@@ -18,7 +18,7 @@ def _span(
     trace_id: int = 1,
     parent_span_id: int | None = None,
     attributes: dict[str, Any] | None = None,
-    status: str = "STATUS_CODE_OK",
+    status: str | int = "STATUS_CODE_OK",
 ) -> dict[str, Any]:
     span: dict[str, Any] = {
         "traceId": f"{trace_id:032x}",
@@ -163,6 +163,56 @@ def test_serialized_tool_output_requires_success_without_an_error() -> None:
 
     assert [(fragment.capability_type, fragment.capability_name) for fragment in fragments] == [
         ("skill", "alpha"),
+    ]
+
+
+def test_authoritative_truncated_skill_output_preserves_success() -> None:
+    truncated_output = '{"success": true, "data": {"skill_content": "large...<truncated 16270 chars>'
+    fragments = _fragments(
+        (
+            0,
+            _trajectory(
+                _span("agent.main", 1),
+                _span(
+                    "tool.skill_tool",
+                    2,
+                    parent_span_id=1,
+                    attributes={
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "travel-guide-generator"},
+                        semconv.GEN_AI_TOOL_OUTPUT: truncated_output,
+                        semconv.OJ_TOOL_AUTHORITATIVE: True,
+                    },
+                    status=1,
+                ),
+                _span(
+                    "tool.skill_tool",
+                    3,
+                    parent_span_id=1,
+                    attributes={
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "untrusted"},
+                        semconv.GEN_AI_TOOL_OUTPUT: truncated_output,
+                    },
+                ),
+                _span(
+                    "tool.skill_tool",
+                    4,
+                    parent_span_id=1,
+                    attributes={
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "errored"},
+                        semconv.GEN_AI_TOOL_OUTPUT: truncated_output,
+                        semconv.OJ_TOOL_AUTHORITATIVE: True,
+                    },
+                    status="STATUS_CODE_ERROR",
+                ),
+            ),
+        )
+    )
+
+    assert [(fragment.capability_type, fragment.capability_name) for fragment in fragments] == [
+        ("skill", "travel-guide-generator"),
     ]
 
 
