@@ -68,7 +68,7 @@ class _FakeLauncher:
     def __init__(self):
         self.relaunched: list[tuple[dict, str]] = []
 
-    def _relaunch(self, inputs, session_id):
+    def relaunch(self, inputs, session_id):
         self.relaunched.append((inputs, session_id))
 
 
