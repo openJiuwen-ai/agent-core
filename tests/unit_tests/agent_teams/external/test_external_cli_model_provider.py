@@ -97,6 +97,6 @@ def test_team_model_config_conversion_without_client_config():
 
 @pytest.mark.level0
 def test_resolved_provider_name_is_codex_bare_key_safe():
-    from openjiuwen.agent_teams.external.cli_agent.codex.options import _BARE_KEY_RE
+    from openjiuwen.harness_providers.codex.options import _BARE_KEY_RE
 
     assert _BARE_KEY_RE.fullmatch(_external_cli_provider_name(_client_config()))

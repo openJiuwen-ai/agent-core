@@ -17,7 +17,7 @@ from typing import Callable
 
 import pytest
 
-from openjiuwen.agent_teams.external.dsh import (
+from openjiuwen.harness_providers.dsh import (
     DshHarness,
     DshHarnessConfig,
     DshHarnessProvider,
@@ -274,7 +274,7 @@ async def test_missing_optional_sdk_does_not_open_a_partial_cycle(monkeypatch: p
         raise ImportError("not installed")
 
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.external.dsh.harness.importlib.import_module",
+        "openjiuwen.harness_providers.dsh.harness.importlib.import_module",
         missing_sdk,
     )
     harness = DshHarness()
@@ -293,7 +293,7 @@ async def test_missing_optional_sdk_does_not_open_a_partial_cycle(monkeypatch: p
 # RUNNING -> IDLE transition from the recorded history, so a loaded CI runner can
 # fail the case for reasons unrelated to the adapter. `_wait_until_idle` closes
 # that window; run the case locally to check it:
-#     RUN_DSH_TIMING_TEST=1 pytest tests/unit_tests/agent_teams/external/dsh/
+#     RUN_DSH_TIMING_TEST=1 pytest tests/unit_tests/harness_providers/dsh/
 @pytest.mark.skipif(
     os.environ.get("RUN_DSH_TIMING_TEST") != "1",
     reason="Timing-sensitive DSH serialization case; set RUN_DSH_TIMING_TEST=1 to run it",

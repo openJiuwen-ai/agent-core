@@ -27,6 +27,7 @@ from openjiuwen.harness_protocol import (
     HarnessStateError,
     HarnessCapability,
     HarnessEvent,
+    HostCapability,
     ItemEventKind,
     ItemLifecycleEvent,
     OutputChannel,
@@ -196,12 +197,23 @@ class _FakeMemberSession:
     def __init__(self) -> None:
         self.pre_run_calls = 0
         self.post_run_calls = 0
+        self.commit_calls = 0
+        self.state: dict[str, Any] = {}
 
     async def pre_run(self) -> None:
         self.pre_run_calls += 1
 
     async def post_run(self) -> None:
         self.post_run_calls += 1
+
+    def get_state(self, key: str) -> Any:
+        return self.state.get(key)
+
+    def update_state(self, data: dict[str, Any]) -> None:
+        self.state.update(data)
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
 
 
 class _FakeTeamSession:
@@ -264,7 +276,17 @@ async def test_context_factory_start_stop_and_event_pump() -> None:
     await runtime.stop()
 
     assert factory_calls == [team_session]
-    assert harness.start_contexts == [_context()]
+    assert len(harness.start_contexts) == 1
+    started = harness.start_contexts[0]
+    assert started.agent_name == "worker"
+    assert started.agent_id == "member-agent"
+    assert started.system_prompt == "work carefully"
+    # The runtime installs the host services it owns: the IO adapter answers
+    # user-input requests and the member session persists checkpoints.
+    assert HostCapability.USER_INPUT in started.host_capabilities
+    assert HostCapability.CHECKPOINT_SINK in started.host_capabilities
+    assert started.interactions is not None
+    assert started.checkpoint_sink is not None
     assert harness.events_calls == 1
     assert harness.stop_calls == 1
     assert harness._cursor.close_calls == 1

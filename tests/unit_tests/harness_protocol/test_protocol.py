@@ -833,7 +833,7 @@ def test_public_protocol_uses_turn_and_step_terminology() -> None:
         *package_root.glob("*.py"),
         *package_root.glob("*.md"),
         repository / "docs" / "dev" / "harness_protocol_integration.md",
-        repository / "openjiuwen" / "agent_teams" / "external" / "dsh" / "README.md",
+        repository / "openjiuwen" / "harness_providers" / "dsh" / "README.md",
     ]
 
     for source in public_sources:

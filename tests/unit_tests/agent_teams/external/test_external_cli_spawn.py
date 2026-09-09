@@ -14,8 +14,10 @@ from openjiuwen.agent_teams.external.cli_agent.spawn import (
     build_cli_runtime,
     descriptor_from_context,
 )
-from openjiuwen.agent_teams.external.cli_agent.codex.runtime import CodexSdkRuntime
+from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, ReinvokeCliRuntime
+from openjiuwen.harness_providers.claudecode import ClaudeCodeHarness
+from openjiuwen.harness_providers.codex import CodexHarness
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
@@ -232,21 +234,7 @@ async def test_reinvoke_surfaces_chunks_live_during_turn():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
-    class FakeCodexConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    sdk = SimpleNamespace(
-        CodexConfig=FakeCodexConfig,
-        AsyncCodex=object,
-        ApprovalMode=SimpleNamespace(deny_all="deny-all"),
-        Sandbox=SimpleNamespace(full_access="full-access"),
-    )
-    monkeypatch.setattr(
-        "openjiuwen.agent_teams.external.cli_agent.codex.runtime.load_codex_sdk",
-        lambda: sdk,
-    )
+async def test_build_cli_runtime_dispatches_codex_to_protocol_harness():
     token = set_session_id("sess-1")
     try:
         runtime = await build_cli_runtime(
@@ -265,24 +253,58 @@ async def test_build_cli_runtime_dispatches_codex_to_sdk_backend(monkeypatch):
     finally:
         reset_session_id(token)
 
-    assert isinstance(runtime, CodexSdkRuntime)
-    assert runtime._thread_options == {
-        "ephemeral": False,
-        "config": {"model_reasoning_summary": "detailed"},
-        "cwd": "/workspace",
-        "developer_instructions": "ROLE: isolated developer",
-        "approval_mode": "deny-all",
-        "sandbox": "full-access",
-    }
-    assert runtime._config.kwargs["cwd"] == "/workspace"
-    assert runtime._config.kwargs["codex_bin"] == "/opt/codex-cli"
-    assert (
-        'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"'
-        in runtime._config.kwargs["config_overrides"]
-    )
-    assert runtime._member_agent_id == "ext_team_dev-1"
-    assert runtime._turn_idle_timeout_s == 45.0
-    assert runtime._turn_idle_retries == 2
+    assert isinstance(runtime, ExternalHarnessMemberRuntime)
+    assert isinstance(runtime.harness, CodexHarness)
+    assert runtime.provider_name == "codex"
+    assert runtime.reliability_agent_kind == "codex"
+    assert runtime.inject_mcp is True
+    config = runtime.harness._config
+    assert config.cwd == "/workspace"
+    assert config.codex_bin == "/opt/codex-cli"
+    assert config.bypass_approvals_and_sandbox is True
+    assert config.turn_idle_timeout_s == 45.0
+    assert config.turn_idle_retries == 2
+    assert config.mcp_default_tools_approval_mode == "approve"
+    assert "OPENJIUWEN_TEAM_JOIN" in config.env
+    mcp_servers = runtime._extra_mcp_servers
+    assert [server.name for server in mcp_servers] == ["openjiuwen-team"]
+    assert mcp_servers[0].command == ("openjiuwen-team-mcp",)
+    context = runtime._context_source
+    assert context.agent_id == "ext_team_dev-1"
+    assert context.system_prompt == "ROLE: isolated developer"
+    assert context.host_session_id == "sess-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_dispatches_claude_to_protocol_harness():
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent="claude"),
+            cwd="/workspace",
+            add_dirs=("/shared",),
+            cli_path="/opt/claude",
+            inject_mcp=True,
+            system_prompt="ROLE: isolated developer",
+            member_agent_id="ext_team_dev-1",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert isinstance(runtime, ExternalHarnessMemberRuntime)
+    assert isinstance(runtime.harness, ClaudeCodeHarness)
+    assert runtime.provider_name == "claude-code"
+    assert runtime.reliability_agent_kind == "claude"
+    config = runtime.harness._config
+    assert config.cwd == "/workspace"
+    assert config.add_dirs == ("/shared",)
+    assert config.cli_path == "/opt/claude"
+    assert config.inherit_process_env is False
+    assert "OPENJIUWEN_TEAM_JOIN" in config.env
+    assert not any(key.startswith("CLAUDECODE") for key in config.env)
+    # Claude mounts the team MCP server in process after configure; nothing yet.
+    assert runtime._extra_mcp_servers == []
 
 
 @pytest.mark.asyncio
