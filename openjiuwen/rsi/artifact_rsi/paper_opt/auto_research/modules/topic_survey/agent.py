@@ -195,18 +195,35 @@ class TopicSurveyAgent:
 
     @classmethod
     def _validate_paper_submission(cls, draft: TopicSurveyDraft) -> None:
-        """Reject structurally valid surveys that contain no actual paper."""
-        has_paper_source = False
+        """Still reject a portal home/search shell disguised as a paper
+        source (the model claiming a search-results page IS the paper) --
+        that's a specific hallucination risk, not a format mismatch. But a
+        survey with no paper-typed source at all, only genuine web_page
+        evidence, is no longer rejected: some legitimate topics are
+        grounded in documentation/technical web content rather than a
+        formal paper, and that's still useful context worth keeping --
+        flagged with a warning instead of discarded outright."""
+        has_real_paper_source = False
+        has_disguised_portal_source = False
         for source in draft.sources:
             source_is_paper = source.source_type == "paper"
             source_is_pdf = Path(source.local_path).suffix.lower() == ".pdf"
-            if (source_is_paper or source_is_pdf) and not cls._is_portal_shell_url(source.url):
-                has_paper_source = True
+            if not (source_is_paper or source_is_pdf):
+                continue
+            if cls._is_portal_shell_url(source.url):
+                has_disguised_portal_source = True
+            else:
+                has_real_paper_source = True
                 break
-        if not has_paper_source:
+        if has_disguised_portal_source and not has_real_paper_source:
             raise RuntimeError(
                 "topic survey did not produce a paper source; portal home/search pages "
                 "cannot be submitted as literature evidence"
+            )
+        if not has_real_paper_source:
+            _LOGGER.warning(
+                "topic survey produced no paper source (only web_page/non-paper "
+                "sources); continuing with what was gathered"
             )
 
     @staticmethod

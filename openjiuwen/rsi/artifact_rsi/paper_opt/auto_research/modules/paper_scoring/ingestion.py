@@ -112,7 +112,11 @@ def available_input_tokens(settings: PaperScoringSettings) -> int:
     )
 
 
-def _brace_end(text: str, open_idx: int) -> int:
+def _brace_end(text: str, open_idx: int) -> int | None:
+    """Index just past the brace matching `text[open_idx]`, or `None` if the
+    braces never balance -- callers treat that as "can't tell where this
+    construct ends" and fall back to leaving the text as-is, rather than
+    aborting the whole ingestion over one stray/unbalanced brace."""
     depth = 0
     for index in range(open_idx, len(text)):
         char = text[index]
@@ -122,7 +126,7 @@ def _brace_end(text: str, open_idx: int) -> int:
             depth -= 1
             if depth == 0:
                 return index + 1
-    raise LatexIngestError("unbalanced braces in LaTeX source")
+    return None
 
 
 def _strip_line_comment(line: str) -> str:
@@ -187,13 +191,20 @@ def _resolve_include(root: Path, current_dir: Path, spec: str) -> Path:
     return _jail(root, path)
 
 
-def _expand_tex(path: Path, *, root: Path, stack: tuple[Path, ...] = ()) -> list[LineRecord]:
+def _expand_tex(
+    path: Path, *, root: Path, warnings: list[str], stack: tuple[Path, ...] = ()
+) -> list[LineRecord]:
+    """Recursively inline \\input/\\include. A cyclic, escaping, or missing
+    include is skipped (and noted in `warnings`) rather than aborting the
+    whole document -- the rest of the paper is still worth reading."""
     resolved = _jail(root, path)
     if resolved in stack:
         cycle = " -> ".join(str(item.relative_to(root).as_posix()) for item in (*stack, resolved))
-        raise LatexIngestError(f"cyclic \\input/\\include: {cycle}")
+        warnings.append(f"cyclic \\input/\\include skipped: {cycle}")
+        return []
     if not resolved.is_file():
-        raise LatexIngestError(f"included file not found: {resolved}")
+        warnings.append(f"included file not found, skipped: {resolved}")
+        return []
     relative = resolved.relative_to(root).as_posix()
     records: list[LineRecord] = []
     text = resolved.read_text(encoding="utf-8")
@@ -207,8 +218,15 @@ def _expand_tex(path: Path, *, root: Path, stack: tuple[Path, ...] = ()) -> list
             prefix = line[cursor: match.start()]
             if prefix.strip():
                 records.append(LineRecord(relative, line_no, prefix.rstrip()))
-            included = _resolve_include(root, resolved.parent, match.group(1))
-            records.extend(_expand_tex(included, root=root, stack=(*stack, resolved)))
+            try:
+                included = _resolve_include(root, resolved.parent, match.group(1))
+            except LatexIngestError as exc:
+                warnings.append(f"skipped include: {exc}")
+                cursor = match.end()
+                continue
+            records.extend(
+                _expand_tex(included, root=root, warnings=warnings, stack=(*stack, resolved))
+            )
             cursor = match.end()
         suffix = line[cursor:]
         if suffix.strip() or cursor == 0:
@@ -258,6 +276,8 @@ def _unwrap_text_macros(text: str) -> str:
         changed = False
         for match in _TEXT_MACRO_RE.finditer(text):
             close = _brace_end(text, match.end() - 1)
+            if close is None:
+                continue  # unbalanced -- leave this instance as literal text
             inner = text[match.end(): close - 1]
             text = text[: match.start()] + inner + text[close:]
             changed = True
@@ -348,6 +368,8 @@ def _extract_caption(block: str) -> str:
     if not match:
         return ""
     close = _brace_end(block, match.end() - 1)
+    if close is None:
+        return ""
     return _normalize_prose(block[match.end(): close - 1])
 
 
@@ -357,13 +379,18 @@ def _extract_label(block: str) -> str | None:
 
 
 def _find_env(text: str, name: str, start: int = 0) -> tuple[int, int] | None:
+    """Span of a `\\begin{name}...\\end{name}` block, or `None` if there's no
+    `\\begin{name}` at all *or* it's never closed. Callers already treat
+    `None` as "not a recognized block here" and fall back to scanning it as
+    ordinary text, so an unclosed environment degrades instead of aborting
+    the whole ingestion."""
     begin = re.search(rf"\\begin\s*\{{{re.escape(name)}\}}", text[start:])
     if not begin:
         return None
     begin_at = start + begin.start()
     end = re.search(rf"\\end\s*\{{{re.escape(name)}\}}", text[begin_at:])
     if not end:
-        raise LatexIngestError(f"unclosed \\begin{{{name}}}")
+        return None
     return begin_at, begin_at + end.end()
 
 
@@ -398,9 +425,10 @@ def _add_section(
     return index + 1 if name != "preamble" else index
 
 
-def _parse_bib_file(path: Path) -> list[BibliographyEntry]:
+def _parse_bib_file(path: Path, warnings: list[str]) -> list[BibliographyEntry]:
     if not path.is_file():
-        raise LatexIngestError(f"bibliography file not found: {path}")
+        warnings.append(f"bibliography file not found, skipped: {path}")
+        return []
     text = path.read_text(encoding="utf-8")
     entries: list[BibliographyEntry] = []
     for match in re.finditer(r"@\w+\s*\{([^,]+),", text):
@@ -505,6 +533,7 @@ def _rewrite_and_extract(
     *,
     root: Path,
     settings: PaperScoringSettings,
+    warnings: list[str],
 ) -> tuple[list[PaperSection], list[TableBlock], list[FigureAsset]]:
     text = _joined(records)
     line_starts: list[int] = []
@@ -549,6 +578,7 @@ def _rewrite_and_extract(
     current_name = "preamble"
     current_canonical: CanonicalSection = "other"
     current_id = "sec-preamble"
+    max_figures_warned = False
 
     while pos < len(text):
         if text.startswith(r"\appendix", pos):
@@ -565,53 +595,60 @@ def _rewrite_and_extract(
 
         abstract = re.match(r"\\begin\{abstract\}", text[pos:])
         if abstract:
-            end_record = _record_at(pos)
-            _flush(name=current_name, canonical=current_canonical, end_record=end_record)
             close = re.search(r"\\end\{abstract\}", text[pos:])
-            if not close:
-                raise LatexIngestError("unclosed abstract environment")
-            inner = text[pos + abstract.end(): pos + close.start()]
-            sections.append(
-                PaperSection(
-                    section_id=f"sec-{section_index:03d}",
-                    name="Abstract",
-                    canonical_name="abstract",
-                    text=_normalize_prose(inner),
-                    source_path=end_record.source,
-                    line_start=end_record.line_no,
-                    line_end=_record_at(pos + close.end()).line_no,
+            if close is None:
+                warnings.append("unclosed abstract environment; treated as body text")
+            else:
+                end_record = _record_at(pos)
+                _flush(name=current_name, canonical=current_canonical, end_record=end_record)
+                inner = text[pos + abstract.end(): pos + close.start()]
+                sections.append(
+                    PaperSection(
+                        section_id=f"sec-{section_index:03d}",
+                        name="Abstract",
+                        canonical_name="abstract",
+                        text=_normalize_prose(inner),
+                        source_path=end_record.source,
+                        line_start=end_record.line_no,
+                        line_end=_record_at(pos + close.end()).line_no,
+                    )
                 )
-            )
-            section_index += 1
-            current_name = "body"
-            current_canonical = "other"
-            current_id = f"sec-{section_index:03d}"
-            buf_source = _record_at(pos + close.end()).source
-            buf_line = _record_at(pos + close.end()).line_no
-            pos += close.end()
-            continue
+                section_index += 1
+                current_name = "body"
+                current_canonical = "other"
+                current_id = f"sec-{section_index:03d}"
+                buf_source = _record_at(pos + close.end()).source
+                buf_line = _record_at(pos + close.end()).line_no
+                pos += close.end()
+                continue
 
         section_match = _HEADING_CMD_RE.match(text[pos:])
         if section_match:
             brace_at = pos + section_match.end() - 1
             close = _brace_end(text, brace_at)
-            title = _normalize_prose(text[brace_at + 1: close - 1])
-            end_record = _record_at(pos)
-            _flush(name=current_name, canonical=current_canonical, end_record=end_record)
-            command = section_match.group(1)
-            mapped = _canonical_heading(title)
-            if command in {"subsection", "subsubsection"} and mapped == "other":
-                if current_canonical == "other" and in_appendix:
-                    mapped = "appendix"
-                elif current_canonical != "other":
-                    mapped = current_canonical
-            current_name = title or command
-            current_canonical = mapped
-            current_id = f"sec-{section_index:03d}"
-            buf_source = end_record.source
-            buf_line = end_record.line_no
-            pos = close
-            continue
+            if close is None:
+                warnings.append(
+                    f"unbalanced braces after \\{section_match.group(1)} near "
+                    f"{_record_at(pos).source}:{_record_at(pos).line_no}; treated as body text"
+                )
+            else:
+                title = _normalize_prose(text[brace_at + 1: close - 1])
+                end_record = _record_at(pos)
+                _flush(name=current_name, canonical=current_canonical, end_record=end_record)
+                command = section_match.group(1)
+                mapped = _canonical_heading(title)
+                if command in {"subsection", "subsubsection"} and mapped == "other":
+                    if current_canonical == "other" and in_appendix:
+                        mapped = "appendix"
+                    elif current_canonical != "other":
+                        mapped = current_canonical
+                current_name = title or command
+                current_canonical = mapped
+                current_id = f"sec-{section_index:03d}"
+                buf_source = end_record.source
+                buf_line = end_record.line_no
+                pos = close
+                continue
 
         table_span = None
         if text.startswith(r"\begin{table}", pos) or text.startswith(r"\begin{table*}", pos):
@@ -690,22 +727,39 @@ def _rewrite_and_extract(
                 caption = ""
                 label = None
             rec = _record_at(start)
-            source = _resolve_graphics(root, spec, current_source=rec.source)
+            try:
+                source = _resolve_graphics(root, spec, current_source=rec.source)
+            except LatexIngestError as exc:
+                warnings.append(f"skipped figure: {exc}")
+                buf.append(f"[FIGURE unresolved: {caption or spec}]")
+                pos = end
+                continue
             if len(figures) >= settings.max_figures:
-                raise LatexIngestError(
-                    f"paper exceeds max_figures={settings.max_figures}: {source}"
-                )
+                if not max_figures_warned:
+                    max_figures_warned = True
+                    warnings.append(
+                        f"max_figures={settings.max_figures} reached; later figures omitted"
+                    )
+                buf.append(f"[FIGURE omitted (max_figures reached): {caption or source.name}]")
+                pos = end
+                continue
             section_id, canonical = current_id, current_canonical
-            figure = _load_figure(
-                source,
-                figure_id=f"fig-{len(figures) + 1:03d}",
-                section_id=section_id,
-                canonical=canonical,
-                caption=caption,
-                label=label,
-                relative=source.relative_to(root).as_posix(),
-                max_side=settings.figure_max_side,
-            )
+            try:
+                figure = _load_figure(
+                    source,
+                    figure_id=f"fig-{len(figures) + 1:03d}",
+                    section_id=section_id,
+                    canonical=canonical,
+                    caption=caption,
+                    label=label,
+                    relative=source.relative_to(root).as_posix(),
+                    max_side=settings.figure_max_side,
+                )
+            except LatexIngestError as exc:
+                warnings.append(f"skipped figure {source}: {exc}")
+                buf.append(f"[FIGURE unavailable: {caption or source.name}]")
+                pos = end
+                continue
             figures.append(figure)
             buf.append(
                 f"[FIGURE {figure.figure_id}: {caption or source.name} | source={figure.source_path}]"
@@ -793,7 +847,8 @@ def ingest_latex(
     if not tex_path.is_file():
         raise LatexIngestError(f"LaTeX file does not exist: {tex_path}")
     root = tex_path.parent
-    records = _expand_tex(tex_path, root=root)
+    warnings: list[str] = []
+    records = _expand_tex(tex_path, root=root, warnings=warnings)
     included = list(dict.fromkeys(record.source for record in records))
     body = _document_body(records)
     if not body:
@@ -807,10 +862,15 @@ def ingest_latex(
             bib_path = spec.strip()
             if not bib_path.endswith(".bib"):
                 bib_path += ".bib"
-            bibliography.extend(_parse_bib_file(_jail(root, root / bib_path)))
+            try:
+                jailed = _jail(root, root / bib_path)
+            except LatexIngestError as exc:
+                warnings.append(f"skipped bibliography: {exc}")
+                continue
+            bibliography.extend(_parse_bib_file(jailed, warnings))
 
     sections, tables, figures = _rewrite_and_extract(
-        body, root=root, settings=settings
+        body, root=root, settings=settings, warnings=warnings
     )
     if bibliography:
         bib_lines = []
@@ -865,6 +925,7 @@ def ingest_latex(
         bibliography=bibliography,
         included_files=included,
         token_estimate=token_estimate,
+        warnings=warnings,
     )
 
 
