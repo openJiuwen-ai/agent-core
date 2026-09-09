@@ -80,9 +80,8 @@ _current_phase: ContextVar[str | None] = ContextVar("wf_current_phase", default=
 _MAX_FANOUT = 4096
 # Seconds the cancel path of ``parallel()`` waits for branch tasks to actually
 # terminate before the engine unwinds (see its ``except CancelledError``). A
-# branch whose cancel is swallowed by an in-flight LLM stream would otherwise
-# hold the teardown hostage for its whole natural run; the cap bounds the drain,
-# and such a straggler dies at the abort gate on its next attempt instead.
+# slow-to-finish branch would otherwise hold the teardown hostage for its
+# whole natural run; the cap bounds the drain.
 _BRANCH_DRAIN_TIMEOUT = 2.0
 
 
@@ -1424,13 +1423,13 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
             # still propagates out of the branch; only real errors map to None.
             return None
 
-    # Create branch tasks explicitly: when pause/stop cancels the engine
-    # coroutine, the gather futures being awaited are not cancelled
-    # (Task.cancel does not cancel _fut_waiter), so branches would become
-    # orphans that keep burning tokens (production 09-07: policy and
-    # competition branches ran 3s/88s past the pause). On outer
-    # cancellation, cancel every branch so CancelledError lands on each
-    # branch's current await.
+    # Create branch tasks explicitly and re-cancel each one in the except block
+    # below: gather() already forwards cancellation to every child automatically
+    # in the common case, but if the driver's own cancel lands in the narrow
+    # window where its Task._fut_waiter is momentarily unset, CancelledError is
+    # thrown straight into this coroutine without ever touching the gather
+    # future, so gather's child-cancellation never runs. The explicit loop is
+    # the reliable backstop for that gap.
     branch_tasks = [
         asyncio.create_task(branch(i, th)) for i, th in enumerate(thunks)
     ]
@@ -1444,8 +1443,8 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
         # still alive here would hit "unknown session" on its next send_turn
         # (production 09-08: pause landed while a branch was still building its
         # avatar, and its first turn found the session row already popped).
-        # Bounded wait — a straggler that outlives the drain dies at the abort
-        # gate on its next attempt (see _attempt_calls), not by holding teardown.
+        # Bounded wait for the DRIVER only — a branch that ignores its cancel
+        # keeps running past this timeout; it is not force-terminated here.
         await asyncio.wait(branch_tasks, timeout=_BRANCH_DRAIN_TIMEOUT)
         raise
 
