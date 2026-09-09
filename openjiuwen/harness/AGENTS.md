@@ -79,6 +79,7 @@ harness/
 | KV 缓存 / skill 状态 | `kv_cache/` + `skills/` | `S_16` |
 | 个人上下文 | `personal_context/` | `S_17` |
 | 子代理与生命周期 | `subagents/` + `subagent_lifecycle.py` | `S_18` |
+| 协议 Harness 实现 / IO adapter / manifest 工厂 | `openjiuwen/harness_providers/`（同级包，见其 `AGENTS.md`） | `S_19` |
 
 ## 架构铁律
 

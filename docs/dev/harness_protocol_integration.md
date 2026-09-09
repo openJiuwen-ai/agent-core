@@ -726,21 +726,25 @@ class AcmeProvider:
 
 ## 12. DSH 的程序化接入
 
-仓库内 `external.dsh` 是 DeepSeek Harness Python SDK 的首个协议实现。SDK 保持 optional：本地
-开发可先安装 DSH checkout 中的 Python package，公共 OpenJiuwen import 不依赖它：
+仓库内 `openjiuwen.harness_providers.dsh` 是 DeepSeek Harness Python SDK 的协议实现（Claude Code /
+Codex / DeepAgent 的实现是同级的 `harness_providers.claudecode` / `.codex` / `.native`，共用
+`harness_providers.base.SerializedTurnHarness` 骨架）。SDK 保持 optional：本地开发可先安装 DSH
+checkout 中的 Python package，公共 OpenJiuwen import 不依赖它：
 
 ```bash
 uv pip install -e /path/to/deepseek-harness/python/sdk
 ```
 
-当前尚无声明式 registry/spawn 接线，必须显式按 provider -> harness -> member runtime 组装：
+SDK 不会隐式读取 `~/.dsh`：配置必须给 `dsh_home`（或 `env["DSH_HOME"]`），`profile` 默认 `sdk`。
+声明式 registry/spawn 尚未接线，按 provider -> harness -> member runtime 组装（或用
+`openjiuwen.harness_providers.create_harness(manifest, provider="dsh")` 从 manifest 构造）：
 
 ```python
 import asyncio
 
 from openjiuwen.agent_teams.external import ExternalHarnessMemberRuntime
-from openjiuwen.agent_teams.external.dsh import DshHarnessProvider
 from openjiuwen.harness_protocol import HarnessContext
+from openjiuwen.harness_providers.dsh import DshHarnessProvider
 
 
 async def consume_outputs(runtime: ExternalHarnessMemberRuntime) -> None:
@@ -755,7 +759,7 @@ async def main() -> None:
             "provider": "deepseek-official",
             "model": "deepseek-v4-flash",
             "cwd": "/path/to/member-worktree",
-            "cordis": "/path/to/custom-cordis.yml",
+            "dsh_home": "/path/to/dsh-home",
             "system_prompt_env_var": "DSH_SYSTEM_PROMPT",
         }
     )
@@ -897,15 +901,30 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 23. required event 在背压下不丢，只有 derived coalescible/best-effort 类别按 policy 处理；
 24. ID scope、correlation/causation 与 Unix/monotonic 时间语义符合 spec。
 
-## 15. 当前限制与后续接线
+## 15. 内置实现、IO adapter 与 manifest 工厂
 
-当前已有通用 `ExternalHarnessMemberRuntime` 和程序化 DSH adapter，但仍没有：
+`openjiuwen.harness_providers` 提供四个内置实现与两层宿主胶水：
 
-- 修改 `ExternalCliAgentSpec`；
-- 注册 Python entry point group；
-- 改造 `build_cli_runtime`；
-- 迁移 Claude Code/Codex runtime。
+| provider 名 | 实现 | card 名 | capabilities |
+|---|---|---|---|
+| `native` | `native.DeepAgentHarness`（进程内 DeepAgent 交互循环） | `deepagent` | STEER, FORCE_ABORT |
+| `claudecode` | `claudecode.ClaudeCodeHarness`（claude-agent-sdk） | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS |
+| `codex` | `codex.CodexHarness`（openai-codex） | `codex` | 同上 |
+| `dsh` | `dsh.DshHarness`（deepseek-harness） | `deepseek-harness` | 空 |
 
-这些接线完成前，协议实现不能仅靠 TeamAgentSpec/YAML 声明自动成为 team member，需要像 DSH
-示例一样程序化构造 provider、harness、context 和 runtime。请把其它 provider 与 harness 实现放在
-独立、可测试的模块中，避免依赖当前 CLI spawn 内部结构，以便后续直接接入 registry。
+- `harness_providers.io_adapter.HarnessIOAdapter`：把任意 `HarnessProtocol` 投影成 DeepAgent 风格
+  输入输出——输入接受用户文本与 `InteractiveInput`（回答 ask-user 中断），输出为
+  `llm_output` / `llm_reasoning` / `tool_call` / `tool_result` / `__interaction__` `OutputSchema`；
+  adapter 自身即 `HarnessInteractionHandler`，`UserInputRequest` 变成 `__interaction__` chunk，直到
+  宿主 `send(InteractiveInput)` 才应答 provider。
+- `harness_providers.create_harness(manifest, provider=..., config=..., language=...)`：从 AgentTemplate
+  manifest（`AgentTemplateSpec` 或 `manifest.json` 包路径）建未启动 harness；`native` 热加载整份
+  template，三方 provider 只取模型端点，manifest 里的 `tools` / `rails` / `subagents` / `skills` 会被
+  拒绝。`build_harness_context(...)` 把 persona prompt sections 渲染成 `system_prompt`、manifest MCP
+  变成 `mcp_servers`。
+- team 侧 `ExternalHarnessMemberRuntime` 组合 IO adapter；`build_cli_runtime` 的 claude / codex 分支
+  已切到这两个 provider（`ExternalCliAgentSpec` 字段不变）。
+
+仍未完成：Python entry point provider discovery；把 `dsh` / `native` 接入 `ExternalCliAgentSpec`
+声明式 spawn。端到端契约测试见 `tests/system_tests/harness_providers/`（对本机 CLI 运行，缺 CLI
+或 SDK 时自动跳过）。

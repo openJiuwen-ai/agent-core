@@ -1,0 +1,85 @@
+# harness_providers maintenance guide
+
+`openjiuwen.harness_providers` hosts the built-in implementations of the
+provider-neutral `openjiuwen.harness_protocol` SPI plus the two glue layers a
+host needs to drive them: the DeepAgent-style I/O adapter and the manifest
+factory. Contracts live in `harness_protocol`; nothing here changes them.
+
+## Module map
+
+```
+harness_providers/
+├── base.py         # SerializedTurnHarness: shared lifecycle / turn queue / interaction / checkpoint skeleton
+├── stream.py       # BoundedEventBuffer + BufferedEventCursor (single-consumer, BLOCK backpressure)
+├── io_adapter.py   # HarnessIOAdapter: protocol <-> DeepAgent OutputSchema / InteractiveInput contract
+├── factory.py      # create_harness(manifest, provider=...) / build_harness_context(...) / resolve_provider
+├── inputs.py       # harness_input_text: HarnessInput -> prompt text
+├── jsonsafe.py     # to_json_safe: vendor objects -> protocol JSON values
+├── native/         # DeepAgentHarness over the in-process DeepAgent interaction loop (+ NativeHarnessProvider)
+├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier)
+├── codex/          # CodexHarness over openai-codex (config / options / mapping / failure_classifier)
+└── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
+```
+
+Provider names accepted by the factory: `native`, `claudecode`, `codex`, `dsh`.
+The provider card names are `deepagent`, `claude-code`, `codex`, `deepseek-harness`.
+
+Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, feature
+`openjiuwen/harness/docs/features/F_03_harness-providers-and-manifest-factory.md`, team wiring
+`openjiuwen/agent_teams/docs/specs/S_27_external-harness-member-runtime.md` and
+`openjiuwen/agent_teams/docs/features/F_96_protocol-harness-providers-and-member-migration.md`.
+
+## Invariants
+
+1. **One turn skeleton.** Every provider subclasses `SerializedTurnHarness` and
+   implements only `_open_session` / `_close_session` / `_execute_turn` (+
+   `_steer` / `_interrupt_turn` when the card declares STEER / abort). The base
+   class owns the state machine, the pending queue, `STARTED`/terminal event
+   pairing, interaction bookkeeping (`_request_interaction`,
+   `_cancel_pending_interactions`) and checkpoint publishing
+   (`_publish_checkpoint`, `_restored_checkpoint_data`). Do not re-implement
+   these per provider.
+2. **Capabilities are truthful.** A card declares only what the SDK can do
+   end to end; unsupported commands raise `UnsupportedHarnessCapabilityError`.
+   DSH keeps an empty capability set; Claude Code / Codex declare STEER,
+   GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS; the DeepAgent
+   harness declares STEER and FORCE_ABORT.
+3. **Vendor SDKs stay optional.** Config / provider / package imports never
+   import a vendor SDK; `_open_session` loads it lazily and a missing SDK
+   surfaces as `HarnessError`. Startup failures raise `ProviderStartupError`
+   with a normalized `TurnError` so hosts classify without parsing text.
+4. **Failure vocabulary is shared.** `TurnError.category` is one of
+   `auth_required / quota_exceeded / rate_limited / server_unavailable /
+   network_timeout / process_start_failed / sdk_error / unknown`;
+   `provider_data` carries `sdk_error_type` / `http_status`. The team
+   reliability layer maps this one-to-one.
+5. **Provider-private seams do not leak.** `CodexHarness(notification_observer=...)`
+   and `ClaudeCodeHarness(transport_factory=...)` are constructor-only hooks for
+   hosts that own SDK objects (observability bridges, ssh transports). They never
+   appear in the public event stream or in JSON provider config.
+6. **User input is an interaction.** Claude `AskUserQuestion` and DeepAgent
+   `ask_user` interrupts become `UserInputRequest`s; the turn stays open until
+   the host answers. When the host declares USER_INPUT / TOOL_APPROVAL the
+   Claude harness switches `permission_mode` to `default` so the SDK actually
+   consults `can_use_tool`.
+7. **The IO adapter is the only DeepAgent-facing projection.** `HarnessIOAdapter`
+   emits `llm_output` / `llm_reasoning` / `tool_call` / `tool_result` /
+   `__interaction__` chunks and resolves `InteractiveInput` against pending
+   interactions; `agent_teams.external.member_runtime` composes it instead of
+   projecting events itself.
+8. **The manifest is DeepAgent-first.** `create_harness` hot-loads the full
+   `AgentTemplateSpec` for `native`; third-party providers only take the model
+   endpoint and, through `build_harness_context`, the rendered prompt sections
+   and MCP servers. Manifests carrying `tools` / `rails` / `subagents` / `skills`
+   are rejected for third-party providers instead of being silently dropped.
+
+## Change requirements
+
+- New provider: subclass `SerializedTurnHarness`, add a `*HarnessProvider`,
+  register the name in `factory.resolve_provider` / `PROVIDER_NAMES`, add
+  fake-SDK unit tests under `tests/unit_tests/harness_providers/` and a real
+  CLI suite under `tests/system_tests/harness_providers/` reusing
+  `_contract.py`.
+- Mapping changes need the corresponding fake-SDK test updated; keep raw SDK
+  objects out of `ProviderEvent` payloads (`to_json_safe` first).
+- Public protocol changes are made in `openjiuwen/harness_protocol` first.

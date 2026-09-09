@@ -247,17 +247,25 @@ provider session/Turn 协议合并。
 - `openjiuwen/harness_protocol/`：公共三方 Harness Python SPI 1.0，使用
   `Session > Turn > Step`、单消费者持续/单 Turn 事件视图以及独立 observation /
   interaction / hook 三平面。协议包保持无厂商 SDK 依赖。
-- `external/member_runtime.py`：`ExternalHarnessMemberRuntime`，持续消费一次 `harness.events()`，把
-  output/tool/state/Turn lifecycle 投影到现有 `MemberRuntime`/`StreamController` 表面，并复用
-  `TeamContextTracker` 的 pending/commit 投递。内部 `harness.round` callback 是 legacy 兼容名，
-  不得反向写入公共协议。
-- `external/dsh/`：DeepSeek Harness Python SDK adapter。一个外部 Turn 对应一次从 adapter 派发到
-  whole-agent idle 的串行 `Session.run()` activity interval；DSH 以 prompt durable receipt 作为通知
-  收集边界，native turn 作为 provider event，native step 映射为 `item_type="step"`。SDK 仅在 start 时
-  lazy import。首版 capabilities 为空，不支持 steer、
-  abort、pause/resume、checkpoint 或动态 MCP；system prompt 需要 custom Cordis composition 消费
-  配置的环境变量。当前只支持 provider -> harness -> `ExternalHarnessMemberRuntime` 的程序化构造，
-  尚未进入 `ExternalCliAgentSpec`/spawn registry。详见 [[F_95_dsh-external-harness-adapter]]。
+- `openjiuwen/harness_providers/`：协议的内置实现（`native` DeepAgent / `claudecode` / `codex` /
+  `dsh`），共用 `SerializedTurnHarness` 骨架；`HarnessIOAdapter` 把协议投影成 DeepAgent 风格的
+  `OutputSchema` / `InteractiveInput` 契约（含 ask-user 中断），`create_harness(manifest, provider=...)`
+  按 AgentTemplate manifest 建 harness。DSH adapter 从 `external/dsh/` 迁到
+  `harness_providers/dsh/`（`external/dsh/__init__.py` 仅保留 re-export）。见 `harness_providers/AGENTS.md`。
+- `external/member_runtime.py`：`ExternalHarnessMemberRuntime`，组合 `HarnessIOAdapter` 并叠加团队
+  行为：成员 child AgentSession（provider checkpoint sink + `TeamContextTracker` 投递基线）、
+  `harness.state` / `harness.round`（legacy 兼容名）回调、外部 runtime 可靠性上下文
+  （`bind_reliability_context`：FAILED terminal / 启动失败 → leader 邮箱失败消息，retrying 诊断 →
+  进度事件）、观测桥接（`bind_span_bridge`）、认证 fallback 持久化（`bind_fallback_promotion`）与
+  MCP server 挂载（`bind_mcp_servers`）。`resume_external_backend=True` 时要求 checkpoint 存在并以
+  `REQUIRE_RESUME` 启动。Claude Code / Codex 成员都走这一条路径（`build_cli_runtime`），不再有
+  `ClaudeSdkRuntime` / `CodexSdkRuntime`。详见 [[F_96_protocol-harness-providers-and-member-migration]]。
+- `external/cli_agent/claude/`：只剩团队侧接线——`sdk_mcp.py`（进程内 SDK MCP 团队工具集，作为
+  `McpServerConfig(IN_PROCESS)` 挂到 runtime）、`ssh_transport.py`（Claude SDK ssh transport，经
+  `ClaudeCodeHarness(transport_factory=...)` 注入）、`options.py`（team 命名的 session id 助手）。
+  `external/cli_agent/codex/`：`observer.py`（把原始 SDK notification 喂给 `CodexSpanBridge` 的
+  provider-private observer）+ `options.py`（team MCP overrides 助手）。DSH 的 Turn 边界与限制见
+  [[F_95_dsh-external-harness-adapter]]。
 
 - `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +
   dispatch_mode + teammate_mode + db_config + transport_config）+ `TEAM_JOIN_ENV` 环境变量（`OPENJIUWEN_TEAM_JOIN`）。
@@ -300,10 +308,13 @@ provider session/Turn 协议合并。
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
 `command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`/`ssh_transport`），非空集即外部 CLI 成员的能力上限。
 leader 用 `spawn_external_cli(cli_agent=<name>)` 按名引用，不在 spawn
-调用里传启动细节。当前内置 adapter：claude / codex / gemini / openclaw / hermes / generic。
-spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 adapter 注入团队 MCP server——
-有 launch flag 的 claude `--mcp-config <inline-json>`、codex `-c mcp_servers...`；无 flag 的
-gemini / hermes 由 spawn 路径跑一次 `<cli> mcp add ...` 带外注册（`mcp_register_command`），
+调用里传启动细节。当前内置 backend：claude / codex（`harness_providers` 协议 provider +
+`ExternalHarnessMemberRuntime`）与 adapter 型 gemini / openclaw / hermes / generic
+（`CliRuntimeBase` 子进程 runtime）。spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 backend
+注入团队 MCP server——claude 走 SDK 进程内 MCP（`_bind_protocol_member_team_tools` 在 `configure`
+后把 `build_claude_sdk_mcp_tool_set` 的 server 作为 `McpServerConfig(IN_PROCESS)` 挂上）、codex 走
+stdio `McpServerConfig`（`CodexHarnessConfig.mcp_env_passthrough` 带上 `MCP_SERVER_ENV_VARS`）；无
+flag 的 gemini / hermes 由 spawn 路径跑一次 `<cli> mcp add ...` 带外注册（`mcp_register_command`），
 openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 是 CLI 子进程，继承
 `OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。`ssh_transport` 配置后 CLI 进程在远程 SSH 端点
 启动，`command` / `cwd` / `mcp_server_command` 均按远程主机解释；DB / messager 可达性由部署保证。

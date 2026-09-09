@@ -2,8 +2,9 @@
 
 This directory defines the provider-neutral public Python SPI for third-party
 agent harnesses. It contains contracts and immutable value objects only. The
-current Claude Code, Codex, and subprocess implementations remain outside this
-directory until their explicit migrations.
+built-in implementations (DeepAgent, Claude Code, Codex, DSH) live in
+`openjiuwen/harness_providers`; the subprocess CLI adapters for other tools
+remain in `openjiuwen/agent_teams/external/cli_agent`.
 
 ## Scope
 

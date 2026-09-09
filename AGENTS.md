@@ -19,6 +19,11 @@ settings, and `Makefile` defines the common lint/test entry points.
   primitives; includes prompts, rails, tools, subagents, task loop, and
   workspace handling. Tool permission engine lives in `openjiuwen/harness/security/`;
   prompt/tool security rails live in `openjiuwen/harness/rails/security/`.
+- `openjiuwen/harness_protocol/`: provider-neutral SPI (contracts and frozen
+  value objects only) for driving third-party agent harnesses.
+- `openjiuwen/harness_providers/`: built-in implementations of that SPI
+  (`native` DeepAgent, `claudecode`, `codex`, `dsh`), the DeepAgent-style
+  `HarnessIOAdapter`, and the manifest-driven `create_harness` factory.
 - `openjiuwen/extensions/`: optional integrations such as storage,
   checkpointers, sandbox providers, and vendor-specific adapters.
 - `openjiuwen/agent_evolving/` and `openjiuwen/dev_tools/`: optimization,

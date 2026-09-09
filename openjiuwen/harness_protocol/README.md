@@ -179,8 +179,10 @@ class MyHarness:
 - Long-lived protocol specification:
   `openjiuwen/harness_protocol/SPEC.md`
 
-`agent_teams.external.member_runtime` provides an optional projection onto the
-team `MemberRuntime` behavior. `agent_teams.external.dsh` is the first protocol
-implementation and is currently wired programmatically. The Claude Code and
-Codex implementations remain under `agent_teams.external.cli_agent` and do not
-yet implement this package.
+Built-in implementations live in `openjiuwen.harness_providers`
+(`native` DeepAgent, `claudecode`, `codex`, `dsh`) together with
+`HarnessIOAdapter`, which projects this protocol onto the DeepAgent-style
+input/output contract, and `create_harness`, which builds a provider from an
+AgentTemplate manifest. `agent_teams.external.member_runtime` composes that
+adapter into the team `MemberRuntime` behavior; the team spawn path builds
+Claude Code and Codex members on these providers.
