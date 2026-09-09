@@ -69,9 +69,10 @@ async def test_parallel_cancels_every_branch_on_driver_cancel():
     drv.cancel()
     with pytest.raises(asyncio.CancelledError):
         await drv
-    await _settle_loose_tasks()
 
     assert all(ev.is_set() for ev in cancelled)  # every branch saw the cancel
+
+    await _settle_loose_tasks()
 
 
 @pytest.mark.asyncio
@@ -103,9 +104,10 @@ async def test_parallel_drains_branches_before_unwinding():
     drv.cancel()
     with pytest.raises(asyncio.CancelledError):
         await drv
-    await _settle_loose_tasks()
 
     assert dead.is_set()  # branch died BEFORE the driver re-raised
+
+    await _settle_loose_tasks()
 
 
 # ----------------------------------------------------- _attempt_calls abort gate
