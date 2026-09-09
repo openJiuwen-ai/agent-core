@@ -290,6 +290,9 @@ def test_auto_full_baseline_is_frozen_inside_single_run(tmp_path: Path) -> None:
     assert baseline_progress.iteration == 0
     assert baseline_progress.total_iterations == 1
     assert len(report["epoch_checkpoints"]) == 1
+    for call in evaluator.calls:
+        full = Path(call["output_dir"]).name in {"frozen_baseline", "full"}
+        assert call["case_concurrency"] == (2 if full else 1)
 
     call_count = len(evaluator.calls)
     asyncio.run(

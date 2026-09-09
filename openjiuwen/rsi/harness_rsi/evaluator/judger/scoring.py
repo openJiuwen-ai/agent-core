@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
@@ -87,15 +88,35 @@ def scoring_contract(case: dict[str, Any]) -> tuple[list[dict[str, Any]], list[d
     return behaviors, _normalize_items(reference.get("forbidden_behaviors", []), forbidden=True)
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate judge JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"non-finite judge JSON value: {value}")
+
+
 def parse_judge_output(raw: str) -> dict[str, Any]:
-    """Allow a single fenced object, but never silently repair missing score fields."""
+    """Accept one complete JSON verdict, optionally fenced with surrounding prose."""
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines[-1].strip() != "```":
-            raise ValueError("judge JSON fence is incomplete")
-        text = "\n".join(lines[1:-1])
-    parsed = json.loads(text)
+    if not text.startswith(("{", "[")) and "```" in text:
+        match = re.search(
+            r"^```(?:json)?[ \t]*\r?\n(.*?)^```[ \t]*(?:\r?\n|$)",
+            text,
+            re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        )
+        if match is None:
+            raise ValueError("judge output must contain one complete JSON fence")
+        outside = text[:match.start()] + text[match.end():]
+        if "```" in outside or any(char in outside for char in "{}[]"):
+            raise ValueError("ambiguous judge output: more than one structured payload")
+        text = match[1].strip()
+    parsed = json.loads(text, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
     if not isinstance(parsed, dict):
         raise ValueError("judge output must be an object")
     return parsed

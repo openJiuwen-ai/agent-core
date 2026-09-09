@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
+from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
 from openjiuwen.core.common.logging import logger
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import task_input
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
@@ -74,7 +74,7 @@ class CaseRunner:
         """Run one case and persist final trace/result artifacts.
 
         Execution order:
-        1. ``configure_openjiuwen_home`` redirects the global home to a case-scoped
+        1. ``set_task_openjiuwen_home`` binds a task-local home to a case-scoped
            runtime home. On Windows this uses a short temp root to avoid MAX_PATH
            failures while preserving per-case isolation. Other platforms keep
            ``case_dir`` as the runtime home.
@@ -87,17 +87,17 @@ class CaseRunner:
            first; this call is the fallback for normal/error exit without ``clean_team``).
         4. ``judger.judge`` reads stable ``case_dir/artifacts/`` and ``case_dir/tr/``.
         5. ``trace.json`` and ``result.json`` are written with final evaluation fields.
-        6. ``backend.cleanup``, ``_cleanup_scratch``, and ``reset_openjiuwen_home`` run in ``finally``.
+        6. ``backend.cleanup``, ``_cleanup_scratch``, and ``reset_task_openjiuwen_home`` run in ``finally``.
         """
         case_id = _case_id(case)
         session_id = f"eval_{case_id}_{uuid4().hex}"
         case_dir = Path(output_dir).expanduser().resolve()
         _prepare_case_dir(case_dir)
-        # Redirect global home so team_home() and stable_base path derivation
+        # Bind task-local home so team_home() and stable_base path derivation
         # resolve under a case-scoped runtime home for this case only.
         runtime_home_dir = _runtime_home_dir(case_dir, session_id)
         runtime_home_dir.mkdir(parents=True, exist_ok=True)
-        configure_openjiuwen_home(runtime_home_dir)
+        home_token = set_task_openjiuwen_home(runtime_home_dir)
         result_path = case_dir / "result.json"
         trace_path = case_dir / "trace.json"
         started_at = datetime.now(UTC).astimezone()
@@ -298,8 +298,10 @@ class CaseRunner:
                     raise
                 logger.warning("case runtime cleanup failed after case error: {}", exc)
             finally:
-                _cleanup_scratch(case_dir, runtime_home_dir)
-                reset_openjiuwen_home()
+                try:
+                    _cleanup_scratch(case_dir, runtime_home_dir)
+                finally:
+                    reset_task_openjiuwen_home(home_token)
 
     @model_usage_stage("judge")
     async def _judge(

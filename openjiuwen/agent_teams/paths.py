@@ -15,10 +15,22 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 _configured_openjiuwen_home: Path | None = None
 _configured_global_skills_dir: Path | None = None
+_task_openjiuwen_home: ContextVar[Path | None] = ContextVar("task_openjiuwen_home", default=None)
+
+
+def set_task_openjiuwen_home(path: str | Path) -> Token[Path | None]:
+    """Bind a runtime home to this async task without changing the host default."""
+    return _task_openjiuwen_home.set(Path(path))
+
+
+def reset_task_openjiuwen_home(token: Token[Path | None]) -> None:
+    """Restore the enclosing task's runtime home, including on cancellation."""
+    _task_openjiuwen_home.reset(token)
 
 # Per-workspace Skill visibility declaration file name. Skills live in exactly
 # one physical library (``global_skills_dir()``); which team member may see
@@ -42,13 +54,17 @@ def reset_openjiuwen_home() -> None:
 def get_openjiuwen_home() -> Path:
     """Return the root directory for openJiuWen local state.
 
-    Resolution order: an explicit :func:`configure_openjiuwen_home` override
+    Resolution order: a task-local :func:`set_task_openjiuwen_home` binding,
+    an explicit :func:`configure_openjiuwen_home` override
     (process-global, set by the host platform at startup), then the
     ``OPENJIUWEN_HOME`` environment variable (the only channel a spawned
     subprocess — e.g. a Codex MCP server — can inherit, since the in-memory
     override does not cross process boundaries), then the default
     ``~/.openjiuwen``.
     """
+    task_home = _task_openjiuwen_home.get()
+    if task_home is not None:
+        return task_home
     if _configured_openjiuwen_home is not None:
         return _configured_openjiuwen_home
     env_home = os.environ.get("OPENJIUWEN_HOME")

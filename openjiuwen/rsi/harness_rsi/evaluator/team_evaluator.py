@@ -9,6 +9,7 @@ import hashlib
 import json
 import shutil
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -66,9 +67,20 @@ class TeamEvaluator:
     def __init__(self, config: EvaluatorConfig) -> None:
         self.config = config
         self.metrics_collector = MetricsCollector()
-        self.case_runner = CaseRunner(
-            backend=build_backend(config=config),
-            judger=build_judger(config),
+        self.case_runner = self._make_case_runner()
+
+    def _make_case_runner(self) -> CaseRunner:
+        backend = build_backend(config=self.config)
+        existing = getattr(self, "case_runner", None)
+        if (isinstance(backend, SingleHarnessExecutionBackend)
+                and isinstance(existing, CaseRunner)
+                and isinstance(existing.backend, SingleHarnessExecutionBackend)):
+            # The processor already isolates subscriptions by async context.
+            # Reuse its registration instead of accumulating one per case.
+            backend._trajectory_span_processor = existing.backend._trajectory_span_processor
+        return CaseRunner(
+            backend=backend,
+            judger=build_judger(self.config),
         )
 
     async def evaluate(
@@ -95,8 +107,11 @@ class TeamEvaluator:
         output_dir: str,
         dataset: DatasetArtifact | None = None,
         on_case_stage: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        case_concurrency: int = 1,
     ) -> str:
-        """Run one batch of cases with fresh Team runtimes and persist artifacts."""
+        """Persist case results in input order; concurrency is opt-in per evaluation."""
+        if isinstance(case_concurrency, bool) or not isinstance(case_concurrency, int) or case_concurrency < 1:
+            raise ValueError("case_concurrency must be a positive integer")
         if (isinstance(self.case_runner, CaseRunner)
                 and isinstance(self.case_runner.backend, SingleHarnessExecutionBackend)
                 and self.case_runner.judger is not None):
@@ -122,36 +137,50 @@ class TeamEvaluator:
 
         harness_refs = _load_harness_refs(harness_refs_path) if harness_refs_path else {}
         total_cases = len(cases)
+        completed_cases = 0
+        stage_lock = asyncio.Lock()
 
-        for case_index, case in enumerate(cases, start=1):
+        async def report_case(
+            case_index: int, case_id: str, case_ref: EvaluationCaseTraceRef | None = None,
+        ) -> None:
+            nonlocal completed_cases
+            async with stage_lock:
+                if case_ref is not None:
+                    completed_cases += 1
+                if on_case_stage is not None:
+                    payload = {
+                        "case_index": case_index,
+                        "total_cases": total_cases,
+                        "case_id": case_id,
+                        "status": str(case_ref.status or "") if case_ref is not None else "running",
+                        "score": case_ref.score if case_ref is not None else None,
+                    }
+                    if case_concurrency > 1:
+                        payload["completed_cases"] = completed_cases
+                    await on_case_stage(payload)
+
+        async def run_case(case_index: int, case: dict[str, Any]) -> EvaluationCaseTraceRef:
             case_id = str(case.get("case_id") or f"case_{case_index:03d}")
             case_output_dir = case_results_dir / _case_dir_name(case_id, case_index)
 
             if can_resume_cases:
                 completed_ref = _load_completed_case_ref(case_output_dir, case_id=case_id)
                 if completed_ref is not None:
-                    case_refs.append(completed_ref)
-                    continue
+                    if case_concurrency > 1:
+                        await report_case(case_index, case_id, completed_ref)
+                    return completed_ref
 
+            runner = self.case_runner if case_concurrency == 1 else self._make_case_runner()
             retry_history: list[dict[str, Any]] = []
             retry_limit = max(0, int(self.config.transient_case_retry_limit))
-            if on_case_stage is not None:
-                await on_case_stage(
-                    {
-                        "case_index": case_index,
-                        "total_cases": total_cases,
-                        "case_id": case_id,
-                        "status": "running",
-                        "score": None,
-                    }
-                )
+            await report_case(case_index, case_id)
             for attempt in range(retry_limit + 1):
                 try:
-                    case_ref = await self.case_runner.execute(
-                        case={**case, "case_id": case_id},
+                    case_ref = await runner.execute(
+                        case=deepcopy({**case, "case_id": case_id}),
                         output_dir=str(case_output_dir),
                         team_skill_ref_path=team_skill_ref_path,
-                        harness_refs=harness_refs,
+                        harness_refs=deepcopy(harness_refs),
                     )
                 except EvaluationInfrastructureError as exc:
                     transient_error = _transient_transport_error(str(exc))
@@ -183,17 +212,29 @@ class TeamEvaluator:
                     json.dumps(retry_history, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-            case_refs.append(case_ref)
-            if on_case_stage is not None:
-                await on_case_stage(
-                    {
-                        "case_index": case_index,
-                        "total_cases": total_cases,
-                        "case_id": case_id,
-                        "status": str(getattr(case_ref, "status", "") or ""),
-                        "score": getattr(case_ref, "score", None),
-                    }
-                )
+            await report_case(case_index, case_id, case_ref)
+            return case_ref
+
+        if case_concurrency == 1:
+            for case_index, case in enumerate(cases, start=1):
+                case_refs.append(await run_case(case_index, case))
+        else:
+            semaphore = asyncio.Semaphore(case_concurrency)
+
+            async def bounded_case(case_index: int, case: dict[str, Any]) -> EvaluationCaseTraceRef:
+                async with semaphore:
+                    return await run_case(case_index, case)
+
+            tasks = [asyncio.create_task(bounded_case(index, case)) for index, case in enumerate(cases, start=1)]
+            try:
+                # Gather preserves dataset order even when cases finish out of order.
+                case_refs = list(await asyncio.gather(*tasks))
+            except BaseException:
+                for task in tasks:
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         summary_path = await self.metrics_collector.collect(
             str(case_results_dir),
@@ -243,9 +284,12 @@ def _evaluation_input_fingerprint(
         "harness_refs": _path_identity(harness_refs_path),
     }
     if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
+        from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
         from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
 
         payload["evaluator"] = _material_identity(evaluator_config, Path.cwd())
+        payload["llm_judge_score_contract"] = "threshold_binary_v1"
+        payload["judge_protocol"] = judge_protocol_identity()
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

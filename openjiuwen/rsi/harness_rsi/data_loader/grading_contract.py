@@ -7,7 +7,6 @@ import math
 import re
 from typing import Any
 
-
 _ITEM = re.compile(
     r"^\s*(?:\d+[.)\u3001]\s*)?\[\s*"
     r"(?P<kind>weight|deduct(?:ion)?|\u6743\u91cd|\u6263(?:\u5206)?)\s*[:\uff1a]?\s*"
@@ -15,6 +14,9 @@ _ITEM = re.compile(
     re.IGNORECASE,
 )
 _NUMBERED = re.compile(r"^\s*\d+[.)\u3001]\s*")
+_SCORING_ANNOTATION = re.compile(
+    r"^\s*\[\s*(?:weight|deduct(?:ion)?|\u6743\u91cd|\u6263(?:\u5206)?)", re.IGNORECASE
+)
 _HEADING = re.compile(r"^\s*(?:\u3010[^\u3011]+\u3011|#{1,6}\s)")
 
 
@@ -30,11 +32,13 @@ def parse_weighted_rubric(text: str) -> tuple[list[dict[str, Any]], list[dict[st
     positive: list[dict[str, Any]] = []
     negative: list[dict[str, Any]] = []
     current = None
+    group = False
     for line in text.splitlines():
         if not line.strip():
             continue
         match = _ITEM.fullmatch(line)
         if match:
+            group = _NUMBERED.match(line) is None
             amount = float(match["amount"]) / 100
             is_weight = match["kind"].lower() in {"weight", "\u6743\u91cd"}
             if not math.isfinite(amount) or not 0 < amount <= 1:
@@ -47,6 +51,9 @@ def parse_weighted_rubric(text: str) -> tuple[list[dict[str, Any]], list[dict[st
             }
             items.append(current)
         elif _NUMBERED.match(line) or line.lstrip().startswith("["):
+            if current is not None and group and not _SCORING_ANNOTATION.match(_NUMBERED.sub("", line)):
+                current["description"] += "\n" + line.strip()
+                continue
             raise ValueError("unrecognized rubric item; use explicit [weight N%] or [deduct N%] annotations")
         elif _HEADING.match(line):
             current = None
@@ -70,16 +77,33 @@ def normalize_grading_case(case: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(case)
     if "case_id" not in normalized and "id" in normalized:
         normalized["case_id"] = normalized["id"]
-    if "reference_solution" not in case and "judge_rubrics" not in case:
-        return normalized
     raw_reference = case.get("reference", {})
     if not isinstance(raw_reference, dict):
         raise ValueError("reference must be an object")
+    aliases = {key: case[key] for key in ("reference_solution", "judge_rubrics") if key in case}
+    for nested, top_level in (("solution", "reference_solution"), ("judge_rubrics", "judge_rubrics")):
+        if nested not in raw_reference:
+            continue
+        value = raw_reference[nested]
+        if top_level in aliases and aliases[top_level] != value:
+            raise ValueError(f"conflicting grading fields: {top_level} and reference.{nested}")
+        aliases[top_level] = value
+    if not aliases:
+        return normalized
     reference = dict(raw_reference)
-    if "reference_solution" in case:
-        _set_consistent(reference, "answer", case["reference_solution"])
-    if "judge_rubrics" in case:
-        positive, negative = parse_weighted_rubric(case["judge_rubrics"])
+    if "reference_solution" in aliases:
+        _set_consistent(reference, "answer", aliases["reference_solution"])
+    if "judge_rubrics" in aliases:
+        text = aliases["judge_rubrics"]
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("judge_rubrics must be non-empty text")
+        if any(_SCORING_ANNOTATION.match(_NUMBERED.sub("", line)) for line in text.splitlines()):
+            # Retain the existing explicit percentage contract for legacy datasets.
+            positive, negative = parse_weighted_rubric(text)
+        else:
+            # The model applies prose rules as a whole; do not infer or split weights.
+            positive = [{"id": "rubric_overall", "description": text, "weight": 1.0}]
+            negative = []
         if reference.get("rubric"):
             raise ValueError("judge_rubrics cannot be combined with reference.rubric")
         _set_consistent(reference, "required_behaviors", positive)

@@ -45,6 +45,7 @@ def case_stage_payload(
     *,
     case_id: str | None = None,
     score: float | None = None,
+    completed_cases: int | None = None,
 ) -> dict[str, Any]:
     """Build a real single-harness per-case evaluation stage payload.
 
@@ -80,6 +81,13 @@ def case_stage_payload(
         payload["case_id"] = str(case_id)
     if score is not None:
         payload["score"] = score
+    if completed_cases is not None:
+        payload.update(
+            id="evaluate.parallel",
+            name=f"Cases {completed_cases}/{total_cases} completed",
+            status="done" if completed_cases == total_cases else "running",
+            completed_cases=completed_cases,
+        )
     return payload
 
 

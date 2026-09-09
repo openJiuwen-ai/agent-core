@@ -252,6 +252,7 @@ class OrchestratorSchedulingConfig:
     coordination_strategy: str = "team_first_single_pass"
     promotion_policy: str = "epoch_full_evaluation"
     full_evaluation_enabled: bool = True
+    full_evaluation_concurrency: int = 2
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OrchestratorSchedulingConfig":
@@ -260,11 +261,16 @@ class OrchestratorSchedulingConfig:
             coordination_strategy=str(data.get("coordination_strategy", "team_first_single_pass")),
             promotion_policy=str(data.get("promotion_policy", "epoch_full_evaluation")),
             full_evaluation_enabled=_bool_value(data.get("full_evaluation_enabled"), default=True),
+            full_evaluation_concurrency=_int_value(data.get("full_evaluation_concurrency"), default=2),
         )
         config.validate()
         return config
 
     def validate(self) -> None:
+        if (isinstance(self.full_evaluation_concurrency, bool)
+                or not isinstance(self.full_evaluation_concurrency, int)
+                or self.full_evaluation_concurrency < 1):
+            raise ValueError("scheduling.full_evaluation_concurrency must be a positive integer")
         if self.evaluation_strategy != "hybrid":
             raise ValueError("scheduling.evaluation_strategy must be hybrid")
         if self.coordination_strategy != "team_first_single_pass":
@@ -313,6 +319,7 @@ class AutoCoordinatingHarnessConfig:
     def validate(self) -> None:
         if self.max_epochs < 1:
             raise ValueError("max_epochs must be greater than or equal to 1")
+        self.scheduling.validate()
         if self.data_loader.batch_size < 1:
             raise ValueError("data_loader.batch_size must be greater than or equal to 1")
         if not self.data_loader.batch_balance_keys:

@@ -56,7 +56,15 @@ class JudgeBudgetRail(AgentRail):
                 UserMessage(
                     content=(
                         "Final evaluation turn. Return the complete grading JSON now. "
-                        "If essential evidence remains unverified, return status=unavailable instead of guessing."
+                        "No more tools are available: do not emit tool calls or tool-call markup. "
+                        "Use the evidence already read; return only the grading JSON object. "
+                        "Missing/deleted deliverables or a summary-only answer are task failures: "
+                        "return status=completed, scoring unmet requirements 0. "
+                        "Assess criteria independently: missing code does not erase supported "
+                        "proof/analysis credit. Explain each item's supported and missing parts. "
+                        "Unread or truncated evidence is not proof of absence. "
+                        "Use status=unavailable only for genuine evaluator limitations such as "
+                        "unreadable supplied evidence or unavailable verification tools, not missing work."
                     )
                 )
             )
@@ -64,10 +72,14 @@ class JudgeBudgetRail(AgentRail):
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         result = ctx.inputs.tool_result
         success = result.get("success") if isinstance(result, dict) else getattr(result, "success", None)
+        data = result.get("data") if isinstance(result, dict) else getattr(result, "data", None)
+        error = result.get("error") if isinstance(result, dict) else getattr(result, "error", None)
+        content = data.get("content", "") if isinstance(data, dict) else ""
         with _io_path(self.log_path).open("a", encoding="utf-8") as stream:
             stream.write(
                 json.dumps(
-                    {"tool": ctx.inputs.tool_name, "arguments": ctx.inputs.tool_args, "success": success},
+                    {"tool": ctx.inputs.tool_name, "arguments": ctx.inputs.tool_args, "success": success,
+                     "error": error, "returned_chars": len(content) if isinstance(content, str) else None},
                     ensure_ascii=False,
                     default=str,
                 )

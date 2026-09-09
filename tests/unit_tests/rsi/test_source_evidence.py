@@ -98,6 +98,21 @@ def setup(tmp_path):
     return controller, refs, cases, file
 
 
+def test_judge_policy_change_invalidates_epoch_source_signature(setup, monkeypatch):
+    from openjiuwen.rsi.harness_rsi.evaluator.judger import judge_evidence
+
+    controller, refs, cases, _file = setup
+    controller.config = replace(
+        controller.config, evaluator=replace(controller.config.evaluator, evaluation_method="llm_as_judge")
+    )
+    monkeypatch.setattr(judge_evidence, "judge_protocol_identity", lambda: {"policy": "old"})
+    old = controller._evaluation_context(cases, str(refs))
+    monkeypatch.setattr(judge_evidence, "judge_protocol_identity", lambda: {"policy": "new"})
+    new = controller._evaluation_context(cases, str(refs))
+    assert old["signature"] != new["signature"]
+    assert old["cases"] == new["cases"]
+
+
 def test_epochs_reuse_h0_then_latest_checkpoint_without_fake_usage(setup, tmp_path):
     controller, refs, _cases, file = setup
     events = []

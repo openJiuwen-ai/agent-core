@@ -27,6 +27,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.controlled_skill_treatment_rail import
     ControlledSkillTreatmentRail,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.harness_input_rail import HarnessInputRail
 from openjiuwen.rsi.harness_rsi.evaluator.judger import JudgeResult
 from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
     RSISkillUseRail,
@@ -109,7 +110,7 @@ class SingleHarnessExecutionBackend:
         status = "passed"
         response: Any = None
         error = ""
-        started = False
+        agent = None
         workspace_dir = Path(output_dir).expanduser().resolve() / "workspace"
         role_name = ""
         workspace_before: dict[str, dict[str, Any]] = {}
@@ -166,6 +167,7 @@ class SingleHarnessExecutionBackend:
                 harness_path=harness_path,
                 shell_only=bool(solver_container_name),
                 controlled_skill_name=_controlled_skill_name(case),
+                workspace="/testbed" if solver_container_name else workspace_dir,
             )
             controlled_skill_treatment = next(
                 (rail for rail in agent_rails if isinstance(rail, ControlledSkillTreatmentRail)),
@@ -179,6 +181,7 @@ class SingleHarnessExecutionBackend:
                 ),
                 system_prompt=_single_harness_system_prompt(
                     role_name,
+                    workspace="/testbed" if solver_container_name else str(workspace_dir),
                 ),
                 workspace=str(workspace_dir),
                 rails=[rail for rail in agent_rails if not isinstance(rail, RSISkillUseRail)],
@@ -190,7 +193,6 @@ class SingleHarnessExecutionBackend:
                 sys_operation=sys_operation,
             )
             await Runner.start()
-            started = True
             # Register through the native API before plugin discovery so the
             # rail has its filesystem operation when reading Skill descriptions.
             for rail in agent_rails:
@@ -246,8 +248,15 @@ class SingleHarnessExecutionBackend:
                     error = f"failed to sync SWE-bench solver workspace: {exc}"
             workspace_after = _snapshot_workspace(workspace_dir)
             try:
-                if started:
-                    await Runner.stop()
+                if agent is not None:
+                    # Runner is process-global: another case or Judge may still
+                    # be using it. Release only this execution's owned resources.
+                    try:
+                        await agent.cleanup_task_resources()
+                    finally:
+                        agent.ability_manager.teardown_tools()
+                        if sys_operation is None:
+                            Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
             finally:
                 if solver_container_name:
                     remove_terminal_bench_container(solver_container_name)
@@ -274,7 +283,7 @@ class SingleHarnessExecutionBackend:
         )
 
     async def cleanup(self, team_name: str, session_id: str) -> None:
-        """No-op cleanup; this backend starts and stops Runner inside execute()."""
+        """No-op; execute releases case resources, not the host-owned Runner."""
 
 
 def _enforce_container_sys_operation_rail(agent: Any) -> None:
@@ -316,6 +325,7 @@ def _single_harness_rails(
     harness_path: str | Path,
     shell_only: bool = False,
     controlled_skill_name: str = "",
+    workspace: str | Path | None = None,
 ) -> list[Any]:
     rails: list[Any] = [
         RSISysOperationRail(
@@ -326,6 +336,8 @@ def _single_harness_rails(
     ]
     if controlled_skill_name:
         rails.append(ControlledSkillTreatmentRail(controlled_skill_name))
+    if workspace is not None:
+        rails.append(HarnessInputRail(harness_path, workspace))
     skill_dir = _resolve_skill_dir(team_skill_ref_path) if team_skill_ref_path else None
     # load_plugin binds skills to an existing native rail. Register the RSI
     # delivery adapter even for an empty H0; do not add any baseline skill.
@@ -531,13 +543,17 @@ def _configure_git_lf_line_endings(workspace_dir: Path) -> None:
             )
 
 
-def _single_harness_system_prompt(role_name: str) -> str:
+def _single_harness_system_prompt(role_name: str, *, workspace: str = "") -> str:
     return (
         f"You are the standalone evaluation agent for role `{role_name}`. "
         "Solve the given task with the bound expert harness and available local tools. "
         "Write any produced files under the current workspace unless the task explicitly "
         "names another working directory. Preserve existing line endings when editing files; "
         "Terminal-Bench verifiers may compare exact file hashes."
+        + (f" Your task workspace and default output directory is `{workspace}`. "
+           "Loaded plugin and skill directories are read-only capability sources, not task "
+           "workspaces. Do not write deliverables, temporary files or validation reports there."
+           if workspace else "")
     )
 
 

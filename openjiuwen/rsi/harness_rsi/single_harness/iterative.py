@@ -153,6 +153,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             )
         if not config.scheduling.full_evaluation_enabled:
             raise ValueError("iterative single-harness optimization requires the epoch full checkpoint")
+        config.scheduling.validate()
         if config.member_optimizer.sibling_candidate_count != 1 or config.member_optimizer.improver_policy_ref:
             raise ValueError("single-harness optimization requires one candidate and no improver evolution policy")
         restricted_member_config = replace(
@@ -290,6 +291,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 cases=all_cases,
                 harness_refs_path=source_refs,
                 output_dir=output_dir / "evaluations" / "frozen_baseline",
+                case_concurrency=self.config.scheduling.full_evaluation_concurrency,
                 dataset=dataset,
                 node_ref="h0",
                 on_event=on_event,
@@ -741,6 +743,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 cases=all_cases,
                 harness_refs_path=current_refs,
                 output_dir=output_dir / "evaluations" / f"e{epoch:03d}" / "full",
+                case_concurrency=self.config.scheduling.full_evaluation_concurrency,
                 dataset=dataset,
                 node_ref=epoch_node_ref,
                 on_event=on_event,
@@ -904,12 +907,17 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         return _result_from_state(state, state_path, report_path)
 
     def _evaluation_context(self, cases: list[dict[str, Any]], harness_refs_path: str) -> dict[str, Any]:
+        from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
+
         return evaluation_context(
             harness_refs_path=harness_refs_path,
             evaluator_config={
                 "config": self.config.evaluator,
                 "adapter": f"{type(self.evaluator).__module__}.{type(self.evaluator).__qualname__}",
                 "adapter_config": getattr(self.evaluator, "config", None),
+                **({"llm_judge_score_contract": "threshold_binary_v1", "judge_protocol": judge_protocol_identity()}
+                   if self.config.evaluator.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge"
+                   else {}),
             },
             cases=cases,
         )
@@ -992,6 +1000,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         dataset: DatasetArtifact,
         node_ref: str = "h0",
         on_event: OnEvent | None = None,
+        case_concurrency: int = 1,
     ) -> str:
         context = self._evaluation_context(cases, harness_refs_path)
         existing = output_dir / "eval_ref.yaml"
@@ -1019,6 +1028,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         str(payload.get("status") or "running"),
                         case_id=str(payload.get("case_id") or "") or None,
                         score=payload.get("score"),
+                        completed_cases=payload.get("completed_cases"),
                     ),
                 ),
             )
@@ -1029,6 +1039,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         stage_kwargs = {"on_case_stage": emit_case_stage} if supports_stages and on_event is not None else {}
+        if "case_concurrency" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        ):
+            stage_kwargs["case_concurrency"] = case_concurrency
         result = await self.evaluator.evaluate_batch(
             cases=cases,
             team_skill_ref_path="",
