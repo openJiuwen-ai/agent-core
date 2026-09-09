@@ -8,10 +8,10 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.organization.events import BaseOrgEvent, OrgTopic
 from openjiuwen.agent_teams.organization.db import OrgDbContext
+from openjiuwen.agent_teams.organization.events import BaseOrgEvent, OrgTopic
 from openjiuwen.agent_teams.organization.message_service import OrgMessageService
-from openjiuwen.agent_teams.organization.schema import OrgLeaderHandle, OrganizationSpec
+from openjiuwen.agent_teams.organization.schema import OrganizationSpec, OrgLeaderHandle, OrgUnclaimedTaskPolicy
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 
@@ -52,11 +52,13 @@ class TeamOrganizationManager:
         display_name: str | None = None,
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
+        unclaimed_task_policy: OrgUnclaimedTaskPolicy | None = None,
     ) -> OrganizationSpec:
         return await self.task_pool.ensure_organization(
             display_name=display_name,
             description=description,
             metadata=metadata,
+            unclaimed_task_policy=unclaimed_task_policy,
         )
 
     async def register_leader(

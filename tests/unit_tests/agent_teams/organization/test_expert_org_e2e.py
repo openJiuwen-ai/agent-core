@@ -181,6 +181,7 @@ async def wired_organization():
     org_runtime.set_expert_group_catalog(HostCatalog())
     org_runtime.set_expert_team_launcher(HostLauncher(team_runtime, db))
     yield org_runtime, session_id, team_runtime
+    await org_runtime.close()
     clear_process_org_managers()
     await db.close()
 

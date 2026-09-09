@@ -25,12 +25,24 @@ _ORG_TASK_NEW_COLUMNS = (
     ("failure_code", "TEXT"),
     ("failure_reason", "TEXT"),
     ("failed_at", "INTEGER"),
+    ("unclaimed_phase", "TEXT"),
+    ("unclaimed_deadline_at", "BIGINT"),
+    ("unclaimed_json", "TEXT"),
+    ("recreated_from_task_id", "TEXT"),
+    ("recreation_request_id", "TEXT"),
 )
 
 
 def ensure_org_static_tables(sync_conn) -> None:
     SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
     _ensure_org_task_columns(sync_conn)
+    inspector = inspect(sync_conn)
+    if "unclaimed_task_policy_json" not in {col["name"] for col in inspector.get_columns("org_info")}:
+        sync_conn.exec_driver_sql("ALTER TABLE org_info ADD COLUMN unclaimed_task_policy_json TEXT")
+    task_table = SQLModel.metadata.tables["org_task"]
+    for index in task_table.indexes:
+        if index.name in {"ix_org_task_unclaimed_due", "ix_org_task_recreation_request"}:
+            index.create(sync_conn, checkfirst=True)
 
 
 def _ensure_org_task_columns(sync_conn) -> None:

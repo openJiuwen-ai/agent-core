@@ -745,6 +745,8 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        if self._organization_runtime_manager is not None:
+            await self._organization_runtime_manager.release_team(team_id=team_name, session_id=session_id)
         try:
             await entry.agent.stop_coordination()
         except Exception as exc:

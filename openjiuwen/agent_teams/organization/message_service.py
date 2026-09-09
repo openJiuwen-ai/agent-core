@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import delete, select
+from sqlmodel import col
 
 from openjiuwen.agent_teams.organization.db import (
     OrgDbContext,
@@ -19,6 +20,9 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgLeaderMessageReceiptRecord,
     OrgLeaderMessageRecord,
     OrgLeaderRecord,
+    OrgTaskRecord,
+    OrgTaskStatus,
+    OrgUnclaimedPhase,
 )
 from openjiuwen.agent_teams.organization.transport_api import TransportAPI, create_message_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase
@@ -184,6 +188,65 @@ class OrgMessageService:
             row = (await session.execute(stmt)).one_or_none()
             return self._message_dict(*row) if row else None
 
+    @staticmethod
+    def add_system_notification(
+        session: Any,
+        *,
+        organization_id: str,
+        message_id: str,
+        team_id: str,
+        leader_id: str | None,
+        content: str,
+        metadata: dict[str, Any],
+        now: int,
+    ) -> None:
+        """Stage a notification in the caller's task-state transaction."""
+
+        session.add(
+            OrgLeaderMessageRecord(
+                message_id=message_id,
+                organization_id=organization_id,
+                from_team_id="__organization__",
+                from_leader_id="__organization__",
+                to_team_id=team_id,
+                to_leader_id=leader_id,
+                content=content,
+                metadata_json=json_dumps(metadata),
+                created_at=now,
+            )
+        )
+        session.add(
+            OrgLeaderMessageReceiptRecord(
+                message_id=message_id,
+                recipient_team_id=team_id,
+                recipient_leader_id=leader_id,
+                organization_id=organization_id,
+                created_at=now,
+            )
+        )
+
+    async def list_pending_system_notifications(self, *, after_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        """Keyset pagination keeps handled messages from shifting subsequent pages."""
+
+        await self.initialize()
+        stmt = (
+            select(OrgLeaderMessageRecord, OrgLeaderMessageReceiptRecord)
+            .join(
+                OrgLeaderMessageReceiptRecord,
+                OrgLeaderMessageReceiptRecord.message_id == OrgLeaderMessageRecord.message_id,
+            )
+            .where(
+                OrgLeaderMessageRecord.organization_id == self.organization_id,
+                OrgLeaderMessageRecord.from_team_id == "__organization__",
+                col(OrgLeaderMessageReceiptRecord.handled_at).is_(None),
+                OrgLeaderMessageRecord.message_id > after_id,
+            )
+            .order_by(OrgLeaderMessageRecord.message_id)
+            .limit(limit)
+        )
+        async with self._read() as session:
+            return [self._message_dict(*row) for row in (await session.execute(stmt)).all()]
+
     async def ack_leader_message(
         self,
         *,
@@ -201,6 +264,12 @@ class OrgMessageService:
             already_handled = receipt.handled_at is not None
             if not already_handled:
                 now = get_current_time()
+                message = await session.get(OrgLeaderMessageRecord, message_id)
+                if message is not None and message.from_team_id == "__organization__":
+                    metadata = json_loads(message.metadata_json, {})
+                    task = await session.get(OrgTaskRecord, metadata["task_id"])
+                    if self._requires_description_revision(metadata, task, now):
+                        return OrgMessageOpResult(ok=False, reason="supplement the description before acknowledging")
                 receipt.recipient_leader_id = leader_id
                 receipt.handled_at = now
                 receipt.handling_result_json = json_dumps(handling_result)
@@ -208,6 +277,18 @@ class OrgMessageService:
             data = self._receipt_dict(receipt)
             data["already_handled"] = already_handled
             return OrgMessageOpResult(ok=True, data=data)
+
+    @staticmethod
+    def _requires_description_revision(metadata: dict[str, Any], task: OrgTaskRecord | None, now: int) -> bool:
+        """A live revision request may only be acknowledged after a successful revision."""
+
+        if metadata.get("unclaimed_kind") != "revision" or task is None:
+            return False
+        return (
+            task.status == OrgTaskStatus.OPEN.value
+            and task.unclaimed_phase == OrgUnclaimedPhase.REVISION_PENDING.value
+            and task.unclaimed_deadline_at > now
+        )
 
     async def purge_organization(self) -> int:
         """Delete every leader message owned by this organization."""
@@ -220,9 +301,7 @@ class OrgMessageService:
                 )
             )
             result = await session.execute(
-                delete(OrgLeaderMessageRecord).where(
-                    OrgLeaderMessageRecord.organization_id == self.organization_id
-                )
+                delete(OrgLeaderMessageRecord).where(OrgLeaderMessageRecord.organization_id == self.organization_id)
             )
             await session.commit()
             return max(result.rowcount or 0, 0)
@@ -234,9 +313,7 @@ class OrgMessageService:
         to_team_id: str | None,
         to_leader_id: str | None,
     ) -> list[tuple[str, str | None]]:
-        stmt = select(OrgLeaderRecord).where(
-            OrgLeaderRecord.organization_id == self.organization_id
-        )
+        stmt = select(OrgLeaderRecord).where(OrgLeaderRecord.organization_id == self.organization_id)
         if to_team_id:
             stmt = stmt.where(OrgLeaderRecord.team_id == to_team_id)
         else:

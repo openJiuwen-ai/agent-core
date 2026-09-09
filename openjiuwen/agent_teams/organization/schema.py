@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Table
+from sqlalchemy import Index, Table
 from sqlmodel import Field as SQLField
 from sqlmodel import SQLModel
 
@@ -32,6 +32,34 @@ class OrgTaskStatus(StrEnum):
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+class OrgUnclaimedPhase(StrEnum):
+    INITIAL_WAIT = "INITIAL_WAIT"
+    REVISION_PENDING = "REVISION_PENDING"
+    POST_REVISION_WAIT = "POST_REVISION_WAIT"
+    CLOSED = "CLOSED"
+
+
+class OrgUnclaimedTaskPolicy(BaseModel):
+    """Organization defaults; task creation snapshots the three waiting periods."""
+
+    enabled: bool = True
+    initial_claim_timeout_seconds: int = Field(default=300, gt=0)
+    description_update_timeout_seconds: int = Field(default=180, gt=0)
+    post_update_claim_timeout_seconds: int = Field(default=300, gt=0)
+    scan_interval_seconds: int = Field(default=5, gt=0)
+
+
+class OrgUnclaimedTaskState(BaseModel):
+    phase: OrgUnclaimedPhase
+    deadline_at: int | None = None
+    policy: OrgUnclaimedTaskPolicy
+    description_revision: int = 0
+    revision_requested_at: int | None = None
+    description_revised_at: int | None = None
+    request_id: str | None = None
+    closed_reason: str | None = None
 
 
 ORG_TASK_TERMINAL_STATUS_VALUES = (
@@ -141,6 +169,8 @@ class OrgTask(BaseModel):
     failure_reason: str | None = None
     failed_at: int | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    unclaimed: OrgUnclaimedTaskState | None = None
+    recreated_from_task_id: str | None = None
 
     def brief(self) -> dict[str, Any]:
         payload = {
@@ -158,6 +188,10 @@ class OrgTask(BaseModel):
             payload["aggregation_mode"] = self.aggregation.mode
         if self.failure_code is not None:
             payload["failure_code"] = self.failure_code
+        if self.unclaimed is not None:
+            payload["unclaimed"] = self.unclaimed.model_dump(exclude={"policy"})
+        if self.recreated_from_task_id is not None:
+            payload["recreated_from_task_id"] = self.recreated_from_task_id
         return payload
 
 
@@ -196,6 +230,7 @@ class OrganizationSpec(BaseModel):
     owner_leader_id: str | None = None
     leaders: list[OrgLeaderHandle] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    unclaimed_task_policy: OrgUnclaimedTaskPolicy = Field(default_factory=OrgUnclaimedTaskPolicy)
 
 
 class OrgInfoRecord(SQLModel, table=True):
@@ -205,6 +240,7 @@ class OrgInfoRecord(SQLModel, table=True):
     display_name: str | None = None
     description: str | None = None
     metadata_json: str | None = None
+    unclaimed_task_policy_json: str | None = None
     created_at: int
     updated_at: int
 
@@ -223,6 +259,10 @@ class OrgLeaderRecord(SQLModel, table=True):
 
 class OrgTaskRecord(SQLModel, table=True):
     __tablename__ = "org_task"
+    __table_args__ = (
+        Index("ix_org_task_unclaimed_due", "organization_id", "unclaimed_phase", "unclaimed_deadline_at"),
+        Index("ix_org_task_recreation_request", "recreation_request_id", unique=True),
+    )
 
     task_id: str = SQLField(primary_key=True)
     organization_id: str = SQLField(index=True)
@@ -250,6 +290,11 @@ class OrgTaskRecord(SQLModel, table=True):
     failure_reason: str | None = None
     failed_at: int | None = None
     metadata_json: str | None = None
+    unclaimed_phase: str | None = None
+    unclaimed_deadline_at: int | None = None
+    unclaimed_json: str | None = None
+    recreated_from_task_id: str | None = None
+    recreation_request_id: str | None = None
 
 
 class OrgLeaderMessageRecord(SQLModel, table=True):
@@ -333,6 +378,9 @@ def org_static_tables() -> list[Table]:
 
 
 __all__ = [
+    "OrgUnclaimedPhase",
+    "OrgUnclaimedTaskPolicy",
+    "OrgUnclaimedTaskState",
     "ORG_STATIC_TABLE_NAMES",
     "ORG_TASK_LEGACY_STATUS_FAILURE_CODES",
     "ORG_TASK_TERMINAL_STATUS_VALUES",

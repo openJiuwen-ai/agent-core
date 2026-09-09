@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
     OrgTaskClaimedEvent,
-    OrgTaskCreatedEvent,
     OrgTaskCompletedEvent,
+    OrgTaskCreatedEvent,
     OrgTaskDelegatedEvent,
     OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
@@ -29,18 +29,19 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_REPAIRS_TASK_ID_KEY,
+    OrganizationSpec,
     OrgTaskFailureCode,
     OrgTaskReviewStatus,
     OrgTaskStatus,
-    OrganizationSpec,
+    OrgUnclaimedTaskPolicy,
 )
 from openjiuwen.agent_teams.organization.task_pool import (
     OrgTaskManager,
     _is_supersedable_task,
 )
+from openjiuwen.agent_teams.organization.unclaimed import OrgUnclaimedTaskService
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
-
 
 _ORG_OWNER_LIFECYCLE_SECTION = "organization_owner_lifecycle"
 _ORG_COLLABORATION_SECTION = "organization_collaboration"
@@ -77,10 +78,12 @@ _ORG_COLLABORATION_PROMPT = {
 }
 
 _LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS = 0.1
-_PARENT_RESUME_TERMINAL_STATUSES = frozenset({
-    OrgTaskStatus.COMPLETED,
-    OrgTaskStatus.FAILED,
-})
+_PARENT_RESUME_TERMINAL_STATUSES = frozenset(
+    {
+        OrgTaskStatus.COMPLETED,
+        OrgTaskStatus.FAILED,
+    }
+)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -93,6 +96,7 @@ class OrganizationRuntimeManager:
     def __init__(self, team_runtime_manager: "TeamRuntimeManager") -> None:
         self._team_runtime_manager = team_runtime_manager
         self._membership_lock = asyncio.Lock()
+        self._unclaimed_services: dict[tuple[str, str], OrgUnclaimedTaskService] = {}
         self._subscribed_topics: set[tuple[str, str, str, OrgTopic, int]] = set()
         self._team_organizations: dict[tuple[str, str], str] = {}
         self._leader_turn_queues: dict[tuple[str, str], deque[object]] = {}
@@ -111,9 +115,7 @@ class OrganizationRuntimeManager:
 
         self._leader_turn_runner = runner
 
-    def set_configured_team_provider(
-        self, provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
-    ) -> None:
+    def set_configured_team_provider(self, provider: Callable[[str], Awaitable[list[dict[str, Any]]]]) -> None:
         """Set the host callback exposing dormant same-process team templates."""
 
         self._configured_team_provider = provider
@@ -133,9 +135,7 @@ class OrganizationRuntimeManager:
 
         self._expert_team_launcher = launcher
 
-    def set_expert_adapter_installer(
-        self, installer: Callable[["OrganizationRuntimeManager"], None] | None
-    ) -> None:
+    def set_expert_adapter_installer(self, installer: Callable[["OrganizationRuntimeManager"], None] | None) -> None:
         """Register a host callback that injects Catalog/Launcher on first use.
 
         The installer should be idempotent and must not run package scans itself;
@@ -182,6 +182,7 @@ class OrganizationRuntimeManager:
         session_id: str,
         display_name: str | None = None,
         description: str | None = None,
+        unclaimed_task_policy: OrgUnclaimedTaskPolicy | None = None,
     ) -> OrganizationSpec:
         """Create an organization owned by an active team and bind its leader."""
 
@@ -205,6 +206,7 @@ class OrganizationRuntimeManager:
 
             owner_leader_id = self._leader_id(owner_agent, owner_backend)
             spec = await manager.initialize(
+                unclaimed_task_policy=unclaimed_task_policy,
                 display_name=display_name,
                 description=description,
                 metadata={
@@ -241,9 +243,7 @@ class OrganizationRuntimeManager:
                     raise
                 activated_team_id = await self._team_activator(target_team_id, session_id)
                 if not activated_team_id:
-                    raise ValueError(
-                        f"configured team could not be activated: {target_team_id}"
-                    ) from exc
+                    raise ValueError(f"configured team could not be activated: {target_team_id}") from exc
                 target_team_id = activated_team_id
                 target_agent, target_backend = await self._resolve_leader(target_team_id, session_id)
             manager = get_process_org_manager(
@@ -321,6 +321,10 @@ class OrganizationRuntimeManager:
             if organization.owner_team_id != owner_team_id:
                 raise ValueError("only the organization owner team can dissolve an organization")
 
+            service = self._unclaimed_services.pop((session_id, organization_id), None)
+            if service is not None:
+                await service.stop()
+
             member_team_ids = {leader.team_id for leader in organization.leaders}
             member_team_ids.add(owner_team_id)
             for team_id in member_team_ids:
@@ -330,14 +334,10 @@ class OrganizationRuntimeManager:
                     worker.cancel()
                 self._leader_turn_queues.pop(key, None)
                 self._scheduled_leader_messages = {
-                    message_key
-                    for message_key in self._scheduled_leader_messages
-                    if message_key[:2] != key
+                    message_key for message_key in self._scheduled_leader_messages if message_key[:2] != key
                 }
                 self._scheduled_parent_reviews = {
-                    review_key
-                    for review_key in self._scheduled_parent_reviews
-                    if review_key[:2] != key
+                    review_key for review_key in self._scheduled_parent_reviews if review_key[:2] != key
                 }
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
@@ -354,11 +354,13 @@ class OrganizationRuntimeManager:
                         and subscribed_team == team_id
                     ):
                         if callable(unsubscribe) and messager_id == id(backend.messager):
-                            await unsubscribe(topic.build(
-                                session_id,
-                                organization_id,
-                                team_id if topic is OrgTopic.TEAM_INBOX else None,
-                            ))
+                            await unsubscribe(
+                                topic.build(
+                                    session_id,
+                                    organization_id,
+                                    team_id if topic is OrgTopic.TEAM_INBOX else None,
+                                )
+                            )
                         self._subscribed_topics.discard(subscribed)
                 backend.org_task_manager = None
                 backend.org_message_service = None
@@ -428,18 +430,13 @@ class OrganizationRuntimeManager:
             return []
         return await self._configured_team_provider(session_id)
 
-    async def list_expert_groups(
-        self, *, capabilities: set[str] | None = None
-    ) -> list[dict[str, Any]]:
+    async def list_expert_groups(self, *, capabilities: set[str] | None = None) -> list[dict[str, Any]]:
         """List host-validated AgentGroup templates; does not create Teams."""
 
         self._ensure_expert_adapters()
         if self._expert_group_catalog is None:
             return []
-        return [
-            descriptor.to_dict()
-            for descriptor in self._expert_group_catalog.list(capabilities=capabilities)
-        ]
+        return [descriptor.to_dict() for descriptor in self._expert_group_catalog.list(capabilities=capabilities)]
 
     async def create_and_invite_expert_team(
         self,
@@ -536,6 +533,72 @@ class OrganizationRuntimeManager:
             session_id,
             capabilities=set(self._capabilities(agent)),
         )
+        await self._ensure_unclaimed_service(manager, session_id)
+
+    async def _ensure_unclaimed_service(self, manager: Any, session_id: str) -> None:
+        key = (session_id, manager.organization_id)
+        service = self._unclaimed_services.get(key)
+        if service is None:
+            organization = await manager.get_organization()
+
+            async def notify(message: dict[str, Any]) -> None:
+                team_id = message["to_team_id"]
+                if self._team_organizations.get((session_id, team_id)) != manager.organization_id:
+                    return
+                entry = await self._team_runtime_manager.pool.get(team_id)
+                if entry is None or entry.current_session_id != session_id:
+                    return
+                message_key = (session_id, team_id, message["message_id"])
+                if message_key in self._scheduled_leader_messages:
+                    return
+                self._scheduled_leader_messages.add(message_key)
+                self._schedule_leader_turn(
+                    team_id=team_id,
+                    session_id=session_id,
+                    prompt="",
+                    message_key=message_key,
+                    unclaimed_notification=(key, message),
+                )
+
+            service = OrgUnclaimedTaskService(
+                manager,
+                notify,
+                organization.unclaimed_task_policy.scan_interval_seconds,
+            )
+            self._unclaimed_services[key] = service
+        service.start()
+
+    async def release_team(self, *, team_id: str, session_id: str) -> None:
+        """Release background work before the last bound team or its database stops."""
+        key = (session_id, team_id)
+        organization_id = self._team_organizations.pop(key, None)
+        worker = self._leader_turn_workers.pop(key, None)
+        if worker is not None and worker is not asyncio.current_task():
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        queue = self._leader_turn_queues.pop(key, deque())
+        self._clear_leader_turn_queue(queue)
+        if organization_id and not any(
+            session == session_id and org == organization_id for (session, _), org in self._team_organizations.items()
+        ):
+            service = self._unclaimed_services.pop((session_id, organization_id), None)
+            if service is not None:
+                await service.stop()
+
+    async def close(self) -> None:
+        """Stop organization-owned tasks before host teardown."""
+        services = list(self._unclaimed_services.values())
+        self._unclaimed_services.clear()
+        for service in services:
+            await service.stop()
+        workers = [worker for worker in self._leader_turn_workers.values() if worker is not asyncio.current_task()]
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        self._leader_turn_workers.clear()
+        self._leader_turn_queues.clear()
+        self._scheduled_leader_messages.clear()
+        self._scheduled_parent_reviews.clear()
 
     @staticmethod
     def _set_owner_lifecycle_prompt(agent: "TeamAgent", *, is_owner: bool) -> None:
@@ -647,6 +710,9 @@ class OrganizationRuntimeManager:
             team_id=team_id,
             unread_only=True,
         ):
+            if message["from_team_id"] == "__organization__":
+                # The deadline scanner replays these with phase-aware prompts.
+                continue
             self._schedule_leader_message_turn(
                 team_id=team_id,
                 session_id=session_id,
@@ -710,6 +776,12 @@ class OrganizationRuntimeManager:
             )
 
         for task in await manager.task_pool.list_tasks_created_by_team(team_id=team_id):
+            if (
+                task.unclaimed is not None
+                and task.failure_code is OrgTaskFailureCode.EXPIRED
+                and task.unclaimed.closed_reason in {"description_update_timeout", "post_update_claim_timeout"}
+            ):
+                continue
             if not task.parent_task_id:
                 if task.status not in _PARENT_RESUME_TERMINAL_STATUSES:
                     parent_ids.add(task.task_id)
@@ -822,6 +894,9 @@ class OrganizationRuntimeManager:
                 return
             if isinstance(event, OrgTaskFailedEvent):
                 task = await manager.task_pool.get_task(event.task_id)
+                if self._is_unclaimed_expiration(task, event):
+                    # The durable expiration inbox request also covers root tasks.
+                    return
                 if task is None or not task.parent_task_id:
                     return
                 if task.created_by.team_id != backend.team_name:
@@ -934,6 +1009,17 @@ class OrganizationRuntimeManager:
             handler=_on_inbox_event,
         )
 
+    @staticmethod
+    def _is_unclaimed_expiration(task: Any, event: OrgTaskFailedEvent) -> bool:
+        """Unclaimed expiry has its own durable creator notification path."""
+
+        if task is None or task.unclaimed is None or event.failure_code != "EXPIRED":
+            return False
+        return task.unclaimed.closed_reason in {
+            "description_update_timeout",
+            "post_update_claim_timeout",
+        }
+
     async def _subscribe_once(
         self,
         *,
@@ -983,9 +1069,7 @@ class OrganizationRuntimeManager:
         trigger_task_id: str | None = None,
     ) -> None:
         trigger_context = (
-            f" Task {trigger_task_id} just completed, so re-evaluate this open task now."
-            if trigger_task_id
-            else ""
+            f" Task {trigger_task_id} just completed, so re-evaluate this open task now." if trigger_task_id else ""
         )
         prompt = (
             f"Organization task {task_id} is available in {organization_id}.{trigger_context} "
@@ -1239,6 +1323,7 @@ class OrganizationRuntimeManager:
         prompt: str,
         message_key: tuple[str, str, str] | None = None,
         review_key: tuple[str, str, str] | None = None,
+        unclaimed_notification: tuple[tuple[str, str], dict[str, Any]] | None = None,
     ) -> None:
         key = (session_id, team_id)
         queue = self._leader_turn_queues.setdefault(key, deque())
@@ -1247,6 +1332,7 @@ class OrganizationRuntimeManager:
                 "query": prompt,
                 "_org_message_key": message_key,
                 "_org_review_key": review_key,
+                "_org_unclaimed_notification": unclaimed_notification,
             }
         )
         worker = self._leader_turn_workers.get(key)
@@ -1275,6 +1361,39 @@ class OrganizationRuntimeManager:
                     message_key = inputs.pop("_org_message_key", None)
                     review_key = inputs.pop("_org_review_key", None)
                 try:
+                    notification = inputs.pop("_org_unclaimed_notification", None) if isinstance(inputs, dict) else None
+                    if notification is not None:
+                        service_key, message = notification
+                        service = self._unclaimed_services.get(service_key)
+                        if service is None:
+                            continue
+                        persisted = await service.manager.message_service.get_leader_message(
+                            message_id=message["message_id"],
+                            team_id=team_id,
+                        )
+                        if (
+                            persisted is None
+                            or persisted["handled_at"] is not None
+                            or not await service.is_actionable(persisted)
+                        ):
+                            continue
+                        from openjiuwen.agent_teams.prompts.loader import load_template
+
+                        language = getattr(entry.agent.spec, "language", None) or "cn"
+                        inputs["query"] = (
+                            load_template(
+                                f"org_unclaimed_{message['metadata']['unclaimed_kind']}",
+                                language,
+                            )
+                            .format(
+                                {
+                                    **message["metadata"],
+                                    "message_id": message["message_id"],
+                                    "organization_id": service.manager.organization_id,
+                                }
+                            )
+                            .content
+                        )
                     await self._run_leader_turn(team_id, session_id, inputs)
                 finally:
                     if message_key is not None:

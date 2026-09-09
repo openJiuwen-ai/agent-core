@@ -14,6 +14,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskOutputContext,
     OrgTaskOutputSpec,
     OrgTaskReviewStatus,
+    OrgUnclaimedTaskPolicy,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
@@ -90,6 +91,7 @@ class OrgCreateOrganizationTool(_OrgControlTool):
             "type": "object",
             "properties": {
                 "organization_id": {"type": "string"},
+                "unclaimed_task_policy": OrgUnclaimedTaskPolicy.model_json_schema(),
                 "display_name": {"type": "string"},
                 "description": {"type": "string"},
             },
@@ -104,6 +106,9 @@ class OrgCreateOrganizationTool(_OrgControlTool):
                 session_id=self.session_id,
                 display_name=inputs.get("display_name"),
                 description=inputs.get("description"),
+                unclaimed_task_policy=OrgUnclaimedTaskPolicy.model_validate(inputs["unclaimed_task_policy"])
+                if "unclaimed_task_policy" in inputs
+                else None,
             )
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
@@ -117,8 +122,7 @@ class OrgInviteTeamTool(_OrgControlTool):
 
     _tool_name = "org_invite_team"
     _tool_description = (
-        "Invite an active team in this session to the organization. "
-        "The invitation is accepted automatically."
+        "Invite an active team in this session to the organization. The invitation is accepted automatically."
     )
     _target_team_param_description = "Active team to add."
 
@@ -164,8 +168,7 @@ class OrgDissolveOrganizationTool(_OrgControlTool):
         super().__init__(
             name="org_dissolve_organization",
             description=(
-                "Dissolve an organization owned by this team, remove its members, "
-                "and delete its task-pool data."
+                "Dissolve an organization owned by this team, remove its members, and delete its task-pool data."
             ),
             runtime_manager=runtime_manager,
             team_id=team_id,
@@ -229,9 +232,7 @@ class OrgActivateAndInviteTeamTool(OrgInviteTeamTool):
     """Activate a configured team when necessary, then invite it into the organization."""
 
     _tool_name = "org_activate_and_invite_team"
-    _tool_description = (
-        "Activate a configured team if dormant, then invite it into the organization."
-    )
+    _tool_description = "Activate a configured team if dormant, then invite it into the organization."
     _target_team_param_description = "Configured profile or active team to add."
 
 
@@ -447,6 +448,12 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                         "Once an accepted repair exists, the original no longer blocks parent complete."
                     ),
                 },
+                "recreation_request_id": {
+                    "type": "string",
+                    "description": (
+                        "Expiration notification message_id. Recreate once; parent and repair link are derived."
+                    ),
+                },
                 "delegated_to_team_id": {"type": "string"},
                 "aggregation_mode": {
                     "type": "string",
@@ -484,6 +491,7 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             output_spec=OrgTaskOutputSpec.model_validate(inputs["output_spec"]) if inputs.get("output_spec") else None,
             metadata=inputs.get("metadata") or {},
             repairs_task_id=inputs.get("repairs_task_id"),
+            recreation_request_id=inputs.get("recreation_request_id"),
             created_by=OrgTaskCreator(
                 creator_type="team_leader",
                 creator_id=self.leader_id,
@@ -564,7 +572,10 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
         super().__init__(
             name="org_update_task",
-            description="Start, complete, or fail an organization task assigned to this team.",
+            description=(
+                "Start, complete, or fail an assigned task; revise_description lets the creator "
+                "supplement an unclaimed task once when requested by the organization."
+            ),
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -572,8 +583,11 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["start", "complete", "failed"]},
+                "action": {"type": "string", "enum": ["start", "complete", "failed", "revise_description"]},
                 "task_id": {"type": "string"},
+                "request_id": {"type": "string"},
+                "expected_description_revision": {"type": "integer", "minimum": 0},
+                "description": {"type": "string"},
                 "output_context": {"type": "object"},
                 "output_abstract": {"type": "string"},
                 "failure_code": {
@@ -596,7 +610,20 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
         await self._ensure_registered()
         action = inputs.get("action")
         task_id = inputs.get("task_id", "")
-        if action == "start":
+        if action == "revise_description":
+            if not self._has_valid_description_revision_inputs(inputs):
+                return ToolOutput(
+                    success=False, error="description, request_id and expected_description_revision required"
+                )
+            result = await self.manager.revise_unclaimed_task_description(
+                task_id=task_id,
+                team_id=self.team_id,
+                leader_id=self.leader_id,
+                request_id=inputs["request_id"],
+                expected_description_revision=inputs["expected_description_revision"],
+                description=inputs["description"],
+            )
+        elif action == "start":
             result = await self.manager.start_task(task_id=task_id, team_id=self.team_id)
         elif action == "complete":
             result = await self.manager.complete_task(
@@ -622,6 +649,16 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
         if not result.ok or result.task is None:
             return ToolOutput(success=False, error=result.reason)
         return ToolOutput(success=True, data=result.task.brief())
+
+    @staticmethod
+    def _has_valid_description_revision_inputs(inputs: dict[str, Any]) -> bool:
+        revision = inputs.get("expected_description_revision")
+        return (
+            isinstance(inputs.get("description"), str)
+            and isinstance(inputs.get("request_id"), str)
+            and isinstance(revision, int)
+            and not isinstance(revision, bool)
+        )
 
 
 class OrgSendLeaderMessageTool(_OrgLeaderTool):
