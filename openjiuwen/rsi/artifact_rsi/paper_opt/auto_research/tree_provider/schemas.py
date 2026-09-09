@@ -23,7 +23,11 @@ RsiStatus = Literal[
 ]
 
 NodeOutcome = Literal["success", "failed", "rejected", "pending"]
-NodeLogicalKind = Literal["root", "reporting", "adopted", "rejected"]
+# ``failed`` remains the machine-level outcome for a node that could not
+# produce a usable candidate.  ``pruned`` is the user-facing tree kind for
+# that outcome, so a failed node can be skipped without being confused with a
+# normally evaluated-but-not-adopted candidate (``rejected``).
+NodeLogicalKind = Literal["root", "reporting", "adopted", "rejected", "pruned"]
 
 
 class RsiUsageTokens(BaseModel):
@@ -107,7 +111,7 @@ class RsiTreeNode(BaseModel):
     node_id: str
     iteration: int
     parent_id: str | None
-    type: Literal["root", "reporting"]
+    type: Literal["root", "reporting", "pruned"]
     adopted: bool
     # The candidate's composite paper score (judge.py::score_paper's
     # `overall`). Null for root, pending, and any node the pipeline never

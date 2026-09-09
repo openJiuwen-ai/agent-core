@@ -152,6 +152,71 @@ def _has_paper(run_id: str) -> bool:
     return paper_tex_path(run_id).exists() or paper_output_path(run_id).exists()
 
 
+def _friendly_pruned_reason(
+    *,
+    terminal: TerminalReport | None = None,
+    failure_class: str | None = None,
+    phase: str | None = None,
+) -> str:
+    """Return a short, user-facing reason for a pruned paper node.
+
+    The manager's failure and abort fields are intentionally used only to
+    classify the phase.  Their raw contents can contain exception messages,
+    stack details, or model/tool wording that is not suitable for the tree
+    card.  Those details remain in the per-node manager workspace/logs.
+    """
+
+    if phase == "scoring" or failure_class == "scoring_error":
+        return "评估结果未达到预期，已剪枝。"
+
+    context = " ".join(
+        value
+        for value in (
+            failure_class,
+            terminal.status if terminal is not None else None,
+            terminal.abort_reason if terminal is not None else None,
+            terminal.failure_reason if terminal is not None else None,
+            terminal.summary if terminal is not None else None,
+        )
+        if value
+    ).lower()
+
+    if any(
+        marker in context
+        for marker in (
+            "topic_survey",
+            "survey",
+            "research",
+            "source",
+            "download",
+            "fetch",
+            "retriev",
+            "文献",
+            "资料",
+        )
+    ):
+        return "资料获取质量不佳，已剪枝。"
+    if any(
+        marker in context
+        for marker in (
+            "experiment_execution",
+            "execution",
+            "experiment",
+            "code_implementation",
+            "smoke",
+            "dataset",
+            "run.py",
+        )
+    ):
+        return "实验验证效果不佳，已剪枝。"
+    if phase == "paper_generation" or any(
+        marker in context
+        for marker in ("reporting", "latex", "paper", "report", "pdf", "tex")
+    ):
+        return "论文内容质量未达到要求，已剪枝。"
+    return "当前方案效果未达到要求，已剪枝。"
+
+
 def _artifact_ref_for_node(node_id: str, run_id: str) -> ArtifactRef | None:
     if not _has_paper(run_id):
         return None
@@ -485,7 +550,18 @@ class PaperTreeOrchestrator:
             ):
                 await self._run_one_node(state)
             if not self._cancelled and not self._pause_requested:
+                # Reaching the outer iteration budget is only a successful
+                # task completion when at least one usable paper candidate was
+                # adopted.  A run whose every candidate was pruned must not
+                # look successful merely because the loop ran to its budget.
+                if state.node_count > 0 and state.best_node_id is None:
+                    state.status = "failed"
+                    state.error_message = "未生成可用的论文结果。"
+                    self.storage.save_task_state(state)
+                    await self._emit(EventStatus(status="failed"))
+                    return
                 state.status = "completed"
+                state.error_message = None
                 self.storage.save_task_state(state)
                 await self._emit(EventStatus(status="completed"))
             elif self._pause_requested and not self._cancelled:
@@ -577,19 +653,43 @@ class PaperTreeOrchestrator:
                 )
             )
 
-        node = await self._build_node(
-            node_id=node_id,
-            round_index=round_index,
-            attempt=attempt,
-            parent=frontier,
-            node_run_id=seed.run_id,
-            terminal=terminal,
-        )
+        try:
+            node = await self._build_node(
+                node_id=node_id,
+                round_index=round_index,
+                attempt=attempt,
+                parent=frontier,
+                node_run_id=seed.run_id,
+                terminal=terminal,
+            )
+        except Exception:  # noqa: BLE001 -- one node must not kill the tree loop
+            # Artifact discovery/finalization is part of this candidate's
+            # lifecycle.  If it fails after the manager has returned, keep the
+            # same node-level fallback semantics and let the next iteration
+            # start from the last adopted frontier.
+            logger.exception(
+                "paper node finalization did not complete task=%s node=%s",
+                self.task_id,
+                node_id,
+            )
+            node = self._pruned_node(
+                node_id=node_id,
+                round_index=round_index,
+                attempt=attempt,
+                parent_id=parent_id,
+                node_run_id=seed.run_id,
+                reason=_friendly_pruned_reason(
+                    terminal=terminal,
+                    failure_class="node_finalization",
+                    phase="pipeline",
+                ),
+                failure_class="node_finalization",
+            )
 
         self.storage.append_node(node)
         state.node_count = round_index
         if node.snapshot_artifact_id:
-            ref = _artifact_ref_for_node(node.node_id, seed.run_id)
+            ref = self._safe_artifact_ref(node.node_id, seed.run_id)
             if ref is not None:
                 self.storage.register_artifact(ref)
         if node.adopted:
@@ -615,21 +715,10 @@ class PaperTreeOrchestrator:
             )
         )
 
-        # A terminal manager result is not a retryable paper candidate.  The
-        # previous loop kept opening fresh outer nodes after BLOCKED/FAILED,
-        # which made a single unsatisfiable survey requirement look like a
-        # hung task and multiplied the same expensive survey calls.
-        if terminal.status in {"blocked", "failed", "incomplete"}:
-            state.status = "failed"
-            state.error_message = (
-                terminal.failure_reason
-                or terminal.abort_reason
-                or terminal.summary
-                or f"manager terminated with status {terminal.status}"
-            )
-            self.storage.save_task_state(state)
-            self._cancelled = True
-            await self._emit(EventStatus(status="failed"))
+        # A terminal non-complete manager result has already consumed the
+        # manager/module retry budget for this candidate.  _build_node turns
+        # it into a PRUNED node; keep the outer tree search alive so the next
+        # iteration can try a fresh candidate from the last adopted frontier.
 
     async def _run_manager(self, seed: NodeSeed) -> TerminalReport:
         try:
@@ -712,34 +801,37 @@ class PaperTreeOrchestrator:
     ) -> RsiTreeNode:
         parent_id = parent.node_id if parent else None
 
-        if not _has_paper(node_run_id):
-            return RsiTreeNode(
+        # A partial paper must not become the new baseline when the manager
+        # did not reach a complete terminal state.  Keep a reference when one
+        # exists for diagnostics/download-by-id, but never score or adopt it.
+        if terminal.status != "complete":
+            ref = self._safe_artifact_ref(node_id, node_run_id)
+            return self._pruned_node(
                 node_id=node_id,
-                iteration=round_index,
+                round_index=round_index,
+                attempt=attempt,
                 parent_id=parent_id,
-                type="reporting",
-                adopted=False,
-                reason=(
-                    terminal.failure_reason
-                    or terminal.abort_reason
-                    or terminal.summary
-                    or "no paper produced"
-                ),
+                node_run_id=node_run_id,
+                reason=_friendly_pruned_reason(terminal=terminal),
                 failure_class=f"pipeline_{terminal.status}",
-                extra={
-                    "paper": PaperNodeExtra(
-                        logical_kind="rejected",
-                        round_index=round_index,
-                        attempt=attempt,
-                        input_node_id=parent_id,
-                        retry_of_node_id=parent_id,
-                        outcome="failed",
-                        node_run_id=node_run_id,
-                    ).model_dump(mode="json")
-                },
+                ref=ref,
             )
 
-        ref = _artifact_ref_for_node(node_id, node_run_id)
+        if not _has_paper(node_run_id):
+            return self._pruned_node(
+                node_id=node_id,
+                round_index=round_index,
+                attempt=attempt,
+                parent_id=parent_id,
+                node_run_id=node_run_id,
+                reason=_friendly_pruned_reason(
+                    terminal=terminal,
+                    phase="paper_generation",
+                ),
+                failure_class="paper_generation",
+            )
+
+        ref = self._safe_artifact_ref(node_id, node_run_id)
         changes = [
             RsiChange(
                 operation="generate",
@@ -765,29 +857,26 @@ class PaperTreeOrchestrator:
             # The paper still gets an artifact ref (it genuinely exists),
             # but this node can't be adopted or trusted as a future
             # comparison baseline (score_overall stays unset below).
-            return RsiTreeNode(
+            logger.warning(
+                "paper node scoring did not complete task=%s node=%s: %s",
+                self.task_id,
+                node_id,
+                exc,
+            )
+            return self._pruned_node(
                 node_id=node_id,
-                iteration=round_index,
+                round_index=round_index,
+                attempt=attempt,
                 parent_id=parent_id,
-                type="reporting",
-                adopted=False,
-                summary=terminal.summary or None,
-                snapshot_artifact_id=ref.artifact_id if ref else None,
-                reason=str(exc),
+                node_run_id=node_run_id,
+                reason=_friendly_pruned_reason(
+                    terminal=terminal,
+                    failure_class="scoring_error",
+                    phase="scoring",
+                ),
                 failure_class="scoring_error",
+                ref=ref,
                 changes=changes,
-                extra={
-                    "paper": PaperNodeExtra(
-                        logical_kind="rejected",
-                        round_index=round_index,
-                        attempt=attempt,
-                        input_node_id=parent_id,
-                        retry_of_node_id=parent_id,
-                        outcome="rejected",
-                        artifacts=[ref] if ref else [],
-                        node_run_id=node_run_id,
-                    ).model_dump(mode="json")
-                },
             )
 
         parent_score = _node_score(parent)
@@ -843,6 +932,66 @@ class PaperTreeOrchestrator:
                 ).model_dump(mode="json")
             },
         )
+
+    def _pruned_node(
+        self,
+        *,
+        node_id: str,
+        round_index: int,
+        attempt: int,
+        parent_id: str | None,
+        node_run_id: str,
+        reason: str,
+        failure_class: str,
+        ref: ArtifactRef | None = None,
+        changes: list[RsiChange] | None = None,
+    ) -> RsiTreeNode:
+        """Build the short, user-facing terminal representation of a node.
+
+        The current frontier is deliberately not changed by this node.  The
+        caller persists it and starts the next outer iteration from the last
+        adopted candidate.
+        """
+
+        return RsiTreeNode(
+            node_id=node_id,
+            iteration=round_index,
+            parent_id=parent_id,
+            type="pruned",
+            adopted=False,
+            snapshot_artifact_id=ref.artifact_id if ref else None,
+            reason=reason,
+            failure_class=failure_class,
+            changes=changes or [],
+            extra={
+                "paper": PaperNodeExtra(
+                    logical_kind="pruned",
+                    round_index=round_index,
+                    attempt=attempt,
+                    input_node_id=parent_id,
+                    retry_of_node_id=parent_id,
+                    outcome="failed",
+                    artifacts=[ref] if ref else [],
+                    node_run_id=node_run_id,
+                ).model_dump(mode="json")
+            },
+        )
+
+    def _safe_artifact_ref(self, node_id: str, node_run_id: str) -> ArtifactRef | None:
+        """Return a candidate artifact reference without failing node cleanup."""
+
+        if not _has_paper(node_run_id):
+            return None
+        try:
+            return _artifact_ref_for_node(node_id, node_run_id)
+        except OSError as exc:
+            logger.warning(
+                "paper node artifact could not be indexed task=%s node=%s: %s",
+                self.task_id,
+                node_id,
+                exc,
+            )
+            return None
 
     # -- helpers ------------------------------------------------------------
     def _frontier_node(self, state: PaperTaskState) -> RsiTreeNode | None:
