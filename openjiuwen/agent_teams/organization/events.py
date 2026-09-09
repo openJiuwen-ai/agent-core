@@ -35,6 +35,8 @@ class OrgEvent:
     TASK_DELEGATED = "org_task_delegated"
     TASK_COMPLETED = "org_task_completed"
     TASK_FAILED = "org_task_failed"
+    TASK_DESCRIPTION_REVISION_REQUESTED = "org_task_description_revision_requested"
+    TASK_DESCRIPTION_REVISED = "org_task_description_revised"
     TASK_REVIEW_REQUESTED = "org_task_review_requested"
     TASK_REVIEWED = "org_task_reviewed"
     SUMMARY_TASK_CREATED = "org_summary_task_created"
@@ -71,6 +73,19 @@ class OrgTaskClaimedEvent(BaseOrgEvent):
 
     task_id: str
     claimed_by_team_id: str
+
+
+class OrgTaskDescriptionRevisionRequestedEvent(BaseOrgEvent):
+    task_id: str
+    request_id: str
+    deadline_at: int
+
+
+class OrgTaskDescriptionRevisedEvent(BaseOrgEvent):
+    task_id: str
+    request_id: str
+    description_revision: int
+    deadline_at: int
 
 
 class OrgTaskDelegatedEvent(BaseOrgEvent):
@@ -149,6 +164,8 @@ class OrgTeamJoinedEvent(BaseOrgEvent):
 
 
 _EVENT_TYPE_MAP: dict[str, type[BaseOrgEvent]] = {
+    OrgEvent.TASK_DESCRIPTION_REVISION_REQUESTED: OrgTaskDescriptionRevisionRequestedEvent,
+    OrgEvent.TASK_DESCRIPTION_REVISED: OrgTaskDescriptionRevisedEvent,
     OrgEvent.BROADCAST: OrgBroadcastEvent,
     OrgEvent.TASK_CREATED: OrgTaskCreatedEvent,
     OrgEvent.TASK_CLAIMED: OrgTaskClaimedEvent,
@@ -188,6 +205,8 @@ class OrgEventMessage(BaseModel):
 
 
 __all__ = [
+    "OrgTaskDescriptionRevisionRequestedEvent",
+    "OrgTaskDescriptionRevisedEvent",
     "BaseOrgEvent",
     "OrgBroadcastEvent",
     "OrgEvent",

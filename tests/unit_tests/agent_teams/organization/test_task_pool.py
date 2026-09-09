@@ -26,8 +26,8 @@ from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
     OrgAssignmentType,
     OrgTaskAggregationMode,
-    OrgTaskEventRecord,
     OrgTaskCreator,
+    OrgTaskEventRecord,
     OrgTaskFailureCode,
     OrgTaskRecord,
     OrgTaskReviewStatus,
@@ -138,7 +138,9 @@ async def active_organization_runtime():
                 state=RuntimeState.PAUSED,
             )
         )
-    yield OrganizationRuntimeManager(runtime), agents, session_id
+    org_runtime = OrganizationRuntimeManager(runtime)
+    yield org_runtime, agents, session_id
+    await org_runtime.close()
     clear_process_org_managers()
     await db.close()
 

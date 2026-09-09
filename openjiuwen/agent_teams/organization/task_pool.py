@@ -10,7 +10,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import case, delete, or_, select, update
+from sqlmodel import col
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.messager import Messager
@@ -29,23 +30,28 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
     OrgTaskDelegatedEvent,
+    OrgTaskDescriptionRevisedEvent,
+    OrgTaskDescriptionRevisionRequestedEvent,
     OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
     OrgTaskReviewRequestedEvent,
     OrgTopic,
 )
+from openjiuwen.agent_teams.organization.message_service import OrgMessageService
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
     ORG_TASK_REPAIRS_TASK_ID_KEY,
     ORG_TASK_RETRY_COUNT_KEY,
     ORG_TASK_RETRY_LIMIT_KEY,
     ORG_TASK_TERMINAL_STATUS_VALUES,
+    OrganizationSpec,
     OrgAssignment,
     OrgAssignmentType,
     OrgInfoRecord,
     OrgLeaderHandle,
+    OrgLeaderMessageReceiptRecord,
+    OrgLeaderMessageRecord,
     OrgLeaderRecord,
-    OrganizationSpec,
     OrgTask,
     OrgTaskAggregationConfig,
     OrgTaskAggregationMode,
@@ -61,11 +67,13 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskSource,
     OrgTaskSourceRecord,
     OrgTaskStatus,
+    OrgUnclaimedPhase,
+    OrgUnclaimedTaskPolicy,
+    OrgUnclaimedTaskState,
     default_root_aggregation,
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
-
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +162,7 @@ class OrgTaskManager:
         display_name: str | None = None,
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
+        unclaimed_task_policy: OrgUnclaimedTaskPolicy | None = None,
     ) -> OrganizationSpec:
         await self.initialize()
         now = get_current_time()
@@ -175,8 +184,13 @@ class OrgTaskManager:
                 if metadata is not None:
                     row.metadata_json = _json_dumps(metadata)
                 row.updated_at = now
+            if unclaimed_task_policy is not None:
+                row.unclaimed_task_policy_json = _json_dumps(unclaimed_task_policy.model_dump())
             await session.commit()
             return OrganizationSpec(
+                unclaimed_task_policy=OrgUnclaimedTaskPolicy.model_validate(
+                    _json_loads(row.unclaimed_task_policy_json, {})
+                ),
                 organization_id=row.organization_id,
                 display_name=row.display_name,
                 description=row.description,
@@ -197,6 +211,9 @@ class OrgTaskManager:
             leaders = (await session.execute(stmt)).scalars().all()
             metadata = _json_loads(row.metadata_json, {})
             return OrganizationSpec(
+                unclaimed_task_policy=OrgUnclaimedTaskPolicy.model_validate(
+                    _json_loads(row.unclaimed_task_policy_json, {})
+                ),
                 organization_id=row.organization_id,
                 display_name=row.display_name,
                 description=row.description,
@@ -344,9 +361,12 @@ class OrgTaskManager:
         repairs_task_id: str | None = None,
         delegated_to_team_id: str | None = None,
         aggregation_mode: OrgTaskAggregationMode | str | None = None,
+        recreation_request_id: str | None = None,
     ) -> OrgTaskOpResult:
         await self.initialize()
         capabilities = required_capabilities or []
+        if created_by.organization_id != self.organization_id:
+            return OrgTaskOpResult(ok=False, reason="task creator belongs to another organization")
         if not capabilities or any(
             not isinstance(capability, str) or not capability.strip()
             for capability in capabilities
@@ -392,6 +412,76 @@ class OrgTaskManager:
         status = OrgTaskStatus.DELEGATED if delegated_to_team_id else OrgTaskStatus.OPEN
         spec_model = self._coerce_output_spec(output_spec)
         async with self._write() as session:
+            now = get_current_time()
+            recreated_from = None
+            if recreation_request_id is not None:
+                notification = await session.get(OrgLeaderMessageRecord, recreation_request_id)
+                if (
+                    notification is None
+                    or notification.organization_id != self.organization_id
+                    or notification.from_team_id != "__organization__"
+                    or notification.to_team_id != created_by.team_id
+                    or notification.to_leader_id != created_by.creator_id
+                    or created_by.creator_type != "team_leader"
+                ):
+                    return OrgTaskOpResult(ok=False, reason="invalid recreation request or creator")
+                notification_meta = _json_loads(notification.metadata_json, {})
+                if notification_meta.get("unclaimed_kind") != "expired":
+                    return OrgTaskOpResult(ok=False, reason="request is not an expiration notification")
+                existing = (
+                    (
+                        await session.execute(
+                            select(OrgTaskRecord).where(
+                                OrgTaskRecord.recreation_request_id == recreation_request_id,
+                                OrgTaskRecord.organization_id == self.organization_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if existing is not None:
+                    return OrgTaskOpResult(ok=True, task=self._to_task(existing))
+                source = await session.get(OrgTaskRecord, notification_meta["task_id"])
+                if (
+                    source is None
+                    or source.organization_id != self.organization_id
+                    or source.status != OrgTaskStatus.FAILED.value
+                    or source.failure_code != OrgTaskFailureCode.EXPIRED.value
+                ):
+                    return OrgTaskOpResult(ok=False, reason="recreation source is not expired")
+                if parent_task_id is not None and parent_task_id != source.parent_task_id:
+                    return OrgTaskOpResult(ok=False, reason="recreation must keep the original parent")
+                parent_task_id = source.parent_task_id
+                target = _repairs_target_id(source.metadata_json) or source.task_id
+                if parent_task_id:
+                    if repairs_target is not None and repairs_target != target:
+                        return OrgTaskOpResult(ok=False, reason="recreation must repair the original sibling")
+                    repairs_target = target
+                    task_metadata[ORG_TASK_REPAIRS_TASK_ID_KEY] = target
+                recreated_from = source.task_id
+                # Lock the source before repair-budget checks and creation. Concurrent
+                # requests recheck the receipt after this update acquires the row lock.
+                await session.execute(
+                    update(OrgTaskRecord)
+                    .where(
+                        OrgTaskRecord.task_id == source.task_id,
+                    )
+                    .values(updated_at=OrgTaskRecord.updated_at)
+                )
+                existing = (
+                    (
+                        await session.execute(
+                            select(OrgTaskRecord).where(
+                                OrgTaskRecord.recreation_request_id == recreation_request_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if existing is not None:
+                    return OrgTaskOpResult(ok=True, task=self._to_task(existing))
             if parent_task_id:
                 parent = await session.get(OrgTaskRecord, parent_task_id)
                 if parent is None or parent.organization_id != self.organization_id:
@@ -471,6 +561,8 @@ class OrgTaskManager:
             if parent_task_id is None:
                 aggregation_json = _json_dumps(default_root_aggregation(task_id).model_dump())
             row = OrgTaskRecord(
+                recreation_request_id=recreation_request_id,
+                recreated_from_task_id=recreated_from,
                 task_id=task_id,
                 organization_id=self.organization_id,
                 parent_task_id=parent_task_id,
@@ -493,7 +585,28 @@ class OrgTaskManager:
                 output_spec_json=_json_dumps(spec_model.model_dump() if spec_model else None),
                 metadata_json=_json_dumps(task_metadata),
             )
+            organization = await session.get(OrgInfoRecord, self.organization_id)
+            policy = OrgUnclaimedTaskPolicy.model_validate(
+                _json_loads(organization.unclaimed_task_policy_json, {}) if organization else {}
+            )
+            if (
+                policy.enabled
+                and status is OrgTaskStatus.OPEN
+                and created_by.creator_type == "team_leader"
+                and created_by.team_id
+                and task_type != "organization.summary"
+            ):
+                self._set_unclaimed(
+                    row,
+                    OrgUnclaimedTaskState(
+                        phase=OrgUnclaimedPhase.INITIAL_WAIT,
+                        deadline_at=now + policy.initial_claim_timeout_seconds * 1000,
+                        policy=policy,
+                    ),
+                )
             session.add(row)
+            if recreation_request_id is not None:
+                await self._ack_system_notification(session, recreation_request_id, created_by.team_id, now)
             await session.commit()
         task = self._to_task(row)
         await self._publish_task_created(task)
@@ -504,6 +617,347 @@ class OrgTaskManager:
                 delegated_to_team_id,
             )
         return OrgTaskOpResult(ok=True, task=task)
+
+    @staticmethod
+    def _set_unclaimed(row: OrgTaskRecord, state: OrgUnclaimedTaskState) -> None:
+        row.unclaimed_phase = state.phase.value
+        row.unclaimed_deadline_at = state.deadline_at
+        row.unclaimed_json = _json_dumps(state.model_dump())
+
+    @staticmethod
+    def _unclaimed_state(row: OrgTaskRecord) -> OrgUnclaimedTaskState | None:
+        if row.unclaimed_json is None:
+            return None
+        state = OrgUnclaimedTaskState.model_validate_json(row.unclaimed_json)
+        state.phase = OrgUnclaimedPhase(row.unclaimed_phase)
+        state.deadline_at = row.unclaimed_deadline_at
+        if state.phase is OrgUnclaimedPhase.CLOSED and state.closed_reason is None:
+            state.closed_reason = row.assignment_type
+        return state
+
+    @staticmethod
+    def _unclaimed_assignment_allowed(now: int):
+        return or_(
+            col(OrgTaskRecord.unclaimed_phase).is_(None),
+            col(OrgTaskRecord.unclaimed_phase).not_in(
+                (
+                    OrgUnclaimedPhase.REVISION_PENDING.value,
+                    OrgUnclaimedPhase.POST_REVISION_WAIT.value,
+                )
+            ),
+            OrgTaskRecord.unclaimed_deadline_at > now,
+        )
+
+    @staticmethod
+    async def _ack_system_notification(session: Any, message_id: str, team_id: str, now: int) -> None:
+        await session.execute(
+            update(OrgLeaderMessageReceiptRecord)
+            .where(
+                OrgLeaderMessageReceiptRecord.message_id == message_id,
+                OrgLeaderMessageReceiptRecord.recipient_team_id == team_id,
+                col(OrgLeaderMessageReceiptRecord.handled_at).is_(None),
+            )
+            .values(handled_at=now)
+        )
+
+    def _add_unclaimed_notification(
+        self,
+        session: Any,
+        row: OrgTaskRecord,
+        *,
+        kind: str,
+        team_id: str,
+        leader_id: str | None,
+        now: int,
+    ) -> str:
+        notification_key = _json_dumps([self.organization_id, row.task_id, kind, team_id])
+        message_id = f"org-unclaimed-{uuid.uuid5(uuid.NAMESPACE_URL, notification_key).hex}"
+        state = self._unclaimed_state(row)
+        metadata = {
+            "unclaimed_kind": kind,
+            "task_id": row.task_id,
+            "request_id": state.request_id,
+            "deadline_at": state.deadline_at,
+            "description_revision": state.description_revision,
+            "parent_task_id": row.parent_task_id,
+            "repairs_task_id": _repairs_target_id(row.metadata_json) or row.task_id,
+            "failure_reason": row.failure_reason,
+        }
+        OrgMessageService.add_system_notification(
+            session,
+            organization_id=self.organization_id,
+            message_id=message_id,
+            team_id=team_id,
+            leader_id=leader_id,
+            content=_json_dumps(metadata),
+            metadata=metadata,
+            now=now,
+        )
+        return message_id
+
+    def _add_unclaimed_audit(
+        self,
+        session: Any,
+        event: BaseOrgEvent,
+        now: int,
+        **details: Any,
+    ) -> None:
+        message = OrgEventMessage.from_event(event)
+        session.add(
+            OrgTaskEventRecord(
+                event_id=f"org-event-{uuid.uuid4().hex}",
+                organization_id=self.organization_id,
+                event_type=message.event_type,
+                task_id=message.payload["task_id"],
+                team_id=event.team_id,
+                leader_id=event.leader_id,
+                payload_json=_json_dumps({**message.payload, **details}),
+                created_at=now,
+            )
+        )
+
+    async def advance_unclaimed_tasks(self, *, now: int | None = None, batch_size: int = 100) -> int:
+        """Process one deadline snapshot in keyset pages; no model or transport awaits in transactions."""
+        await self.initialize()
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        scan_at = get_current_time() if now is None else now
+        after_id = ""
+        changed = 0
+        while True:
+            async with self._read() as session:
+                ids = list(
+                    (
+                        await session.execute(
+                            select(OrgTaskRecord.task_id)
+                            .where(
+                                OrgTaskRecord.organization_id == self.organization_id,
+                                OrgTaskRecord.status == OrgTaskStatus.OPEN.value,
+                                OrgTaskRecord.assignment_type == OrgAssignmentType.UNASSIGNED.value,
+                                col(OrgTaskRecord.unclaimed_phase).in_(
+                                    [
+                                        OrgUnclaimedPhase.INITIAL_WAIT.value,
+                                        OrgUnclaimedPhase.REVISION_PENDING.value,
+                                        OrgUnclaimedPhase.POST_REVISION_WAIT.value,
+                                    ]
+                                ),
+                                OrgTaskRecord.unclaimed_deadline_at <= scan_at,
+                                OrgTaskRecord.task_id > after_id,
+                            )
+                            .order_by(OrgTaskRecord.task_id)
+                            .limit(batch_size)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            if not ids:
+                return changed
+            for task_id in ids:
+                changed += await self._advance_unclaimed_task(task_id, now)
+            after_id = ids[-1]
+
+    async def _advance_unclaimed_task(self, task_id: str, now: int | None) -> bool:
+        async with self._write() as session:
+            now = get_current_time() if now is None else now
+            row = await session.get(OrgTaskRecord, task_id)
+            if (
+                row is None
+                or row.organization_id != self.organization_id
+                or row.unclaimed_deadline_at is None
+                or row.unclaimed_deadline_at > now
+                or row.status != OrgTaskStatus.OPEN.value
+                or row.assignment_type != OrgAssignmentType.UNASSIGNED.value
+            ):
+                return False
+            state = self._unclaimed_state(row)
+            old_phase = state.phase
+            old_deadline = state.deadline_at
+            if old_phase is OrgUnclaimedPhase.INITIAL_WAIT:
+                state.phase = OrgUnclaimedPhase.REVISION_PENDING
+                state.revision_requested_at = now
+                state.deadline_at = now + state.policy.description_update_timeout_seconds * 1000
+                state.request_id = f"org-revision-{uuid.uuid4().hex}"
+                values = {}
+                kind = "revision"
+                event = OrgTaskDescriptionRevisionRequestedEvent(
+                    organization_id=self.organization_id,
+                    team_id=row.creator_team_id,
+                    leader_id=row.creator_id,
+                    task_id=task_id,
+                    request_id=state.request_id,
+                    deadline_at=state.deadline_at,
+                )
+            else:
+                state.phase = OrgUnclaimedPhase.CLOSED
+                state.deadline_at = None
+                state.closed_reason = (
+                    "description_update_timeout"
+                    if old_phase is OrgUnclaimedPhase.REVISION_PENDING
+                    else "post_update_claim_timeout"
+                )
+                values = {
+                    "status": OrgTaskStatus.FAILED.value,
+                    "failure_code": OrgTaskFailureCode.EXPIRED.value,
+                    "failure_reason": state.closed_reason,
+                    "failed_at": now,
+                }
+                kind = "expired"
+                event = OrgTaskFailedEvent(
+                    organization_id=self.organization_id,
+                    team_id=row.creator_team_id,
+                    leader_id=row.creator_id,
+                    task_id=task_id,
+                    failure_code=OrgTaskFailureCode.EXPIRED.value,
+                    failure_reason=state.closed_reason,
+                )
+            result = await session.execute(
+                update(OrgTaskRecord)
+                .where(
+                    OrgTaskRecord.task_id == task_id,
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.status == OrgTaskStatus.OPEN.value,
+                    OrgTaskRecord.assignment_type == OrgAssignmentType.UNASSIGNED.value,
+                    OrgTaskRecord.unclaimed_phase == old_phase.value,
+                    OrgTaskRecord.unclaimed_deadline_at == old_deadline,
+                )
+                .values(
+                    **values,
+                    updated_at=now,
+                    unclaimed_phase=state.phase.value,
+                    unclaimed_deadline_at=state.deadline_at,
+                    unclaimed_json=_json_dumps(state.model_dump()),
+                )
+            )
+            if result.rowcount != 1:
+                return False
+            await session.refresh(row)
+            self._add_unclaimed_notification(
+                session,
+                row,
+                kind=kind,
+                team_id=row.creator_team_id,
+                leader_id=row.creator_id,
+                now=now,
+            )
+            self._add_unclaimed_audit(session, event, now)
+            await session.commit()
+        await self._publish_event(event, persist=False)
+        return True
+
+    async def revise_unclaimed_task_description(
+        self,
+        *,
+        task_id: str,
+        team_id: str,
+        leader_id: str,
+        request_id: str,
+        expected_description_revision: int,
+        description: str,
+    ) -> OrgTaskOpResult:
+        """The creator may successfully supplement the description once during Tr."""
+        await self.initialize()
+        description = description.strip()
+        if not description or expected_description_revision < 0:
+            return OrgTaskOpResult(ok=False, reason="non-empty description and non-negative revision required")
+        async with self._write() as session:
+            now = get_current_time()
+            row = await session.get(OrgTaskRecord, task_id)
+            if (
+                row is None
+                or row.organization_id != self.organization_id
+                or row.creator_team_id != team_id
+                or row.creator_id != leader_id
+            ):
+                return OrgTaskOpResult(ok=False, reason="only the task creator may supplement its description")
+            state = self._unclaimed_state(row)
+            if state is None or state.request_id != request_id:
+                return OrgTaskOpResult(ok=False, reason="invalid description revision request")
+            if state.description_revision == expected_description_revision + 1 and row.description == description:
+                return OrgTaskOpResult(ok=True, task=self._to_task(row))
+            if (
+                state.phase is not OrgUnclaimedPhase.REVISION_PENDING
+                or row.status != OrgTaskStatus.OPEN.value
+                or row.assignment_type != OrgAssignmentType.UNASSIGNED.value
+                or state.description_revision != expected_description_revision
+                or state.deadline_at <= now
+            ):
+                return OrgTaskOpResult(ok=False, reason="task is no longer awaiting description revision")
+            if row.description.strip() == description:
+                return OrgTaskOpResult(ok=False, reason="description must change")
+            previous_description = row.description
+            state.phase = OrgUnclaimedPhase.POST_REVISION_WAIT
+            state.description_revision += 1
+            state.description_revised_at = now
+            state.deadline_at = now + state.policy.post_update_claim_timeout_seconds * 1000
+            result = await session.execute(
+                update(OrgTaskRecord)
+                .where(
+                    OrgTaskRecord.task_id == task_id,
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.status == OrgTaskStatus.OPEN.value,
+                    OrgTaskRecord.assignment_type == OrgAssignmentType.UNASSIGNED.value,
+                    OrgTaskRecord.unclaimed_phase == OrgUnclaimedPhase.REVISION_PENDING.value,
+                    OrgTaskRecord.unclaimed_deadline_at > now,
+                )
+                .values(
+                    description=description,
+                    updated_at=now,
+                    unclaimed_phase=state.phase.value,
+                    unclaimed_deadline_at=state.deadline_at,
+                    unclaimed_json=_json_dumps(state.model_dump()),
+                )
+            )
+            if result.rowcount != 1:
+                return OrgTaskOpResult(ok=False, reason="task changed while supplementing description")
+            await session.refresh(row)
+            leaders = (
+                (
+                    await session.execute(
+                        select(OrgLeaderRecord).where(
+                            OrgLeaderRecord.organization_id == self.organization_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            required = set(_json_loads(row.required_capabilities_json, []))
+            notified = set()
+            for leader in leaders:
+                if (
+                    leader.team_id != row.creator_team_id
+                    and leader.team_id not in notified
+                    and required.issubset(set(_json_loads(leader.capabilities_json, [])))
+                ):
+                    self._add_unclaimed_notification(
+                        session,
+                        row,
+                        kind="revised",
+                        team_id=leader.team_id,
+                        leader_id=leader.leader_id,
+                        now=now,
+                    )
+                    notified.add(leader.team_id)
+            event = OrgTaskDescriptionRevisedEvent(
+                organization_id=self.organization_id,
+                team_id=team_id,
+                leader_id=leader_id,
+                task_id=task_id,
+                request_id=request_id,
+                description_revision=state.description_revision,
+                deadline_at=state.deadline_at,
+            )
+            self._add_unclaimed_audit(
+                session,
+                event,
+                now,
+                previous_description=previous_description,
+                description=description,
+            )
+            await session.commit()
+        await self._publish_event(event, persist=False)
+        return OrgTaskOpResult(ok=True, task=self._to_task(row))
 
     async def get_task(self, task_id: str) -> OrgTask | None:
         await self.initialize()
@@ -590,8 +1044,8 @@ class OrgTaskManager:
 
     async def claim_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
         await self.initialize()
-        now = get_current_time()
         async with self._write() as session:
+            now = get_current_time()
             result = await session.execute(
                 update(OrgTaskRecord)
                 .where(
@@ -599,6 +1053,7 @@ class OrgTaskManager:
                     OrgTaskRecord.organization_id == self.organization_id,
                     OrgTaskRecord.status == OrgTaskStatus.OPEN.value,
                     OrgTaskRecord.assignment_type == OrgAssignmentType.UNASSIGNED.value,
+                    self._unclaimed_assignment_allowed(now),
                 )
                 .values(
                     status=OrgTaskStatus.CLAIMED.value,
@@ -607,6 +1062,10 @@ class OrgTaskManager:
                     assigned_by_team_id=None,
                     assigned_at=now,
                     updated_at=now,
+                    unclaimed_phase=case(
+                        (col(OrgTaskRecord.unclaimed_phase).is_not(None), OrgUnclaimedPhase.CLOSED.value)
+                    ),
+                    unclaimed_deadline_at=None,
                 )
             )
             await session.commit()
@@ -632,14 +1091,15 @@ class OrgTaskManager:
         to_team_id: str,
     ) -> OrgTaskOpResult:
         await self.initialize()
-        now = get_current_time()
         async with self._write() as session:
+            now = get_current_time()
             result = await session.execute(
                 update(OrgTaskRecord)
                 .where(
                     OrgTaskRecord.task_id == task_id,
                     OrgTaskRecord.organization_id == self.organization_id,
                     OrgTaskRecord.status.not_in(ORG_TASK_TERMINAL_STATUS_VALUES),
+                    self._unclaimed_assignment_allowed(now),
                     or_(
                         OrgTaskRecord.assigned_team_id.is_(None),
                         OrgTaskRecord.assigned_team_id == from_team_id,
@@ -652,6 +1112,10 @@ class OrgTaskManager:
                     assigned_by_team_id=from_team_id,
                     assigned_at=now,
                     updated_at=now,
+                    unclaimed_phase=case(
+                        (col(OrgTaskRecord.unclaimed_phase).is_not(None), OrgUnclaimedPhase.CLOSED.value)
+                    ),
+                    unclaimed_deadline_at=None,
                 )
             )
             await session.commit()
@@ -1286,25 +1750,32 @@ class OrgTaskManager:
             team_inbox_id=to_team_id,
         )
 
-    async def _publish_event(self, event: BaseOrgEvent, *, team_inbox_id: str | None = None) -> None:
+    async def _publish_event(
+        self,
+        event: BaseOrgEvent,
+        *,
+        team_inbox_id: str | None = None,
+        persist: bool = True,
+    ) -> None:
         message = OrgEventMessage.from_event(event)
         # Keep a compact durable activity trail for the web UI and for
         # post-run inspection.  Transport delivery remains best effort.
         try:
-            async with self._write() as session:
-                session.add(
-                    OrgTaskEventRecord(
-                        event_id=f"org-event-{uuid.uuid4().hex[:12]}",
-                        organization_id=self.organization_id,
-                        event_type=message.event_type,
-                        task_id=message.payload.get("task_id"),
-                        team_id=message.payload.get("team_id"),
-                        leader_id=message.payload.get("leader_id"),
-                        payload_json=_json_dumps(message.payload),
-                        created_at=get_current_time(),
+            if persist:
+                async with self._write() as session:
+                    session.add(
+                        OrgTaskEventRecord(
+                            event_id=f"org-event-{uuid.uuid4().hex[:12]}",
+                            organization_id=self.organization_id,
+                            event_type=message.event_type,
+                            task_id=message.payload.get("task_id"),
+                            team_id=message.payload.get("team_id"),
+                            leader_id=message.payload.get("leader_id"),
+                            payload_json=_json_dumps(message.payload),
+                            created_at=get_current_time(),
+                        )
                     )
-                )
-                await session.commit()
+                    await session.commit()
         except Exception:  # noqa: BLE001
             logger.warning("Failed to persist organization activity event", exc_info=True)
 
@@ -1319,6 +1790,8 @@ class OrgTaskManager:
                 event,
                 (
                     OrgTaskCreatedEvent,
+                    OrgTaskDescriptionRevisionRequestedEvent,
+                    OrgTaskDescriptionRevisedEvent,
                     OrgTaskClaimedEvent,
                     OrgTaskDelegatedEvent,
                     OrgTaskCompletedEvent,
@@ -1359,6 +1832,8 @@ class OrgTaskManager:
         aggregation_payload = _json_loads(row.aggregation_json, None)
         status, failure_code = OrgTaskManager._task_status_from_row(row)
         return OrgTask(
+            unclaimed=OrgTaskManager._unclaimed_state(row),
+            recreated_from_task_id=row.recreated_from_task_id,
             task_id=row.task_id,
             parent_task_id=row.parent_task_id,
             root_task_id=row.root_task_id,
@@ -1381,9 +1856,7 @@ class OrgTaskManager:
                 assigned_by_team_id=row.assigned_by_team_id,
                 assigned_at=row.assigned_at,
             ),
-            aggregation=OrgTaskAggregationConfig.model_validate(aggregation_payload)
-            if aggregation_payload
-            else None,
+            aggregation=OrgTaskAggregationConfig.model_validate(aggregation_payload) if aggregation_payload else None,
             output_spec=OrgTaskOutputSpec.model_validate(output_spec) if output_spec else None,
             output_context=OrgTaskOutputContext.model_validate(output_context) if output_context else None,
             output_abstract=row.output_abstract,

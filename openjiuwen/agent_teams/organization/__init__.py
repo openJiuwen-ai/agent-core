@@ -14,10 +14,10 @@ from openjiuwen.agent_teams.organization.message_service import (
 )
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.schema import (
+    OrganizationSpec,
     OrgAssignment,
     OrgAssignmentType,
     OrgLeaderHandle,
-    OrganizationSpec,
     OrgTask,
     OrgTaskAggregationConfig,
     OrgTaskAggregationMode,
@@ -27,6 +27,9 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskReviewStatus,
     OrgTaskSource,
     OrgTaskStatus,
+    OrgUnclaimedPhase,
+    OrgUnclaimedTaskPolicy,
+    OrgUnclaimedTaskState,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager, OrgTaskOpResult
 from openjiuwen.agent_teams.organization.transport_api import (
@@ -37,6 +40,9 @@ from openjiuwen.agent_teams.organization.transport_api import (
 )
 
 __all__ = [
+    "OrgUnclaimedPhase",
+    "OrgUnclaimedTaskPolicy",
+    "OrgUnclaimedTaskState",
     "ExpertGroupDescriptor",
     "LaunchedExpertTeam",
     "NegotiationRequest",
