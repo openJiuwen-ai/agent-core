@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.runner import Runner
@@ -40,7 +41,7 @@ from tests.system_tests.harness_providers.conftest import requires_native_model
 pytestmark = [pytest.mark.asyncio, requires_native_model]
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def _runner() -> None:
     await Runner.start()
     try:
@@ -50,7 +51,11 @@ async def _runner() -> None:
 
 
 def _manifest(*, with_ask_user: bool = False) -> AgentTemplateSpec:
-    rails = [RailSpec(type="core.ask_user")] if with_ask_user else []
+    # File / shell tools are mounted by the sys-operation rail, which a spec
+    # build does not add on its own; the manifest declares it explicitly.
+    rails = [RailSpec(type="core.sys_operation")]
+    if with_ask_user:
+        rails.append(RailSpec(type="core.ask_user"))
     return AgentTemplateSpec(
         agent_card=AgentCard(id="native-e2e", name="native-e2e", description="Native harness e2e agent."),
         model=ModelSpec(

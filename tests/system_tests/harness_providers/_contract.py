@@ -20,6 +20,7 @@ from typing import Any
 from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
+    HarnessCapability,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
@@ -210,6 +211,14 @@ async def run_follow_up_turns(harness: HarnessProtocol, context: HarnessContext)
     assert harness.state is HarnessState.TERMINATED
 
 
+def _abort_mode_for(harness: HarnessProtocol) -> AbortMode:
+    """Pick the abort mode the provider card declares (graceful preferred)."""
+    if harness.card.supports(HarnessCapability.GRACEFUL_ABORT):
+        return AbortMode.GRACEFUL
+    assert harness.card.supports(HarnessCapability.FORCE_ABORT), "provider declares no abort capability"
+    return AbortMode.FORCE
+
+
 async def run_abort_turn(harness: HarnessProtocol, context: HarnessContext) -> None:
     """Abort a long turn after the first output; the turn terminates as ABORTED."""
     await harness.start(context)
@@ -231,7 +240,7 @@ async def run_abort_turn(harness: HarnessProtocol, context: HarnessContext) -> N
             events.append(event)
             if not aborted and isinstance(event.event, OutputEvent):
                 aborted = True
-                await harness.abort(mode=AbortMode.GRACEFUL)
+                await harness.abort(mode=_abort_mode_for(harness))
 
     await asyncio.wait_for(_consume(), timeout=TURN_TIMEOUT_S)
     assert aborted, "the turn produced no output to abort on"
