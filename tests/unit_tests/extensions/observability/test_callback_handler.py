@@ -48,6 +48,8 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_RESPONSE_ID,
     GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_DEFINITIONS,
     GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
@@ -69,6 +71,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_CONVERSATION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
     OJ_STREAM_CLOSE_EVENT,
     OJ_STREAM_FRAME_COUNT,
     OJ_STREAM_FRAME_EVENT,
@@ -248,6 +251,55 @@ async def test_runtime_initialize_wires_global_callback_framework() -> None:
     assert sum(span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool" for span in spans) == 2
     names = [span.name for span in spans]
     assert names.count("agent.root") == 2
+
+
+@pytest.mark.asyncio
+async def test_backend_neutral_io_is_reserved_for_spans_without_a_carrier() -> None:
+    """Only spans with no standard carrier state their I/O the neutral way.
+
+    ``openjiuwen.span.input``/``output`` exist for records that have no
+    dedicated GenAI field. An LLM span has ``gen_ai.input.messages`` and a
+    tool span has ``gen_ai.tool.call.arguments``/``result``; writing the
+    neutral keys there too stored the same bytes twice and let the two
+    copies drift.
+    """
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    config = ObservabilityConfig(enabled=True, service_name="neutral-io-test", sample_rate=1.0)
+    framework = Runner.callback_framework
+
+    try:
+        runtime.initialize(config, span_exporter_override=exporter)
+        root = runtime.get_tracer("neutral-io-test").start_span("agent.root")
+        set_root_span(root, session_id="session-neutral")
+        session = SimpleNamespace(get_session_id=lambda: "session-neutral")
+        try:
+            await _emit_callback_flow(framework, session)
+        finally:
+            if root.is_recording():
+                root.end()
+            clear_root_span(session_id="session-neutral", expected_span=root)
+            runtime.shutdown()
+    finally:
+        runtime.shutdown()
+        reset_state()
+
+    spans = exporter.get_finished_spans()
+    llm = next(s for s in spans if s.attributes.get(GEN_AI_OPERATION_NAME) == "chat")
+    tool = next(s for s in spans if s.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool")
+    agent_root = next(s for s in spans if s.name == "agent.root")
+
+    # Each carries its I/O through the standard field for its kind...
+    assert llm.attributes[GEN_AI_INPUT_MESSAGES]
+    assert tool.attributes[GEN_AI_TOOL_CALL_ARGUMENTS]
+    assert tool.attributes[GEN_AI_TOOL_CALL_RESULT]
+    # ...and does not repeat it through the neutral one.
+    assert OJ_SPAN_INPUT not in llm.attributes
+    assert OJ_SPAN_INPUT not in tool.attributes
+    assert OJ_SPAN_OUTPUT not in tool.attributes
+    # The agent root has no standard carrier, so the neutral keys are its own.
+    assert agent_root.attributes[OJ_SPAN_INPUT] == "hello"
+    assert OJ_SPAN_OUTPUT in agent_root.attributes
 
 
 def test_request_numbers_are_additive_and_subject_local_across_turn_roots() -> None:
@@ -711,12 +763,8 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
         "preserved tail",
     ]
     assert all("metadata" not in message for message in structured)
-    span_input = json.loads(span.attributes[OJ_SPAN_INPUT])
-    assert [message["content"] for message in span_input] == [
-        repeated_content,
-        repeated_content,
-        "preserved tail",
-    ]
+    # An LLM span states its input once, through the standard carrier.
+    assert OJ_SPAN_INPUT not in span.attributes
     assert "private" not in json.dumps(provenance)
 
 

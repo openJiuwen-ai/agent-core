@@ -42,7 +42,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_OPERATION_NAME,
     GEN_AI_TOOL_NAME,
     OJ_REQUEST_MESSAGE_COUNT,
-    OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX,
     OJ_REQUEST_ID,
     OJ_SPAN_INPUT,
 )
@@ -1894,15 +1893,14 @@ async def test_team_span_uses_agent_team_name(
 
 
 @pytest.mark.asyncio
-async def test_cross_iteration_prompt_delta_uses_team_span_count(
+async def test_cross_iteration_llm_span_carries_the_full_prompt(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Iteration 2's LLM call emits the full prompt (not delta).
+    """Iteration 2's LLM call states the whole prompt, not just what is new.
 
-    The per-member prev message_count is stored on the team span (keyed by
-    agent_id) so it survives across iterations.  ``openjiuwen.span.input``
-    still uses delta (only new messages), but per-message ``gen_ai.prompt.{i}.*``
-    attributes use the full prompt so the trace always shows the complete context.
+    A reader opening one call must see the complete context that call ran
+    against, so the per-message prompt attributes repeat the earlier messages
+    rather than only the ones this iteration appended.
     """
     from openjiuwen.agent_teams.observability.span_context import (
         get_team_span,
@@ -1943,14 +1941,10 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     )
     await rail.after_task_iteration(ctx1)
 
-    # Team span must now carry the per-member prev count for this agent.
-    team_span = get_team_span()
+    # The iteration span names its member, which is how a reader tells two
+    # members' calls apart within one team trace.
     agent_id = _attr(_get_iter_span(in_memory_exporter, 1), AT_AGENT_ID)
     assert agent_id, "iteration 1 span should carry agentteam.agent.id"
-    prev_count_key = f"{OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX}{agent_id}"
-    assert _attr(team_span, prev_count_key) == len(msgs1), (
-        "team span should record iteration 1's message count per-member"
-    )
 
     # --- Iteration 2: same agent, 2 new messages appended ---
     inputs2 = TaskIterationInputs(iteration=2, query="iter2", loop_event=None)
@@ -1985,14 +1979,9 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     assert [message["content"] for message in prompts[1:]] == [
         "m1", "m2", "m3", "m4", "m5",
     ], "iteration 2 should carry the full prompt, not a delta"
-    # openjiuwen.span.input still uses delta — iteration 2 only has new messages.
-    input_json = _attr(iter2_llm, "openjiuwen.span.input", "")
-    assert "m4" in input_json and "m5" in input_json, (
-        "span.input should contain new messages (delta)"
-    )
-    assert "m1" not in input_json and "m2" not in input_json, (
-        "span.input should NOT re-emit iteration 1 messages"
-    )
+    # An LLM span has a standard carrier for its input, so it does not also
+    # write the backend-neutral one reserved for spans that have none.
+    assert _attr(iter2_llm, "openjiuwen.span.input", None) is None
 
     remove_team_span("test_team")
 

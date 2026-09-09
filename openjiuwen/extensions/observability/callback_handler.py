@@ -35,7 +35,6 @@ from openjiuwen.extensions.observability.redaction import (
     redact_error_summary,
     redact_prompt,
     redact_system_prompt,
-    truncate,
 )
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.demand import (
@@ -46,7 +45,6 @@ from openjiuwen.extensions.observability.span_record_processor import StreamFram
 from openjiuwen.extensions.observability.error_reporting import record_span_error
 from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 from openjiuwen.extensions.observability.semconv import (
-    AT_AGENT_ID,
     AT_MEMBER_NAME,
 
     ERROR_TYPE,
@@ -105,7 +103,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_INFERENCE_ID,
     OJ_REQUEST_ID,
     OJ_REQUEST_MESSAGE_COUNT,
-    OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX,
     OJ_REQUEST_NUMBER,
     OJ_REQUEST_PURPOSE,
     OJ_RUN_ID,
@@ -709,7 +706,6 @@ class OtelCallbackHandler:
                 raw_input = self._serialize_tool_inputs(inputs)
                 redacted_input = redact_prompt(raw_input, self._config)
                 authoritative.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_input)
-                authoritative.set_attribute(OJ_SPAN_INPUT, redacted_input)
                 publish_span_snapshot(authoritative, "attributes")
                 return
 
@@ -731,7 +727,6 @@ class OtelCallbackHandler:
             raw_input = self._serialize_tool_inputs(inputs)
             redacted_input = redact_prompt(raw_input, self._config)
             span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_input)
-            span.set_attribute(OJ_SPAN_INPUT, redacted_input)
             self._propagate_session_context(span)
             self._stamp_parent_member_name(span)
             push_tool_span(tool_name, span)
@@ -749,7 +744,6 @@ class OtelCallbackHandler:
                 serialized_output = self._serialize_tool_result(result)
                 redacted = redact_completion(serialized_output, self._config)
                 authoritative.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
-                authoritative.set_attribute(OJ_SPAN_OUTPUT, redacted)
                 publish_span_snapshot(authoritative, "output")
                 return result
             span = pop_tool_span(tool_name)
@@ -767,7 +761,6 @@ class OtelCallbackHandler:
             serialized_output = self._serialize_tool_result(result)
             redacted = redact_completion(serialized_output, self._config)
             span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
-            span.set_attribute(OJ_SPAN_OUTPUT, redacted)
             # A tool that returns ``success=False`` never raises, so the status
             # has to come from the result itself or the call reports OK.
             failure_reason = tool_failure_reason(result)
@@ -813,7 +806,6 @@ class OtelCallbackHandler:
                     recorded_output = tool_result_for_exception(exc)
                     redacted = redact_completion(recorded_output, self._config)
                     span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
-                    span.set_attribute(OJ_SPAN_OUTPUT, redacted)
                 record_span_error(
                     span,
                     exception=exc,
@@ -962,70 +954,11 @@ class OtelCallbackHandler:
         if request_purpose in ("assistant", "compaction"):
             span.set_attribute(OJ_REQUEST_PURPOSE, request_purpose)
 
-        # ── Delta tracking ──────────────────────────────────────────
-        # The previous LLM call's message_count decides whether this is a
-        # subsequent call. It drives the per-message prompt attributes and
-        # the openjiuwen.span.input JSON.
-        #
-        #   - First call (prev_count == 0):  emit ALL messages as attributes.
-        #   - Context compression (current < prev): emit ALL messages.
-        #   - Subsequent call: emit only new (delta) messages.
-        #
-        # System messages are ALWAYS emitted regardless of delta — they form
-        # the stable instruction baseline that every span needs.
-        #
-        # Cross-iteration: the count is stored on the root span (not the
-        # iteration span) keyed by agent_id, because each iteration opens and
-        # closes its own agent span — a count stored there is lost before the
-        # next iteration's first LLM call, which would then re-emit the full
-        # prompt. Each agent keeps its own chain
-        # (openjiuwen.request.previous_message_count.<agent_id>); OTel span
-        # set_attribute is internally locked so no manual locking is needed.
+        # The message count is a display fact, kept on the agent span that
+        # owns this call as well as on the call itself.
         agent_span = get_current_agent_span()
-        root_span = get_root_span()
-        agent_id = ""
-        if agent_span is not None:
-            raw_id = agent_span.attributes.get(AT_AGENT_ID)
-            if raw_id is not None:
-                agent_id = str(raw_id)
-
-        prev_count_raw: int = 0
-        if root_span is not None and agent_id:
-            prev_attr = root_span.attributes.get(f"{OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX}{agent_id}")
-            if prev_attr is not None:
-                try:
-                    prev_count_raw = int(str(prev_attr))
-                except (ValueError, TypeError):
-                    pass
-
-        is_first_call = prev_count_raw == 0 or msg_count < prev_count_raw
-
-        # Update the per-member count on the root span for the next LLM call
-        # of this member (across iterations). Also keep the per-span display
-        # count on the current iteration span.
-        if root_span is not None and root_span.is_recording() and agent_id:
-            root_span.set_attribute(f"{OJ_REQUEST_PREVIOUS_MESSAGE_COUNT_PREFIX}{agent_id}", msg_count)
         if agent_span is not None:
             agent_span.set_attribute(OJ_REQUEST_MESSAGE_COUNT, msg_count)
-
-        # ── openjiuwen.span.input (delta view, same logic) ──────────
-        if is_first_call:
-            # System messages are carried by gen_ai.system_instructions and
-            # gen_ai.input.messages; this channel is the turn's own view of
-            # what the request added.
-            delta_msgs = [m for m in messages if _message_role(m) != "system"]
-        else:
-            delta_msgs = messages[prev_count_raw:]
-
-        input_json = json.dumps(
-            [{"role": _message_role(m),
-              "content": _coerce_message_content(_message_content(m))}
-             for m in delta_msgs],
-            ensure_ascii=False, default=str,
-        ) if delta_msgs else "[]"
-        input_max_len = max(self._config.attribute_value_max_length * 10, 81920)
-        span.set_attribute(OJ_SPAN_INPUT,
-                           truncate(input_json, input_max_len))
 
         tools = kwargs.get("tools")
         if tools:
