@@ -209,6 +209,7 @@ If there is no contradiction or duplication, output exactly: NONE
 DREAM_MERGE_SYSTEM = (
     "You consolidate near-duplicate rules in a single track of an experience bank. "
     "Reduce redundancy without dropping mutually exclusive conditions. "
+    "Always write a multi-line THINKING chain of thought first, then REASON, then the verdict. "
     "Output the structured verdict format exactly."
 )
 
@@ -254,11 +255,15 @@ Cluster rules (0-based index, text, count):
 Pairwise cosine similarities (i, j, sim):
 {sim_table or "(none)"}
 {tip_extra}
-Reply in EXACTLY this format:
+Reply in EXACTLY this format (field order mandatory):
+THINKING:
+<multi-line chain of thought: compare members, similarities, and conditions; justify MERGE vs KEEP_DISTINCT vs REWRITE>
+REASON: <one-sentence decision summary>
 VERDICT: MERGE | KEEP_DISTINCT | REWRITE
 CANONICAL: <single retained or rewritten text; empty allowed for KEEP_DISTINCT>
 KEEP_INDICES: <comma-separated 0-based indices to keep when KEEP_DISTINCT; else empty>
-REASON: <one sentence>
+
+THINKING is the comparison/trade-off process (required, non-empty). REASON is the final conclusion sentence (required, non-empty).
 """
 
 

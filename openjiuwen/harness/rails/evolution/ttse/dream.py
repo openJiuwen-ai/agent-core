@@ -81,6 +81,26 @@ class MergeVerdict:
     canonical: str = ""
     keep_indices: List[int] = field(default_factory=list)
     reason: str = ""
+    thinking: str = ""
+
+
+_MERGE_FIELD_HEADERS = ("THINKING", "REASON", "VERDICT", "CANONICAL", "KEEP_INDICES")
+_THINKING_LOG_MAX = 300
+
+
+def _truncate_thinking(text: str, limit: int = _THINKING_LOG_MAX) -> str:
+    s = (text or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "..."
+
+
+def _is_merge_field_header(line: str) -> bool:
+    up = line.strip().upper()
+    for header in _MERGE_FIELD_HEADERS:
+        if up == header or up.startswith(header + ":") or up.startswith(header + " "):
+            return True
+    return False
 
 
 def load_dream_state(path: str) -> DreamState:
@@ -187,16 +207,35 @@ async def prune_stale(
 
 
 def parse_merge_verdict(text: str, cluster_size: int) -> Optional[MergeVerdict]:
-    """Parse VERDICT/CANONICAL/KEEP_INDICES/REASON from LLM merge output."""
+    """Parse THINKING/REASON/VERDICT/CANONICAL/KEEP_INDICES from LLM merge output.
+
+    THINKING and REASON must be non-empty; otherwise returns ``None``.
+    """
     if not text:
         return None
     verdict = ""
     canonical = ""
     keep_indices: List[int] = []
     reason = ""
+    thinking_lines: List[str] = []
+    in_thinking = False
     for line in str(text).splitlines():
         s = line.strip()
         up = s.upper()
+        if up.startswith("THINKING"):
+            in_thinking = True
+            # Inline body on the same line: "THINKING: ..."
+            if ":" in s:
+                inline = s.split(":", 1)[-1].strip()
+                if inline:
+                    thinking_lines.append(inline)
+            continue
+        if in_thinking:
+            if _is_merge_field_header(s) and not up.startswith("THINKING"):
+                in_thinking = False
+            else:
+                thinking_lines.append(line.rstrip())
+                continue
         if up.startswith("VERDICT"):
             payload = s.split(":", 1)[-1].strip() if ":" in s else s
             token = payload.split()[0].upper() if payload else ""
@@ -213,9 +252,16 @@ def parse_merge_verdict(text: str, cluster_size: int) -> Optional[MergeVerdict]:
                         keep_indices.append(idx)
         elif up.startswith("REASON"):
             reason = s.split(":", 1)[-1].strip() if ":" in s else s
-    if not verdict:
+    thinking = "\n".join(thinking_lines).strip()
+    if not verdict or not thinking or not reason:
         return None
-    return MergeVerdict(verdict=verdict, canonical=canonical, keep_indices=keep_indices, reason=reason)
+    return MergeVerdict(
+        verdict=verdict,
+        canonical=canonical,
+        keep_indices=keep_indices,
+        reason=reason,
+        thinking=thinking,
+    )
 
 
 def _best_count_text(cluster: Sequence[Dict[str, Any]]) -> str:
@@ -281,14 +327,21 @@ async def _apply_merge_verdict(
     category = store.record_category(cluster[0])
     reason = "dream_merge" if verdict.verdict == "MERGE" else "dream_rewrite"
     logger.info(
-        "[TTSERail] dream before_%s track=%s category=%s members=%s canonical=%s llm_reason=%s",
+        "[TTSERail] dream before_%s track=%s category=%s members=%s canonical=%s llm_reason=%s thinking=%s",
         verdict.verdict.lower(),
         track,
         category,
         _format_cluster_members(cluster),
         canonical,
         verdict.reason or "",
+        _truncate_thinking(verdict.thinking),
     )
+    if verdict.thinking:
+        logger.debug(
+            "[TTSERail] dream before_%s full_thinking=%s",
+            verdict.verdict.lower(),
+            verdict.thinking,
+        )
     for record in cluster:
         logger.info(
             "[TTSERail] dream before_delete track=%s action=%s text=%s",
@@ -302,7 +355,7 @@ async def _apply_merge_verdict(
         track, canonical, count=merged_count, category=category, save=False
     )
     logger.info(
-        "[TTSERail] dream after_%s track=%s category=%s members=%s canonical=%s count=%s llm_reason=%s",
+        "[TTSERail] dream after_%s track=%s category=%s members=%s canonical=%s count=%s llm_reason=%s thinking=%s",
         verdict.verdict.lower(),
         track,
         category,
@@ -310,6 +363,7 @@ async def _apply_merge_verdict(
         canonical,
         merged_count,
         verdict.reason or "",
+        _truncate_thinking(verdict.thinking),
     )
     return verdict.verdict.lower(), (canonical, track)
 
@@ -435,19 +489,21 @@ async def dream_merge(
         if action in ("merge", "rewrite"):
             merged += 1
             logger.info(
-                "[TTSERail] dream %s track=%s size=%s reason=%s",
+                "[TTSERail] dream %s track=%s size=%s reason=%s thinking=%s",
                 action,
                 track,
                 len(cluster),
                 effective.reason or "",
+                _truncate_thinking(effective.thinking),
             )
         else:
             kept += 1
             logger.info(
-                "[TTSERail] dream keep_distinct track=%s size=%s reason=%s",
+                "[TTSERail] dream keep_distinct track=%s size=%s reason=%s thinking=%s",
                 track,
                 len(cluster),
                 effective.reason or "",
+                _truncate_thinking(effective.thinking),
             )
     return merged, kept, added_items
 

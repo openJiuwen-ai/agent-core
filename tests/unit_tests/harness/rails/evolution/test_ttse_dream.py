@@ -211,12 +211,44 @@ async def test_legacy_migrated_not_immediately_pruned(tmp_path):
 
 def test_parse_merge_verdict():
     v = parse_merge_verdict(
-        "VERDICT: MERGE\nCANONICAL: the grader is case-sensitive\nKEEP_INDICES:\nREASON: paraphrase\n",
+        "THINKING:\n"
+        "Members 0-2 are paraphrases of the same case-sensitivity fact.\n"
+        "Sims are high; conditions do not conflict.\n"
+        "REASON: paraphrase\n"
+        "VERDICT: MERGE\n"
+        "CANONICAL: the grader is case-sensitive\n"
+        "KEEP_INDICES:\n",
         3,
     )
     assert v is not None
     assert v.verdict == "MERGE"
     assert v.canonical == "the grader is case-sensitive"
+    assert "paraphrases" in v.thinking
+    assert v.reason == "paraphrase"
+
+
+def test_parse_merge_verdict_requires_thinking_and_reason():
+    assert (
+        parse_merge_verdict(
+            "REASON: paraphrase\nVERDICT: MERGE\nCANONICAL: x\nKEEP_INDICES:\n",
+            2,
+        )
+        is None
+    )
+    assert (
+        parse_merge_verdict(
+            "THINKING:\nsame idea\nVERDICT: MERGE\nCANONICAL: x\nKEEP_INDICES:\n",
+            2,
+        )
+        is None
+    )
+    assert (
+        parse_merge_verdict(
+            "THINKING:\n\nREASON: \nVERDICT: MERGE\nCANONICAL: x\nKEEP_INDICES:\n",
+            2,
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -244,10 +276,13 @@ async def test_dream_merge_near_duplicate_facts(tmp_path):
 
     def handler(prompt: str):
         return (
+            "THINKING:\n"
+            "All three facts describe grader case sensitivity with high pairwise sims.\n"
+            "No mutually exclusive conditions; merge into one canonical statement.\n"
+            "REASON: near duplicates\n"
             "VERDICT: MERGE\n"
             "CANONICAL: the grader checks column names case-sensitively\n"
             "KEEP_INDICES:\n"
-            "REASON: near duplicates\n"
         )
 
     rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
@@ -295,7 +330,15 @@ async def test_dream_keep_distinct_tips(tmp_path):
     )
 
     def handler(prompt: str):
-        return "VERDICT: KEEP_DISTINCT\nCANONICAL:\nKEEP_INDICES: 0, 1\nREASON: different conditions\n"
+        return (
+            "THINKING:\n"
+            "TIP 0 targets csv counts via python_exec; TIP 1 targets huge logs via grep.\n"
+            "Conditions and capabilities differ; keep both.\n"
+            "REASON: different conditions\n"
+            "VERDICT: KEEP_DISTINCT\n"
+            "CANONICAL:\n"
+            "KEEP_INDICES: 0, 1\n"
+        )
 
     rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
     await rail._ttse_store.add_record_direct(
@@ -598,10 +641,13 @@ async def test_dream_merge_same_category_inherits_category(tmp_path):
 
     def handler(prompt: str):
         return (
+            "THINKING:\n"
+            "All three facts describe grader case sensitivity with high pairwise sims.\n"
+            "No mutually exclusive conditions; merge into one canonical statement.\n"
+            "REASON: near duplicates\n"
             "VERDICT: MERGE\n"
             "CANONICAL: the grader checks column names case-sensitively\n"
             "KEEP_INDICES:\n"
-            "REASON: near duplicates\n"
         )
 
     rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
@@ -647,10 +693,13 @@ async def test_run_dream_inherits_category_on_merge(tmp_path):
             classify_calls.append(prompt)
             return '{"assignments": {"1": "documents-office-and-records"}}'
         return (
+            "THINKING:\n"
+            "Both facts are paraphrases of grader case sensitivity.\n"
+            "Merge into one canonical fact.\n"
+            "REASON: near duplicates\n"
             "VERDICT: MERGE\n"
             "CANONICAL: the grader checks names case-sensitively\n"
             "KEEP_INDICES:\n"
-            "REASON: near duplicates\n"
         )
 
     cfg = TTSEConfig(
