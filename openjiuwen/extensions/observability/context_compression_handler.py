@@ -90,13 +90,21 @@ class ContextCompressionObservabilityBridge:
                 payload=payload,
             )
             if event is not None:
-                queue_context_window_compaction(
+                queued = queue_context_window_compaction(
                     session_id=str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or ""),
                     subject_id=str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main"),
-                    request_id=str(parent_span.attributes.get(OJ_REQUEST_ID) or ""),
                     step_id=str(parent_span.attributes.get(OJ_STEP_ID) or ""),
                     operation_id=state.operation_id,
                 )
+                if not queued:
+                    # Silence here is what hid the previous defect: every
+                    # compaction failed to queue and nothing said so, leaving
+                    # the viewer to report each one as missing its output.
+                    logger.debug(
+                        "otel: context compaction {} not queued for correlation; "
+                        "its parent span states no step id",
+                        state.operation_id,
+                    )
         except Exception as exc:
             logger.warning("otel: context compression completion bridge failed - {}", exc)
 

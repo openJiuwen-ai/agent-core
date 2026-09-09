@@ -512,7 +512,7 @@ _trajectory_subject_states: dict[
 ] = {}
 _trajectory_subject_state_lock = threading.Lock()
 _pending_context_window_compactions: dict[
-    tuple[str, str, str, str],
+    tuple[str, str, str],
     list[str],
 ] = {}
 _pending_context_window_compactions_lock = threading.Lock()
@@ -553,15 +553,18 @@ def queue_context_window_compaction(
     *,
     session_id: str,
     subject_id: str,
-    request_id: str,
     step_id: str,
     operation_id: str,
 ) -> bool:
-    """Queue one completed compaction for its next matching context window."""
+    """Queue one completed compaction for its next matching context window.
+
+    Returns:
+        Whether the compaction was queued. False means the caller could not
+        name the step it belongs to, so no window will ever claim it.
+    """
     key = _context_window_transition_key(
         session_id=session_id,
         subject_id=subject_id,
-        request_id=request_id,
         step_id=step_id,
     )
     resolved_operation_id = str(operation_id or "").strip()
@@ -578,14 +581,12 @@ def consume_context_window_compaction(
     *,
     session_id: str,
     subject_id: str,
-    request_id: str,
     step_id: str,
 ) -> str | None:
     """Consume the oldest compaction for exactly one routed context window."""
     key = _context_window_transition_key(
         session_id=session_id,
         subject_id=subject_id,
-        request_id=request_id,
         step_id=step_id,
     )
     if key is None:
@@ -604,16 +605,22 @@ def _context_window_transition_key(
     *,
     session_id: str,
     subject_id: str,
-    request_id: str,
     step_id: str,
-) -> tuple[str, str, str, str] | None:
+) -> tuple[str, str, str] | None:
+    """Scope one compaction to the step whose next window states its output.
+
+    The step is the finest scope both sides can agree on. A request id cannot
+    be part of this key: a compaction is queued between model calls, so the
+    call that will state its output does not exist yet and has no id to match
+    against -- keying on one left every compaction unclaimed.
+    """
     values = tuple(
         str(value or "").strip()
-        for value in (session_id, subject_id, request_id, step_id)
+        for value in (session_id, subject_id, step_id)
     )
     if any(not value for value in values):
         return None
-    return cast(tuple[str, str, str, str], values)
+    return cast(tuple[str, str, str], values)
 
 
 def advance_context_window(

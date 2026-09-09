@@ -489,7 +489,6 @@ def test_epoch_baseline_preserves_compaction_correlation_independently() -> None
         queued = queue_context_window_compaction(
             session_id="baseline-compaction-session",
             subject_id="baseline-compaction-subject",
-            request_id="request-1",
             step_id="step-1",
             operation_id="operation-1",
         )

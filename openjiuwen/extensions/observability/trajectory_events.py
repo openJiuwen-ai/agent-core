@@ -201,7 +201,6 @@ def emit_context_window_commit(
     caused_by_operation_id = consume_context_window_compaction(
         session_id=session_id,
         subject_id=subject_id,
-        request_id=str(llm_span.attributes.get(OJ_REQUEST_ID) or ""),
         step_id=str(llm_span.attributes.get(OJ_STEP_ID) or ""),
     )
     if caused_by_operation_id is not None:
