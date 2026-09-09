@@ -452,6 +452,12 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
     description: Optional[str] = Field(default=None, description="The swarmflow script's META description")
+    script_path: Optional[str] = Field(
+        default=None,
+        description="Absolute path of the script driving this run, on workflow_started. The "
+                    "embedder's snapshot reads it here so a cold-start resume can relaunch "
+                    "through resume_id + script_path.",
+    )
     phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
     label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
     prompt: Optional[str] = Field(default=None, description="Rendered agent prompt, on agent_started")

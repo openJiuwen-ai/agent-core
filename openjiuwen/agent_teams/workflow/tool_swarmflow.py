@@ -592,6 +592,7 @@ class SwarmflowTool(AsyncTool):
                 relaunch_kind=inputs.get(_RELAUNCH_KIND_KEY),
                 workflow_name=name_box["name"],
                 description=name_box.get("description"),
+                script_path=progress.script_path,
                 phase=progress.phase,
                 label=progress.label,
                 prompt=progress.prompt,
