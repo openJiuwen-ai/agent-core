@@ -178,6 +178,40 @@ def test_planned_candidate_is_only_prior_and_starts_fail_closed() -> None:
     assert decisions[0].evidence_refs == ()
 
 
+def test_planned_skills_across_main_agent_steps_share_the_agent_branch() -> None:
+    trajectory = _trajectory(
+        _span("agent.main", 1),
+        _span(
+            "agent.main.react_iteration.1",
+            2,
+            parent_span_id=1,
+            attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
+        ),
+        _skill(3, "weather", parent_span_id=2),
+        _span(
+            "agent.main.react_iteration.2",
+            4,
+            parent_span_id=1,
+            attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
+        ),
+        _skill(5, "travel-guide-generator", parent_span_id=4),
+    )
+    continuity = ((0, trajectory),)
+
+    candidates = build_symphony_edge_candidates(
+        project_symphony_execution_fragments(continuity),
+        continuity,
+        planned_graph=_planned_graph(
+            ("weather", "travel-guide-generator"),
+            names=("weather", "travel-guide-generator"),
+        ),
+    )
+
+    assert [_names(candidate) for candidate in candidates] == [
+        ("weather", "travel-guide-generator"),
+    ]
+
+
 def test_planned_graph_does_not_add_unplanned_or_proximity_pairs() -> None:
     trajectory = _trajectory(
         _span("agent.main", 1),

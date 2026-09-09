@@ -19,6 +19,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     span_attributes,
     span_identity,
     span_sort_key,
+    span_status,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.extensions.observability import semconv
@@ -26,6 +27,11 @@ from openjiuwen.extensions.observability import semconv
 _COMPOSE_TOOL_NAME = "symphony_compose_graph"
 _SKILL_TOOL_NAME = "skill_tool"
 _SUBAGENT_DISPATCH_TOOLS = frozenset({"task_tool", "subagent_spawn", "sessions_spawn"})
+_OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
+_TRUNCATED_JSON_SUCCESS_PREFIX = re.compile(
+    r'^\s*\{\s*"success"\s*:\s*true(?:\s*,|\s*\})',
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -213,8 +219,9 @@ def _branch_identities(
         task_candidate: tuple[str, str] | None = None
         root = identity
         while True:
-            category = span_category(by_identity[current])
-            if category == "agent":
+            current_span = by_identity[current]
+            category = span_category(current_span)
+            if category == "agent" and not _is_step_wrapper(current_span):
                 result[identity] = current
                 break
             if category == "task" and task_candidate is None:
@@ -226,6 +233,12 @@ def _branch_identities(
                 break
             current = parent
     return result
+
+
+def _is_step_wrapper(span: Mapping[str, Any]) -> bool:
+    """Return whether an agent-named span is an iteration, not a branch."""
+
+    return str(span_attributes(span).get(semconv.OJ_TRAJECTORY_RECORD_KIND) or "").strip() == "step"
 
 
 def _skill_fragments(
@@ -536,7 +549,8 @@ def _effective_skill_name(span: Mapping[str, Any]) -> str | None:
         return None
     inputs = _tool_input_mapping(tool_call.get("input"))
     skill_name = str(inputs.get("skill_name") or "").strip() if inputs is not None else ""
-    if not skill_name or not _explicit_success(tool_call.get("output")):
+    output = tool_call.get("output")
+    if not skill_name or not (_explicit_success(output) or _authoritative_truncated_success(span, output)):
         return None
     return skill_name
 
@@ -639,6 +653,26 @@ def _explicit_success(value: Any) -> bool:
         return False
     error = re.search(r"(?:^|\s)error\s*=\s*([^\s]+)", value, re.IGNORECASE)
     return error is None or error.group(1).lower() in {"none", "null"}
+
+
+def _authoritative_truncated_success(
+    span: Mapping[str, Any],
+    value: Any,
+) -> bool:
+    """Trust a standard truncated prefix only on an authoritative OK span."""
+
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if (
+        _OBSERVABILITY_TRUNCATED_SUFFIX.search(stripped) is None
+        or _TRUNCATED_JSON_SUCCESS_PREFIX.match(stripped) is None
+    ):
+        return False
+    if span_attributes(span).get(semconv.OJ_TOOL_AUTHORITATIVE) is not True:
+        return False
+    code = str(span_status(span).get("code") or "").upper()
+    return code in {"1", "OK", "STATUS_CODE_OK"}
 
 
 __all__ = ["SymphonyExecutionFragment", "project_symphony_execution_fragments"]
