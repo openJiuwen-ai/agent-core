@@ -1058,6 +1058,10 @@ class CodeGraphService:
             ) from exc
         return resolved
 
+    async def ready_for_query(self) -> CodeGraphIndex:
+        """Return a queryable index, including a held snapshot while a rebuild is busy."""
+        return await self._ready_for_query()
+
     async def _ready_for_query(self) -> CodeGraphIndex:
         self._query_hold = None
         if self._entry is None and self.is_stale() and self._index is not None:
