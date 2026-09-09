@@ -298,7 +298,7 @@ def test_web_proxy_url_precedence_and_legacy_fallback(monkeypatch):
 async def test_paid_invoke_invalid_provider():
     tool = WebPaidSearchTool(language="cn")
     result = await tool.invoke({"query": "test", "provider": "invalid"})
-    assert "[ERROR]: provider must be one of" in result
+    assert "[ERROR]: provider must be auto or a configured search provider" in result
 
 
 @pytest.mark.asyncio
