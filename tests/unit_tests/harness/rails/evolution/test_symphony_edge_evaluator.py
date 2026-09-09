@@ -43,8 +43,7 @@ class _RecordingLLM:
 class _SleepingLLM(_RecordingLLM):
     async def invoke(self, messages: object, **kwargs: Any) -> object:
         self.calls.append({"messages": messages, **kwargs})
-        await asyncio.sleep(10)
-        raise AssertionError("model call was not cancelled")
+        raise TimeoutError("model client timeout")
 
 
 class _ConcurrentLLM(_RecordingLLM):
@@ -65,17 +64,6 @@ class _ConcurrentLLM(_RecordingLLM):
         await asyncio.wait_for(self.all_started.wait(), timeout=0.5)
         self.active -= 1
         return _response(_payload(call)["candidates"][0], "success")
-
-
-class _FirstThenSleepingLLM(_RecordingLLM):
-    async def invoke(self, messages: object, **kwargs: Any) -> object:
-        call = {"messages": messages, **kwargs}
-        self.calls.append(call)
-        candidate = _payload(call)["candidates"][0]
-        if candidate["candidate_id"] == "candidate-1":
-            return _response(candidate, "success")
-        await asyncio.sleep(10)
-        raise AssertionError("pending call was not cancelled at the total deadline")
 
 
 def _fragment(index: int, name: str | None = None) -> SymphonyExecutionFragment:
@@ -424,7 +412,7 @@ async def test_requests_are_bounded_data_without_execution_control_fields() -> N
     assert set(item) == {"candidate_id", "endpoint_a", "endpoint_b", "evidence_refs", "summaries"}
     assert call["temperature"] == 0
     assert call["max_tokens"] == 512
-    assert call["timeout"] == 30.0
+    assert "timeout" not in call
     system_prompt = call["messages"][0]["content"].casefold()
     assert "names" in system_prompt and "ordering" in system_prompt and "planned" in system_prompt
     assert "not evidence" in system_prompt
@@ -452,10 +440,7 @@ async def test_candidate_calls_are_concurrent_and_bounded(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_model_call_timeout_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openjiuwen.harness.rails.evolution import symphony_edge_evaluator
-
-    monkeypatch.setattr(symphony_edge_evaluator, "_ASYNC_TIMEOUT_SECONDS", 0.001)
+async def test_model_call_timeout_fails_closed() -> None:
     candidate = _candidate(1)
     result = await evaluate_symphony_edge_candidates(
         llm=_SleepingLLM(),
@@ -465,30 +450,6 @@ async def test_model_call_timeout_fails_closed(monkeypatch: pytest.MonkeyPatch) 
         summaries=_summaries(candidate),
     )
     assert result[0].status == "insufficient_evidence"
-
-
-@pytest.mark.asyncio
-async def test_total_timeout_preserves_completed_updates_and_cancels_pending(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openjiuwen.harness.rails.evolution import symphony_edge_evaluator
-
-    monkeypatch.setattr(symphony_edge_evaluator, "_MAX_CONCURRENT_CANDIDATE_CALLS", 1)
-    monkeypatch.setattr(symphony_edge_evaluator, "_TOTAL_EVALUATION_TIMEOUT_SECONDS", 0.02)
-    monkeypatch.setattr(symphony_edge_evaluator, "_ASYNC_TIMEOUT_SECONDS", 1.0)
-    first, second = _candidate(1), _candidate(2)
-    llm = _FirstThenSleepingLLM()
-
-    result = await evaluate_symphony_edge_candidates(
-        llm=llm,
-        query="query",
-        candidates=(first, second),
-        decisions=(_decision(first), _decision(second)),
-        summaries=_summaries(first, second),
-    )
-
-    assert [decision.status for decision in result] == ["success", "insufficient_evidence"]
-    assert len(llm.calls) == 2
 
 
 @pytest.mark.asyncio

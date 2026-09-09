@@ -363,7 +363,6 @@ class OntologyMatcher:
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ),
-                timeout=200,
                 error_context="LLM graph matching",
                 request_overrides=thinking_disabled_request_overrides(),
                 response_observer=self.model_response_observer,

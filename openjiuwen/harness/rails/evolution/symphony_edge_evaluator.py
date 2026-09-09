@@ -27,9 +27,6 @@ from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
 )
 from openjiuwen.symphony.interfaces.llm import SymphonyLLM, SymphonyMessages
 
-_MODEL_TIMEOUT_SECONDS = 30.0
-_ASYNC_TIMEOUT_SECONDS = 30.0
-_TOTAL_EVALUATION_TIMEOUT_SECONDS = 60.0
 _MAX_CONCURRENT_CANDIDATE_CALLS = 8
 _MAX_RESPONSE_TOKENS = 512
 _MAX_RESPONSE_BYTES = 16 * 1024
@@ -198,12 +195,8 @@ async def _evaluate_requests(
         return (candidate.candidate_id, result) if result is not None else None
 
     tasks = [asyncio.create_task(evaluate_one(candidate, messages)) for candidate, messages in requests]
-    pending: set[asyncio.Task[tuple[str, SymphonyEdgeDecision] | None]] = set()
     try:
-        done, pending = await asyncio.wait(
-            tasks,
-            timeout=_TOTAL_EVALUATION_TIMEOUT_SECONDS,
-        )
+        done, _ = await asyncio.wait(tasks)
         updates: dict[str, SymphonyEdgeDecision] = {}
         for task in done:
             item = task.result()
@@ -216,11 +209,6 @@ async def _evaluate_requests(
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-    finally:
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def _invoke_and_parse_request(
@@ -229,13 +217,11 @@ async def _invoke_and_parse_request(
     messages: SymphonyMessages,
 ) -> SymphonyEdgeDecision | None:
     try:
-        async with asyncio.timeout(_ASYNC_TIMEOUT_SECONDS):
-            response = await llm.invoke(
-                messages,
-                temperature=0,
-                max_tokens=_MAX_RESPONSE_TOKENS,
-                timeout=_MODEL_TIMEOUT_SECONDS,
-            )
+        response = await llm.invoke(
+            messages,
+            temperature=0,
+            max_tokens=_MAX_RESPONSE_TOKENS,
+        )
     except Exception:
         return None
     try:

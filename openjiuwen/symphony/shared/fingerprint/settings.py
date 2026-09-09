@@ -27,7 +27,7 @@ class FingerprintSettings:
     max_concurrency: int = 4
     body_limit: int = 16_000
     llm_max_tokens: int = 2_048
-    llm_timeout: float | None = 60.0
+    llm_timeout: float | None = None
     evidence_text_limit: int = 512
     cache_enabled: bool = True
     extraction_protocol_version: str = EXTRACTION_PROTOCOL_VERSION
