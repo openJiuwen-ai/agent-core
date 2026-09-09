@@ -54,7 +54,7 @@
    skipped` 紧随 `workflow_completed`）。修法：`SwarmflowRunHandle` 去掉 `relaunch` 闭包，只存
    `inputs + session_id`；`BackgroundTaskController.set_launcher(tool)` 由每个 cycle 的新
    SwarmflowTool 在 `__init__` 登记（`_native.background_task_controller` 在 rail build 前已 attach，
-   构造时可达）；`resume()` 用当前 launcher 的 `_relaunch(h.inputs, h.session_id)`，无 launcher 时
+   构造时可达）；`resume()` 用当前 launcher 的 `relaunch(h.inputs, h.session_id)`（跨类调用的公开契约，非受保护成员），无 launcher 时
    保留票据返回 False。按钮/语义两路统一，无 per-call 参数。曾尝试 `resume(run_id, tool=self)` +
    `(tool or self)._relaunch` 闭包（已回退）——只修了语义通道，按钮路径无工具在手仍落死 harness。
 7. **`action="stop"` 对已解栈的 run 由工具「宣告 stopped」**。paused run 在 pause 时已 unwind，

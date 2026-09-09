@@ -184,7 +184,7 @@ journal 在 call-path 记录（`__call__:` 前缀）之外，新增 run 级记�
   `new_swarmflow_run_id()`。best-effort，journal 读取失败只 debug log，不阻塞。
 - **`relaunch_kind`**：`WorkflowProgressTeamEvent.relaunch_kind: "relaunch" | "resume" | None`，
   由 `SwarmflowTool._publish` 从 inputs 透传。`"relaunch"`（脚本编辑重跑，存在 resume_id 时
-  invoke 设置）= 整体替换 phase/agent 树；`"resume"`（pause→resume，`_relaunch` 设置）= 增量合并；
+  invoke 设置）= 整体替换 phase/agent 树；`"resume"`（pause→resume，`relaunch` 设置）= 增量合并；
   `None` = 全新 launch。
 - **`swarmflow_human_reply_topic(session_id, team_name, run_id)`**：human session 真人回复走专用
   topic（run-scoped，避免与 leader team-event 订阅竞态）。
@@ -204,7 +204,7 @@ journal 在 call-path 记录（`__call__:` 前缀）之外，新增 run 级记�
 - engine：`Runtime.agent_gate`（`AgentAdmission` 协议）；Swarmflow 注入 `RunAgentAdmission`（先 L2 后 L3）。
   **未注入时 back-compat**：`primitives._resolve_agent_gate(rt)` 惰性构造 `SemaphoreAdmission(rt.make_cap())`
   赋回 `rt.agent_gate`，等价旧 `Runtime.sem`（`MockBackend` / `preprocess_swarmflow` / 旧测试不受影响）。
-- **resume（`F_43`）**：`_relaunch` 复用 inputs 内 ticket/gate，**不**二次 admit。注：`run_background.finally`
+- **resume（`F_43`）**：`relaunch` 复用 inputs 内 ticket/gate，**不**二次 admit。注：`run_background.finally`
   对 `WorkflowAborted→CancelledError` 也会 release（pause 退出即释 L1）；resume 复用同 ticket 但不重新 admit，
   故 resume 期间不占 L1 槽（详见 `S_21` 错误语义）。
 - **`run_id`**：进程内身份 + Leader 播报 + worker 命名前缀；**不改变** journal 路径（仍
@@ -235,14 +235,14 @@ async_tool_runtime.cancel(task_id)`。
    human 还 cancel `_pending_human` 在等真人的 future）。abort_all 在 controller 协程内**完整**执行，
    故必须排在 cancel 之前，否则顶层 cancel 解栈时 session supervisor 泄漏。
 
-**resume 契约**：`controller.resume()` → `SwarmflowTool._relaunch(inputs, session_id)`（新 task_id +
+**resume 契约**：`controller.resume()` → `SwarmflowTool.relaunch(inputs, session_id)`（新 task_id +
 `launch_async_tool(同一 inputs)`，绕过 `invoke`）。journal 路径由 `(team,session,name)` 唯一决定 →
 命中 pause 前完成的 agent、断点后 live。SwarmflowTool 把 engine 抛的 `WorkflowAborted` 转
 `CancelledError`，让 async-tool runtime 静默取消（不注入完成）。human turn 的 `correlation_id` 跨
 resume 稳定，真人回复仍能匹配重跑的那轮。**resume 必须恢复 `session_id` contextvar**：relaunch 由
 外部协程（controller）驱动、不在 leader round 上下文里，而 `launch_async_tool` 的新 task 在
 `create_task` 时继承当前 context；故 `run_background` 捕获 `session_id` 一次（贯穿 `_publish` topic
-/ `run_swarmflow` / relaunch 闭包），`_relaunch` 在 launch 前 `set_session_id(原 session)`、`finally`
+/ `run_swarmflow` / relaunch 闭包），`relaunch` 在 launch 前 `set_session_id(原 session)`、`finally`
 复位。缺这一步 resume 会解析到空 session → 用错 journal 路径（不命中缓存、全部重跑）+ 进度事件发到
 错 topic（外部 monitor/drain 收不到）。
 
