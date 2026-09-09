@@ -511,6 +511,10 @@ _trajectory_subject_states: dict[
     tuple[str, tuple[tuple[str, str], ...]],
 ] = {}
 _trajectory_subject_state_lock = threading.Lock()
+# One subject's compaction operations, in the order they were first seen, so
+# every attempt of one operation reports the same number.
+_context_compaction_numbers: dict[tuple[str, str], dict[str, int]] = {}
+_context_compaction_number_lock = threading.Lock()
 _pending_context_window_compactions: dict[
     tuple[str, str, str],
     list[str],
@@ -547,6 +551,44 @@ def next_execution_subject_request_number(
         request_number = _execution_subject_request_sequences.get(key, 0) + 1
         _execution_subject_request_sequences[key] = request_number
     return request_number
+
+
+def context_compaction_number(
+    *,
+    session_id: str,
+    subject_id: str,
+    operation_id: str,
+) -> int:
+    """Return which compaction this operation is for one subject.
+
+    The number belongs to the operation, not to the model call that carries
+    it: a throttled compaction is retried, and every attempt must state the
+    same number so a reader sees one compaction that took several tries
+    rather than several compactions.
+
+    Args:
+        session_id: Session the compaction belongs to.
+        subject_id: Execution subject whose context is being compacted.
+        operation_id: Identity of the compaction operation.
+
+    Returns:
+        The operation's number within the subject, counting from one. Zero
+        when the caller cannot name the session, subject or operation.
+    """
+    normalized_operation = str(operation_id or "").strip()
+    normalized_subject = str(subject_id or "").strip()
+    session = _normalize_session_id(session_id)
+    if not normalized_operation or not normalized_subject or not session:
+        return 0
+    key = (session, normalized_subject)
+    with _context_compaction_number_lock:
+        assigned = _context_compaction_numbers.setdefault(key, {})
+        existing = assigned.get(normalized_operation)
+        if existing is not None:
+            return existing
+        number = len(assigned) + 1
+        assigned[normalized_operation] = number
+    return number
 
 
 def queue_context_window_compaction(
@@ -1032,6 +1074,8 @@ def reset_state() -> None:
         _trajectory_subject_states.clear()
     with _pending_context_window_compactions_lock:
         _pending_context_window_compactions.clear()
+    with _context_compaction_number_lock:
+        _context_compaction_numbers.clear()
 
 
 def flush_child_spans(*, trace_id: int | None = None) -> int:

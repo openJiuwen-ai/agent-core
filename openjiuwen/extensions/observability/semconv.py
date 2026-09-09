@@ -57,6 +57,11 @@ OJ_INFERENCE_ID = "openjiuwen.inference.id"
 OJ_REQUEST_NUMBER = "openjiuwen.request.number"
 OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
 OJ_CONTEXT_OPERATION_ID = "openjiuwen.context.operation.id"
+# Which compaction this is for its subject, counting operations rather than
+# model calls: a compaction the provider throttles is retried, and all of its
+# attempts state the same number so a reader counts what happened to the
+# context, not what the provider made of it.
+OJ_COMPACTION_NUMBER = "openjiuwen.compaction.number"
 OJ_TRAJECTORY_RECORD_KIND = "openjiuwen.trajectory.record.kind"
 OJ_TRAJECTORY_SCHEMA_VERSION = "openjiuwen.trajectory.schema_version"
 OJ_TRAJECTORY_EVENT_ID = "openjiuwen.trajectory.event_id"
