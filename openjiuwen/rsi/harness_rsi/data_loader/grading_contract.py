@@ -94,7 +94,16 @@ def normalize_grading_case(case: dict[str, Any]) -> dict[str, Any]:
     if "reference_solution" in aliases:
         _set_consistent(reference, "answer", aliases["reference_solution"])
     if "judge_rubrics" in aliases:
-        positive, negative = parse_weighted_rubric(aliases["judge_rubrics"])
+        text = aliases["judge_rubrics"]
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("judge_rubrics must be non-empty text")
+        if any(_SCORING_ANNOTATION.match(_NUMBERED.sub("", line)) for line in text.splitlines()):
+            # Retain the existing explicit percentage contract for legacy datasets.
+            positive, negative = parse_weighted_rubric(text)
+        else:
+            # The model applies prose rules as a whole; do not infer or split weights.
+            positive = [{"id": "rubric_overall", "description": text, "weight": 1.0}]
+            negative = []
         if reference.get("rubric"):
             raise ValueError("judge_rubrics cannot be combined with reference.rubric")
         _set_consistent(reference, "required_behaviors", positive)

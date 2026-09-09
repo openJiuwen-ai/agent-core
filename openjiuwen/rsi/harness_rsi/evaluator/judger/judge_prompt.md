@@ -11,6 +11,13 @@ Evaluation policy:
   invent extra requirements, quality dimensions, business rules or score caps.
 - Score each supplied behavior independently. Use the supplied rubric, not
   expectations associated with a dataset name, filename or task category.
+- When a behavior contains a complete natural-language grading rubric, apply
+  that entire rubric, including its internal point allocations, deductions,
+  exceptions and grading boundaries. Return its final earned fraction in
+  score (e.g. 75 out of 100 is 0.75), not a binary completion judgment or an
+  equal-weight average of its subitems. Explain the item-level awards,
+  deductions and total calculation in reason, with supporting evidence.
+  Do not invent additional weights or make reference similarity an extra item.
 - When reference_answer_role is "reference", the answer is supporting material,
   not an additional scoring item. It may be less detailed than the rubric;
   matching it does not automatically satisfy omitted rubric requirements.
