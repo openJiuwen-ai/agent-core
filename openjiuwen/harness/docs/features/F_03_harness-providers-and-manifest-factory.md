@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-09-09 |
 | 范围 | `openjiuwen/harness_providers/`（`base` / `stream` / `io_adapter` / `factory` / `native` / `claudecode` / `codex` / `dsh`）、`openjiuwen/harness/resources/extension_resolver.py`（`render_agent_template_system_prompt`） |
-| 测试基线 | `tests/unit_tests/harness_providers`（45 通过）；`tests/system_tests/harness_providers`：Claude Code 8/8、DSH 5/5 通过，native 需 `API_BASE/API_KEY/MODEL_NAME`，Codex 受本机 CLI 版本限制 |
+| 测试基线 | `tests/unit_tests/harness_providers`（46 通过）；`tests/system_tests/harness_providers`：Claude Code 8/8、Codex 7/7、DSH 5/5 通过，native 需 `API_BASE/API_KEY/MODEL_NAME` |
 | Refs | #751 |
 
 ## 背景

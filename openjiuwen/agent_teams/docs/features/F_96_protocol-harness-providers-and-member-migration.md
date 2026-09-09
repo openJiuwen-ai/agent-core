@@ -8,7 +8,7 @@
 | 范围 | `openjiuwen/harness_providers/`（新包）、`openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/{spawn,claude,codex}/`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
 | 协议版本 | `1.0` |
 | 关联 feature | `F_94_external-harness-protocol.md`、`F_95_dsh-external-harness-adapter.md` |
-| 测试基线 | `tests/unit_tests/agent_teams/external`（137+ 通过）、`tests/unit_tests/harness_providers`（45 通过）、`tests/unit_tests/harness_protocol`（27 通过）、`tests/unit_tests/agent_teams -m level0`（1262 通过）；e2e：Claude Code 8/8、DSH 5/5 通过，Codex 因本机 CLI 0.152.1 不支持已配置的默认模型而被服务端拒绝 |
+| 测试基线 | `tests/unit_tests/agent_teams`（2879 通过）、`tests/unit_tests/harness`（4126 通过）、`tests/unit_tests/harness_providers`（46 通过）、`tests/unit_tests/harness_protocol`（27 通过）；e2e：Claude Code 8/8、Codex 7/7（codex-cli 0.153.4）、DSH 5/5 通过 |
 | Refs | #751 |
 
 ## 背景
@@ -116,14 +116,15 @@ MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / roll
   provider）、`tests/unit_tests/harness_protocol/`、`tests/unit_tests/agent_teams -m level0`。
 - e2e：`tests/system_tests/harness_providers/`——共享 `_contract.py` 校验 STARTED/terminal 配对、
   sequence 单调、tool item 配对、follow-up 串行、abort / steer / ask-user / checkpoint resume /
-  manifest prompt。本机结果：Claude Code 8/8、DSH 5/5 通过；Codex 5 项因本机 codex-cli 0.152.1
-  对已配置默认模型 `gpt-6-astra` 返回"requires a newer version of Codex"（直接 `codex exec`
-  同样失败，ChatGPT 账号也不接受其它模型）未能通过，代码路径与 Claude 相同骨架且单测覆盖。
+  manifest prompt。本机结果：Claude Code 8/8、Codex 7/7（codex-cli 0.153.4；0.152.1 对已配置默认
+  模型 `gpt-6-astra` 会被服务端以"requires a newer version of Codex"拒绝）、DSH 5/5 通过。
+  Codex e2e 暴露并修复了一个竞态：external STARTED 发出时 `thread.turn()` 尚未返回 handle，此窗口内
+  的 STEER 现在先排队，handle 建立后立即 `steer`。
 
 ## 已知遗留
 
 - Codex `item/tool/requestUserInput` 在当前 SDK 无生成类型，Codex 尚不支持 `UserInputRequest`。
 - `dsh` / `native` 尚未接入 `ExternalCliAgentSpec` 声明式 spawn；provider entry point discovery 未做。
-- Codex e2e 需要能跑已配置默认模型的 CLI 版本（或 `CODEX_E2E_MODEL` 指定可用模型）。
+- Codex e2e 依赖本机 CLI 支持已配置默认模型；可用 `CODEX_E2E_MODEL` 指定其它模型。
 - Claude 认证 fallback 成功后若团队 DB `promote_member_fallback_model` 失败，只记录告警，不再回退
   到原端点（旧实现会回退）。
