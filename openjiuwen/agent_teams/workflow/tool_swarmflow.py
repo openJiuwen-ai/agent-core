@@ -555,7 +555,7 @@ class SwarmflowTool(AsyncTool):
         name_box: dict[str, Any] = {"name": None, "description": None}
         # Capture the session once. A resume relaunch runs from an external
         # coroutine (the controller) that lacks the leader's session contextvar,
-        # so ``_relaunch`` restores it — otherwise the resumed run would publish
+        # so ``relaunch`` restores it — otherwise the resumed run would publish
         # progress on the wrong topic and resume from the wrong journal path.
         session_id = get_session_id()
 
@@ -734,7 +734,7 @@ class SwarmflowTool(AsyncTool):
             if self._governor is not None:
                 await self._governor.release_workflow(ticket)
 
-    def _relaunch(self, inputs: dict[str, Any], session_id: str) -> None:
+    def relaunch(self, inputs: dict[str, Any], session_id: str) -> None:
         """Re-launch the paused swarmflow with the SAME inputs (resume path).
 
         Called by the controller through :meth:`BackgroundTaskController.set_launcher`

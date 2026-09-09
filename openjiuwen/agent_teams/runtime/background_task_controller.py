@@ -178,7 +178,7 @@ class BackgroundTaskController:
                 return False
             for rid, h in targets.items():
                 try:
-                    launcher._relaunch(h.inputs, h.session_id)
+                    launcher.relaunch(h.inputs, h.session_id)
                 except Exception:
                     team_logger.debug("[bg-ctl] relaunch failed for %s", rid, exc_info=True)
                 self._paused.pop(rid, None)
