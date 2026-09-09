@@ -246,6 +246,7 @@ def _evaluation_input_fingerprint(
         from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
 
         payload["evaluator"] = _material_identity(evaluator_config, Path.cwd())
+        payload["llm_judge_score_contract"] = "threshold_binary_v1"
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

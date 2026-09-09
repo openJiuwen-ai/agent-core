@@ -910,6 +910,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "config": self.config.evaluator,
                 "adapter": f"{type(self.evaluator).__module__}.{type(self.evaluator).__qualname__}",
                 "adapter_config": getattr(self.evaluator, "config", None),
+                **({"llm_judge_score_contract": "threshold_binary_v1"}
+                   if self.config.evaluator.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge"
+                   else {}),
             },
             cases=cases,
         )

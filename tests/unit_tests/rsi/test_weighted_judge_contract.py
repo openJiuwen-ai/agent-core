@@ -222,7 +222,8 @@ async def test_imported_weighted_judger_result_reaches_analyzer_with_deductions(
     case_inputs = CaseReader.read_case_inputs(str(tmp_path / "eval" / "cases"))
     summary = CaseReader.read_summary(str(tmp_path / "eval" / "summary.json"))
     signals = build_signal_extractor(summary.evaluation_method).extract(summary, case_inputs)
-    assert case_inputs[0].score == pytest.approx(0.7)
+    assert case_inputs[0].score == 0.0
+    assert case_inputs[0].evaluation_metadata["parsed"]["overall_score"] == pytest.approx(0.7)
     assert signals.method_specific["triggered_forbidden_behaviors"]["example"] == ["deduction_001", "deduction_002"]
     for evidence_available in (False, True):
         prompt_input = json.loads(

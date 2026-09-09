@@ -21,6 +21,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
     score_judge_output,
     scoring_contract,
 )
+from openjiuwen.rsi.harness_rsi.evaluator.optimization_signals import optimization_signals_contract
 from openjiuwen.rsi.harness_rsi.model_call import run_model_call_with_retries
 
 if TYPE_CHECKING:
@@ -145,10 +146,11 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 )
                 continue
             write_judge_json(judge_dir / "assessment.json", normalized)
+            passed = score >= self._config.judge_success_score
             return JudgeResult(
                 method=self.method,
-                score=score,
-                passed=score >= self._config.judge_success_score,
+                score=float(passed),
+                passed=passed,
                 reason=normalized["overall_reason"],
                 metadata={
                     "parsed": normalized,
@@ -156,6 +158,10 @@ class LlmAsJudgeJudger(EvaluationJudger):
                     "requirement_results": requirements,
                     "judge_dir": str(judge_dir),
                     "pass_threshold": self._config.judge_success_score,
+                    "optimization_signals": optimization_signals_contract(
+                        continuous_score=score,
+                        source="llm_as_judge.assessment.overall_score",
+                    ),
                     "attempt": attempt + 1,
                 },
             )

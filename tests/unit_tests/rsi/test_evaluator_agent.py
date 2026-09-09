@@ -73,14 +73,58 @@ def test_explicit_factory_and_config_roundtrip():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("score,passed", [(0.799, False), (0.8, True), (0.965, True)])
+@pytest.mark.parametrize("score,passed", [(0.0, False), (0.6, False), (0.799, False), (0.8, True), (0.965, True), (1.0, True)])
 async def test_configured_threshold_reaches_case_reference(tmp_path, monkeypatch, score, passed):
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", AsyncMock(return_value=json.dumps(_output((score, score)))))
     runner = CaseRunner(backend=_Backend("done"), judger=LlmAsJudgeJudger(_config(judge_success_score=0.8)))
     ref = await runner.execute(case=_case(), output_dir=str(tmp_path / "case"), team_skill_ref_path="")
-    assert ref.score == pytest.approx(score)
+    assert ref.score == float(passed)
     assert ref.metadata["evaluation_passed"] is passed
     assert ref.status == ("passed" if passed else "failed")
+    result = json.loads(Path(ref.result_path).read_text(encoding="utf-8"))
+    assert result["score"] == float(passed)
+    trace = json.loads(Path(ref.trace_path).read_text(encoding="utf-8"))
+    assert trace["evaluation"]["score"] == float(passed)
+    metadata = result["evaluation"]["metadata"]
+    assert metadata["parsed"]["overall_score"] == pytest.approx(score)
+    assert metadata["optimization_signals"]["continuous_score"]["value"] == pytest.approx(score)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_scores", [
+    [0.53, 1.0, 0.929, 0.815, 1.0],
+    [0.845, 1.0, 1.0, 0.734, 0.967],
+])
+async def test_node_score_averages_binary_cases_not_raw_judge_scores(tmp_path, monkeypatch, raw_scores):
+    from openjiuwen.rsi.harness_rsi.single_harness.events_translate import progress_event, root_node_event
+    from openjiuwen.rsi.harness_rsi.single_harness.iterative import _eval_case_native_signals, _eval_score
+
+    monkeypatch.setattr(llm_as_judge, "run_judge_agent", AsyncMock(side_effect=[
+        json.dumps(_output((score, score))) for score in raw_scores
+    ]))
+    evaluator = TeamEvaluator(_config())
+    evaluator.case_runner = CaseRunner(backend=_Backend("done"), judger=LlmAsJudgeJudger(_config()))
+    cases = [{**_case(), "case_id": f"case-{i}"} for i in range(5)]
+    stages = []
+
+    async def stage(event):
+        stages.append(event)
+
+    ref_path = await evaluator.evaluate_batch(cases, "", "", str(tmp_path / "eval"), on_case_stage=stage)
+    summary = json.loads((tmp_path / "eval/summary.json").read_text(encoding="utf-8"))
+    assert summary["passed_cases"] == 4
+    assert summary["average_score"] == 0.8
+    assert _eval_score(ref_path) == 0.8
+    assert [s["score"] for s in stages if s.get("status") in {"passed", "failed"}] == [
+        float(score >= 0.8) for score in raw_scores
+    ]
+    state = {"baseline_score": _eval_score(ref_path), "best_score": _eval_score(ref_path)}
+    assert root_node_event(state).node.score == 0.8
+    progress = progress_event(state, total_iterations=3)
+    assert progress.score == progress.baseline == 0.8
+    signals = _eval_case_native_signals(ref_path)
+    assert len(signals) == 5
+    assert [signals[f"case-{i}"]["score"] for i in range(5)] == pytest.approx(raw_scores)
 
 
 @pytest.mark.parametrize(
@@ -292,7 +336,7 @@ async def test_case_runner_to_analyzer_preserves_all_criteria(tmp_path, monkeypa
     extractor = build_signal_extractor(summary.evaluation_method)
     assert isinstance(extractor, LlmJudgeSignalExtractor)
     signals = extractor.extract(summary, cases)
-    assert cases[0].score == 0.5
+    assert cases[0].score == 0.0
     assert signals.method_specific["low_score_behaviors"]["sample"] == ["rubric_002"]
     assert len(cases[0].evaluation_metadata["requirement_results"]["items"]) == 2
     for evidence_available in (False, True):
@@ -353,7 +397,8 @@ async def test_one_structural_retry_uses_same_frozen_evidence(tmp_path, monkeypa
     )
     assert workspaces[0] == workspaces[1]
     assert result.metadata["attempt"] == 2
-    assert result.score == 0.5
+    assert result.score == 0.0
+    assert result.metadata["parsed"]["overall_score"] == 0.5
     assert "not JSON" in prompts[1]
     assert "prior_output" in prompts[1]
     errors = list(tmp_path.rglob("validation_error_1.json"))

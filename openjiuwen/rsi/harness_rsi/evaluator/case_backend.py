@@ -27,6 +27,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.controlled_skill_treatment_rail import
     ControlledSkillTreatmentRail,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.harness_input_rail import HarnessInputRail
 from openjiuwen.rsi.harness_rsi.evaluator.judger import JudgeResult
 from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
     RSISkillUseRail,
@@ -166,6 +167,7 @@ class SingleHarnessExecutionBackend:
                 harness_path=harness_path,
                 shell_only=bool(solver_container_name),
                 controlled_skill_name=_controlled_skill_name(case),
+                workspace="/testbed" if solver_container_name else workspace_dir,
             )
             controlled_skill_treatment = next(
                 (rail for rail in agent_rails if isinstance(rail, ControlledSkillTreatmentRail)),
@@ -179,6 +181,7 @@ class SingleHarnessExecutionBackend:
                 ),
                 system_prompt=_single_harness_system_prompt(
                     role_name,
+                    workspace="/testbed" if solver_container_name else str(workspace_dir),
                 ),
                 workspace=str(workspace_dir),
                 rails=[rail for rail in agent_rails if not isinstance(rail, RSISkillUseRail)],
@@ -322,6 +325,7 @@ def _single_harness_rails(
     harness_path: str | Path,
     shell_only: bool = False,
     controlled_skill_name: str = "",
+    workspace: str | Path | None = None,
 ) -> list[Any]:
     rails: list[Any] = [
         RSISysOperationRail(
@@ -332,6 +336,8 @@ def _single_harness_rails(
     ]
     if controlled_skill_name:
         rails.append(ControlledSkillTreatmentRail(controlled_skill_name))
+    if workspace is not None:
+        rails.append(HarnessInputRail(harness_path, workspace))
     skill_dir = _resolve_skill_dir(team_skill_ref_path) if team_skill_ref_path else None
     # load_plugin binds skills to an existing native rail. Register the RSI
     # delivery adapter even for an empty H0; do not add any baseline skill.
@@ -537,13 +543,17 @@ def _configure_git_lf_line_endings(workspace_dir: Path) -> None:
             )
 
 
-def _single_harness_system_prompt(role_name: str) -> str:
+def _single_harness_system_prompt(role_name: str, *, workspace: str = "") -> str:
     return (
         f"You are the standalone evaluation agent for role `{role_name}`. "
         "Solve the given task with the bound expert harness and available local tools. "
         "Write any produced files under the current workspace unless the task explicitly "
         "names another working directory. Preserve existing line endings when editing files; "
         "Terminal-Bench verifiers may compare exact file hashes."
+        + (f" Your task workspace and default output directory is `{workspace}`. "
+           "Loaded plugin and skill directories are read-only capability sources, not task "
+           "workspaces. Do not write deliverables, temporary files or validation reports there."
+           if workspace else "")
     )
 
 
