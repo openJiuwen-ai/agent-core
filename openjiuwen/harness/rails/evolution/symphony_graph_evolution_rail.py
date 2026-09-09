@@ -588,6 +588,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 value = attrs.get(key)
                 if not isinstance(value, str) or not value.strip() or value.strip()[0] not in "[{":
                     continue
+                if value.lstrip().startswith("[ERROR]:"):
+                    continue
                 if not _is_structured_tool_payload(value):
                     issues.append(MappingProxyType({"code": "tool_payload_json_error", "attribute": key}))
         return tuple(issues)
@@ -1051,7 +1053,6 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             planned_graph=prepared.planned_graph,
             edge_search_max_depth=prepared.edge_search_max_depth,
             max_candidates=_CANDIDATE_PROBE_LIMIT,
-            include_team_member_pairs=prepared.capture_mode == "team",
             interrupt_continuations=prepared.interrupt_continuations,
         )
         candidate_truncated = len(candidates_probe) > _MAX_EDGE_CANDIDATES
