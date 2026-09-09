@@ -376,10 +376,52 @@ class SwarmflowTool(AsyncTool):
         if op is None:
             return ToolOutput(success=False, error=f"unknown action {action!r}")
         ok = await op(resume_id)
+        if not ok and action == "stop":
+            ok = await self._announce_stopped(resume_id)
         return ToolOutput(
             success=ok,
             data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"},
         )
+
+    async def _announce_stopped(self, run_id: str) -> bool:
+        """Close a run the controller no longer holds.
+
+        After a cold start the registries are empty, but the embedder's snapshot
+        still shows the run paused and lists it for the leader to resume or
+        stop. Publishing WORKFLOW_STOPPED lets the Monitor card reach its
+        terminal state. No journal seal: the pause record stays, so a manual
+        ``resume_id + script_path`` relaunch remains possible.
+        """
+        if self._messager is None:
+            return False
+        from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.schema.events import (
+            EventMessage,
+            TeamEvent,
+            TeamTopic,
+            WorkflowProgressTeamEvent,
+        )
+        from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+
+        event = WorkflowProgressTeamEvent(
+            team_name=self._team_name,
+            kind=ProgressKind.WORKFLOW_STOPPED,
+            run_id=run_id,
+            text="workflow stopped",
+        )
+        message = EventMessage(
+            event_type=TeamEvent.WORKFLOW_PROGRESS,
+            payload=event.model_dump(),
+            sender_id="swarmflow",
+        )
+        try:
+            await self._messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self._team_name), message=message,
+            )
+        except Exception:  # noqa: BLE001 - best-effort card close
+            team_logger.debug("[swarmflow] stopped announce skipped", exc_info=True)
+            return False
+        return True
 
     @staticmethod
     def _launch_input_error(script_path: str, script: str, name: str, resume_id: str) -> str | None:
