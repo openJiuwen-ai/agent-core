@@ -71,11 +71,13 @@ class SearchSourceTextTool(CodeGraphBaseTool):
             )
         if not isinstance(output.data, dict):
             return output
-        chunks = [item for item in (output.data.get("chunks") or output.data.get("matches") or []) if isinstance(item, dict)]
+        raw_hits = output.data.get("chunks") or output.data.get("matches") or []
+        chunks = [item for item in raw_hits if isinstance(item, dict)]
         if focused:
-            from openjiuwen.harness.tools.code_graph.focused import apply_focused_observation
-
-            from openjiuwen.harness.tools.code_graph.focused import read_graph_generation
+            from openjiuwen.harness.tools.code_graph.focused import (
+                apply_focused_observation,
+                read_graph_generation,
+            )
 
             apply_focused_observation(
                 output.data,
@@ -109,7 +111,7 @@ class SearchSourceTextTool(CodeGraphBaseTool):
             return budget
         try:
             service = await self._service()
-            index = await service._ready_for_query()
+            index = await service.ready_for_query()
             hits = exact_line_hits(
                 repo_root=self.current_repo_root(),
                 index=index,

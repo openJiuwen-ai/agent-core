@@ -151,9 +151,15 @@ def infer_match_mode(query: str) -> str:
         return "exact"
     if re.search(r"(Error|Exception|Traceback|Warning)", text):
         return "exact"
-    if re.fullmatch(r"[A-Za-z_][\w.]*", text) and ("." in text or "_" in text or text.isupper()):
+    if _looks_like_literal_name(text):
         return "exact"
     return "lexical"
+
+
+def _looks_like_literal_name(text: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z_][\w.]*", text):
+        return False
+    return "." in text or "_" in text or text.isupper()
 
 
 def strip_literal_quotes(query: str) -> str:
@@ -299,6 +305,18 @@ def _named_candidate(query: str, candidates: list[dict[str, Any]]) -> dict[str, 
     return None
 
 
+def _ambiguous_shared_name(
+    query: str,
+    pool: list[dict[str, Any]],
+    names: list[str],
+) -> bool:
+    if len(pool) <= 1 or not names or not names[0]:
+        return False
+    if len(set(names)) != 1:
+        return False
+    return _named_candidate(query, pool) is None
+
+
 def _is_confident(candidates: list[dict[str, Any]]) -> bool:
     if len(candidates) == 1:
         return True
@@ -327,7 +345,7 @@ def focused_next_actions(
     impl = [item for item in candidates if item.get("role") == ROLE_IMPLEMENTATION]
     pool = impl or list(candidates)
     names = [str(item.get("name") or "") for item in pool]
-    if len(pool) > 1 and names[0] and len(set(names)) == 1 and _named_candidate(query, pool) is None:
+    if _ambiguous_shared_name(query, pool, names):
         return [
             {
                 "tool": "resolve_symbol",
