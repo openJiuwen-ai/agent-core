@@ -10,7 +10,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from openjiuwen.core.common.logging import retrieval_logger as logger
 from openjiuwen.core.retrieval.code_graph.indexing.language_registry import (
     language_from_path,
 )
@@ -22,6 +21,7 @@ from openjiuwen.core.retrieval.code_graph.indexing.symbol_extractor import (
     PendingInherit,
     extract_file,
 )
+from openjiuwen.core.retrieval.code_graph.index_log import note_skipped_unreadable
 from openjiuwen.core.retrieval.code_graph.models import (
     CLASS_LIKE_KINDS,
     RESOLUTION_CONFIDENCE,
@@ -71,6 +71,7 @@ def build_index(
     lexical_builder = LexicalIndexBuilder()
     source_bytes = 0
     parsed_count = 0
+    skipped_unreadable: list[str] = []
     raise_if_resource_limits(cfg, source_bytes=0)
     for path in files:
         if cancel_requested(cancel):
@@ -78,6 +79,9 @@ def build_index(
         rel = path.relative_to(root).as_posix()
         parsed = extract_one_file(path, rel, cfg)
         if parsed is None:
+            continue
+        if parsed.unreadable:
+            skipped_unreadable.append(rel)
             continue
         if parsed.oversized:
             index.warnings.append(f"skipped oversized file {rel}")
@@ -104,6 +108,7 @@ def build_index(
             for document, tokens in text_documents(rel, text, cfg):
                 lexical_builder.add(document, tokens)
     index.lexical = lexical_builder.freeze()
+    note_skipped_unreadable(index, skipped_unreadable)
     return index
 
 
@@ -136,6 +141,8 @@ class ParsedFile:
     content_hash: str = ""
     extracted: ExtractedFile | None = None
     oversized: bool = False
+    unreadable: bool = False
+    skip_reason: str = ""
 
 
 def extract_one_file(path: Path, rel: str, config: CodeGraphConfig) -> ParsedFile | None:
@@ -146,8 +153,7 @@ def extract_one_file(path: Path, rel: str, config: CodeGraphConfig) -> ParsedFil
     try:
         source = path.read_bytes()
     except OSError as exc:
-        logger.warning("code_graph skip unreadable %s: %s", rel, exc)
-        return None
+        return ParsedFile(rel_path=rel, unreadable=True, skip_reason=str(exc))
     if len(source) > config.max_file_bytes:
         return ParsedFile(rel_path=rel, oversized=True)
     tree = parse_source(path, source)
