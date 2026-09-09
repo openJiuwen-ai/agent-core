@@ -1435,13 +1435,7 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
         asyncio.create_task(branch(i, th)) for i, th in enumerate(thunks)
     ]
     try:
-        # Shield the gather: the engine task parks on this future while the
-        # branches run, and cancelling a task parked on gather cancels the
-        # gather itself — this except would then only run once every branch
-        # has finished, and a branch whose cancel is absorbed (in-flight LLM
-        # stream) would deadlock the teardown entirely. The shield accepts the
-        # cancellation immediately, so the cancel path below always runs now.
-        return await asyncio.shield(asyncio.gather(*branch_tasks))
+        return await asyncio.gather(*branch_tasks)
     except asyncio.CancelledError:
         for bt in branch_tasks:
             bt.cancel()
@@ -1450,9 +1444,8 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
         # still alive here would hit "unknown session" on its next send_turn
         # (production 09-08: pause landed while a branch was still building its
         # avatar, and its first turn found the session row already popped).
-        # Bounded wait — a branch whose cancel is swallowed by an in-flight LLM
-        # stream must not stall teardown forever; that straggler dies at the
-        # abort gate on its next attempt (see _attempt_calls).
+        # Bounded wait — a straggler that outlives the drain dies at the abort
+        # gate on its next attempt (see _attempt_calls), not by holding teardown.
         await asyncio.wait(branch_tasks, timeout=_BRANCH_DRAIN_TIMEOUT)
         raise
 
