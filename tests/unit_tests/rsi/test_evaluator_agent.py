@@ -378,7 +378,36 @@ async def test_judge_failures_do_not_become_zero_score_tasks(tmp_path, monkeypat
         await runner.execute(case=_case(), output_dir=str(tmp_path / "case"), team_skill_ref_path="")
     assert json.loads((tmp_path / "case" / "evaluation_error.json").read_text())["score"] is None
     assert not (tmp_path / "case" / "result.json").exists()
-    assert call.await_count == (2 if kind in {"invalid_json", "missing_criterion"} else 1)
+    assert call.await_count == (1 if kind == "model_error" else 2)
+
+
+@pytest.mark.asyncio
+async def test_missing_delivery_is_zero_and_batch_continues_to_next_case(tmp_path, monkeypatch):
+    from openjiuwen.rsi.harness_rsi.single_harness.iterative import _nonpassing_case_ids
+
+    missing = _output((0.0, 0.0))
+    missing["overall_reason"] = "The final response claims success but supplies no deliverable."
+    for item in missing["behaviors"]:
+        item.update(reason="Required work was not delivered", evidence="response: I completed it above; no artifacts")
+    call = AsyncMock(side_effect=[
+        json.dumps({"status": "unavailable", "reason": "The agent supplied only a summary, not the deliverable"}),
+        json.dumps(missing),
+        json.dumps(_output((1.0, 1.0))),
+    ])
+    monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
+    evaluator = TeamEvaluator(_config())
+    evaluator.case_runner = CaseRunner(backend=_Backend("I completed it above"), judger=LlmAsJudgeJudger(_config()))
+    ref_path = await evaluator.evaluate_batch(
+        [_case(), {**_case(), "case_id": "next"}], "", "", str(tmp_path / "eval"),
+    )
+    assert _nonpassing_case_ids(ref_path) == {_case()["case_id"]}
+    cases = CaseReader.read_case_inputs(str(tmp_path / "eval/cases"))
+    assert [case.score for case in cases] == [0.0, 1.0]
+    assert cases[0].evaluation_metadata["parsed"]["overall_reason"] == missing["overall_reason"]
+    assert cases[0].evaluation_metadata["requirement_results"]["items"]
+    assert call.call_args_list[0].args[1] == call.call_args_list[1].args[1]
+    assert "task failures" in call.call_args_list[1].args[2]
+    assert not list((tmp_path / "eval").rglob("evaluation_error.json"))
 
 
 @pytest.mark.asyncio

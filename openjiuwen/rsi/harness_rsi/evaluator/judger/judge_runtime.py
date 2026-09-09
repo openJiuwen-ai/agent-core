@@ -56,7 +56,10 @@ class JudgeBudgetRail(AgentRail):
                 UserMessage(
                     content=(
                         "Final evaluation turn. Return the complete grading JSON now. "
-                        "If essential evidence remains unverified, return status=unavailable instead of guessing."
+                        "Missing/deleted deliverables or a summary-only answer are task failures: "
+                        "return status=completed, scoring unmet requirements 0. "
+                        "Use status=unavailable only for genuine evaluator limitations such as "
+                        "unreadable supplied evidence or unavailable verification tools, not missing work."
                     )
                 )
             )
