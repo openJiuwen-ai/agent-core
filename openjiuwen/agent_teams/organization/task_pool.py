@@ -1208,6 +1208,43 @@ class OrgTaskManager:
         await self._publish_task_delegated(task, from_team_id, to_team_id)
         return OrgTaskOpResult(ok=True, task=task)
 
+    async def bind_root_summary_team(
+        self,
+        *,
+        root_task_id: str,
+        summary_team_id: str,
+    ) -> OrgTaskOpResult:
+        """Write the provisioned Summary Team id back into a SUMMARY_TEAM root's aggregation.
+
+        ``_complete_summary_provision`` delegates the Summary Task to the dynamic
+        team but never lands the team id on the root task's
+        ``OrgTaskAggregationConfig.summary_team_id``, so ``org_view_tasks`` on the
+        root shows ``summary_team_id=None`` even though the Summary Task is
+        already assigned.  Call this after delegation to keep the two views in
+        sync (design doc §4.4.1).
+        """
+        await self.initialize()
+        async with self._write() as session:
+            row = await session.get(OrgTaskRecord, root_task_id)
+            if row is None or row.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"org task not found: {root_task_id}")
+            aggregation_payload = _json_loads(row.aggregation_json, None)
+            if aggregation_payload is None:
+                return OrgTaskOpResult(ok=False, reason=f"root task has no aggregation: {root_task_id}")
+            aggregation = OrgTaskAggregationConfig.model_validate(aggregation_payload)
+            if aggregation.mode is not OrgTaskAggregationMode.SUMMARY_TEAM:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"root task is not SUMMARY_TEAM: {root_task_id}",
+                )
+            if aggregation.summary_team_id == summary_team_id:
+                return OrgTaskOpResult(ok=True, task=self._to_task(row))
+            aggregation.summary_team_id = summary_team_id
+            row.aggregation_json = _json_dumps(aggregation.model_dump())
+            row.updated_at = get_current_time()
+            await session.commit()
+            return OrgTaskOpResult(ok=True, task=self._to_task(row))
+
     async def start_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
         await self.initialize()
         now = get_current_time()
@@ -1359,6 +1396,52 @@ class OrgTaskManager:
                 team_id=team_id,
                 task_id=task_id,
                 failure_code=code.value,
+                failure_reason=reason,
+            )
+        )
+        return OrgTaskOpResult(ok=True, task=task)
+
+    async def fail_summary_task(
+        self,
+        *,
+        summary_task_id: str,
+        failure_reason: str,
+    ) -> OrgTaskOpResult:
+        """Mark a Summary Task FAILED with SUMMARY_PROVISION_FAILED (§4.4.3).
+
+        Unlike :meth:`fail_task`, this internal path skips the assignment guard:
+        provisioning can fail *before* the Summary Task is delegated, so
+        ``assigned_team_id`` may still be None here.  The failure code is written
+        onto the task row so ``org_view_tasks`` surfaces ``failure_code`` rather
+        than an inscrutable WAITING_SOURCES/DELEGATED state.
+        """
+        await self.initialize()
+        reason = (failure_reason or "").strip() or "summary team provision failed"
+        now = get_current_time()
+        async with self._write() as session:
+            row = await session.get(OrgTaskRecord, summary_task_id)
+            if row is None or row.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"org task not found: {summary_task_id}")
+            if row.task_type != ORG_SUMMARY_TASK_TYPE:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"task is not a summary task: {summary_task_id}",
+                )
+            if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
+                return OrgTaskOpResult(ok=False, reason=f"task is terminal: {summary_task_id}")
+            row.status = OrgTaskStatus.FAILED.value
+            row.failure_code = OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value
+            row.failure_reason = reason
+            row.failed_at = now
+            row.updated_at = now
+            await session.commit()
+        task = self._to_task(row)
+        await self._publish_event(
+            OrgTaskFailedEvent(
+                organization_id=self.organization_id,
+                team_id=row.creator_team_id or "",
+                task_id=summary_task_id,
+                failure_code=OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value,
                 failure_reason=reason,
             )
         )

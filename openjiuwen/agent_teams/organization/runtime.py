@@ -1288,6 +1288,12 @@ class OrganizationRuntimeManager:
                 from_team_id=from_team_id,
                 to_team_id=launched.team_id,
             )
+        # Land the dynamic team id on the root task's aggregation too, so
+        # org_view_tasks on the root shows summary_team_id instead of None (§4.4.1).
+        await manager.task_pool.bind_root_summary_team(
+            root_task_id=root_task_id,
+            summary_team_id=launched.team_id,
+        )
         await manager.task_pool.publish_event(
             OrgSummaryProvisionedEvent(
                 organization_id=manager.organization_id,
@@ -1308,10 +1314,16 @@ class OrganizationRuntimeManager:
         summary_task_id: str,
         failure_reason: str,
     ) -> None:
-        """Mark the execution FAILED and wake the root leader (§4.4.3 / §8)."""
+        """Mark the execution FAILED, fail the Summary Task, wake the root leader (§4.4.3 / §8)."""
         await manager.task_pool.update_summary_execution(
             execution_id=execution.execution_id,
             status=OrgSummaryExecutionStatus.FAILED,
+        )
+        # Surface the failure on the Summary Task itself (failure_code), not only
+        # the SummaryExecution, so org_view_tasks shows SUMMARY_PROVISION_FAILED.
+        await manager.task_pool.fail_summary_task(
+            summary_task_id=summary_task_id,
+            failure_reason=failure_reason,
         )
         await manager.task_pool.publish_event(
             OrgSummaryProvisionFailedEvent(

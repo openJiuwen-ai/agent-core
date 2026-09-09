@@ -778,6 +778,75 @@ async def test_create_task_summary_team_creates_summary_task_and_reads_sources(o
     assert attached.ok
 
 
+@pytest.mark.asyncio
+async def test_bind_root_summary_team_writes_summary_team_id(org_manager):
+    """provision 后根任务 aggregation.summary_team_id 应被回填 (§4.4.1)."""
+    manager, _messager = org_manager
+    created = await manager.create_task(
+        task_id="root-summary-bind",
+        title="Root",
+        description="SUMMARY_TEAM bind test.",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    assert created.ok
+    root = created.task
+    assert root.aggregation is not None
+    assert root.aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+    # Before bind, summary_team_id is None (provision has not written it back).
+    assert root.aggregation.summary_task_id
+    assert root.aggregation.summary_team_id is None
+
+    bound = await manager.bind_root_summary_team(
+        root_task_id="root-summary-bind",
+        summary_team_id="org-summary-deadbeef",
+    )
+    assert bound.ok
+    assert bound.task.aggregation.summary_team_id == "org-summary-deadbeef"
+    assert bound.task.aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+    # final_output_task_id and summary_task_id are preserved.
+    assert bound.task.aggregation.summary_task_id == root.aggregation.summary_task_id
+    assert bound.task.aggregation.final_output_task_id == root.aggregation.summary_task_id
+
+    # Idempotent: binding the same team again is a no-op success.
+    again = await manager.bind_root_summary_team(
+        root_task_id="root-summary-bind",
+        summary_team_id="org-summary-deadbeef",
+    )
+    assert again.ok
+    assert again.task.aggregation.summary_team_id == "org-summary-deadbeef"
+
+
+@pytest.mark.asyncio
+async def test_bind_root_summary_team_rejects_non_summary_root(org_manager):
+    """非 SUMMARY_TEAM 根任务应拒绝绑定."""
+    manager, _messager = org_manager
+    await manager.create_task(
+        task_id="root-hierarchical",
+        title="Root",
+        description="HIERARCHICAL root.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    bound = await manager.bind_root_summary_team(
+        root_task_id="root-hierarchical",
+        summary_team_id="org-summary-deadbeef",
+    )
+    assert not bound.ok
+    assert "not SUMMARY_TEAM" in bound.reason
+
+
 def test_to_task_normalizes_legacy_terminal_statuses():
     for legacy_status, failure_code in ORG_TASK_LEGACY_STATUS_FAILURE_CODES.items():
         row = OrgTaskRecord(
@@ -3247,6 +3316,63 @@ async def test_summary_provision_failed_wakes_root_leader(active_organization_ru
     assert len(turns) == 1
     assert turns[0]["team_id"] == "team-a"
     assert "supplement" in turns[0]["prompt"] or "summary" in turns[0]["prompt"].lower()
+
+
+@pytest.mark.asyncio
+async def test_fail_summary_task_marks_failure_code(active_organization_runtime):
+    """provision 失败时 Summary Task 应落 failure_code=SUMMARY_PROVISION_FAILED (§4.4.3)."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-failtask"
+    manager, _org_manager, summary_id = await _seed_summary_team_org(
+        runtime, agents, session_id, org_id
+    )
+    # Before failure the Summary Task is not yet FAILED.
+    task = await manager.get_task(summary_id)
+    assert task is not None
+    assert task.failure_code is None
+
+    result = await manager.fail_summary_task(
+        summary_task_id=summary_id,
+        failure_reason="summary team provision failed: no capacity",
+    )
+    assert result.ok
+    failed = result.task
+    assert failed.status is OrgTaskStatus.FAILED
+    assert failed.failure_code is not None
+    assert str(failed.failure_code) == OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value
+    assert "no capacity" in failed.failure_reason
+
+    # Double-fail on a terminal task is rejected.
+    again = await manager.fail_summary_task(
+        summary_task_id=summary_id,
+        failure_reason="again",
+    )
+    assert not again.ok
+    assert "terminal" in again.reason
+
+
+@pytest.mark.asyncio
+async def test_fail_summary_task_rejects_non_summary(active_organization_runtime):
+    """非 summary task 调用 fail_summary_task 应被拒绝."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-failnon"
+    manager, _org_manager, _summary_id = await _seed_summary_team_org(
+        runtime, agents, session_id, org_id
+    )
+    created = await manager.create_task(
+        task_id="plain-task",
+        title="Plain",
+        description="Not a summary task.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+    )
+    assert created.ok
+    result = await manager.fail_summary_task(
+        summary_task_id="plain-task",
+        failure_reason="nope",
+    )
+    assert not result.ok
+    assert "not a summary task" in result.reason
 
 
 @pytest.mark.asyncio
