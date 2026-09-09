@@ -416,7 +416,10 @@ class OrgTaskManager:
         # so the caller cannot pick it).  Populated before the write block so the
         # root row can reference it in its aggregation config.
         summary_task_id: str | None = None
-        if aggregation_mode is not None and OrgTaskAggregationMode(aggregation_mode) is OrgTaskAggregationMode.SUMMARY_TEAM:
+        if (
+            aggregation_mode is not None
+            and OrgTaskAggregationMode(aggregation_mode) is OrgTaskAggregationMode.SUMMARY_TEAM
+        ):
             summary_task_id = f"org-task-{uuid.uuid4().hex[:12]}"
         assignment_type = OrgAssignmentType.DELEGATED if delegated_to_team_id else OrgAssignmentType.UNASSIGNED
         status = OrgTaskStatus.DELEGATED if delegated_to_team_id else OrgTaskStatus.OPEN
@@ -1948,18 +1951,34 @@ class OrgTaskManager:
             if summary is None or summary.organization_id != self.organization_id:
                 return {"ready": False, "source_failed": None, "reason": f"summary task not found: {summary_task_id}"}
             if summary.task_type != ORG_SUMMARY_TASK_TYPE:
-                return {"ready": False, "source_failed": None, "reason": f"task is not a summary task: {summary_task_id}"}
+                return {
+                    "ready": False,
+                    "source_failed": None,
+                    "reason": f"task is not a summary task: {summary_task_id}",
+                }
             stmt = select(OrgTaskSourceRecord).where(OrgTaskSourceRecord.summary_task_id == summary_task_id)
             source_rows = (await session.execute(stmt)).scalars().all()
             for source_row in source_rows:
                 source = await session.get(OrgTaskRecord, source_row.source_task_id)
                 if source is None or source.organization_id != self.organization_id:
-                    return {"ready": False, "source_failed": source_row.source_task_id, "reason": f"source task not found: {source_row.source_task_id}"}
+                    return {
+                        "ready": False,
+                        "source_failed": source_row.source_task_id,
+                        "reason": f"source task not found: {source_row.source_task_id}",
+                    }
                 if source_row.required and source.status != OrgTaskStatus.COMPLETED.value:
-                    return {"ready": False, "source_failed": source_row.source_task_id, "reason": f"source task is not completed: {source_row.source_task_id}"}
+                    return {
+                        "ready": False,
+                        "source_failed": source_row.source_task_id,
+                        "reason": f"source task is not completed: {source_row.source_task_id}",
+                    }
                 review = await self._get_latest_review_row(session, source_row.source_task_id)
                 if review is not None and review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
-                    return {"ready": False, "source_failed": source_row.source_task_id, "reason": f"source task review is not accepted: {source_row.source_task_id}"}
+                    return {
+                        "ready": False,
+                        "source_failed": source_row.source_task_id,
+                        "reason": f"source task review is not accepted: {source_row.source_task_id}",
+                    }
             if not source_rows:
                 return {"ready": False, "source_failed": None, "reason": "no sources bound to summary task"}
             return {"ready": True, "source_failed": None, "reason": ""}

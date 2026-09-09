@@ -83,7 +83,8 @@ class DefaultSummaryTeamFactory:
         self._summary_team_stopper = summary_team_stopper
         self._summary_team_recoverer = summary_team_recoverer
 
-    def default_spec(self) -> SummaryTeamSpec:
+    @staticmethod
+    def default_spec() -> SummaryTeamSpec:
         """Return the framework preset Summary Team spec."""
         return SummaryTeamSpec()
 
