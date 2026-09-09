@@ -152,7 +152,24 @@ def emit_context_window_commit(
     messages: list[dict[str, Any]],
     request_purpose: str,
 ) -> Span | None:
-    """Emit one ended context.window.commit child span."""
+    """Emit one ended context.window.commit child span.
+
+    Only a request that carries the conversation forward advances the chain.
+    A compaction asks the model to summarize the conversation, so its prompt
+    is *about* the context rather than part of it; committing it would splice
+    a foreign window into the chain a reader replays.
+
+    Returns:
+        The emitted span, or None when this request does not advance the
+        chain or the owning span is no longer recording.
+    """
+    if request_purpose == "compaction":
+        # Return before advancing: the advance is what rewrites the subject's
+        # canonical state, so letting a compaction reach it would both corrupt
+        # the chain and make the next real turn's delta a near-full window.
+        # The compaction's own prompt stays on its LLM span, and its operation
+        # is already recorded by the compaction.completed event.
+        return None
     session_id = str(llm_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(llm_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     window_id = uuid.uuid4().hex

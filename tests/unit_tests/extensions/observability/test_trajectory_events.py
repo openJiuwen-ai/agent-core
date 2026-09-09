@@ -354,6 +354,74 @@ def test_context_window_delta_uses_occurrence_identity_and_preserves_history() -
     assert [message["message_id"] for message in payloads[0]["messages"]] == ["a", "b", "c"]
 
 
+def test_compaction_request_does_not_enter_the_conversation_chain() -> None:
+    """A compaction summarizes the conversation; its prompt is not part of it.
+
+    Committing one spliced a foreign window into the chain, so the next real
+    turn's delta had to remove the whole summary prompt and restore the whole
+    conversation -- a near-full window every time compaction ran.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("trajectory-compaction-chain-test")
+    parent = tracer.start_span(
+        "llm.call",
+        attributes={
+            GEN_AI_CONVERSATION_ID: "compaction-session",
+            OJ_EXECUTION_SUBJECT_ID: "subject-compaction",
+        },
+    )
+    try:
+        turn_one = [
+            {"message_id": "a", "role": "user", "content": "question"},
+            {"message_id": "b", "role": "assistant", "content": "answer"},
+        ]
+        # What the model is asked during a compaction: a different prompt
+        # about the conversation, sharing none of its message identities.
+        summary_prompt = [
+            {"message_id": "s1", "role": "system", "content": "Return plain text only."},
+            {"message_id": "s2", "role": "user", "content": "Summarize the conversation."},
+        ]
+        turn_two = [
+            {"message_id": "a", "role": "user", "content": "question"},
+            {"message_id": "b", "role": "assistant", "content": "answer"},
+            {"message_id": "c", "role": "user", "content": "follow up"},
+        ]
+        emit_context_window_commit(
+            tracer=tracer, llm_span=parent, messages=turn_one, request_purpose="assistant"
+        )
+        skipped = emit_context_window_commit(
+            tracer=tracer, llm_span=parent, messages=summary_prompt, request_purpose="compaction"
+        )
+        emit_context_window_commit(
+            tracer=tracer, llm_span=parent, messages=turn_two, request_purpose="assistant"
+        )
+    finally:
+        parent.end()
+        provider.shutdown()
+        reset_state()
+
+    assert skipped is None
+    events = [span for span in exporter.get_finished_spans() if span.name == "context.window.commit"]
+    # Two conversation turns committed; the compaction between them did not.
+    assert [_attrs(span)[OJ_TRAJECTORY_SUBJECT_SEQUENCE] for span in events] == [1, 2]
+    payloads = [_payload(span) for span in events]
+    assert [message["message_id"] for message in payloads[0]["messages"]] == ["a", "b"]
+    # The chain stayed on the conversation: turn two bases on turn one, and
+    # its delta is the one message that was added, not a rebuilt window.
+    assert payloads[1]["base_window_id"] == payloads[0]["window_id"]
+    assert [(item["op"], item["message_id"]) for item in payloads[1]["delta"]] == [
+        ("insert", "c"),
+    ]
+    committed = {
+        message["message_id"]
+        for payload in payloads
+        for message in payload.get("messages", [])
+    }
+    assert committed.isdisjoint({"s1", "s2"})
+
+
 def test_context_window_first_commit_after_epoch_rotation_is_a_full_baseline() -> None:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
