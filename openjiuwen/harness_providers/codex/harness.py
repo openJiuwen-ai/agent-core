@@ -20,6 +20,7 @@ from openjiuwen.harness_protocol import (
     HarnessProtocolError,
     HarnessStateError,
     HostCapability,
+    InteractionResponseStatus,
     ProviderEvent,
     ResumePolicy,
     ToolApprovalDecision,
@@ -27,6 +28,8 @@ from openjiuwen.harness_protocol import (
     TurnError,
     TurnEventKind,
     TurnResult,
+    UserInputRequest,
+    json_value_to_builtin,
 )
 from openjiuwen.harness_providers.base import (
     PendingTurn,
@@ -47,14 +50,20 @@ from openjiuwen.harness_providers.codex.options import (
     start_thread_with_raw_events,
 )
 from openjiuwen.harness_providers.inputs import harness_input_text
-from openjiuwen.harness_providers.jsonsafe import to_json_object
+from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
 
 ADAPTER_VERSION = "0.1.0"
 _INTERRUPT_TIMEOUT_S = 5.0
 _APPROVAL_WAIT_TIMEOUT_S = 600.0
+# A human answering a question has no natural deadline; the reader thread
+# re-checks the event loop between slices instead of giving up.
+_USER_INPUT_WAIT_SLICE_S = 30.0
 _NO_ACTIVE_TURN_ERROR_CODE = -32600
 _NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
 _APPROVAL_METHODS = frozenset({"item/commandExecution/requestApproval", "item/fileChange/requestApproval"})
+# App Server request emitted by Codex's experimental ``request_user_input`` tool.
+USER_INPUT_METHOD = "item/tool/requestUserInput"
+_INTERACTIVE_HOST_CAPABILITIES = frozenset({HostCapability.TOOL_APPROVAL, HostCapability.USER_INPUT})
 # Provider interaction asking the host to ratify (persist) an auth fallback.
 AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
 
@@ -107,6 +116,7 @@ class CodexHarness(SerializedTurnHarness):
         optional_host_capabilities=frozenset(
             {
                 HostCapability.TOOL_APPROVAL,
+                HostCapability.USER_INPUT,
                 HostCapability.CHECKPOINT_SINK,
                 HostCapability.MCP_SERVERS,
                 HostCapability.PROVIDER_INTERACTION,
@@ -201,6 +211,7 @@ class CodexHarness(SerializedTurnHarness):
             cwd=cwd,
             env=build_process_env(self._config, context.env),
             mcp_servers=context.mcp_servers,
+            enable_user_input=HostCapability.USER_INPUT in context.host_capabilities,
         )
         options = build_thread_options(
             sdk=sdk,
@@ -210,7 +221,7 @@ class CodexHarness(SerializedTurnHarness):
             system_prompt=context.system_prompt,
         )
         client = sdk.AsyncCodex(config=codex_config)
-        if HostCapability.TOOL_APPROVAL in context.host_capabilities:
+        if context.host_capabilities & _INTERACTIVE_HOST_CAPABILITIES:
             _install_approval_handler(client, self._approval_handler)
         try:
             if resume_thread_id is not None:
@@ -467,6 +478,9 @@ class CodexHarness(SerializedTurnHarness):
     # ------------------------------------------------------------------
 
     def _approval_handler(self, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Answer App Server requests: tool approvals and ``request_user_input``."""
+        if method == USER_INPUT_METHOD:
+            return self._handle_user_input_request(params or {})
         if method not in _APPROVAL_METHODS:
             return {}
         loop = self._loop
@@ -478,6 +492,51 @@ class CodexHarness(SerializedTurnHarness):
         except Exception as exc:
             logger.warning("[codex] approval routing for %s failed: %s", method, exc)
             return {"decision": "decline"}
+
+    def _handle_user_input_request(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        context = self._context
+        loop = self._loop
+        if context is None or HostCapability.USER_INPUT not in context.host_capabilities:
+            logger.warning("[codex] request_user_input arrived without a USER_INPUT host; answering nothing")
+            return _EMPTY_USER_INPUT_ANSWER
+        if loop is None or loop.is_closed():
+            return _EMPTY_USER_INPUT_ANSWER
+        future = asyncio.run_coroutine_threadsafe(self._route_user_input(params), loop)
+        while True:
+            try:
+                return future.result(timeout=_USER_INPUT_WAIT_SLICE_S)
+            except TimeoutError:
+                if loop.is_closed():
+                    future.cancel()
+                    return _EMPTY_USER_INPUT_ANSWER
+            except Exception as exc:
+                logger.warning("[codex] user input routing failed: %s", exc)
+                return _EMPTY_USER_INPUT_ANSWER
+
+    async def _route_user_input(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        active = self._active_turn
+        item_id = str(params.get("itemId") or params.get("item_id") or "codex-user-input")
+        questions = _user_input_questions(params)
+        if not questions:
+            return _EMPTY_USER_INPUT_ANSWER
+        request = UserInputRequest(
+            request_id=f"codex-ask:{item_id}",
+            prompt=_render_questions(questions),
+            provider_session_id=self._thread_id,
+            turn_id=active.turn_id if active is not None else None,
+            choices=_first_choices(questions),
+            provider_data={
+                "tool_name": "request_user_input",
+                "call_id": item_id,
+                "questions": to_json_safe(questions),
+                "is_blocking": bool(params.get("isBlocking", True)),
+            },
+        )
+        response = await self._request_interaction(request)
+        if response is None or response.status is not InteractionResponseStatus.COMPLETED:
+            return _EMPTY_USER_INPUT_ANSWER
+        answers = _answers_from_response(json_value_to_builtin(response.content), questions)
+        return {"answers": {question_id: {"answers": values} for question_id, values in answers.items()}}
 
     async def _route_approval(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         active = self._active_turn
@@ -498,6 +557,90 @@ class CodexHarness(SerializedTurnHarness):
         if response.decision in (ToolApprovalDecision.ALLOW, ToolApprovalDecision.ALLOW_FOR_SESSION):
             return {"decision": "accept"}
         return {"decision": "decline"}
+
+
+_EMPTY_USER_INPUT_ANSWER: dict[str, Any] = {"answers": {}}
+
+
+def _user_input_questions(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the ``request_user_input`` questions as plain dicts (id, question, options...)."""
+    raw = params.get("questions")
+    if not isinstance(raw, list):
+        return []
+    questions: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping):
+            continue
+        question = dict(to_json_object(item))
+        question.setdefault("id", f"q{index}")
+        questions.append(question)
+    return questions
+
+
+def _render_questions(questions: list[dict[str, Any]]) -> str:
+    """Render the questions as one prompt; options are listed by label."""
+    lines: list[str] = []
+    for question in questions:
+        header = str(question.get("header") or "").strip()
+        text = str(question.get("question") or "").strip()
+        lines.append(f"{header}: {text}" if header and text else header or text or "Input requested")
+        options = question.get("options")
+        if isinstance(options, list):
+            for option in options:
+                if not isinstance(option, Mapping) or not option.get("label"):
+                    continue
+                description = str(option.get("description") or "").strip()
+                label = str(option["label"])
+                lines.append(f"  - {label}: {description}" if description else f"  - {label}")
+    return "\n".join(lines)
+
+
+def _first_choices(questions: list[dict[str, Any]]) -> tuple[str, ...]:
+    options = questions[0].get("options") if questions else None
+    if not isinstance(options, list):
+        return ()
+    return tuple(str(item.get("label")) for item in options if isinstance(item, Mapping) and item.get("label"))
+
+
+def _answers_from_response(content: Any, questions: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Normalize a host user-input response into per-question answer lists.
+
+    Hosts may answer with a mapping keyed by question id or question text,
+    a positional list, a ``{"answer": ...}`` object, or a bare scalar for the
+    first question.
+    """
+    ids = [str(question["id"]) for question in questions]
+    by_text = {str(question.get("question") or ""): question_id for question, question_id in zip(questions, ids)}
+    if isinstance(content, Mapping):
+        answers = content.get("answers")
+        if isinstance(answers, Mapping):
+            return _keyed_answers(answers, ids, by_text)
+        if "answer" in content:
+            return {ids[0]: _answer_values(content["answer"])}
+        return _keyed_answers(content, ids, by_text)
+    if isinstance(content, list):
+        return {question_id: _answer_values(value) for question_id, value in zip(ids, content)}
+    if content is None:
+        return {}
+    return {ids[0]: _answer_values(content)}
+
+
+def _keyed_answers(mapping: Mapping[Any, Any], ids: list[str], by_text: Mapping[str, str]) -> dict[str, list[str]]:
+    answers: dict[str, list[str]] = {}
+    for key, value in mapping.items():
+        key_text = str(key)
+        question_id = key_text if key_text in ids else by_text.get(key_text)
+        if question_id is not None:
+            answers[question_id] = _answer_values(value)
+    return answers
+
+
+def _answer_values(value: Any) -> list[str]:
+    if isinstance(value, Mapping) and isinstance(value.get("answers"), list):
+        return [str(item) for item in value["answers"]]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    return [str(value)]
 
 
 def _install_approval_handler(client: Any, handler: Callable[[str, Mapping[str, Any] | None], dict[str, Any]]) -> None:
@@ -524,4 +667,4 @@ def _is_no_active_turn_to_steer(exc: Exception) -> bool:
     )
 
 
-__all__ = ["ADAPTER_VERSION", "CodexHarness", "NotificationObserver"]
+__all__ = ["ADAPTER_VERSION", "USER_INPUT_METHOD", "CodexHarness", "NotificationObserver"]

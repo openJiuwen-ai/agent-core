@@ -18,6 +18,9 @@ from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexM
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
 CODEX_API_KEY_ENV = "OPENJIUWEN_CODEX_API_KEY"
+# Codex feature flag exposing the experimental ``request_user_input`` tool in
+# default mode; without it the model only has the tool in collaboration modes.
+USER_INPUT_FEATURE_OVERRIDE = "features.default_mode_request_user_input=true"
 # TOML bare-key pattern (A-Za-z0-9_-). Codex parses each --config value as
 # TOML, and a dotted-path segment that is a bare key names a different table
 # from the same string wrapped in quotes, so provider table keys must stay
@@ -121,10 +124,19 @@ def build_codex_config(
     cwd: str | None,
     env: Mapping[str, str],
     mcp_servers: tuple[McpServerConfig, ...],
+    enable_user_input: bool = False,
 ) -> Any:
-    """Build ``CodexConfig`` for one harness session."""
+    """Build ``CodexConfig`` for one harness session.
+
+    Args:
+        enable_user_input: Give the model Codex's experimental
+            ``request_user_input`` tool; it is off in the CLI's default mode,
+            so a host that declares ``USER_INPUT`` must switch it on here.
+    """
     process_env = dict(env)
     overrides: tuple[str, ...] = ()
+    if enable_user_input:
+        overrides += (USER_INPUT_FEATURE_OVERRIDE,)
     if model is not None:
         overrides += codex_model_config_overrides(model)
         if model.api_key:
@@ -229,6 +241,7 @@ async def start_thread_with_raw_events(*, client: Any, sdk: Any, options: dict[s
 
 __all__ = [
     "CODEX_API_KEY_ENV",
+    "USER_INPUT_FEATURE_OVERRIDE",
     "build_codex_config",
     "build_process_env",
     "build_thread_options",
