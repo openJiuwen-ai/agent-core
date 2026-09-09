@@ -458,6 +458,73 @@ async def test_requests_are_bounded_data_without_execution_control_fields() -> N
 
 
 @pytest.mark.asyncio
+async def test_dense_bounded_summary_is_still_sent_to_model() -> None:
+    candidate = _candidate(1)
+    summary = SymphonyEdgeEvaluationSummary(
+        endpoint_a=SymphonyEdgeEndpointSummary(
+            fragment="a" * 384,
+            input="b" * 384,
+            output="c" * 384,
+        ),
+        endpoint_b=SymphonyEdgeEndpointSummary(
+            fragment="d" * 384,
+            input="e" * 384,
+            output="f" * 384,
+        ),
+    )
+    llm = _RecordingLLM()
+
+    result = await evaluate_symphony_edge_candidates(
+        llm=llm,
+        query="query",
+        candidates=(candidate,),
+        decisions=(_decision(candidate),),
+        summaries={candidate.candidate_id: summary},
+    )
+
+    assert len(llm.calls) == 1
+    assert result[0].status == "success"
+
+
+@pytest.mark.asyncio
+async def test_oversized_summary_is_truncated_before_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openjiuwen.harness.rails.evolution import symphony_edge_evaluator
+
+    candidate = _candidate(1)
+    summary = SymphonyEdgeEvaluationSummary(
+        endpoint_a=SymphonyEdgeEndpointSummary(
+            fragment="a" * 384,
+            input="b" * 384,
+            output="c" * 384,
+        ),
+        endpoint_b=SymphonyEdgeEndpointSummary(
+            fragment="d" * 384,
+            input="e" * 384,
+            output="f" * 384,
+        ),
+    )
+    monkeypatch.setattr(symphony_edge_evaluator, "_MAX_CANDIDATE_PAYLOAD_BYTES", 2_500)
+    monkeypatch.setattr(symphony_edge_evaluator, "_MAX_CANDIDATE_MESSAGE_BYTES", 4_000)
+    llm = _RecordingLLM()
+
+    result = await evaluate_symphony_edge_candidates(
+        llm=llm,
+        query="query",
+        candidates=(candidate,),
+        decisions=(_decision(candidate),),
+        summaries={candidate.candidate_id: summary},
+    )
+
+    assert len(llm.calls) == 1
+    assert result[0].status == "success"
+    call = llm.calls[0]
+    item = _payload(call)["candidates"][0]
+    assert len(item["summaries"]["endpoint_a"]["fragment"].encode()) < 384
+    assert len(json.dumps(item, ensure_ascii=False, separators=(",", ":")).encode()) <= 2_500
+    assert len(json.dumps(call["messages"], ensure_ascii=False, separators=(",", ":")).encode()) <= 4_000
+
+
+@pytest.mark.asyncio
 async def test_candidate_calls_are_concurrent_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     from openjiuwen.harness.rails.evolution import symphony_edge_evaluator
 

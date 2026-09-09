@@ -34,9 +34,10 @@ _MAX_RESPONSE_BYTES = 16 * 1024
 _MAX_REASON_BYTES = 512
 _MAX_SUMMARY_FIELD_BYTES = 384
 _MAX_QUERY_BYTES = 256
-_MAX_CANDIDATE_BYTES = 3 * 1024
+_MAX_CANDIDATE_PAYLOAD_BYTES = 4 * 1024
+_MAX_CANDIDATE_MESSAGE_BYTES = 6 * 1024
 _MAX_EVALUATED_CANDIDATES = 64
-_MAX_TOTAL_INPUT_BYTES = _MAX_EVALUATED_CANDIDATES * _MAX_CANDIDATE_BYTES
+_MAX_TOTAL_INPUT_BYTES = _MAX_EVALUATED_CANDIDATES * _MAX_CANDIDATE_MESSAGE_BYTES
 _EVIDENCE_REF_RE = re.compile(r"^(?P<trace_id>[^#\s]+)#span=(?P<span_id>[^#\s]+)$")
 _CAPABILITY_TYPES = frozenset({"skill", "tool", "subagent"})
 _SUMMARY_FIELDS = ("fragment", "capability", "input", "output", "error", "artifact")
@@ -169,16 +170,41 @@ def _build_candidate_requests(
             summary = summaries.get(candidate.candidate_id)
         except Exception:
             return None
-        payload = _candidate_payload(candidate, summary)
-        if payload is None or _json_size(payload) > _MAX_CANDIDATE_BYTES:
+        request = _bounded_candidate_request(bounded_query, candidate, summary)
+        if request is None:
             return None
-        messages = _messages(bounded_query, payload)
-        message_bytes = _json_size(messages)
-        if message_bytes > _MAX_CANDIDATE_BYTES or total_bytes + message_bytes > _MAX_TOTAL_INPUT_BYTES:
+        messages, message_bytes = request
+        if total_bytes + message_bytes > _MAX_TOTAL_INPUT_BYTES:
             return None
         total_bytes += message_bytes
         requests.append((candidate, messages))
     return tuple(requests)
+
+
+def _bounded_candidate_request(
+    query: str,
+    candidate: SymphonyEdgeCandidate,
+    summary: SymphonyEdgeEvaluationSummary | None,
+) -> tuple[SymphonyMessages, int] | None:
+    """Build the largest summary that fits the bounded model request."""
+
+    lower = 1
+    upper = _MAX_SUMMARY_FIELD_BYTES
+    best: tuple[SymphonyMessages, int] | None = None
+    while lower <= upper:
+        field_bytes = (lower + upper) // 2
+        payload = _candidate_payload(candidate, summary, summary_field_bytes=field_bytes)
+        if payload is None:
+            lower = field_bytes + 1
+            continue
+        messages = _messages(query, payload)
+        message_bytes = _json_size(messages)
+        if _json_size(payload) <= _MAX_CANDIDATE_PAYLOAD_BYTES and message_bytes <= _MAX_CANDIDATE_MESSAGE_BYTES:
+            best = messages, message_bytes
+            lower = field_bytes + 1
+        else:
+            upper = field_bytes - 1
+    return best
 
 
 async def _evaluate_requests(
@@ -234,8 +260,10 @@ async def _invoke_and_parse_request(
 def _candidate_payload(
     candidate: SymphonyEdgeCandidate,
     summary: SymphonyEdgeEvaluationSummary | None,
+    *,
+    summary_field_bytes: int = _MAX_SUMMARY_FIELD_BYTES,
 ) -> dict[str, Any] | None:
-    serialized_summary = _summary_payload(summary)
+    serialized_summary = _summary_payload(summary, max_field_bytes=summary_field_bytes)
     if serialized_summary is None:
         return None
     return {
@@ -255,7 +283,11 @@ def _candidate_payload(
     }
 
 
-def _summary_payload(summary: SymphonyEdgeEvaluationSummary | None) -> dict[str, dict[str, str]] | None:
+def _summary_payload(
+    summary: SymphonyEdgeEvaluationSummary | None,
+    *,
+    max_field_bytes: int = _MAX_SUMMARY_FIELD_BYTES,
+) -> dict[str, dict[str, str]] | None:
     if not isinstance(summary, SymphonyEdgeEvaluationSummary):
         return None
     result: dict[str, dict[str, str]] = {}
@@ -270,7 +302,7 @@ def _summary_payload(summary: SymphonyEdgeEvaluationSummary | None) -> dict[str,
                 continue
             if not _is_valid_utf8(value):
                 return None
-            bounded = _truncate_utf8(value, _MAX_SUMMARY_FIELD_BYTES)
+            bounded = _truncate_utf8(value, max_field_bytes)
             if bounded.strip():
                 fields[name] = bounded
         if not fields:
