@@ -127,6 +127,7 @@ class OrganizationRuntimeManager:
         self._expert_team_launcher: ExpertTeamLauncher | None = None
         self._expert_adapter_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
         self._summary_team_factory: SummaryTeamFactory | None = None
+        self._summary_team_factory_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
 
     def set_leader_turn_runner(self, runner: Callable[[str, str, object], Awaitable[bool]]) -> None:
         """Set the host-owned path used to run an autonomous leader turn."""
@@ -165,8 +166,27 @@ class OrganizationRuntimeManager:
 
     def set_summary_team_factory(self, factory: SummaryTeamFactory) -> None:
         """Set the host adapter that provisions and releases on-demand Summary Teams."""
-
         self._summary_team_factory = factory
+
+    def set_summary_team_factory_installer(
+        self, installer: Callable[["OrganizationRuntimeManager"], None] | None
+    ) -> None:
+        """Register a host callback that injects the SummaryTeamFactory on first use.
+
+        Mirrors :meth:`set_expert_adapter_installer`.  The installer should be
+        idempotent and must not provision anything itself; it only constructs and
+        ``set_summary_team_factory`` when a summary event first needs it.
+        """
+        self._summary_team_factory_installer = installer
+
+    def _ensure_summary_factory(self) -> None:
+        """Lazily run the host installer once the SummaryTeamFactory is still missing."""
+        if self._summary_team_factory is not None:
+            return
+        installer = self._summary_team_factory_installer
+        if installer is None:
+            return
+        installer(self)
 
     def _ensure_expert_adapters(self) -> None:
         """Lazily run the host installer once Catalog or Launcher is still missing."""
@@ -767,7 +787,7 @@ class OrganizationRuntimeManager:
         Task to its running dynamic team, and re-evaluate sources for a still-
         WAITING one so a dropped ''sources ready'' notification is rebuilt.
         """
-        summary_factory = self._summary_team_factory
+        summary_factory = self._ensure_summary_factory() or self._summary_team_factory
         for execution in await manager.task_pool.list_summary_executions():
             if execution.status in {
                 OrgSummaryExecutionStatus.COMPLETED,
@@ -1094,7 +1114,7 @@ class OrganizationRuntimeManager:
                 )
 
         async def _on_org_event(message: Any) -> None:
-            summary_factory = self._summary_team_factory
+            summary_factory = self._ensure_summary_factory() or self._summary_team_factory
             if summary_factory is None:
                 return
             event = message.get_payload()
@@ -1450,7 +1470,7 @@ class OrganizationRuntimeManager:
             )
 
     async def _release_summary_execution(self, *, manager: Any, execution: Any, session_id: str) -> None:
-        summary_factory = self._summary_team_factory
+        summary_factory = self._ensure_summary_factory() or self._summary_team_factory
         if summary_factory is None:
             return
         if execution.summary_team_id:
