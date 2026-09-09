@@ -100,6 +100,9 @@ jiuwen-memory = ["JiuwenMemory>=0.1.0", "httpx>=0.24"]
 agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
 claude = ["claude-agent-sdk>=0.2.115"]
 codex = ["openai-codex>=0.144.4"]
+# The SDK has only ever published pre-releases; the lower bound names one so
+# PEP 440 lets a resolver pick it up at all. Import name stays `deepseek_harness`.
+dsh = ["deepseek-harness-sdk>=0.1.1rc1"]
 ssh = ["asyncssh>=2.24.0"]
 observability = [
     "opentelemetry-api>=1.25.0",
@@ -204,6 +207,7 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
+    "**/harness/resources/*.yaml",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
     "symphony/README.md",

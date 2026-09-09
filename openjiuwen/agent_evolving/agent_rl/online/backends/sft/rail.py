@@ -29,7 +29,12 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SOURCE,
 )
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, read_usage
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    iter_spans,
+    read_usage,
+    write_llm_exchange,
+)
 from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.extensions.observability import semconv
@@ -591,39 +596,18 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         if tools:
             attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = tools
 
-        for message_index, message in enumerate(messages):
-            normalized = normalize_message(message)
-            base = f"{semconv.GEN_AI_PROMPT}.{message_index}"
-            for key in (
-                "role",
-                "content",
-                "name",
-                "tool_call_id",
-                "reasoning_content",
-                "reasoning",
-                "refusal",
-            ):
-                if key in normalized:
-                    attrs[f"{base}.{key}"] = normalized[key]
-            if normalized.get("tool_calls"):
-                attrs[f"{base}.tool_calls"] = normalized["tool_calls"]
-
-        attrs[f"{semconv.GEN_AI_COMPLETION}.0.role"] = response.get("role") or "assistant"
+        prompts = [normalize_message(message) for message in messages]
+        completion: dict[str, Any] = {"role": response.get("role") or "assistant"}
+        for key in ("name", "reasoning_content", "reasoning", "refusal", "tool_calls"):
+            if key in response:
+                completion[key] = response[key]
         response_content = response.get("content")
         if response_content is not None:
-            attrs[f"{semconv.GEN_AI_COMPLETION}.0.content"] = response_content
+            completion["content"] = response_content
         elif not response.get("tool_calls"):
-            attrs[f"{semconv.GEN_AI_COMPLETION}.0.content"] = turn.get("llm_str") or ""
-        for key in (
-            "name",
-            "reasoning_content",
-            "reasoning",
-            "refusal",
-        ):
-            if key in response:
-                attrs[f"{semconv.GEN_AI_COMPLETION}.0.{key}"] = response[key]
+            completion["content"] = turn.get("llm_str") or ""
+        attrs.update(write_llm_exchange(prompts, [completion]))
         if response.get("tool_calls"):
-            attrs[f"{semconv.GEN_AI_COMPLETION}.0.tool_calls"] = response["tool_calls"]
             attrs[semconv.GEN_AI_TOOL_CALLS] = response["tool_calls"]
         if turn.get("prompt_ids") is not None:
             attrs["prompt_ids"] = turn.get("prompt_ids")

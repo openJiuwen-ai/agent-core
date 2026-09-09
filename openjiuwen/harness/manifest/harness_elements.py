@@ -462,21 +462,21 @@ def build_general_purpose_subagent(factory_kwargs: dict[str, Any], context: Any)
 harness_element(
     kind=ElementKind.SUBAGENT,
     name=SUBAGENT_EXPLORE,
-    description="Read-only exploration sub-agent (core.subagent.*; no ObservabilityRail).",
+    description="Read-only exploration sub-agent (core.subagent.*; no observability rail).",
     input_model=SubAgentInput,
     builder=build_explore_subagent,
 )
 harness_element(
     kind=ElementKind.SUBAGENT,
     name=SUBAGENT_PLAN,
-    description="Planning sub-agent (core.subagent.*; no ObservabilityRail).",
+    description="Planning sub-agent (core.subagent.*; no observability rail).",
     input_model=SubAgentInput,
     builder=build_plan_subagent,
 )
 harness_element(
     kind=ElementKind.SUBAGENT,
     name=SUBAGENT_BROWSER,
-    description="Browser automation sub-agent (core.subagent.*; no ObservabilityRail).",
+    description="Browser automation sub-agent (core.subagent.*; no observability rail).",
     input_model=BrowserSubAgentInput,
     builder=build_browser_subagent,
 )

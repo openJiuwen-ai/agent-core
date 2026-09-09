@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.harness.prompts.tools import build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -70,6 +71,8 @@ class ToolCallTool(Tool):
                     "result": result,
                 },
             )
+        except ToolInterruptException:
+            raise
         except Exception as exc:
             logger.warning(
                 "[ProgressiveToolRail] tool_call invoke failed | error=%s",

@@ -65,7 +65,7 @@ def test_slotted_descriptions_are_fully_filled(lang, desc_key):
     assert "{{" not in desc, f"unresolved placeholder in {desc_key}/{lang}"
     # The shared handoff fragment is the one both send_message variants pull in.
     if desc_key.startswith("send_message"):
-        assert ".team/" in desc
+        assert "write_file" in desc
 
 
 @pytest.mark.level0

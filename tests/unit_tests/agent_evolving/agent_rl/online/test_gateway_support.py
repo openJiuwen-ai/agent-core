@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
 
 
@@ -221,10 +224,10 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
     trajectory = _canonical_llm_trajectory(
         "traj-1",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "pong"}],
+            ),
             "provider_response_json": {
                 "prompt_token_ids": [1, 2, 3],
                 "choices": [{"token_ids": [4, 5], "logprobs": [-0.1, -0.2]}],
@@ -246,10 +249,10 @@ async def test_online_trajectory_converter_preserves_trace_plain_meta():
     trajectory = _canonical_llm_trajectory(
         "trace-meta-converter",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "pong"}],
+            ),
         },
         resource_attrs={
             "openjiuwen.trajectory.source": "rl_online",
@@ -274,10 +277,10 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
     trajectory = _canonical_llm_trajectory(
         "traj-stream",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "pong"}],
+            ),
             "evolution.rl.prompt_token_ids": [1, 2, 3],
             "evolution.rl.completion_token_ids": [4, 5],
             "evolution.rl.logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
@@ -329,12 +332,13 @@ def test_online_trajectory_converter_reads_detached_messages():
     trajectory = _canonical_llm_trajectory(
         "traj-detached-message",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_PROMPT}.1.role": "assistant",
-            f"{semconv.GEN_AI_PROMPT}.1.content": "previous turn",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "previous turn"},
+                ],
+                [{"role": "assistant", "content": "pong"}],
+            ),
         },
     )
 

@@ -29,6 +29,11 @@ from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
 )
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    current_execution_subject,
+    execution_subject_scope,
+)
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 try:
@@ -57,6 +62,56 @@ def _summarize_task_description(task_description: Any) -> dict[str, Any]:
         "length": len(task_text),
         "sha256_12": task_hash,
     }
+
+
+async def _run_subagent_with_observable_stream(
+    subagent: Any,
+    inputs: dict[str, Any],
+) -> dict[str, Any]:
+    """Run a subagent through its public stream while returning invoke-style output.
+
+    Builtin DeepAgent subagents expose both ``invoke`` and ``stream``.  The
+    streaming path is required for truthful first-token and generation timing;
+    chunks stay inside this task tool and only the terminal answer is returned
+    to the parent agent.  Third-party test/adaptor agents that only implement
+    ``invoke`` retain their existing behavior.
+    """
+    stream = getattr(subagent, "stream", None)
+    if not callable(stream):
+        return await subagent.invoke(inputs)
+
+    output_parts: list[str] = []
+    terminal_result: dict[str, Any] | None = None
+    async for chunk in stream(inputs):
+        chunk_type = getattr(chunk, "type", None)
+        payload = getattr(chunk, "payload", None)
+        if isinstance(chunk, dict):
+            chunk_type = chunk.get("type", chunk_type)
+            payload = chunk.get("payload", payload)
+        if not isinstance(payload, dict):
+            continue
+        if chunk_type == "llm_output":
+            content = payload.get("content")
+            if isinstance(content, str):
+                output_parts.append(content)
+            continue
+        if chunk_type != "answer":
+            continue
+        terminal_result = dict(payload)
+        terminal_result.setdefault("result_type", "answer")
+        if "output" not in terminal_result:
+            content = terminal_result.get("content")
+            if isinstance(content, str):
+                terminal_result["output"] = content
+
+    if terminal_result is None:
+        terminal_result = {
+            "output": "".join(output_parts),
+            "result_type": "answer",
+        }
+    if terminal_result.get("result_type") == "error":
+        raise RuntimeError(str(terminal_result.get("output") or "subagent failed"))
+    return terminal_result
 
 
 class TaskTool(Tool):
@@ -254,74 +309,118 @@ class TaskTool(Tool):
 
         succeeded = False
         affinity_enabled = False
+        parent_subject = current_execution_subject()
+        parent_subject_id = parent_subject.subject_id if parent_subject else "main"
+        subject = ExecutionSubject(
+            subject_id=f"subagent:{uuid.uuid4().hex}",
+            display_name=str(
+                getattr(getattr(subagent, "card", None), "name", None)
+                or subagent_type
+            ),
+            kind="subagent",
+            parent_subject_id=parent_subject_id,
+            session_id=sub_session_id,
+        )
+        owner_root = None
         try:
-            await prepare_subagent_task_resources(subagent)
-            parent_invocation_id = current_usage_invocation_id()
-            affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
-            if affinity_enabled:
-                kv_cache_hooks.prefetch_sticky_subagent(
-                    self.parent_agent,
-                    subagent_type=str(subagent_type),
-                    sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
-                )
-            # Invoke subagent with isolated session_id
-            subagent_inputs = {
-                "query": task_description,
-                "conversation_id": sub_session_id,
-            }
-            if str(subagent_type) == "browser_agent" and resume_task_id:
-                subagent_inputs["run_context"] = {
-                    "browser_resume": True,
-                    "resume_task_id": sub_session_id,
-                }
-            if affinity_enabled:
-                subagent_inputs["parent_session_id"] = parent_session_id
-                # The child owns a new request-local report.  Keep the
-                # delegation boundary explicit when the child/cache lineage
-                # feature is enabled, without changing the legacy disabled
-                # invocation payload.
-                subagent_inputs["delegation_id"] = sub_session_id
-                if parent_invocation_id:
-                    subagent_inputs["parent_invocation_id"] = parent_invocation_id
-            delegation_token = bind_usage_delegation(
-                build_usage_delegation_attribution(
-                    agent_id=getattr(getattr(subagent, "card", None), "id", None),
-                    parent_session_id=parent_session_id,
-                    delegation_id=sub_session_id,
-                    parent_invocation_id=parent_invocation_id,
-                )
+            from openjiuwen.extensions.observability.span_context import get_root_span
+            from openjiuwen.harness.observability.span_context import (
+                register_run_root_span,
+                unregister_run_root_span,
             )
+
+            owner_root = get_root_span(session_id=parent_session_id)
+            if owner_root is not None and owner_root.is_recording():
+                # The subagent runtime binds its isolated sub-session in
+                # callbacks that may execute outside the dispatch task's
+                # ContextVars.  Register an explicit alias to the owning run
+                # so those callbacks resolve A -> A, never "the only live"
+                # unrelated run B.
+                register_run_root_span(owner_root, session_id=sub_session_id)
+            else:
+                owner_root = None
+        except Exception as exc:
+            logger.debug(
+                "[TaskTool] Failed to bind subagent observability owner: %s",
+                exc,
+            )
+        with execution_subject_scope(subject):
             try:
-                result = await subagent.invoke(subagent_inputs)
-            finally:
-                reset_usage_delegation(delegation_token)
-            succeeded = True
-            output = result.get("output", "")
-            data = self._build_result_data(
-                result,
-                output,
-                agent_id=subagent.card.id,
-                subagent_type=str(subagent_type),
-                sub_session_id=sub_session_id,
-            )
-            return ToolOutput(success=True, data=data, error=None)
-        except Exception as e:
-            logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=f"Subagent {subagent_type} execution failed: {e}",
-            ) from e
-        finally:
-            await cleanup_subagent_task_resources(subagent)
-            if affinity_enabled:
-                await kv_cache_hooks.finish_subagent(
-                    self.parent_agent,
+                await prepare_subagent_task_resources(subagent)
+                parent_invocation_id = current_usage_invocation_id()
+                affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+                if affinity_enabled:
+                    kv_cache_hooks.prefetch_sticky_subagent(
+                        self.parent_agent,
+                        subagent_type=str(subagent_type),
+                        sub_session_id=sub_session_id,
+                        parent_session_id=parent_session_id,
+                    )
+                # Invoke subagent with isolated session_id
+                subagent_inputs = {
+                    "query": task_description,
+                    "conversation_id": sub_session_id,
+                }
+                if str(subagent_type) == "browser_agent" and resume_task_id:
+                    subagent_inputs["run_context"] = {
+                        "browser_resume": True,
+                        "resume_task_id": sub_session_id,
+                    }
+                if affinity_enabled:
+                    subagent_inputs["parent_session_id"] = parent_session_id
+                    # The child owns a new request-local report.  Keep the
+                    # delegation boundary explicit when the child/cache lineage
+                    # feature is enabled, without changing the legacy disabled
+                    # invocation payload.
+                    subagent_inputs["delegation_id"] = sub_session_id
+                    if parent_invocation_id:
+                        subagent_inputs["parent_invocation_id"] = parent_invocation_id
+                delegation_token = bind_usage_delegation(
+                    build_usage_delegation_attribution(
+                        agent_id=getattr(getattr(subagent, "card", None), "id", None),
+                        parent_session_id=parent_session_id,
+                        delegation_id=sub_session_id,
+                        parent_invocation_id=parent_invocation_id,
+                    )
+                )
+                try:
+                    result = await _run_subagent_with_observable_stream(
+                        subagent,
+                        subagent_inputs,
+                    )
+                finally:
+                    reset_usage_delegation(delegation_token)
+                succeeded = True
+                output = result.get("output", "")
+                data = self._build_result_data(
+                    result,
+                    output,
+                    agent_id=subagent.card.id,
                     subagent_type=str(subagent_type),
                     sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
-                    succeeded=succeeded,
                 )
+                return ToolOutput(success=True, data=data, error=None)
+            except Exception as e:
+                logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
+                raise build_error(
+                    StatusCode.TOOL_TASK_TOOL_INVOKED,
+                    reason=f"Subagent {subagent_type} execution failed: {e}",
+                ) from e
+            finally:
+                if owner_root is not None:
+                    unregister_run_root_span(
+                        owner_root,
+                        session_id=sub_session_id,
+                    )
+                await cleanup_subagent_task_resources(subagent)
+                if affinity_enabled:
+                    await kv_cache_hooks.finish_subagent(
+                        self.parent_agent,
+                        subagent_type=str(subagent_type),
+                        sub_session_id=sub_session_id,
+                        parent_session_id=parent_session_id,
+                        succeeded=succeeded,
+                    )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

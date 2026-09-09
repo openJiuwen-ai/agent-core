@@ -51,6 +51,9 @@ from openjiuwen.core.context_engine.usage import (
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
     ToolMessage,
     UserMessage,
     SystemMessage
@@ -920,7 +923,13 @@ class ReActAgent(BaseAgent):
             return
         await self._sync_prompt_attachments(ctx, context)
         body = "\n".join(parts)
-        await context.add_messages(UserMessage(content=f"{prefix}{body}"))
+        await context.add_messages(UserMessage(
+            content=f"{prefix}{body}",
+            metadata={
+                OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+                OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
+            },
+        ))
 
     async def _drain_steering_batch(self, ctx: AgentCallbackContext) -> List[str]:
         """Take the share of the steering backlog this model call absorbs.
@@ -1001,6 +1010,7 @@ class ReActAgent(BaseAgent):
             messages=self._build_preview_messages(context),
             tools=list(tools) if tools else None,
             model_context=context,
+            react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
         )
 
         try:
@@ -1034,6 +1044,7 @@ class ReActAgent(BaseAgent):
                 messages=self._build_preview_messages(context),
                 tools=list(tools) if tools else None,
                 model_context=context,
+                react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
             )
             ai_message = await self._railed_model_call(ctx)
 
@@ -2713,6 +2724,7 @@ class ReActAgent(BaseAgent):
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+                        ctx.extra["_react_iteration"] = iteration + 1
 
                         # Honor force_finish requests set at iteration boundary
                         # (e.g. by rails on AFTER_REACT_ITERATION). This lets a

@@ -22,11 +22,13 @@ from openjiuwen.core.single_agent.interrupt.response import (
     InterruptRequest,
     ToolCallInterruptRequest,
 )
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, RESUME_USER_INPUT_KEY
 from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPT_AUTO_CONFIRM_KEY,
+    INTERRUPTION_KEY,
+    RESUME_START_ITERATION_KEY,
+    RESUME_USER_INPUT_KEY,
     ToolInterruptEntry,
     ToolInterruptionState,
-    RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
 )
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 
@@ -148,18 +150,20 @@ class ToolInterruptHandler:
             payloads: list,
             auto_confirm_mapping: Dict[str, str],
     ) -> None:
-        tc = tool_result.tool_call or tool_call
-        outer_id = tc.id
-        inner_id = outer_id
+        # Approval identifies the nested target, but resume must replay the
+        # model-visible outer call so wrappers can reestablish authorization.
+        inner_tool_call = tool_result.tool_call or tool_call
+        outer_id = tool_call.id
+        inner_id = inner_tool_call.id
 
         interrupted_tools[outer_id] = ToolInterruptEntry(
-            tool_call=tc,
+            tool_call=tool_call,
             interrupt_requests={inner_id: tool_result.request},
         )
 
         payload = ToolCallInterruptRequest.from_tool_call(
             request=tool_result.request,
-            tool_call=tc,
+            tool_call=inner_tool_call,
         )
         payloads.append((inner_id, payload))
 

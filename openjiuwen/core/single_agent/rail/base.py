@@ -310,6 +310,7 @@ class ModelCallInputs:
         context_usage_report: Request-local report for the final context window
         context_usage_request_id: Request-local context usage event id
         context_usage_sequence: Request-local execution sequence
+        react_iteration: 1-based inner ReAct loop iteration
     """
     messages: List[Any] = field(default_factory=list)
     tools: Optional[List[Any]] = None
@@ -319,6 +320,7 @@ class ModelCallInputs:
     context_usage_request_id: Optional[str] = None
     context_usage_sequence: Optional[int] = None
     context_usage_attribution: Dict[str, Any] = field(default_factory=dict)
+    react_iteration: int = 0
 
 
 @dataclass
@@ -331,12 +333,14 @@ class ToolCallInputs:
         tool_args: Arguments for the tool
         tool_result: Tool execution result (filled after call)
         tool_msg: Tool message (filled after call)
+        react_iteration: 1-based inner ReAct loop iteration
     """
     tool_call: Optional[Any] = None
     tool_name: str = ""
     tool_args: Any = None
     tool_result: Optional[Any] = None
     tool_msg: Optional[Any] = None
+    react_iteration: int = 0
 
 
 @dataclass

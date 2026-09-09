@@ -240,6 +240,7 @@ async def test_processor_reuses_cached_browser_state_without_navigation() -> Non
     assert state_message is original_state_message
     assert state_message.name == "current_browser_state"
     assert state_message.metadata["browser_state_context"] is True
+    assert state_message.metadata["context_message_id"] == "openjiuwen:browser-state"
     assert state_message.metadata[PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY] is True
     assert "https://first.example" in state_message.content
     assert "https://other.example" in state_message.content

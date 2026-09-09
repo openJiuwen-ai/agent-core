@@ -362,7 +362,10 @@ def test_sft_converter_builds_session_batch():
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft.converter import SFTRawTrajectoryConverter
     from openjiuwen.agent_evolving.trajectory.model import Trajectory
     from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID, TRAJECTORY_SOURCE
-    from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+    from openjiuwen.agent_evolving.trajectory.spans import (
+        attributes_from_map,
+        write_llm_exchange,
+    )
     from openjiuwen.extensions.observability import semconv
 
     trajectory = Trajectory.from_otlp(
@@ -389,10 +392,10 @@ def test_sft_converter_builds_session_batch():
                                     "attributes": attributes_from_map(
                                         {
                                             semconv.GEN_AI_REQUEST_MODEL: "m1",
-                                            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-                                            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-                                            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-                                            f"{semconv.GEN_AI_COMPLETION}.0.content": "world",
+                                            **write_llm_exchange(
+                                                [{"role": "user", "content": "hello"}],
+                                                [{"role": "assistant", "content": "world"}],
+                                            ),
                                         }
                                     ),
                                 }

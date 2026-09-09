@@ -524,6 +524,12 @@ def test_context_engine_injection_does_not_persist_as_execution_history() -> Non
     assert len(second_window.context_messages) == 2
     assert first_window.context_messages[-1].metadata["browser_working_context"] is True
     assert second_window.context_messages[-1].metadata["browser_working_context"] is True
+    assert first_window.context_messages[-1].metadata["context_message_id"] == (
+        "openjiuwen:browser-working-context"
+    )
+    assert second_window.context_messages[-1].metadata["context_message_id"] == (
+        "openjiuwen:browser-working-context"
+    )
 
 
 def test_processor_guidance_defines_each_working_memory_field() -> None:

@@ -16,7 +16,7 @@ import pytest
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.cli_agent import spawn as spawn_mod
 from openjiuwen.agent_teams.external.cli_agent.claude import runtime as claude_runtime_mod
-from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_session_id
+from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_session_id, claude_otel_env
 from openjiuwen.agent_teams.external.cli_agent.claude.runtime import ClaudeSdkRuntime
 from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import build_claude_sdk_mcp_tool_set
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
@@ -354,11 +354,11 @@ class _RecordingTeamLogger:
         self.errors.append((message, args))
 
 
-def _ctx(member: str = "claude-1") -> TeamRuntimeContext:
+def _ctx(member: str = "claude-1", cli_agent: str = "claude") -> TeamRuntimeContext:
     return TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name=member,
-        cli_agent="claude",
+        cli_agent=cli_agent,
         team_spec=TeamSpec(team_name="ext_team", display_name="Ext", language="en"),
         db_config=DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"),
         messager_config=MessagerTransportConfig(backend="inprocess", team_name="ext_team"),
@@ -417,6 +417,121 @@ def fake_claude_sdk(monkeypatch):
     return sdk_module
 
 
+@pytest.mark.level0
+def test_claude_otel_env_adds_source_id_without_dropping_resource_attributes() -> None:
+    env = claude_otel_env(
+        "http://127.0.0.1:4317",
+        source_id="source-1",
+        resource_attributes="service.name=custom,openjiuwen.agent_teams.source.id=old",
+    )
+
+    assert env["OTEL_RESOURCE_ATTRIBUTES"] == (
+        "service.name=custom,openjiuwen.agent_teams.source.id=source-1"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_claude_runtime_injects_native_source_id(
+    fake_claude_sdk: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NativeBridge:
+        async def attach_native_trace(self) -> str:
+            return "http://127.0.0.1:4317"
+
+        @staticmethod
+        def native_traceparent() -> str:
+            return "00-11111111111111111111111111111111-2222222222222222-01"
+
+        @staticmethod
+        def native_source_id() -> str:
+            return "source-1"
+
+    def build_native_bridge(
+        *,
+        member_name: str,
+        member_agent_id: str | None,
+        team_name: str | None,
+        session_id: str | None,
+        role: str | None,
+    ) -> _NativeBridge:
+        del member_name, member_agent_id, team_name, session_id, role
+        return _NativeBridge()
+
+    monkeypatch.setattr(claude_runtime_mod, "_build_claude_span_bridge", build_native_bridge)
+
+    runtime = await claude_runtime_mod.build_claude_runtime(
+        member_name="claude-1",
+        cwd="/project",
+        add_dirs=(),
+        env={"OTEL_RESOURCE_ATTRIBUTES": "service.name=custom"},
+        inject_mcp=False,
+        mcp_server_name="openjiuwen-team",
+        mcp_server_command=("openjiuwen-team-mcp",),
+        system_prompt=None,
+        ssh_transport=None,
+        team_session_id="sess-1",
+        resume_external_backend=False,
+    )
+
+    assert runtime._options.env["OTEL_RESOURCE_ATTRIBUTES"] == (
+        "service.name=custom,openjiuwen.agent_teams.source.id=source-1"
+    )
+    assert runtime._options.settings is not None
+    flag_settings = json.loads(runtime._options.settings)
+    assert flag_settings["env"]["OTEL_RESOURCE_ATTRIBUTES"] == (
+        "service.name=custom,openjiuwen.agent_teams.source.id=source-1"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_claude_runtime_disables_native_otel_for_ssh(
+    fake_claude_sdk: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NativeBridge:
+        attach_count = 0
+
+        async def attach_native_trace(self) -> str:
+            self.attach_count += 1
+            return "http://127.0.0.1:4317"
+
+    bridge = _NativeBridge()
+
+    def build_native_bridge(
+        *,
+        member_name: str,
+        member_agent_id: str | None,
+        team_name: str | None,
+        session_id: str | None,
+        role: str | None,
+    ) -> _NativeBridge:
+        del member_name, member_agent_id, team_name, session_id, role
+        return bridge
+
+    monkeypatch.setattr(claude_runtime_mod, "_build_claude_span_bridge", build_native_bridge)
+
+    runtime = await claude_runtime_mod.build_claude_runtime(
+        member_name="claude-1",
+        cwd="/remote/project",
+        add_dirs=(),
+        env={"OPENJIUWEN_TEAM_JOIN": "{}"},
+        inject_mcp=False,
+        mcp_server_name="openjiuwen-team",
+        mcp_server_command=("openjiuwen-team-mcp",),
+        system_prompt=None,
+        ssh_transport=SshTransportConfig(host="127.0.0.1", username="u", password="pw"),
+        team_session_id="sess-1",
+        resume_external_backend=False,
+    )
+
+    assert bridge.attach_count == 0
+    assert "CLAUDE_CODE_ENABLE_TELEMETRY" not in runtime._options.env
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in runtime._options.env
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
@@ -429,6 +544,7 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
             mcp_server_command=("openjiuwen-team-mcp",),
             extra_env={"EXTRA": "1"},
             system_prompt="persona",
+            claude_turn_idle_timeout_s=45.0,
         )
     finally:
         reset_session_id(token)
@@ -445,6 +561,7 @@ async def test_build_cli_runtime_uses_claude_sdk_backend(fake_claude_sdk):
     assert options.cli_path is None
     assert options.session_id == build_claude_session_id(team_session_id="sess-1", member_name="claude-1")
     assert options.resume is None
+    assert runtime._turn_idle_timeout_s == 45.0
 
 
 @pytest.mark.asyncio
@@ -490,9 +607,10 @@ async def test_build_cli_runtime_maps_claude_model_config(fake_claude_sdk):
     assert flag_settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-test"
 
 
+@pytest.mark.asyncio
 @pytest.mark.level0
-def test_build_claude_runtime_resumes_session_for_fallback(fake_claude_sdk):
-    runtime = claude_runtime_mod.build_claude_runtime(
+async def test_build_claude_runtime_resumes_session_for_fallback(fake_claude_sdk):
+    runtime = await claude_runtime_mod.build_claude_runtime(
         member_name="claude-1",
         cwd="/project",
         add_dirs=(),
@@ -528,6 +646,30 @@ async def test_build_cli_runtime_claude_rejects_full_command_override(fake_claud
                 _ctx(),
                 command_override=("claude", "--print"),
                 mcp_server_command=("openjiuwen-team-mcp",),
+            )
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.level0
+def test_claude_sdk_runtime_rejects_non_positive_idle_timeout():
+    with pytest.raises(ValueError, match="greater than zero"):
+        ClaudeSdkRuntime(
+            member_name="claude-1",
+            options=_FakeOptions(),
+            turn_idle_timeout_s=0,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_rejects_claude_idle_timeout_for_other_backend(fake_claude_sdk):
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="only supported for Claude SDK members"):
+            await spawn_mod.build_cli_runtime(
+                _ctx(cli_agent="generic"),
+                claude_turn_idle_timeout_s=45.0,
             )
     finally:
         reset_session_id(token)
@@ -897,12 +1039,13 @@ async def test_build_cli_runtime_requires_session_context(fake_claude_sdk):
         await spawn_mod.build_cli_runtime(_ctx())
 
 
+@pytest.mark.asyncio
 @pytest.mark.level0
-def test_claude_sdk_missing_dependency_reports_clear_error(monkeypatch):
+async def test_claude_sdk_missing_dependency_reports_clear_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
 
     with pytest.raises(BaseError):
-        spawn_mod.build_claude_runtime(
+        await spawn_mod.build_claude_runtime(
             member_name="claude-1",
             cwd=None,
             add_dirs=(),

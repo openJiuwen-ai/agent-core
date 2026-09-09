@@ -241,7 +241,7 @@ class ContextProcessorStateRecorder:
             except Exception as exc:
                 logger.debug("token_counter failed while measuring context processor state: %s", exc)
         total_chars = sum(len(str(getattr(message, "content", "") or "")) for message in messages)
-        return math.ceil(total_chars / 4)
+        return math.ceil(total_chars / 3)
 
     def _build_statistic(self, messages: Optional[list[BaseMessage]]) -> ContextStats:
         stat = ContextStats()

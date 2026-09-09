@@ -9,8 +9,9 @@ Scenario (one autonomous leader round):
   ``spawn_member(role_type='external_cli', cli_agent=...)``.
 * Each member is a real third-party CLI subprocess. The spawn path
   auto-injects the team MCP server (``openjiuwen-team-mcp``) so the CLI
-  gets the real teammate team tools (read_inbox / view_task / claim_task —
-  status claimed/completed — / send_message), and launches it with ``cwd``
+  gets the real teammate team tools (view_task / claim_task — status
+  claimed/completed — / send_message; inbound messages are pushed by the
+  coordination layer, so no pull tool), and launches it with ``cwd``
   set to the shared team workspace.
 * The leader creates one task per member: write a file
   ``<member>.md`` into the team workspace, then complete the task and

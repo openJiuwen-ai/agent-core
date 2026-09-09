@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-08-10 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md |
+| 最近一次修订日期 | 2026-09-01 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md |
 
 ## 范围 / 边界
 
@@ -150,7 +150,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     用 `updated_at is not None` 守卫 `exclude_none` 剔除的情况）。
 15. **Card / Config 分层**：`ToolCard` 只承载可序列化的 `id` / `name` /
     `description` / `input_params`；`teammate_mode` / `model_config_allocator` /
-    `on_teammate_created` 这类运行时句柄属于工具实例的私有字段，禁止下沉
+    `agent_team` 这类运行时句柄属于工具实例的私有字段，禁止下沉
     到 `ToolCard`。
 16. **一成员一活跃任务，改派不取消成员**：一个成员同一时刻至多持有一个**活跃**任务。
     "活跃" = `{PLANNING, IN_PROGRESS, IN_REVIEW}`——三个 owned 非终态处境（plan 闸 / 执行 /
@@ -160,10 +160,16 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `TeamTaskManager.get_other_active_task_id(member, exclude_task_id)`（DB 层单列 `task_id`
     投影 + `LIMIT 1` 的存在性探测，`status IN (PLANNING, IN_PROGRESS, IN_REVIEW)`，不物化该成员
     的全部活跃行）校验，命中即拒绝（`exclude_task_id` 放行幂等 re-claim / re-assign / re-start
-    同一任务）；`UpdateTaskTool` 的校验落在 reassignment reset **之前**，
-    拒绝时原任务与当前 owner 均不受扰动。改派执行中任务走
-    `TeamTaskManager.reassign`——DAO 层**原子 CAS 交换 assignee**（任务全程 IN_PROGRESS，
-    不经 PENDING），发 `TASK_REVOKED` 通知原 owner、`TASK_CLAIMED` 通知新 owner，
+    同一任务）；`UpdateTaskTool` 的校验落在改派**之前**，
+    拒绝时原任务与当前 owner 均不受扰动。改派已有 owner 的任务走
+    `TeamTaskManager.reassign`——DAO 层**原子 CAS 交换 assignee**，`SET` 只动 assignee，
+    因此**任务保持原状态、不经 PENDING**。可改派状态集是 `TASK_REASSIGNABLE_STATUSES`
+    = {`PENDING`, `BLOCKED`, `IN_PROGRESS`}（`schema/status.py`）：前两个是"有主但没开工"
+    （调度模式的常驻态、以及创建时预指派的自主任务），交接不丢任何在途工作，是**最安全**
+    的改派时机；`IN_PROGRESS` 代价是原 owner 的在途推理，由 `TASK_REVOKED` 让它停手。
+    两个 gate（`PLANNING` / `IN_REVIEW`）被排除——各自有一份绑在**当前** owner 身上的产物
+    （已提交的计划 / 正在被评判的成果），换人会让产物归属到没做过它的人头上。
+    改派发 `TASK_REVOKED` 通知原 owner、`TASK_CLAIMED` 通知新 owner，
     **不发 `TASK_RELEASED`**（不会 spurious 唤醒空闲 teammate）、**不再** `cancel_member`
     （那会连带取消原 owner 的其它 claim 与 in-flight round）。见 F_54 / F_56。
 17. **取消 / 编辑执行中任务用任务级信号，不取消成员**：cancel 一个执行中任务、或改其
@@ -186,7 +192,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     的两个形态各自独立，只共享模块级纯函数（`_task_node_schema` / `_validate_task_batch`），
     `invoke` / `map_result` 各写一遍；`send_message` 的两个形态共享 `_SendMessageBase`，
     因为共享的是真实投递行为（`_send` / `_multicast` / `_broadcast`），子类只有自己的
-    `to` schema 与一条直线 `_dispatch`。**不为「形态就该有基类」的对称感去造 `_XxxBase`**。
+    收件参数 schema 与一条直线 `_dispatch`。**不为「形态就该有基类」的对称感去造 `_XxxBase`**。
     无论哪种，形态子类里都**零形态分支**，因此不变量 12（schema 扁平、invoke 直线、
     无 role 分支）对每个形态仍成立。
     `send_message` 的形态是 `(dispatch_mode, leader|member)` 二维：scheduled 下
@@ -270,8 +276,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
       准则还在其中，且那条 tool result 由 `team_policy` 重注入保证**不会被压缩掉**——再调一次
       永远拿不到新信息，只白烧一轮。`BuildTeamTool.invoke` 在 `backend.rejects_rebuild()` 为真时
       直接返回失败。判据是 `_history_restored`（由 `TeamAgent.recover_from_session` 置位，该方法
-      即冷恢复入口）**与**团队行仍在，**两个条件缺一不可**：恢复出来的 leader 若在本轮被
-      `CoordinationKernel.start` 的"上次清理没做完"分支执行了 `clean_team`，团队行已消失，
+      即冷恢复入口）**与**团队行仍在，**两个条件缺一不可**：恢复出来的 leader 若接的是一个已被
+      解散的团队（自己的 `clean_team`，或 operator 的 `delete_agent_team`），团队行已消失，
       那时它确实需要重新建队。
 
 21b. **verify 闸是 dispatch 门控的能力，`update_task` 与 `build_team` 双层执法**（[[F_76]]）。`reviewer` /
@@ -308,6 +314,27 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     不按领域分，见「描述文本路径约定」）——
     让 LLM 事先知道界在哪，省掉一次撞墙往返；`test_tool_message.py` 断言描述里的数字与
     常量一致，防止两者漂移。
+23. **把活交给成员的工具，必须先确保成员起来了**（F_84）。注册与拉起分离（`S_05`
+    不变量 1），所以"写完就完事"的工具会把活留在一个没人订阅的看板 / 邮箱上。
+    autonomous 下有两条这样的交付路径，两条都走同一个入口
+    `TeamBackend.autostart_unstarted()`：`send_message`（三条投递路径，写库**之前**
+    拉起——成员必须先订阅 bus，MessageEvent 才有人收）与 `create_task`（`add_graph`
+    成功**之后**拉起——任务已经在板上，才谈得上有人来领）。该方法持有构造期注入的
+    `on_member_started` 回调并自带 leader 门与回调门，**调用方不再各自捎带 spawn 回调**；
+    幂等由下层 `startup_member` 的 CAS 保证。
+    两点边界：**scheduled 的 `create_task` 不拉人**（交接归 `TeamScheduler`，工具再插一手
+    就是双投递，所以差异由 `ScheduledTaskCreateTool` 这个独立类吸收，不是 `invoke` 里的
+    模式分支）；**拉起失败不改变工具的成败**——任务/消息已落库，报失败只会诱使模型重建一遍，
+    补救交给 leader round-idle 对账（`S_05` 不变量 1 的第五个触发点）。
+24. **`send_message` 的单播 / 广播与多播使用分离参数，schema 不使用 union**（F_109）。
+    `SendMessageTool` 的 `to` 固定为 `string`，只承载单个 member_name、`"user"` 或 `"*"`；
+    `targets` 固定为 `array<string>`，只承载多播成员列表。两者运行时必须二选一：同时提供、
+    同时省略、向 `to` 偷传数组或向 `targets` 偷传字符串都在写消息前拒绝，并返回可执行的字段
+    修正提示。`to` 若仍收到 JSON 数组字符串，只识别其错误形状并提示改用 `targets`，不解析代发。
+    这样宿主 LLM 不再需要在 `anyOf(string, array)` 中选择序列化分支，也不会把数组二次 JSON
+    编码后塞进字符串。`ReportToLeaderTool` 仍只有 `to: enum ["leader", "user"]`，
+    schema 不暴露 `targets`，invoke 对 MCP 偷传同样拒绝。多播的全员拒绝、去重、部分失败等
+    既有语义全部留在 `_multicast`，只改变入口字段，不改变消息落库和事件投递。
 
 ## 接口契约
 
@@ -320,7 +347,6 @@ def create_team_tools(
     agent_team: TeamBackend,
     teammate_mode: str = "build_mode",
     dispatch_mode: str = "autonomous",
-    on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     model_config_allocator: Callable[[str | None], "Allocation" | None] | None = None,
     exclude_tools: set[str] | None = None,
     lang: str = "cn",
@@ -336,7 +362,6 @@ def create_team_tools(
 | `dispatch_mode` | `"autonomous"` / `"scheduled"` | 任务如何到达成员。选择 `create_task` / `send_message` 的形态、`member_complete_task` 的 desc_key，以及成员工具集。未知值抛 `KeyError`。见不变量 18。 |
 | `agent_team` | `TeamBackend` | 后端句柄，所有写操作（`build_team` / `spawn_*` / 任务 / 消息）通过它走，不绕过去直接打数据库或 messager。 |
 | `teammate_mode` | `"build_mode"` / `"plan_mode"` | plan_mode 门禁。非 plan_mode 时从 allowed 集合里减掉 `approve_plan` / `submit_plan`，且未启用 team permissions 时也减掉 `approve_tool`。 |
-| `on_teammate_created` | `Callable[[str], Awaitable[None]]` | leader 用 `send_message` 时若发现成员未启动，自动 startup 的回调；不传则没有 auto-start 行为。teammate / human_agent 不消费这个回调。 |
 | `model_config_allocator` | `Callable[[str \| None], Allocation \| None]` | leader 的 `spawn_teammate` 调它选 model；不传则 spawn 出来的 teammate 无 allocation，由后端兜底。teammate 不消费。 |
 | `exclude_tools` | `set[str]` 或 `None` | **减法**——从该角色 allowed 集合里再减一遍。不存在于 allowed 的名字静默忽略（因为减法对空集是恒等）。 |
 | `lang` | `"cn"` / `"en"` | 选语言加载 `_desc`，缺省 `"cn"`。其它字符串走 cn 兜底（`make_translator` 内部 if/else）。 |
@@ -520,13 +545,13 @@ ShutdownMemberTool     → TeamBackend
 ApprovePlanTool        → TeamBackend
 ApproveToolCallTool    → TeamBackend
 ListMembersTool        → TeamBackend
-TaskCreateTool         → TeamBackend.task_manager
+TaskCreateTool         → TeamBackend.task_manager (+ autostart_unstarted()，autonomous 专有)
 ScheduledTaskCreateTool→ TeamBackend (task_manager + member_exists 校验 assignee)
 UpdateTaskTool         → TeamBackend (+ task_manager 通过 backend 取)
 ViewTaskToolV2         → TeamTaskManager
 ClaimTaskTool          → TeamTaskManager
 MemberCompleteTaskTool → TeamTaskManager
-SendMessageTool        → TeamMessageManager (+ TeamBackend roster check + on_teammate_created)
+SendMessageTool        → TeamMessageManager (+ TeamBackend roster check + autostart_unstarted())
 ReportToLeaderTool     → TeamMessageManager (+ TeamBackend.resolve_leader_member_name()：投递时把 "leader" 角色词解析成真实名，读 team_info DB 行并缓存；team 行缺失则 to="leader" 在 invoke 时软失败，非构造期)
 ```
 

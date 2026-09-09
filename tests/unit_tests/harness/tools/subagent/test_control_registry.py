@@ -38,12 +38,10 @@ async def test_release_subagent_control_cancels_and_drops_cache() -> None:
     session = Session(session_id="parent_sess")
     control = get_subagent_control(parent, session)
     control.cancel_all = AsyncMock(return_value=["sub1"])
-    control.flush = MagicMock()
 
     await release_subagent_control(parent, "parent_sess", reason="test")
 
     control.cancel_all.assert_awaited_once_with("test")
-    control.flush.assert_called_once()
     assert not hasattr(parent, "_subagent_controls") or "parent_sess" not in getattr(
         parent,
         "_subagent_controls",
@@ -66,15 +64,11 @@ async def test_release_all_subagent_controls_cancels_every_cached_session() -> N
     control_b = get_subagent_control(parent, session_b)
     control_a.cancel_all = AsyncMock(return_value=["a1"])
     control_b.cancel_all = AsyncMock(return_value=["b1"])
-    control_a.flush = MagicMock()
-    control_b.flush = MagicMock()
 
     await release_all_subagent_controls(parent, reason="rail_uninit")
 
     control_a.cancel_all.assert_awaited_once_with("rail_uninit")
     control_b.cancel_all.assert_awaited_once_with("rail_uninit")
-    control_a.flush.assert_called_once()
-    control_b.flush.assert_called_once()
     assert getattr(parent, "_subagent_controls", {}) == {}
 
 

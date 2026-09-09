@@ -58,6 +58,7 @@ class SkillRecord:
     author: str = ""
     content_hash: str = ""
     source_root: str = ""
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ def _inventory_from_normalized(normalized: tuple[SkillRecord, ...]) -> SkillInve
             "name": item.name,
             "description": item.description,
             "skill_file": item.skill_file,
+            "aliases": list(item.aliases),
             "source": item.source,
             "version": item.version,
             "author": item.author,
@@ -220,6 +222,7 @@ def _scan_skill_directories_uncached(
                     name=sanitize_model_text(name),
                     description=sanitize_model_text(description),
                     skill_file=str(skill_file),
+                    aliases=_skill_aliases(metadata),
                     source=sanitize_model_text(source),
                     version=sanitize_model_text(metadata.get("version") or ""),
                     author=sanitize_model_text(metadata.get("author") or ""),
@@ -326,6 +329,7 @@ def _with_content_hash(record: SkillRecord) -> SkillRecord:
         name=sanitize_model_text(record.name or record.worker_id),
         description=sanitize_model_text(record.description or record.name or record.worker_id),
         skill_file=str(path),
+        aliases=_skill_aliases({"aliases": record.aliases}),
         source=sanitize_model_text(record.source or "local"),
         version=sanitize_model_text(record.version or ""),
         author=sanitize_model_text(record.author or ""),
@@ -414,7 +418,7 @@ def _canonical_skill_id(value: Any) -> str:
     parts: list[str] = []
     for char in raw:
         category = unicodedata.category(char)
-        if category in {"Cc", "Cs"}:
+        if category in {"Cc", "Cs", "Zl", "Zp"}:
             parts.append(f"~u{ord(char):04x}")
         else:
             parts.append(char)
@@ -432,6 +436,9 @@ def sanitize_model_text(value: Any) -> str:
         if category == "Cs":
             cleaned.append("\ufffd")
             unsafe = True
+        elif category in {"Zl", "Zp"}:
+            cleaned.append(" ")
+            unsafe = True
         elif category == "Cc" and char not in {"\n", "\r", "\t"}:
             cleaned.append(" ")
             unsafe = True
@@ -441,6 +448,13 @@ def sanitize_model_text(value: Any) -> str:
     if unsafe and escaped and not escaped.startswith(_UNTRUSTED_PREFIX):
         return f"{_UNTRUSTED_PREFIX}{escaped}"
     return escaped
+
+
+def _skill_aliases(metadata: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = metadata.get("aliases", metadata.get("alias", ()))
+    values = (raw,) if isinstance(raw, str) else raw if isinstance(raw, Sequence) else ()
+    aliases = (sanitize_model_text(value) for value in values)
+    return tuple(dict.fromkeys(alias for alias in aliases if alias))
 
 
 __all__ = [

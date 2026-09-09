@@ -80,17 +80,41 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (
-            "[三方运行时] 成员 {member_name}（{agent_kind}）正在自动重试：{category}。"
+            "[三方运行时] 成员 {member_name}（{agent_kind}，模型 {model}）正在自动重试：{category}。"
+            "进度 {attempt}/{max_attempts}，原因：{reason_message}。"
+            "诊断字段：http_status={http_status}，sdk_error_code={sdk_error_code}。"
             "本轮不结束，成员状态不变，等待 SDK 后续结果。{summary}"
         ),
         "reliability.external_runtime_failed": (
-            "[三方运行时·失败] 成员 {member_name}（{agent_kind}，阶段 {phase}）最终失败："
+            "[三方运行时·失败] 成员 {member_name}（{agent_kind}，模型 {model}，阶段 {phase}）最终失败："
             "{category}。{summary} 原始错误：{reason_message} 建议处理：{suggested_action}。"
-            "是否需要用户介入：{user_action_required}。请评估成员状态并决定是否继续调度。"
+            "诊断字段：failure_id={failure_id}，round_id={round_id}，http_status={http_status}，"
+            "sdk_error_type={sdk_error_type}，sdk_error_code={sdk_error_code}，"
+            "user_action_required={user_action_required}。{phase_guidance}{user_action_guidance}"
+            "仅将上述结构化字段明确提供的信息视为事实，不得推断未提供的根因。"
+            "该通知仅报告当前 attempt 已结束，不表示已安排新的 round；"
+            "如需继续，请根据任务和成员状态显式调度。"
         ),
+        "reliability.user_action.required": "结构化诊断已识别到必须由用户或外部系统完成的操作。",
+        "reliability.user_action.not_identified": (
+            "结构化诊断尚未识别到必须由用户完成的操作，但后续仍可能需要用户介入。"
+        ),
+        "reliability.external_runtime_phase.turn_http": (
+            "该错误在 turn 阶段收到 HTTP 响应，说明 CLI 已成功启动；不得将其诊断为 CLI 未安装。"
+        ),
+        "reliability.external_runtime_phase.turn": (
+            "该错误发生在 turn 阶段；除非存在 process_start_failed 证据，否则不得推断 CLI 未安装。"
+        ),
+        "reliability.external_runtime_phase.startup": "该错误发生在 startup 阶段，请依据错误分类判断启动失败原因。",
         "reliability.suggested_action.auth_required": "请登录 CLI 或配置有效的 API key",
         "reliability.suggested_action.quota_exceeded": "请检查账户额度或更换 API key",
         "reliability.suggested_action.rate_limited": "请稍后重试",
+        "reliability.suggested_action.codex_429_cause_unknown": (
+            "Codex 未提供具体的上游 429 原因；若任务仍未完成，请检查任务与成员状态并显式触发新的 round"
+        ),
+        "reliability.suggested_action.request_rejected": (
+            "模型服务拒绝了请求，请结合诊断字段和运行日志检查请求配置及服务端错误详情"
+        ),
         "reliability.suggested_action.server_unavailable": "服务端暂时不可用，请稍后重试",
         "reliability.suggested_action.network_timeout": "请检查网络连接和 API 地址是否可达",
         "reliability.suggested_action.process_start_failed": "成员运行时启动失败，请检查配置或重试",
@@ -415,18 +439,49 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (
-            "[external runtime] Member {member_name} ({agent_kind}) is auto-retrying: {category}. "
+            "[external runtime] Member {member_name} ({agent_kind}, model {model}) is auto-retrying: {category}. "
+            "Progress: {attempt}/{max_attempts}. Reason: {reason_message}. "
+            "Diagnostics: http_status={http_status}, sdk_error_code={sdk_error_code}. "
             "The round stays open and member status is unchanged; awaiting the next SDK result. {summary}"
         ),
         "reliability.external_runtime_failed": (
-            "[external runtime failed] Member {member_name} ({agent_kind}, phase {phase}) finally "
+            "[external runtime failed] Member {member_name} ({agent_kind}, model {model}, phase {phase}) finally "
             "failed: {category}. {summary} Reason: {reason_message} Suggested action: {suggested_action}. "
-            "User action required: {user_action_required}. Assess the member state and decide whether "
-            "to keep scheduling it."
+            "Diagnostics: failure_id={failure_id}, round_id={round_id}, http_status={http_status}, "
+            "sdk_error_type={sdk_error_type}, sdk_error_code={sdk_error_code}, "
+            "user_action_required={user_action_required}. {phase_guidance}{user_action_guidance}"
+            "Treat only explicitly provided structured fields as facts; do not infer an unspecified root cause. "
+            "This notification only reports that the current attempt ended and does not mean a new round was "
+            "scheduled. If work should continue, schedule it explicitly based on task and member state."
+        ),
+        "reliability.user_action.required": (
+            "The structured diagnosis identified an action that the user or an external system must complete. "
+        ),
+        "reliability.user_action.not_identified": (
+            "The structured diagnosis did not identify a mandatory user action, but user involvement may still "
+            "be needed later. "
+        ),
+        "reliability.external_runtime_phase.turn_http": (
+            "An HTTP response was received during the turn, so the CLI started successfully; do not diagnose "
+            "this as a missing CLI. "
+        ),
+        "reliability.external_runtime_phase.turn": (
+            "This failure occurred during a turn; do not infer a missing CLI without process_start_failed evidence. "
+        ),
+        "reliability.external_runtime_phase.startup": (
+            "This failure occurred during startup; use its category to determine the startup cause. "
         ),
         "reliability.suggested_action.auth_required": "Log in to the CLI or configure a valid API key",
         "reliability.suggested_action.quota_exceeded": "Check account quota or switch to a different API key",
         "reliability.suggested_action.rate_limited": "Please retry later",
+        "reliability.suggested_action.codex_429_cause_unknown": (
+            "Codex did not provide the specific upstream cause for HTTP 429; if the task remains incomplete, "
+            "inspect task and member state and explicitly trigger a new round"
+        ),
+        "reliability.suggested_action.request_rejected": (
+            "The model service rejected the request; inspect diagnostics and runtime logs for request configuration "
+            "and server details"
+        ),
         "reliability.suggested_action.server_unavailable": "Server temporarily unavailable; please retry later",
         "reliability.suggested_action.network_timeout": "Check network connectivity and API endpoint reachability",
         "reliability.suggested_action.process_start_failed": (

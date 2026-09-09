@@ -11,6 +11,7 @@ from typing import Any
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.harness.execution_subject import ExecutionSubject, execution_subject_scope
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
@@ -53,6 +54,7 @@ class SubagentInstance:
         display_name: str,
         role: str,
         parent_session_id: str,
+        parent_subject_id: str = "main",
         agent: Any,
         session_factory: Callable[[], Any],
         running_semaphore: asyncio.Semaphore,
@@ -70,6 +72,13 @@ class SubagentInstance:
         self.display_name = display_name
         self.role = role
         self.parent_session_id = parent_session_id
+        self.execution_subject = ExecutionSubject(
+            subject_id=f"subagent:{subagent_id}",
+            display_name=display_name,
+            kind="subagent",
+            parent_subject_id=parent_subject_id,
+            session_id=subagent_id,
+        )
 
         self.status = StatusChannel()
         self.last_output: str | None = None
@@ -90,6 +99,7 @@ class SubagentInstance:
         self._ops: asyncio.Queue[SubagentOp] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
         self._current_run: asyncio.Task[None] | None = None
+        self._turn_claimed = False
         self._running_semaphore = running_semaphore
         self._interrupt_requested = False
         self._closed = False
@@ -151,6 +161,13 @@ class SubagentInstance:
         kind = self.status.current().kind
         return kind in {SubagentStatusKind.PENDING_INIT, SubagentStatusKind.RUNNING}
 
+    def has_active_turn(self) -> bool:
+        """Return True when a user-input turn is queued or currently executing."""
+        if self._turn_claimed or not self._ops.empty():
+            return True
+        run = self._current_run
+        return run is not None and not run.done()
+
     async def _set_status(self, status: SubagentStatus) -> None:
         await self.status.set(status)
         if self._on_status_changed is not None:
@@ -168,32 +185,38 @@ class SubagentInstance:
                 self._ops.task_done()
 
     async def _handle_user_input(self, op: UserInputOp) -> None:
+        # Claim the turn before waiting for the shared concurrency slot. During
+        # that wait the op is no longer queued and _current_run does not exist
+        # yet, so both signals alone would incorrectly report the instance idle.
+        self._turn_claimed = True
         self.current_task_id = op.task_id
-
-        async with self._running_semaphore:
-            self._interrupt_requested = False
-            await self._set_status(SubagentStatus.running())
-            self._current_run = asyncio.create_task(self._run_one_turn(op))
-            try:
-                if self._turn_timeout_s and self._turn_timeout_s > 0:
-                    await asyncio.wait_for(self._current_run, timeout=self._turn_timeout_s)
-                else:
-                    await self._current_run
-            except asyncio.TimeoutError:
-                await self._on_turn_timeout()
-            except asyncio.CancelledError as exc:
-                await self._on_turn_cancelled(exc)
-            except Exception as exc:
-                logger.warning(
-                    "[SubagentInstance] turn failed: subagent_id=%s error=%s",
-                    self.subagent_id,
-                    exc,
-                    exc_info=True,
-                )
-                if not self.status.current().is_final():
-                    await self._set_status(SubagentStatus.errored(str(exc)))
-            finally:
-                self._current_run = None
+        try:
+            async with self._running_semaphore:
+                self._interrupt_requested = False
+                await self._set_status(SubagentStatus.running())
+                self._current_run = asyncio.create_task(self._run_one_turn(op))
+                try:
+                    if self._turn_timeout_s and self._turn_timeout_s > 0:
+                        await asyncio.wait_for(self._current_run, timeout=self._turn_timeout_s)
+                    else:
+                        await self._current_run
+                except asyncio.TimeoutError:
+                    await self._on_turn_timeout()
+                except asyncio.CancelledError as exc:
+                    await self._on_turn_cancelled(exc)
+                except Exception as exc:
+                    logger.warning(
+                        "[SubagentInstance] turn failed: subagent_id=%s error=%s",
+                        self.subagent_id,
+                        exc,
+                        exc_info=True,
+                    )
+                    if not self.status.current().is_final():
+                        await self._set_status(SubagentStatus.errored(str(exc)))
+                finally:
+                    self._current_run = None
+        finally:
+            self._turn_claimed = False
 
     async def _on_turn_timeout(self) -> None:
         if not self.status.current().is_final():
@@ -227,36 +250,76 @@ class SubagentInstance:
         session = self._session_factory()
         aggregator = TurnOutputAggregator()
         succeeded = False
+        owner_root = self._register_observability_owner()
         try:
-            await session.pre_run()
-            await prepare_subagent_task_resources(self._agent)
-            if self._on_turn_start is not None:
-                self._on_turn_start()
-            if self._on_turn_stream_start is not None:
-                await self._on_turn_stream_start(op)
-            inputs = self._build_stream_inputs(op)
-            gen = self._agent.stream(inputs, session=session)
-            async with contextlib.aclosing(gen):
-                async for chunk in gen:
-                    aggregator.consume(chunk)
-                    if self._on_chunk is not None:
-                        await self._on_chunk(chunk)
-            # Drain the turn tail before settling: the terminal status doubles as
-            # the turn-end signal, so nothing may be emitted after it.
-            if self._on_turn_stream_end is not None:
-                await self._on_turn_stream_end(op, aggregator)
-            await self._settle_turn(op, aggregator)
-            succeeded = not aggregator.is_error() and self.status.current().kind is SubagentStatusKind.COMPLETED
-        except BaseError as exc:
-            await self._set_status(
-                SubagentStatus.errored(str(exc), code=exc.status.name),
-            )
-            raise
-        except Exception as exc:
-            await self._set_status(SubagentStatus.errored(str(exc)))
-            raise
+            with execution_subject_scope(self.execution_subject):
+                try:
+                    await session.pre_run()
+                    await prepare_subagent_task_resources(self._agent)
+                    if self._on_turn_start is not None:
+                        self._on_turn_start()
+                    if self._on_turn_stream_start is not None:
+                        await self._on_turn_stream_start(op)
+                    inputs = self._build_stream_inputs(op)
+                    gen = self._agent.stream(inputs, session=session)
+                    async with contextlib.aclosing(gen):
+                        async for chunk in gen:
+                            aggregator.consume(chunk)
+                            if self._on_chunk is not None:
+                                await self._on_chunk(chunk)
+                    # Drain the turn tail before settling: the terminal status doubles as
+                    # the turn-end signal, so nothing may be emitted after it.
+                    if self._on_turn_stream_end is not None:
+                        await self._on_turn_stream_end(op, aggregator)
+                    await self._settle_turn(op, aggregator)
+                    succeeded = (
+                        not aggregator.is_error()
+                        and self.status.current().kind is SubagentStatusKind.COMPLETED
+                    )
+                except BaseError as exc:
+                    await self._set_status(
+                        SubagentStatus.errored(str(exc), code=exc.status.name),
+                    )
+                    raise
+                except Exception as exc:
+                    await self._set_status(SubagentStatus.errored(str(exc)))
+                    raise
+                finally:
+                    await self._finalize_turn(session, succeeded=succeeded)
         finally:
-            await self._finalize_turn(session, succeeded=succeeded)
+            self._unregister_observability_owner(owner_root)
+
+    def _register_observability_owner(self) -> Any | None:
+        """Alias the parent run root to this subagent's isolated session."""
+        try:
+            from openjiuwen.extensions.observability.span_context import get_root_span
+            from openjiuwen.harness.observability.span_context import register_run_root_span
+
+            owner_root = get_root_span(session_id=self.parent_session_id)
+            if owner_root is None or not owner_root.is_recording():
+                return None
+            register_run_root_span(owner_root, session_id=self.subagent_id)
+            return owner_root
+        except Exception as exc:
+            logger.debug(
+                "[SubagentInstance] Failed to bind observability owner: %s",
+                exc,
+            )
+            return None
+
+    def _unregister_observability_owner(self, owner_root: Any | None) -> None:
+        """Remove the child-session root alias after all turn callbacks finish."""
+        if owner_root is None:
+            return
+        try:
+            from openjiuwen.harness.observability.span_context import unregister_run_root_span
+
+            unregister_run_root_span(owner_root, session_id=self.subagent_id)
+        except Exception as exc:
+            logger.debug(
+                "[SubagentInstance] Failed to unbind observability owner: %s",
+                exc,
+            )
 
     async def _settle_turn(self, op: UserInputOp, aggregator: TurnOutputAggregator) -> None:
         output = aggregator.output()

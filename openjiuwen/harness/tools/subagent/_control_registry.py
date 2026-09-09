@@ -34,6 +34,9 @@ def get_subagent_control(parent_agent: "DeepAgent", session: Any) -> SubagentCon
         control = SubagentControl(parent_agent, parent_session_id, parent_session=session)
         control.hydrate()
         controls[parent_session_id] = control
+    else:
+        control.set_parent_session(session)
+    control.merge_persisted_records()
     return control
 
 
@@ -47,7 +50,6 @@ async def release_subagent_control(
     control = controls.pop(parent_session_id, None)
     if control is not None:
         await control.cancel_all(reason)
-        control.flush()
 
 
 async def release_all_subagent_controls(

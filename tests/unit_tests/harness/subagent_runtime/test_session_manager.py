@@ -14,6 +14,7 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import AgentError, ExecutionError, build_error
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
+from openjiuwen.harness.execution_subject import ExecutionSubject, execution_subject_scope
 from openjiuwen.harness.subagent_runtime.models import SubagentStatusKind, UserInputOp
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
@@ -106,6 +107,30 @@ async def test_create_main_path() -> None:
     assert instance.role == "researcher"
     assert instance.agent_status().kind is SubagentStatusKind.PENDING_INIT
     assert manager.find("parent_sub_explore") is instance
+
+
+@pytest.mark.asyncio
+async def test_create_captures_nested_parent_execution_subject() -> None:
+    manager = _manager()
+    parent_subject = ExecutionSubject(
+        subject_id="subagent:parent",
+        display_name="Parent",
+        kind="subagent",
+        parent_subject_id="main",
+        session_id="parent-subsession",
+    )
+
+    with execution_subject_scope(parent_subject), _patch_create_session():
+        instance = await manager.create(
+            subagent_type="explore",
+            subagent_id="parent_sub_nested",
+            parent_session_id="parent",
+            display_name="Nested",
+            role="researcher",
+        )
+
+    assert instance.execution_subject.parent_subject_id == "subagent:parent"
+    assert instance.execution_subject.subject_id == "subagent:parent_sub_nested"
 
 
 @pytest.mark.asyncio

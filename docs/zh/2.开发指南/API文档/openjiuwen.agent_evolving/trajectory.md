@@ -2,6 +2,12 @@
 
 Canonical 轨迹值对象、进程内 span 采集、同步归档和无状态投影接口。
 
+导入在线 processor 或 Rails 前需要安装可选 observability 依赖：
+
+```bash
+uv sync --extra observability
+```
+
 ## 根包公开接口
 
 ```python
@@ -49,8 +55,10 @@ class Trajectory:
 
 ## class TrajectorySpanProcessor
 
-`TrajectorySpanProcessor` 实现 OpenTelemetry `SpanProcessor`，把已结束 span 扇出到进程内订阅。先把一个
-共享实例注册到当前 `TracerProvider`，再把同一个对象注入所有消费 Rail。
+`TrajectorySpanProcessor` 实现 OpenTelemetry `SpanProcessor`，把已结束 span 扇出到进程内订阅。在线
+Agent/Team host 先 acquire observability，再通过
+`openjiuwen.extensions.observability.demand.get_trajectory_span_processor()` 获取进程级实例。demand
+coordinator 会把同一个对象注册到共享 provider；所有消费 Rail 都注入该对象，不要另建 processor。
 
 ```python
 subscription = processor.subscribe(
@@ -69,6 +77,9 @@ processor.unsubscribe(subscription)
 - `suppress()` 阻止 optimizer/reviewer 自身工作重新进入轨迹订阅，同时保留普通 exporter 输出。
 
 不要从 exporter 回读轨迹，也不要为每个 Rail 单独创建 processor。
+
+如需为每次 Agent invoke 归档一条 canonical LLM/tool execution trajectory，使用 `TrajectoryStore` 挂载
+[`TrajectoryRail`](../openjiuwen.harness/rails/evolution/trajectory_rail.md)。
 
 ## class TrajectoryStore
 

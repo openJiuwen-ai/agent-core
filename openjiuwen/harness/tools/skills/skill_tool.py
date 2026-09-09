@@ -280,11 +280,18 @@ def _skill_layout_metadata(skill_directory: Path) -> Dict[str, Any]:
     return meta
 
 
-def _format_layout_appendix_for_model(layout: Dict[str, Any]) -> str:
+def _format_layout_appendix_for_model(layout: Dict[str, Any], *, skill_name: str = "") -> str:
     """Render directory layout for model-facing tool text.
 
     AbilityManager prefers ``data['content']`` when present and drops other fields.
     Append this block to ``content`` so directory_tree / nested skills stay visible.
+
+    Args:
+        layout: Metadata from :func:`_skill_layout_metadata`.
+        skill_name: Name of the skill being read. Used to spell the nested-skill
+            example as a call that actually works — a nested skill is not
+            registered as a top-level skill, so its own name is not a valid
+            ``skill_name`` and the model has to keep passing the parent's.
     """
     parts: List[str] = []
     tree = layout.get("directory_tree")
@@ -301,15 +308,24 @@ def _format_layout_appendix_for_model(layout: Dict[str, Any]) -> str:
 
     names = layout.get("discovered_skill_names")
     if isinstance(names, list) and names:
-        lines = "\n".join(f"- {name}/SKILL.md" for name in names if str(name).strip())
+        valid_names = [str(name).strip() for name in names if str(name).strip()]
+        lines = "\n".join(f"- {name}/SKILL.md" for name in valid_names)
         if lines:
             note = ""
             if layout.get("discovered_skill_names_truncated"):
                 note = "\n…(truncated)"
+            # Spell the example with this skill's own name and a real nested
+            # path. These directories live inside the skill and are not
+            # registered as top-level skills, so calling skill_tool with one of
+            # their names is the obvious next step and the one that fails.
+            parent = skill_name.strip() or "<this skill>"
+            example = valid_names[0]
             parts.append(
                 "## Nested skills\n"
-                "Load a nested skill with skill_tool and relative_file_path, e.g. "
-                "`designer/SKILL.md`.\n"
+                "Directories inside this skill. They are **not** top-level skills — "
+                f'`skill_tool(skill_name="{example}")` will not find them. Keep this '
+                "skill's name and point relative_file_path at the one you want:\n"
+                f'`skill_tool(skill_name="{parent}", relative_file_path="{example}/SKILL.md")`\n'
                 f"{lines}{note}"
             )
     return "\n\n".join(parts)
@@ -397,11 +413,12 @@ class SkillTool(Tool):
                 "skill_directory": str(skill.directory),
                 "skill_content": skill_file_content,
             }
+            body = skill_file_content
             if (
                 self.multimodal_skill_mode == "hint"
                 and skill_markdown_has_media(skill_file_content)
             ):
-                data["content"] = apply_skill_tool_markdown_images_hint(
+                body = apply_skill_tool_markdown_images_hint(
                     skill_file_content,
                     enable_read_image_multimodal=self.enable_read_image_multimodal,
                 )
@@ -413,11 +430,13 @@ class SkillTool(Tool):
             )
             data.update(layout)
 
-            # AbilityManager._build_tool_message_content short-circuits on data['content']
-            # and would otherwise hide directory_tree / discovered_skill_names from the model.
-            appendix = _format_layout_appendix_for_model(layout)
-            if appendix and data.get("content"):
-                data["content"] = str(data["content"]).rstrip() + "\n\n" + appendix
+            # ``content`` is set unconditionally: AbilityManager renders it verbatim
+            # when present and otherwise falls back to ``str(result)``, which buries
+            # the skill body — and this appendix with it — inside a pydantic repr of
+            # the whole ToolOutput. The other keys stay in ``data`` for programmatic
+            # consumers; the model reads this.
+            appendix = _format_layout_appendix_for_model(layout, skill_name=skill.name)
+            data["content"] = f"{body.rstrip()}\n\n{appendix}" if appendix else body
 
             return ToolOutput(
                 success=True,

@@ -23,6 +23,7 @@ from .browser_working_context import BrowserWorkingContextStore
 
 _BROWSER_STATE_MESSAGE_NAME = "current_browser_state"
 _BROWSER_STATE_METADATA_KEY = "browser_state_context"
+_BROWSER_STATE_MESSAGE_ID = "openjiuwen:browser-state"
 _BROWSER_PROGRESS_MESSAGE_NAME = "browser_state_progress"
 _BROWSER_PROGRESS_METADATA_KEY = "browser_state_progress_context"
 _PAGE_CHANGE_INITIAL = "initial"
@@ -381,6 +382,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             name=_BROWSER_STATE_MESSAGE_NAME,
             metadata={
                 _BROWSER_STATE_METADATA_KEY: True,
+                "context_message_id": _BROWSER_STATE_MESSAGE_ID,
                 PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY: True,
             },
             content=text,

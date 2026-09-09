@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Protocol
+from typing import TYPE_CHECKING, Any, Callable, ContextManager, Protocol
 
 from openjiuwen.agent_teams.external.cli_agent.claude.options import load_claude_sdk
 from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
@@ -53,7 +53,6 @@ def build_claude_sdk_mcp_tool_set(
     lifecycle: str,
     language: str,
     workspace_manager: "TeamWorkspaceManager | None" = None,
-    on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     parent_agent: Any = None,
     messager: Any = None,
@@ -77,7 +76,6 @@ def build_claude_sdk_mcp_tool_set(
         lifecycle: Team lifecycle.
         language: Tool description language.
         workspace_manager: Optional shared workspace manager.
-        on_teammate_created: Optional spawn callback for leader tools.
         model_config_allocator: Optional model allocation callback for spawn tools.
         parent_agent: Optional parent agent used by leader-only async tools.
         messager: Optional messager used by leader-only async tools.
@@ -105,7 +103,6 @@ def build_claude_sdk_mcp_tool_set(
         teammate_mode=teammate_mode,
         dispatch_mode=dispatch_mode,
         lifecycle=lifecycle,
-        on_teammate_created=on_teammate_created,
         model_config_allocator=model_config_allocator,
         lang=language,
         parent_agent=parent_agent,

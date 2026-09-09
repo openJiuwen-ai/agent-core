@@ -248,6 +248,46 @@ class BaseModelClient(ABC):
         }
 
     @staticmethod
+    def _extract_cache_creation_tokens(obj: Any) -> int | None:
+        """Extract cache-write tokens only when the provider exposes them."""
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        paths = (
+            ("input_tokens_details", "cache_creation_tokens"),
+            ("input_token_details", "cache_creation_tokens"),
+            ("prompt_tokens_details", "cache_creation_tokens"),
+        )
+        fields = (
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cache_creation_tokens",
+            "cache_write_tokens",
+        )
+        values = (_get_path(obj, path) for path in paths)
+        for value in (*values, *(_get_value(obj, field) for field in fields)):
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                return max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
     def _extract_reasoning_tokens(obj: Any) -> int:
         """Extract reasoning/thinking token count from provider usage metadata.
 
@@ -540,7 +580,12 @@ class BaseModelClient(ABC):
 
         # Add other parameters (filter out internal parameters)
         # parser and output_parser are for internal use and should not be passed to model API
-        internal_params = {"parser", "output_parser"}
+        internal_params = {
+            "parser",
+            "output_parser",
+            "request_purpose",
+            "context_operation_id",
+        }
 
         # Get all fields from model_config (including extra fields)
         extra_params = self.model_config.model_dump(

@@ -833,7 +833,7 @@ class PrefixCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
-        return max(len(text) // 4, 1) if text else 0
+        return max(len(text) // 3, 1) if text else 0
 
     def _context_debug_enabled(self) -> bool:
         return bool(getattr(self.config, "enable_compression_dump", False))
@@ -857,7 +857,7 @@ class PrefixCompactProcessor(ContextProcessor):
             {
                 "idx": idx,
                 "role": getattr(message, "role", None),
-                "tokens": max(len(str(getattr(message, "content", "") or "")) // 4, 1),
+                "tokens": max(len(str(getattr(message, "content", "") or "")) // 3, 1),
                 "preview": (str(getattr(message, "content", "") or ""))[:200],
             }
             for idx, message in enumerate(messages)

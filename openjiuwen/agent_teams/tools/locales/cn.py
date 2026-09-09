@@ -179,10 +179,13 @@ STRINGS: dict[str, str] = {
         "你不得自行选择、推断或补全；用户未明确指定时必须省略，使该 Agent 使用其自身默认模型"
     ),
     "spawn_external_cli.fallback_model_name": (
-        "必填。必须从团队模型池中选择，并根据该第三方 Agent 支持的模型调用协议选择兼容模型。"
+        "必填，但在没有兼容模型时允许为 null。存在兼容模型时，必须从团队模型池中选择，并根据"
+        "该第三方 Agent 支持的模型调用协议选择兼容模型。当前模型在模型池中且协议兼容时，优先选择"
+        "当前模型；当前模型不在模型池中或协议不兼容时，再选择其他兼容模型；不得随意填写不存在或"
+        "不兼容的模型。"
         "该第三方 Agent 使用自身默认模型但认证不可用时，将使用此模型自动回退；"
-        "仅对运行时明确报告的认证失败生效。模型不存在、协议不兼容或该 Agent 不支持认证回退时，"
-        "仍可使用其自身默认模型，但不启用自动回退"
+        "仅对运行时明确报告的认证失败生效。只有团队模型池中不存在兼容模型时才能传 null，"
+        "此时仍可使用其自身默认模型，但不启用自动回退"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/member/shutdown_member.md
@@ -292,20 +295,23 @@ STRINGS: dict[str, str] = {
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/message/send_message.md
     "send_message.to": (
-        '收件人：填 member_name（如 "backend-dev-1"）发送点对点 DM/私聊，仅你与该成员可见；'
-        '填成员名数组（如 ["m1","m2"]）多播——同一份内容分别发给每个成员，'
-        "开销随接收人数线性增长，同等规模下比广播更贵，仅在必要时使用，"
-        '禁止与 "*"/"user" 混用；'
+        '单个收件人：填 member_name（如 "backend-dev-1"）发送点对点 DM/私聊，仅你与该成员可见；'
         '填 "user"（仅 teammate 用于回复用户，leader 调用会被拒绝）；'
         '填 "*" 广播到团队频道 channel，所有成员可见——一次广播会唤醒每一个成员各跑一轮 '
-        "LLM 交互，开销与团队规模成正比，仅用于全员必须知晓的公告，务必慎用"
+        "LLM 交互，开销与团队规模成正比，仅用于全员必须知晓的公告，务必慎用。"
+        "多播不要填写本字段，改用 targets"
+    ),
+    "send_message.targets": (
+        '多播收件人数组（如 ["m1","m2"]）：同一份内容分别发给每个成员，'
+        "开销随接收人数线性增长，同等规模下比广播更贵，仅在必要时使用；"
+        '禁止包含 "*" 或 "user"。不能与 to 同时填写'
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
     "send_message.error_leader_to_user": "Leader 不能 send_message 给 'user'。请直接用普通回复输出给用户。",
     "send_message.error_content_too_long": (
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"
-        "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"
+        "先用 write_file 把正文写到团队共享产物目录（见团队信息块「团队共享工作空间」的最终产物目录）下的文件，再重发本消息，"
         "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
     ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============

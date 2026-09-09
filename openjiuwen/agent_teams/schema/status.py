@@ -351,6 +351,30 @@ TASK_TRANSITIONS: Dict[TaskStatus, List[TaskStatus]] = {
 }
 
 
+# TASK_REASSIGNABLE_STATUSES — the task's owner can be swapped in place, with
+# the status left exactly as it is. This is a question about *ownership*, not
+# about progress, so it is deliberately not the complement of the terminal
+# states:
+#
+#   PENDING / BLOCKED — owned but not started (the scheduled mode's resting
+#       state, and an autonomous task pre-assigned at creation). Nothing is
+#       in flight, which makes this the *safest* moment to hand work over.
+#   IN_PROGRESS — owned and executing. Handing it over costs the former
+#       owner's in-flight reasoning, which ``TASK_REVOKED`` tells it to drop.
+#
+# The two gates are excluded: ``PLANNING`` and ``IN_REVIEW`` each have an
+# artifact (a submitted plan, a review in progress) bound to the *current*
+# owner, so swapping the owner underneath would leave that artifact attributed
+# to someone who never produced it. Terminal states have no owner to move.
+TASK_REASSIGNABLE_STATUSES: frozenset[TaskStatus] = frozenset(
+    {
+        TaskStatus.PENDING,
+        TaskStatus.BLOCKED,
+        TaskStatus.IN_PROGRESS,
+    }
+)
+
+
 def is_valid_transition(
     current_status: Enum,
     new_status: Enum,

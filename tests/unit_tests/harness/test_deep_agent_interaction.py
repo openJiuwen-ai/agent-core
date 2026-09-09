@@ -867,6 +867,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     effective_inputs = react_agent.invoke.await_args.args[0]
     assert isinstance(effective_inputs["query"], InteractiveInput)
     assert effective_inputs["query"].user_inputs == interactive_input.user_inputs
+    assert react_agent.invoke.await_args.kwargs == {"_streaming": True}
     coordinator.reset.assert_not_called()
     controller.submit_round.assert_not_awaited()
     build_next_work.assert_not_called()

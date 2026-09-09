@@ -2,6 +2,8 @@
 
 Public rail for regular skill online evolution. This page covers existing skill experience evolution, not new skill creation and not team-skill evolution.
 
+Install the runtime dependency first: `uv sync --extra observability`.
+
 ---
 
 ## class SkillEvolutionRail
@@ -13,10 +15,10 @@ Public rail for collecting agent trajectories, detecting reusable regular-skill 
 ```python
 from openjiuwen.harness.rails import (
     EvolutionInterruptRail,
-    EvolutionReviewRuntime,
     SkillEvolutionRail,
     configure_skill_evolution,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime, build_evolve_review_command_prompt
 ```
 
 The active evolution review flow delegates to the stable `evolution_reviewer` subagent through the rail-owned
@@ -45,6 +47,11 @@ configure_skill_evolution(
 
 The configuration API wires `EvolutionInterruptRail` with the regular `SkillEvolutionRail`.
 
+Use `configure_skill_evolution_runtime(...)` instead when the Agent is already initialized; it immediately registers
+only the newly added interrupt and evolution Rails. Both configuration functions are idempotent for an identical
+configuration and reject a conflicting or cross-mode configuration. Remove Rails with
+`unconfigure_skill_evolution(agent, team=False)`; omit `team` to remove both modes.
+
 Manual wiring requires explicit shared objects:
 
 ```python
@@ -59,7 +66,7 @@ skill_rail = SkillEvolutionRail(
 )
 interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
-    submission_service=skill_rail.experience_manager.experience_submission_service,
+    submission_service=skill_rail.approval_submission_service,
 )
 agent = create_deep_agent(
     model=model_client,
@@ -77,8 +84,16 @@ When manual configuring, only one shared `EvolutionInterruptRail` should be used
 - `review_trigger` controls periodic self-check follow_up insertion and defaults to `False`.
 - `review_interval` controls the number of non-follow_up task iterations between review checks and must be at least 1.
 - `signal_trigger=False` disables passive signal scanning and async snapshot creation for passive evolution.
-- Active evolution is available through `request_user_evolution()`; the returned prompt asks the main agent to call `prepare_skill_evolution(user_confirmed=true)` first, then call `evolve_review_task(evolution_review_ref=...)`. The prepare tool collects the current rail's execution/conversation trajectory as default review materials, and `user_intent` only adds optimization direction.
-- Regular skill evolution ignores `kind: team-skill` skills; team skills use `TeamSkillEvolutionRail` / `TeamSkillRail`.
+- The recommended active path is host command dispatch: resolve the subject, call
+  `build_evolve_review_command_prompt()`, and deliver that prompt as the next query in the same Agent Session. The
+  prompt requires `prepare_skill_evolution(user_confirmed=true)` followed by
+  `evolve_review_task(evolution_review_ref=...)`. The prepare tool collects the current Rail execution/conversation
+  trajectory as default review material; `user_intent` only supplies review direction.
+- `request_user_evolution()` remains a compatibility wrapper for hosts that have not migrated to command dispatch.
+- Automatic regular-skill detection excludes both `kind: team-skill` and `kind: swarm-skill`; use
+  `TeamSkillEvolutionRail` for Team-root trajectory capture and passive Team/Swarm Skill detection. An explicit
+  `/evolve` command uses the canonical subject kind resolved from the on-disk `SKILL.md` rather than the Rail mode
+  and is not restricted by this automatic-detection split; legacy `team-skill` resolves as `swarm-skill`.
 
 ### Externally attributed signals
 
@@ -141,7 +156,7 @@ class SkillEvolutionRail(
 * **review_runtime** (EvolutionReviewRuntime): Shared active-review state for review subagent bindings.
 * **subject_kind** (str): Subject kind used by this rail (`"skill"` or `"swarm-skill"` normalized).
 * **language** (str): Prompt language, commonly `"cn"` or `"en"`.
-* **trajectory_span_processor** (TrajectorySpanProcessor): Shared processor already registered with the runtime's OpenTelemetry provider.
+* **trajectory_span_processor** (TrajectorySpanProcessor): Process-wide processor returned by `get_trajectory_span_processor()`. A single-Agent host must acquire observability, mount `AgentObservabilityRail`, and wrap each Agent turn with `open_agent_run_span()` / `close_agent_run_span()`; see `trajectory_rail_example`.
 * **eval_interval** (int): Number of presentations between experience scoring checks. Must be at least 1.
 * **evolution_total_timeout_secs** (float): Background evolution timeout budget.
 * **generate_records_llm_policy** (LLMInvokePolicy): LLM retry/timeout policy for record generation.
@@ -270,9 +285,19 @@ Effective record-generation, evaluation, and simplify LLM policies, the total ti
 
 ## Methods
 
-### async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
+### build_evolve_review_command_prompt(*, subject, user_intent=None, review_agent_name="evolution_reviewer", language="cn") -> str
 
-Build a host-delivered active evolution command prompt for a regular skill. The prompt does not create a review scope directly; it instructs the main agent to call `prepare_skill_evolution(user_confirmed=true)` and then use `evolve_review_task(evolution_review_ref=...)` with the returned `evolution_review_ref`.
+Build the active `/evolve` follow-up prompt. Import it from `openjiuwen.harness.rails.evolution`. Hosts should resolve
+the actual subject kind from `EvolutionStore.resolve_subject_payload(skill_name)` and run the returned prompt in the
+same Agent Session that produced the evidence trajectory.
+
+This explicit command path is independent of `signal_trigger`: the command is a user-authorized review request,
+while `signal_trigger` enables passive post-invoke detection.
+
+### Compatibility: async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
+
+Compatibility wrapper that builds a host-delivered active evolution command prompt for a regular skill. New host
+command handlers should call `build_evolve_review_command_prompt()` directly after resolving the subject.
 
 **Parameters**:
 
@@ -285,9 +310,11 @@ Build a host-delivered active evolution command prompt for a regular skill. The 
 
 * `EvolutionRequestResult`: `mode="agent_prompt"` and `followup_prompt` for the host to inject into the agent loop. It does not stage records or emit an approval event.
 
-### async approve_record(request_id) -> None
+### async approve_record(request_id, *, approved_record_ids=None) -> None
 
 Approve staged records and write them through `EvolutionStore`.
+
+When `approved_record_ids` is provided, only the selected staged records are approved; otherwise all staged records are approved.
 
 If a partial failure occurs, the unwritten tail remains in the same `PendingChange`; retry with the same `request_id`.
 
@@ -295,17 +322,21 @@ If a partial failure occurs, the unwritten tail remains in the same `PendingChan
 
 Reject staged records without writing them.
 
-### async request_simplify(skill_name, user_intent=None, mode="agent_prompt") -> SimplifyRequestResult
+### async request_simplify(skill_name, user_intent=None, *, mode="agent_prompt", max_index_records=100) -> SimplifyRequestResult
 
-Build a host-delivered simplify command prompt. The prompt contains a bounded experience summary index and asks the agent to use `list_skill_experiences`, `read_skill_experiences`, and `simplify_skill_experiences`.
+Build a host-delivered simplify command prompt. The prompt contains an experience summary index bounded by
+`max_index_records` and asks the agent to use `list_skill_experiences`, `read_skill_experiences`, and
+`simplify_skill_experiences`.
 
 **Returns**:
 
 * `SimplifyRequestResult`: `mode="agent_prompt"` and `followup_prompt`. It does not call the scorer, stage governance actions, or emit an approval event.
 
-### async request_rebuild(skill_name, user_intent=None, min_score=0.5) -> Optional[str]
+### async request_rebuild(skill_name, user_intent=None, min_score=0.5, max_context_records=40, max_context_chars=20000) -> Optional[str]
 
 Archive current skill assets and return a rebuild follow-up prompt using filtered evolution records. The host or command handler must inject the returned prompt into the agent loop; the rail does not directly write the rebuilt `SKILL.md`.
+
+`max_context_records` and `max_context_chars` bound the deterministic rebuild context embedded in the prompt.
 
 ### async drain_pending_host_events(wait=False, timeout=None) -> list[OutputSchema]
 
@@ -319,9 +350,15 @@ Compatibility wrapper for `drain_pending_host_events()`.
 
 ## Example
 
+The runnable `examples.agent_evolving.skill_evolution_example` module contains both regular Skill creation and
+evolution cases, including the host-owned single-Agent root trace required for span capture. Select one with
+`--scenario create` or `--scenario evolve`, or run both with `--scenario all`.
+
 ```python
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails import EvolutionInterruptRail, EvolutionReviewRuntime, SkillEvolutionRail
+from openjiuwen.core.runner import Runner
+from openjiuwen.harness.rails import EvolutionInterruptRail, SkillEvolutionRail
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime, build_evolve_review_command_prompt
 
 runtime = EvolutionReviewRuntime()
 skill_rail = SkillEvolutionRail(
@@ -334,7 +371,7 @@ skill_rail = SkillEvolutionRail(
 )
 interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
-    submission_service=skill_rail.experience_manager.experience_submission_service,
+    submission_service=skill_rail.approval_submission_service,
 )
 
 agent = create_deep_agent(
@@ -343,13 +380,11 @@ agent = create_deep_agent(
     rails=[interrupt_rail, skill_rail],
 )
 
-result = await skill_rail.request_user_evolution(
-    "code-review",
-    "Prefer behavior-level findings before style comments",
+subject = skill_rail.store.resolve_subject_payload("code-review")
+followup_prompt = build_evolve_review_command_prompt(
+    subject=subject,
+    user_intent="Prefer behavior-level findings before style comments",
 )
-
-if result.followup_prompt:
-    # Host delivery is application-specific: queue it as the next query,
-    # follow-up, or equivalent message in your agent loop.
-    await agent.invoke({"query": result.followup_prompt})
+# Run this as the next query in the same Session that produced the trajectory.
+await Runner.run_agent(agent, {"query": followup_prompt}, session=session)
 ```

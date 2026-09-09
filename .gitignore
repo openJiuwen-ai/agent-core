@@ -13,6 +13,8 @@ build/
 !openjiuwen/symphony/retrieval/build/**
 !tests/unit_tests/symphony/retrieval/build/
 !tests/unit_tests/symphony/retrieval/build/**
+openjiuwen/symphony/retrieval/build/**/__pycache__/
+tests/unit_tests/symphony/retrieval/build/**/__pycache__/
 develop-eggs/
 dist/
 downloads/

@@ -67,7 +67,6 @@ class TeamToolRail(DeepAgentRail):
         lifecycle: str = "temporary",
         team_mode: str = "default",
         language: str = "cn",
-        on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         exclude_tools: Optional[Set[str]] = None,
         workspace_manager: Optional["TeamWorkspaceManager"] = None,
@@ -90,7 +89,6 @@ class TeamToolRail(DeepAgentRail):
         self._lifecycle = lifecycle
         self._team_mode = team_mode
         self._language = language
-        self._on_teammate_created = on_teammate_created
         self._model_config_allocator = model_config_allocator
         self._exclude_tools = exclude_tools
         self._workspace_manager = workspace_manager
@@ -132,7 +130,6 @@ class TeamToolRail(DeepAgentRail):
             dispatch_mode=self._dispatch_mode,
             lifecycle=self._lifecycle,
             team_mode=self._team_mode,
-            on_teammate_created=self._on_teammate_created,
             model_config_allocator=self._model_config_allocator,
             exclude_tools=self._exclude_tools,
             lang=self._language,

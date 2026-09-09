@@ -20,6 +20,7 @@ from .browser_working_context import (
 
 _BROWSER_WORKING_CONTEXT_MESSAGE_NAME = "browser_working_context"
 _BROWSER_WORKING_CONTEXT_METADATA_KEY = "browser_working_context"
+_BROWSER_WORKING_CONTEXT_MESSAGE_ID = "openjiuwen:browser-working-context"
 
 
 class BrowserWorkingContextProcessorConfig(BrowserWorkingContextConfig):
@@ -63,7 +64,10 @@ class BrowserWorkingContextProcessor(ContextProcessor):
         ]
         working_context_message = UserMessage(
             name=_BROWSER_WORKING_CONTEXT_MESSAGE_NAME,
-            metadata={_BROWSER_WORKING_CONTEXT_METADATA_KEY: True},
+            metadata={
+                _BROWSER_WORKING_CONTEXT_METADATA_KEY: True,
+                "context_message_id": _BROWSER_WORKING_CONTEXT_MESSAGE_ID,
+            },
             content=prompt_text,
         )
         insert_at = len(retained_messages)

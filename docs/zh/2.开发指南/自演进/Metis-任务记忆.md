@@ -24,12 +24,15 @@ uv sync --extra observability
 ```python
 import asyncio
 
-from openjiuwen.agent_evolving.trajectory import TrajectorySpanProcessor
 from openjiuwen.core.runner import Runner
 from openjiuwen.extensions.observability.config import ObservabilityConfig
-from openjiuwen.extensions.observability.setup import (
-    init_observability,
-    shutdown_observability,
+from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
+from openjiuwen.harness.observability import (
+    AgentObservabilityRail,
+    acquire_observability,
+    close_agent_run_span,
+    open_agent_run_span,
+    release_observability,
 )
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.rails import MetisContextEvolveRail
@@ -40,15 +43,12 @@ USER_ID = "your-stable-user-id"
 
 
 async def main():
-    processor = TrajectorySpanProcessor()
-    init_observability(
+    acquire_observability(
         ObservabilityConfig(
-            exporter="console",
-            redact_prompts=True,
-            redact_completions=True,
-        ),
-        additional_span_processors=(processor,),
+            exporter="console", redact_prompts=True, redact_completions=True
+        )
     )
+    processor = get_trajectory_span_processor()
 
     metis_rail = MetisContextEvolveRail(
         llm=model_client,
@@ -58,28 +58,36 @@ async def main():
     )
     agent = create_deep_agent(
         model=model_client,
-        rails=[metis_rail],
+        rails=[AgentObservabilityRail(), metis_rail],
+        trajectory_span_processor=processor,
     )
 
     await Runner.start()
     try:
-        result = await Runner.run_agent(
-            agent,
-            {"query": "分析这个项目的测试失败并给出修复方案"},
-            session="metis-demo-session",
-        )
+        session_id = "metis-demo-session"
+        root_span = open_agent_run_span(session_id=session_id, mode="metis")
+        try:
+            result = await Runner.run_agent(
+                agent,
+                {"query": "分析这个项目的测试失败并给出修复方案"},
+                session=session_id,
+            )
+        except BaseException as exc:
+            close_agent_run_span(root_span, session_id=session_id, exception=exc)
+            raise
+        close_agent_run_span(root_span, session_id=session_id, output=result)
         print(result)
     finally:
         # 默认使用后台演进；退出前等待记忆写入完成。
         await metis_rail.cleanup_background_tasks()
         await Runner.stop()
-        shutdown_observability()
+        release_observability()
 
 
 asyncio.run(main())
 ```
 
-`TrajectorySpanProcessor` 必须注册到实际采集 Agent Span 的 observability runtime。宿主已经完成注册时，直接复用同一个 processor，不要重复创建。
+`get_trajectory_span_processor()` 返回 observability demand coordinator 注册的进程级共享 processor。Agent 和所有消费轨迹的 Rail 都应复用该实例，不要再创建第二个 processor。
 
 ---
 

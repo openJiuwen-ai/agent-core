@@ -17,6 +17,9 @@ from openjiuwen.harness.image_modality_probe import (
     reset_image_support_cache,
     schedule_image_support_probe,
 )
+from openjiuwen.core.foundation.llm.call_scope import (
+    is_llm_observation_suppressed,
+)
 
 
 class _FakeClientConfig:
@@ -98,12 +101,22 @@ async def test_probe_result_is_cached_per_endpoint_and_model() -> None:
 
 @pytest.mark.asyncio
 async def test_probe_retries_without_vendor_switches() -> None:
-    invoke = AsyncMock(side_effect=[TypeError("unknown field: thinking"), _FakeResponse("red")])
+    observation_states: list[bool] = []
+
+    async def invoke_probe(*_args: Any, **_kwargs: Any) -> _FakeResponse:
+        observation_states.append(is_llm_observation_suppressed())
+        if len(observation_states) == 1:
+            raise TypeError("unknown field: thinking")
+        return _FakeResponse("red")
+
+    invoke = AsyncMock(side_effect=invoke_probe)
     llm = _make_llm(invoke=invoke)
 
     assert await probe_image_support(llm) is True
     assert invoke.await_count == 2
     assert "extra_body" not in invoke.await_args.kwargs
+    assert observation_states == [True, True]
+    assert not is_llm_observation_suppressed()
 
 
 @pytest.mark.asyncio

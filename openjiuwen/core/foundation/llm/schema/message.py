@@ -1,10 +1,17 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from typing import Union, List, Optional, Any, Dict
 from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+
+
+OPENJIUWEN_MESSAGE_PROVENANCE_METADATA = "_openjiuwen_message_provenance"
+OPENJIUWEN_MESSAGE_ORIGIN_METADATA = "_openjiuwen_message_origin"
+OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA = "_openjiuwen_message_source_kind"
+OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER = "external_user"
+OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL = "harness_internal"
 
 
 class UsageMetadata(BaseModel):
@@ -26,6 +33,7 @@ class UsageMetadata(BaseModel):
     cache_status: Optional[str] = None
     cache_source: Optional[str] = None
     cache_authoritative: bool = False
+    cache_creation_input_tokens: Optional[int] = None
     reasoning_tokens: int = 0
     input_cost: float = 0.
     output_cost: float = 0.
@@ -52,6 +60,10 @@ class AssistantMessage(BaseMessage):
     prompt_token_ids: Optional[List[int]] = None
     completion_token_ids: Optional[List[int]] = None
     logprobs: Optional[Any] = None
+    response_id: Optional[str] = None
+    response_model: Optional[str] = None
+    provider_metadata: Dict[str, Any] = Field(default_factory=dict)
+    provider_content: Optional[Any] = None
 
     @model_validator(mode='before')
     @classmethod
@@ -121,6 +133,14 @@ class AssistantMessage(BaseMessage):
             result["completion_token_ids"] = self.completion_token_ids
         if self.logprobs is not None:
             result["logprobs"] = self.logprobs
+        if self.response_id is not None:
+            result["response_id"] = self.response_id
+        if self.response_model is not None:
+            result["response_model"] = self.response_model
+        if self.provider_metadata:
+            result["provider_metadata"] = self.provider_metadata
+        if self.provider_content is not None:
+            result["provider_content"] = self.provider_content
         return result
 
 
