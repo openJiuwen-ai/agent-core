@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-09-07 |
+| 最近一次修订日期 | 2026-09-09 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -48,6 +48,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 4. **工具分组簇**：
    - web：`create_web_tools()`（fetch / free_search / paid_search）+ `WebFreeSearchTool` /
      `WebFetchWebpageTool`；`is_free_search_enabled()` / `is_paid_search_enabled()` 门控。
+     付费搜索卡片的描述和 `provider` 枚举仅包含 `auto` 与当前配置了非空 Key 的供应商。
+     调用时重新读取配置：已移除的供应商和失效的环境变量覆盖回退到当前可用供应商，
+     不进入未配置供应商的 runner；全部 Key 移除时不注册工具，也不发出付费请求。
+     热重载不能因卡片 ID 相同而保留旧的付费搜索描述或参数枚举。
    - vision/audio：`create_vision_tools()` / `create_audio_tools()`；由 `VisionModelConfig`
      / `AudioModelConfig` 门控（`S_01` 不变量 8）。
    - todo：`create_todos_tool()`（`TodoCreateTool` / `TodoListTool` / `TodoGetTool` /
