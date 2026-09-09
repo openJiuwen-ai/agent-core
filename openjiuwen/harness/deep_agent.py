@@ -610,7 +610,8 @@ class DeepAgent(BaseAgent):
         """Sync tool cards in the shared AbilityManager during hot-reconfigure.
 
         Tools are matched by id: a card whose id already exists in the
-        AbilityManager is left untouched.  Cards with a new id replace any
+        AbilityManager is left untouched, except paid-search cards whose
+        configured-provider metadata has changed. Cards with a new id replace any
         existing entry with the same name, or are added fresh.  Tools present
         in the AbilityManager but absent from config.tools are removed.
         MCP server registrations and other ability types are not affected.
@@ -643,7 +644,8 @@ class DeepAgent(BaseAgent):
         for name, card in new_by_name.items():
             existing = self.ability_manager.get(name)
             existing_tool = existing if isinstance(existing, ToolCard) else None
-            if existing_tool is not None and existing_tool.id == card.id:
+            same_card = existing_tool is not None and existing_tool.id == card.id
+            if same_card and (name != "paid_search" or existing_tool == card):
                 self._ensure_builtin_tool_resource(card, config)
                 continue  # Same id - no update needed.
             if existing_tool is not None:
