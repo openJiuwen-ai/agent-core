@@ -26,8 +26,8 @@
    | provider | card | capabilities | optional host capabilities |
    |---|---|---|---|
    | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT |
-   | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS |
-   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, CHECKPOINT_SINK, MCP_SERVERS |
+   | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
+   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `dsh` | `deepseek-harness` | （空） | （空） |
 
    未声明的命令抛 `UnsupportedHarnessCapabilityError`；`_validate_context` 在 `start` 里 fail-fast。
@@ -50,7 +50,13 @@
    DELTA 直出，FINAL/SNAPSHOT 只补前缀增量；`send(InteractiveInput)` 先应答 pending interaction，
    未匹配时以 `metadata.kind="interactive_input"` 转发；`delivery_mode(immediate)` 按状态与 STEER
    能力选 AUTO / STEER / FOLLOW_UP。
-8. **manifest 是 DeepAgent-first**：`create_harness` 对 `native` 传整份 template
+8. **provider 扩展先 ratify 再提交**：会改变 provider 持久身份的一次性切换（当前只有 Claude Code /
+   Codex 的认证 fallback）在生效前经 `SerializedTurnHarness._confirm_provider_extension(request_type,
+   payload)` 发 `ProviderInteractionRequest`（`request_type="auth_fallback"`，payload
+   `{model, api_base[, provider]}`）。宿主未声明 `PROVIDER_INTERACTION` 或未装 interactions 时视为
+   同意；声明了但应答非 `COMPLETED` 时 harness 必须断开 fallback client、用原 session / thread 重连
+   原生端点并让当前 Turn 按原 `auth_required` 失败，不发布 `auth_fallback_activated`。
+9. **manifest 是 DeepAgent-first**：`create_harness` 对 `native` 传整份 template
    （`NativeHarnessProvider.create({"deep_agent", "agent_template", "session_id", "language",
    "event_buffer_capacity"})`）；对 `claudecode` / `codex` / `dsh` 只把 `model` 端点映射进 provider
    配置（显式 `config` 优先），manifest 的 `tools` / `rails` / `subagents` / `skills` 非空时
@@ -71,7 +77,9 @@ PROVIDER_NAMES == ("native", "claudecode", "codex", "dsh")
 
 class HarnessIOAdapter:
     def __init__(self, harness, *, event_observer=None, auto_approve_tools=True,
-                 stop_on_unsupported_force_abort=False)
+                 stop_on_unsupported_force_abort=False, provider_interaction_handler=None)
+    # provider_interaction_handler 非空时 prepare_context 追加 HostCapability.PROVIDER_INTERACTION，
+    # handle(ProviderInteractionRequest) 转交该 handler；为空时一律 DECLINED
     async start(context) / stop(); outputs() -> AsyncIterator[OutputSchema]
     async send(content, *, immediate=False) -> SendReceipt | None
     async abort(*, immediate=False) / pause() / resume(*, query=None)

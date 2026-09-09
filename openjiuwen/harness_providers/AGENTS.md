@@ -67,7 +67,18 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    `__interaction__` chunks and resolves `InteractiveInput` against pending
    interactions; `agent_teams.external.member_runtime` composes it instead of
    projecting events itself.
-8. **The manifest is DeepAgent-first.** `create_harness` hot-loads the full
+8. **Provider extensions are ratified before they commit.** A switch that
+   changes the provider's persistent identity (today: the Claude Code / Codex
+   authentication fallback) goes through
+   `SerializedTurnHarness._confirm_provider_extension`, which sends a
+   `ProviderInteractionRequest(request_type="auth_fallback")`. A host without
+   `PROVIDER_INTERACTION` implicitly agrees; a host that declines makes the
+   harness reconnect the native endpoint (same session / thread) and fail the
+   turn with the original `auth_required` error. `HarnessIOAdapter` only
+   declares `PROVIDER_INTERACTION` when a `provider_interaction_handler` is
+   bound; `agent_teams.external.member_runtime` binds one that answers
+   `auth_fallback` from the team DB promotion.
+9. **The manifest is DeepAgent-first.** `create_harness` hot-loads the full
    `AgentTemplateSpec` for `native`; third-party providers only take the model
    endpoint and, through `build_harness_context`, the rendered prompt sections
    and MCP servers. Manifests carrying `tools` / `rails` / `subagents` / `skills`

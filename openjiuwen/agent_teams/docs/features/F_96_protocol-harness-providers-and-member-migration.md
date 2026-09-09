@@ -8,7 +8,7 @@
 | 范围 | `openjiuwen/harness_providers/`（新包）、`openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/{spawn,claude,codex}/`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
 | 协议版本 | `1.0` |
 | 关联 feature | `F_94_external-harness-protocol.md`、`F_95_dsh-external-harness-adapter.md` |
-| 测试基线 | `tests/unit_tests/agent_teams`（2879 通过）、`tests/unit_tests/harness`（4126 通过）、`tests/unit_tests/harness_providers`（46 通过）、`tests/unit_tests/harness_protocol`（27 通过）、`tests/unit_tests/agent_teams/external/test_codex_observability_wiring.py`（5 通过）；e2e：Claude Code 8/8、Codex 7/7（codex-cli 0.153.4）、DSH 5/5、native 7/7（DeepSeek `deepseek-v4-flash` 端点）通过 |
+| 测试基线 | `tests/unit_tests/agent_teams`（2879 通过）、`tests/unit_tests/harness`（4126 通过）、`tests/unit_tests/harness_providers` + `tests/unit_tests/agent_teams/external`（211 通过，含 fallback ratification 用例）、`tests/unit_tests/harness_protocol`（27 通过）、`tests/unit_tests/agent_teams/external/test_codex_observability_wiring.py`（5 通过）；e2e：Claude Code 8/8、Codex 7/7（codex-cli 0.153.4）、DSH 5/5、native 7/7（DeepSeek `deepseek-v4-flash` 端点）通过 |
 | Refs | #751 |
 
 ## 背景
@@ -59,6 +59,12 @@ provider 只实现 `_open_session` / `_close_session` / `_execute_turn`（可选
   http_status})`；类别集合与 `schema/external_runtime_reliability.py` 一一对应。认证 fallback 保留在
   harness 内（第一次输出前的 `auth_required` 一次性切换到 `fallback_model`），并发布
   `ProviderEvent("auth_fallback_activated")`。
+- 认证 fallback 在**提交前**先向宿主 ratify：连上 fallback 端点后，harness 经
+  `SerializedTurnHarness._confirm_provider_extension` 发 `ProviderInteractionRequest(request_type=
+  "auth_fallback", payload={model, api_base[, provider]})`；宿主未声明 `PROVIDER_INTERACTION` 视为默认
+  同意，声明了但应答不是 `COMPLETED` 则 harness 断开 fallback client、以原 session / thread 重新连回
+  原生端点并让本 Turn 按 `auth_required` 失败。Claude Code / Codex 两张 card 把 `PROVIDER_INTERACTION`
+  列为 optional host capability。
 
 ### 4. `HarnessIOAdapter`：协议 ⇄ DeepAgent 输入输出
 
@@ -77,8 +83,10 @@ member runtime 组合 IO adapter，负责：成员 child AgentSession（checkpoi
 回调、可靠性（`bind_reliability_context`：STARTED → `begin_attempt`，FAILED → `finalize_failure`，
 `retrying` 诊断 → `publish_retrying`，启动失败 → `mark_member_error`）、观测桥接
 （`bind_span_bridge`：`start_turn` / `finish_turn`，Claude 桥接另外消费投影 chunk，Codex 桥接经
-provider-private `notification_observer`）、认证 fallback 持久化（`bind_fallback_promotion`）、
-MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / rollout reader）。
+provider-private `notification_observer`）、认证 fallback 持久化（`bind_fallback_promotion`：runtime 以
+`HarnessIOAdapter(provider_interaction_handler=...)` 应答 `auth_fallback` 请求，`promote()` 返回 `True`
+才 `COMPLETED`，返回 `False` 或抛异常都 `DECLINED`，未绑定 promotion 时直接同意；其它 request type 一律
+`DECLINED`）、MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / rollout reader）。
 `resume_external_backend=True` 要求成员 checkpoint 存在并以 `REQUIRE_RESUME` 启动。
 
 `build_cli_runtime` 的 claude / codex 分支改为构造 provider + `HarnessContext` + member runtime；
@@ -108,6 +116,12 @@ MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / roll
   不同 provider 下"看似成功"却行为不同；显式拒绝。
 - **factory 放进 `openjiuwen/harness/manifest`**：需要 import 四个 vendor provider，造成 harness →
   vendor adapter 依赖。
+- **fallback 先切换、宿主事后经 `ProviderEvent` 持久化**（首版做法）：持久化失败时 harness 已经跑在
+  一个团队 DB 里没有记录的端点上，成员重启后又会回到原端点，行为与记录漂移；改为 ratify-before-commit
+  的 provider interaction，让"能不能切"由宿主决定、harness 只负责切与回退。
+- **为 fallback 新增专用协议接口**（如 `HarnessContext.on_fallback`）：这是 provider 私有语义，协议
+  已有 namespaced `ProviderInteractionRequest` 正是为此类扩展预留的；专用接口会把 vendor 语义漏进
+  provider-neutral 协议。
 
 ## 验证
 
@@ -132,5 +146,5 @@ MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / roll
 - Codex `item/tool/requestUserInput` 在当前 SDK 无生成类型，Codex 尚不支持 `UserInputRequest`。
 - `dsh` / `native` 尚未接入 `ExternalCliAgentSpec` 声明式 spawn；provider entry point discovery 未做。
 - Codex e2e 依赖本机 CLI 支持已配置默认模型；可用 `CODEX_E2E_MODEL` 指定其它模型。
-- Claude 认证 fallback 成功后若团队 DB `promote_member_fallback_model` 失败，只记录告警，不再回退
-  到原端点（旧实现会回退）。
+- fallback 被宿主拒绝后若重连原生端点也失败，harness 只记录告警并让 Turn 以 `auth_required` 失败，
+  下一次 `send` 会因无 client 再次报错；未做自动重试。

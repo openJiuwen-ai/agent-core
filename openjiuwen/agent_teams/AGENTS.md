@@ -256,7 +256,8 @@ provider session/Turn 协议合并。
   行为：成员 child AgentSession（provider checkpoint sink + `TeamContextTracker` 投递基线）、
   `harness.state` / `harness.round`（legacy 兼容名）回调、外部 runtime 可靠性上下文
   （`bind_reliability_context`：FAILED terminal / 启动失败 → leader 邮箱失败消息，retrying 诊断 →
-  进度事件）、观测桥接（`bind_span_bridge`）、认证 fallback 持久化（`bind_fallback_promotion`）与
+  进度事件）、观测桥接（`bind_span_bridge`）、认证 fallback 持久化（`bind_fallback_promotion`：以
+  `auth_fallback` provider interaction 先持久化再放行，持久化失败 provider 回退原生端点）与
   MCP server 挂载（`bind_mcp_servers`）。`resume_external_backend=True` 时要求 checkpoint 存在并以
   `REQUIRE_RESUME` 启动。Claude Code / Codex 成员都走这一条路径（`build_cli_runtime`），不再有
   `ClaudeSdkRuntime` / `CodexSdkRuntime`。详见 [[F_96_protocol-harness-providers-and-member-migration]]。

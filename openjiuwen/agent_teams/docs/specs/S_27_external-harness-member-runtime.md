@@ -51,6 +51,12 @@
 9. **legacy 回调名保留**。`harness.state`（`old` / `new` / `session_id`）与 `harness.round`
    （`kind` / `round_id` = 协议 `turn_id` / `result` = `TurnResult | None`）是 `StreamController`
    的兼容契约；不得反向把 `round` 写进公共协议。
+10. **认证 fallback 先持久化再生效**。runtime 把自己作为 adapter 的 `provider_interaction_handler`
+    注入（因此 context 总是带 `HostCapability.PROVIDER_INTERACTION`），只应答
+    `request_type == "auth_fallback"`：`bind_fallback_promotion` 绑定的 `promote()` 返回 `True` →
+    `COMPLETED`，返回 `False` 或抛异常 → `DECLINED`（provider 随即回退原生端点）；未绑定 promotion
+    时直接 `COMPLETED`；其它 request type 一律 `DECLINED`。`ProviderEvent("auth_fallback_activated")`
+    只作日志观测，不再触发持久化。
 
 ## 接口契约
 
@@ -62,7 +68,8 @@ class ExternalHarnessMemberRuntime:
                  inject_mcp=False, mcp_server_name="openjiuwen-team") -> None
     # pre-start bindings
     def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_span_bridge(bridge)
-    def bind_fallback_promotion(promote) / add_teardown_hook(hook)
+    def bind_fallback_promotion(promote)   # promote: () -> Awaitable[bool]; answers the auth_fallback interaction
+    def add_teardown_hook(hook)
     def bind_reliability_context(*, session_id, team_backend, leader_name, update_status_cb, messager)
     # MemberRuntime surface
     async start(*, team_session=None) / stop() / dispose(); state; session_id; outputs()
