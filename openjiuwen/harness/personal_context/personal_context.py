@@ -18,11 +18,12 @@ import stat
 import tempfile
 from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.context_graph import (
     build_context_graph,
@@ -41,8 +42,10 @@ from openjiuwen.harness.personal_context.fetch.feishu import (
     _lark_cli_finish_authorization,
     supported_read_scopes,
 )
+from openjiuwen.harness.personal_context.fetch.gitcode import GitCodeFetchService
 from openjiuwen.harness.personal_context.fetch.github import GitHubFetchService
 from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetchService
+from openjiuwen.harness.personal_context.fetch.rss_feed import RssFeedFetchService
 from openjiuwen.harness.personal_context.fetch.toutiao_reader import ToutiaoReaderFetchService
 from openjiuwen.harness.personal_context.fetch.zhihu_reader import ZhihuReaderFetchService
 from openjiuwen.harness.personal_context.models import FetchBatch, PersonalContextStatus
@@ -59,10 +62,12 @@ _AUTHORIZATION_STATUS_UNAVAILABLE = "Feishu authorization status is unavailable"
 _PROVIDER_TYPES: dict[str, type[ContextFetchService]] = {
     "local_files": LocalFilesFetchService,
     "github": GitHubFetchService,
+    "gitcode": GitCodeFetchService,
     "feishu": FeishuFetchService,
     "browser_bookmarks": BrowserBookmarksFetchService,
     "zhihu_reader": ZhihuReaderFetchService,
     "toutiao_reader": ToutiaoReaderFetchService,
+    "rss_feed": RssFeedFetchService,
 }
 
 
@@ -255,6 +260,7 @@ class PersonalContext:
         self._authorization_error: str | None = None
 
         self._config: PersonalContextConfig | None = None
+        self._embedding_config: EmbeddingConfig | None = None
         self._last_error: dict[str, object] | None = None
 
         self._pipeline_queue: asyncio.Queue[object] = asyncio.Queue(maxsize=_QUEUE_CAPACITY)
@@ -265,10 +271,32 @@ class PersonalContext:
         self._fetch_stop_events: dict[str, asyncio.Event] = {}
         self._fetch_providers: dict[str, ContextFetchService] = {}
         self._manual_fetch_tasks: dict[str, asyncio.Task[None]] = {}
+        self._active_fetch_run_tasks: dict[str, asyncio.Task[None]] = {}
+        self._active_fetch_run_stop_events: dict[str, asyncio.Event] = {}
         self._fetch_running: set[str] = set()
         self._fetch_states: dict[str, str] = {}
         self._fetch_errors: dict[str, str] = {}
         self._fetch_run_progress: dict[str, dict[str, object]] = {}
+
+    def _set_embedding_configuration(
+        self,
+        *,
+        model_name: str | None,
+        base_url: str | None,
+        api_key: str | None,
+    ) -> None:
+        """Set the Host-owned in-memory embedding configuration while stopped."""
+
+        candidate = (
+            EmbeddingConfig(model_name=model_name, base_url=base_url, api_key=api_key)
+            if model_name and base_url and api_key
+            else None
+        )
+        if self._state in {"STARTING", "RUNNING", "STOPPING"}:
+            if candidate == self._embedding_config:
+                return
+            raise _state_error("embedding configuration can only change while stopped")
+        self._embedding_config = candidate
 
     async def set_configuration(self, config: PersonalContextConfig) -> None:
         """Set or replace the complete configuration while PersonalContext is stopped."""
@@ -293,6 +321,8 @@ class PersonalContext:
             self._fetch_tasks = {}
             self._fetch_stop_events = {}
             self._manual_fetch_tasks = {}
+            self._active_fetch_run_tasks = {}
+            self._active_fetch_run_stop_events = {}
             self._fetch_running = set()
             self._last_error = None
             self._state = "CONFIGURED"
@@ -330,7 +360,15 @@ class PersonalContext:
         async with self._fetch_lock:
             for event in self._fetch_stop_events.values():
                 event.set()
-            tasks = list(dict.fromkeys((*self._fetch_tasks.values(), *self._manual_fetch_tasks.values())))
+            tasks = list(
+                dict.fromkeys(
+                    (
+                        *self._fetch_tasks.values(),
+                        *self._manual_fetch_tasks.values(),
+                        *self._active_fetch_run_tasks.values(),
+                    )
+                )
+            )
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -562,7 +600,12 @@ class PersonalContext:
             # lifecycle reaches STOPPED, so the fresh queue is the only queue
             # visible to the new consumer.
             self._pipeline_queue = asyncio.Queue(maxsize=_QUEUE_CAPACITY)
-            pipeline = ContextPipelineService(home=self._home, config=config, input_queue=self._pipeline_queue)
+            pipeline = ContextPipelineService(
+                home=self._home,
+                config=config,
+                input_queue=self._pipeline_queue,
+                embedding_config=self._embedding_config,
+            )
             await pipeline.start()
             self._pipeline_service = pipeline
             if config.collection_enabled:
@@ -736,27 +779,95 @@ class PersonalContext:
                     for target_id in target_ids
                 }
                 created: dict[str, asyncio.Task[None]] = {}
+                created_runs: dict[str, asyncio.Task[None]] = {}
                 previous_states = {target_id: self._fetch_states.get(target_id, "STOPPED") for target_id in target_ids}
                 try:
                     self._fetch_running.update(target_ids)
                     for target_id in target_ids:
+                        run_task = self._start_fetch_run_task(target_id, providers[target_id], trigger="manual")
                         task = asyncio.create_task(
-                            self._run_manual_fetch_once(target_id, providers[target_id]),
+                            self._run_manual_fetch_once(target_id, run_task),
                             name=f"personal-context-fetch-manual-{target_id}",
                         )
                         self._manual_fetch_tasks[target_id] = task
                         self._fetch_states[target_id] = "RUNNING"
                         created[target_id] = task
+                        created_runs[target_id] = run_task
                 except BaseException:
                     for task in created.values():
                         task.cancel()
+                    for task in created_runs.values():
+                        task.cancel()
                     for target_id in target_ids:
                         self._manual_fetch_tasks.pop(target_id, None)
+                        if self._active_fetch_run_tasks.get(target_id) is created_runs.get(target_id):
+                            self._active_fetch_run_tasks.pop(target_id, None)
+                            self._active_fetch_run_stop_events.pop(target_id, None)
                         self._fetch_running.discard(target_id)
                         self._fetch_states[target_id] = previous_states[target_id]
                     raise
 
         return {"state": "accepted", "service_ids": target_ids}
+
+    async def stop_fetch_run(self, service_id: str) -> None:
+        """Stop only the active round for one service and retain completed batches."""
+
+        safe_id = _safe_service_id(service_id)
+        async with self._fetch_lock:
+            if self._config is None or safe_id not in {item.service_id for item in self._config.fetch_services}:
+                raise _state_error("unknown fetch service")
+            task = self._active_fetch_run_tasks.get(safe_id)
+            if task is None or task.done():
+                if task is not None and self._active_fetch_run_tasks.get(safe_id) is task:
+                    self._active_fetch_run_tasks.pop(safe_id, None)
+                    self._active_fetch_run_stop_events.pop(safe_id, None)
+                return
+            stop_event = self._active_fetch_run_stop_events[safe_id]
+            progress = self._fetch_run_progress.get(safe_id, {})
+            self._fetch_run_progress[safe_id] = _fetch_run_status(
+                safe_id,
+                run_state="stopping",
+                total_items=cast(int, progress.get("total_items", 0)),
+                completed_items=cast(int, progress.get("completed_items", 0)),
+            )
+            self._fetch_states[safe_id] = "STOPPING"
+            if not stop_event.is_set():
+                stop_event.set()
+                task.cancel()
+
+        task_error: BaseException | None = None
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        except BaseException as exc:
+            task_error = exc
+            async with self._fetch_lock:
+                self._fetch_states[safe_id] = "FAILED"
+                self._fetch_errors[safe_id] = _redact_text(exc)
+        finally:
+            async with self._fetch_lock:
+                task_settled = task.done()
+                if task_settled and self._active_fetch_run_tasks.get(safe_id) is task:
+                    self._active_fetch_run_tasks.pop(safe_id, None)
+                    self._active_fetch_run_stop_events.pop(safe_id, None)
+                progress = self._fetch_run_progress.get(safe_id, {})
+                if task_settled and task_error is None and progress.get("run_state") == "stopping":
+                    self._fetch_run_progress[safe_id] = _fetch_run_status(
+                        safe_id,
+                        run_state="cancelled",
+                        total_items=cast(int, progress.get("total_items", 0)),
+                        completed_items=cast(int, progress.get("completed_items", 0)),
+                    )
+                if self._fetch_states.get(safe_id) == "STOPPING":
+                    scheduler = self._fetch_tasks.get(safe_id)
+                    self._fetch_states[safe_id] = (
+                        "RUNNING" if scheduler is not None and not scheduler.done() else "STOPPED"
+                    )
+        if task_error is not None:
+            raise task_error
 
     async def stop_fetch_service(self, service_id: str, *, timeout_seconds: float = 30.0) -> None:
         """Stop one provider, aborting its active run if the deadline expires."""
@@ -934,7 +1045,7 @@ class PersonalContext:
             else:
                 stop_error = _error(StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT, "PersonalContext stop timed out")
                 activation.cancel()
-        service_ids = sorted(set(self._fetch_tasks) | set(self._manual_fetch_tasks))
+        service_ids = sorted(set(self._fetch_tasks) | set(self._manual_fetch_tasks) | set(self._active_fetch_run_tasks))
         if service_ids:
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -1010,9 +1121,16 @@ class PersonalContext:
             self._pipeline_service = None
         if not activation_running and self._activation_task is activation:
             self._activation_task = None
-        remaining_tasks = [
-            task for task in (*self._fetch_tasks.values(), *self._manual_fetch_tasks.values()) if not task.done()
-        ]
+        active_tasks = []
+        for matched_task in (
+            *self._fetch_tasks.values(),
+            *self._manual_fetch_tasks.values(),
+            *self._active_fetch_run_tasks.values(),
+        ):
+            if matched_task.done():
+                continue
+            active_tasks.append(matched_task)
+        remaining_tasks = active_tasks
         runtime_still_running = bool(remaining_tasks) or pipeline_running or activation_running
         async with self._state_lock:
             self._state = "FAILED" if stop_error is not None or runtime_still_running else "STOPPED"
@@ -1044,6 +1162,34 @@ class PersonalContext:
             raise _error(StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID, "unsupported fetch provider")
         return provider_type(config, home=self._home)
 
+    def _start_fetch_run_task(
+        self,
+        service_id: str,
+        provider: ContextFetchService,
+        *,
+        trigger: str,
+    ) -> asyncio.Task[None]:
+        """Create and register one round while the caller holds ``_fetch_lock``."""
+
+        existing = self._active_fetch_run_tasks.get(service_id)
+        if existing is not None and not existing.done():
+            raise _state_error(f"fetch service is already running: {service_id}")
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            self._run_fetch_once(service_id, provider, stop_event=stop_event),
+            name=f"personal-context-fetch-{trigger}-run-{service_id}",
+        )
+        self._active_fetch_run_tasks[service_id] = task
+        self._active_fetch_run_stop_events[service_id] = stop_event
+        return task
+
+    def _discard_fetch_run_task(self, service_id: str, task: asyncio.Task[None]) -> None:
+        """Forget a settled round while the caller holds ``_fetch_lock``."""
+
+        if self._active_fetch_run_tasks.get(service_id) is task:
+            self._active_fetch_run_tasks.pop(service_id, None)
+            self._active_fetch_run_stop_events.pop(service_id, None)
+
     async def _run_fetch_service(self, service_id: str, stop_event: asyncio.Event) -> None:
         provider = self._fetch_providers[service_id]
         config = self._service_config(service_id)
@@ -1063,8 +1209,13 @@ class PersonalContext:
                     self._fetch_running.add(service_id)
                     if self._fetch_states.get(service_id) != "STOPPING":
                         self._fetch_states[service_id] = "RUNNING"
+                    run_task = self._start_fetch_run_task(service_id, provider, trigger="scheduled")
                 try:
-                    await self._run_fetch_once(service_id, provider)
+                    await run_task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
                 except Exception as exc:
                     async with self._fetch_lock:
                         if self._fetch_states.get(service_id) != "STOPPING":
@@ -1077,6 +1228,7 @@ class PersonalContext:
                             self._fetch_errors.pop(service_id, None)
                 finally:
                     async with self._fetch_lock:
+                        self._discard_fetch_run_task(service_id, run_task)
                         self._fetch_running.discard(service_id)
         finally:
             current = asyncio.current_task()
@@ -1091,10 +1243,14 @@ class PersonalContext:
     async def _run_manual_fetch_once(
         self,
         service_id: str,
-        provider: ContextFetchService,
+        run_task: asyncio.Task[None],
     ) -> None:
         try:
-            await self._run_fetch_once(service_id, provider)
+            await run_task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
         except Exception as exc:
             async with self._fetch_lock:
                 if self._fetch_states.get(service_id) != "STOPPING":
@@ -1113,9 +1269,16 @@ class PersonalContext:
                 current = asyncio.current_task()
                 if self._manual_fetch_tasks.get(service_id) is current:
                     self._manual_fetch_tasks.pop(service_id, None)
+                self._discard_fetch_run_task(service_id, run_task)
                 self._fetch_running.discard(service_id)
 
-    async def _run_fetch_once(self, service_id: str, provider: ContextFetchService) -> None:
+    async def _run_fetch_once(
+        self,
+        service_id: str,
+        provider: ContextFetchService,
+        *,
+        stop_event: asyncio.Event | None = None,
+    ) -> None:
         config = self._service_config(service_id)
         old_cursor = self._read_cursor(service_id)
         run_id = uuid4().hex
@@ -1127,14 +1290,55 @@ class PersonalContext:
         completed_items = 0
         total_items = 0
         prepared_candidates: tuple[dict[str, object], ...] = ()
+        completed_batches: list[FetchBatch] = []
+        completed_candidate_count = 0
+        commit_completed = False
         self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
 
-        async def abort_run() -> None:
+        async def abort_run(*, discard_new_source_metadata: bool = False) -> None:
             if pipeline_work_enqueued.is_set():
                 with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self._abort_pipeline_run(service_id, run_id)
+                    if discard_new_source_metadata:
+                        await self._rollback_pipeline_run(service_id, run_id)
+                    else:
+                        await self._abort_pipeline_run(service_id, run_id)
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await provider.abort_run(run_id=run_id)
+
+        async def finish_and_commit(
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+            *,
+            has_pipeline_work: bool,
+        ) -> None:
+            if has_pipeline_work:
+                await self._finish_pipeline_run(service_id, run_id)
+            committed_cursor = record_completed_candidates(cursor, candidates)
+            await provider.commit_run(run_id=run_id)
+            self._write_cursor(service_id, committed_cursor)
+
+        async def wait_for_commit_point(
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+            *,
+            has_pipeline_work: bool,
+        ) -> bool:
+            """Finish publication and cursor commit despite caller cancellation."""
+
+            commit_task = asyncio.create_task(
+                finish_and_commit(cursor, candidates, has_pipeline_work=has_pipeline_work),
+                name=f"personal-context-fetch-commit-{service_id}",
+            )
+            cancellation_seen = False
+            while not commit_task.done():
+                try:
+                    await asyncio.shield(commit_task)
+                except asyncio.CancelledError:
+                    if commit_task.cancelled():
+                        raise
+                    cancellation_seen = True
+            commit_task.result()
+            return cancellation_seen
 
         try:
             prepared = await provider.prepare_run(
@@ -1179,15 +1383,28 @@ class PersonalContext:
                         completed_items=completed_items,
                     )
                 last_cursor = dict(batch.next_cursor) if batch.next_cursor is not None else None
+                completed_batches.append(batch)
+                completed_candidate_count = item_count
             if not saw_batch and total_items > 0:
                 raise _fetch_error("provider produced no batch")
             if item_count != total_items:
                 raise _fetch_error("provider did not yield every prepared candidate")
-            if pipeline_work_enqueued.is_set():
-                await self._finish_pipeline_run(service_id, run_id)
-            last_cursor = record_completed_candidates(last_cursor, prepared_candidates)
-            await provider.commit_run(run_id=run_id)
-            self._write_cursor(service_id, last_cursor)
+            cancelled_at_commit = await wait_for_commit_point(
+                last_cursor,
+                prepared_candidates,
+                has_pipeline_work=pipeline_work_enqueued.is_set(),
+            )
+            commit_completed = True
+            if cancelled_at_commit:
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="cancelled",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                )
+                if stop_event is not None and stop_event.is_set():
+                    return
+                raise asyncio.CancelledError
             self._fetch_run_progress[service_id] = _fetch_run_status(
                 service_id,
                 run_state="succeeded",
@@ -1195,14 +1412,78 @@ class PersonalContext:
                 completed_items=completed_items,
             )
         except asyncio.CancelledError:
-            await abort_run()
-            self._fetch_run_progress[service_id] = _fetch_run_status(
-                service_id,
-                run_state="cancelled",
-                total_items=total_items,
-                completed_items=completed_items,
-            )
-            raise
+            if commit_completed:
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="cancelled",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                )
+                raise
+            if stop_event is None or not stop_event.is_set():
+                await abort_run()
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="cancelled",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                )
+                raise
+            try:
+                if not completed_batches:
+                    await abort_run(discard_new_source_metadata=True)
+                else:
+                    if pipeline_work_enqueued.is_set():
+                        await self._rollback_pipeline_run(service_id, run_id)
+                        for completed_batch in completed_batches:
+                            if completed_batch.items:
+                                await self._submit_batch(
+                                    service_id,
+                                    run_id,
+                                    completed_batch,
+                                    enqueued=pipeline_work_enqueued,
+                                )
+                    await wait_for_commit_point(
+                        last_cursor,
+                        prepared_candidates[:completed_candidate_count],
+                        has_pipeline_work=pipeline_work_enqueued.is_set(),
+                    )
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="cancelled",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                )
+                return
+            except asyncio.CancelledError:
+                await abort_run(discard_new_source_metadata=True)
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="cancelled",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                )
+                raise
+            except BaseError as exc:
+                await abort_run(discard_new_source_metadata=True)
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="failed",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                    last_error=_redact_text(exc),
+                )
+                raise
+            except Exception as exc:
+                await abort_run(discard_new_source_metadata=True)
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="failed",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                    last_error=_redact_text(exc),
+                )
+                raise _fetch_error("fetch run cancellation finalization failed", cause=exc) from exc
         except BaseError as exc:
             await abort_run()
             self._fetch_run_progress[service_id] = _fetch_run_status(
@@ -1239,6 +1520,9 @@ class PersonalContext:
 
     async def _abort_pipeline_run(self, service_id: str, run_id: str) -> None:
         await self._submit_pipeline_event("abort", service_id, run_id, None)
+
+    async def _rollback_pipeline_run(self, service_id: str, run_id: str) -> None:
+        await self._submit_pipeline_event("rollback", service_id, run_id, None)
 
     async def _submit_pipeline_event(
         self,

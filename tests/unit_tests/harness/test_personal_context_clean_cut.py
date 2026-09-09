@@ -15,14 +15,14 @@ def test_personal_context_public_contract() -> None:
 
 
 def test_personal_context_core_package_is_removed() -> None:
-    repository_root = Path(__file__).resolve().parents[3]
+    repository_root = Path(__file__).resolve().parents[4]
 
     assert importlib.util.find_spec("openjiuwen.core.personal_context") is None
-    assert not (repository_root / "openjiuwen" / "core" / "personal_context").exists()
+    assert not (repository_root / "agent-core" / "openjiuwen" / "core" / "personal_context").exists()
 
 
 def test_legacy_module_is_removed() -> None:
-    repository_root = Path(__file__).resolve().parents[3]
-    legacy_package = repository_root / "openjiuwen" / "core" / "proactive_context"
+    repository_root = Path(__file__).resolve().parents[4]
+    legacy_package = repository_root / "agent-core" / "openjiuwen" / "core" / "proactive_context"
 
     assert not any(legacy_package.rglob("*.py"))

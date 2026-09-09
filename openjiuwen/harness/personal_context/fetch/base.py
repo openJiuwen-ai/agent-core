@@ -39,7 +39,12 @@ class ContextFetchService(ABC):
         cursor: dict[str, object] | None,
         candidates: tuple[dict[str, object], ...],
     ) -> AsyncIterator[FetchBatch]:
-        """Read and yield batches only for the prepared candidates."""
+        """Yield complete batches in prepared-candidate order.
+
+        Every non-empty batch must consume the next contiguous candidate
+        prefix.  Core uses that boundary to retain completed batches and
+        advance only their matching cursor when an active run is stopped.
+        """
 
         del run_id, cursor, candidates
         if False:

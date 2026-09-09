@@ -22,9 +22,11 @@ EXPECTED_CLASSES = {
     "BrowserBookmarksFetchService",
     "FeishuFetchService",
     "GitHubFetchService",
+    "GitCodeFetchService",
     "LocalFilesFetchService",
     "ToutiaoReaderFetchService",
     "ZhihuReaderFetchService",
+    "RssFeedFetchService",
     "PersonalContextStatus",
     "RawChangeItem",
     "FetchBatch",
@@ -88,6 +90,7 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         "start_fetch_service": "(self, service_id: 'str') -> 'None'",
         "stop_agent_use": "(self) -> 'None'",
         "stop_collection": "(self, *, timeout_seconds: 'float' = 30.0) -> 'None'",
+        "stop_fetch_run": "(self, service_id: 'str') -> 'None'",
         "stop_fetch_service": "(self, service_id: 'str', *, timeout_seconds: 'float' = 30.0) -> 'None'",
     }
 
