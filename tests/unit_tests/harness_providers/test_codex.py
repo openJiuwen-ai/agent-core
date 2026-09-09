@@ -53,6 +53,11 @@ class _FakeSdkState:
         self.thread_calls: list[tuple[str, dict[str, Any]]] = []
         self.scripts: list[list[Any]] = []
         self.next_thread_id = "thread-1"
+        self.handles: list["_FakeHandle"] = []
+        # ``thread.turn()`` blocks until released so tests can steer before the
+        # SDK handle exists (the STARTED-to-turn/start window).
+        self.turn_gate = asyncio.Event()
+        self.turn_gate.set()
 
 
 class _FakeHandle:
@@ -89,8 +94,10 @@ class _FakeThread:
         self.handles: list[_FakeHandle] = []
 
     async def turn(self, prompt: str) -> _FakeHandle:
+        await self.state.turn_gate.wait()
         handle = _FakeHandle(self.state, self.id, prompt)
         self.handles.append(handle)
+        self.state.handles.append(handle)
         return handle
 
 
@@ -373,4 +380,27 @@ async def test_approval_requests_route_to_the_host_handler(monkeypatch: pytest.M
     assert terminal.kind is TurnEventKind.FINISHED
     assert decisions[0].tool_name == "shell" and decisions[0].call_id == "cmd-9"
     assert decisions[0].arguments["command"] == "rm -rf /"
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_steer_before_the_sdk_handle_exists_is_queued(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+
+    async def _complete(handle: _FakeHandle) -> Any:
+        return _turn_completed(handle.id, _Status.completed)
+
+    state.scripts.append([_complete])
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    state.turn_gate.clear()
+    receipt = await harness.send(HarnessInput(content="long"))
+    await asyncio.sleep(0.01)
+    assert harness.state is HarnessState.RUNNING and not state.handles
+    steer = await harness.send(HarnessInput(content="early"), mode=DeliveryMode.STEER)
+    assert steer.turn_id == receipt.turn_id
+    state.turn_gate.set()
+    terminal = _terminal(await _turn(harness, receipt.turn_id))
+    assert terminal.kind is TurnEventKind.FINISHED
+    assert state.handles[0].steers == ["early"]
     await harness.stop()
