@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-09-09 |
 | 范围 | `openjiuwen/harness_providers/`（`base` / `stream` / `io_adapter` / `factory` / `native` / `claudecode` / `codex` / `dsh`）、`openjiuwen/harness/resources/extension_resolver.py`（`render_agent_template_system_prompt`） |
-| 测试基线 | `tests/unit_tests/harness_providers`（46 通过）；`tests/system_tests/harness_providers`：Claude Code 8/8、Codex 7/7、DSH 5/5 通过，native 需 `API_BASE/API_KEY/MODEL_NAME` |
+| 测试基线 | `tests/unit_tests/harness_providers`（46 通过）；`tests/system_tests/harness_providers`：Claude Code 8/8、Codex 7/7、DSH 5/5、native 7/7（`API_BASE/API_KEY/MODEL_NAME` 指向 DeepSeek `deepseek-v4-flash`）通过 |
 | Refs | #751 |
 
 ## 背景
@@ -25,7 +25,10 @@ DeepAgent 设计，`tools` / `rails` / `subagents` / `skills` 依赖框架，三
    `ItemLifecycleEvent`；ask-user 中断保持 Turn 打开，经 `UserInputRequest` 取得宿主答案后用
    `InteractiveInput` 继续；无宿主 handler 时以 `stop_reason="interrupt"` 结束并在 `provider_data`
    带 `pending_interrupt_ids`，宿主可用 `metadata.kind=interactive_input` 的输入恢复。声明
-   STEER（`send_input(mode=STEER)`）与 FORCE_ABORT（`cancel_round`）。
+   STEER（`send_input(mode=STEER)`）与 FORCE_ABORT（`cancel_round`）。`_open_session` 在 `agent.start`
+   前显式 `ensure_initialized()`：交互循环不会自行初始化 agent，否则 pending rails 不注册、cwd
+   ContextVar 不按 `cwd` 初始化（native e2e 发现）。文件/shell 工具由 manifest 的 `core.sys_operation`
+   rail 提供，spec build 不默认挂载。
 3. **`HarnessIOAdapter`**（`io_adapter.py`）：协议 ⇄ DeepAgent I/O；自身实现
    `HarnessInteractionHandler`，`UserInputRequest` → `__interaction__` chunk → `InteractiveInput`
    应答；工具审批默认自动放行。

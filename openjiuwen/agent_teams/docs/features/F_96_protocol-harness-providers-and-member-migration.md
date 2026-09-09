@@ -8,7 +8,7 @@
 | 范围 | `openjiuwen/harness_providers/`（新包）、`openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/{spawn,claude,codex}/`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
 | 协议版本 | `1.0` |
 | 关联 feature | `F_94_external-harness-protocol.md`、`F_95_dsh-external-harness-adapter.md` |
-| 测试基线 | `tests/unit_tests/agent_teams`（2879 通过）、`tests/unit_tests/harness`（4126 通过）、`tests/unit_tests/harness_providers`（46 通过）、`tests/unit_tests/harness_protocol`（27 通过）；e2e：Claude Code 8/8、Codex 7/7（codex-cli 0.153.4）、DSH 5/5 通过 |
+| 测试基线 | `tests/unit_tests/agent_teams`（2879 通过）、`tests/unit_tests/harness`（4126 通过）、`tests/unit_tests/harness_providers`（46 通过）、`tests/unit_tests/harness_protocol`（27 通过）、`tests/unit_tests/agent_teams/external/test_codex_observability_wiring.py`（5 通过）；e2e：Claude Code 8/8、Codex 7/7（codex-cli 0.153.4）、DSH 5/5、native 7/7（DeepSeek `deepseek-v4-flash` 端点）通过 |
 | Refs | #751 |
 
 ## 背景
@@ -119,7 +119,13 @@ MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / roll
   manifest prompt。本机结果：Claude Code 8/8、Codex 7/7（codex-cli 0.153.4；0.152.1 对已配置默认
   模型 `gpt-6-astra` 会被服务端以"requires a newer version of Codex"拒绝）、DSH 5/5 通过。
   Codex e2e 暴露并修复了一个竞态：external STARTED 发出时 `thread.turn()` 尚未返回 handle，此窗口内
-  的 STEER 现在先排队，handle 建立后立即 `steer`。
+  的 STEER 现在先排队，handle 建立后立即 `steer`。native e2e（`API_BASE/API_KEY/MODEL_NAME` 指向
+  DeepSeek）暴露并修复了 `DeepAgentHarness` 未在 `start` 前 `ensure_initialized()` 的问题：交互循环
+  不会自行初始化 agent，pending rails（含观测 rail）从未注册、cwd ContextVar 也未按 `cwd` 初始化。
+  manifest 若要文件/shell 工具需显式声明 `core.sys_operation` rail（spec build 不默认挂载）。
+- Codex 观测接线（`observer.py` 的 notification → `CodexSpanBridge` 映射、`_start_codex_observability`
+  的 receiver / rollout reader 启动与 config/env 注入、`build_cli_runtime` 的绑定与 teardown hook）由
+  `test_codex_observability_wiring.py` 以假桥接覆盖。
 
 ## 已知遗留
 
