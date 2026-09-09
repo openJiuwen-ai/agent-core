@@ -10,7 +10,7 @@ Default production detector is :class:`SignalBasedSuccessDetector`:
   1. tool_calls < detect_min_tool_calls -> skip
   2. execution_failure signal -> partial (induce, no blame); short-circuits user_intent
   3. user_intent feedback (only when no execution_failure) -> partial
-  4. any write/edit output_path -> skip (artifact tasks out of scope)
+  4. extract write/edit output_paths (if any; logged only); always proceed to Judge
   5. one Judge LLM on query + final_reply -> success|partial|fail
 
 :class:`TrajectoryErrorSuccessDetector` remains for trajectory-error defaults / test injection.
@@ -265,8 +265,8 @@ class SignalBasedSuccessDetector(SuccessDetector):
     * ``execution_failure`` (deterministic tool-output rules) -> ``partial``.
     * Else ``user_intent`` feedback (skill-agnostic) -> ``partial``; skipped when
       ``execution_failure`` already matched.
-    * Any write/edit ``output_path`` -> ``skip`` (no artifact Judge this round).
-    * Otherwise one Judge LLM on query + final_reply.
+    * Extract write/edit ``output_path`` list (logged; not fed to Judge).
+    * One Judge LLM on query + final_reply.
     """
 
     def __init__(
@@ -348,24 +348,19 @@ class SignalBasedSuccessDetector(SuccessDetector):
             return SuccessOutcome("partial", 0.5, "signal:user_intent")
 
         paths = extract_output_paths(msgs, max_paths=self._config.detect_max_output_paths)
-        if paths:
-            logger.info(
-                "[TTSERail] detect branch=skip_artifact_paths n_paths=%s",
-                len(paths),
-            )
-            return SuccessOutcome("skip", 0.0, f"artifact_paths:{len(paths)}")
-
-        logger.info("[TTSERail] detect no artifact paths; proceed to Judge")
         query = _task_query(ctx, snapshot, msgs)
         final_reply = extract_final_reply(
             msgs,
             max_chars=self._config.detect_final_reply_chars,
         )
         logger.info(
-            "[TTSERail] detect branch=judge_llm query_len=%s reply_len=%s",
+            "[TTSERail] detect branch=judge_llm query_len=%s reply_len=%s n_paths=%s paths=%s",
             len(query or ""),
             len(final_reply or ""),
+            len(paths),
+            paths,
         )
+        logger.info("[TTSERail] detect final_reply=%s", final_reply or "(empty)")
         prompt = detect_judge_prompt(query, final_reply)
         try:
             raw = await invoke_text_with_retry(

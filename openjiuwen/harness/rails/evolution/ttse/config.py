@@ -62,7 +62,7 @@ class TTSEConfig:
             induce call.
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
         detect_min_tool_calls: Min tool calls before reply-delivery detect runs.
-        detect_max_output_paths: Cap on extracted write paths (artifact gate).
+        detect_max_output_paths: Cap on extracted write paths fed to the Judge.
         detect_final_reply_chars: Max chars of final assistant reply fed to Judge.
         detect_llm_policy: Short policy for the one-shot reply-delivery Judge.
         dream_enabled: Run periodic Auto-dream bank hygiene.

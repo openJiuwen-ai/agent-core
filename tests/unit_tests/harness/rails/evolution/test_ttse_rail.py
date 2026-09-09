@@ -673,8 +673,10 @@ async def test_signal_detector_script_artifact_alone_does_not_fast_path(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_signal_detector_artifact_paths_skip(tmp_path):
-    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+async def test_signal_detector_artifact_paths_also_judged(tmp_path):
+    llm = ScriptedLLM(
+        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
+    )
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
     out = await det.detect(
@@ -682,9 +684,12 @@ async def test_signal_detector_artifact_paths_skip(tmp_path):
         _n_tool_messages(5, write_path="deck.pptx"),
         snapshot={"ttse_task_query": "make a ppt"},
     )
-    assert out.outcome == "skip"
-    assert out.reason.startswith("artifact_paths:")
-    assert llm.calls == []
+    assert out.outcome == "success"
+    assert len(llm.calls) == 1
+    assert "make a ppt" in llm.calls[0]
+    assert "Here is the answer." in llm.calls[0]
+    assert "Claimed artifact output paths" not in llm.calls[0]
+    assert "deck.pptx" not in llm.calls[0]
 
 
 @pytest.mark.asyncio
