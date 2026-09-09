@@ -41,6 +41,15 @@ SummaryTeamBuilder = Callable[
     Awaitable[LaunchedSummaryTeam],
 ]
 
+#: Re-attach or recreate the Team that backs an interrupted SummaryExecution.
+#: Receives ``(spec, execution_id, organization_id, root_task_id,
+#: summary_task_id, session_id)`` and returns the running Team.  When omitted,
+#: recovery delegates to the builder so a fresh Team is launched.
+SummaryTeamRecoverer = Callable[
+    [SummaryTeamSpec, str, str, str, str, str],
+    Awaitable[LaunchedSummaryTeam],
+]
+
 #: Stop and reclaim a previously provisioned Summary Team by execution id.
 SummaryTeamStopper = Callable[[str, str], Awaitable[None]]
 
@@ -57,6 +66,10 @@ class DefaultSummaryTeamFactory:
             summary_task_id, session_id)`` and returns the running Team.
         summary_team_stopper: Receives ``(execution_id, session_id)`` and stops /
             reclaims the Team recorded for that execution.
+        summary_team_recoverer: Receives ``(spec, execution_id, organization_id,
+            root_task_id, summary_task_id, session_id)`` and returns the running
+            Team for an interrupted execution.  Defaults to the builder, which
+            launches a fresh Team when the host has no re-attach path.
     """
 
     def __init__(
@@ -64,9 +77,11 @@ class DefaultSummaryTeamFactory:
         *,
         summary_team_builder: SummaryTeamBuilder,
         summary_team_stopper: SummaryTeamStopper,
+        summary_team_recoverer: SummaryTeamRecoverer | None = None,
     ) -> None:
         self._summary_team_builder = summary_team_builder
         self._summary_team_stopper = summary_team_stopper
+        self._summary_team_recoverer = summary_team_recoverer
 
     def default_spec(self) -> SummaryTeamSpec:
         """Return the framework preset Summary Team spec."""
@@ -90,6 +105,39 @@ class DefaultSummaryTeamFactory:
             session_id,
         )
 
+    async def recover(
+        self,
+        *,
+        execution_id: str,
+        organization_id: str,
+        root_task_id: str,
+        summary_task_id: str,
+        session_id: str,
+    ) -> LaunchedSummaryTeam:
+        """Re-attach or recreate the Team backing an interrupted execution (§8).
+
+        Uses the host ``summary_team_recoverer`` when supplied, otherwise falls
+        back to ``provision`` semantics via the builder so a fresh Team starts.
+        """
+        spec = self.default_spec()
+        recoverer = self._summary_team_recoverer
+        if recoverer is not None:
+            return await recoverer(
+                spec,
+                execution_id,
+                organization_id,
+                root_task_id,
+                summary_task_id,
+                session_id,
+            )
+        return await self._summary_team_builder(
+            spec,
+            organization_id,
+            root_task_id,
+            summary_task_id,
+            session_id,
+        )
+
     async def release(self, *, execution_id: str, session_id: str) -> None:
         """Stop and reclaim a previously provisioned Summary Team."""
         await self._summary_team_stopper(execution_id, session_id)
@@ -98,5 +146,6 @@ class DefaultSummaryTeamFactory:
 __all__ = [
     "DefaultSummaryTeamFactory",
     "SummaryTeamBuilder",
+    "SummaryTeamRecoverer",
     "SummaryTeamStopper",
 ]

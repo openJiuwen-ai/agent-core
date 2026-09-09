@@ -457,10 +457,14 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 "delegated_to_team_id": {"type": "string"},
                 "aggregation_mode": {
                     "type": "string",
-                    "enum": [OrgTaskAggregationMode.HIERARCHICAL.value],
+                    "enum": [
+                        OrgTaskAggregationMode.HIERARCHICAL.value,
+                        OrgTaskAggregationMode.SUMMARY_TEAM.value,
+                    ],
                     "description": (
-                        "Root-task aggregation mode. Only HIERARCHICAL is supported; "
-                        "SUMMARY_TEAM is rejected until SummaryTeamFactory lands."
+                        "Root-task aggregation mode. HIERARCHICAL splits work into "
+                        "children resolved upward; SUMMARY_TEAM creates a framework "
+                        "Summary Task and a task-specific Summary Team on demand."
                     ),
                 },
             },

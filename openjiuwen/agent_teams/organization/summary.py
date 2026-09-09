@@ -63,7 +63,7 @@ class LaunchedSummaryTeam:
 
 
 class SummaryTeamFactory(Protocol):
-    """Host-injected adapter that creates and releases task-specific Summary Teams."""
+    """Host-injected adapter that creates, recreates, and releases task-specific Summary Teams."""
 
     def default_spec(self) -> SummaryTeamSpec:
         """Return the framework preset Summary Team spec."""
@@ -77,6 +77,23 @@ class SummaryTeamFactory(Protocol):
         session_id: str,
     ) -> LaunchedSummaryTeam:
         """Create and start a Summary Team; raise on failure."""
+
+    async def recover(
+        self,
+        *,
+        execution_id: str,
+        organization_id: str,
+        root_task_id: str,
+        summary_task_id: str,
+        session_id: str,
+    ) -> LaunchedSummaryTeam:
+        """Re-attach or recreate a Summary Team for an interrupted execution (§8).
+
+        Called after a process restart for a SummaryExecution that never bound a
+        ``summary_team_id``.  The host decides whether the previously started Team
+        still exists (reuse its id) or must be launched fresh; it must return the
+        team that should now back the execution.
+        """
 
     async def release(self, *, execution_id: str, session_id: str) -> None:
         """Stop and reclaim a previously provisioned Summary Team instance."""

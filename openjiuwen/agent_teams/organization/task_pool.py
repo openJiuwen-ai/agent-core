@@ -410,13 +410,14 @@ class OrgTaskManager:
                 mode = OrgTaskAggregationMode(aggregation_mode)
             except ValueError:
                 return OrgTaskOpResult(ok=False, reason=f"invalid aggregation_mode: {aggregation_mode!r}")
-            if mode is OrgTaskAggregationMode.SUMMARY_TEAM:
-                return OrgTaskOpResult(
-                    ok=False,
-                    reason="SUMMARY_TEAM aggregation is not supported yet",
-                )
-            if mode is not OrgTaskAggregationMode.HIERARCHICAL:
+            if mode is not OrgTaskAggregationMode.HIERARCHICAL and mode is not OrgTaskAggregationMode.SUMMARY_TEAM:
                 return OrgTaskOpResult(ok=False, reason=f"invalid aggregation_mode: {aggregation_mode!r}")
+        # Auto-generated Summary Task id for a SUMMARY_TEAM root (framework-owned,
+        # so the caller cannot pick it).  Populated before the write block so the
+        # root row can reference it in its aggregation config.
+        summary_task_id: str | None = None
+        if aggregation_mode is not None and OrgTaskAggregationMode(aggregation_mode) is OrgTaskAggregationMode.SUMMARY_TEAM:
+            summary_task_id = f"org-task-{uuid.uuid4().hex[:12]}"
         assignment_type = OrgAssignmentType.DELEGATED if delegated_to_team_id else OrgAssignmentType.UNASSIGNED
         status = OrgTaskStatus.DELEGATED if delegated_to_team_id else OrgTaskStatus.OPEN
         spec_model = self._coerce_output_spec(output_spec)
@@ -558,7 +559,16 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
             aggregation_json = None
             if parent_task_id is None:
-                aggregation_json = _json_dumps(default_root_aggregation(task_id).model_dump())
+                if summary_task_id is not None:
+                    aggregation_json = _json_dumps(
+                        OrgTaskAggregationConfig(
+                            mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+                            summary_task_id=summary_task_id,
+                            final_output_task_id=summary_task_id,
+                        ).model_dump()
+                    )
+                else:
+                    aggregation_json = _json_dumps(default_root_aggregation(task_id).model_dump())
             row = OrgTaskRecord(
                 recreation_request_id=recreation_request_id,
                 recreated_from_task_id=recreated_from,
@@ -600,6 +610,23 @@ class OrgTaskManager:
             session.add(row)
             if recreation_request_id is not None:
                 await self._ack_system_notification(session, recreation_request_id, created_by.team_id, now)
+            summary_row: OrgTaskRecord | None = None
+            if summary_task_id is not None:
+                # A SUMMARY_TEAM root carries a framework-owned Summary Task
+                # (WAITING_SOURCES, SUMMARY_TEAM), created in the same write so
+                # the two rows land atomically (§4.4.3 / org_create_task).
+                summary_row = await self._insert_summary_task_row(
+                    session,
+                    task_id=summary_task_id,
+                    title=f"Summary for {title}",
+                    description=f"Automatically created summary task for root {task_id}.",
+                    created_by=created_by,
+                    root_task_id=task_id,
+                    source_task_ids=None,
+                    output_spec=output_spec,
+                    metadata={},
+                    now=now,
+                )
             await session.commit()
         task = self._to_task(row)
         await self._publish_task_created(task)
@@ -608,6 +635,15 @@ class OrgTaskManager:
                 task,
                 created_by.team_id or "",
                 delegated_to_team_id,
+            )
+        if summary_row is not None:
+            await self._publish_event(
+                OrgSummaryTaskCreatedEvent(
+                    organization_id=self.organization_id,
+                    team_id=created_by.team_id,
+                    leader_id=created_by.creator_id if created_by.creator_type == "team_leader" else None,
+                    summary_task_id=summary_row.task_id,
+                )
             )
         return OrgTaskOpResult(ok=True, task=task)
 
@@ -1709,37 +1745,21 @@ class OrgTaskManager:
         """Create the framework-owned Summary Task row (WAITING_SOURCES, SUMMARY_TEAM)."""
         await self.initialize()
         now = get_current_time()
-        spec_model = self._coerce_output_spec(output_spec)
-        aggregation = OrgTaskAggregationConfig(
-            mode=OrgTaskAggregationMode.SUMMARY_TEAM,
-            summary_task_id=task_id,
-            final_output_task_id=task_id,
-        )
         async with self._write() as session:
             if await session.get(OrgTaskRecord, task_id) is not None:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
-            row = OrgTaskRecord(
+            row = await self._insert_summary_task_row(
+                session,
                 task_id=task_id,
-                organization_id=self.organization_id,
-                parent_task_id=None,
-                root_task_id=root_task_id,
-                creator_type=created_by.creator_type,
-                creator_id=created_by.creator_id,
-                creator_team_id=created_by.team_id,
-                status=OrgTaskStatus.WAITING_SOURCES.value,
-                created_at=now,
-                updated_at=now,
                 title=title,
                 description=description,
-                task_type=ORG_SUMMARY_TASK_TYPE,
-                required_capabilities_json=_json_dumps([ORG_SUMMARY_CAPABILITY]),
-                assignment_type=OrgAssignmentType.UNASSIGNED.value,
-                aggregation_json=_json_dumps(aggregation.model_dump()),
-                output_spec_json=_json_dumps(spec_model.model_dump() if spec_model else None),
-                metadata_json=_json_dumps(dict(metadata or {})),
+                created_by=created_by,
+                root_task_id=root_task_id,
+                source_task_ids=None,
+                output_spec=output_spec,
+                metadata=metadata or {},
+                now=now,
             )
-            session.add(row)
-            await session.commit()
             if source_task_ids:
                 attached = await self._attach_summary_sources(
                     session,
@@ -1750,9 +1770,59 @@ class OrgTaskManager:
                 )
                 if attached is not None:
                     return attached
-                await session.commit()
-        task = self._to_task(row)
+            await session.commit()
+            task = self._to_task(row)
         return OrgTaskOpResult(ok=True, task=task)
+
+    async def _insert_summary_task_row(
+        self,
+        session: Any,
+        *,
+        task_id: str,
+        title: str,
+        description: str,
+        created_by: OrgTaskCreator,
+        root_task_id: str,
+        source_task_ids: list[str] | None,
+        output_spec: OrgTaskOutputSpec | dict[str, Any] | None,
+        metadata: dict[str, Any],
+        now: int,
+    ) -> OrgTaskRecord:
+        """Insert the framework-owned Summary Task row inside an open write session.
+
+        Shared by ``_build_summary_task`` (standalone path) and ``create_task``
+        (auto-created for a SUMMARY_TEAM root), so both stay on one row shape.
+        Source binding is handled by the caller so it can return a validation
+        error without leaving a partially-created row.
+        """
+        spec_model = self._coerce_output_spec(output_spec)
+        aggregation = OrgTaskAggregationConfig(
+            mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+            summary_task_id=task_id,
+            final_output_task_id=task_id,
+        )
+        row = OrgTaskRecord(
+            task_id=task_id,
+            organization_id=self.organization_id,
+            parent_task_id=None,
+            root_task_id=root_task_id,
+            creator_type=created_by.creator_type,
+            creator_id=created_by.creator_id,
+            creator_team_id=created_by.team_id,
+            status=OrgTaskStatus.WAITING_SOURCES.value,
+            created_at=now,
+            updated_at=now,
+            title=title,
+            description=description,
+            task_type=ORG_SUMMARY_TASK_TYPE,
+            required_capabilities_json=_json_dumps([ORG_SUMMARY_CAPABILITY]),
+            assignment_type=OrgAssignmentType.UNASSIGNED.value,
+            aggregation_json=_json_dumps(aggregation.model_dump()),
+            output_spec_json=_json_dumps(spec_model.model_dump() if spec_model else None),
+            metadata_json=_json_dumps(dict(metadata or {})),
+        )
+        session.add(row)
+        return row
 
     @staticmethod
     async def _attach_summary_sources(
