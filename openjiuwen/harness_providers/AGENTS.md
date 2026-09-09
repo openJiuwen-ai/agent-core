@@ -57,11 +57,15 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    and `ClaudeCodeHarness(transport_factory=...)` are constructor-only hooks for
    hosts that own SDK objects (observability bridges, ssh transports). They never
    appear in the public event stream or in JSON provider config.
-6. **User input is an interaction.** Claude `AskUserQuestion` and DeepAgent
-   `ask_user` interrupts become `UserInputRequest`s; the turn stays open until
-   the host answers. When the host declares USER_INPUT / TOOL_APPROVAL the
-   Claude harness switches `permission_mode` to `default` so the SDK actually
-   consults `can_use_tool`.
+6. **User input is an interaction.** Claude `AskUserQuestion`, Codex
+   `request_user_input` (App Server request `item/tool/requestUserInput`,
+   parsed from the raw `_approval_handler` params because the SDK has no
+   generated type for it) and DeepAgent `ask_user` interrupts become
+   `UserInputRequest`s; the turn stays open until the host answers. When the
+   host declares USER_INPUT / TOOL_APPROVAL the Claude harness switches
+   `permission_mode` to `default` so the SDK actually consults `can_use_tool`;
+   the Codex harness adds `features.default_mode_request_user_input=true`
+   because the tool is off in the CLI's default mode.
 7. **The IO adapter is the only DeepAgent-facing projection.** `HarnessIOAdapter`
    emits `llm_output` / `llm_reasoning` / `tool_call` / `tool_result` /
    `__interaction__` chunks and resolves `InteractiveInput` against pending

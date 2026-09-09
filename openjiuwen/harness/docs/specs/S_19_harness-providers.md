@@ -27,7 +27,7 @@
    |---|---|---|---|
    | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT |
    | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
-   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
+   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `dsh` | `deepseek-harness` | （空） | （空） |
 
    未声明的命令抛 `UnsupportedHarnessCapabilityError`；`_validate_context` 在 `start` 里 fail-fast。
@@ -39,9 +39,14 @@
 5. **JSON 边界**：进入事件的 vendor 对象一律先 `to_json_safe`；原始 SDK 对象只经
    provider-private 构造参数（`CodexHarness(notification_observer)`、
    `ClaudeCodeHarness(transport_factory)`）流向宿主。
-6. **用户输入是 interaction**：Claude `AskUserQuestion` 与 DeepAgent `ask_user` 中断映射为
-   `UserInputRequest`，Turn 在应答前保持 RUNNING；宿主未提供 handler 时 Claude 拒绝该工具、
-   DeepAgent 以 `stop_reason="interrupt"` 结束 Turn 并保留 `pending_interrupt_ids`。
+6. **用户输入是 interaction**：Claude `AskUserQuestion`、Codex `request_user_input`
+   （App Server 请求 `item/tool/requestUserInput`）与 DeepAgent `ask_user` 中断映射为
+   `UserInputRequest`，Turn 在应答前保持 RUNNING；宿主未提供 handler 时 Claude 拒绝该工具、Codex 回
+   空 `answers`、DeepAgent 以 `stop_reason="interrupt"` 结束 Turn 并保留 `pending_interrupt_ids`。
+   Codex 的该工具是 CLI 实验特性，宿主声明 USER_INPUT 时 harness 自动追加
+   `features.default_mode_request_user_input=true`；多题请求渲染为一条 prompt，首题选项作 `choices`，
+   原始 `questions` 进 `provider_data`，宿主答案按题 id / 题面 / 位置归一化回
+   `{"answers": {id: {"answers": [...]}}}`。
    `DeepAgentHarness._open_session` 必须在 `agent.start` 之前 `ensure_initialized()`：DeepAgent 的
    交互循环不会自行初始化 agent，pending rails（含观测 rail）与 cwd ContextVar 都在此时落定，
    随后创建的 supervisor / scheduler task 才能继承。
