@@ -1302,8 +1302,9 @@ class PersonalContext:
         run_id: str | None = None,
     ) -> dict[str, object]:
         """Return one identified round or bounded per-service run history."""
-        if run_id is not None and (service_id is None or not isinstance(run_id, str) or not run_id.strip()):
-            raise _state_error("run_id requires service_id and a non-empty string")
+        if run_id is not None:
+            if service_id is None or not isinstance(run_id, str) or not run_id.strip():
+                raise _state_error("run_id requires service_id and a non-empty string")
         async with self._state_lock:
             ids = [service.service_id for service in self._config.fetch_services] if self._config else []
             if service_id is not None:
