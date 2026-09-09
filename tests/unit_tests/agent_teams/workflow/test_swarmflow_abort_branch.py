@@ -341,3 +341,31 @@ def _inputs(run_id: str) -> dict[str, Any]:
         "_completion_ctx": {},
         "script_path": "/tmp/flow.py",
     }
+
+
+def test_workflow_started_team_event_carries_script_path():
+    """The engine puts script_path on WORKFLOW_STARTED; the tool must carry it
+    onto the team event, or the embedder's snapshot never sees it and a
+    cold-start resume advisory has no launch-plane call to offer. (The engine
+    and embedder tests each covered their own side; this is the bridge.)
+    """
+    from openjiuwen.agent_teams.workflow.engine.progress import WorkflowProgressEvent
+
+    tool = _make_tool(messager=_CapturingMessager())
+
+    async def _fake_run_swarmflow(*_a, observer=None, **_k):
+        observer.emit(WorkflowProgressEvent(
+            kind=ProgressKind.WORKFLOW_STARTED, name="m", script_path="/abs/flow.py",
+        ))
+        return {"ok": True}
+
+    with patch("openjiuwen.agent_teams.workflow.runner.run_swarmflow", side_effect=_fake_run_swarmflow):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(tool.run_background("task-sp", _inputs("wf_1")))
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+
+    started = [m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_STARTED]
+    assert started and started[0].payload["script_path"] == "/abs/flow.py"
