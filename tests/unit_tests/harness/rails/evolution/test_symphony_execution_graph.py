@@ -1,18 +1,35 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Iterator, Sequence
+from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
+from types import SimpleNamespace
 from typing import Any, overload
+from unittest.mock import AsyncMock
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
+from openjiuwen.harness.rails.evolution.symphony_edge_evaluator import (
+    SymphonyEdgeEndpointSummary,
+    SymphonyEdgeEvaluationSummary,
+    evaluate_symphony_edge_candidates,
+)
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    SymphonyInterruptContinuation,
+    build_model_edge_decisions,
+    build_symphony_edge_candidates,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
+    project_symphony_execution_fragments,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
     CapabilityIdentity,
@@ -1185,6 +1202,227 @@ def test_callback_boundary_rejects_recursive_json() -> None:
 
     with pytest.raises(ValueError):
         _canonical_graph_pair(None, execution)
+
+
+def _native_cross_trace_input():
+    trajectories = []
+    for trace, name in ((_TRACE_ID, "producer"), ("2" * 32, "consumer")):
+        spans = [
+            {
+                "traceId": trace,
+                "spanId": "0" * 15 + "1",
+                "name": "agent.root",
+                "startTimeUnixNano": "1",
+                "endTimeUnixNano": "5",
+            },
+            {
+                "traceId": trace,
+                "spanId": "0" * 15 + "2",
+                "parentSpanId": "0" * 15 + "1",
+                "name": "tool.skill_tool",
+                "startTimeUnixNano": "2",
+                "endTimeUnixNano": "3",
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": name, "relative_file_path": "SKILL.md"}),
+                        semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True, "artifact_id": "artifact"}),
+                    }
+                ),
+            },
+        ]
+        trajectories.append(
+            Trajectory.from_otlp(
+                {
+                    "resourceSpans": [
+                        {
+                            "resource": {
+                                "attributes": attributes_from_map(
+                                    {TRAJECTORY_ID: "interrupt-chain", SESSION_ID: "session"}
+                                )
+                            },
+                            "scopeSpans": [{"spans": spans}],
+                        }
+                    ]
+                }
+            )
+        )
+    continuities = tuple((0, trajectory) for trajectory in trajectories)
+    fragments = project_symphony_execution_fragments(continuities)
+    plan = {
+        "graph": {
+            "id": "plan",
+            "type": "planned_graph",
+            "directed": True,
+            "metadata": {"status": "ready"},
+            "nodes": {name: {"label": name, "metadata": {"type": "skill"}} for name in ("producer", "consumer")},
+            "edges": [{"source": "producer", "target": "consumer", "relation": "can_feed", "metadata": {}}],
+        }
+    }
+    continuation = SymphonyInterruptContinuation(_TRACE_ID, "2" * 32, 0, 0, 1, (_TRACE_ID, "2" * 32))
+    candidates = build_symphony_edge_candidates(
+        fragments, continuities, planned_graph=plan, interrupt_continuations=(continuation,)
+    )
+    assert len(candidates) == 1
+    return plan, continuation, candidates
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["success", "failure", "no_relation", "invalid"])
+async def test_native_cross_trace_candidates_through_model_and_graph(status: str) -> None:
+    plan, continuation, candidates = _native_cross_trace_input()
+    candidate = candidates[0]
+    native_refs = candidate.evidence_refs
+
+    async def judge(messages, **kwargs):
+        del kwargs
+        payload = json.loads(messages[1]["content"])["candidates"][0]
+        assert set(payload["evidence_refs"]) == set(native_refs)
+        if status == "invalid":
+            return "invalid JSON"
+        return json.dumps(
+            {
+                "decisions": [
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "status": status,
+                        "reason": "consumer used the producer artifact",
+                        "evidence_refs": payload["evidence_refs"],
+                    }
+                ]
+            }
+        )
+
+    model = SimpleNamespace(invoke=AsyncMock(side_effect=judge))
+    decisions = await evaluate_symphony_edge_candidates(
+        llm=model,
+        query="original task",
+        candidates=candidates,
+        decisions=build_model_edge_decisions(candidates),
+        summaries={
+            candidate.candidate_id: SymphonyEdgeEvaluationSummary(
+                endpoint_a=SymphonyEdgeEndpointSummary(output="artifact produced"),
+                endpoint_b=SymphonyEdgeEndpointSummary(input="artifact consumed"),
+            )
+        },
+    )
+    assert model.invoke.await_count == 1
+    assert decisions[0].status == ("insufficient_evidence" if status == "invalid" else status)
+    identities = [_identity(name, "skill", name) for name in ("producer", "consumer")]
+    args = dict(
+        trace_id=_TRACE_ID,
+        query="original task",
+        outcome="success",
+        candidates=candidates,
+        decisions=decisions,
+        capability_snapshot=identities,
+        trace_ids=continuation.trace_ids,
+        interrupt_continuations=(continuation,),
+    )
+    graph = build_symphony_execution_graph(**args)
+    assert graph["trace_ids"] == list(continuation.trace_ids)
+    assert json.loads(_canonical_graph_pair(plan, graph)) == {"planned_graph": plan, "execution_graph": graph}
+    assert len(graph["graph"]["edges"]) == (1 if status in {"success", "failure"} else 0)
+    if status in {"success", "failure"}:
+        edge = graph["graph"]["edges"][0]["metadata"]
+        assert edge["success"] is (status == "success")
+        assert set(edge["evidence_refs"]) == set(native_refs)
+        assert edge["source_fragment_id"] == candidate.source_fragment.fragment_id
+        assert edge["target_fragment_id"] == candidate.target_fragment.fragment_id
+        for tamper in ("id", "ref", "trace_ids"):
+            altered = deepcopy(graph)
+            if tamper == "id":
+                altered["graph"]["id"] = "forged"
+            elif tamper == "ref":
+                altered["graph"]["edges"][0]["metadata"]["evidence_refs"][0] = "foreign#span=0000000000000002"
+            else:
+                altered["trace_ids"] = ["2" * 32, _TRACE_ID]
+            if tamper != "id":
+                altered["graph"]["id"] = _execution_graph_id(altered)
+            with pytest.raises(ValueError):
+                _canonical_graph_pair(plan, altered)
+    # Trace order is part of graph identity even when a segment has no edge.
+    first_order = build_symphony_execution_graph(**{**args, "trace_ids": (_TRACE_ID, "2" * 32, "3" * 32, "4" * 32)})
+    second_order = build_symphony_execution_graph(**{**args, "trace_ids": (_TRACE_ID, "2" * 32, "4" * 32, "3" * 32)})
+    assert first_order["graph"]["id"] != second_order["graph"]["id"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "wrong_order", "wrong_continuity", "malformed", "bool", "negative", "out_of_range", "forged_ref"],
+)
+def test_execution_graph_rejects_invalid_cross_trace_descriptor_or_ref(case: str) -> None:
+    _, continuation, candidates = _native_cross_trace_input()
+    changes = {
+        "wrong_continuity": {"continuity_index": 1},
+        "bool": {"source_segment_index": False},
+        "negative": {"source_segment_index": -1, "target_segment_index": 0},
+        "out_of_range": {"source_segment_index": 2, "target_segment_index": 3},
+    }
+    boundaries = (continuation,)
+    traces = continuation.trace_ids
+    if case == "missing":
+        boundaries = ()
+    elif case == "malformed":
+        boundaries = ({"source_trace_id": _TRACE_ID},)
+    elif case == "wrong_order":
+        traces = (_TRACE_ID, "3" * 32, "2" * 32)
+    elif case == "forged_ref":
+        candidates = (
+            replace(candidates[0], evidence_refs=(_TRACE_ID + "#span=unknown", candidates[0].evidence_refs[1])),
+        )
+    else:
+        changed = replace(continuation, **changes[case])
+        boundaries = (changed,)
+        candidates = (replace(candidates[0], interrupt_continuation=changed),)
+    graph = build_symphony_execution_graph(
+        trace_id=_TRACE_ID,
+        query="task",
+        outcome="success",
+        candidates=candidates,
+        decisions=(_decision(candidates[0]),),
+        capability_snapshot=[_identity(name, "skill", name) for name in ("producer", "consumer")],
+        trace_ids=traces,
+        interrupt_continuations=boundaries,
+    )
+    assert graph["graph"]["edges"] == []
+
+
+def test_cross_trace_anchors_with_equal_span_ids_cannot_borrow_source_refs() -> None:
+    _, continuation, candidates = _native_cross_trace_input()
+    candidate = candidates[0]
+    source = replace(candidate.source_fragment, span_ids=("0000000000000002", "0000000000000003"))
+    refs = (_TRACE_ID + "#span=0000000000000002", _TRACE_ID + "#span=0000000000000003")
+    forged = replace(candidate, source_fragment=source, evidence_refs=refs)
+    graph = build_symphony_execution_graph(
+        trace_id=_TRACE_ID,
+        query="task",
+        outcome="success",
+        candidates=(forged,),
+        decisions=(_decision(forged),),
+        capability_snapshot=[_identity(name, "skill", name) for name in ("producer", "consumer")],
+        trace_ids=continuation.trace_ids,
+        interrupt_continuations=(continuation,),
+    )
+    assert graph["graph"]["edges"] == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_conflicting_continuation_cannot_turn_existing_candidate_decision_into_edge(reverse: bool) -> None:
+    _, boundary, candidates = _native_cross_trace_input()
+    conflict = replace(boundary, trace_ids=boundary.trace_ids + ("3" * 32,))
+    descriptors = (boundary, conflict) if not reverse else (conflict, boundary)
+    graph = build_symphony_execution_graph(
+        trace_id=_TRACE_ID,
+        query="task",
+        outcome="success",
+        candidates=candidates,
+        decisions=(_decision(candidates[0]),),
+        capability_snapshot=[_identity(name, "skill", name) for name in ("producer", "consumer")],
+        trace_ids=conflict.trace_ids,
+        interrupt_continuations=descriptors,
+    )
+    assert graph["graph"]["edges"] == []
 
 
 def test_capability_identity_is_a_frozen_dataclass() -> None:
