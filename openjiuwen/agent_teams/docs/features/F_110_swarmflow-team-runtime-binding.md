@@ -7,11 +7,11 @@
 | 日期 | 2026-09-07 |
 | 范围 | `runtime/background_task_controller.py`、`workflow/tool_swarmflow.py`、`workflow/engine/{progress,runtime,runner}.py` |
 | 测试基线 | 确定性单测 `test_background_task_controller.py::test_stop_none_*` + `test_engine.py::test_workflow_started_carries_script_path`；workflow 全套 29 passed |
-| 关联 | SDD-0018（swarm-design-docs 仓）、`F_43` / `S_18` |
+| 关联 | `F_43` / `S_18`；嵌入层 jiuwenswarm 的 team runtime 生命周期联动 |
 
 ## 背景
 
-SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑定到 team runtime：点方块 /
+嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑定到 team runtime：点方块 /
 切换会话 / 断连兜底都要驱动 controller 的**全量** `pause_all` / `stop_all`。现状三处缺口：
 
 1. `BackgroundTaskController.pause(resume)` 已支持 `run_id=None` 全量，但 `stop(run_id: str)` 仍是
@@ -62,7 +62,7 @@ SDD-0018 在嵌入层（jiuwenswarm）把 swarmflow run 的生命周期完全绑
    leader 的「停止」在冷启动场景是假的。`_control_run` 在 `controller.stop` 未命中时调
    `_announce_stopped(run_id)`：向 team topic 发一条 `WORKFLOW_STOPPED` progress 事件让 Monitor
    卡片落终态，并返回 success。**不写 journal seal**——pause 记录仍在，手动 `resume_id +
-   script_path` 仍可续（对齐 SDD-0018 §5.10 方案 B「丢票不 seal」）。resume 无此退化：没有票据
+   script_path` 仍可续（与决策 1 的「丢票不 seal」一致）。resume 无此退化：没有票据
    就没有可重放的 inputs，只能报 not_found 让 leader 走发射面。
 
 ## 拒绝的方案
