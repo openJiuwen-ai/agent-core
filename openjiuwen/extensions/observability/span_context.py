@@ -460,6 +460,13 @@ class LlmSpanState:
         reasoning_last_ns: Monotonic-ns of the last reasoning chunk.
         reasoning_start_wall_ns: Wall-clock epoch (time.time_ns) captured
             at the first reasoning chunk.
+        stream_phase: Kind and tool-call id of the stream phase in progress,
+            None before the first chunk and after the stream is closed.
+        stream_phase_last_sequence: Frame sequence of the most recent chunk
+            in the current phase. A phase's closing marker can only be written
+            once the phase is known to be over, so the frame that ended it has
+            to be remembered until then.
+        stream_opened: Whether the opening marker for this stream was written.
     """
 
     span: Span
@@ -481,6 +488,12 @@ class LlmSpanState:
     # is a monotonic delta (reasoning_last_ns - reasoning_first_ns). end_time
     # is set to start + that delta so the UI span duration equals reasoning time.
     reasoning_start_wall_ns: int | None = None
+    # Stream phase tracking. Individual frames travel on the stream-frame
+    # channel; the span itself keeps only phase markers, so its event count
+    # grows with the number of phases rather than with the answer's length.
+    stream_phase: tuple[str, str] | None = None
+    stream_phase_last_sequence: int = 0
+    stream_opened: bool = False
 
 
 _root_span_ctx: ContextVar[Span | None] = ContextVar("observability_root_span", default=None)

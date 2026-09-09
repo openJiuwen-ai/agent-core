@@ -101,6 +101,20 @@ def publish_span_snapshot(span: Any, update_kind: str) -> None:
         logger.warning("otel: recording span snapshot publish failed - {}", exc)
 
 
+def publish_stream_frame(record: Any) -> None:
+    """Publish one model-stream frame through the shared processor."""
+    with _DEMAND_LOCK:
+        processor = _SPAN_RECORD_PROCESSOR
+    if processor is None:
+        return
+    try:
+        processor.publish_stream_frame(record)
+    except Exception as exc:
+        # Frame delivery is optional observability and must not escape into
+        # the model, tool, or agent execution path.
+        logger.warning("otel: stream frame publish failed - {}", exc)
+
+
 def acquire_observability_demand(
     runtime: str,
     *,

@@ -130,6 +130,63 @@ class OtlpSpanSnapshotRecord:
         return self.payload.raw_json
 
 
+@dataclass(frozen=True, slots=True)
+class StreamFrameRecord:
+    """One model-stream frame delivered outside the span-snapshot path.
+
+    A streaming answer produces hundreds of these. Carrying them as span
+    events made every frame cost a full span snapshot, and capped what
+    survived at the SDK's per-span event limit -- which evicts the *oldest*
+    events, so the beginning of a long answer was silently lost. Frames
+    travel on their own channel instead, and the span keeps only the phase
+    markers that stay bounded in number.
+
+    Field names follow the OpenTelemetry ``LogRecord`` shape so this
+    transport can be replaced by the logs pipeline, once that API leaves
+    experimental status, without changing what a frame means.
+
+    Attributes:
+        event_name: Frame event name, e.g. ``openjiuwen.stream.chunk``.
+        timestamp_unix_nano: Wall-clock epoch of the frame itself.
+        observed_timestamp_unix_nano: Wall-clock epoch this record was built.
+        trace_id: Owning span's trace id, lowercase hex.
+        span_id: Owning span's id, lowercase hex.
+        sequence: Per-span frame counter, so a reader can detect a gap.
+        kind: One of ``text-delta`` / ``reasoning-delta`` /
+            ``tool-call-delta`` / ``usage``.
+        session_id: Conversation this frame belongs to.
+        execution_subject_id: Execution subject owning the chain.
+        execution_subject_session_id: Session the subject was created under.
+        text: Text or reasoning increment, when the kind carries one.
+        tool_call_id: Tool call this frame contributes to, when any.
+        tool_name: Tool name, when the frame names one.
+        arguments_delta: Tool-argument increment, when the frame carries one.
+        request_id: Request correlation id.
+        run_id: Run correlation id.
+        agent_mode: Agent mode of the owning span.
+        schema_version: Frame schema version.
+    """
+
+    event_name: str
+    timestamp_unix_nano: int
+    observed_timestamp_unix_nano: int
+    trace_id: str
+    span_id: str
+    sequence: int
+    kind: str
+    session_id: str | None
+    execution_subject_id: str | None
+    execution_subject_session_id: str | None
+    text: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    arguments_delta: str | None = None
+    request_id: str | None = None
+    run_id: str | None = None
+    agent_mode: str | None = None
+    schema_version: str = "1"
+
+
 class OtlpSpanRecordConsumer(Protocol):
     """Fast synchronous sink used from ``SpanProcessor.on_end``."""
 
@@ -142,6 +199,13 @@ class OtlpSpanSnapshotConsumer(Protocol):
 
     def consume_snapshot(self, record: OtlpSpanSnapshotRecord) -> None:
         """Accept one recording-span snapshot without blocking."""
+
+
+class StreamFrameConsumer(Protocol):
+    """Optional model-stream frame capability of an ended-span consumer."""
+
+    def consume_stream_frame(self, record: StreamFrameRecord) -> None:
+        """Accept one model-stream frame without blocking."""
 
 
 @dataclass(slots=True)
@@ -160,6 +224,13 @@ def _accepts_snapshots(registration: _ConsumerRegistration) -> bool:
     if not registration.accepting:
         return False
     return callable(getattr(registration.consumer, "consume_snapshot", None))
+
+
+def _accepts_stream_frames(registration: _ConsumerRegistration) -> bool:
+    """Report whether a live registration can take model-stream frames."""
+    if not registration.accepting:
+        return False
+    return callable(getattr(registration.consumer, "consume_stream_frame", None))
 
 
 def _attribute_text(attributes: Any, *keys: str) -> str | None:
@@ -318,6 +389,40 @@ class SpanRecordProcessor(SpanProcessor):
 
         self._deliver_snapshot(registrations, record)
 
+    def publish_stream_frame(self, record: StreamFrameRecord) -> None:
+        """Fan one model-stream frame out to every frame-capable consumer.
+
+        A frame is additive, not a snapshot: nothing downstream may coalesce
+        one away, because a dropped frame is an increment lost for good. That
+        stays affordable only because a frame carries just its own increment
+        rather than the whole span.
+        """
+        registrations = self._acquire_stream_frame_leases()
+        if not registrations:
+            return
+        for index, registration in enumerate(registrations):
+            previous_registration = getattr(
+                self._callback_local,
+                "current_registration",
+                None,
+            )
+            self._callback_local.current_registration = registration
+            try:
+                registration.consumer.consume_stream_frame(record)
+            except Exception as exc:
+                logger.warning(
+                    "span_record_processor: stream frame consumer {} failed - {}",
+                    type(registration.consumer).__name__,
+                    exc,
+                )
+            except BaseException:
+                for pending_registration in registrations[index + 1:]:
+                    self._release_lease(pending_registration)
+                raise
+            finally:
+                self._callback_local.current_registration = previous_registration
+                self._release_lease(registration)
+
     def on_end(self, span: ReadableSpan) -> None:
         """Deliver one immutable record without affecting the business path."""
         registrations = self._acquire_leases()
@@ -434,6 +539,21 @@ class SpanRecordProcessor(SpanProcessor):
                 registration
                 for registration in self._registrations
                 if _accepts_snapshots(registration)
+            )
+            for registration in registrations:
+                registration.in_flight += 1
+                registration.lease_threads[thread_id] = (
+                    registration.lease_threads.get(thread_id, 0) + 1
+                )
+            return registrations
+
+    def _acquire_stream_frame_leases(self) -> tuple[_ConsumerRegistration, ...]:
+        thread_id = threading.get_ident()
+        with self._lock:
+            registrations = tuple(
+                registration
+                for registration in self._registrations
+                if _accepts_stream_frames(registration)
             )
             for registration in registrations:
                 registration.in_flight += 1

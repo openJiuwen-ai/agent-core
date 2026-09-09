@@ -38,7 +38,11 @@ from openjiuwen.extensions.observability.redaction import (
     truncate,
 )
 from openjiuwen.extensions.observability.config import ObservabilityConfig
-from openjiuwen.extensions.observability.demand import publish_span_snapshot
+from openjiuwen.extensions.observability.demand import (
+    publish_span_snapshot,
+    publish_stream_frame,
+)
+from openjiuwen.extensions.observability.span_record_processor import StreamFrameRecord
 from openjiuwen.extensions.observability.error_reporting import record_span_error
 from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 from openjiuwen.extensions.observability.semconv import (
@@ -75,6 +79,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
+    OJ_AGENT_MODE,
     OJ_EVENT_SEQUENCE,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
@@ -108,9 +113,15 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_SPAN_OUTPUT,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
+    OJ_STREAM_CLOSE_EVENT,
+    OJ_STREAM_FRAME_COUNT,
+    OJ_STREAM_FRAME_EVENT,
     OJ_STREAM_KIND,
-    OJ_STREAM_TEXT,
-    OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA,
+    OJ_STREAM_OPEN_EVENT,
+    OJ_STREAM_PHASE_CLOSE_EVENT,
+    OJ_STREAM_PHASE_FIRST_SEQUENCE,
+    OJ_STREAM_PHASE_LAST_SEQUENCE,
+    OJ_STREAM_PHASE_OPEN_EVENT,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TOOL_AUTHORITATIVE,
@@ -220,6 +231,15 @@ def _get_field(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
     return getattr(value, name, default)
+
+
+def _attribute_text(attributes: Any, key: str) -> str | None:
+    """Return one span attribute as trimmed text, or None when it is absent."""
+    value = attributes.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _trajectory_message_origin(
@@ -506,18 +526,9 @@ class OtelCallbackHandler:
                     state.reasoning_first_ns = now_ns
                     state.reasoning_start_wall_ns = time.time_ns()
                 state.reasoning_last_ns = now_ns
-            if state.span.is_recording() and delta:
-                state.span.add_event(
-                    name="llm.chunk",
-                    attributes={
-                        "delta_chars": len(delta),
-                    },
-                )
             if state.span.is_recording():
                 self._record_stream_event(state, chunk, delta, reasoning_chunk)
             self._maybe_record_response_attrs(state, chunk)
-            if state.span.is_recording():
-                publish_span_snapshot(state.span, "stream_chunk")
         except Exception as exc:
             logger.warning("otel: on_llm_stream_output failed: {}", exc)
         return kwargs.get("result")
@@ -1084,6 +1095,7 @@ class OtelCallbackHandler:
                 getattr(getattr(state.span, "context", None), "span_id", 0),
             )
             return
+        self._close_stream_markers(state)
 
         try:
             raw_content = _message_content(response)
@@ -1329,37 +1341,184 @@ class OtelCallbackHandler:
         text_delta: str,
         reasoning_delta: str,
     ) -> None:
-        """Write one additive event for one actual streaming callback."""
-        attributes: dict[str, Any] = {OJ_EVENT_SEQUENCE: state.stream_event_sequence}
-        state.stream_event_sequence += 1
+        """Send one stream frame and keep the span's phase markers current.
 
+        The frame itself leaves on the stream-frame channel. The span keeps
+        only phase markers, because its event list is a bounded ring that
+        evicts the oldest entry -- putting frames there lost the start of
+        every long answer.
+        """
+        sequence = state.stream_event_sequence
+        state.stream_event_sequence += 1
+        kind, text, tool_call_id, tool_name, arguments_delta = self._stream_frame_fields(
+            chunk,
+            text_delta,
+            reasoning_delta,
+        )
+        self._publish_stream_frame(
+            state,
+            sequence=sequence,
+            kind=kind,
+            text=text,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            arguments_delta=arguments_delta,
+        )
+        self._advance_stream_phase(
+            state,
+            sequence=sequence,
+            kind=kind,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+        )
+
+    def _stream_frame_fields(
+        self,
+        chunk: Any,
+        text_delta: str,
+        reasoning_delta: str,
+    ) -> tuple[str, str | None, str | None, str | None, str | None]:
+        """Resolve one streaming callback into the fields of a frame.
+
+        Returns:
+            The frame kind, its text, tool call id, tool name and tool
+            argument increment; every field but the kind is None when this
+            kind does not carry it.
+        """
         tool_calls = _get_field(chunk, "tool_calls") or []
         usage = _get_field(chunk, "usage_metadata")
         if reasoning_delta:
-            attributes[OJ_STREAM_KIND] = "reasoning-delta"
-            attributes[OJ_STREAM_TEXT] = redact_completion(reasoning_delta, self._config)
-        elif tool_calls:
-            attributes[OJ_STREAM_KIND] = "tool-call-delta"
+            redacted = redact_completion(reasoning_delta, self._config)
+            return "reasoning-delta", redacted, None, None, None
+        if tool_calls:
             tool_call = tool_calls[0]
             tool_id = _get_field(tool_call, "id")
             tool_name = _get_field(tool_call, "name")
             arguments = _get_field(tool_call, "arguments")
-            if tool_id:
-                attributes[GEN_AI_TOOL_CALL_ID] = str(tool_id)
-            if tool_name:
-                attributes[GEN_AI_TOOL_NAME] = str(tool_name)
+            arguments_delta = None
             if arguments not in (None, ""):
-                attributes[OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA] = redact_completion(
-                    _coerce_message_content(arguments), self._config
+                arguments_delta = redact_completion(
+                    _coerce_message_content(arguments),
+                    self._config,
                 )
-        elif usage is not None and not text_delta:
-            attributes[OJ_STREAM_KIND] = "usage"
-        else:
-            attributes[OJ_STREAM_KIND] = "text-delta"
-            if text_delta:
-                attributes[OJ_STREAM_TEXT] = redact_completion(text_delta, self._config)
+            return (
+                "tool-call-delta",
+                None,
+                str(tool_id) if tool_id else None,
+                str(tool_name) if tool_name else None,
+                arguments_delta,
+            )
+        if usage is not None and not text_delta:
+            return "usage", None, None, None, None
+        text = redact_completion(text_delta, self._config) if text_delta else None
+        return "text-delta", text, None, None, None
 
-        state.span.add_event("openjiuwen.stream.chunk", attributes=attributes)
+    @staticmethod
+    def _publish_stream_frame(
+        state: LlmSpanState,
+        *,
+        sequence: int,
+        kind: str,
+        text: str | None,
+        tool_call_id: str | None,
+        tool_name: str | None,
+        arguments_delta: str | None,
+    ) -> None:
+        """Hand one frame to the stream-frame channel."""
+        span_context = state.span.get_span_context()
+        attributes = state.span.attributes or {}
+        recorded_at = time.time_ns()
+        publish_stream_frame(StreamFrameRecord(
+            event_name=OJ_STREAM_FRAME_EVENT,
+            timestamp_unix_nano=recorded_at,
+            observed_timestamp_unix_nano=recorded_at,
+            trace_id=f"{span_context.trace_id:032x}",
+            span_id=f"{span_context.span_id:016x}",
+            sequence=sequence,
+            kind=kind,
+            session_id=_attribute_text(attributes, GEN_AI_CONVERSATION_ID),
+            execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
+            execution_subject_session_id=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_SESSION_ID,
+            ),
+            text=text,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            arguments_delta=arguments_delta,
+            request_id=_attribute_text(attributes, OJ_REQUEST_ID),
+            run_id=_attribute_text(attributes, OJ_RUN_ID),
+            agent_mode=_attribute_text(attributes, OJ_AGENT_MODE),
+        ))
+
+    @staticmethod
+    def _advance_stream_phase(
+        state: LlmSpanState,
+        *,
+        sequence: int,
+        kind: str,
+        tool_call_id: str | None,
+        tool_name: str | None,
+    ) -> None:
+        """Keep the span's phase markers in step with the frame stream."""
+        if kind == "usage":
+            # Usage carries no content and so belongs to no phase.
+            return
+        if not state.stream_opened:
+            state.span.add_event(
+                OJ_STREAM_OPEN_EVENT,
+                attributes={OJ_EVENT_SEQUENCE: sequence},
+            )
+            state.stream_opened = True
+        # A tool call is its own phase: consecutive calls share a kind but
+        # describe different work, and a reader needs their boundary.
+        phase = (kind, tool_call_id or "")
+        if state.stream_phase == phase:
+            state.stream_phase_last_sequence = sequence
+            return
+        OtelCallbackHandler._close_stream_phase(state)
+        attributes: dict[str, Any] = {
+            OJ_STREAM_KIND: kind,
+            OJ_STREAM_PHASE_FIRST_SEQUENCE: sequence,
+        }
+        if tool_call_id:
+            attributes[GEN_AI_TOOL_CALL_ID] = tool_call_id
+        if tool_name:
+            attributes[GEN_AI_TOOL_NAME] = tool_name
+        state.span.add_event(OJ_STREAM_PHASE_OPEN_EVENT, attributes=attributes)
+        state.stream_phase = phase
+        state.stream_phase_last_sequence = sequence
+
+    @staticmethod
+    def _close_stream_phase(state: LlmSpanState) -> None:
+        """Write the closing marker of the phase that just ended.
+
+        A phase can only be closed once it is known to be over, which is when
+        the next phase opens or the stream ends -- never on the frame that
+        turns out to have been its last.
+        """
+        phase = state.stream_phase
+        if phase is None:
+            return
+        attributes: dict[str, Any] = {
+            OJ_STREAM_KIND: phase[0],
+            OJ_STREAM_PHASE_LAST_SEQUENCE: state.stream_phase_last_sequence,
+        }
+        if phase[1]:
+            attributes[GEN_AI_TOOL_CALL_ID] = phase[1]
+        state.span.add_event(OJ_STREAM_PHASE_CLOSE_EVENT, attributes=attributes)
+        state.stream_phase = None
+
+    @staticmethod
+    def _close_stream_markers(state: LlmSpanState) -> None:
+        """Close the open phase and mark the end of the frame stream."""
+        if not state.stream_opened:
+            return
+        OtelCallbackHandler._close_stream_phase(state)
+        state.span.add_event(
+            OJ_STREAM_CLOSE_EVENT,
+            attributes={OJ_STREAM_FRAME_COUNT: state.stream_event_sequence},
+        )
 
     @staticmethod
     def _message_occurrence_ids(messages: Any) -> tuple[str, ...]:

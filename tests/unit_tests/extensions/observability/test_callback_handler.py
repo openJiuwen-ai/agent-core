@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.test_logger import logger
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Span, StatusCode, set_span_in_context
@@ -68,7 +69,13 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_CONVERSATION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_INPUT,
+    OJ_STREAM_CLOSE_EVENT,
+    OJ_STREAM_FRAME_COUNT,
+    OJ_STREAM_FRAME_EVENT,
     OJ_STREAM_KIND,
+    OJ_STREAM_OPEN_EVENT,
+    OJ_STREAM_PHASE_CLOSE_EVENT,
+    OJ_STREAM_PHASE_OPEN_EVENT,
     OJ_TRACE_COMPLETE,
     OJ_TRACE_FORCED_CLOSE,
     OJ_TRACE_ROOT,
@@ -78,6 +85,7 @@ from openjiuwen.extensions.observability.semconv import (
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
     clear_root_span,
+    get_current_llm_span,
     reset_state,
     set_active_span_tracker,
     set_current_agent_span,
@@ -87,6 +95,7 @@ from openjiuwen.extensions.observability.span_record_processor import (
     OtlpSpanRecord,
     OtlpSpanSnapshotRecord,
     SpanRecordProcessor,
+    StreamFrameRecord,
 )
 from openjiuwen.harness.observability.run_span import close_agent_run_span
 
@@ -95,12 +104,16 @@ class _LiveRecordConsumer:
     def __init__(self) -> None:
         self.records: list[OtlpSpanRecord] = []
         self.snapshots: list[OtlpSpanSnapshotRecord] = []
+        self.frames: list[StreamFrameRecord] = []
 
     def consume(self, record: OtlpSpanRecord) -> None:
         self.records.append(record)
 
     def consume_snapshot(self, record: OtlpSpanSnapshotRecord) -> None:
         self.snapshots.append(record)
+
+    def consume_stream_frame(self, record: StreamFrameRecord) -> None:
+        self.frames.append(record)
 
 
 def _llm_spans(exporter: InMemorySpanExporter) -> list[Any]:
@@ -533,14 +546,28 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     assert attrs[OJ_REQUEST_ID] == "request-1"
     assert attrs[OJ_RUN_ID] == "run-1"
 
-    stream_events = [
-        event for event in llm_span.events if event.name == "openjiuwen.stream.chunk"
+    # Frames leave on their own channel, so the span carries phase markers
+    # rather than one event per frame.
+    assert not [
+        event for event in llm_span.events if event.name == OJ_STREAM_FRAME_EVENT
     ]
-    assert [event.attributes[OJ_EVENT_SEQUENCE] for event in stream_events] == [0, 1]
-    assert [event.attributes[OJ_STREAM_KIND] for event in stream_events] == [
+    phase_opens = [
+        event for event in llm_span.events if event.name == OJ_STREAM_PHASE_OPEN_EVENT
+    ]
+    assert [event.attributes[OJ_STREAM_KIND] for event in phase_opens] == [
         "text-delta",
         "reasoning-delta",
     ]
+    marker_names = [
+        event.name for event in llm_span.events
+        if event.name.startswith("openjiuwen.stream.")
+    ]
+    assert marker_names[0] == OJ_STREAM_OPEN_EVENT
+    assert marker_names[-1] == OJ_STREAM_CLOSE_EVENT
+    closes = [
+        event for event in llm_span.events if event.name == OJ_STREAM_PHASE_CLOSE_EVENT
+    ]
+    assert len(closes) == len(phase_opens)
 
 
 @pytest.mark.asyncio
@@ -1336,26 +1363,112 @@ async def test_stream_callbacks_publish_recoverable_live_snapshots(
         provider.shutdown()
 
     llm_snapshots = [record for record in consumer.snapshots if record.name == "chat test-model"]
+    # A chunk no longer costs a whole-span snapshot: it travels as a frame.
     assert [record.update_kind for record in llm_snapshots] == [
         "started",
         "attributes",
         "attributes",
-        "stream_chunk",
-        "stream_chunk",
     ]
-    assert [record.record_revision for record in llm_snapshots] == [1, 2, 3, 4, 5]
+    assert [frame.kind for frame in consumer.frames] == ["text-delta", "text-delta"]
+    assert [frame.sequence for frame in consumer.frames] == [0, 1]
+    assert [frame.text for frame in consumer.frames] == ["hel", "lo"]
+    assert {frame.session_id for frame in consumer.frames} == {"live-session"}
+    assert [record.record_revision for record in llm_snapshots] == [1, 2, 3]
     final = next(record for record in consumer.records if record.span_id == llm_snapshots[0].span_id)
-    assert final.record_revision == 6
+    assert final.record_revision == 4
     assert final.lifecycle == "final"
-    second_chunk_payload = json.loads(llm_snapshots[-1].raw_json)
-    second_chunk_span = second_chunk_payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
-    assert [event["name"] for event in second_chunk_span["events"]] == [
-        "llm.chunk",
-        "openjiuwen.stream.chunk",
-        "llm.chunk",
-        "openjiuwen.stream.chunk",
+    final_payload = json.loads(final.raw_json)
+    final_span = final_payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    # The ended span keeps only the bounded phase markers: no event on it
+    # scales with the number of chunks any more.
+    assert [event["name"] for event in final_span["events"]] == [
+        OJ_STREAM_OPEN_EVENT,
+        OJ_STREAM_PHASE_OPEN_EVENT,
+        OJ_STREAM_PHASE_CLOSE_EVENT,
+        OJ_STREAM_CLOSE_EVENT,
     ]
 
+
+
+@pytest.mark.asyncio
+async def test_long_stream_keeps_every_frame_and_a_bounded_span(monkeypatch) -> None:
+    """A long answer loses no frame, and its span stays inside the event cap.
+
+    Frames used to be span events. The SDK caps a span at 128 events and
+    evicts the *oldest* on overflow, so a long answer silently lost its
+    beginning -- exactly the part a reader needs to replay it from the start.
+    """
+    processor = SpanRecordProcessor()
+    consumer = _LiveRecordConsumer()
+    processor.register_consumer(consumer)
+    provider = TracerProvider()
+    tracker = ActiveSpanTracker()
+    provider.add_span_processor(tracker)
+    provider.add_span_processor(processor)
+    tracer = provider.get_tracer("long-stream-test")
+    monkeypatch.setattr(demand_module, "_SPAN_RECORD_PROCESSOR", processor)
+    reset_state()
+    set_active_span_tracker(tracker)
+    root = tracer.start_span(
+        "agent.root",
+        attributes={OJ_TRACE_ROOT: True, "gen_ai.conversation.id": "long-session"},
+    )
+    set_root_span(root, session_id="long-session")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, service_name="long-stream-test"),
+        tracer=tracer,
+    )
+    chunk_count = 300
+    llm_span = None
+
+    try:
+        with LlmCallScope(unified_completion=True):
+            await handler.on_llm_stream_input(
+                messages=[{"role": "user", "content": "write at length"}],
+                model="test-model",
+            )
+            await handler.on_llm_input(messages=[{"role": "user", "content": "write at length"}])
+            llm_span = get_current_llm_span()
+            for index in range(chunk_count):
+                await handler.on_llm_stream_output(
+                    result=AssistantMessageChunk(content=f"w{index} "),
+                )
+            await handler.on_llm_stream_completed(
+                result=AssistantMessage(content="done", finish_reason="stop"),
+            )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="long-session", expected_span=root)
+        set_active_span_tracker(None)
+        reset_state()
+        provider.shutdown()
+
+    frames = [frame for frame in consumer.frames if frame.kind == "text-delta"]
+    logger.info(
+        "long stream: chunks={} frames={} span_events={}",
+        chunk_count,
+        len(frames),
+        len(llm_span.events),
+    )
+    # Every frame arrives, in order, with no gap a reader would have to guess at.
+    assert [frame.sequence for frame in frames] == list(range(chunk_count))
+    assert [frame.text for frame in frames] == [f"w{index} " for index in range(chunk_count)]
+    # One text phase for the whole answer, so the span holds four markers no
+    # matter how long the model talks.
+    assert [event.name for event in llm_span.events] == [
+        OJ_STREAM_OPEN_EVENT,
+        OJ_STREAM_PHASE_OPEN_EVENT,
+        OJ_STREAM_PHASE_CLOSE_EVENT,
+        OJ_STREAM_CLOSE_EVENT,
+    ]
+    close_event = llm_span.events[-1]
+    assert close_event.attributes[OJ_STREAM_FRAME_COUNT] == chunk_count
+    # No chunk costs a whole-span snapshot any more.
+    chunk_snapshots = [
+        record for record in consumer.snapshots if record.update_kind == "stream_chunk"
+    ]
+    assert chunk_snapshots == []
 
 
 def test_request_numbers_are_allocated_without_a_root_span() -> None:

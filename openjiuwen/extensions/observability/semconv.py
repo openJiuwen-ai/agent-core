@@ -108,6 +108,26 @@ OJ_STREAM_KIND = "openjiuwen.stream.kind"
 OJ_STREAM_TEXT = "openjiuwen.stream.text"
 OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA = "openjiuwen.stream.tool_call.arguments_delta"
 
+# Name of one model-stream frame. A frame is carried on the stream-frame
+# channel rather than as a span event: an answer produces hundreds of them,
+# and the SDK's per-span event limit evicts the oldest, which would drop the
+# beginning of every long answer.
+OJ_STREAM_FRAME_EVENT = "openjiuwen.stream.chunk"
+
+# Phase markers kept on the span itself. Their count grows with the number of
+# phases a call goes through, not with the length of its answer, so the span
+# stays well inside the event limit however long the model talks.
+OJ_STREAM_OPEN_EVENT = "openjiuwen.stream.open"
+OJ_STREAM_PHASE_OPEN_EVENT = "openjiuwen.stream.phase.open"
+OJ_STREAM_PHASE_CLOSE_EVENT = "openjiuwen.stream.phase.close"
+OJ_STREAM_CLOSE_EVENT = "openjiuwen.stream.close"
+
+# Frame sequence a phase marker refers to, so a reader can line a marker up
+# against the frame stream without replaying it.
+OJ_STREAM_PHASE_FIRST_SEQUENCE = "openjiuwen.stream.phase.first_sequence"
+OJ_STREAM_PHASE_LAST_SEQUENCE = "openjiuwen.stream.phase.last_sequence"
+OJ_STREAM_FRAME_COUNT = "openjiuwen.stream.frame_count"
+
 OJ_TOOL_RESOURCE_ID = "openjiuwen.tool.resource_id"
 OJ_TOOL_PROTOCOL = "openjiuwen.tool.protocol"
 OJ_TOOL_AUTHORITATIVE = "openjiuwen.tool.authoritative"
