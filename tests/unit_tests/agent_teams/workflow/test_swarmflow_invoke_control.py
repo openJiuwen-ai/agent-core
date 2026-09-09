@@ -79,3 +79,52 @@ async def test_tool_registers_itself_as_controller_launcher():
     assert ctl._launcher is old_tool
     new_tool = SwarmflowTool(parent_agent=_harness(), messager=None, team_name="t", model_resolver=None)
     assert ctl._launcher is new_tool  # newest cycle wins
+
+
+class _MissController(_FakeController):
+    async def stop(self, run_id): self.calls.append(("stop", run_id)); return False
+
+
+class _RecMessager:
+    def __init__(self): self.published = []
+    async def publish(self, *, topic_id, message): self.published.append((topic_id, message))
+
+
+@pytest.mark.asyncio
+async def test_stop_on_unregistered_run_announces_stopped_without_seal():
+    """After a cold start the controller holds no ticket for a run the embedder
+    still shows as paused. stop must still close the card: publish
+    WORKFLOW_STOPPED on the team topic (no journal seal — a manual
+    resume_id+script_path relaunch stays possible), and report success.
+    """
+    from openjiuwen.agent_teams.context import set_session_id
+    from openjiuwen.agent_teams.schema.events import TeamEvent
+
+    ctl = _MissController()
+    tool = _make_tool(ctl)
+    tool._messager = _RecMessager()
+    tool._team_name = "t"
+    set_session_id("s1")
+
+    out = await tool.invoke({"resume_id": "wf_cold", "action": "stop"})
+
+    assert out.success and out.data["status"] == "done"
+    assert ctl.calls == [("stop", "wf_cold")]
+    (topic, msg), = tool._messager.published
+    assert "s1" in topic and "t" in topic
+    assert msg.event_type == TeamEvent.WORKFLOW_PROGRESS
+    assert msg.payload["kind"] == "workflow_stopped"
+    assert msg.payload["run_id"] == "wf_cold"
+
+
+@pytest.mark.asyncio
+async def test_resume_on_unregistered_run_still_reports_not_found():
+    """Only stop has the close-the-card fallback; resume needs a real ticket."""
+    class _Ctl(_FakeController):
+        async def resume(self, run_id): return False
+    tool = _make_tool(_Ctl())
+    tool._messager = _RecMessager()
+    tool._team_name = "t"
+    out = await tool.invoke({"resume_id": "wf_cold", "action": "resume"})
+    assert not out.success and out.data["status"] == "not_found"
+    assert tool._messager.published == []
