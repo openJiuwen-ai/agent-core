@@ -8,11 +8,6 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
     LaunchedExpertTeam,
 )
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
-from openjiuwen.agent_teams.organization.summary import (
-    LaunchedSummaryTeam,
-    SummaryTeamFactory,
-    SummaryTeamSpec,
-)
 from openjiuwen.agent_teams.organization.message_service import (
     OrgMessageOpResult,
     OrgMessageService,
@@ -38,6 +33,14 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgUnclaimedTaskPolicy,
     OrgUnclaimedTaskState,
 )
+from openjiuwen.agent_teams.organization.summary import (
+    LaunchedSummaryTeam,
+    SummaryTeamFactory,
+    SummaryTeamSpec,
+)
+from openjiuwen.agent_teams.organization.summary_team_factory import (
+    DefaultSummaryTeamFactory,
+)
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager, OrgTaskOpResult
 from openjiuwen.agent_teams.organization.transport_api import (
     NegotiationRequest,
@@ -52,6 +55,7 @@ __all__ = [
     "OrgUnclaimedTaskState",
     "ExpertGroupDescriptor",
     "LaunchedExpertTeam",
+    "DefaultSummaryTeamFactory",
     "LaunchedSummaryTeam",
     "NegotiationRequest",
     "NegotiationResult",
