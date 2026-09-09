@@ -162,16 +162,22 @@ def emit_context_window_commit(
         window_id=window_id,
         messages=messages,
     )
-    payload = {
+    # Only a baseline carries the complete window. Every later commit is the
+    # delta against the one before it, which a consumer applies onto the chain
+    # it has already read. Repeating the whole window on each commit made a
+    # streaming turn's storage grow with the square of its length: measured on
+    # one real session, 173 commits carried 121.7 MB of windows to express
+    # 0.5 MB of actual change.
+    payload: dict[str, Any] = {
         "window_id": window_id,
         "base_window_id": base_window_id,
         "complete": True,
-        "messages": messages,
         "delta": delta,
         "request_purpose": request_purpose,
     }
     if is_epoch_baseline:
         payload.update({
+            "messages": messages,
             "transition_kind": "epoch_baseline",
             "baseline_reason": "runtime_epoch_start",
         })

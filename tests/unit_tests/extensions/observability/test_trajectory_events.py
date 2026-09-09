@@ -284,11 +284,9 @@ async def test_core_occurrence_ids_and_request_system_slot_survive_provider_norm
         "context-a",
         "context-b",
     ]
-    assert [message["message_id"] for message in second["messages"]] == [
-        "openjiuwen:request-system-slot:0",
-        "context-a",
-        "context-b",
-    ]
+    # Only the baseline carries a complete window; a later commit states the
+    # change against it and the reader applies that onto the chain it holds.
+    assert "messages" not in second
     system_ops = [
         item for item in second["delta"]
         if item["message_id"] == "openjiuwen:request-system-slot:0"
@@ -590,7 +588,15 @@ async def test_concurrent_subjects_have_independent_sequence_and_window_state() 
         first, second = map(_payload, events)
         assert first["base_window_id"] is None
         assert second["base_window_id"] == first["window_id"]
-        assert all(message["content"] == subject for event in events for message in _payload(event)["messages"])
+        # The baseline states the window; the follow-up states the change, and
+        # both stay scoped to their own subject.
+        assert all(message["content"] == subject for message in first["messages"])
+        assert "messages" not in second
+        assert all(
+            operation["message"]["content"] == subject
+            for operation in second["delta"]
+            if "message" in operation
+        )
 
 
 def test_langfuse_only_span_is_not_a_native_v2_event() -> None:
