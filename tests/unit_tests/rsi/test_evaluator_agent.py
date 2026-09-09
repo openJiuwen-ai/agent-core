@@ -55,6 +55,8 @@ def _output(scores=(1.0, 0.0)):
 
 
 def test_explicit_factory_and_config_roundtrip():
+    assert EvaluatorConfig().judge_success_score == 0.8
+    assert EvaluatorConfig.from_dict({}).judge_success_score == 0.8
     config = EvaluatorConfig.from_dict(
         {
             "evaluation_method": "llm-as-judge",
@@ -69,6 +71,17 @@ def test_explicit_factory_and_config_roundtrip():
     assert isinstance(build_judger(EvaluatorConfig()), ScriptBasedJudger)
     with pytest.raises(ValueError, match="model_config_ref"):
         build_judger(EvaluatorConfig(evaluation_method="llm_as_judge"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("score,passed", [(0.799, False), (0.8, True), (0.965, True)])
+async def test_configured_threshold_reaches_case_reference(tmp_path, monkeypatch, score, passed):
+    monkeypatch.setattr(llm_as_judge, "run_judge_agent", AsyncMock(return_value=json.dumps(_output((score, score)))))
+    runner = CaseRunner(backend=_Backend("done"), judger=LlmAsJudgeJudger(_config(judge_success_score=0.8)))
+    ref = await runner.execute(case=_case(), output_dir=str(tmp_path / "case"), team_skill_ref_path="")
+    assert ref.score == pytest.approx(score)
+    assert ref.metadata["evaluation_passed"] is passed
+    assert ref.status == ("passed" if passed else "failed")
 
 
 @pytest.mark.parametrize(
@@ -370,5 +383,5 @@ def test_judge_model_or_threshold_changes_invalidate_reused_evaluations(tmp_path
     model.write_text('{"model": "second"}')
     assert _evaluation_input_fingerprint(**kwargs) != before
     assert _evaluation_input_fingerprint(**kwargs) != _evaluation_input_fingerprint(
-        **{**kwargs, "evaluator_config": replace(config, judge_success_score=0.8)}
+        **{**kwargs, "evaluator_config": replace(config, judge_success_score=0.9)}
     )

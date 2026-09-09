@@ -948,10 +948,13 @@ class TestDiagnosisAgentStrategy:
         assert isinstance(rails[1], runtime_module._DiagnosisBudgetRail)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,passing_score", [("swebench_official", 1.0), ("llm_as_judge", 0.8)])
     async def test_analyze_diagnoses_only_nonpassing_cases(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        passing_score: float,
     ) -> None:
         from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
@@ -968,9 +971,9 @@ class TestDiagnosisAgentStrategy:
                     {
                         "case_id": case_id,
                         "status": "passed" if passed else "failed",
-                        "score": 1.0 if passed else 0.0,
+                        "score": passing_score if passed else 0.0,
                         "evaluation": {
-                            "method": "swebench_official",
+                            "method": method,
                             "passed": passed,
                             "reason": "",
                             "metadata": {},
@@ -987,8 +990,8 @@ class TestDiagnosisAgentStrategy:
                     "total_cases": 2,
                     "passed_cases": 1,
                     "failed_cases": 1,
-                    "average_score": 0.5,
-                    "evaluation_method": "swebench_official",
+                    "average_score": passing_score / 2,
+                    "evaluation_method": method,
                 }
             ),
             encoding="utf-8",

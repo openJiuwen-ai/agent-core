@@ -19,7 +19,6 @@ from openjiuwen.rsi.harness_rsi.evaluator.team_evaluator import TeamEvaluator
 from tests.unit_tests.rsi.test_evaluator import _Backend
 from tests.unit_tests.rsi.test_evaluator_agent import _config
 
-
 RUBRIC = (
     "Grade the response against the following criteria.\n"
     "## Positive requirements\n"
@@ -31,13 +30,19 @@ RUBRIC = (
 )
 
 
-def _case():
-    return {
+def _case(nested=False):
+    case = {
         "id": "example",
         "input": "Name Monday and Tuesday.",
         "reference_solution": "Monday and Tuesday.",
         "judge_rubrics": RUBRIC,
     }
+    if nested:
+        case["reference"] = {
+            "solution": case.pop("reference_solution"),
+            "judge_rubrics": case.pop("judge_rubrics"),
+        }
+    return case
 
 
 def _verdict():
@@ -54,15 +59,16 @@ def _verdict():
     }
 
 
-def test_alias_import_is_idempotent_and_does_not_mutate_or_double_score_answer(tmp_path):
-    raw = _case()
+@pytest.mark.parametrize("nested", [False, True])
+def test_alias_import_is_idempotent_and_does_not_mutate_or_double_score_answer(tmp_path, nested):
+    raw = _case(nested)
     before = copy.deepcopy(raw)
     path = tmp_path / "cases.json"
     path.write_text(json.dumps([raw]), encoding="utf-8")
     case = load_json_cases(path)[0]
     assert raw == before
     assert case["case_id"] == "example"
-    assert case["reference"]["answer"] == raw["reference_solution"]
+    assert case["reference"]["answer"] == _case()["reference_solution"]
     assert case["reference"]["answer_role"] == "reference"
     assert case["reference"]["penalty_mode"] == "subtract"
     assert normalize_grading_case(case) == case
@@ -86,6 +92,23 @@ def test_chinese_annotations_and_multiline_descriptions_preserve_meaning():
     assert positive[0]["description"] == "First criterion.\nContinuation with detailed evidence."
     assert positive[1]["description"] == "Second criterion."
     assert [item["penalty"] for item in negative] == [0.06, 0.04]
+
+
+def test_weighted_groups_keep_subitems_without_rescaling_or_extra_criteria():
+    rubric = (
+        "Use partial credit for correct steps.\n"
+        "## Content\n[weight 90%] Score the following out of 100.\n"
+        "1. [60 points] First requirement.\n2. [40 points] Second requirement.\n"
+        "## Presentation\n[weight 10%] Score out of ten.\na. First check (5 points).\nb. Second check (5 points)."
+    )
+    positive, negative = parse_weighted_rubric(rubric)
+    assert [item["weight"] for item in positive] == [0.9, 0.1]
+    assert "1. [60 points]" in positive[0]["description"]
+    assert "2. [40 points]" in positive[0]["description"]
+    assert "b. Second check" in positive[1]["description"]
+    assert not negative
+    with pytest.raises(ValueError, match="unrecognized"):
+        parse_weighted_rubric(rubric + "\n3. [deduct six points] Malformed deduction.")
 
 
 @pytest.mark.parametrize(
@@ -129,6 +152,23 @@ def test_answer_only_alias_retains_answer_scoring():
     assert not forbidden
 
 
+@pytest.mark.parametrize("field,value", [("solution", "Different answer"), ("judge_rubrics", "Different rubric")])
+def test_conflicting_top_level_and_nested_aliases_are_rejected(field, value):
+    with pytest.raises(ValueError, match="conflicting grading fields"):
+        normalize_grading_case({**_case(), "reference": {field: value}})
+
+
+def test_matching_top_level_and_nested_aliases_do_not_duplicate_criteria():
+    case = {**_case(), "reference": _case(True)["reference"]}
+    assert scoring_contract(case) == scoring_contract(_case())
+
+
+def test_nested_answer_only_and_canonical_conflict():
+    assert scoring_contract({"reference": {"solution": "Answer"}})[0][0]["id"] == "reference_answer"
+    with pytest.raises(ValueError, match="conflicting grading fields"):
+        normalize_grading_case({"reference": {"solution": "Answer", "answer": "Other"}})
+
+
 def test_deduction_only_rubric_uses_answer_as_base_not_an_empty_score():
     case = {**_case(), "judge_rubrics": "1. [deduct 6%] Invented evidence."}
     behaviors, forbidden = scoring_contract(case)
@@ -169,9 +209,10 @@ def test_invalid_scoring_policy_fails_preflight(field, value):
 
 
 @pytest.mark.asyncio
-async def test_imported_weighted_judger_result_reaches_analyzer_with_deductions(tmp_path, monkeypatch):
+@pytest.mark.parametrize("nested", [False, True])
+async def test_imported_weighted_judger_result_reaches_analyzer_with_deductions(tmp_path, monkeypatch, nested):
     dataset = tmp_path / "cases.json"
-    dataset.write_text(json.dumps([_case()]), encoding="utf-8")
+    dataset.write_text(json.dumps([_case(nested)]), encoding="utf-8")
     cases = load_json_cases(dataset)
     judge_call = AsyncMock(return_value=json.dumps(_verdict()))
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", judge_call)
@@ -204,5 +245,6 @@ async def test_imported_weighted_judger_result_reaches_analyzer_with_deductions(
     workspace = judge_call.call_args.args[1]
     request = json.loads((workspace / "request.json").read_text(encoding="utf-8"))
     assert request["reference_answer_role"] == "reference"
+    assert request["rubric_instructions"] == RUBRIC
     assert request["reference_answer"] == _case()["reference_solution"]
     assert len(request["behaviors"]) == 2
