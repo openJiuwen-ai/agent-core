@@ -58,6 +58,11 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.secti
 _LOGGER = get_logger(__name__)
 
 _SKILLS_DIR = Path(__file__).parent / "skills"
+# Runtime copy under the paper workspace so the agent's sandboxed
+# read_file / skill_tool / shell can reach SKILL.md and the skill scripts
+# when project_root() has been redirected to a task run_dir (jiuwenswarm).
+# Dotted so it is not mistaken for a paper artifact.
+_MATERIALIZED_SKILLS_DIRNAME = ".skills"
 _ALL_SKILL_NAMES = ("ts-plan", "ts-write", "ts-figure", "ts-review", "ts-latex")
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
 _REVIEWER_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "reviewer_system_prompt.md"
@@ -365,7 +370,7 @@ class ReportingAgent:
             + "\n\n".join(f"## Evidence: {key}\n\n{value}" for key, value in evidence.items())
         )
 
-    def _enabled_skill_dirs(self) -> list[str]:
+    def _enabled_skill_dirs(self, skills_root: Path | None = None) -> list[str]:
         """Explicit per-skill directory list rather than the whole
         {SKILLS_DIR} parent — the SDK's skill registration accepts either
         (confirmed against the installed harness: SkillManager.register
@@ -374,13 +379,39 @@ class ReportingAgent:
         when a single parent path is passed). This is what makes
         reporting.method_figure.enabled: false a real toggle — the model
         never sees ts-figure as an available skill at all, not just a
-        skill it's told not to use."""
+        skill it's told not to use.
+
+        ``skills_root`` defaults to the package-tree source. After
+        materializing into the paper workspace, pass the copy so the
+        agent is registered against sandbox-reachable paths.
+        """
+        root = _SKILLS_DIR if skills_root is None else Path(skills_root)
         method_figure_enabled = bool((self._pw_config.get("method_figure") or {}).get("enabled", True))
         return [
-            str(_SKILLS_DIR / name)
+            str(root / name)
             for name in _ALL_SKILL_NAMES
             if name != "ts-figure" or method_figure_enabled
         ]
+
+    @staticmethod
+    def _materialize_skills(workspace: Path, skill_dirs: list[str]) -> Path:
+        """Copy enabled skill directories into ``workspace/.skills``.
+
+        Always refreshes the dest so a retry cannot keep a previous
+        session's edited scripts. ``__pycache__`` is skipped. Returns
+        the dest path, which is what ``{SKILLS_DIR}`` and ``skills=``
+        must point at — the package-tree source is outside the sandbox
+        once ``project_root()`` is a task run_dir.
+        """
+        dest = workspace / _MATERIALIZED_SKILLS_DIRNAME
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        ignore = shutil.ignore_patterns("__pycache__")
+        for src in skill_dirs:
+            src_path = Path(src)
+            shutil.copytree(src_path, dest / src_path.name, ignore=ignore)
+        return dest
 
     # -- agent construction: mirrors code_implementation's _build_coding_agent
     # (create_deep_agent + guarded shell + fs tools scoped to a workspace) --
@@ -426,9 +457,10 @@ class ReportingAgent:
         # shell subprocesses inherit the full parent env — see
         # OperationUtils.prepare_environment). Set here, not hardcoded in
         # the script: a live run once found latexmk/pdflatex missing from
-        # PATH and, since the agent can write to that script (project_root
-        # is a required sandbox root for skill discovery), edited a
-        # machine-specific absolute path directly into tracked source.
+        # PATH and edited a machine-specific absolute path into the skill
+        # script. Skills are now copied into the paper workspace (so that
+        # write cannot touch tracked source), but LATEX_BIN_DIR still
+        # exists so the agent has no reason to "helpfully" hardcode a path.
         latex_bin_dir = os.environ.get("LATEX_BIN_DIR") or self._pw_config.get("latex_bin_dir")
         if latex_bin_dir:
             os.environ.setdefault("LATEX_BIN_DIR", latex_bin_dir)
@@ -448,6 +480,13 @@ class ReportingAgent:
             os.environ.setdefault("DRAWIO_SKILL_DIR", drawio_skill_dir)
 
         workspace = paper_workspace_dir(run_id)
+        # Package-tree _SKILLS_DIR is outside the sandbox once
+        # project_root() has been redirected to a task run_dir
+        # (jiuwenswarm). Copy enabled skills into the paper workspace
+        # so read_file / skill_tool / shell python {SKILLS_DIR}/... all
+        # resolve inside restrict_to_work_dir. Refresh every session so
+        # a retry cannot keep a previous attempt's edited scripts.
+        skills_root = self._materialize_skills(workspace, self._enabled_skill_dirs())
         # {PAPER_WORKSPACE}, like {SKILLS_DIR}, is a literal placeholder in
         # every SKILL.md — resolved once here, not per-skill — so every
         # script invocation and file write in the session can use the one
@@ -459,7 +498,7 @@ class ReportingAgent:
         # instead of trusting Path.cwd()).
         system_prompt = (
             _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-            .replace("{SKILLS_DIR}", str(_SKILLS_DIR))
+            .replace("{SKILLS_DIR}", str(skills_root))
             .replace("{PAPER_WORKSPACE}", str(workspace))
         )
 
@@ -496,7 +535,7 @@ class ReportingAgent:
                 description="Writes and compiles the final paper for a completed research run.",
             ),
             system_prompt=system_prompt,
-            skills=self._enabled_skill_dirs(),
+            skills=self._enabled_skill_dirs(skills_root),
             subagents=[reviewer_config],
             # Deliberately NOT passing sys_operation= here. This installed
             # SDK's resolve_deep_agent_parts() (harness/factory.py) only sets
@@ -523,14 +562,10 @@ class ReportingAgent:
             workspace=str(workspace),
             restrict_to_work_dir=True,
             auto_create_workspace=False,
-            # _SKILLS_DIR lives under the installed package tree, not inside
-            # the narrow per-run paper workspace above — without an explicit
-            # project_root, restrict_to_work_dir's sandbox only allows the
-            # workspace itself, and skill registration's own fs.read_file
-            # calls (SkillManager.register, called at invoke() time) fail
-            # silently/raise before the agent ever gets a turn. Same
-            # project_root/cwd pairing topic_survey's _create_agent already
-            # uses for the same reason.
+            # Skills are copied into the paper workspace above; this
+            # project_root is the (possibly redirected) run root, not the
+            # package checkout. Same project_root/cwd pairing topic_survey's
+            # _create_agent already uses.
             project_root=str(project_root()),
             cwd=str(workspace),
         )
