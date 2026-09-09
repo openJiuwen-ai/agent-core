@@ -925,6 +925,10 @@ class ReActAgent(BaseAgent):
             extra_kwargs["logprobs"] = True
             extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
 
+        # HITL 续跑轮强制流式：模型调用逐 token 写 session（llm_reasoning/llm_output），
+        # 前端才能实时看到思考/正文；不满足则继续原 invoke 语义。
+        if ctx.extra.get("_resumed_from_hitl") and not ctx.extra.get("_streaming"):
+            ctx.extra["_streaming"] = True
         if not ctx.extra.get("_streaming"):
             try:
                 ai_message = await llm.invoke(
@@ -1819,6 +1823,10 @@ class ReActAgent(BaseAgent):
                         self._clear_interruption_state(session)
                     # Restore original query so MemoryRail.after_invoke writes the right UserMessage
                     ctx.extra["_original_query"] = interruption_state.original_query
+                    # HITL（ask_user/权限/确认）中断后的续跑轮：把流式标志带过来，
+                    # 避免下一轮模型调用落到非流式 invoke（stream=false）整批返回，
+                    # 导致用户回答后长时间看不到任何增量（只剩 keepalive）。
+                    ctx.extra["_resumed_from_hitl"] = True
 
                 state_loaded_at = time.monotonic()
 
