@@ -375,22 +375,29 @@ class SwarmflowTool(AsyncTool):
         op = ops.get(action)
         if op is None:
             return ToolOutput(success=False, error=f"unknown action {action!r}")
+        # A paused run has already unwound, so the engine will never emit
+        # WORKFLOW_STOPPED for it — whether the controller still holds its
+        # ticket (drops it, reports True) or not (cold start, reports False).
+        # Announce it here either way so the embedder's card closes; an active
+        # run announces its own stop while unwinding.
+        was_paused = action == "stop" and controller.is_paused(resume_id)
         ok = await op(resume_id)
-        if not ok and action == "stop":
-            ok = await self._announce_stopped(resume_id)
+        if action == "stop" and (was_paused or not ok):
+            ok = await self._announce_stopped(resume_id) or ok
         return ToolOutput(
             success=ok,
             data={"run_id": resume_id, "action": action, "status": "done" if ok else "not_found"},
         )
 
     async def _announce_stopped(self, run_id: str) -> bool:
-        """Close a run the controller no longer holds.
+        """Publish WORKFLOW_STOPPED for a run that has no engine task left.
 
-        After a cold start the registries are empty, but the embedder's snapshot
-        still shows the run paused and lists it for the leader to resume or
-        stop. Publishing WORKFLOW_STOPPED lets the Monitor card reach its
-        terminal state. No journal seal: the pause record stays, so a manual
-        ``resume_id + script_path`` relaunch remains possible.
+        Covers a paused run (unwound at pause time) and a cold-started one
+        (registries empty): the embedder's snapshot still shows it paused and
+        lists it for the leader to resume or stop, so the Monitor card needs
+        this event to reach its terminal state. No journal seal: the pause
+        record stays, so a manual ``resume_id + script_path`` relaunch remains
+        possible.
         """
         if self._messager is None:
             return False
