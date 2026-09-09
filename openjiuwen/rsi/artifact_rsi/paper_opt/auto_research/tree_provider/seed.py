@@ -5,8 +5,9 @@ Prior-paper carryover (2026-09-03): wraps the real
 ``auto_research.modules.paper_preprocess`` module (Option A — a prose
 improvement prompt built from the parent's compiled paper), not the
 Option B bib/prior_results.json merge originally planned. See
-docs/paper_tree_orchestrator_design.md's dated note for why. The root's
-uploaded-paper ingestion is still not wired in — out of scope here.
+docs/paper_tree_orchestrator_design.md's dated note for why. Uploaded
+papers are staged by the orchestrator and passed into each node as the
+initial modification context.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ class NodeSeed:
     objective: str
     constraints: list[str] = field(default_factory=list)
     research_paths: list[str] = field(default_factory=list)
+    task_mode: str = "create_new_paper"
+    initial_prompt: str = ""
 
 
 def build_node_run_id(task_id: str, round_index: int) -> str:
@@ -66,6 +69,9 @@ def build_node_seed(
     optimization_instruction: str | None,
     retry_reason: str | None,
     parent_run_id: str | None,
+    initial_research_paths: list[str] | None = None,
+    initial_prompt: str = "",
+    task_mode: str = "create_new_paper",
 ) -> NodeSeed:
     run_id = build_node_run_id(task_id, round_index)
     prior_prompt = build_prior_paper_prompt(parent_run_id)
@@ -88,5 +94,7 @@ def build_node_seed(
         topic=topic,
         objective=objective,
         constraints=constraints,
-        research_paths=[],
+        research_paths=list(initial_research_paths or []),
+        task_mode=task_mode,
+        initial_prompt=prior_prompt or initial_prompt,
     )

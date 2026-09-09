@@ -171,6 +171,11 @@ class EngineReport:
     usage: RsiUsage | None
     artifact_index: list[ArtifactRef]
     summary: str | None
+    # Paper providers expose the current best and the initial baseline here
+    # so AgentServer can render the same scores in task/report responses.
+    # Defaults keep older program providers and persisted reports compatible.
+    best_score: float | None = None
+    baseline: float | None = None
 
 
 __all__ = [

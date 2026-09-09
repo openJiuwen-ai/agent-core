@@ -63,7 +63,7 @@ class PaperArtifactProvider(ArtifactProvider, Protocol):
         task_id: str,
         on_event: OnEvent | None = None,
     ) -> EngineResult:
-        """Return ``SCENARIO_NOT_SUPPORTED`` without changing paper task state."""
+        """Pause the active paper task and persist its current checkpoint."""
         ...
 
     async def resume(
@@ -71,7 +71,7 @@ class PaperArtifactProvider(ArtifactProvider, Protocol):
         request: ArtifactEngineRequest,
         on_event: OnEvent | None = None,
     ) -> EngineResult:
-        """Return ``SCENARIO_NOT_SUPPORTED`` without changing paper task state."""
+        """Paper recovery is not exposed yet; return ``SCENARIO_NOT_SUPPORTED``."""
         ...
 
     def read_state(self, task_id: str) -> EngineState:

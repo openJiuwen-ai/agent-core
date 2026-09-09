@@ -785,6 +785,12 @@ class CodeImplementationAgent:
             max_iterations=max_iterations,
             tool_owner_id=f"rsi-code-{run_id}-cycle-{cycle}",
             workspace=str(agent_workspace),
+            # Code implementation can legitimately take longer than the
+            # harness default one-round completion timeout.  The pipeline
+            # already bounds outer task-loop rounds with TaskCompletionRail;
+            # do not impose a second wall-clock timeout that can leave the
+            # manager waiting on a task whose cancellation is incomplete.
+            completion_timeout=None,
             # We don't use the harness's own memory/skills/todo scaffold for
             # this one-shot codegen task — skip it so agent_workspace/ only
             # contains what the agent itself actually writes.

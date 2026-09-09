@@ -40,20 +40,55 @@ class TopicSurveyInput(BaseModel):
         return value.strip()
 
 
+class CitationMetadata(BaseModel):
+    """Best-effort bibliographic metadata for one survey source.
+
+    The host computes citation eligibility and the final citation key.  These
+    fields are evidence supplied by the source or the survey agent, not an
+    authority that can mark an incomplete source as citable.
+    """
+
+    authors: list[str] = Field(default_factory=list)
+    year: str | int | None = None
+    venue: str | None = None
+    doi: str | None = None
+
+    @field_validator("authors")
+    @classmethod
+    def _clean_authors(cls, value: list[str]) -> list[str]:
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @field_validator("year", "venue", "doi")
+    @classmethod
+    def _strip_optional_text(cls, value: str | int | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+
 class SurveySource(BaseModel):
-    """One downloaded source and the evidence distilled from it."""
+    """One saved source and the evidence distilled from it."""
 
     title: str = Field(min_length=1)
     url: str = Field(min_length=1)
     source_type: Literal["paper", "web_page"]
     local_path: str = Field(min_length=1)
     summary: str = Field(min_length=1)
+    abstract: str = ""
     # Not min_length=1: a source can be legitimate supporting/background
     # context (a methodology reference, a tool's docs) with no standalone
     # "finding" of its own -- requiring one just forces the model to
     # fabricate something to pass validation.
     key_findings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
+    retrieval_mode: Literal["downloaded_pdf", "downloaded_html", "metadata_only"] = (
+        "downloaded_html"
+    )
+    citation: CitationMetadata = Field(default_factory=CitationMetadata)
+    citation_key: str | None = None
+    citation_eligible: bool = False
+    citation_exclusion_reasons: list[str] = Field(default_factory=list)
 
     @field_validator("title", "url", "summary")
     @classmethod
@@ -68,9 +103,17 @@ class SurveySource(BaseModel):
     def _validate_local_path(cls, value: str) -> str:
         return _safe_relative_path(value)
 
+    @field_validator("citation_key")
+    @classmethod
+    def _strip_citation_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
 
 class TopicSurveyDraft(BaseModel):
-    """Structured survey returned by the model after it saves every source."""
+    """Structured survey returned after every listed source is saved locally."""
 
     short_summary: str = Field(min_length=1)
     # Not min_length=1: some surveys are pure background/context gathering

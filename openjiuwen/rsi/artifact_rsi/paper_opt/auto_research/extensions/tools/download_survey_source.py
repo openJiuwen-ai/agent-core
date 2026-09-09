@@ -19,6 +19,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
 
 _TIMEOUT_SECONDS = 60
 _MAX_PDF_CANDIDATES = 12
+_MAX_FALLBACK_EVIDENCE_CHARS = 12_000
 _PDF_LINK_TEXT = re.compile(r"(?:download|view|full\s*text)?\s*pdf", re.IGNORECASE)
 
 
@@ -53,7 +54,9 @@ class DownloadSurveySourceTool(Tool):
                 name="download_survey_source",
                 description=(
                     "Download a public URL as its original PDF or HTML into the current "
-                    "Topic Survey sources directory. HTML downloads return likely PDF links."
+                    "Topic Survey sources directory. HTML downloads return likely PDF links. "
+                    "When a download fails, optional fallback_evidence can persist a usable "
+                    "abstract or search snippet without retrying the URL."
                 ),
                 input_params={
                     "type": "object",
@@ -62,6 +65,28 @@ class DownloadSurveySourceTool(Tool):
                         "filename": {
                             "type": "string",
                             "description": "Optional filename stem; directories and extensions are ignored.",
+                        },
+                        "fallback_evidence": {
+                            "type": "object",
+                            "description": (
+                                "Optional source metadata and abstract/search evidence to save "
+                                "if this one download attempt fails. It never triggers a second "
+                                "HTTP request."
+                            ),
+                            "properties": {
+                                "title": {"type": "string"},
+                                "source_type": {"type": "string", "enum": ["paper", "web_page"]},
+                                "authors": {"type": "array", "items": {"type": "string"}},
+                                "year": {"type": "string"},
+                                "venue": {"type": "string"},
+                                "doi": {"type": "string"},
+                                "abstract": {"type": "string"},
+                                "search_snippet": {"type": "string"},
+                                "evidence_text": {"type": "string"},
+                                "summary": {"type": "string"},
+                                "key_findings": {"type": "array", "items": {"type": "string"}},
+                                "limitations": {"type": "array", "items": {"type": "string"}},
+                            },
                         },
                     },
                     "required": ["url"],
@@ -74,6 +99,114 @@ class DownloadSurveySourceTool(Tool):
         self._project_root = project_root.resolve()
         self._proxy_url = str(proxy_url or "").strip() or None
         self._allowed_domains = allowed_domains
+
+    def _write_metadata_fallback(
+        self,
+        *,
+        url: str,
+        fallback: dict[str, Any],
+        error: str,
+    ) -> Path | None:
+        """Persist usable metadata without making another request.
+
+        This is deliberately part of the existing downloader contract rather
+        than a proxy-specific rail.  A direct download that succeeds keeps the
+        exact original PDF/HTML path; this path is used only after the one
+        attempted request failed.
+        """
+
+        evidence_parts = [
+            str(fallback.get("abstract") or "").strip(),
+            str(fallback.get("search_snippet") or "").strip(),
+            str(fallback.get("evidence_text") or "").strip(),
+            str(fallback.get("summary") or "").strip(),
+        ]
+        if not any(evidence_parts):
+            return None
+
+        source_id = hashlib.sha256(url.strip().lower().encode("utf-8")).hexdigest()[:12]
+        target = self._download_dir / f"source-{source_id}.metadata.md"
+        authors = fallback.get("authors") or []
+        if not isinstance(authors, list):
+            authors = [str(authors)]
+        findings = fallback.get("key_findings") or []
+        if not isinstance(findings, list):
+            findings = [str(findings)]
+        limitations = fallback.get("limitations") or []
+        if not isinstance(limitations, list):
+            limitations = [str(limitations)]
+
+        def _section(title: str, value: str) -> str:
+            value = value.strip()[:_MAX_FALLBACK_EVIDENCE_CHARS]
+            return f"## {title}\n\n{value or '(not available)'}\n"
+
+        lines = [
+            "# Metadata-only Survey Evidence",
+            "",
+            f"- URL: {url}",
+            f"- Title: {str(fallback.get('title') or url).strip()}",
+            f"- Source type: {str(fallback.get('source_type') or 'paper').strip()}",
+            "- Retrieval mode: metadata_only",
+            f"- Download failure: {error}",
+            f"- Authors: {', '.join(str(item).strip() for item in authors if str(item).strip()) or '(unknown)' }",
+            f"- Year: {str(fallback.get('year') or '').strip() or '(unknown)' }",
+            f"- Venue: {str(fallback.get('venue') or '').strip() or '(unknown)' }",
+            f"- DOI: {str(fallback.get('doi') or '').strip() or '(unknown)' }",
+            "",
+            _section("Abstract", str(fallback.get("abstract") or "")),
+            _section("Search Snippet", str(fallback.get("search_snippet") or "")),
+            _section("Fetched Evidence", str(fallback.get("evidence_text") or "")),
+            _section("Summary", str(fallback.get("summary") or "")),
+            "## Key Findings",
+            "",
+            "".join(f"- {str(item).strip()}\n" for item in findings if str(item).strip())
+            or "- (not available)\n",
+            "## Limitations",
+            "",
+            "".join(f"- {str(item).strip()}\n" for item in limitations if str(item).strip())
+            or "- Download failed; evidence is metadata-only.\n",
+        ]
+        self._download_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines), encoding="utf-8")
+        return target
+
+    def _failure_result(
+        self,
+        *,
+        url: str,
+        error: str,
+        fallback: Any,
+    ) -> dict[str, Any]:
+        if isinstance(fallback, dict):
+            target = self._write_metadata_fallback(url=url, fallback=fallback, error=error)
+            if target is not None:
+                source_type = str(fallback.get("source_type") or "paper").strip()
+                if source_type not in {"paper", "web_page"}:
+                    source_type = "paper"
+                citation_metadata = {
+                    "authors": fallback.get("authors") or [],
+                    "year": fallback.get("year"),
+                    "venue": fallback.get("venue"),
+                    "doi": fallback.get("doi"),
+                }
+                result: dict[str, Any] = {
+                    "success": True,
+                    "url": url,
+                    "title": str(fallback.get("title") or url).strip(),
+                    "source_type": source_type,
+                    "retrieval_mode": "metadata_only",
+                    "downloaded": False,
+                    "local_path": to_project_relative(target, root=self._project_root),
+                    "download_error": error,
+                    "message": (
+                        "The URL was not downloaded. Metadata-only evidence was saved; "
+                        "continue with another accessible source when possible."
+                    ),
+                    "citation": citation_metadata,
+                    "citation_metadata": citation_metadata,
+                }
+                return result
+        return {"success": False, "error": error}
 
     @staticmethod
     def _pdf_candidates(html: bytes, *, base_url: str) -> list[str]:
@@ -111,6 +244,7 @@ class DownloadSurveySourceTool(Tool):
             }
 
         filename = _safe_filename(str((inputs or {}).get("filename", "") or ""))
+        fallback = (inputs or {}).get("fallback_evidence")
         try:
             async with _http.new_session() as session:
                 status, headers, body, final_url, _truncated = await _http.request(
@@ -123,15 +257,24 @@ class DownloadSurveySourceTool(Tool):
                     proxy_url=self._proxy_url,
                 )
             if status >= 400:
-                return {"success": False, "error": f"HTTP {status} for {url}"}
+                return self._failure_result(
+                    url=url,
+                    error=f"HTTP {status} for {url}",
+                    fallback=fallback,
+                )
             if not _domain_allowed(final_url, self._allowed_domains):
-                return {
-                    "success": False,
-                    "error": "redirected URL is outside the configured domestic academic source domains",
-                }
+                return self._failure_result(
+                    url=url,
+                    error="redirected URL is outside the configured domestic academic source domains",
+                    fallback=fallback,
+                )
             content_type = headers.get("Content-Type", "").lower()
         except Exception as exc:  # noqa: BLE001 - surface transport errors to the agent
-            return {"success": False, "error": f"download failed: {exc}"}
+            return self._failure_result(
+                url=url,
+                error=f"download failed: {exc}",
+                fallback=fallback,
+            )
 
         is_pdf = "application/pdf" in content_type or body.startswith(b"%PDF-")
         extension = ".pdf" if is_pdf else ".html"
@@ -146,6 +289,8 @@ class DownloadSurveySourceTool(Tool):
             "url": url,
             "final_url": final_url,
             "source_type": "pdf" if is_pdf else "html",
+            "retrieval_mode": "downloaded_pdf" if is_pdf else "downloaded_html",
+            "downloaded": True,
             "local_path": to_project_relative(target, root=self._project_root),
             "bytes_downloaded": len(body),
         }

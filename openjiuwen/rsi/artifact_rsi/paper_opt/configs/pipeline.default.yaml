@@ -58,8 +58,8 @@ logging:
   max_bytes: 10485760
 
 topic_survey:
-  max_papers: 5
-  max_web_pages: 5
+  max_papers: 1
+  max_web_pages: 1
   max_iterations: 30
   # Retrieval is best-effort.  If a public endpoint keeps hanging, finalize
   # the sources already downloaded instead of consuming the Provider watchdog.
@@ -160,6 +160,13 @@ reporting:
   # paper-reviewer subagent reading the entire assembled draft is itself a
   # large completion. Other modules keep the 600s default.
   timeout: 900
+  # Check the host LaTeX/MiKTeX installation before starting the reporting
+  # agent, so a missing compiler fails fast instead of consuming model turns.
+  latex_preflight: true
+  latex_preflight_timeout: 10
+  # Optional explicit TeX bin directory; normally PATH and platform defaults
+  # discover a user/system MiKTeX or MacTeX installation automatically.
+  latex_bin_dir: null
   # Per-source timeout (seconds) for bibliography.py's best-effort Crossref/
   # arXiv metadata enrichment (bibliography.try_enrich_from_network) — never
   # blocks the module on a slow/offline network, just falls back to the
@@ -188,7 +195,7 @@ paper_scoring:
   timeout: 600
   temperature: 0
   rubric_samples: 5
-  max_validation_retries: 1
+  max_validation_retries: 3
   context_window_tokens: 128000
   output_reserve_tokens: 4000
   prompt_overhead_tokens: 2500

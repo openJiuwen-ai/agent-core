@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -13,10 +14,17 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     to_project_relative,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
+    CitationMetadata,
     SurveySource,
     TopicSurveyDraft,
     TopicSurveyOutput,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.citations import (
+    resolve_citation,
+    stable_source_id,
+)
+
+_SOURCE_MANIFEST_FILENAME = "source-manifest.json"
 
 _LOGGER = get_logger(__name__)
 
@@ -63,8 +71,59 @@ def _bullets(items: list[str]) -> str:
     return "".join(f"- {item}\n" for item in items)
 
 
+def _normalize_source(source: SurveySource, source_path: Path) -> SurveySource:
+    """Resolve source metadata on the host, never trusting model flags."""
+
+    retrieval_mode = source.retrieval_mode
+    if source_path.suffix.lower() == ".pdf":
+        retrieval_mode = "downloaded_pdf"
+    elif source_path.name.endswith(".metadata.md"):
+        retrieval_mode = "metadata_only"
+    elif retrieval_mode == "metadata_only":
+        retrieval_mode = "metadata_only"
+    else:
+        retrieval_mode = "downloaded_html"
+
+    resolution = resolve_citation(
+        title=source.title,
+        url=source.url,
+        local_path=source_path,
+        supplied=source.citation or CitationMetadata(),
+    )
+    return source.model_copy(
+        update={
+            "retrieval_mode": retrieval_mode,
+            "citation": resolution.metadata,
+            "citation_key": resolution.key,
+            "citation_eligible": resolution.eligible,
+            "citation_exclusion_reasons": resolution.exclusion_reasons,
+        }
+    )
+
+
+def _write_manifest(directory: Path, sources: list[SurveySource]) -> Path:
+    manifest_path = directory / _SOURCE_MANIFEST_FILENAME
+    payload = {
+        "version": 1,
+        "sources": [
+            {
+                "source_id": stable_source_id(source.url),
+                **source.model_dump(mode="json"),
+            }
+            for source in sources
+        ],
+    }
+    temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(manifest_path)
+    return manifest_path
+
+
 def write_survey_artifacts(topic: str, draft: TopicSurveyDraft) -> TopicSurveyOutput:
-    """Validate downloaded files and render the summary artifacts atomically."""
+    """Validate saved evidence and render summary/manifest artifacts atomically."""
     directory = survey_directory(topic)
     directory.mkdir(parents=True, exist_ok=True)
     report_path = directory / "research_summary.md"
@@ -74,15 +133,39 @@ def write_survey_artifacts(topic: str, draft: TopicSurveyDraft) -> TopicSurveyOu
             f"topic survey produced no sources that were actually downloaded "
             f"(all {len(draft.sources)} reported source(s) failed path validation)"
         )
+    normalized = [
+        (_normalize_source(source, source_path), source_path)
+        for source, source_path in kept
+    ]
 
     reference_lines: list[str] = []
     source_sections: list[str] = []
-    for index, (source, source_path) in enumerate(kept, 1):
+    for index, (source, source_path) in enumerate(normalized, 1):
         link = _relative_source_link(source_path, report_path)
         reference_lines.append(f"[{source.title}]({link})")
+        citation_status = "citable" if source.citation_eligible else "evidence-only"
+        citation_details = (
+            f"- **Citation key:** {source.citation_key}\n"
+            if source.citation_key
+            else "- **Citation exclusion reason:** "
+            + ", ".join(source.citation_exclusion_reasons or ["incomplete_metadata"])
+            + "\n"
+        )
+        authors = ", ".join(source.citation.authors) or "(unknown)"
+        year = source.citation.year or "(unknown)"
+        venue = source.citation.venue or "(unknown)"
+        doi = source.citation.doi or "(unknown)"
         source_sections.append(
             f"### {index}. [{source.title}]({link})\n\n"
             f"- **URL:** {source.url}\n"
+            f"- **Retrieval mode:** {source.retrieval_mode}\n"
+            f"- **Citation status:** {citation_status}\n"
+            f"{citation_details}"
+            f"- **Authors:** {authors}\n"
+            f"- **Year:** {year}\n"
+            f"- **Venue:** {venue}\n"
+            f"- **DOI:** {doi}\n"
+            f"- **Abstract:** {source.abstract or '(not available)'}\n"
             f"- **Summary:** {source.summary}\n"
             f"- **Key findings:**\n{_bullets(source.key_findings)}"
             f"- **Limitations:**\n{_bullets(source.limitations or ['(none recorded)'])}"
@@ -102,6 +185,7 @@ def write_survey_artifacts(topic: str, draft: TopicSurveyDraft) -> TopicSurveyOu
     temporary = report_path.with_suffix(report_path.suffix + ".tmp")
     temporary.write_text(report, encoding="utf-8")
     temporary.replace(report_path)
+    _write_manifest(directory, [source for source, _path in normalized])
 
     return TopicSurveyOutput(
         topic=topic,
@@ -110,5 +194,5 @@ def write_survey_artifacts(topic: str, draft: TopicSurveyDraft) -> TopicSurveyOu
         open_problems=draft.open_problems,
         references=reference_lines,
         research_summary_path=to_project_relative(report_path),
-        sources=[source for source, _path in kept],
+        sources=[source for source, _path in normalized],
     )

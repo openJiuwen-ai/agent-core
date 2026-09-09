@@ -15,6 +15,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex_runtime import (
+    discover_latex_runtime,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import section_by_id
 
 _LATEX_SPECIAL_CHARS = {
@@ -368,6 +371,8 @@ def compile_document(tex_path: Path, *, timeout_seconds: int = 300) -> CompileRe
     loop (docs/paper_writing_design.md §8) to act on.
     """
     workdir = tex_path.parent
+    runtime = discover_latex_runtime()
+    child_env = runtime.with_environment()
     toolchain_missing = True
     for command in _COMPILE_COMMANDS:
         try:
@@ -379,7 +384,8 @@ def compile_document(tex_path: Path, *, timeout_seconds: int = 300) -> CompileRe
                 timeout=timeout_seconds,
                 encoding="utf-8",
                 check=False,  # non-zero exit is inspected below, not exceptional
-                errors="replace"
+                errors="replace",
+                env=child_env,
             )
         except FileNotFoundError:
             continue

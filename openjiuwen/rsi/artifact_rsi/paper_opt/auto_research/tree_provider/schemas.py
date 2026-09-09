@@ -23,7 +23,11 @@ RsiStatus = Literal[
 ]
 
 NodeOutcome = Literal["success", "failed", "rejected", "pending"]
-NodeLogicalKind = Literal["root", "reporting", "adopted", "rejected"]
+# ``failed`` remains the machine-level outcome for a node that could not
+# produce a usable candidate.  ``pruned`` is the user-facing tree kind for
+# that outcome, so a failed node can be skipped without being confused with a
+# normally evaluated-but-not-adopted candidate (``rejected``).
+NodeLogicalKind = Literal["root", "reporting", "adopted", "rejected", "pruned"]
 
 
 class RsiUsageTokens(BaseModel):
@@ -107,11 +111,11 @@ class RsiTreeNode(BaseModel):
     node_id: str
     iteration: int
     parent_id: str | None
-    type: Literal["root", "reporting"]
+    type: Literal["root", "reporting", "pruned"]
     adopted: bool
     # The candidate's composite paper score (judge.py::score_paper's
-    # `overall`). Null for root, pending, and any node the pipeline never
-    # produced a scorable paper for (failed run, scoring error).
+    # `overall`). Root carries the uploaded baseline score when the input is
+    # a scorable LaTeX source; pending and unscorable nodes remain null.
     score: float | None = None
     summary: str | None = None
     snapshot_artifact_id: str | None = None
@@ -199,6 +203,8 @@ class EngineReport(BaseModel):
     usage: RsiUsage | None = None
     artifact_index: list[ArtifactRef] = Field(default_factory=list)
     summary: str | None = None
+    best_score: float | None = None
+    baseline: float | None = None
 
 
 class ArtifactValidationResult(BaseModel):
@@ -259,6 +265,12 @@ class PaperTaskState(BaseModel):
     # *reporting* node has actually been adopted. Root (type="root", never
     # has an artifact) must never be assigned here.
     best_node_id: str | None = None
+    # Current best composite score and the score used as the task baseline.
+    # For an uploaded LaTeX paper, baseline is scored before the first
+    # candidate. For instruction-only tasks, the first adopted candidate is
+    # the baseline by design.
+    score: float | None = None
+    baseline: float | None = None
     # Internal-only: root or the most recently adopted reporting node --
     # the parent/comparison baseline _frontier_node() resolves for the
     # *next* round. Starts at root (see _ensure_root_node) and is what lets

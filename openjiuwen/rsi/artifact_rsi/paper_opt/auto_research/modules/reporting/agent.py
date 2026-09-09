@@ -49,6 +49,13 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex
     escape_latex,
     render_results_table,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex_runtime import (
+    LatexRuntime,
+    LatexRuntimeError,
+    configure_latex_environment,
+    discover_latex_runtime,
+    preflight_latex_runtime,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.schemas import (
     ReportingInput,
     ReportingOutput,
@@ -69,6 +76,8 @@ _REVIEWER_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "reviewer_sys
 _SECTIONS_BY_ID = {spec.id: spec for spec in SECTIONS}
 _CURRENT_EXPERIMENT_HEADING = "## Current Experiment"
 _RESEARCH_GROUNDING_HEADING = "## Research Grounding"
+_SURVEY_SOURCE_EXCERPT_CHARS = 6_000
+_SURVEY_EVIDENCE_TOTAL_CHARS = 30_000
 # Lives at the workspace root (not under sections/) — host-written on a
 # failed attempt, read back (and overwritten) on the next retry. Named
 # loudly/uppercase so it stands out among sections/*.tex in a directory
@@ -92,6 +101,7 @@ class ReportingAgent:
         self.config = config
         self._injected_model = model
         self._pw_config = dict(config.get("reporting") or {})
+        self._latex_runtime: LatexRuntime | None = None
 
     def run(self, inputs: ReportingInput) -> ReportingOutput:
         import asyncio
@@ -104,6 +114,23 @@ class ReportingAgent:
     async def _run_async(self, inputs: ReportingInput) -> ReportingOutput:
         run_id = inputs.plan.run_id
         workspace = paper_workspace_dir(run_id)
+        if self._pw_config.get("latex_preflight", True):
+            try:
+                latex_bin_dir = os.environ.get("LATEX_BIN_DIR") or self._pw_config.get("latex_bin_dir")
+                self._latex_runtime = preflight_latex_runtime(
+                    latex_bin_dir,
+                    timeout_seconds=float(self._pw_config.get("latex_preflight_timeout", 10.0)),
+                )
+                configure_latex_environment(self._latex_runtime)
+            except LatexRuntimeError as exc:
+                message = f"LaTeX runtime preflight failed before reporting started: {exc}"
+                _LOGGER.error(message)
+                return ReportingOutput(
+                    status="failed",
+                    sections_dir=str(paper_sections_dir(run_id)),
+                    refs_bib_path=str(paper_refs_bib_path(run_id)),
+                    notes=message,
+                )
         # First attempt for this run: wipe fresh, same "one-shot task" stance
         # topic_survey takes for the same reason (docs/paper_writing_design.md
         # §9). A retry (attempt > 1) keeps the workspace instead — the
@@ -235,18 +262,58 @@ class ReportingAgent:
 
     @staticmethod
     def _read_survey_summary(survey: ResearchBrief) -> str | None:
-        """The first entry in survey.resource_paths is topic_survey's own
-        curated research_summary.md (topic_survey/agent.py::asurvey) — read
-        that one bounded file rather than granting a file-reading tool.
-        resource_paths is min_length=1 on ResearchBrief, so it's never empty
-        here."""
+        """Read the curated summary plus bounded local source evidence.
+
+        ``research_summary.md`` remains the first and authoritative handoff,
+        but metadata-only and directly downloaded HTML sources contain useful
+        context that should not be discarded before reporting.  The host reads
+        those files here instead of giving the paper agent an unrestricted file
+        tool.  Raw PDFs remain represented by the survey summary unless a
+        downstream extractor has already produced text.
+        """
         try:
             abs_path = resolve_project_reference(survey.resource_paths[0])
         except ValueError:
             return None
         if not abs_path.is_file():
             return None
-        return abs_path.read_text(encoding="utf-8")
+        try:
+            summary = abs_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+        from bs4 import BeautifulSoup
+
+        chunks = [summary]
+        total_chars = len(summary)
+        seen: set[Path] = {abs_path.resolve()}
+        for reference in survey.resource_paths[1:]:
+            if total_chars >= _SURVEY_EVIDENCE_TOTAL_CHARS:
+                break
+            try:
+                source_path = resolve_project_reference(reference).resolve()
+            except ValueError:
+                continue
+            if source_path in seen or not source_path.is_file():
+                continue
+            seen.add(source_path)
+            if source_path.suffix.lower() == ".pdf":
+                excerpt = "(PDF source is available locally; text extraction is deferred.)"
+            else:
+                try:
+                    excerpt = source_path.read_text(encoding="utf-8", errors="replace")
+                    if source_path.suffix.lower() in {".html", ".htm"}:
+                        excerpt = BeautifulSoup(excerpt, "html.parser").get_text(" ", strip=True)
+                    excerpt = " ".join(excerpt.split())
+                except OSError as exc:
+                    excerpt = f"(source could not be read locally: {exc})"
+            remaining = _SURVEY_EVIDENCE_TOTAL_CHARS - total_chars
+            excerpt = excerpt[: min(_SURVEY_SOURCE_EXCERPT_CHARS, remaining)]
+            if not excerpt:
+                continue
+            chunks.append(f"\n\n## Detailed source evidence: {source_path.name}\n\n{excerpt}")
+            total_chars += len(excerpt)
+        return "".join(chunks)
 
     @staticmethod
     def _resolve_summary_path(survey: ResearchBrief) -> Path | None:
@@ -269,8 +336,9 @@ class ReportingAgent:
         result = inputs.result
         citation_list = (
             "\n".join(f"- {title} -> \\cite{{{key}}}" for title, key in bib.title_to_key.items())
-            or "(no sources recovered)"
+            or "(no citable sources recovered)"
         )
+        evidence_only_list = "\n".join(f"- {item}" for item in bib.evidence_only_sources) or "(none)"
 
         metric_name_set: set[str] = set()
         for variant in result.variants:
@@ -338,6 +406,7 @@ class ReportingAgent:
         # \cite{GAIA_benchmark} vs the real generated key gaiaabenchmarkfo1c294c3f).
         citation_suffix = (
             f"\n\nCitable sources — use \\cite{{key}} only for these, never invent a key:\n{citation_list}"
+            f"\n\nEvidence-only sources — use as background evidence, but do not cite them:\n{evidence_only_list}"
         )
 
         return {
@@ -452,18 +521,12 @@ class ReportingAgent:
             timeout=completion_timeout,
         )
 
-        # ts-latex/scripts/compile.py reads LATEX_BIN_DIR to put a TeX
-        # distribution's bin/ on PATH for the subprocess it launches (SDK
-        # shell subprocesses inherit the full parent env — see
-        # OperationUtils.prepare_environment). Set here, not hardcoded in
-        # the script: a live run once found latexmk/pdflatex missing from
-        # PATH and edited a machine-specific absolute path into the skill
-        # script. Skills are now copied into the paper workspace (so that
-        # write cannot touch tracked source), but LATEX_BIN_DIR still
-        # exists so the agent has no reason to "helpfully" hardcode a path.
-        latex_bin_dir = os.environ.get("LATEX_BIN_DIR") or self._pw_config.get("latex_bin_dir")
-        if latex_bin_dir:
-            os.environ.setdefault("LATEX_BIN_DIR", latex_bin_dir)
+        # ts-latex/scripts/compile.py inherits the resolved host environment.
+        # This also covers direct construction with latex_preflight disabled.
+        if self._latex_runtime is None:
+            latex_bin_dir = os.environ.get("LATEX_BIN_DIR") or self._pw_config.get("latex_bin_dir")
+            self._latex_runtime = discover_latex_runtime(latex_bin_dir)
+        configure_latex_environment(self._latex_runtime)
 
         # Same bridging pattern as LATEX_BIN_DIR above, for ts-figure's
         # attempt_drawio.py: DRAWIO_BIN (the export binary) and

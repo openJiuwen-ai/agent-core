@@ -59,8 +59,8 @@ def project_engine_state(task: PaperTaskState, usage: RsiUsage | None = None) ->
         iteration=task.node_count,
         total_iterations=task.max_iterations,
         best_node_id=task.best_node_id,
-        score=None,
-        baseline=None,
+        score=task.score,
+        baseline=task.baseline,
         usage=usage,
         updated_at=task.updated_at,
         error_code=task.error_code,
@@ -81,4 +81,6 @@ def project_engine_report(
         usage=usage,
         artifact_index=artifact_index,
         summary=summary,
+        best_score=task.score,
+        baseline=task.baseline,
     )

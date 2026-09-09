@@ -43,6 +43,7 @@ class PaperArtifactProviderImpl:
     """
 
     artifact_type = "paper"
+    supports_pause = True
 
     def __init__(self) -> None:
         self._orchestrators: dict[str, PaperTreeOrchestrator] = {}
@@ -89,11 +90,34 @@ class PaperArtifactProviderImpl:
         )
 
     async def pause(self, task_id: str, on_event: OnEvent | None = None) -> EngineResult:
+        orchestrator = self._orchestrators.get(task_id)
+        if orchestrator is None:
+            try:
+                state = self._require_task_state(task_id)
+            except KeyError:
+                return EngineResult(
+                    task_id=task_id,
+                    status="failed",
+                    error_code="TASK_NOT_FOUND",
+                    error_message="paper task snapshot is not available",
+                )
+            return EngineResult(
+                task_id=task_id,
+                status=state.status,
+                final_node_id=state.best_node_id,
+                error_code="TASK_NOT_RUNNING" if state.status == "running" else None,
+                error_message=(
+                    "paper task is not running in this provider process"
+                    if state.status == "running"
+                    else None
+                ),
+            )
+
+        state = await orchestrator.pause(on_event=on_event)
         return EngineResult(
             task_id=task_id,
-            status="running",
-            error_code="SCENARIO_NOT_SUPPORTED",
-            error_message="paper scenario does not support pause",
+            status=state.status,
+            final_node_id=state.best_node_id,
         )
 
     async def resume(
@@ -143,7 +167,14 @@ class PaperArtifactProviderImpl:
         orchestrator = self._orchestrators.get(task_id)
         if orchestrator is not None:
             await orchestrator.terminate()
-        state = self._storage_for(task_id).load_task_state()
+        try:
+            storage = self._storage_for(task_id)
+        except KeyError:
+            # A queued task can be paused before run() registers its
+            # orchestrator/run directory. The worker owns that public task
+            # snapshot, so termination is still a valid terminal control.
+            return EngineResult(task_id=task_id, status="terminated")
+        state = storage.load_task_state()
         return EngineResult(
             task_id=task_id,
             status="terminated",

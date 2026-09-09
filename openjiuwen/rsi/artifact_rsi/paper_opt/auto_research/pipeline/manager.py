@@ -100,6 +100,34 @@ def _enabled_modules(config: dict[str, Any], *, has_reflection: bool) -> list[Mo
     return enabled
 
 
+_NO_LITERATURE_MARKERS = (
+    "无需文献综述",
+    "不需要文献综述",
+    "无需查文献",
+    "不需要查文献",
+    "无需寻找论文",
+    "不需要寻找论文",
+    "no literature review",
+    "no citation",
+    "no citations",
+)
+
+
+def _is_no_literature_create_task(task: OriginalTask) -> bool:
+    """Whether the task explicitly makes literature surveying unnecessary.
+
+    This is intentionally opt-in and limited to new papers.  Modification
+    tasks still need source-grounded evidence, even when their brief happens
+    to mention a narrow scope.
+    """
+    if task.task_mode != "create_new_paper" or task.initial_research_paths:
+        return False
+    text = "\n".join(
+        [task.topic, task.objective, task.initial_prompt, *task.constraints]
+    ).casefold()
+    return any(marker.casefold() in text for marker in _NO_LITERATURE_MARKERS)
+
+
 def _initial_research_paths(task: OriginalTask) -> list[str]:
     paths: list[str] = []
     for raw in task.initial_research_paths:
@@ -116,6 +144,12 @@ def build_initial_state(
     has_reflection: bool = False,
 ) -> PersistedManagerState:
     enabled = _enabled_modules(config, has_reflection=has_reflection)
+    if _is_no_literature_create_task(task):
+        # A deterministic from-scratch teaching paper can use the original
+        # task brief as its design input.  Running topic_survey here would
+        # incorrectly require a downloadable paper/PDF even though the task
+        # explicitly says that no literature review is needed.
+        enabled = [module for module in enabled if module != "topic_survey"]
     missing = [] if has_reflection else ["reflection"]
     requirements = default_requirements(task.topic)
     if "reporting" in enabled:
@@ -191,9 +225,17 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
     if report.module == "topic_survey":
         task.counters.survey_calls += 1
         if report.outcome == "succeeded" and isinstance(report.handoff, SurveyHandoff):
-            for path in [report.handoff.research_summary_path, *report.handoff.source_paths]:
-                if path and path not in task.research_paths:
-                    task.research_paths.append(path)
+            survey_paths = [
+                path
+                for path in [report.handoff.research_summary_path, *report.handoff.source_paths]
+                if path
+            ]
+            # ReportingAgent treats the first resource as the research
+            # summary.  Put the latest survey first while retaining the
+            # task-local uploaded-paper context for provenance and fallback.
+            task.research_paths = survey_paths + [
+                path for path in task.research_paths if path not in survey_paths
+            ]
             task.artifacts.append(
                 ArtifactRecord(
                     id=f"art-survey-{report.round_index}",

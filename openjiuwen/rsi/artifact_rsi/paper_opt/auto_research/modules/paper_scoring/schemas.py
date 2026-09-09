@@ -277,7 +277,7 @@ class CompositeWeights(BaseModel):
 
 class PaperScoringSettings(BaseModel):
     rubric_samples: int = Field(default=5)
-    max_validation_retries: int = Field(default=1, ge=0, le=3)
+    max_validation_retries: int = Field(default=3, ge=0, le=3)
     timeout: int = Field(default=600, ge=1)
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     context_window_tokens: int = Field(default=128_000, ge=1000)
