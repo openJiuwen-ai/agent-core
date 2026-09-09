@@ -193,11 +193,9 @@ class SelectCodeContextTool(CodeGraphBaseTool):
 
 
 def _candidate_for(state, symbol_id: str) -> dict[str, Any] | None:
-    from openjiuwen.core.retrieval.code_graph.query.resolve_symbol import split_file_and_symbol
-
     if symbol_id in state.candidates:
         return state.candidates[symbol_id]
-    file_part, local = split_file_and_symbol(symbol_id)
+    file_part, local = _split_file_and_symbol(symbol_id)
     if not file_part or not local:
         return None
     wanted = local.lower()
@@ -213,6 +211,14 @@ def _candidate_for(state, symbol_id: str) -> dict[str, Any] | None:
         if name == wanted or qualified.endswith("." + wanted) or str(sid).endswith("::" + local):
             return payload
     return None
+
+
+def _split_file_and_symbol(symbol_id: str) -> tuple[str, str]:
+    text = str(symbol_id or "")
+    if "::" not in text:
+        return "", ""
+    file_part, local = text.split("::", 1)
+    return file_part.replace("\\", "/"), local
 
 
 def _has_file_evidence(state, file_path: str) -> bool:

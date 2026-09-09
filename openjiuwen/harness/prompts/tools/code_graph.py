@@ -143,6 +143,51 @@ def _select_context_params(language: str) -> Dict[str, Any]:
     }
 
 
+def _focus_code_params(language: str) -> Dict[str, Any]:
+    lang = language if language in ("cn", "en") else "cn"
+    return {
+        "type": "object",
+        "properties": {
+            "candidate_id": {
+                "type": "string",
+                "description": (
+                    "Stable id from the last search, graph_generation:symbol_id"
+                    if lang == "en"
+                    else "上一次检索返回的稳定 id，格式 graph_generation:symbol_id"
+                ),
+            },
+            "symbol_id": {
+                "type": "string",
+                "description": (
+                    "Fallback when candidate_id is missing"
+                    if lang == "en"
+                    else "没有 candidate_id 时用完整 symbol_id"
+                ),
+            },
+            "reason": {
+                "type": "string",
+                "description": (
+                    "Optional: why this is the current edit target"
+                    if lang == "en"
+                    else "可选：为什么把这里当作当前编辑目标"
+                ),
+            },
+            "include_relations": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional relation kinds to attach after the window. "
+                    "Default empty. Use callers, callees, importers, or impact "
+                    "only when the issue needs them."
+                    if lang == "en"
+                    else "可选关系，默认空。仅在 issue 需要调用/注册/影响分析时传入 callers/callees/importers/impact。"
+                ),
+            },
+        },
+        "required": [],
+    }
+
+
 def _search_text_params(language: str) -> Dict[str, Any]:
     lang = language if language in ("cn", "en") else "cn"
     return {
@@ -573,3 +618,19 @@ class SubmitCodeContextMetadataProvider(ToolMetadataProvider):
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return _submit_params(language)
+
+
+class FocusCodeMetadataProvider(ToolMetadataProvider):
+    def get_name(self) -> str:
+        return "focus_code"
+
+    def get_description(self, language: str = "cn") -> str:
+        if language == "en":
+            return (
+                "Focus one search candidate and open a 50-100 line edit window. "
+                "Does not search and does not write a patch."
+            )
+        return "把一条检索候选设为当前焦点，并打开 50–100 行编辑窗口。不搜索，也不写补丁。"
+
+    def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
+        return _focus_code_params(language)

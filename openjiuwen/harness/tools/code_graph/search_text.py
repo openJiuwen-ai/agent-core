@@ -13,26 +13,130 @@ from openjiuwen.harness.tools.code_graph._base import CodeGraphBaseTool, CodeGra
 class SearchSourceTextTool(CodeGraphBaseTool):
     def __init__(self, context: CodeGraphToolContext) -> None:
         super().__init__("search_source_text", "SearchSourceTextTool", context)
+        if getattr(context.run_state, "uses_focused", False):
+            self._attach_match_mode_schema()
+
+    def _attach_match_mode_schema(self) -> None:
+        """Optional only on the focused card. Classic schema stays byte-stable."""
+        params = dict(self.card.input_params or {})
+        properties = dict(params.get("properties") or {})
+        if "match_mode" in properties:
+            return
+        language = getattr(self.context, "language", "en")
+        properties["match_mode"] = {
+            "type": "string",
+            "enum": ["auto", "exact", "lexical"],
+            "description": (
+                "auto chooses exact for quoted/error/config/decorator literals; "
+                "exact is a substring scan; lexical is BM25"
+                if language == "en"
+                else "auto 对引号/报错/配置键/decorator 选 exact；exact 是字面量子串；lexical 是 BM25"
+            ),
+        }
+        params["properties"] = properties
+        self.card.input_params = params
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         query = str(inputs.get("query") or "").strip()
         if not query:
             return ToolOutput(success=False, error="query is required")
-        output = await self._invoke_service(
-            lambda service: service.search_text(
+        state = self.context.run_state
+        focused = bool(getattr(state, "uses_focused", False))
+        match_mode = "lexical"
+        if focused:
+            from openjiuwen.harness.tools.code_graph.focused import infer_match_mode
+
+            raw_mode = str(inputs.get("match_mode") or "auto").strip().lower()
+            match_mode = infer_match_mode(query) if raw_mode in {"", "auto"} else raw_mode
+            if match_mode not in {"exact", "lexical"}:
+                match_mode = infer_match_mode(query)
+        path_prefix = inputs.get("path_prefix")
+        include_tests = bool(inputs.get("include_tests"))
+        limit = self.policy.results(inputs.get("limit") or self._default_results())
+        if focused and match_mode == "exact":
+            output = await self._exact_search(
                 query,
-                path_prefix=inputs.get("path_prefix"),
-                limit=self.policy.results(inputs.get("limit") or self._default_results()),
-                include_tests=bool(inputs.get("include_tests")),
+                path_prefix=path_prefix,
+                limit=limit,
+                include_tests=include_tests,
             )
-        )
-        if isinstance(output.data, dict) and "next_actions" not in output.data:
-            state = self.context.run_state
-            if not getattr(state, "is_locate_exam", False):
-                actions = text_next_actions(output.data.get("chunks") or [])
-                if actions:
-                    output.data["next_actions"] = actions
+        else:
+            output = await self._invoke_service(
+                lambda service: service.search_text(
+                    query,
+                    path_prefix=path_prefix,
+                    limit=limit,
+                    include_tests=include_tests,
+                )
+            )
+        if not isinstance(output.data, dict):
+            return output
+        raw_hits = output.data.get("chunks") or output.data.get("matches") or []
+        chunks = [item for item in raw_hits if isinstance(item, dict)]
+        if focused:
+            from openjiuwen.harness.tools.code_graph.focused import (
+                apply_focused_observation,
+                read_graph_generation,
+            )
+
+            apply_focused_observation(
+                output.data,
+                query=query,
+                state=state,
+                raw_items=chunks,
+                matched_by=["exact" if match_mode == "exact" else "lexical"],
+                empty_hint="lexical" if match_mode == "exact" else "exact",
+                generation_id=read_graph_generation(self.context),
+            )
+            output.data["match_mode"] = match_mode
+        elif "next_actions" not in output.data and not getattr(state, "is_locate_exam", False):
+            actions = text_next_actions(chunks)
+            if actions:
+                output.data["next_actions"] = actions
         return output
+
+    async def _exact_search(
+        self,
+        query: str,
+        *,
+        path_prefix: str | None,
+        limit: int,
+        include_tests: bool,
+    ) -> ToolOutput:
+        from openjiuwen.core.retrieval.code_graph.errors import CodeGraphStatus
+        from openjiuwen.harness.tools.code_graph.focused import exact_line_hits
+
+        budget = self._touch_budget()
+        if budget is not None:
+            return budget
+        try:
+            service = await self._service()
+            index = await service.ready_for_query()
+            hits = exact_line_hits(
+                repo_root=self.current_repo_root(),
+                index=index,
+                query=query,
+                path_prefix=path_prefix,
+                limit=limit,
+                ban_tests=bool(self.context.config.ban_tests) and not include_tests,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolOutput(success=False, error=str(exc))
+        status = CodeGraphStatus.NO_MATCH if not hits else CodeGraphStatus.COMPLETE
+        data = {
+            "status": status.value,
+            "message": (
+                "search succeeded but no matches"
+                if not hits
+                else f"found {len(hits)} exact line hit(s)"
+            ),
+            "chunks": hits,
+            "matches": hits,
+            "match_mode": "exact",
+        }
+        if self.context.run_state is not None:
+            self.context.run_state.remember_payload(data)
+        return ToolOutput(success=True, data=data)
 
 
 def text_next_actions(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:

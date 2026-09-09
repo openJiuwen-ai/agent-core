@@ -15,6 +15,7 @@ from openjiuwen.core.retrieval.code_graph.query.test_paths import is_test_path
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.code_graph._base import CodeGraphBaseTool, CodeGraphToolContext
 from openjiuwen.harness.tools.code_graph.commit_code_context import SubmitCodeContextTool
+from openjiuwen.harness.tools.code_graph.focus_code import FocusCodeTool
 from openjiuwen.harness.tools.code_graph.search_code import FindCodeSymbolsTool
 from openjiuwen.harness.tools.code_graph.search_text import SearchSourceTextTool
 from openjiuwen.harness.tools.code_graph.select_context import SelectCodeContextTool
@@ -31,6 +32,7 @@ __all__ = [
     "FindCodeSymbolsTool",
     "FindImportersTool",
     "FindSubclassesTool",
+    "FocusCodeTool",
     "InspectCodeStructureTool",
     "ReadSymbolTool",
     "ResolveSymbolTool",
@@ -49,13 +51,20 @@ class ResolveSymbolTool(CodeGraphBaseTool):
         name = str(inputs.get("name") or inputs.get("symbol_id") or "").strip()
         if not name:
             return ToolOutput(success=False, error="name is required")
-        return await self._invoke_service(
+        output = await self._invoke_service(
             lambda service: service.resolve_symbol(
                 name,
                 kind=str(inputs.get("kind") or "").strip() or None,
                 path_hint=str(inputs.get("path_hint") or "").strip() or None,
                 limit=self.policy.results(inputs.get("limit") or 8),
             )
+        )
+        return _reshape_focused_hits(
+            self,
+            output,
+            query=name,
+            raw_key="matches",
+            matched_by=["exact"],
         )
 
 
@@ -71,7 +80,7 @@ class InspectCodeStructureTool(CodeGraphBaseTool):
         kinds = inputs.get("kinds")
         if kinds is not None and not isinstance(kinds, list):
             kinds = [kinds]
-        return await self._invoke_service(
+        output = await self._invoke_service(
             lambda service: service.list_symbols(
                 file=file_path,
                 parent_symbol=parent,
@@ -79,6 +88,13 @@ class InspectCodeStructureTool(CodeGraphBaseTool):
                 depth=self.policy.depth(inputs.get("depth") or 1),
                 limit=self.policy.nodes(inputs.get("limit")),
             )
+        )
+        return _reshape_focused_hits(
+            self,
+            output,
+            query=file_path or parent or "",
+            raw_key="symbols",
+            matched_by=["structure"],
         )
 
 
@@ -309,4 +325,33 @@ class FindSubclassesTool(_FindRelationTool):
     tool_name = "find_subclasses"
     class_id = "FindSubclassesTool"
     relation = "inherited_by"
+
+
+def _reshape_focused_hits(
+    tool: CodeGraphBaseTool,
+    output: ToolOutput,
+    *,
+    query: str,
+    raw_key: str,
+    matched_by: list[str],
+) -> ToolOutput:
+    """Give resolve/inspect the same candidate contract as find/search."""
+    state = tool.context.run_state
+    if not getattr(state, "uses_focused", False) or not isinstance(output.data, dict):
+        return output
+    from openjiuwen.harness.tools.code_graph.focused import (
+        apply_focused_observation,
+        read_graph_generation,
+    )
+
+    raw_items = [item for item in (output.data.get(raw_key) or []) if isinstance(item, dict)]
+    apply_focused_observation(
+        output.data,
+        query=query,
+        state=state,
+        raw_items=raw_items,
+        matched_by=matched_by,
+        generation_id=read_graph_generation(tool.context),
+    )
+    return output
 

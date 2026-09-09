@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from openjiuwen.harness.tools.code_graph.factory import (
+    FOCUSED_CORE_TOOL_NAMES,
     LOCATE_EXAM_TOOL_NAMES,
     PRODUCT_GRAPH_TOOL_NAMES,
     build_code_graph_profile_tools,
@@ -10,6 +11,7 @@ from openjiuwen.harness.tools.code_graph.factory import (
 from openjiuwen.harness.tools.code_graph._base import CodeGraphToolContext, resolve_repo_root
 
 __all__ = [
+    "FOCUSED_CORE_TOOL_NAMES",
     "LOCATE_EXAM_TOOL_NAMES",
     "PRODUCT_GRAPH_TOOL_NAMES",
     "CodeGraphToolContext",

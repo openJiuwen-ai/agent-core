@@ -14,9 +14,11 @@ from typing import Dict, Optional
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.schema.code_graph import (
     CodeGraphProfile,
+    CodeGraphRetrievalInterface,
     PROMPT_MODE_LOCATE,
     PROMPT_MODE_PRODUCT,
     resolve_code_graph_profile,
+    resolve_code_graph_retrieval_interface,
 )
 
 GRAPH_PROFILE_PROMPT_EN = """\
@@ -145,9 +147,53 @@ trace_call_paths 只用于多跳路径，必须传 direction=callers 或 callees
 submit_code_context 会生成 <PATCH_CONTEXT>，不要自己打标签。
 """
 
+GRAPH_FOCUSED_PROFILE_PROMPT_EN = """\
+Code Graph (profile: graph, retrieval_interface: focused):
+Locate a few candidates, then focus_code, then edit.
+
+1. First use resolve_symbol, find_code_symbols, or search_source_text
+   to get a short candidate list.
+2. Once a credible implementation candidate appears, call focus_code next.
+   Do not reword the same search.
+3. If the focused source matches the issue, edit that implementation and
+   run tests.
+4. If the focused window is clearly wrong, either focus a different
+   candidate, or request relations once with
+   focus_code(include_relations=["callers"|"importers"|"impact"]).
+5. read_file is only for non-code assets, unindexed files, or when graph
+   tools return UNAVAILABLE. Do not use bash for grep/cat discovery before
+   editing; after editing, bash is for tests.
+6. The patch does not have to stay inside the focused window. Multi-file
+   edits need call, import, or impact evidence.
+7. inspect_code_structure for a large class before focusing a method.
+   There is no read_symbol, read_code, select_code_context, or submit tool.
+"""
+
+GRAPH_FOCUSED_PROFILE_PROMPT_CN = """\
+Code Graph（profile: graph，retrieval_interface: focused）：
+先定位少量候选，再 focus_code，再编辑。
+
+1. 先用 resolve_symbol、find_code_symbols 或 search_source_text 拿到短候选。
+2. 一旦出现可信的 implementation 候选，下一步调用 focus_code。
+   不要对同一目标换措辞重复搜索。
+3. focused 源码与 issue 一致时，编辑该实现并跑测试。
+4. 窗口明显不匹配时：再 focus 另一个候选，或通过
+   focus_code(include_relations=...) 做一次有目的的关系验证。
+5. read_file 只用于非代码资产、未索引文件或图工具 UNAVAILABLE。
+   编辑前不要用 bash 做 grep/cat 式发现；编辑后 bash 用于测试。
+6. 补丁不必严格限制在 focused 窗口。多文件修改需要调用、注册或影响证据。
+7. 大类先 inspect_code_structure，再聚焦方法。
+   没有 read_symbol / read_code / select_code_context / submit。
+"""
+
 GRAPH_PROFILE_PROMPT: Dict[str, str] = {
     "en": GRAPH_PROFILE_PROMPT_EN,
     "cn": GRAPH_PROFILE_PROMPT_CN,
+}
+
+GRAPH_FOCUSED_PROFILE_PROMPT: Dict[str, str] = {
+    "en": GRAPH_FOCUSED_PROFILE_PROMPT_EN,
+    "cn": GRAPH_FOCUSED_PROFILE_PROMPT_CN,
 }
 
 LOCATE_EXAM_PROMPT: Dict[str, str] = {
@@ -161,6 +207,7 @@ def build_code_graph_profile_prompt(
     *,
     language: Optional[str] = None,
     prompt_mode: str = PROMPT_MODE_PRODUCT,
+    retrieval_interface: object = None,
 ) -> str:
     """Prompt text for one profile. Empty string when the profile is off."""
     resolved_profile = resolve_code_graph_profile(profile)
@@ -170,10 +217,18 @@ def build_code_graph_profile_prompt(
     mode = (prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
     if mode == PROMPT_MODE_LOCATE:
         return LOCATE_EXAM_PROMPT.get(resolved_language, LOCATE_EXAM_PROMPT["cn"])
+    if (
+        resolve_code_graph_retrieval_interface(retrieval_interface)
+        == CodeGraphRetrievalInterface.FOCUSED
+    ):
+        return GRAPH_FOCUSED_PROFILE_PROMPT.get(
+            resolved_language, GRAPH_FOCUSED_PROFILE_PROMPT["cn"]
+        )
     return GRAPH_PROFILE_PROMPT.get(resolved_language, GRAPH_PROFILE_PROMPT["cn"])
 
 
 __all__ = [
+    "GRAPH_FOCUSED_PROFILE_PROMPT",
     "GRAPH_PROFILE_PROMPT",
     "LOCATE_EXAM_PROMPT",
     "build_code_graph_profile_prompt",

@@ -15,9 +15,12 @@ from typing import Any
 from openjiuwen.harness.schema.code_graph import (
     PROMPT_MODE_LOCATE,
     PROMPT_MODE_PRODUCT,
+    RETRIEVAL_INTERFACE_DEFAULT,
     CodeGraphProfile,
+    CodeGraphRetrievalInterface,
     CodeGraphRunState,
     resolve_code_graph_profile,
+    resolve_code_graph_retrieval_interface,
 )
 from openjiuwen.harness.tools.code_graph._base import CodeGraphToolContext
 from openjiuwen.harness.tools.code_graph.find import (
@@ -35,6 +38,7 @@ from openjiuwen.harness.tools.code_graph.find import (
     SubmitCodeContextTool,
     TraceCallPathsTool,
 )
+from openjiuwen.harness.tools.code_graph.focus_code import FocusCodeTool
 from openjiuwen.harness.tools.code_graph.read_code import ReadCodeTool
 
 LOCATE_EXAM_TOOL_NAMES = (
@@ -59,6 +63,16 @@ PRODUCT_GRAPH_TOOL_NAMES = tuple(
     name for name in LOCATE_EXAM_TOOL_NAMES if name != "submit_code_context"
 )
 
+# ACI product surface. Duplicate read tools stay in classic only; focus_code
+# is the source window. Relation hops are opt-in via focus_code.include_relations.
+FOCUSED_CORE_TOOL_NAMES = (
+    "resolve_symbol",
+    "find_code_symbols",
+    "search_source_text",
+    "inspect_code_structure",
+    "focus_code",
+)
+
 _TOOL_CLASSES = {
     "read_code": ReadCodeTool,
     "resolve_symbol": ResolveSymbolTool,
@@ -74,6 +88,7 @@ _TOOL_CLASSES = {
     "trace_call_paths": TraceCallPathsTool,
     "select_code_context": SelectCodeContextTool,
     "submit_code_context": SubmitCodeContextTool,
+    "focus_code": FocusCodeTool,
 }
 
 
@@ -81,6 +96,7 @@ def code_graph_profile_tool_names(
     profile: Any,
     *,
     prompt_mode: str = PROMPT_MODE_PRODUCT,
+    retrieval_interface: Any = RETRIEVAL_INTERFACE_DEFAULT,
 ) -> tuple[str, ...]:
     """Tool names a profile exposes, in prompt order."""
     resolved = resolve_code_graph_profile(profile)
@@ -89,6 +105,11 @@ def code_graph_profile_tool_names(
     mode = (prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
     if mode == PROMPT_MODE_LOCATE:
         return LOCATE_EXAM_TOOL_NAMES
+    if (
+        resolve_code_graph_retrieval_interface(retrieval_interface)
+        == CodeGraphRetrievalInterface.FOCUSED
+    ):
+        return FOCUSED_CORE_TOOL_NAMES
     return PRODUCT_GRAPH_TOOL_NAMES
 
 
@@ -98,20 +119,28 @@ def build_code_graph_profile_tools(
     *,
     profile: Any = CodeGraphProfile.OFF,
     prompt_mode: str = PROMPT_MODE_PRODUCT,
+    retrieval_interface: Any = RETRIEVAL_INTERFACE_DEFAULT,
 ) -> list:
     """Instantiate the tools for one profile.
 
     All tools share ``context``, therefore one service, one index, and one run
     state per host agent. Product omits ``submit_code_context``; locate-exam
-    (ContextBench) includes it.
+    (ContextBench) includes it.     ``focused`` replaces ``select_code_context`` / ``read_symbol`` / ``read_code``
+    with ``focus_code`` and hides advanced relation tools.
     """
     resolved = resolve_code_graph_profile(profile)
     if resolved == CodeGraphProfile.OFF:
         return []
     resolved_mode = (prompt_mode or PROMPT_MODE_PRODUCT).strip().lower()
+    resolved_interface = resolve_code_graph_retrieval_interface(retrieval_interface)
     if run_state is not None:
         run_state.profile = resolved.value
         run_state.prompt_mode = resolved_mode
+        run_state.retrieval_interface = resolved_interface.value
         context.run_state = run_state
-    names = code_graph_profile_tool_names(resolved, prompt_mode=resolved_mode)
+    names = code_graph_profile_tool_names(
+        resolved,
+        prompt_mode=resolved_mode,
+        retrieval_interface=resolved_interface,
+    )
     return [_TOOL_CLASSES[name](context) for name in names]

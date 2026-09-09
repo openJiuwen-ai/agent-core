@@ -29,8 +29,8 @@ from openjiuwen.harness.subagents.code_agent import (
 )
 from openjiuwen.harness.tools.code_graph.session import reset_localization_sessions
 from openjiuwen.harness.tools.code_graph import (
+    FOCUSED_CORE_TOOL_NAMES,
     LOCATE_EXAM_TOOL_NAMES,
-    PRODUCT_GRAPH_TOOL_NAMES,
     CodeGraphToolContext,
     build_code_graph_profile_tools,
 )
@@ -103,10 +103,12 @@ def test_graph_profile_exposes_find_tools(tmp_path: Path) -> None:
             _context(repo, tmp_path, state), state, profile=CodeGraphProfile.GRAPH
         )
     ]
-    assert names == list(PRODUCT_GRAPH_TOOL_NAMES)
+    assert names == list(FOCUSED_CORE_TOOL_NAMES)
+    assert "focus_code" in names
     assert "search_code" not in names
     assert "search_text" not in names
     assert "select_context" not in names
+    assert "select_code_context" not in names
     assert "trace_call_chain" not in names
     assert "commit_code_context" not in names
     assert "analyze_impact" not in names
@@ -439,6 +441,7 @@ async def test_select_code_context_errors_use_the_public_name(tmp_path: Path) ->
         for tool in build_code_graph_profile_tools(
             _context(repo, tmp_path),
             profile=CodeGraphProfile.GRAPH,
+            retrieval_interface="classic",
         )
     }
     missing_state = await tools["select_code_context"].invoke({"reason": "gate"})
@@ -508,7 +511,7 @@ async def test_graph_profile_registers_find_tools_on_the_code_agent(
         inject_builtin_plan_agents=False,
     )
     names = _registered_tool_names(agent)
-    assert names == set(PRODUCT_GRAPH_TOOL_NAMES)
+    assert names == set(FOCUSED_CORE_TOOL_NAMES)
     runtime = getattr(agent, "code_graph_runtime", None)
     assert runtime is not None
     assert runtime.repo_root
