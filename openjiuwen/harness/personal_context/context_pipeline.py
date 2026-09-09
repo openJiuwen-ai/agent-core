@@ -5762,15 +5762,20 @@ def _rename_balanced_directories(
                     if length > 32:
                         raise _pipeline_error("balanced directory names conflict")
                 reserved[directory.parent].add(unicodedata.normalize("NFC", name).casefold())
-        directory_mapping[directory] = directory_mapping[directory.parent] / name
+        mapped_parent = directory_mapping.get(directory.parent)
+        if mapped_parent is None:
+            raise KeyError(directory.parent)
+        directory_mapping[directory] = mapped_parent / name
     files = [page for page in _walk_tree_paths(context_root) if _path_is_file(page)]
-    mapping = {
-        page.relative_to(context_root).as_posix(): (directory_mapping[page.parent] / page.name)
-        .relative_to(context_root)
-        .as_posix()
-        for page in files
-        if directory_mapping[page.parent] != page.parent
-    }
+    mapping = {}
+    for page in files:
+        mapped_parent = directory_mapping.get(page.parent)
+        if mapped_parent is None:
+            raise KeyError(page.parent)
+        if mapped_parent != page.parent:
+            mapping[page.relative_to(context_root).as_posix()] = (
+                (mapped_parent / page.name).relative_to(context_root).as_posix()
+            )
     if not mapping:
         return
     if len({value.casefold() for value in mapping.values()}) != len(mapping):
