@@ -16,21 +16,27 @@ from openjiuwen.harness_protocol import JsonObject
 class DshHarnessConfig:
     """Configuration passed to ``deepseek_harness.DeepSeekHarness``.
 
-    The optional SDK dependency is deliberately not imported here.  A custom
-    Cordis composition must consume ``system_prompt_env_var`` when it is set;
-    the DSH Python SDK does not expose a native system-prompt argument.
+    The optional SDK dependency is deliberately not imported here.  Field
+    names mirror ``deepseek_harness.DeepSeekHarnessConfig``; ``dsh_home`` (or
+    a non-empty ``DSH_HOME`` in ``env``) is mandatory for the SDK runtime,
+    which never falls back to ``~/.dsh`` implicitly.  A custom Cordis
+    composition must consume ``system_prompt_env_var`` when it is set; the
+    DSH Python SDK does not expose a native system-prompt argument.
     """
 
     provider: str = "deepseek-official"
     model: str = "deepseek-v4-flash"
+    reasoning_effort: str | None = None
     max_tokens: int | None = None
     cwd: str | None = None
     runtime_cwd: str | None = None
-    session_root: str | None = None
-    cordis: str | None = None
+    dsh_bin: str | None = None
+    dsh_home: str | None = None
+    profile: str | None = None
+    patches: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
-    runtime_bin: str | None = None
     launch_args_override: tuple[str, ...] | None = None
+    initialize_timeout_seconds: float | None = None
     request_timeout_seconds: float | None = None
     shutdown_timeout_seconds: float | None = 1.0
     base_url: str | None = None
@@ -44,11 +50,12 @@ class DshHarnessConfig:
         if not self.provider or not self.model:
             raise ValueError("DSH provider and model must not be empty")
         optional_strings = (
+            "reasoning_effort",
             "cwd",
             "runtime_cwd",
-            "session_root",
-            "cordis",
-            "runtime_bin",
+            "dsh_bin",
+            "dsh_home",
+            "profile",
             "base_url",
             "api_key",
             "system_prompt_env_var",
@@ -67,6 +74,7 @@ class DshHarnessConfig:
         if self.event_buffer_capacity <= 0:
             raise ValueError("DSH event_buffer_capacity must be positive")
         for name, timeout in (
+            ("initialize_timeout_seconds", self.initialize_timeout_seconds),
             ("request_timeout_seconds", self.request_timeout_seconds),
             ("shutdown_timeout_seconds", self.shutdown_timeout_seconds),
         ):
@@ -75,12 +83,16 @@ class DshHarnessConfig:
                     raise TypeError(f"DSH {name} must be numeric when provided")
                 if timeout <= 0:
                     raise ValueError(f"DSH {name} must be positive when provided")
-        if self.system_prompt_env_var is not None and not self.system_prompt_env_var:
-            raise ValueError("DSH system_prompt_env_var must not be empty")
+        for name in ("dsh_home", "profile", "system_prompt_env_var"):
+            value = getattr(self, name)
+            if value is not None and not value.strip():
+                raise ValueError(f"DSH {name} must not be empty")
         if not isinstance(self.env, Mapping):
             raise TypeError("DSH env must be an object")
         if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
             raise TypeError("DSH env must map strings to strings")
+        if not isinstance(self.patches, (list, tuple)) or any(not isinstance(item, str) for item in self.patches):
+            raise TypeError("DSH patches must be an array of strings")
         launch_args = self.launch_args_override
         if launch_args is not None:
             if not isinstance(launch_args, (list, tuple)):
@@ -88,6 +100,7 @@ class DshHarnessConfig:
             if not launch_args or any(not isinstance(arg, str) or not arg for arg in launch_args):
                 raise ValueError("DSH launch_args_override must contain non-empty strings")
             object.__setattr__(self, "launch_args_override", tuple(launch_args))
+        object.__setattr__(self, "patches", tuple(self.patches))
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
 
     @classmethod
@@ -106,11 +119,12 @@ class DshHarnessConfig:
                 raise TypeError("DSH env must be an object")
             values["env"] = dict(env)
 
-        launch_args = values.get("launch_args_override")
-        if launch_args is not None:
-            if not isinstance(launch_args, (list, tuple)):
-                raise TypeError("DSH launch_args_override must be an array")
-            values["launch_args_override"] = tuple(launch_args)
+        for name in ("launch_args_override", "patches"):
+            items = values.get(name)
+            if items is not None:
+                if not isinstance(items, (list, tuple)):
+                    raise TypeError(f"DSH {name} must be an array")
+                values[name] = tuple(items)
 
         return cls(**values)  # type: ignore[arg-type]
 

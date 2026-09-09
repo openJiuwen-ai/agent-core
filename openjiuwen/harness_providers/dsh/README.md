@@ -1,27 +1,29 @@
 # DeepSeek Harness external adapter
 
 本包使用 DeepSeek Harness（DSH）Python SDK 实现
-`openjiuwen.harness_protocol` 1.0。它负责 provider session、输入排队、DSH notification
-归一化和有界事件流；`external.member_runtime.ExternalHarnessMemberRuntime` 再把公共协议投影成
-AgentTeam 内部 `MemberRuntime` 行为。
+`openjiuwen.harness_protocol` 1.0。它负责 provider session 与 DSH notification 归一化；输入排队、
+lifecycle 状态机和有界事件流来自 `harness_providers.base.SerializedTurnHarness`；
+`harness_providers.io_adapter.HarnessIOAdapter` 把公共协议投影成 DeepAgent 风格的输入输出，
+`agent_teams.external.member_runtime.ExternalHarnessMemberRuntime` 再在其上叠加团队行为。
 
 ## 当前边界
 
 ```text
-DshHarnessProvider
+DshHarnessProvider / create_harness(manifest, provider="dsh")
        |
        v
-   DshHarness  -- HarnessProtocol 1.0
+   DshHarness  -- HarnessProtocol 1.0（SerializedTurnHarness 子类）
        |
        v
-ExternalHarnessMemberRuntime
+HarnessIOAdapter  -- DeepAgent OutputSchema / InteractiveInput 契约
        |
        v
-AgentTeam MemberRuntime / StreamController
+ExternalHarnessMemberRuntime  -- AgentTeam MemberRuntime / StreamController
 ```
 
-首版只支持程序化构造，尚未注册到 `ExternalCliAgentSpec`、`build_cli_runtime` 或声明式 member spawn。
-现有 Claude Code/Codex backend 也没有迁入本包。
+DSH 支持程序化构造与 manifest 工厂（`create_harness(..., provider="dsh")`），尚未注册到
+`ExternalCliAgentSpec` / `build_cli_runtime` 的声明式 member spawn。Claude Code / Codex 已作为同级
+provider 迁入 `harness_providers.claudecode` / `harness_providers.codex`。
 
 ## Turn 与事件映射
 

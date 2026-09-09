@@ -236,6 +236,46 @@ def _resolve_external_paths(
     return cwd, tuple(extra_dirs)
 
 
+def _bind_protocol_member_team_tools(
+    runtime: Any,
+    *,
+    teammate: "TeamAgent",
+    teammate_backend: "TeamBackend",
+    spec: "TeamAgentSpec",
+    ctx: "TeamRuntimeContext",
+    team_name: str,
+) -> None:
+    """Mount the in-process team MCP tool set on a Claude Code protocol member.
+
+    Codex members receive the team MCP server as a stdio ``McpServerConfig``
+    inside ``build_cli_runtime``; Claude runs the collaboration tools in
+    process through the SDK MCP server, which needs the member's own
+    ``TeamBackend`` and therefore can only be built after ``configure``.
+    """
+    if not runtime.inject_mcp or runtime.provider_name != "claude-code":
+        return
+    from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_sdk_mcp_tool_set
+    from openjiuwen.harness_protocol import McpServerConfig, McpTransport
+
+    tool_set = build_claude_sdk_mcp_tool_set(
+        server_name=runtime.mcp_server_name,
+        team_backend=teammate_backend,
+        role=ctx.role.value,
+        teammate_mode=spec.teammate_mode,
+        dispatch_mode=spec.dispatch_mode,
+        lifecycle=spec.lifecycle,
+        language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
+        workspace_manager=teammate.infra.workspace_manager,
+        messager=teammate.infra.messager,
+        team_name=team_name,
+        team_permissions_enabled=spec.enable_permissions,
+        span_bridge=runtime.span_bridge,
+    )
+    runtime.bind_mcp_servers(
+        [McpServerConfig(name=runtime.mcp_server_name, transport=McpTransport.IN_PROCESS, instance=tool_set.server)]
+    )
+
+
 async def external_cli_spawn(
     *,
     team_agent: "TeamAgent",
@@ -414,26 +454,19 @@ async def external_cli_spawn(
             team_name,
         ),
     )
-    from openjiuwen.agent_teams.external.cli_agent.claude import ClaudeSdkRuntime
-    from openjiuwen.agent_teams.external.cli_agent.codex import CodexSdkRuntime
+    from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 
-    if isinstance(runtime, ClaudeSdkRuntime) and teammate_backend is not None:
-        runtime.bind_team_tools(
-            team_backend=teammate_backend,
-            role=ctx.role.value,
-            teammate_mode=spec.teammate_mode,
-            dispatch_mode=spec.dispatch_mode,
-            lifecycle=spec.lifecycle,
-            language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
-            workspace_manager=teammate.infra.workspace_manager,
-            messager=teammate.infra.messager,
+    if isinstance(runtime, ExternalHarnessMemberRuntime) and teammate_backend is not None:
+        _bind_protocol_member_team_tools(
+            runtime,
+            teammate=teammate,
+            teammate_backend=teammate_backend,
+            spec=spec,
+            ctx=ctx,
             team_name=team_name,
-            team_permissions_enabled=spec.enable_permissions,
         )
-
-    # Inject the reliability delivery surface (failed message to the
-    # leader mailbox + member ERROR status) for Claude/Codex SDK runtimes only.
-    if isinstance(runtime, (ClaudeSdkRuntime, CodexSdkRuntime)) and teammate_backend is not None:
+        # Inject the reliability delivery surface (failed message to the
+        # leader mailbox + member ERROR status) for SDK-backed members only.
         leader_name = await teammate_backend.resolve_leader_member_name()
         runtime.bind_reliability_context(
             session_id=session_id or "",

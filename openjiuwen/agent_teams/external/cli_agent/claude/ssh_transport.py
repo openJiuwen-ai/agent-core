@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import Any
 
-from openjiuwen.agent_teams.external.cli_agent.claude.options import load_claude_sdk
+from openjiuwen.harness_providers.claudecode.options import load_claude_sdk
 from openjiuwen.agent_teams.external.descriptor import TEAM_JOIN_ENV
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.core.common.exception.codes import StatusCode

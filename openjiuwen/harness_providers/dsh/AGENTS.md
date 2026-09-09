@@ -9,10 +9,16 @@ DSH SDK 当前源码优先于历史文档；不要根据其它厂商能力推断
 - `provider.py`：实现 provider factory，只构造未启动 Harness。
 - `harness.py`：session lifecycle、输入队列、外部 Turn ownership、notification bridge。
 - `mapping.py`：DSH notification/RunResult 到公共事件和 `TurnResult` 的纯映射与累积。
-- `stream.py`：有界、可关闭、单消费者的持续/单 Turn event cursor。
 
-通用 AgentTeam 投影属于相邻的 `external/member_runtime.py`，不得在本目录复制
-`MemberRuntime`、`StreamController` 或 team coordination 状态机。
+lifecycle 状态机、输入队列、有界事件流由上层 `harness_providers/base.py`（`SerializedTurnHarness`）
+与 `harness_providers/stream.py` 提供，本目录只实现 `_open_session` / `_close_session` /
+`_execute_turn`。通用 AgentTeam 投影属于 `agent_teams/external/member_runtime.py`（基于
+`harness_providers/io_adapter.py`），不得在本目录复制 `MemberRuntime`、`StreamController` 或 team
+coordination 状态机。
+
+配置字段镜像当前安装的 `deepseek_harness.DeepSeekHarnessConfig`（`dsh_home` / `profile` /
+`dsh_bin` / `patches` / `reasoning_effort` / `initialize_timeout_seconds` ...）；SDK 不会隐式使用
+`~/.dsh`，宿主必须显式给 `dsh_home` 或在 `env` 里带 `DSH_HOME`。
 
 ## 不变量
 

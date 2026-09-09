@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Bounded single-consumer observation stream used by the DSH adapter."""
+"""Bounded single-consumer observation stream shared by harness providers."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class BoundedEventBuffer:
             while len(self._items) >= self._capacity and not self._closed:
                 await self._condition.wait()
             if self._closed:
-                raise EventBufferClosed("DSH event buffer is closed")
+                raise EventBufferClosed("harness event buffer is closed")
             self._items.append(event)
             self._condition.notify_all()
 
@@ -70,13 +70,13 @@ class BoundedEventBuffer:
             self._closed = True
             self._condition.notify_all()
 
-    def cursor(self, *, turn_id: str | None = None, per_turn: bool = False) -> "DshEventCursor":
+    def cursor(self, *, turn_id: str | None = None, per_turn: bool = False) -> "BufferedEventCursor":
         """Acquire the single consumer lease and return a cursor."""
 
         if self._consumer_active:
-            raise HarnessStateError("the DSH observation stream already has an active consumer")
+            raise HarnessStateError("the harness observation stream already has an active consumer")
         self._consumer_active = True
-        return DshEventCursor(self, expected_turn_id=turn_id, per_turn=per_turn)
+        return BufferedEventCursor(self, expected_turn_id=turn_id, per_turn=per_turn)
 
     def release_consumer(self) -> None:
         """Release the consumer lease.  The operation is idempotent."""
@@ -84,7 +84,7 @@ class BoundedEventBuffer:
         self._consumer_active = False
 
 
-class DshEventCursor:
+class BufferedEventCursor:
     """Cycle-long or finite-turn view over one ``BoundedEventBuffer``."""
 
     def __init__(
@@ -100,7 +100,7 @@ class DshEventCursor:
         self._selected_turn_id: str | None = None
         self._closed = False
 
-    def __aiter__(self) -> "DshEventCursor":
+    def __aiter__(self) -> "BufferedEventCursor":
         return self
 
     async def __anext__(self) -> HarnessEvent:
@@ -120,7 +120,9 @@ class DshEventCursor:
                 selected_turn_id = self._selected_turn_id
                 await self.aclose()
                 if self._per_turn and selected_turn_id is not None:
-                    raise HarnessProtocolError(f"DSH event stream closed before turn {selected_turn_id!r} terminated")
+                    raise HarnessProtocolError(
+                        f"harness event stream closed before turn {selected_turn_id!r} terminated"
+                    )
                 raise StopAsyncIteration
 
             if not self._per_turn:
@@ -135,13 +137,13 @@ class DshEventCursor:
                 if self._expected_turn_id is not None and event.turn_id != self._expected_turn_id:
                     await self.aclose()
                     raise HarnessStateError(
-                        "requested DSH turn is not the next unconsumed turn: "
+                        "requested turn is not the next unconsumed turn: "
                         f"expected {self._expected_turn_id!r}, found {event.turn_id!r}"
                     )
                 consumed = await self._buffer.get()
                 if consumed is None:
                     await self.aclose()
-                    raise HarnessProtocolError("DSH event stream changed while selecting a turn")
+                    raise HarnessProtocolError("harness event stream changed while selecting a turn")
                 event = consumed
                 payload = event.event
                 self._selected_turn_id = event.turn_id
@@ -163,4 +165,4 @@ class DshEventCursor:
         self._buffer.release_consumer()
 
 
-__all__ = ["BoundedEventBuffer", "DshEventCursor", "EventBufferClosed"]
+__all__ = ["BoundedEventBuffer", "BufferedEventCursor", "EventBufferClosed"]

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from openjiuwen.agent_teams.external.dsh.config import DshHarnessConfig
-from openjiuwen.agent_teams.external.dsh.harness import DshHarness
+from openjiuwen.harness_providers.dsh.config import DshHarnessConfig
+from openjiuwen.harness_providers.dsh.harness import DshHarness
 from openjiuwen.harness_protocol import HarnessCard, JsonObject
 
 
