@@ -170,12 +170,14 @@ class SymphonyFlowEngine:
         return self.store.evidence_fingerprint() != self.store.read_distillation_fingerprint()
 
     def _unacknowledged_current_candidates(self) -> tuple[CombinationCandidate, ...]:
-        return tuple(
-            candidate
-            for recipe_id in self.list_recipes()
-            if (candidate := self.get_candidate(recipe_id)) is not None
-            and not self.store.is_candidate_acknowledged(candidate.recipe_id, candidate.version)
-        )
+        candidates: list[CombinationCandidate] = []
+        for recipe_id in self.list_recipes():
+            candidate = self.get_candidate(recipe_id)
+            if candidate is None:
+                continue
+            if not self.store.is_candidate_acknowledged(candidate.recipe_id, candidate.version):
+                candidates.append(candidate)
+        return tuple(candidates)
 
     def _new_verified_candidates(self, report: DistillReport) -> tuple[CombinationCandidate, ...]:
         candidates: list[CombinationCandidate] = []
@@ -459,15 +461,20 @@ class SymphonyFlowEngine:
     def list_candidates(self) -> tuple[CombinationCandidate, ...]:
         """Return all current active verified candidates as immutable snapshots."""
 
-        return tuple(
-            candidate for recipe_id in self.list_recipes() if (candidate := self.get_candidate(recipe_id)) is not None
-        )
+        candidates: list[CombinationCandidate] = []
+        for recipe_id in self.list_recipes():
+            candidate = self.get_candidate(recipe_id)
+            if candidate is not None:
+                candidates.append(candidate)
+        return tuple(candidates)
 
     def acknowledge_candidate(self, recipe_id: str, version: int) -> bool:
         """Acknowledge successful Host Event delivery for one candidate version."""
 
         current = self.get_recipe(recipe_id)
-        if current is None or current.version != version or current.status != "active" or current.grade != "verified":
+        if current is None:
+            return False
+        if current.version != version or current.status != "active" or current.grade != "verified":
             return False
         return self.store.acknowledge_candidate(recipe_id, version)
 
@@ -495,14 +502,11 @@ __all__ = [
 
 def _candidate_from_recipe(recipe: ExperienceRecipe) -> CombinationCandidate:
     applicability = recipe.applicability
-    summary = " — ".join(
-        part
-        for part in (
-            str(applicability.get("task_description") or "").strip(),
-            str(applicability.get("trigger_conditions") or "").strip(),
-        )
-        if part
-    )
+    summary_parts = [
+        str(applicability.get("task_description") or "").strip(),
+        str(applicability.get("trigger_conditions") or "").strip(),
+    ]
+    summary = " — ".join(part for part in summary_parts if part)
     edges = recipe.combination_structure.get("edges") or ()
     structure = tuple(
         (

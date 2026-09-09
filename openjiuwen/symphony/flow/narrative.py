@@ -122,11 +122,11 @@ async def _distill_with_llm(
     )
     if not task_description or not narrative:
         raise ValueError("narrative distillation produced empty text")
-    example_requests = [
-        sanitized
-        for item in (payload.get("example_requests") or [])
-        if (sanitized := sanitize_distilled_text(item, source_queries=source_queries))
-    ]
+    example_requests = []
+    for item in payload.get("example_requests") or []:
+        sanitized = sanitize_distilled_text(item, source_queries=source_queries)
+        if sanitized:
+            example_requests.append(sanitized)
     return {
         "applicability": {
             "task_description": task_description,

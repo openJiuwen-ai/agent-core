@@ -275,7 +275,11 @@ def _successful_execution_graph(value: dict[str, Any]) -> dict[str, Any] | None:
     ]
     if not edges:
         return None
-    endpoint_ids = {str(edge[key]) for edge in edges for key in ("source", "target") if edge.get(key)}
+    endpoint_ids: set[str] = set()
+    for edge in edges:
+        for key in ("source", "target"):
+            if edge.get(key):
+                endpoint_ids.add(str(edge[key]))
     projected = deepcopy(value)
     projected["graph"]["edges"] = edges
     projected["graph"]["nodes"] = {
