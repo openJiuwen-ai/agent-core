@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.organization.events import (
     BaseOrgEvent,
     OrgEventMessage,
     OrgLeaderMessageEvent,
+    OrgSummaryCompletedEvent,
     OrgSummarySourcesUpdatedEvent,
     OrgSummaryTaskCreatedEvent,
     OrgTaskClaimedEvent,
@@ -485,10 +486,13 @@ class OrgTaskManager:
                 if not created_by.team_id:
                     return OrgTaskOpResult(ok=False, reason="child task must be created by a team")
                 if parent.assigned_team_id != created_by.team_id:
-                    return OrgTaskOpResult(
-                        ok=False,
-                        reason="only the parent task's assigned team can create child tasks",
-                    )
+                    if not await self._is_summary_team_for_parent_guard(
+                        session, parent, created_by.team_id
+                    ):
+                        return OrgTaskOpResult(
+                            ok=False,
+                            reason="only the parent task's assigned team can create child tasks",
+                        )
                 if parent.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                     return OrgTaskOpResult(ok=False, reason=f"parent task is terminal: {parent_task_id}")
                 expected_root = parent.root_task_id
@@ -1255,6 +1259,15 @@ class OrgTaskManager:
                 task_id=task_id,
             )
         )
+        if row.task_type == ORG_SUMMARY_TASK_TYPE:
+            await self._publish_event(
+                OrgSummaryCompletedEvent(
+                    organization_id=self.organization_id,
+                    team_id=team_id,
+                    root_task_id=row.root_task_id or task_id,
+                    summary_task_id=task_id,
+                )
+            )
         if review_event is not None:
             await self._publish_event(review_event)
         return OrgTaskOpResult(ok=True, task=task)
@@ -1532,6 +1545,32 @@ class OrgTaskManager:
         """True when the target matches the parent-complete supersedeable criteria."""
         review = await self._get_latest_review_row(session, repaired.task_id)
         return _is_supersedable_task(repaired.status, review)
+
+    async def _is_summary_team_for_parent_guard(
+        self, session: Any, parent: OrgTaskRecord, team_id: str
+    ) -> bool:
+        """Allow a SUMMARY_TEAM root's dynamic Summary Team to create supplementary children.
+
+        A Summary Task is created with ``parent_task_id=None``, so it lives outside
+        the regular child-tree whose children only the root's assigned team may
+        create.  The on-demand Summary Team must still be able to spawn the focused
+        supplementary tasks it needs to complete the aggregation; guard that by
+        requiring the creator to be the team currently assigned that root's summary
+        task.
+        """
+        if parent.parent_task_id:
+            return False
+        config = _json_loads(parent.aggregation_json, {}) or {}
+        mode = config.get("mode")
+        if mode != OrgTaskAggregationMode.SUMMARY_TEAM.value:
+            return False
+        summary_task_id = config.get("summary_task_id")
+        if not summary_task_id:
+            return False
+        summary = await session.get(OrgTaskRecord, summary_task_id)
+        if summary is None or summary.organization_id != self.organization_id:
+            return False
+        return summary.assigned_team_id == team_id
 
     async def _list_sibling_repairs_of(
         self,
