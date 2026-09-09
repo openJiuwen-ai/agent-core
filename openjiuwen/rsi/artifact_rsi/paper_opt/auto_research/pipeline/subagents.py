@@ -20,6 +20,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     scientific_status_from_metrics,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    agent_trace_path,
     ensure_manager_dir,
     find_harness_run_dirs,
     generated_code_dir,
@@ -229,6 +230,81 @@ _REPAIR_LOG_CHARS = 800
 _SDK_LOG_TYPE_RE = re.compile(
     r"\| (?:llm|common|tool|interface|performance|prompt_builder) \|"
 )
+_TRIED_COMMANDS_LIMIT = 5
+_TRIED_COMMAND_CHARS = 300
+
+
+def _extract_bash_command(arguments: Any) -> str | None:
+    """Best-effort pull of the shell command string out of a sanitized
+    tool_call_start.arguments payload. The shape isn't fixed -- normally a
+    dict (or JSON-encoded string) with a "command" key, but sanitize_for_trace
+    wraps anything over its char budget into {"text", "chars", "digest",
+    "truncated"} instead. Returns None rather than raising on anything
+    unexpected -- this only feeds an optional prompt hint, never correctness.
+    """
+    try:
+        payload = arguments
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            return None
+        command = payload.get("command")
+        if command is None and isinstance(payload.get("text"), str):
+            try:
+                inner = json.loads(payload["text"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                inner = None
+            command = inner.get("command") if isinstance(inner, dict) else payload.get("text")
+        if not isinstance(command, str):
+            return None
+        command = " ".join(command.split()).strip()
+        if not command:
+            return None
+        if len(command) > _TRIED_COMMAND_CHARS:
+            command = command[: _TRIED_COMMAND_CHARS - 1] + "…"
+        return command
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _parse_failed_bash_commands(trace_path: Path, *, limit: int = _TRIED_COMMANDS_LIMIT) -> list[str]:
+    """Scan a prior attempt's agent_trace.jsonl for bash tool calls that ended
+    in tool_call_error (e.g. the 300s bash-tool timeout), returning up to
+    `limit` of the most recent ones. Tolerant of a missing, empty, or
+    truncated/malformed file (e.g. from a killed process) -- this must never
+    raise, since _code_retry_block calls it unconditionally on every retry.
+    """
+    pending: dict[str, str] = {}
+    failed: list[str] = []
+    try:
+        with trace_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if event.get("tool_name") != "bash":
+                    continue
+                call_id = event.get("call_id")
+                if not call_id:
+                    continue
+                kind = event.get("event")
+                if kind == "tool_call_start":
+                    command = _extract_bash_command(event.get("arguments"))
+                    if command:
+                        pending[call_id] = command
+                elif kind == "tool_call_error":
+                    command = pending.pop(call_id, None)
+                    if command:
+                        failed.append(command)
+                elif kind == "tool_call_end":
+                    pending.pop(call_id, None)
+    except OSError:
+        return []
+    return failed[-limit:]
 
 
 _LOCAL_DATASET_RE = re.compile(
@@ -623,7 +699,18 @@ def _code_retry_block(contract: SubtaskContract, state: PersistedManagerState) -
         return ""
     handoff = getattr(prior, "handoff", None)
     log_paths = list(getattr(handoff, "log_paths", []) or [])
-    remaining = _REPAIR_CONTEXT_CHARS
+    trace_path = agent_trace_path(state.task_state.run_id, prior.module, prior.round_index, prior.attempt)
+    failed_commands = _parse_failed_bash_commands(trace_path)
+    tried_block = ""
+    if failed_commands:
+        bullets = "\n".join(f"- `{cmd}`" for cmd in failed_commands)
+        tried_block = (
+            "## Commands already tried and failed in the previous attempt\n\n"
+            "These already failed or timed out — diagnose the underlying cause "
+            "instead of repeating them verbatim:\n\n"
+            f"{bullets}\n\n"
+        )
+    remaining = _REPAIR_CONTEXT_CHARS - len(tried_block)
     sections: list[str] = []
     per_file = max(400, remaining // max(len(log_paths), 1)) if log_paths else remaining
     for path in log_paths:
@@ -656,6 +743,7 @@ def _code_retry_block(contract: SubtaskContract, state: PersistedManagerState) -
         "failure instead of repeating the same implementation.\n\n"
         f"Prior failure summary:\n{prior.summary or '(none)'}\n\n"
         f"Repair instruction:\n{contract.repair_instruction or '(none)'}\n\n"
+        f"{tried_block}"
         f"Logs from the previous attempt:\n{logs}\n\n"
     )
 

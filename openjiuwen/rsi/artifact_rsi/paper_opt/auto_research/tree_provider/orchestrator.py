@@ -42,6 +42,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.schemas i
     PaperTaskState,
     RsiChange,
     RsiTreeNode,
+    friendly_failure_reason,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.seed import NodeSeed, build_node_seed
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.storage import TaskStorage
@@ -161,6 +162,17 @@ def _artifact_ref_for_node(node_id: str, run_id: str) -> ArtifactRef | None:
         sha256=sha256,
         download_url=None,
     )
+
+
+def _display_node(node: RsiTreeNode) -> RsiTreeNode:
+    """Provider-facing copy of `node` for EventNode -- swaps `reason` for its
+    friendly-text version (see schemas.py::friendly_failure_reason) without
+    touching the node persisted to storage or fed into the next round's seed
+    prompt via PaperTaskState.last_reason."""
+    friendly = friendly_failure_reason(node)
+    if friendly is None or friendly == node.reason:
+        return node
+    return node.model_copy(update={"reason": friendly})
 
 
 def _node_run_id(node: RsiTreeNode | None) -> str | None:
@@ -296,7 +308,7 @@ class PaperTreeOrchestrator:
             reason="task terminated while this reporting attempt was in progress",
             failure_class="terminated",
         ):
-            await self._emit(EventNode(node=node))
+            await self._emit(EventNode(node=_display_node(node)))
         state = self.storage.load_task_state()
         if state is not None:
             state.status = "terminated"
@@ -320,7 +332,7 @@ class PaperTreeOrchestrator:
                 reason=f"task crashed: {exc}",
                 failure_class="crashed",
             ):
-                await self._emit(EventNode(node=node))
+                await self._emit(EventNode(node=_display_node(node)))
             state.status = "failed"
             state.error_message = str(exc)
             self.storage.save_task_state(state)
@@ -417,7 +429,7 @@ class PaperTreeOrchestrator:
             state.last_reason = node.reason
         self.storage.save_task_state(state)
 
-        await self._emit(EventNode(node=node))
+        await self._emit(EventNode(node=_display_node(node)))
         await self._emit(
             EventProgress(
                 iteration=state.node_count,

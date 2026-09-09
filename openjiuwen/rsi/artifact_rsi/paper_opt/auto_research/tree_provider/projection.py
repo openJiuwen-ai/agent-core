@@ -14,7 +14,19 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.schemas i
     RsiTreeNode,
     RsiUsage,
     TreeResponse,
+    friendly_failure_reason,
 )
+
+
+def _display_node(node: RsiTreeNode) -> RsiTreeNode:
+    """Provider-facing copy of `node` for TreeResponse -- see
+    orchestrator.py's identically-named helper for the EventNode side of the
+    same transform; kept as two small copies rather than a shared import to
+    avoid projection.py depending on orchestrator.py for one function."""
+    friendly = friendly_failure_reason(node)
+    if friendly is None or friendly == node.reason:
+        return node
+    return node.model_copy(update={"reason": friendly})
 
 
 def tree_depth(nodes: list[RsiTreeNode]) -> int:
@@ -33,7 +45,11 @@ def tree_depth(nodes: list[RsiTreeNode]) -> int:
 
 
 def project_tree_response(task: PaperTaskState, nodes: list[RsiTreeNode]) -> TreeResponse:
-    return TreeResponse(nodes=nodes, depth=tree_depth(nodes), iteration=task.node_count)
+    return TreeResponse(
+        nodes=[_display_node(node) for node in nodes],
+        depth=tree_depth(nodes),
+        iteration=task.node_count,
+    )
 
 
 def project_engine_state(task: PaperTaskState, usage: RsiUsage | None = None) -> EngineState:

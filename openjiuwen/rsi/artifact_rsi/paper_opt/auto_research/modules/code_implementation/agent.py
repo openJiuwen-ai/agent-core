@@ -103,7 +103,29 @@ _INVALID_METHOD_SENTINEL = "__invalid__"
 # ("choose from 'a', 'b'"), 3.12+ do not ("choose from a, b"). Split on
 # commas and strip optional quotes rather than assuming either form.
 _ARGPARSE_CHOICES_RE = re.compile(r"choose from ([^\n)]+)")
+# Absolute paths mentioned as plain text in the design/instruction context
+# (e.g. a dataset path) that the coding agent would otherwise have to
+# rediscover via a broad, unbounded find/grep across the whole workspace or
+# user home directory -- see _extract_path_candidates/_stage_referenced_paths.
+_WINDOWS_ABS_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")
+_POSIX_ABS_PATH_RE = re.compile(r"(?<![:\w])/(?:[^\s\"'<>|]+)")
+_REFERENCED_PATH_TRAILING_PUNCT = ".,;:)]'\"\\"
+_MAX_REFERENCED_CANDIDATES = 8
+_MAX_REFERENCED_FILE_BYTES = 50 * 1024 * 1024
+_REFERENCED_PATHS_SUBDIR = "referenced_paths"
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ReferencedPath:
+    """One absolute path found in free-text instructions and verified to
+    exist on the host, ready to describe to the coding agent so it doesn't
+    need to search for it."""
+
+    kind: str  # "file" | "dir" | "file_too_large"
+    host_path: str
+    workspace_rel: str | None = None
+    size_bytes: int | None = None
 
 
 @dataclass
@@ -305,6 +327,9 @@ class CodeImplementationAgent:
         output_dir.mkdir(parents=True, exist_ok=True)
         code_dir = generated_code_dir(plan.run_id).resolve()
         agent_artifact_path = self._stage_artifact_input(inputs.artifact_path, agent_workspace)
+        referenced_candidates = self._extract_path_candidates(design_context, inputs.extra_host_instructions)
+        referenced_paths = self._stage_referenced_paths(referenced_candidates, agent_workspace)
+        referenced_prompt = self._build_referenced_paths_prompt(referenced_paths)
 
         # Only a last-resort fallback now — see _build_output, which discovers
         # the real variant list from the entry point itself rather than
@@ -313,8 +338,11 @@ class CodeImplementationAgent:
         # can't run at all).
         variant_names = [*plan.baselines, "proposed"]
         artifact_prompt = self._build_artifact_prompt(agent_artifact_path)
-        task_prompt = artifact_prompt + inputs.extra_host_instructions + self._build_task_prompt(
-            plan, design_context
+        task_prompt = (
+            artifact_prompt
+            + referenced_prompt
+            + inputs.extra_host_instructions
+            + self._build_task_prompt(plan, design_context)
         )
         max_cycles = self._max_validation_cycles()
         smoke_root = active_artifact_dir(plan.run_id, smoke_test_dir(plan.run_id).resolve())
@@ -868,6 +896,103 @@ class CodeImplementationAgent:
             "stubs, or invented paper content. The host will expose the same input to the "
             "generated program through `ARTIFACT_PATH` at execution time, so do not "
             "hardcode this workspace path into the generated code.\n\n"
+        )
+
+    @staticmethod
+    def _extract_path_candidates(*texts: str, limit: int = _MAX_REFERENCED_CANDIDATES) -> list[str]:
+        """Pull absolute Windows/POSIX path-looking tokens out of free-text
+        instructions (e.g. a dataset path mentioned in the design context),
+        so they can be verified and handed to the agent directly instead of
+        it discovering them via a broad, unbounded find/grep. Candidates are
+        capped BEFORE any filesystem I/O -- existence checks happen later in
+        _stage_referenced_paths, which is the real filter against regex false
+        positives (URLs, code fences, import lines); this cap only bounds how
+        many of those checks we're willing to do.
+        """
+        seen: dict[str, None] = {}
+        for text in texts:
+            if not text:
+                continue
+            for pattern in (_WINDOWS_ABS_PATH_RE, _POSIX_ABS_PATH_RE):
+                for match in pattern.finditer(text):
+                    candidate = match.group(0).rstrip(_REFERENCED_PATH_TRAILING_PUNCT)
+                    if candidate and candidate not in seen:
+                        seen[candidate] = None
+                    if len(seen) >= limit:
+                        return list(seen)
+        return list(seen)
+
+    @staticmethod
+    def _stage_referenced_paths(candidates: list[str], agent_workspace: Path) -> list["_ReferencedPath"]:
+        """Verify each candidate path actually exists on the host, and stage
+        existing files into the sandbox (mirroring _stage_artifact_input) so
+        the coding agent can read them without depending on whether its
+        sandboxed file tools permit arbitrary host paths. Directories and
+        oversized files are reported but not copied. Every candidate is
+        handled independently under a broad try/except: a regex-mangled
+        string can raise almost anything when handed to Path()/.exists() on
+        Windows, and continuing past one bad candidate matters more than
+        being precise about which exception type to catch.
+        """
+        results: list[_ReferencedPath] = []
+        referenced_root = agent_workspace / _REFERENCED_PATHS_SUBDIR
+        for candidate in candidates:
+            try:
+                path = Path(candidate)
+                if not path.exists():
+                    continue
+                if path.is_dir():
+                    results.append(_ReferencedPath(kind="dir", host_path=str(path)))
+                    continue
+                size = path.stat().st_size
+                if size > _MAX_REFERENCED_FILE_BYTES:
+                    results.append(
+                        _ReferencedPath(kind="file_too_large", host_path=str(path), size_bytes=size)
+                    )
+                    continue
+                subdir = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:10]
+                dest_dir = referenced_root / subdir
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / path.name
+                shutil.copy2(path, dest)
+                results.append(
+                    _ReferencedPath(
+                        kind="file",
+                        host_path=str(path),
+                        workspace_rel=f"{_REFERENCED_PATHS_SUBDIR}/{subdir}/{path.name}",
+                        size_bytes=size,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — one malformed candidate must not drop the rest
+                continue
+        return results
+
+    @staticmethod
+    def _build_referenced_paths_prompt(records: list["_ReferencedPath"]) -> str:
+        if not records:
+            return ""
+        lines: list[str] = []
+        for record in records:
+            if record.kind == "file":
+                lines.append(f"- `{record.workspace_rel}` (staged from `{record.host_path}`)")
+            elif record.kind == "dir":
+                lines.append(
+                    f"- `{record.host_path}` — confirmed to exist as a directory; "
+                    "list/read it directly, do not `find` for it"
+                )
+            else:
+                size_mb = (record.size_bytes or 0) / (1024 * 1024)
+                lines.append(
+                    f"- `{record.host_path}` — confirmed to exist (~{size_mb:.0f} MB, not copied); "
+                    "read it directly at that path if your sandbox allows, do not search for it"
+                )
+        return (
+            "## Verified paths from your instructions\n\n"
+            "These absolute paths were mentioned in your task instructions and have "
+            "already been located and verified for you:\n\n"
+            f"{chr(10).join(lines)}\n\n"
+            "Do not run `find`/`grep` across the workspace or user home directories "
+            "to rediscover them.\n\n"
         )
 
     def _build_task_prompt(self, plan: ExperimentPlan, design_context: str) -> str:
