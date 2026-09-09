@@ -63,6 +63,7 @@ from openjiuwen.core.retrieval.code_graph.query.trace_call_chain import (
     trace_call_chain as query_trace_call_chain,
 )
 from openjiuwen.core.retrieval.code_graph.identity import RepoIdentity, canonical_workspace_path
+from openjiuwen.core.retrieval.code_graph.index_log import definition_count
 from openjiuwen.core.retrieval.code_graph.snapshot import compute_snapshot
 from openjiuwen.core.retrieval.code_graph.store.index_store import DiskIndexStore
 
@@ -1145,6 +1146,7 @@ class CodeGraphService:
         cache_hit: bool,
     ) -> None:
         duration_ms = (time.perf_counter() - started) * 1000
+        definitions = definition_count(index)
         record_code_graph_event(
             kind,
             duration_ms,
@@ -1154,12 +1156,14 @@ class CodeGraphService:
             file_count=index.file_count,
             symbol_count=len(index.symbols),
             relation_count=len(index.relations),
+            definitions=definitions,
         )
         logger.info(
-            "code_graph %s duration_ms=%.1f files=%s symbols=%s relations=%s cache_hit=%s repo=%s",
+            "code_graph %s duration_ms=%.1f files=%s definitions=%s symbols=%s relations=%s cache_hit=%s repo=%s",
             kind,
             duration_ms,
             index.file_count,
+            definitions,
             len(index.symbols),
             len(index.relations),
             cache_hit,
