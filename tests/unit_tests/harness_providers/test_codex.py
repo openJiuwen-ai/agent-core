@@ -23,11 +23,14 @@ from openjiuwen.harness_protocol import (
     HarnessProtocolError,
     HarnessState,
     HostCapability,
+    InteractionResponseStatus,
     ItemLifecycleEvent,
     McpServerConfig,
     McpTransport,
     OutputEvent,
     OutputOperation,
+    ProviderEvent,
+    ProviderInteractionResponse,
     ResumePolicy,
     ToolApprovalDecision,
     ToolApprovalResponse,
@@ -403,4 +406,89 @@ async def test_steer_before_the_sdk_handle_exists_is_queued(monkeypatch: pytest.
     terminal = _terminal(await _turn(harness, receipt.turn_id))
     assert terminal.kind is TurnEventKind.FINISHED
     assert state.handles[0].steers == ["early"]
+    await harness.stop()
+
+
+def _auth_failure(turn_id: str) -> Any:
+    error = SimpleNamespace(message="unauthorized", codex_error_info="unauthorized")
+    return _turn_completed(turn_id, _Status.failed, error=error)
+
+
+def _fallback_config() -> CodexHarnessConfig:
+    return CodexHarnessConfig(
+        inherit_process_env=False,
+        model=CodexModelConfig(model="native-model"),
+        fallback_model=CodexModelConfig(model="fallback-model", provider="alt", api_base="https://alt", api_key="k"),
+    )
+
+
+class _RatificationHandler:
+    def __init__(self, status: InteractionResponseStatus) -> None:
+        self.status = status
+        self.requests: list[Any] = []
+
+    async def handle(self, request: Any) -> Any:
+        self.requests.append(request)
+        return ProviderInteractionResponse(request_id=request.request_id, status=self.status)
+
+    async def cancel(self, request_id: str, *, reason: Any = None) -> None:
+        _ = request_id, reason
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_activates_fallback_after_host_ratification(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+
+    async def _fail(handle: _FakeHandle) -> Any:
+        return _auth_failure(handle.id)
+
+    async def _complete(handle: _FakeHandle) -> Any:
+        return _turn_completed(handle.id, _Status.completed)
+
+    state.scripts.append([_fail])
+    state.scripts.append([_complete])
+    handler = _RatificationHandler(InteractionResponseStatus.COMPLETED)
+    harness = CodexHarness(_fallback_config())
+    await harness.start(_context(interactions=handler, host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION})))
+    receipt = await harness.send(HarnessInput(content="hi"))
+    events = await _turn(harness, receipt.turn_id)
+    assert _terminal(events).kind is TurnEventKind.FINISHED
+    assert harness.fallback_activated
+    assert [request.request_type for request in handler.requests] == ["auth_fallback"]
+    assert handler.requests[0].payload["model"] == "fallback-model"
+    assert [call[0] for call in state.thread_calls] == ["start", "resume"]
+    assert any(
+        isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
+    )
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_declined_fallback_ratification_restores_the_native_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+
+    async def _fail(handle: _FakeHandle) -> Any:
+        return _auth_failure(handle.id)
+
+    state.scripts.append([_fail])
+    handler = _RatificationHandler(InteractionResponseStatus.DECLINED)
+    harness = CodexHarness(_fallback_config())
+    await harness.start(_context(interactions=handler, host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION})))
+    receipt = await harness.send(HarnessInput(content="hi"))
+    events = await _turn(harness, receipt.turn_id)
+    terminal = _terminal(events)
+    logger.info("declined codex fallback terminal: %s", terminal)
+    assert terminal.kind is TurnEventKind.FAILED
+    assert terminal.result.error.category == "auth_required"
+    assert not harness.fallback_activated
+    assert len(handler.requests) == 1
+    # native start -> fallback resume -> native resume; the fallback client is closed.
+    assert [call[0] for call in state.thread_calls] == ["start", "resume", "resume"]
+    assert len(state.clients) == 3
+    assert state.clients[1].closed
+    assert not state.clients[2].closed
+    assert harness.provider_session_id == "thread-1"
+    assert not any(
+        isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
+    )
     await harness.stop()

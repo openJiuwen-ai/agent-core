@@ -30,6 +30,8 @@ from openjiuwen.harness_protocol import (
     OutputEvent,
     OutputKind,
     OutputOperation,
+    ProviderInteractionRequest,
+    ProviderInteractionResponse,
     SendReceipt,
     ToolApprovalDecision,
     ToolApprovalRequest,
@@ -305,4 +307,41 @@ async def test_failed_start_stops_the_harness_and_propagates() -> None:
     with pytest.raises(RuntimeError, match="no sdk"):
         await adapter.start(_context())
     assert harness.stops == 1
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_provider_interaction_requests_are_declined_without_a_handler() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    assert HostCapability.PROVIDER_INTERACTION not in harness.contexts[0].host_capabilities
+    request = ProviderInteractionRequest(
+        request_id="ext-1", provider="fake", request_type="auth_fallback", schema_version="1", payload={}
+    )
+    response = await adapter.handle(request)
+    assert isinstance(response, ProviderInteractionResponse)
+    assert response.status is InteractionResponseStatus.DECLINED
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
+async def test_provider_interaction_requests_route_to_the_bound_handler() -> None:
+    harness = _FakeHarness()
+    seen: list[ProviderInteractionRequest] = []
+
+    async def _handler(request: ProviderInteractionRequest) -> ProviderInteractionResponse:
+        seen.append(request)
+        return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.COMPLETED)
+
+    adapter = HarnessIOAdapter(harness, provider_interaction_handler=_handler)
+    await adapter.start(_context())
+    assert HostCapability.PROVIDER_INTERACTION in harness.contexts[0].host_capabilities
+    request = ProviderInteractionRequest(
+        request_id="ext-2", provider="fake", request_type="auth_fallback", schema_version="1", payload={"model": "m"}
+    )
+    response = await adapter.handle(request)
+    logger.info("provider interaction response: %s", response)
+    assert response.status is InteractionResponseStatus.COMPLETED
+    assert seen[0].payload == {"model": "m"}
     await adapter.stop()

@@ -28,12 +28,14 @@ from openjiuwen.harness_protocol import (
     HarnessCapability,
     HarnessEvent,
     HostCapability,
+    InteractionResponseStatus,
     ItemEventKind,
     ItemLifecycleEvent,
     OutputChannel,
     OutputEvent,
     OutputKind,
     OutputOperation,
+    ProviderInteractionRequest,
     SendReceipt,
     StateChangedEvent,
     TurnEventKind,
@@ -625,3 +627,64 @@ def test_runtime_satisfies_member_and_team_context_protocols() -> None:
     assert isinstance(harness, HarnessProtocol)
     assert isinstance(runtime, MemberRuntime)
     assert isinstance(runtime, TeamContextAwareRuntime)
+
+
+def _auth_fallback_request() -> ProviderInteractionRequest:
+    return ProviderInteractionRequest(
+        request_id="fallback-1",
+        provider="fake",
+        request_type="auth_fallback",
+        schema_version="1",
+        payload={"model": "alt"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_auth_fallback_is_ratified_only_when_promotion_persists() -> None:
+    harness = _FakeHarness()
+    outcomes: list[bool] = [True, False]
+
+    async def promote() -> bool:
+        return outcomes.pop(0)
+
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    runtime.bind_fallback_promotion(promote)
+    await runtime.start(team_session=_FakeTeamSession())
+    interactions = harness.start_contexts[0].interactions
+    assert interactions is not None
+    assert HostCapability.PROVIDER_INTERACTION in harness.start_contexts[0].host_capabilities
+
+    persisted = await interactions.handle(_auth_fallback_request())
+    assert persisted.status is InteractionResponseStatus.COMPLETED
+    rejected = await interactions.handle(_auth_fallback_request())
+    assert rejected.status is InteractionResponseStatus.DECLINED
+    unknown = await interactions.handle(
+        ProviderInteractionRequest(request_id="x", provider="fake", request_type="other", schema_version="1", payload={})
+    )
+    assert unknown.status is InteractionResponseStatus.DECLINED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_auth_fallback_is_ratified_without_a_promotion_hook_and_declined_on_errors() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    await runtime.start(team_session=_FakeTeamSession())
+    interactions = harness.start_contexts[0].interactions
+    assert interactions is not None
+    accepted = await interactions.handle(_auth_fallback_request())
+    assert accepted.status is InteractionResponseStatus.COMPLETED
+    await runtime.stop()
+
+    async def broken() -> bool:
+        raise RuntimeError("db down")
+
+    broken_harness = _FakeHarness()
+    failing = ExternalHarnessMemberRuntime(harness=broken_harness, context=_context())
+    failing.bind_fallback_promotion(broken)
+    await failing.start(team_session=_FakeTeamSession())
+    declined = await broken_harness.start_contexts[0].interactions.handle(_auth_fallback_request())
+    assert declined.status is InteractionResponseStatus.DECLINED
+    await failing.stop()

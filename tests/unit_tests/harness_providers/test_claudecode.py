@@ -25,6 +25,7 @@ from openjiuwen.harness_protocol import (
     OutputEvent,
     OutputOperation,
     ProviderEvent,
+    ProviderInteractionResponse,
     ResumePolicy,
     TurnEventKind,
     TurnLifecycleEvent,
@@ -424,6 +425,48 @@ async def test_auth_failure_activates_fallback_once(monkeypatch: pytest.MonkeyPa
     assert fallback_client.options.model == "fallback-model"
     assert '"ANTHROPIC_BASE_URL": "https://alt"' in fallback_client.options.settings
     assert any(
+        isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
+    )
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_declined_fallback_ratification_restores_the_native_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+    state.scripts.append([_result(sdk, is_error=True, subtype="error", api_error_status=401, errors=["auth"])])
+    requests: list[Any] = []
+
+    class _Handler:
+        async def handle(self, request: Any) -> Any:
+            requests.append(request)
+            return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
+
+        async def cancel(self, request_id: str, *, reason: InteractionCancelReason = InteractionCancelReason.PROVIDER_WITHDREW) -> None:
+            _ = request_id, reason
+
+    harness = ClaudeCodeHarness(
+        ClaudeCodeHarnessConfig(
+            inherit_process_env=False,
+            model=ClaudeModelConfig(model="native-model"),
+            fallback_model=ClaudeModelConfig(model="fallback-model", api_base="https://alt", api_key="k"),
+        )
+    )
+    await harness.start(
+        _context(interactions=_Handler(), host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION}))
+    )
+    receipt = await harness.send(HarnessInput(content="hi"))
+    events = await _turn(harness, receipt.turn_id)
+    terminal = _terminal(events)
+    logger.info("declined fallback terminal: %s", terminal)
+    assert terminal.kind is TurnEventKind.FAILED
+    assert terminal.result.error.category == "auth_required"
+    assert not harness.fallback_activated
+    assert [request.request_type for request in requests] == ["auth_fallback"]
+    assert requests[0].payload == {"model": "fallback-model", "api_base": "https://alt"}
+    # native -> fallback -> native again; the fallback client was dropped.
+    assert [client.options.model for client in state.clients] == ["native-model", "fallback-model", "native-model"]
+    assert state.clients[1].disconnected
+    assert not any(
         isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
     )
     await harness.stop()
