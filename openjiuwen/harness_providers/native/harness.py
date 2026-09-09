@@ -225,6 +225,11 @@ class DeepAgentHarness(SerializedTurnHarness):
             agent.add_rail(_ObservationRail())
             if context.system_prompt:
                 _append_context_prompt(agent, context.system_prompt, self._language)
+            # The interaction loop never initializes the agent on its own: the
+            # pending rails (including the observation rail) must be registered
+            # and the cwd ContextVar seeded here, before the supervisor and the
+            # task scheduler tasks are spawned and inherit this context.
+            await agent.ensure_initialized()
             session_id = self._session_id_override or f"{context.host_session_id}:{context.agent_id}"
             session = create_agent_session(session_id=session_id, card=agent.card)
             await session.pre_run(inputs={})
