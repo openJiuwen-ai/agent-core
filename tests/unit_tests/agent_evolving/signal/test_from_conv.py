@@ -575,7 +575,82 @@ class TestConversationSignalDetector:
 
         signals = await detector.detect_user_intent(messages)
 
+        # bash path is not a skill hit; skillless path may still emit unattributed feedback
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].skill_name is None
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_rule_fallback() -> None:
+        messages = [
+            {"role": "user", "content": "写个脚本"},
+            {"role": "assistant", "content": "好的，我来写"},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        detector = ConversationSignalDetector()
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert signals[0].skill_name is None
+        assert "不对" in signals[0].excerpt
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_skips_without_correction_pattern() -> None:
+        messages = [
+            {"role": "user", "content": "写个脚本"},
+            {"role": "assistant", "content": "写好了"},
+            {"role": "user", "content": "再加个注释吧"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": true, "excerpt": "x"}'})
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+
+        signals = await detector.detect_user_intent(messages)
+
         assert signals == []
+        llm.invoke.assert_not_called()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_llm_true() -> None:
+        messages = [
+            {"role": "user", "content": "写个脚本"},
+            {"role": "assistant", "content": "写好了"},
+            {"role": "user", "content": "不对，变量名错了"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value={"content": '{"is_feedback": true, "excerpt": "变量名错了"}'}
+        )
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert len(signals) == 1
+        assert signals[0].skill_name is None
+        assert signals[0].excerpt == "变量名错了"
+        llm.invoke.assert_awaited_once()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_llm_false() -> None:
+        messages = [
+            {"role": "user", "content": "写个脚本"},
+            {"role": "assistant", "content": "写好了"},
+            {"role": "user", "content": "不对，再想想"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": false}'})
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert signals == []
+        llm.invoke.assert_awaited_once()
 
 
 class TestCollectSkillsFromMessages:

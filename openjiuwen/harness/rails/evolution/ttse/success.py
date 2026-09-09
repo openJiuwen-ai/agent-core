@@ -8,9 +8,10 @@ so :class:`TTSERail` can gate induce and the blame -> retire -> synthesize pass.
 Default production detector is :class:`SignalBasedSuccessDetector`:
   0. external ``ttse_score`` (if present) -> success/partial/fail (benchmark bypass)
   1. tool_calls < detect_min_tool_calls -> skip
-  2. execution_failure signal -> partial (induce, no blame)
-  3. any write/edit output_path -> skip (artifact tasks out of scope)
-  4. one Judge LLM on query + final_reply -> success|partial|fail
+  2. execution_failure signal -> partial (induce, no blame); short-circuits user_intent
+  3. user_intent feedback (only when no execution_failure) -> partial
+  4. any write/edit output_path -> skip (artifact tasks out of scope)
+  5. one Judge LLM on query + final_reply -> success|partial|fail
 
 :class:`TrajectoryErrorSuccessDetector` remains for trajectory-error defaults / test injection.
 """
@@ -196,6 +197,37 @@ def _has_execution_failure(
     return any(getattr(s, "signal_type", "") == "execution_failure" for s in signals or [])
 
 
+async def _has_user_intent_feedback(
+    messages: Any,
+    *,
+    llm: Model,
+    model: str,
+    signal_detector: Optional[Any] = None,
+    language: str = "cn",
+) -> bool:
+    """True when passive user feedback yields ``user_intent`` signal(s).
+
+    Prefer an injected detector that exposes ``detect_user_intent``. When a detector
+    is injected without that method, treat as no feedback (test fakes). Otherwise
+    build a bound :class:`ConversationSignalDetector`.
+    """
+    if signal_detector is not None:
+        if not hasattr(signal_detector, "detect_user_intent"):
+            return False
+        detector = signal_detector
+    else:
+        detector = ConversationSignalDetector()
+    bind = getattr(detector, "bind_llm", None)
+    if callable(bind):
+        detector = bind(llm=llm, model=model, language=language)
+    try:
+        signals = await detector.detect_user_intent(list(messages or []))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TTSERail] detect user_intent failed: %s", exc)
+        return False
+    return bool(signals)
+
+
 def _parse_judge_json(raw: str) -> Optional[dict]:
     text = (raw or "").strip()
     if not text:
@@ -227,13 +259,14 @@ def _outcome_from_judge(data: dict) -> Optional[SuccessOutcome]:
 
 
 class SignalBasedSuccessDetector(SuccessDetector):
-    """Default TTSE detector: external score bypass, failure fast-path, reply Judge.
+    """Default TTSE detector: external score bypass, failure/feedback fast-path, reply Judge.
 
     * External ``ttse_score`` (snapshot/ctx) wins first for benchmarks.
     * ``execution_failure`` (deterministic tool-output rules) -> ``partial``.
+    * Else ``user_intent`` feedback (skill-agnostic) -> ``partial``; skipped when
+      ``execution_failure`` already matched.
     * Any write/edit ``output_path`` -> ``skip`` (no artifact Judge this round).
     * Otherwise one Judge LLM on query + final_reply.
-    * Does **not** call ``detect_user_intent``.
     """
 
     def __init__(
@@ -244,12 +277,14 @@ class SignalBasedSuccessDetector(SuccessDetector):
         config: Optional[TTSEConfig] = None,
         signal_detector: Optional[ConversationSignalDetector] = None,
         detect_llm_policy: Optional[LLMInvokePolicy] = None,
+        language: str = "cn",
     ) -> None:
         self._llm = llm
         self._model = model
         self._config = config or TTSEConfig()
         self._signal_detector = signal_detector
         self._policy = detect_llm_policy or self._config.detect_llm_policy
+        self._language = language
 
     async def detect(
         self,
@@ -300,6 +335,17 @@ class SignalBasedSuccessDetector(SuccessDetector):
         if _has_execution_failure(trajectory, msgs, signal_detector=self._signal_detector):
             logger.info("[TTSERail] detect branch=partial_execution_failure")
             return SuccessOutcome("partial", 0.5, "signal:execution_failure")
+
+        logger.info("[TTSERail] detect checking user_intent feedback")
+        if await _has_user_intent_feedback(
+            msgs,
+            llm=self._llm,
+            model=self._model,
+            signal_detector=self._signal_detector,
+            language=self._language,
+        ):
+            logger.info("[TTSERail] detect branch=partial_user_intent")
+            return SuccessOutcome("partial", 0.5, "signal:user_intent")
 
         paths = extract_output_paths(msgs, max_paths=self._config.detect_max_output_paths)
         if paths:

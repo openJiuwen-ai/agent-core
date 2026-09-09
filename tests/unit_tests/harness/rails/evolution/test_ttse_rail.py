@@ -568,11 +568,19 @@ async def test_rail_flush_induces_partial_buffer(tmp_path):
 class _FakeSignalDetector:
     """Stand-in for ConversationSignalDetector returning fixed signal types."""
 
-    def __init__(self, types):
+    def __init__(self, types, *, user_intent_signals=None):
         self._types = types
+        self._user_intent_signals = user_intent_signals
+        self.user_intent_calls = 0
 
     def detect_trajectory_signals(self, trajectory, *, messages=None, signal_types=None):
         return [SimpleNamespace(signal_type=t) for t in self._types]
+
+    async def detect_user_intent(self, *args, **kwargs):
+        self.user_intent_calls += 1
+        if self._user_intent_signals is None:
+            return []
+        return list(self._user_intent_signals)
 
 
 def test_adapter_count_and_extract_helpers():
@@ -744,27 +752,86 @@ async def test_signal_detector_bad_json_skips(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_signal_detector_does_not_call_user_intent(tmp_path, monkeypatch):
-    calls = {"intent": 0}
-
-    async def _boom(*args, **kwargs):
-        calls["intent"] += 1
-        raise AssertionError("detect_user_intent must not be called")
-
-    monkeypatch.setattr(
-        "openjiuwen.agent_evolving.signal.from_conv.ConversationSignalDetector.detect_user_intent",
-        _boom,
-    )
+async def test_signal_detector_user_intent_partial_no_judge(tmp_path):
+    """Secondary corrective user turn -> partial; Judge LLM is not called."""
     llm = ScriptedLLM(
         lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
     )
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    fake = _FakeSignalDetector([], user_intent_signals=[SimpleNamespace(signal_type="user_intent")])
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg, signal_detector=fake)
+    messages = _n_tool_messages(5)
+    messages.insert(-1, {"role": "user", "content": "你做错了，重新来"})
+    out = await det.detect(None, messages, snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "partial"
+    assert out.reason == "signal:user_intent"
+    assert fake.user_intent_calls == 1
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_failure_short_circuits_user_intent(tmp_path):
+    llm = ScriptedLLM(lambda p: '{"outcome":"fail","delivery":"answer","goals":[],"reason":"x"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    fake = _FakeSignalDetector(
+        ["execution_failure"],
+        user_intent_signals=[SimpleNamespace(signal_type="user_intent")],
+    )
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg, signal_detector=fake)
+    messages = _n_tool_messages(5)
+    messages.insert(-1, {"role": "user", "content": "你做错了，重新来"})
+    out = await det.detect(None, messages, snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "partial"
+    assert out.reason == "signal:execution_failure"
+    assert fake.user_intent_calls == 0
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_user_intent_beats_artifact_skip(tmp_path):
+    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    fake = _FakeSignalDetector([], user_intent_signals=[SimpleNamespace(signal_type="user_intent")])
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg, signal_detector=fake)
+    messages = _n_tool_messages(5, write_path="deck.pptx")
+    messages.insert(-1, {"role": "user", "content": "不对，版式错了"})
+    out = await det.detect(None, messages, snapshot={"ttse_task_query": "make a ppt"})
+    assert out.outcome == "partial"
+    assert out.reason == "signal:user_intent"
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_mock_user_intent_empty_continues_to_judge(tmp_path):
+    llm = ScriptedLLM(
+        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
+    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    fake = _FakeSignalDetector([], user_intent_signals=[])
+    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg, signal_detector=fake)
+    out = await det.detect(None, _n_tool_messages(5), snapshot={"ttse_task_query": "q"})
+    assert out.outcome == "success"
+    assert fake.user_intent_calls == 1
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_real_skillless_feedback_partial(tmp_path):
+    """End-to-end skillless path: correction pattern + no injected detector."""
+    llm = ScriptedLLM(
+        lambda p: (
+            '{"is_feedback": true, "excerpt": "你做错了"}'
+            if "is_feedback" in p or "反馈" in p or "feedback" in p.lower()
+            else '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
+        )
+    )
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
     messages = _n_tool_messages(5)
-    messages.insert(1, {"role": "user", "content": "你做错了，重新来"})
+    messages.insert(-1, {"role": "user", "content": "你做错了，重新来"})
     out = await det.detect(None, messages, snapshot={"ttse_task_query": "q"})
-    assert out.outcome == "success"
-    assert calls["intent"] == 0
+    assert out.outcome == "partial"
+    assert out.reason == "signal:user_intent"
 
 
 @pytest.mark.asyncio
