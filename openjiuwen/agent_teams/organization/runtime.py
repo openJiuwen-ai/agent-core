@@ -78,10 +78,12 @@ _ORG_COLLABORATION_PROMPT = {
 }
 
 _LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS = 0.1
-_PARENT_RESUME_TERMINAL_STATUSES = frozenset({
-    OrgTaskStatus.COMPLETED,
-    OrgTaskStatus.FAILED,
-})
+_PARENT_RESUME_TERMINAL_STATUSES = frozenset(
+    {
+        OrgTaskStatus.COMPLETED,
+        OrgTaskStatus.FAILED,
+    }
+)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -113,9 +115,7 @@ class OrganizationRuntimeManager:
 
         self._leader_turn_runner = runner
 
-    def set_configured_team_provider(
-        self, provider: Callable[[str], Awaitable[list[dict[str, Any]]]]
-    ) -> None:
+    def set_configured_team_provider(self, provider: Callable[[str], Awaitable[list[dict[str, Any]]]]) -> None:
         """Set the host callback exposing dormant same-process team templates."""
 
         self._configured_team_provider = provider
@@ -135,9 +135,7 @@ class OrganizationRuntimeManager:
 
         self._expert_team_launcher = launcher
 
-    def set_expert_adapter_installer(
-        self, installer: Callable[["OrganizationRuntimeManager"], None] | None
-    ) -> None:
+    def set_expert_adapter_installer(self, installer: Callable[["OrganizationRuntimeManager"], None] | None) -> None:
         """Register a host callback that injects Catalog/Launcher on first use.
 
         The installer should be idempotent and must not run package scans itself;
@@ -245,9 +243,7 @@ class OrganizationRuntimeManager:
                     raise
                 activated_team_id = await self._team_activator(target_team_id, session_id)
                 if not activated_team_id:
-                    raise ValueError(
-                        f"configured team could not be activated: {target_team_id}"
-                    ) from exc
+                    raise ValueError(f"configured team could not be activated: {target_team_id}") from exc
                 target_team_id = activated_team_id
                 target_agent, target_backend = await self._resolve_leader(target_team_id, session_id)
             manager = get_process_org_manager(
@@ -338,14 +334,10 @@ class OrganizationRuntimeManager:
                     worker.cancel()
                 self._leader_turn_queues.pop(key, None)
                 self._scheduled_leader_messages = {
-                    message_key
-                    for message_key in self._scheduled_leader_messages
-                    if message_key[:2] != key
+                    message_key for message_key in self._scheduled_leader_messages if message_key[:2] != key
                 }
                 self._scheduled_parent_reviews = {
-                    review_key
-                    for review_key in self._scheduled_parent_reviews
-                    if review_key[:2] != key
+                    review_key for review_key in self._scheduled_parent_reviews if review_key[:2] != key
                 }
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
@@ -362,11 +354,13 @@ class OrganizationRuntimeManager:
                         and subscribed_team == team_id
                     ):
                         if callable(unsubscribe) and messager_id == id(backend.messager):
-                            await unsubscribe(topic.build(
-                                session_id,
-                                organization_id,
-                                team_id if topic is OrgTopic.TEAM_INBOX else None,
-                            ))
+                            await unsubscribe(
+                                topic.build(
+                                    session_id,
+                                    organization_id,
+                                    team_id if topic is OrgTopic.TEAM_INBOX else None,
+                                )
+                            )
                         self._subscribed_topics.discard(subscribed)
                 backend.org_task_manager = None
                 backend.org_message_service = None
@@ -436,18 +430,13 @@ class OrganizationRuntimeManager:
             return []
         return await self._configured_team_provider(session_id)
 
-    async def list_expert_groups(
-        self, *, capabilities: set[str] | None = None
-    ) -> list[dict[str, Any]]:
+    async def list_expert_groups(self, *, capabilities: set[str] | None = None) -> list[dict[str, Any]]:
         """List host-validated AgentGroup templates; does not create Teams."""
 
         self._ensure_expert_adapters()
         if self._expert_group_catalog is None:
             return []
-        return [
-            descriptor.to_dict()
-            for descriptor in self._expert_group_catalog.list(capabilities=capabilities)
-        ]
+        return [descriptor.to_dict() for descriptor in self._expert_group_catalog.list(capabilities=capabilities)]
 
     async def create_and_invite_expert_team(
         self,
@@ -905,12 +894,7 @@ class OrganizationRuntimeManager:
                 return
             if isinstance(event, OrgTaskFailedEvent):
                 task = await manager.task_pool.get_task(event.task_id)
-                if (
-                    task is not None
-                    and task.unclaimed is not None
-                    and event.failure_code == "EXPIRED"
-                    and task.unclaimed.closed_reason in {"description_update_timeout", "post_update_claim_timeout"}
-                ):
+                if self._is_unclaimed_expiration(task, event):
                     # The durable expiration inbox request also covers root tasks.
                     return
                 if task is None or not task.parent_task_id:
@@ -1025,6 +1009,17 @@ class OrganizationRuntimeManager:
             handler=_on_inbox_event,
         )
 
+    @staticmethod
+    def _is_unclaimed_expiration(task: Any, event: OrgTaskFailedEvent) -> bool:
+        """Unclaimed expiry has its own durable creator notification path."""
+
+        if task is None or task.unclaimed is None or event.failure_code != "EXPIRED":
+            return False
+        return task.unclaimed.closed_reason in {
+            "description_update_timeout",
+            "post_update_claim_timeout",
+        }
+
     async def _subscribe_once(
         self,
         *,
@@ -1074,9 +1069,7 @@ class OrganizationRuntimeManager:
         trigger_task_id: str | None = None,
     ) -> None:
         trigger_context = (
-            f" Task {trigger_task_id} just completed, so re-evaluate this open task now."
-            if trigger_task_id
-            else ""
+            f" Task {trigger_task_id} just completed, so re-evaluate this open task now." if trigger_task_id else ""
         )
         prompt = (
             f"Organization task {task_id} is available in {organization_id}.{trigger_context} "

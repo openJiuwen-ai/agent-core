@@ -268,13 +268,7 @@ class OrgMessageService:
                 if message is not None and message.from_team_id == "__organization__":
                     metadata = json_loads(message.metadata_json, {})
                     task = await session.get(OrgTaskRecord, metadata["task_id"])
-                    if (
-                        metadata.get("unclaimed_kind") == "revision"
-                        and task is not None
-                        and task.status == OrgTaskStatus.OPEN.value
-                        and task.unclaimed_phase == OrgUnclaimedPhase.REVISION_PENDING.value
-                        and task.unclaimed_deadline_at > now
-                    ):
+                    if self._requires_description_revision(metadata, task, now):
                         return OrgMessageOpResult(ok=False, reason="supplement the description before acknowledging")
                 receipt.recipient_leader_id = leader_id
                 receipt.handled_at = now
@@ -283,6 +277,18 @@ class OrgMessageService:
             data = self._receipt_dict(receipt)
             data["already_handled"] = already_handled
             return OrgMessageOpResult(ok=True, data=data)
+
+    @staticmethod
+    def _requires_description_revision(metadata: dict[str, Any], task: OrgTaskRecord | None, now: int) -> bool:
+        """A live revision request may only be acknowledged after a successful revision."""
+
+        if metadata.get("unclaimed_kind") != "revision" or task is None:
+            return False
+        return (
+            task.status == OrgTaskStatus.OPEN.value
+            and task.unclaimed_phase == OrgUnclaimedPhase.REVISION_PENDING.value
+            and task.unclaimed_deadline_at > now
+        )
 
     async def purge_organization(self) -> int:
         """Delete every leader message owned by this organization."""
@@ -295,9 +301,7 @@ class OrgMessageService:
                 )
             )
             result = await session.execute(
-                delete(OrgLeaderMessageRecord).where(
-                    OrgLeaderMessageRecord.organization_id == self.organization_id
-                )
+                delete(OrgLeaderMessageRecord).where(OrgLeaderMessageRecord.organization_id == self.organization_id)
             )
             await session.commit()
             return max(result.rowcount or 0, 0)
@@ -309,9 +313,7 @@ class OrgMessageService:
         to_team_id: str | None,
         to_leader_id: str | None,
     ) -> list[tuple[str, str | None]]:
-        stmt = select(OrgLeaderRecord).where(
-            OrgLeaderRecord.organization_id == self.organization_id
-        )
+        stmt = select(OrgLeaderRecord).where(OrgLeaderRecord.organization_id == self.organization_id)
         if to_team_id:
             stmt = stmt.where(OrgLeaderRecord.team_id == to_team_id)
         else:

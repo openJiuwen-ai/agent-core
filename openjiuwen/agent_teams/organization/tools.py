@@ -122,8 +122,7 @@ class OrgInviteTeamTool(_OrgControlTool):
 
     _tool_name = "org_invite_team"
     _tool_description = (
-        "Invite an active team in this session to the organization. "
-        "The invitation is accepted automatically."
+        "Invite an active team in this session to the organization. The invitation is accepted automatically."
     )
     _target_team_param_description = "Active team to add."
 
@@ -169,8 +168,7 @@ class OrgDissolveOrganizationTool(_OrgControlTool):
         super().__init__(
             name="org_dissolve_organization",
             description=(
-                "Dissolve an organization owned by this team, remove its members, "
-                "and delete its task-pool data."
+                "Dissolve an organization owned by this team, remove its members, and delete its task-pool data."
             ),
             runtime_manager=runtime_manager,
             team_id=team_id,
@@ -234,9 +232,7 @@ class OrgActivateAndInviteTeamTool(OrgInviteTeamTool):
     """Activate a configured team when necessary, then invite it into the organization."""
 
     _tool_name = "org_activate_and_invite_team"
-    _tool_description = (
-        "Activate a configured team if dormant, then invite it into the organization."
-    )
+    _tool_description = "Activate a configured team if dormant, then invite it into the organization."
     _target_team_param_description = "Configured profile or active team to add."
 
 
@@ -454,7 +450,9 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 },
                 "recreation_request_id": {
                     "type": "string",
-                    "description": "Expiration notification message_id. Recreate once; parent and repair link are derived.",
+                    "description": (
+                        "Expiration notification message_id. Recreate once; parent and repair link are derived."
+                    ),
                 },
                 "delegated_to_team_id": {"type": "string"},
                 "aggregation_mode": {
@@ -613,12 +611,7 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
         action = inputs.get("action")
         task_id = inputs.get("task_id", "")
         if action == "revise_description":
-            if (
-                not isinstance(inputs.get("description"), str)
-                or not isinstance(inputs.get("request_id"), str)
-                or not isinstance(inputs.get("expected_description_revision"), int)
-                or isinstance(inputs.get("expected_description_revision"), bool)
-            ):
+            if not self._has_valid_description_revision_inputs(inputs):
                 return ToolOutput(
                     success=False, error="description, request_id and expected_description_revision required"
                 )
@@ -656,6 +649,16 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
         if not result.ok or result.task is None:
             return ToolOutput(success=False, error=result.reason)
         return ToolOutput(success=True, data=result.task.brief())
+
+    @staticmethod
+    def _has_valid_description_revision_inputs(inputs: dict[str, Any]) -> bool:
+        revision = inputs.get("expected_description_revision")
+        return (
+            isinstance(inputs.get("description"), str)
+            and isinstance(inputs.get("request_id"), str)
+            and isinstance(revision, int)
+            and not isinstance(revision, bool)
+        )
 
 
 class OrgSendLeaderMessageTool(_OrgLeaderTool):

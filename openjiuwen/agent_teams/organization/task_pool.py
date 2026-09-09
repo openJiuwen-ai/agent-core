@@ -77,17 +77,21 @@ from openjiuwen.agent_teams.tools.database.engine import get_current_time
 
 logger = logging.getLogger(__name__)
 
-_FAILABLE_TASK_STATUSES = frozenset({
-    OrgTaskStatus.CLAIMED.value,
-    OrgTaskStatus.DELEGATED.value,
-    OrgTaskStatus.IN_PROGRESS.value,
-})
+_FAILABLE_TASK_STATUSES = frozenset(
+    {
+        OrgTaskStatus.CLAIMED.value,
+        OrgTaskStatus.DELEGATED.value,
+        OrgTaskStatus.IN_PROGRESS.value,
+    }
+)
 
 # Rejected / needs-revision children may be superseded by an accepted repair sibling.
-_SUPERSEDEABLE_REVIEW_STATUSES = frozenset({
-    OrgTaskReviewStatus.REJECTED.value,
-    OrgTaskReviewStatus.NEEDS_REVISION.value,
-})
+_SUPERSEDEABLE_REVIEW_STATUSES = frozenset(
+    {
+        OrgTaskReviewStatus.REJECTED.value,
+        OrgTaskReviewStatus.NEEDS_REVISION.value,
+    }
+)
 
 
 def _is_accepted_task(status: str, review: Any) -> bool:
@@ -253,11 +257,13 @@ class OrgTaskManager:
         await self.initialize()
         async with self._write() as session:
             task_ids = list(
-                (await session.execute(
-                    select(OrgTaskRecord.task_id).where(
-                        OrgTaskRecord.organization_id == self.organization_id
+                (
+                    await session.execute(
+                        select(OrgTaskRecord.task_id).where(OrgTaskRecord.organization_id == self.organization_id)
                     )
-                )).scalars().all()
+                )
+                .scalars()
+                .all()
             )
 
             counts: dict[str, int] = {}
@@ -285,9 +291,7 @@ class OrgTaskManager:
                 counts["task_reviews"] = 0
 
             await _delete(
-                delete(OrgTaskEventRecord).where(
-                    OrgTaskEventRecord.organization_id == self.organization_id
-                ),
+                delete(OrgTaskEventRecord).where(OrgTaskEventRecord.organization_id == self.organization_id),
                 "task_events",
             )
             await _delete(
@@ -368,8 +372,7 @@ class OrgTaskManager:
         if created_by.organization_id != self.organization_id:
             return OrgTaskOpResult(ok=False, reason="task creator belongs to another organization")
         if not capabilities or any(
-            not isinstance(capability, str) or not capability.strip()
-            for capability in capabilities
+            not isinstance(capability, str) or not capability.strip() for capability in capabilities
         ):
             return OrgTaskOpResult(
                 ok=False,
@@ -416,14 +419,7 @@ class OrgTaskManager:
             recreated_from = None
             if recreation_request_id is not None:
                 notification = await session.get(OrgLeaderMessageRecord, recreation_request_id)
-                if (
-                    notification is None
-                    or notification.organization_id != self.organization_id
-                    or notification.from_team_id != "__organization__"
-                    or notification.to_team_id != created_by.team_id
-                    or notification.to_leader_id != created_by.creator_id
-                    or created_by.creator_type != "team_leader"
-                ):
+                if not self._is_valid_recreation_notification(notification, created_by):
                     return OrgTaskOpResult(ok=False, reason="invalid recreation request or creator")
                 notification_meta = _json_loads(notification.metadata_json, {})
                 if notification_meta.get("unclaimed_kind") != "expired":
@@ -443,12 +439,7 @@ class OrgTaskManager:
                 if existing is not None:
                     return OrgTaskOpResult(ok=True, task=self._to_task(existing))
                 source = await session.get(OrgTaskRecord, notification_meta["task_id"])
-                if (
-                    source is None
-                    or source.organization_id != self.organization_id
-                    or source.status != OrgTaskStatus.FAILED.value
-                    or source.failure_code != OrgTaskFailureCode.EXPIRED.value
-                ):
+                if not self._is_expired_recreation_source(source):
                     return OrgTaskOpResult(ok=False, reason="recreation source is not expired")
                 if parent_task_id is not None and parent_task_id != source.parent_task_id:
                     return OrgTaskOpResult(ok=False, reason="recreation must keep the original parent")
@@ -500,8 +491,7 @@ class OrgTaskManager:
                     return OrgTaskOpResult(
                         ok=False,
                         reason=(
-                            f"root_task_id must match parent.root_task_id ({expected_root!r}); "
-                            f"got {root_task_id!r}"
+                            f"root_task_id must match parent.root_task_id ({expected_root!r}); got {root_task_id!r}"
                         ),
                     )
                 root_task_id = expected_root
@@ -589,13 +579,7 @@ class OrgTaskManager:
             policy = OrgUnclaimedTaskPolicy.model_validate(
                 _json_loads(organization.unclaimed_task_policy_json, {}) if organization else {}
             )
-            if (
-                policy.enabled
-                and status is OrgTaskStatus.OPEN
-                and created_by.creator_type == "team_leader"
-                and created_by.team_id
-                and task_type != "organization.summary"
-            ):
+            if self._should_track_unclaimed_task(policy, status, created_by, task_type):
                 self._set_unclaimed(
                     row,
                     OrgUnclaimedTaskState(
@@ -623,6 +607,65 @@ class OrgTaskManager:
         row.unclaimed_phase = state.phase.value
         row.unclaimed_deadline_at = state.deadline_at
         row.unclaimed_json = _json_dumps(state.model_dump())
+
+    def _is_valid_recreation_notification(
+        self,
+        notification: OrgLeaderMessageRecord | None,
+        created_by: OrgTaskCreator,
+    ) -> bool:
+        if notification is None or created_by.creator_type != "team_leader":
+            return False
+        return (
+            notification.organization_id == self.organization_id
+            and notification.from_team_id == "__organization__"
+            and notification.to_team_id == created_by.team_id
+            and notification.to_leader_id == created_by.creator_id
+        )
+
+    def _is_expired_recreation_source(self, source: OrgTaskRecord | None) -> bool:
+        if source is None or source.organization_id != self.organization_id:
+            return False
+        return source.status == OrgTaskStatus.FAILED.value and source.failure_code == OrgTaskFailureCode.EXPIRED.value
+
+    @staticmethod
+    def _should_track_unclaimed_task(
+        policy: OrgUnclaimedTaskPolicy,
+        status: OrgTaskStatus,
+        created_by: OrgTaskCreator,
+        task_type: str | None,
+    ) -> bool:
+        if not policy.enabled or status is not OrgTaskStatus.OPEN:
+            return False
+        return (
+            created_by.creator_type == "team_leader"
+            and bool(created_by.team_id)
+            and task_type != "organization.summary"
+        )
+
+    def _is_due_unclaimed_task(self, row: OrgTaskRecord | None, now: int) -> bool:
+        if row is None or row.organization_id != self.organization_id:
+            return False
+        if row.unclaimed_deadline_at is None or row.unclaimed_deadline_at > now:
+            return False
+        return row.status == OrgTaskStatus.OPEN.value and row.assignment_type == OrgAssignmentType.UNASSIGNED.value
+
+    def _is_description_creator(self, row: OrgTaskRecord | None, team_id: str, leader_id: str) -> bool:
+        if row is None or row.organization_id != self.organization_id:
+            return False
+        return row.creator_team_id == team_id and row.creator_id == leader_id
+
+    @staticmethod
+    def _can_revise_unclaimed_description(
+        state: OrgUnclaimedTaskState,
+        row: OrgTaskRecord,
+        expected_description_revision: int,
+        now: int,
+    ) -> bool:
+        if state.phase is not OrgUnclaimedPhase.REVISION_PENDING:
+            return False
+        if row.status != OrgTaskStatus.OPEN.value or row.assignment_type != OrgAssignmentType.UNASSIGNED.value:
+            return False
+        return state.description_revision == expected_description_revision and state.deadline_at > now
 
     @staticmethod
     def _unclaimed_state(row: OrgTaskRecord) -> OrgUnclaimedTaskState | None:
@@ -761,14 +804,7 @@ class OrgTaskManager:
         async with self._write() as session:
             now = get_current_time() if now is None else now
             row = await session.get(OrgTaskRecord, task_id)
-            if (
-                row is None
-                or row.organization_id != self.organization_id
-                or row.unclaimed_deadline_at is None
-                or row.unclaimed_deadline_at > now
-                or row.status != OrgTaskStatus.OPEN.value
-                or row.assignment_type != OrgAssignmentType.UNASSIGNED.value
-            ):
+            if not self._is_due_unclaimed_task(row, now):
                 return False
             state = self._unclaimed_state(row)
             old_phase = state.phase
@@ -863,25 +899,14 @@ class OrgTaskManager:
         async with self._write() as session:
             now = get_current_time()
             row = await session.get(OrgTaskRecord, task_id)
-            if (
-                row is None
-                or row.organization_id != self.organization_id
-                or row.creator_team_id != team_id
-                or row.creator_id != leader_id
-            ):
+            if not self._is_description_creator(row, team_id, leader_id):
                 return OrgTaskOpResult(ok=False, reason="only the task creator may supplement its description")
             state = self._unclaimed_state(row)
             if state is None or state.request_id != request_id:
                 return OrgTaskOpResult(ok=False, reason="invalid description revision request")
             if state.description_revision == expected_description_revision + 1 and row.description == description:
                 return OrgTaskOpResult(ok=True, task=self._to_task(row))
-            if (
-                state.phase is not OrgUnclaimedPhase.REVISION_PENDING
-                or row.status != OrgTaskStatus.OPEN.value
-                or row.assignment_type != OrgAssignmentType.UNASSIGNED.value
-                or state.description_revision != expected_description_revision
-                or state.deadline_at <= now
-            ):
+            if not self._can_revise_unclaimed_description(state, row, expected_description_revision, now):
                 return OrgTaskOpResult(ok=False, reason="task is no longer awaiting description revision")
             if row.description.strip() == description:
                 return OrgTaskOpResult(ok=False, reason="description must change")
@@ -993,8 +1018,7 @@ class OrgTaskManager:
         stmt = select(OrgTaskRecord).where(OrgTaskRecord.organization_id == self.organization_id)
         if include_open:
             stmt = stmt.where(
-                (OrgTaskRecord.assigned_team_id == team_id)
-                | (OrgTaskRecord.status == OrgTaskStatus.OPEN.value)
+                (OrgTaskRecord.assigned_team_id == team_id) | (OrgTaskRecord.status == OrgTaskStatus.OPEN.value)
             )
         else:
             stmt = stmt.where(OrgTaskRecord.assigned_team_id == team_id)
@@ -1490,9 +1514,7 @@ class OrgTaskManager:
             # Abandoned repair attempts (failed/rejected repair-of-original) do not block.
             if _is_supersedable(child) and _is_repair_child(child):
                 continue
-            if _is_supersedable(child) and any(
-                _is_accepted(repair) for repair in repairs_of.get(child.task_id, ())
-            ):
+            if _is_supersedable(child) and any(_is_accepted(repair) for repair in repairs_of.get(child.task_id, ())):
                 continue
             if _is_supersedable(child):
                 return f"child task is not superseded by an accepted repair: {child.task_id}"
@@ -1515,18 +1537,18 @@ class OrgTaskManager:
     ) -> list[OrgTaskRecord]:
         """Return direct siblings whose repairs_task_id points at repairs_target."""
         sibling_rows = (
-            await session.execute(
-                select(OrgTaskRecord).where(
-                    OrgTaskRecord.organization_id == self.organization_id,
-                    OrgTaskRecord.parent_task_id == parent_task_id,
+            (
+                await session.execute(
+                    select(OrgTaskRecord).where(
+                        OrgTaskRecord.organization_id == self.organization_id,
+                        OrgTaskRecord.parent_task_id == parent_task_id,
+                    )
                 )
             )
-        ).scalars().all()
-        return [
-            sibling
-            for sibling in sibling_rows
-            if _repairs_target_id(sibling.metadata_json) == repairs_target
-        ]
+            .scalars()
+            .all()
+        )
+        return [sibling for sibling in sibling_rows if _repairs_target_id(sibling.metadata_json) == repairs_target]
 
     async def _apply_repair_create_guards(
         self,
@@ -1576,19 +1598,13 @@ class OrgTaskManager:
                 continue
             return OrgTaskOpResult(
                 ok=False,
-                reason=(
-                    f"repairs_task_id target already has an active repair "
-                    f"{sibling.task_id}: {repairs_target}"
-                ),
+                reason=(f"repairs_task_id target already has an active repair {sibling.task_id}: {repairs_target}"),
             )
 
         if retry_limit is not None and existing >= retry_limit:
             return OrgTaskOpResult(
                 ok=False,
-                reason=(
-                    f"retry_limit reached for repaired task {repairs_target}: "
-                    f"{existing}/{retry_limit}"
-                ),
+                reason=(f"retry_limit reached for repaired task {repairs_target}: {existing}/{retry_limit}"),
             )
 
         repaired_meta[ORG_TASK_RETRY_COUNT_KEY] = existing + 1
