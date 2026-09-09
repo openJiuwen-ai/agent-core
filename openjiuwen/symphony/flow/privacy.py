@@ -31,16 +31,13 @@ def sanitize_distilled_text(value: object, *, source_queries: Iterable[str] = ()
     """Redact credentials and verbatim source requests from model-derived text."""
 
     text = redact_common_credentials(redact_sensitive_text(str(value or "").strip()))
-    blocked = sorted(
-        {
-            candidate
-            for query in source_queries
-            for candidate in (str(query).strip(), redact_sensitive_text(str(query).strip()))
-            if candidate
-        },
-        key=len,
-        reverse=True,
-    )
+    blocked_candidates: set[str] = set()
+    for query in source_queries:
+        normalized_query = str(query).strip()
+        for candidate in (normalized_query, redact_sensitive_text(normalized_query)):
+            if candidate:
+                blocked_candidates.add(candidate)
+    blocked = sorted(blocked_candidates, key=len, reverse=True)
     for candidate in blocked:
         text = text.replace(candidate, "<redacted-request>")
     return text[:_MAX_DISTILLED_TEXT_LENGTH]

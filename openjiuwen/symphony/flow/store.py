@@ -195,14 +195,15 @@ class FlowStore:
         recipes_root = self.root / RECIPES_DIRNAME
         if not recipes_root.is_dir():
             return []
-        return sorted(
-            child.name
-            for child in recipes_root.iterdir()
-            if child.is_dir()
-            and not child.is_symlink()
-            and _RECIPE_ID_PATTERN.fullmatch(child.name)
-            and self._recipe_version_files(child.name)
-        )
+        recipe_ids: list[str] = []
+        for child in recipes_root.iterdir():
+            if not child.is_dir() or child.is_symlink():
+                continue
+            if not _RECIPE_ID_PATTERN.fullmatch(child.name):
+                continue
+            if self._recipe_version_files(child.name):
+                recipe_ids.append(child.name)
+        return sorted(recipe_ids)
 
     def _recipe_version_files(self, recipe_id: str) -> list[Path]:
         directory = self.recipe_dir(recipe_id)
@@ -303,7 +304,7 @@ class FlowStore:
     def read_package(self, package_id: str) -> dict[str, Any] | None:
         try:
             payload = json.loads(self.package_path(package_id).read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return None
         return payload if isinstance(payload, dict) else None
 
@@ -313,12 +314,9 @@ class FlowStore:
             return []
         output = []
         for child in sorted(packages_root.iterdir()):
-            if (
-                not child.is_file()
-                or child.is_symlink()
-                or child.suffix != ".json"
-                or not _PACKAGE_ID_PATTERN.fullmatch(child.stem)
-            ):
+            if not child.is_file() or child.is_symlink():
+                continue
+            if child.suffix != ".json" or not _PACKAGE_ID_PATTERN.fullmatch(child.stem):
                 continue
             try:
                 payload = json.loads(child.read_text(encoding="utf-8"))

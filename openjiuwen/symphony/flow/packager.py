@@ -173,7 +173,9 @@ def _validate_simple_chain(skill_pack: dict[str, Any], recipe_id: str) -> None:
         outdegree[source] += 1
         adjacency[source] = target
     starts = [node_id for node_id, degree in indegree.items() if degree == 0]
-    if len(edges) != len(nodes) - 1 or len(starts) != 1 or max(indegree.values()) > 1 or max(outdegree.values()) > 1:
+    has_valid_size = len(edges) == len(nodes) - 1 and len(starts) == 1
+    has_valid_degrees = max(indegree.values()) <= 1 and max(outdegree.values()) <= 1
+    if not has_valid_size or not has_valid_degrees:
         raise RecipeNotPackableError(f"recipe {recipe_id} is not a simple skill chain")
     visited: set[str] = set()
     current = starts[0]
