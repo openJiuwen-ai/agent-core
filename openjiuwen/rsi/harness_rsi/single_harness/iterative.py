@@ -420,6 +420,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 _sync_retained_case_ids(
                     working_retained_case_ids,
                     source_case_scores,
+                    passing_case_ids=_passing_case_ids(source_eval_ref),
                 )
                 active_cases = _cases_with_ids(
                     batch,
@@ -654,10 +655,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         )
                         residual_eval_refs.append(residual_eval_ref)
                         residual_scores = _eval_case_scores(residual_eval_ref)
-                        completed_case_ids = {case_id for case_id, score in residual_scores.items() if score >= 1.0}
+                        completed_case_ids = _passing_case_ids(residual_eval_ref)
                         _sync_retained_case_ids(
                             working_retained_case_ids,
                             residual_scores,
+                            passing_case_ids=completed_case_ids,
                         )
                         residual_case_ids = _nonpassing_case_ids(residual_eval_ref)
                         attempt_record.update(
@@ -763,7 +765,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             }
             best_score = _number(state.get("best_score"))
             full_case_scores = _eval_case_scores(full_eval_ref)
-            full_failed_case_ids = sorted(case_id for case_id, score in full_case_scores.items() if score < 1.0)
+            full_passing_case_ids = _passing_case_ids(full_eval_ref)
+            full_failed_case_ids = sorted(set(full_case_scores) - full_passing_case_ids)
             previous_best_eval_ref = str(state.get("best_eval_ref_path", "") or "")
             previous_best_case_scores = _eval_case_scores(previous_best_eval_ref) if previous_best_eval_ref else {}
             regressed_best_case_ids = []
@@ -773,12 +776,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     regressed_best_case_ids.append(case_id)
             regressed_best_case_ids.sort()
             failed_retention_case_ids = sorted(
-                case_id for case_id in working_retained_case_ids if full_case_scores.get(case_id, 0.0) < 1.0
+                case_id for case_id in working_retained_case_ids if case_id not in full_passing_case_ids
             )
             failed_target_case_ids = sorted(
-                case_id for case_id in provisional_target_case_ids if full_case_scores.get(case_id, 0.0) < 1.0
+                case_id for case_id in provisional_target_case_ids if case_id not in full_passing_case_ids
             )
-            full_passing_case_ids = {case_id for case_id, score in full_case_scores.items() if score >= 1.0}
             full_failed_machine_evidence = _failed_machine_evidence(full_eval_ref)
             full_error_case_ids = _error_case_ids(full_eval_ref)
             gate_selections = [
@@ -1287,9 +1289,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         missing_skills = sorted({item["runtime_name"] for item in missing_skill_invocations})
         failed_machine_evidence = _failed_machine_evidence(candidate_eval_ref)
         min_target_delta = float(self.config.member_optimizer.candidate_min_target_behavior_delta)
-        failing_target_case_ids = sorted(
-            case_id for case_id in target_case_ids if source_case_scores.get(case_id, 0.0) < 1.0
-        )
+        failing_target_case_ids = sorted(set(target_case_ids) - _passing_case_ids(paired_source_eval_ref))
         improved_target_case_ids = sorted(
             case_id
             for case_id in failing_target_case_ids
@@ -1739,9 +1739,7 @@ def _initialize_frozen_baseline(
     if not str(state.get("best_eval_ref_path", "") or ""):
         state["best_eval_ref_path"] = str(baseline_path)
         state["best_score"] = state["baseline_score"]
-        state["retained_case_ids"] = sorted(
-            case_id for case_id, score in _eval_case_scores(baseline_path).items() if score >= 1.0
-        )
+        state["retained_case_ids"] = sorted(_passing_case_ids(baseline_path))
 
 
 def _resume_fingerprint_matches(stored: Any, requested: dict[str, Any]) -> bool:
@@ -2083,10 +2081,14 @@ def _cases_with_ids(cases: list[dict[str, Any]], case_ids: set[str]) -> list[dic
 def _sync_retained_case_ids(
     retained_case_ids: set[str],
     evaluated_case_scores: dict[str, float],
+    *,
+    passing_case_ids: set[str] | None = None,
 ) -> None:
     """Replace retention state for every case observed in a fresh evaluation."""
     retained_case_ids.difference_update(evaluated_case_scores)
-    retained_case_ids.update(case_id for case_id, score in evaluated_case_scores.items() if score >= 1.0)
+    if passing_case_ids is None:
+        passing_case_ids = {case_id for case_id, score in evaluated_case_scores.items() if score >= 1.0}
+    retained_case_ids.update(passing_case_ids & evaluated_case_scores.keys())
 
 
 def _rejected_capability_history(candidate_gates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2954,12 +2956,37 @@ def _nonpassing_case_ids(eval_ref_path: str) -> set[str]:
         if status == "skipped" or metadata.get("infrastructure_skip") is True:
             continue
         status_failed = status in {"failed", "error"}
-        score_failed = score is not None and score < 1.0
+        explicit_passed = _llm_case_passed(case)
+        score_failed = (not explicit_passed) if explicit_passed is not None else (score is not None and score < 1.0)
         if score is None:
             score_failed = _eval_case_explicit_passed(case) is False
         if case_id and (status_failed or score_failed):
             case_ids.add(case_id)
     return case_ids
+
+
+def _llm_case_passed(case: dict[str, Any]) -> bool | None:
+    """LLM graders apply their configured threshold without rewriting numeric scores."""
+    metadata = case.get("metadata", {})
+    if isinstance(metadata, dict) and metadata.get("evaluation_method") == "llm_as_judge":
+        return _eval_case_explicit_passed(case)
+    return None
+
+
+def _passing_case_ids(eval_ref_path: str | Path) -> set[str]:
+    passing: set[str] = set()
+    for case in _read_yaml(eval_ref_path).get("cases", []):
+        if not isinstance(case, dict) or str(case.get("status", "")).lower() in {"failed", "error", "skipped"}:
+            continue
+        metadata = case.get("metadata", {})
+        if isinstance(metadata, dict) and metadata.get("infrastructure_skip") is True:
+            continue
+        explicit = _llm_case_passed(case)
+        score = _number(case.get("score"))
+        passed = explicit if explicit is not None else score is not None and score >= 1.0
+        if passed and case.get("case_id"):
+            passing.add(str(case["case_id"]))
+    return passing
 
 
 def _eval_case_explicit_passed(case: dict[str, Any]) -> bool | None:
@@ -3007,8 +3034,7 @@ def _classify_replay_outcome(
 ) -> dict[str, Any]:
     """Compare a provisional target with the epoch replay trajectory."""
     target_case_ids = {str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)}
-    scores = _eval_case_scores(eval_ref_path)
-    failed_target_case_ids = sorted(case_id for case_id in target_case_ids if scores.get(case_id, 0.0) < 1.0)
+    failed_target_case_ids = sorted(target_case_ids - _passing_case_ids(eval_ref_path))
     _, first_edit_steps = _pre_edit_invoked_names_by_case(
         eval_ref_path,
         action_group="skill",
@@ -3055,8 +3081,7 @@ def _select_gate_from_epoch_checkpoint(
             "missing_runtime_invocations": [],
             "correlated_regression_case_ids": [],
         }
-    scores = _eval_case_scores(full_eval_ref)
-    failed_target_case_ids = sorted(case_id for case_id in target_case_ids if scores.get(case_id, 0.0) < 1.0)
+    failed_target_case_ids = sorted(target_case_ids - _passing_case_ids(full_eval_ref))
     if failed_target_case_ids:
         replay = _classify_replay_outcome(gate, full_eval_ref)
         return {

@@ -2453,7 +2453,10 @@ class DiagnosisAgentStrategy:
         output_dir = Path(invocation.output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        diagnosis_case_inputs = [case for case in case_inputs if not case.evaluation_passed or case.score < 1.0]
+        diagnosis_case_inputs = [
+            case for case in case_inputs
+            if not case.evaluation_passed or (case.evaluation_method != "llm_as_judge" and case.score < 1.0)
+        ]
         per_case_results = await self._per_case_diagnosis(
             diagnosis_case_inputs,
             signals,

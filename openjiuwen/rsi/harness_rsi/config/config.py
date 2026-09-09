@@ -59,7 +59,7 @@ class EvaluatorConfig:
     judge_agent_max_tokens: int = 8192
     judge_timeout_sec: int = 300
     judge_max_retries: int = 2
-    judge_success_score: float = 1.0
+    judge_success_score: float = 0.8
     transient_case_retry_limit: int = 2
     solver_backend: str = "deep_agent"
     jiuwenswarm_executable: str = ""
@@ -80,7 +80,7 @@ class EvaluatorConfig:
             judge_agent_max_tokens=_int_value(data.get("judge_agent_max_tokens"), default=8192),
             judge_timeout_sec=_int_value(data.get("judge_timeout_sec"), default=300),
             judge_max_retries=_int_value(data.get("judge_max_retries"), default=2),
-            judge_success_score=float(data.get("judge_success_score", 1.0)),
+            judge_success_score=float(data.get("judge_success_score", 0.8)),
             transient_case_retry_limit=_int_value(
                 data.get("transient_case_retry_limit"),
                 default=2,
