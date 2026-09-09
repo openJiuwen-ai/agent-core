@@ -367,8 +367,8 @@ class TopicSurveyAgent:
                 else ""
             )
             + "Survey this topic. Search for relevant papers and authoritative webpages, "
-            "start by calling free_search with several focused queries, and only use URLs "
-            "returned by that tool; never guess a URL or use a file:// path. "
+            # "start by calling free_search with several focused queries, and only use URLs "
+            # "returned by that tool; never guess a URL or use a file:// path. "
             "fetch each selected source for summarization, and use download_survey_source "
             "to save its raw PDF or HTML under DOWNLOAD_DIRECTORY. "
             "Then call submit_topic_survey exactly once."
