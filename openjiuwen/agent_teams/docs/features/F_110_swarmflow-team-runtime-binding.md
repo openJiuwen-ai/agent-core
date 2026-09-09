@@ -67,6 +67,13 @@
    仍可续（与决策 1 的「丢票不 seal」一致）。resume 无此退化：没有票据就没有可重放的 inputs，
    只能报 not_found 让 leader 走发射面。
 
+8. **`script_path` 必须跨过 tool 层的桥**。决策 2 让引擎在 `WORKFLOW_STARTED` 上带 `script_path`，但
+   `SwarmflowTool._build_progress_message` 逐字段构造 `WorkflowProgressTeamEvent`，schema 没有该字段、
+   构造也没拷贝——引擎侧测试和嵌入层侧测试各自通过，中间这一跳漏了。实测：冷启动后快照里所有 run
+   的 `script_path` 都是 None，advisory 给不出发射面调用，leader 只能新起 run。修法：
+   `WorkflowProgressTeamEvent.script_path` + 桥上拷贝 `progress.script_path`；补一条走真实
+   `run_background → observer → publish` 链路的测试。
+
 ## 拒绝的方案
 
 - **stop 全量复用 `pause(None)` 的"移入 `_paused`"语义**：拒绝。stop 是终止意图，active run 必须
@@ -87,7 +94,8 @@
 - `test_stop_on_unregistered_run_announces_stopped_without_seal` / `test_stop_on_paused_run_announces_stopped`：
   controller.stop 未命中或命中 paused 票据时 team topic 收到 `workflow_stopped`（含 run_id）；
   `test_stop_on_active_run_does_not_double_announce`：active run 不宣告；resume 未命中仍 not_found。
-- 回归：`test_background_task_controller.py` + `test_engine.py` 全绿（45 passed）；workflow 全套 268 passed。
+- `test_workflow_started_team_event_carries_script_path`：经 `run_background` 真实发布链路，team event 携带 `script_path`。
+- 回归：`test_background_task_controller.py` + `test_engine.py` 全绿（45 passed）；workflow 全套 288 passed。
 
 ## 已知遗留
 
