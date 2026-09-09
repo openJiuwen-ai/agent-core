@@ -62,6 +62,7 @@ from openjiuwen.harness_protocol import (
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
 EventObserver = Callable[[HarnessEvent], Awaitable[None]]
+ProviderInteractionHandler = Callable[[ProviderInteractionRequest], Awaitable[ProviderInteractionResponse]]
 INTERACTIVE_INPUT_KIND = "interactive_input"
 _END: Any = object()
 
@@ -107,6 +108,10 @@ class HarnessIOAdapter:
             ``__interaction__`` chunks resolved by ``{"approved": bool}``.
         stop_on_unsupported_force_abort: Stop the whole cycle when the host asks
             for an immediate abort the provider cannot deliver.
+        provider_interaction_handler: Optional coroutine answering provider
+            extension requests. When set the adapter declares
+            ``HostCapability.PROVIDER_INTERACTION``; otherwise every
+            ``ProviderInteractionRequest`` is declined.
     """
 
     def __init__(
@@ -116,10 +121,12 @@ class HarnessIOAdapter:
         event_observer: EventObserver | None = None,
         auto_approve_tools: bool = True,
         stop_on_unsupported_force_abort: bool = False,
+        provider_interaction_handler: ProviderInteractionHandler | None = None,
     ) -> None:
         self._harness = harness
         self._event_observer = event_observer
         self._auto_approve_tools = auto_approve_tools
+        self._provider_interaction_handler = provider_interaction_handler
         self._stop_on_unsupported_force_abort = stop_on_unsupported_force_abort
         self._output_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._event_task: asyncio.Task[None] | None = None
@@ -170,6 +177,8 @@ class HarnessIOAdapter:
         capabilities = set(context.host_capabilities) | {HostCapability.USER_INPUT}
         if not self._auto_approve_tools:
             capabilities.add(HostCapability.TOOL_APPROVAL)
+        if self._provider_interaction_handler is not None:
+            capabilities.add(HostCapability.PROVIDER_INTERACTION)
         interactions = context.interactions if context.interactions is not None else self
         return dataclasses.replace(
             context,
@@ -319,7 +328,10 @@ class HarnessIOAdapter:
                 error_message="dynamic tool calls are not routed by the harness IO adapter",
             )
         if isinstance(request, ProviderInteractionRequest):
-            return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
+            handler = self._provider_interaction_handler
+            if handler is None:
+                return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
+            return await handler(request)
         if request.request_id in self._pending:
             raise HarnessStateError(f"interaction {request.request_id!r} is already pending")
         loop = asyncio.get_running_loop()
@@ -528,4 +540,10 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
-__all__ = ["EventObserver", "HarnessIOAdapter", "INTERACTIVE_INPUT_KIND", "to_harness_input"]
+__all__ = [
+    "EventObserver",
+    "HarnessIOAdapter",
+    "INTERACTIVE_INPUT_KIND",
+    "ProviderInteractionHandler",
+    "to_harness_input",
+]

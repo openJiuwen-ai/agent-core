@@ -55,6 +55,8 @@ _APPROVAL_WAIT_TIMEOUT_S = 600.0
 _NO_ACTIVE_TURN_ERROR_CODE = -32600
 _NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
 _APPROVAL_METHODS = frozenset({"item/commandExecution/requestApproval", "item/fileChange/requestApproval"})
+# Provider interaction asking the host to ratify (persist) an auth fallback.
+AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
 
 NotificationObserver = Callable[[Any], None]
 
@@ -107,6 +109,7 @@ class CodexHarness(SerializedTurnHarness):
                 HostCapability.TOOL_APPROVAL,
                 HostCapability.CHECKPOINT_SINK,
                 HostCapability.MCP_SERVERS,
+                HostCapability.PROVIDER_INTERACTION,
             }
         ),
     )
@@ -427,6 +430,20 @@ class CodexHarness(SerializedTurnHarness):
             await self._connect(context, model=fallback, resume_thread_id=thread_id)
         except Exception as exc:
             logger.warning("[codex] authentication fallback activation failed: %s", exc)
+            return False
+        ratified = await self._confirm_provider_extension(
+            AUTH_FALLBACK_REQUEST_TYPE,
+            {"model": fallback.model, "provider": fallback.provider, "api_base": fallback.api_base},
+        )
+        if not ratified:
+            # The host could not persist the switch; resume the thread on the
+            # native endpoint so the member does not run on an unrecorded one.
+            logger.warning("[codex] host declined the authentication fallback; restoring the native endpoint")
+            await self._close_session()
+            try:
+                await self._connect(context, model=self._config.model, resume_thread_id=thread_id)
+            except Exception as exc:
+                logger.warning("[codex] restoring the native endpoint failed: %s", exc)
             return False
         self._active_model = fallback
         self._fallback_activated = True

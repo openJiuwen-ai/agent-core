@@ -44,8 +44,11 @@ from openjiuwen.harness_protocol import (
     HarnessProtocolError,
     HarnessState,
     HarnessStateError,
+    HostCapability,
     InteractionCancelReason,
+    InteractionResponseStatus,
     JsonObject,
+    ProviderInteractionRequest,
     SendReceipt,
     StateChangedEvent,
     TurnError,
@@ -514,6 +517,33 @@ class SerializedTurnHarness(ABC):
         finally:
             self._pending_interactions.pop(request.request_id, None)
         return validate_interaction_response(request, response)
+
+    async def _confirm_provider_extension(self, request_type: str, payload: Mapping[str, Any]) -> bool:
+        """Ask the host to ratify a provider-specific decision, if it can.
+
+        Sends a ``ProviderInteractionRequest`` when the host declared
+        ``PROVIDER_INTERACTION`` and supplied a handler; ``True`` means the host
+        completed the request. Without such a host the decision is the
+        provider's own and the call returns ``True``.
+        """
+
+        context = self._context
+        if context is None or context.interactions is None:
+            return True
+        if HostCapability.PROVIDER_INTERACTION not in context.host_capabilities:
+            return True
+        active = self._active_turn
+        request = ProviderInteractionRequest(
+            request_id=f"{self.card.name}:{request_type}:{uuid.uuid4().hex}",
+            provider=self.card.name,
+            request_type=request_type,
+            schema_version="1",
+            payload=payload,
+            provider_session_id=self._session_id,
+            turn_id=active.turn_id if active is not None else None,
+        )
+        response = await self._request_interaction(request)
+        return response is not None and response.status is InteractionResponseStatus.COMPLETED
 
     async def _cancel_pending_interactions(self, reason: InteractionCancelReason) -> None:
         pending = dict(self._pending_interactions)

@@ -36,8 +36,11 @@ from openjiuwen.harness_protocol import (
     HarnessState,
     HarnessStateError,
     HostCapability,
+    InteractionResponseStatus,
     McpServerConfig,
     ProviderEvent,
+    ProviderInteractionRequest,
+    ProviderInteractionResponse,
     ResumePolicy,
     SendReceipt,
     StateChangedEvent,
@@ -58,6 +61,7 @@ _EXTERNAL_RUNTIME_STATE_KEY = "external_runtime"
 _EXTERNAL_BACKEND_KEY = "backend"
 _EXTERNAL_CHECKPOINT_KEY = "checkpoint"
 _AUTH_FALLBACK_EVENT = "auth_fallback_activated"
+_AUTH_FALLBACK_REQUEST = "auth_fallback"
 
 ContextFactory = Callable[
     [Any | None],
@@ -233,6 +237,7 @@ class ExternalHarnessMemberRuntime:
             event_observer=self._on_event,
             auto_approve_tools=True,
             stop_on_unsupported_force_abort=stop_on_unsupported_force_abort,
+            provider_interaction_handler=self._on_provider_interaction,
         )
         if isinstance(context, HarnessContext):
             self._member_name = context.agent_name
@@ -299,7 +304,12 @@ class ExternalHarnessMemberRuntime:
         self._span_bridge = bridge
 
     def bind_fallback_promotion(self, promote: PromoteFallbackModel | None) -> None:
-        """Persist the provider's authentication fallback once it activates."""
+        """Persist the provider's authentication fallback before it commits.
+
+        The provider asks through an ``auth_fallback`` provider interaction;
+        the switch is ratified only when ``promote`` returns ``True``, otherwise
+        the provider restores its native endpoint.
+        """
         self._promote_fallback_model = promote
 
     def add_teardown_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
@@ -502,7 +512,11 @@ class ExternalHarnessMemberRuntime:
         elif isinstance(payload, DiagnosticEvent):
             await self._on_diagnostic(payload)
         elif isinstance(payload, ProviderEvent) and payload.event_type == _AUTH_FALLBACK_EVENT:
-            await self._on_fallback_activated()
+            team_logger.info(
+                "[external-cli] member {} switched to the authentication fallback {}",
+                self._member_name,
+                payload.payload,
+            )
 
     async def _on_turn_event(self, envelope: HarnessEvent, payload: TurnLifecycleEvent) -> None:
         kind = _member_round_kind(payload.kind)
@@ -538,20 +552,28 @@ class ExternalHarnessMemberRuntime:
             summary=f"{self._member_name} {self._agent_kind} SDK retrying: {category}",
         )
 
-    async def _on_fallback_activated(self) -> None:
+    async def _on_provider_interaction(self, request: ProviderInteractionRequest) -> ProviderInteractionResponse:
+        """Answer provider extension requests; only ``auth_fallback`` is understood."""
+        if request.request_type != _AUTH_FALLBACK_REQUEST:
+            return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
+        status = InteractionResponseStatus.COMPLETED if await self._persist_fallback() else InteractionResponseStatus.DECLINED
+        return ProviderInteractionResponse(request_id=request.request_id, status=status)
+
+    async def _persist_fallback(self) -> bool:
         promote = self._promote_fallback_model
         if promote is None:
-            return
+            return True
         try:
             promoted = await promote()
         except Exception:
             team_logger.exception("[external-cli] member {} failed to persist the authentication fallback", self._member_name)
-            return
+            return False
         if not promoted:
             team_logger.warning(
-                "[external-cli] member {} activated the authentication fallback but failed to persist it",
+                "[external-cli] member {} could not persist the authentication fallback; the provider keeps its native endpoint",
                 self._member_name,
             )
+        return promoted
 
     async def _finalize_turn_failure(self, result: TurnResult | None) -> None:
         ctx = self._reliability_ctx

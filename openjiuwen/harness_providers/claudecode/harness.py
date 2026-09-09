@@ -54,6 +54,8 @@ from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
 
 ADAPTER_VERSION = "0.1.0"
 ASK_USER_TOOL_NAME = "AskUserQuestion"
+# Provider interaction asking the host to ratify (persist) an auth fallback.
+AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
 _INTERACTIVE_HOST_CAPABILITIES = frozenset({HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL})
 
 TransportFactory = Callable[[Any], Any]
@@ -109,6 +111,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                 HostCapability.USER_INPUT,
                 HostCapability.CHECKPOINT_SINK,
                 HostCapability.MCP_SERVERS,
+                HostCapability.PROVIDER_INTERACTION,
             }
         ),
     )
@@ -337,6 +340,16 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         except ProviderStartupError as exc:
             logger.warning("[claude-code] authentication fallback activation failed: %s", exc)
             return False
+        ratified = await self._confirm_provider_extension(
+            AUTH_FALLBACK_REQUEST_TYPE,
+            {"model": fallback.model, "api_base": fallback.api_base},
+        )
+        if not ratified:
+            # The host could not persist the switch; go back to the native
+            # endpoint so the member does not silently run on an unrecorded one.
+            logger.warning("[claude-code] host declined the authentication fallback; restoring the native endpoint")
+            await self._reconnect_native_endpoint(context)
+            return False
         self._active_model = fallback
         self._fallback_activated = True
         await self._emit(
@@ -349,6 +362,25 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             turn=turn,
         )
         return True
+
+    async def _reconnect_native_endpoint(self, context: HarnessContext) -> None:
+        """Drop the fallback client and resume the session on the native endpoint."""
+        fallback_client = self._client
+        self._client = None
+        if fallback_client is not None:
+            try:
+                await fallback_client.disconnect()
+            except Exception as exc:
+                logger.debug("[claude-code] disconnect after declined fallback failed: %s", exc)
+        try:
+            self._client = await self._connect(
+                context,
+                model=self._config.model,
+                resume=self._claude_session_id,
+                session_id=None,
+            )
+        except ProviderStartupError as exc:
+            logger.warning("[claude-code] restoring the native endpoint failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Permission / user-input routing
