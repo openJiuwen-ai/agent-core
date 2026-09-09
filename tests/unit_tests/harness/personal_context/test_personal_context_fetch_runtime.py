@@ -289,7 +289,8 @@ async def test_gitcode_prepare_failure_isolated_from_other_manual_service(
     tasks = list(personal_context._manual_fetch_tasks.values())
     await asyncio.gather(*tasks)
 
-    assert result == {"state": "accepted", "service_ids": ["gitcode-demo", "local-good"]}
+    assert result["state"] == "accepted"
+    assert result["service_ids"] == ["gitcode-demo", "local-good"]
     assert personal_context._fetch_states["gitcode-demo"] == "FAILED"
     assert personal_context._fetch_states["local-good"] == "STOPPED"
     assert pipeline_events == [("batch", "local-good"), ("finish", "local-good")]
@@ -689,7 +690,8 @@ async def test_run_fetch_all_accepts_only_enabled_services_and_returns_before_co
 
     result = await personal_context.run_fetch()
 
-    assert result == {"state": "accepted", "service_ids": ["a", "b"]}
+    assert result == {"state": "accepted", "service_ids": ["a", "b"], "runs": result["runs"]}
+    assert [item["service_id"] for item in result["runs"]] == ["a", "b"]
     assert set(personal_context._manual_fetch_tasks) == {"a", "b"}
     assert all(not task.done() for task in personal_context._manual_fetch_tasks.values())
     assert "disabled" not in _BlockingManualProvider.instances
@@ -720,6 +722,7 @@ async def test_run_fetch_one_ignores_service_switch_when_collection_is_enabled(
     assert result == {
         "state": "accepted",
         "service_ids": ["disabled"],
+        "runs": result["runs"],
     }
     await _finish_manual_tasks(personal_context, ("disabled",))
 
@@ -2051,10 +2054,10 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
     await personal_context.set_configuration(config)
     await personal_context.activate_runtime()
     try:
-        assert await personal_context.run_fetch() == {
-            "state": "accepted",
-            "service_ids": ["notes-a", "notes-b"],
-        }
+        accepted = await personal_context.run_fetch()
+        assert accepted["state"] == "accepted"
+        assert accepted["service_ids"] == ["notes-a", "notes-b"]
+        assert [item["service_id"] for item in accepted["runs"]] == ["notes-a", "notes-b"]
         for _attempt in range(500):
             status = await personal_context.snapshot()
             cursor_files = sorted((home / "state" / "cursors").glob("*.json"))
@@ -2120,7 +2123,7 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         )
         persistent_files = {path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file()}
         assert all(
-            path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/"))
+            path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/", "state/run-history/"))
             for path in persistent_files
         )
         assert not list((home / "workspace" / "sandboxes").rglob("*"))
@@ -2597,3 +2600,147 @@ def test_strict_rollback_restores_preexisting_source_metadata(tmp_path: Path) ->
     )
 
     assert metadata_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_acceptance_retention_restart_and_active_slot(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    config = _manual_config(tmp_path)
+    core = await _ready_manual_personal_context(tmp_path, config)
+    run_ids = []
+    for _ in range(7):
+        accepted = await core.run_fetch(service_id="notes")
+        run_id = accepted["runs"][0]["run_id"]
+        run_ids.append(run_id)
+        active = await core.get_fetch_run_status("notes", run_id=run_id)
+        assert active["run_state"] == "running"
+        assert active["finished_at"] is None
+        await _finish_manual_tasks(core, ("notes",))
+        finished = await core.get_fetch_run_status("notes", run_id=run_id)
+        assert finished["run_state"] == "succeeded"
+        assert finished["progress_percent"] == 100
+        assert finished["completed_items"] == finished["total_items"] == 0
+        assert finished["finished_at"] >= finished["started_at"]
+        assert _BlockingManualProvider.instances["notes"].commit_calls == [run_id]
+    assert len(set(run_ids)) == 7
+    retained = await core.get_fetch_run_status("notes")
+    assert [run["run_id"] for run in retained["runs"]] == run_ids[-5:][::-1]
+    with pytest.raises(Exception, match="not found|expired"):
+        await core.get_fetch_run_status("notes", run_id=run_ids[0])
+    restored = PersonalContext(home=tmp_path)
+    await restored.set_configuration(config)
+    assert await restored.get_fetch_run_status("notes") == retained
+    accepted = await core.run_fetch(service_id="notes")
+    assert len((await core.get_fetch_run_status("notes"))["runs"]) == 6
+    await _finish_manual_tasks(core, ("notes",))
+    assert len((await core.get_fetch_run_status("notes"))["runs"]) == 5
+    assert accepted["runs"][0]["run_id"] != run_ids[-1]
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_failure_cancel_and_query_validation(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    for fail in (True, False):
+        accepted = await core.run_fetch(service_id="notes")
+        run_id = accepted["runs"][0]["run_id"]
+        provider = _BlockingManualProvider.instances["notes"]
+        await provider.started.wait()
+        if fail:
+            provider.fail = True
+            await _finish_manual_tasks(core, ("notes",))
+        else:
+            await core.stop_fetch_run("notes")
+            await asyncio.gather(*core._manual_fetch_tasks.values())
+        result = await core.get_fetch_run_status("notes", run_id=run_id)
+        assert result["run_state"] == ("failed" if fail else "cancelled")
+        assert result["finished_at"] is not None
+    for kwargs in ({"run_id": "abc"}, {"service_id": "notes", "run_id": ""}, {"service_id": "unknown"}):
+        with pytest.raises(Exception):
+            await core.get_fetch_run_status(**kwargs)
+    group = await core.get_fetch_run_status()
+    assert group["services"][0]["service_id"] == "notes"
+    assert len(group["services"][0]["runs"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_stop_before_worker_starts(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    accepted = await core.run_fetch(service_id="notes")
+    await core.stop_fetch_run("notes")
+    record = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
+    assert record["run_state"] == "cancelled"
+    assert record["finished_at"] is not None
+    restored = PersonalContext(home=tmp_path)
+    await restored.set_configuration(_manual_config(tmp_path))
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_reconfigure_remove_restore_and_atomic_failure(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    accepted = await core.run_fetch(service_id="notes")
+    await _finish_manual_tasks(core, ("notes",))
+    record = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
+    restored = PersonalContext(home=tmp_path)
+    await restored.set_configuration(_manual_config(tmp_path, collection_enabled=False))
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+    backup = restored.remove_fetch_run_history("notes")
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == []
+    restored.restore_fetch_run_history("notes", backup)
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+    history_path = tmp_path / "state" / "run-history" / "notes.json"
+    original = history_path.read_bytes()
+
+    def fail_replace(*args):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(personal_context_module.os, "replace", fail_replace)
+    with pytest.raises(Exception, match="history write failed"):
+        restored._write_run_history("notes", [])
+    assert history_path.read_bytes() == original
+    assert list(history_path.parent.glob(".notes.json.*")) == []
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_rejects_corrupt_file(tmp_path):
+    history_path = tmp_path / "state" / "run-history" / "notes.json"
+    history_path.parent.mkdir(parents=True)
+    history_path.write_text('{"schema_version":1,"runs":[{"credentials":"must-not-return"}]}')
+    core = PersonalContext(home=tmp_path)
+    with pytest.raises(Exception, match="history is invalid"):
+        await core.set_configuration(_manual_config(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_stop_during_result_write_keeps_success(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    writing = threading.Event()
+    release = threading.Event()
+    original_write = core._write_run_history
+
+    def blocked_write(service_id, records):
+        writing.set()
+        assert release.wait(3)
+        original_write(service_id, records)
+
+    monkeypatch.setattr(core, "_write_run_history", blocked_write)
+    accepted = await core.run_fetch(service_id="notes")
+    provider = _BlockingManualProvider.instances["notes"]
+    await provider.started.wait()
+    provider.release.set()
+    assert await asyncio.to_thread(writing.wait, 3)
+    stop_task = asyncio.create_task(core.stop_fetch_run("notes"))
+    await asyncio.sleep(0)
+    progress = (await core.snapshot()).fetch_run_progress["notes"]
+    release.set()
+    await stop_task
+    await asyncio.gather(*core._manual_fetch_tasks.values())
+    assert progress["run_state"] == "succeeded"
+    result = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
+    assert result["run_state"] == "succeeded"

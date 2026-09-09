@@ -16,6 +16,7 @@ import os
 import re
 import stat
 import tempfile
+from copy import deepcopy
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Mapping, cast
@@ -277,6 +278,8 @@ class PersonalContext:
         self._fetch_states: dict[str, str] = {}
         self._fetch_errors: dict[str, str] = {}
         self._fetch_run_progress: dict[str, dict[str, object]] = {}
+        self._fetch_run_history: dict[str, list[dict[str, object]]] = {}
+        self._fetch_run_identity: dict[str, dict[str, object]] = {}
 
     def _set_embedding_configuration(
         self,
@@ -309,7 +312,13 @@ class PersonalContext:
                 if self._state == "CREATED":
                     self._state = "CONFIGURED"
                 return
+            history = {
+                service.service_id: await asyncio.to_thread(self._read_run_history, service.service_id)
+                for service in config.fetch_services
+            }
             await self._cancel_authorization(clear_error=True)
+            self._fetch_run_history = history
+            self._fetch_run_identity = {}
             self._config = config
             self._fetch_states = {service.service_id: "STOPPED" for service in config.fetch_services}
             self._fetch_errors = {}
@@ -804,10 +813,15 @@ class PersonalContext:
                             self._active_fetch_run_tasks.pop(target_id, None)
                             self._active_fetch_run_stop_events.pop(target_id, None)
                         self._fetch_running.discard(target_id)
+                        self._fetch_run_identity.pop(target_id, None)
                         self._fetch_states[target_id] = previous_states[target_id]
                     raise
 
-        return {"state": "accepted", "service_ids": target_ids}
+        return {
+            "state": "accepted",
+            "service_ids": target_ids,
+            "runs": [{"service_id": item, "run_id": self._fetch_run_identity[item]["run_id"]} for item in target_ids],
+        }
 
     async def stop_fetch_run(self, service_id: str) -> None:
         """Stop only the active round for one service and retain completed batches."""
@@ -824,6 +838,8 @@ class PersonalContext:
                 return
             stop_event = self._active_fetch_run_stop_events[safe_id]
             progress = self._fetch_run_progress.get(safe_id, {})
+            if progress.get("run_state") in {"succeeded", "failed", "cancelled"}:
+                return
             self._fetch_run_progress[safe_id] = _fetch_run_status(
                 safe_id,
                 run_state="stopping",
@@ -850,6 +866,8 @@ class PersonalContext:
         finally:
             async with self._fetch_lock:
                 task_settled = task.done()
+                if task_settled:
+                    await self._retain_fetch_run(safe_id)
                 if task_settled and self._active_fetch_run_tasks.get(safe_id) is task:
                     self._active_fetch_run_tasks.pop(safe_id, None)
                     self._active_fetch_run_stop_events.pop(safe_id, None)
@@ -1175,17 +1193,22 @@ class PersonalContext:
         if existing is not None and not existing.done():
             raise _state_error(f"fetch service is already running: {service_id}")
         stop_event = asyncio.Event()
+        run_id = uuid4().hex
+        self._fetch_run_identity[service_id] = {"run_id": run_id, "started_at": _utc_now(), "finished_at": None}
+        self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
         task = asyncio.create_task(
-            self._run_fetch_once(service_id, provider, stop_event=stop_event),
+            self._run_fetch_once(service_id, provider, stop_event=stop_event, run_id=run_id),
             name=f"personal-context-fetch-{trigger}-run-{service_id}",
         )
         self._active_fetch_run_tasks[service_id] = task
         self._active_fetch_run_stop_events[service_id] = stop_event
         return task
 
-    def _discard_fetch_run_task(self, service_id: str, task: asyncio.Task[None]) -> None:
+    async def _discard_fetch_run_task(self, service_id: str, task: asyncio.Task[None]) -> None:
         """Forget a settled round while the caller holds ``_fetch_lock``."""
 
+        if task.done():
+            await self._retain_fetch_run(service_id)
         if self._active_fetch_run_tasks.get(service_id) is task:
             self._active_fetch_run_tasks.pop(service_id, None)
             self._active_fetch_run_stop_events.pop(service_id, None)
@@ -1228,7 +1251,7 @@ class PersonalContext:
                             self._fetch_errors.pop(service_id, None)
                 finally:
                     async with self._fetch_lock:
-                        self._discard_fetch_run_task(service_id, run_task)
+                        await self._discard_fetch_run_task(service_id, run_task)
                         self._fetch_running.discard(service_id)
         finally:
             current = asyncio.current_task()
@@ -1269,8 +1292,118 @@ class PersonalContext:
                 current = asyncio.current_task()
                 if self._manual_fetch_tasks.get(service_id) is current:
                     self._manual_fetch_tasks.pop(service_id, None)
-                self._discard_fetch_run_task(service_id, run_task)
+                await self._discard_fetch_run_task(service_id, run_task)
                 self._fetch_running.discard(service_id)
+
+    async def get_fetch_run_status(
+        self,
+        service_id: str | None = None,
+        *,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
+        """Return one identified round or bounded per-service run history."""
+        if run_id is not None and (service_id is None or not isinstance(run_id, str) or not run_id.strip()):
+            raise _state_error("run_id requires service_id and a non-empty string")
+        async with self._state_lock:
+            ids = [service.service_id for service in self._config.fetch_services] if self._config else []
+            if service_id is not None:
+                service_id = _safe_service_id(service_id)
+                if service_id not in ids:
+                    raise _state_error("unknown fetch service")
+                ids = [service_id]
+            groups: list[dict[str, object]] = []
+            for item in ids:
+                records = deepcopy(self._fetch_run_history.get(item, []))
+                identity = self._fetch_run_identity.get(item)
+                if identity is not None:
+                    current = {**self._fetch_run_progress[item], **identity}
+                    records = [current] + [entry for entry in records if entry["run_id"] != identity["run_id"]]
+                groups.append({"service_id": item, "runs": records})
+                if run_id is not None:
+                    for record in records:
+                        if record["run_id"] == run_id:
+                            return record
+                    raise _state_error("fetch run not found or expired")
+            return groups[0] if service_id is not None else {"services": groups}
+
+    def _run_history_path(self, service_id: str) -> Path:
+        path = self._home / "state" / "run-history" / f"{_safe_service_id(service_id)}.json"
+        _assert_no_symlink_chain(path)
+        return path
+
+    def _read_run_history(self, service_id: str) -> list[dict[str, object]]:
+        path = self._run_history_path(service_id)
+        if not path.exists():
+            return []
+        try:
+            if path.stat().st_size > 32 * 1024:
+                raise ValueError("history exceeds size limit")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or set(data) != {"schema_version", "runs"} or data["schema_version"] != 1:
+                raise ValueError("invalid history schema")
+            records = data["runs"]
+            if not isinstance(records, list) or len(records) > 5:
+                raise ValueError("invalid history retention")
+            seen: set[str] = set()
+            progress_fields = set(_fetch_run_status(service_id, run_state="idle"))
+            for record in records:
+                if not isinstance(record, dict) or set(record) != progress_fields | {
+                    "run_id",
+                    "started_at",
+                    "finished_at",
+                }:
+                    raise ValueError("invalid history fields")
+                PersonalContextStatus.validate_fetch_run_progress(
+                    {service_id: {key: record[key] for key in progress_fields}}
+                )
+                if record["run_state"] not in {"succeeded", "failed", "cancelled"}:
+                    raise ValueError("history must be terminal")
+                identifier = record["run_id"]
+                if (
+                    not isinstance(identifier, str)
+                    or not re.fullmatch(r"[a-f0-9]{32}", identifier)
+                    or identifier in seen
+                ):
+                    raise ValueError("invalid history run_id")
+                seen.add(identifier)
+                for field in ("started_at", "finished_at"):
+                    timestamp = datetime.fromisoformat(record[field])
+                    if timestamp.tzinfo is None:
+                        raise ValueError("history timestamp must include timezone")
+            return records
+        except Exception as exc:
+            raise _file_error("fetch run history is invalid", cause=exc) from exc
+
+    def _write_run_history(self, service_id: str, records: list[dict[str, object]]) -> None:
+        path = self._run_history_path(service_id)
+        temporary: Path | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            encoded = json.dumps({"schema_version": 1, "runs": records}, ensure_ascii=False).encode("utf-8")
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except Exception as exc:
+            raise _file_error("fetch run history write failed", cause=exc) from exc
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    temporary.unlink()
+
+    def remove_fetch_run_history(self, service_id: str) -> list[dict[str, object]]:
+        """Remove one service's terminal records, returning a rollback snapshot."""
+        records = self._read_run_history(service_id)
+        self._run_history_path(service_id).unlink(missing_ok=True)
+        self._fetch_run_history.pop(service_id, None)
+        self._fetch_run_identity.pop(service_id, None)
+        return records
+
+    def restore_fetch_run_history(self, service_id: str, records: list[dict[str, object]]) -> None:
+        self._write_run_history(service_id, records)
+        self._fetch_run_history[service_id] = deepcopy(records)
 
     async def _run_fetch_once(
         self,
@@ -1278,10 +1411,64 @@ class PersonalContext:
         provider: ContextFetchService,
         *,
         stop_event: asyncio.Event | None = None,
+        run_id: str | None = None,
+    ) -> None:
+        run_id = run_id or uuid4().hex
+        identity = self._fetch_run_identity.get(service_id)
+        if identity is None or identity["run_id"] != run_id:
+            identity = {"run_id": run_id, "started_at": _utc_now(), "finished_at": None}
+            self._fetch_run_identity[service_id] = identity
+        self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
+        try:
+            await self._execute_fetch_once(service_id, provider, stop_event=stop_event, run_id=run_id)
+        except asyncio.CancelledError:
+            if self._fetch_run_progress[service_id]["run_state"] in {"running", "stopping"}:
+                self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="cancelled")
+            raise
+        except Exception:
+            if self._fetch_run_progress[service_id]["run_state"] in {"running", "stopping"}:
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="failed",
+                    last_error="fetch run failed before processing",
+                )
+            raise
+        finally:
+            await self._retain_fetch_run(service_id)
+
+    async def _retain_fetch_run(self, service_id: str) -> None:
+        identity = self._fetch_run_identity.get(service_id)
+        if identity is None:
+            return
+        progress = self._fetch_run_progress[service_id]
+        if progress["run_state"] in {"running", "stopping"}:
+            progress = _fetch_run_status(service_id, run_state="cancelled")
+            self._fetch_run_progress[service_id] = progress
+        identity["finished_at"] = _utc_now()
+        record = {**progress, **identity}
+        retained = [record] + [
+            entry for entry in self._fetch_run_history.get(service_id, []) if entry["run_id"] != identity["run_id"]
+        ]
+        self._fetch_run_history[service_id] = retained[:5]
+        writer = asyncio.create_task(asyncio.to_thread(self._write_run_history, service_id, retained[:5]))
+        try:
+            await asyncio.shield(writer)
+        except asyncio.CancelledError:
+            await writer
+            raise
+        finally:
+            self._fetch_run_identity.pop(service_id, None)
+
+    async def _execute_fetch_once(
+        self,
+        service_id: str,
+        provider: ContextFetchService,
+        *,
+        stop_event: asyncio.Event | None = None,
+        run_id: str,
     ) -> None:
         config = self._service_config(service_id)
         old_cursor = self._read_cursor(service_id)
-        run_id = uuid4().hex
         run_started_at = datetime.now(UTC)
         last_cursor = dict(old_cursor) if old_cursor is not None else None
         saw_batch = False
