@@ -78,8 +78,7 @@ class ArtifactProvider(Protocol):
 
         A supported implementation persists its checkpoint before emitting
         checkpoint-related node/progress events and finally
-        ``EventStatus("paused")``.  Paper providers return
-        ``SCENARIO_NOT_SUPPORTED`` without changing task state.
+        ``EventStatus("paused")``.
         """
         ...
 

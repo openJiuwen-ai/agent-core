@@ -1,5 +1,6 @@
 """The server-selected optimizer reaches every model-backed paper module."""
 
+import asyncio
 import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -15,6 +16,9 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_exec
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.agent import ReflectionAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider import orchestrator as module
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.provider import (
+    PaperArtifactProviderImpl,
+)
 
 
 @pytest.mark.asyncio
@@ -38,7 +42,15 @@ async def test_orchestrator_passes_optimizer_to_all_modules(tmp_path, monkeypatc
         optimization_instruction=None, artifact_path=str(tmp_path), model=model,
     )
     orchestrator.config = {"manager": {"modules": {"reflection": True}}}
-    seed = SimpleNamespace(run_id="model-r1", topic="test", research_paths=[], objective="test", constraints=[])
+    seed = SimpleNamespace(
+        run_id="model-r1",
+        topic="test",
+        research_paths=["input/paper_context.md"],
+        objective="test",
+        constraints=[],
+        initial_prompt="uploaded baseline context",
+        task_mode="modify_paper",
+    )
     assert await orchestrator._run_manager(seed) == "done"
     instance = captured[0]
     assert instance.manager._injected_model is model
@@ -47,6 +59,145 @@ async def test_orchestrator_passes_optimizer_to_all_modules(tmp_path, monkeypatc
     assert instance.registry.get("topic_survey").agent._model is model
     assert instance.registry.get("code_implementation").artifact_path == str(tmp_path)
     assert instance.registry.get("experiment_execution").artifact_path == str(tmp_path)
+    call = instance.arun.await_args.kwargs
+    assert call["research_paths"] == ["input/paper_context.md"]
+    assert call["initial_prompt"] == "uploaded baseline context"
+    assert call["task_mode"] == "modify_paper"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stages_uploaded_paper_and_builds_task_context(tmp_path):
+    source = tmp_path / "upload" / "paper.pdf"
+    source.parent.mkdir()
+    source.write_bytes(b"uploaded paper")
+    run_dir = tmp_path / "task"
+    orchestrator = module.PaperTreeOrchestrator(
+        task_id="uploaded-paper",
+        run_dir=str(run_dir),
+        max_iterations=0,
+        optimization_instruction="Improve the evaluation.",
+        artifact_path=str(source),
+    )
+
+    await orchestrator.start()
+    assert orchestrator._task is not None  # noqa: SLF001
+    await orchestrator._task  # noqa: SLF001
+
+    snapshot = run_dir / "input" / "paper" / "paper.pdf"
+    context = run_dir / "input" / "paper_context.md"
+    state = orchestrator.storage.load_task_state()
+    assert state is not None
+    assert state.artifact_path == str(snapshot)
+    assert snapshot.read_bytes() == b"uploaded paper"
+    assert context.is_file()
+    assert orchestrator.initial_prompt.startswith("TASK MODE: modify_paper")
+    assert orchestrator.initial_research_paths == [
+        "input/paper_context.md",
+        "input/paper/paper.pdf",
+    ]
+    assert "input/paper/paper.pdf" in context.read_text(encoding="utf-8")
+
+    seed = module.build_node_seed(
+        task_id="uploaded-paper",
+        round_index=1,
+        optimization_instruction="Improve the evaluation.",
+        retry_reason=None,
+        parent_run_id=None,
+        initial_research_paths=orchestrator.initial_research_paths,
+        initial_prompt=orchestrator.initial_prompt,
+        task_mode="modify_paper",
+    )
+    assert seed.task_mode == "modify_paper"
+    assert seed.initial_prompt == orchestrator.initial_prompt
+    assert seed.research_paths == orchestrator.initial_research_paths
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_pause_cancels_inflight_manager_and_persists_paused(
+    tmp_path, monkeypatch
+):
+    started = asyncio.Event()
+    events = []
+
+    class Runtime:
+        def __init__(self, config, **kwargs):
+            del config, kwargs
+
+        async def arun(self, **kwargs):
+            del kwargs
+            started.set()
+            await asyncio.sleep(60)
+
+    monkeypatch.setattr(module, "ManagerRuntime", Runtime)
+    monkeypatch.setattr(module, "set_project_root", lambda path: None)
+    monkeypatch.setattr(module, "load_project_dotenv", lambda: None)
+
+    async def on_event(event):
+        events.append(event)
+
+    orchestrator = module.PaperTreeOrchestrator(
+        task_id="pause-paper",
+        run_dir=str(tmp_path),
+        max_iterations=1,
+        optimization_instruction="improve the paper",
+        artifact_path=None,
+        on_event=on_event,
+    )
+    await orchestrator.start()
+    await started.wait()
+
+    paused = await orchestrator.pause()
+
+    assert paused.status == "paused"
+    persisted = orchestrator.storage.load_task_state()
+    assert persisted is not None
+    assert persisted.status == "paused"
+    assert orchestrator._task is not None  # noqa: SLF001 - lifecycle assertion
+    assert orchestrator._task.cancelled()  # noqa: SLF001 - lifecycle assertion
+    assert [event.status for event in events if isinstance(event, module.EventStatus)] == [
+        "running",
+        "paused",
+    ]
+
+
+def test_paper_provider_supports_pause_without_advertising_resume():
+    provider = PaperArtifactProviderImpl()
+
+    assert provider.supports_pause is True
+    assert getattr(provider, "supports_resume", False) is False
+
+
+@pytest.mark.asyncio
+async def test_paper_provider_pause_delegates_to_live_orchestrator():
+    provider = PaperArtifactProviderImpl()
+    orchestrator = SimpleNamespace(
+        pause=AsyncMock(return_value=SimpleNamespace(status="paused", best_node_id="node-1"))
+    )
+    provider._orchestrators["pause-provider"] = orchestrator  # noqa: SLF001 - provider seam test
+
+    result = await provider.pause("pause-provider")
+
+    assert result.status == "paused"
+    assert result.final_node_id == "node-1"
+    orchestrator.pause.assert_awaited_once_with(on_event=None)
+
+
+@pytest.mark.parametrize("web_proxy", [None, "http://proxy.example.test:7890"])
+def test_orchestrator_uses_global_search_scope_with_or_without_proxy(
+    tmp_path, monkeypatch, web_proxy
+):
+    monkeypatch.setattr(module, "set_project_root", lambda path: None)
+    orchestrator = module.PaperTreeOrchestrator(
+        task_id=f"scope-{bool(web_proxy)}",
+        run_dir=str(tmp_path),
+        max_iterations=1,
+        optimization_instruction=None,
+        artifact_path=None,
+        web_proxy=web_proxy,
+    )
+
+    assert orchestrator.config["topic_survey"]["search_scope"] == "global"
+    assert orchestrator.config["topic_survey"]["web_proxy"] == web_proxy
 
 
 @pytest.mark.parametrize("web_proxy", [None, "http://proxy.example.test:7890"])

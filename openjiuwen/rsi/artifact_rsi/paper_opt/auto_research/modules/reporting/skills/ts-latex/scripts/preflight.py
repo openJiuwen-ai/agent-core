@@ -1,0 +1,50 @@
+#!/usr/bin/env python
+"""Check that the host LaTeX/MiKTeX installation is usable.
+
+This script is intended for the macOS/Windows installation or first-run
+workflow after MiKTeX has been provisioned. It only checks the installation;
+it never downloads or installs a TeX distribution.
+
+Usage: python preflight.py [latex-bin-dir]
+"""
+
+from __future__ import annotations
+
+import json
+import contextlib
+import io
+import sys
+
+
+def main() -> int:
+    # Importing the host package registers optional parsers and can emit
+    # informational lines. Keep this CLI's stdout a machine-readable JSON
+    # contract for installers and first-run checks.
+    with contextlib.redirect_stdout(io.StringIO()):
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex_runtime import (
+            LatexRuntimeError,
+            preflight_latex_runtime,
+        )
+
+    latex_bin_dir = sys.argv[1] if len(sys.argv) > 1 else None
+    try:
+        runtime = preflight_latex_runtime(latex_bin_dir)
+    except LatexRuntimeError as exc:
+        print(json.dumps({"ready": False, "error": str(exc)}))
+        return 1
+
+    print(
+        json.dumps(
+            {
+                "ready": True,
+                "latexmk": str(runtime.latexmk) if runtime.latexmk else None,
+                "pdflatex": str(runtime.pdflatex) if runtime.pdflatex else None,
+                "bin_dir": str(runtime.bin_dir) if runtime.bin_dir else None,
+            }
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -350,7 +350,7 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
         if contract.mode == "create":
             if state.latest_plan is not None:
                 raise DecisionValidationError("design already exists; use revise_research or update")
-            if not state.research_paths:
+            if not state.research_paths and "topic_survey" in state.enabled_modules:
                 raise DecisionValidationError("create requires research_paths")
             if "topic_survey" in state.enabled_modules:
                 if not _has_succeeded_survey(reports):
@@ -545,6 +545,13 @@ def sync_host_requirements(state: PersistedManagerState) -> None:
     if survey is not None:
         _complete_requirement(
             task, "req-research", survey.report_id, notes="host: topic_survey succeeded"
+        )
+    elif "topic_survey" not in task.enabled_modules:
+        _complete_requirement(
+            task,
+            "req-research",
+            "",
+            notes="host: topic_survey disabled; original task brief is the research input",
         )
     design = _latest_succeeded(reports, "experiment_design")
     if design is not None:

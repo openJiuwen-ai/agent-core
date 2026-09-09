@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -25,9 +26,15 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     paper_scoring_dir,
     paper_tex_path,
     set_project_root,
+    to_project_relative,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.config.settings import load_config
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import TerminalReport
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess import (
+    LatexValidationError,
+    PaperPreprocessAgent,
+    PaperPreprocessInput,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.agent import ReflectionAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.manager import ManagerRuntime
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.judge import PaperScore, score_paper
@@ -205,6 +212,8 @@ class PaperTreeOrchestrator:
         self.max_iterations = max_iterations
         self.optimization_instruction = optimization_instruction
         self.artifact_path = artifact_path
+        self.initial_prompt = ""
+        self.initial_research_paths: list[str] = []
         # AgentServer-resolved openjiuwen.core.foundation.llm.Model
         # instance (ArtifactEngineRequest.model), shared by scoring and all
         # model-backed pipeline modules. None retains standalone config/env
@@ -228,10 +237,136 @@ class PaperTreeOrchestrator:
         self.on_event = on_event
         self._task: asyncio.Task | None = None
         self._cancelled = False
+        self._pause_requested = False
+
+    def _stage_input_artifact(self, artifact_path: str | None) -> str | None:
+        """Copy the caller's input into this task's durable workspace.
+
+        Every module in a node receives this path rather than the caller's
+        original path.  That makes the input immutable from the pipeline's
+        point of view and keeps retries/nodes reproducible after the caller's
+        temporary upload location disappears.
+        """
+        if not artifact_path:
+            return None
+        source = Path(str(artifact_path)).expanduser().resolve()
+        if not source.exists():
+            raise FileNotFoundError(f"uploaded artifact does not exist: {artifact_path!r}")
+
+        run_dir = self.storage.run_dir.resolve()
+        snapshot_dir = run_dir / "input" / "paper"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        # A second start/recovery of the same task should reuse the existing
+        # task-local snapshot instead of copying it into itself.
+        try:
+            source.relative_to(snapshot_dir.resolve())
+        except ValueError:
+            pass
+        else:
+            return str(source)
+
+        if not source.name:
+            raise ValueError(f"uploaded artifact has no usable name: {artifact_path!r}")
+        target = snapshot_dir / source.name
+        if target.is_symlink() or target.exists():
+            if target.is_dir() and not target.is_symlink():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        if source.is_dir():
+            shutil.copytree(source, target)
+        elif source.is_file():
+            shutil.copy2(source, target)
+        else:
+            raise ValueError(f"uploaded artifact is not a regular file or directory: {artifact_path!r}")
+        return str(target)
+
+    def _prepare_uploaded_paper_context(self) -> None:
+        """Create the manager-facing context and paths for an uploaded paper."""
+        self.initial_prompt = ""
+        self.initial_research_paths = []
+        if not self.artifact_path:
+            return
+
+        run_dir = self.storage.run_dir.resolve()
+        snapshot = Path(self.artifact_path).resolve()
+        relative_snapshot = to_project_relative(snapshot, root=run_dir)
+        input_dir = run_dir / "input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        context_path = input_dir / "paper_context.md"
+        context_path_relative = to_project_relative(context_path, root=run_dir)
+        artifact_instruction = (
+            f"The user's uploaded baseline artifact is available at `{relative_snapshot}` "
+            "inside this task workspace. Read and use this task-local snapshot as the "
+            "baseline for the modification; do not treat its existing results as new "
+            "measurements."
+        )
+
+        initial_prompt = "TASK MODE: modify_paper\n\n" + artifact_instruction
+        research_paths = [context_path_relative]
+        main_tex = snapshot / "main.tex" if snapshot.is_dir() else None
+        if main_tex is not None and main_tex.is_file():
+            main_relative = to_project_relative(main_tex, root=run_dir)
+            try:
+                processed = PaperPreprocessAgent().run(
+                    PaperPreprocessInput(paper_dir=str(snapshot))
+                ).initial_prompt
+            except LatexValidationError as exc:
+                processed = (
+                    "TASK MODE: modify_paper\n\n"
+                    f"The staged directory could not be validated as a complete LaTeX paper: {exc}. "
+                    f"Inspect `{main_relative}` and the other files under `{relative_snapshot}` directly."
+                )
+            else:
+                # Keep the prompt portable and consistent with the relative
+                # resource paths exposed to downstream agents.
+                processed = processed.replace(str(main_tex), main_relative)
+                processed = f"{processed}\n\n{artifact_instruction}"
+            initial_prompt = processed
+            # The explicit main.tex path is useful to experiment design even
+            # though directory expansion intentionally ignores .tex files.
+            research_paths.append(main_relative)
+        elif snapshot.is_dir():
+            # Directory expansion can still expose supported resources (for
+            # example an uploaded PDF plus sidecar notes).
+            initial_prompt += (
+                f" The directory contains the uploaded paper resources; inspect `{relative_snapshot}`."
+            )
+            research_paths.append(relative_snapshot)
+        else:
+            research_paths.append(relative_snapshot)
+
+        context_path.write_text(
+            "\n".join(
+                [
+                    "# Uploaded baseline paper/input",
+                    "",
+                    f"Task-local snapshot: `{relative_snapshot}`",
+                    "",
+                    "The snapshot above is the immutable input for this task. It must be "
+                    "available to research, design, implementation, execution, and reporting.",
+                    "",
+                    "## Initial paper context",
+                    "",
+                    initial_prompt,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        self.initial_prompt = initial_prompt
+        self.initial_research_paths = research_paths
 
     # -- lifecycle ----------------------------------------------------------
     async def start(self) -> PaperTaskState:
         state = self.storage.load_task_state()
+        if state is None:
+            self.artifact_path = self._stage_input_artifact(self.artifact_path)
+        else:
+            self.artifact_path = self._stage_input_artifact(state.artifact_path or self.artifact_path)
+            state.artifact_path = self.artifact_path
+        self._prepare_uploaded_paper_context()
         if state is None:
             state = PaperTaskState(
                 task_id=self.task_id,
@@ -250,12 +385,6 @@ class PaperTreeOrchestrator:
         return state
 
     def _ensure_root_node(self, state: PaperTaskState) -> None:
-        # NOTE: the uploaded-paper case (artifact_path set) is not actually
-        # ingested into a comparable paper artifact yet — seed.py's
-        # `build_prior_paper_prompt` only reads *parent nodes'* own compiled
-        # papers, not the root's raw upload. Root is treated as score-less
-        # regardless, so round 1 always auto-adopts (see `_node_score`/
-        # scoring-skip logic in `_build_node`).
         has_upload = bool(self.artifact_path)
         root = RsiTreeNode(
             node_id=_root_node_id(self.task_id),
@@ -264,7 +393,7 @@ class PaperTreeOrchestrator:
             type="root",
             adopted=True,
             summary=(
-                "Uploaded starting paper (ingestion not yet wired in)."
+                "Uploaded starting paper staged as the task-local baseline input."
                 if has_upload
                 else "No starting paper; first node writes from scratch."
             ),
@@ -283,6 +412,46 @@ class PaperTreeOrchestrator:
         # node and must not be visible as the public best_node_id (see
         # schemas.py::PaperTaskState field comments).
         state.frontier_node_id = root.node_id
+
+    async def pause(self, on_event: OnEvent | None = None) -> PaperTaskState:
+        """Cancel the in-flight node and persist the task as paused.
+
+        ManagerRuntime already turns ``CancelledError`` into a durable manager
+        checkpoint.  The tree-level task must make the same transition before
+        cancelling its loop so a concurrent worker poll cannot observe a
+        running task after the pause request has been accepted.
+        """
+        state = self.storage.load_task_state()
+        if state is None:
+            raise RuntimeError("pause requested with no persisted task state")
+        if state.status in {"completed", "failed", "paused", "terminated"}:
+            return state
+
+        self._pause_requested = True
+        state.status = "paused"
+        self.storage.save_task_state(state)
+
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+        state = self.storage.load_task_state() or state
+        if state.status not in {"completed", "failed", "terminated"}:
+            state.status = "paused"
+            self.storage.save_task_state(state)
+
+        event = EventStatus(status="paused")
+        # The callback supplied at run() time is the canonical worker sink. A
+        # direct provider caller can still receive the event when no run-time
+        # sink was registered.
+        if self.on_event is not None:
+            await self._emit(event)
+        elif on_event is not None:
+            await on_event(event)
+        return state
 
     async def terminate(self) -> None:
         self._cancelled = True
@@ -309,13 +478,26 @@ class PaperTreeOrchestrator:
         if state is None:
             raise RuntimeError("_run_loop started with no persisted task state")
         try:
-            while state.node_count < self.max_iterations and not self._cancelled:
+            while (
+                state.node_count < self.max_iterations
+                and not self._cancelled
+                and not self._pause_requested
+            ):
                 await self._run_one_node(state)
-            if not self._cancelled:
+            if not self._cancelled and not self._pause_requested:
                 state.status = "completed"
                 self.storage.save_task_state(state)
                 await self._emit(EventStatus(status="completed"))
+            elif self._pause_requested and not self._cancelled:
+                state.status = "paused"
+                self.storage.save_task_state(state)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001 -- must not crash the loop silently
+            if self._pause_requested and not self._cancelled:
+                state.status = "paused"
+                self.storage.save_task_state(state)
+                return
             for node in self._finalize_pending_nodes(
                 reason=f"task crashed: {exc}",
                 failure_class="crashed",
@@ -342,6 +524,9 @@ class PaperTreeOrchestrator:
             optimization_instruction=self.optimization_instruction,
             retry_reason=state.last_reason,
             parent_run_id=_node_run_id(frontier),
+            initial_research_paths=self.initial_research_paths,
+            initial_prompt=self.initial_prompt,
+            task_mode="modify_paper" if self.artifact_path else "create_new_paper",
         )
 
         # Persist a placeholder before any NodeStageEvent references
@@ -415,6 +600,8 @@ class PaperTreeOrchestrator:
         else:
             state.attempts_since_last_adoption = attempt
             state.last_reason = node.reason
+        if self._pause_requested:
+            state.status = "paused"
         self.storage.save_task_state(state)
 
         await self._emit(EventNode(node=node))
@@ -427,6 +614,22 @@ class PaperTreeOrchestrator:
                 usage=None,
             )
         )
+
+        # A terminal manager result is not a retryable paper candidate.  The
+        # previous loop kept opening fresh outer nodes after BLOCKED/FAILED,
+        # which made a single unsatisfiable survey requirement look like a
+        # hung task and multiplied the same expensive survey calls.
+        if terminal.status in {"blocked", "failed", "incomplete"}:
+            state.status = "failed"
+            state.error_message = (
+                terminal.failure_reason
+                or terminal.abort_reason
+                or terminal.summary
+                or f"manager terminated with status {terminal.status}"
+            )
+            self.storage.save_task_state(state)
+            self._cancelled = True
+            await self._emit(EventStatus(status="failed"))
 
     async def _run_manager(self, seed: NodeSeed) -> TerminalReport:
         try:
@@ -483,6 +686,8 @@ class PaperTreeOrchestrator:
                     run_id=seed.run_id,
                     objective=seed.objective,
                     constraints=seed.constraints or None,
+                    initial_prompt=getattr(seed, "initial_prompt", ""),
+                    task_mode=getattr(seed, "task_mode", "create_new_paper"),
                 )
         except Exception as exc:  # noqa: BLE001 -- defensive: arun() itself already
             # turns internal failures into a TerminalReport; this only
