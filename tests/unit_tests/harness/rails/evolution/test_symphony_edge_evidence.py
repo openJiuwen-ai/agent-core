@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+import pytest
+
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
@@ -10,6 +12,7 @@ from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution import symphony_edge_evidence as evidence_module
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
+    SymphonyInterruptContinuation,
     build_model_edge_decisions,
     build_symphony_edge_candidates,
 )
@@ -370,6 +373,174 @@ def test_candidates_never_cross_traces() -> None:
     )
 
     assert candidates == ()
+
+
+def _cross_trace_fixture():
+    first = _trajectory(_span("agent.first", 1), _skill(2, "producer"), _skill(3, "other"), _skill(4, "producer"))
+    second = _trajectory(
+        _span("agent.second", 10, trace_number=2),
+        _skill(11, "consumer", trace_number=2, parent_span_id=10),
+        _skill(12, "other", trace_number=2, parent_span_id=10),
+        _skill(13, "consumer", trace_number=2, parent_span_id=10),
+    )
+    continuities = ((0, first), (0, second))
+    fragments = project_symphony_execution_fragments(continuities)
+    boundary = SymphonyInterruptContinuation(f"{1:032x}", f"{2:032x}", 0, 0, 1, (f"{1:032x}", f"{2:032x}"))
+    plan = _planned_graph(("producer", "consumer"), names=("producer", "consumer"))
+    plan["graph"].update(type="planned_graph", directed=True, metadata={"status": "ready"})
+    return fragments, continuities, boundary, plan
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "no_descriptor",
+        "no_plan",
+        "not_ready",
+        "undirected",
+        "gap",
+        "nonadjacent",
+        "source_branches",
+        "target_branches",
+        "negative",
+        "bool",
+        "out_of_range",
+        "malformed",
+        "bad_trace_ids",
+        "wrong_source",
+    ],
+)
+def test_cross_trace_candidate_rejection_matrix(case: str) -> None:
+    fragments, continuities, boundary, plan = _cross_trace_fixture()
+    boundaries = (boundary,)
+    if case == "no_descriptor":
+        boundaries = ()
+    elif case == "no_plan":
+        plan = None
+    elif case == "not_ready":
+        plan["graph"]["metadata"]["status"] = "needs_input"
+    elif case == "undirected":
+        plan["graph"]["directed"] = False
+    elif case == "gap":
+        fragments = tuple(
+            replace(item, continuity_index=1) if item.trace_id == boundary.target_trace_id else item
+            for item in fragments
+        )
+    elif case in {"source_branches", "target_branches"}:
+        target_trace = boundary.source_trace_id if case == "source_branches" else boundary.target_trace_id
+        first = next(item for item in fragments if item.trace_id == target_trace and item.capability_type == "skill")
+        fragments = tuple(replace(item, branch_span_id="other-branch") if item is first else item for item in fragments)
+    else:
+        changes = {
+            "nonadjacent": {
+                "target_segment_index": 2,
+                "trace_ids": (boundary.source_trace_id, "middle", boundary.target_trace_id),
+            },
+            "negative": {"source_segment_index": -1, "target_segment_index": 0},
+            "bool": {"continuity_index": False},
+            "out_of_range": {"source_segment_index": 8, "target_segment_index": 9},
+            "bad_trace_ids": {"trace_ids": [boundary.source_trace_id, boundary.target_trace_id]},
+            "wrong_source": {"source_trace_id": "wrong"},
+        }
+        boundaries = (
+            ({"source_trace_id": boundary.source_trace_id},)
+            if case == "malformed"
+            else (replace(boundary, **changes[case]),)
+        )
+    candidates = build_symphony_edge_candidates(
+        fragments,
+        continuities,
+        planned_graph=plan,
+        interrupt_continuations=boundaries,
+        edge_search_max_depth=10,
+    )
+    assert all(candidate.source_fragment.trace_id == candidate.target_fragment.trace_id for candidate in candidates)
+
+
+def test_cross_trace_repeated_occurrences_use_last_source_first_target_and_native_branches() -> None:
+    fragments, continuities, boundary, plan = _cross_trace_fixture()
+    candidates = build_symphony_edge_candidates(
+        fragments, continuities, planned_graph=plan, interrupt_continuations=(boundary,)
+    )
+    cross = [
+        candidate
+        for candidate in candidates
+        if candidate.source_fragment.trace_id != candidate.target_fragment.trace_id
+    ]
+    assert len(cross) == 1
+    candidate = cross[0]
+    assert candidate.candidate_reasons == ("interrupt_continuation",)
+    assert candidate.source_fragment.anchor_span_id == f"{4:016x}"
+    assert candidate.target_fragment.anchor_span_id == f"{11:016x}"
+    assert candidate.source_fragment.branch_span_id == f"{1:016x}"
+    assert candidate.target_fragment.branch_span_id == f"{10:016x}"
+    assert set(candidate.evidence_refs) == {f"{1:032x}#span={4:016x}", f"{2:032x}#span={11:016x}"}
+
+
+@pytest.mark.parametrize("max_candidates", [1, 64, None])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_conflicting_continuation_descriptors_are_rejected_before_candidate_limit(max_candidates, reverse) -> None:
+    fragments, continuities, boundary, plan = _cross_trace_fixture()
+    conflict = replace(boundary, trace_ids=boundary.trace_ids + (f"{3:032x}",))
+    descriptors = (boundary, conflict) if not reverse else (conflict, boundary)
+    candidates = build_symphony_edge_candidates(
+        fragments,
+        continuities,
+        planned_graph=plan,
+        interrupt_continuations=descriptors,
+        max_candidates=max_candidates,
+    )
+    assert all(candidate.source_fragment.trace_id == candidate.target_fragment.trace_id for candidate in candidates)
+
+
+def test_adjacent_interrupt_continuation_requires_ready_directed_plan() -> None:
+    first = _trajectory(_span("agent.first", 1, trace_number=1), _skill(2, "producer", trace_number=1))
+    second = _trajectory(_span("agent.second", 10, trace_number=2), _skill(11, "consumer", trace_number=2))
+    continuities = ((0, first), (0, second))
+    fragments = project_symphony_execution_fragments(continuities)
+    boundary = SymphonyInterruptContinuation(
+        f"{1:032x}",
+        f"{2:032x}",
+        0,
+        0,
+        1,
+        (f"{1:032x}", f"{2:032x}"),
+    )
+    ready_plan = {
+        "graph": {
+            "type": "planned_graph",
+            "directed": True,
+            "metadata": {"status": "ready"},
+            "nodes": {
+                "producer": {"label": "producer", "metadata": {"type": "skill"}},
+                "consumer": {"label": "consumer", "metadata": {"type": "skill"}},
+            },
+            "edges": [{"source": "producer", "target": "consumer"}],
+        }
+    }
+
+    candidates = build_symphony_edge_candidates(
+        fragments,
+        continuities,
+        planned_graph=ready_plan,
+        interrupt_continuations=(boundary,),
+    )
+
+    assert [_names(candidate) for candidate in candidates] == [("producer", "consumer")]
+    assert candidates[0].interrupt_continuation == boundary
+    assert set(candidates[0].evidence_refs) == {
+        f"{1:032x}#span={2:016x}",
+        f"{2:032x}#span={11:016x}",
+    }
+    assert (
+        build_symphony_edge_candidates(
+            fragments,
+            continuities,
+            planned_graph={"graph": {"metadata": {"status": "needs_input"}}},
+            interrupt_continuations=(boundary,),
+        )
+        == ()
+    )
 
 
 def test_repeated_name_does_not_create_unsubstantiated_self_candidate() -> None:

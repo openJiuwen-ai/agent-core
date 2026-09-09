@@ -19,6 +19,8 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs, ToolCallInputs
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.extensions.observability import span_context as shared_span_context
@@ -101,6 +103,7 @@ def _ctx(
     session_id: str = "session-1",
     member_id: str = "member-1",
     result: dict | None = None,
+    query: object = "run",
 ) -> AgentCallbackContext:
     session = SimpleNamespace(
         get_session_id=lambda: session_id,
@@ -109,7 +112,7 @@ def _ctx(
     return AgentCallbackContext(
         agent=SimpleNamespace(card=SimpleNamespace(id=member_id)),
         inputs=InvokeInputs(
-            query="run",
+            query=query,  # type: ignore[arg-type]
             conversation_id=session_id,
             result=result or {"result_type": "answer", "output": "done"},
         ),
@@ -269,6 +272,23 @@ async def test_first_ready_planned_graph_wins_and_is_detached() -> None:
     assert prepared.quality_flags == ("planned_graph_invalid",)
     capture = rail._current_capture()
     assert capture is not None
+    rail._unsubscribe_capture(capture)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["needs_input", "no_plan"])
+async def test_non_ready_planned_graph_status_is_not_marked_invalid(status: str) -> None:
+    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor())
+    ctx = _ctx()
+    await rail.before_invoke(ctx)
+    graph = _ready_graph("not-ready")
+    graph["graph"]["metadata"]["status"] = status
+    await rail._on_after_tool_call(_tool_ctx(ctx, {"success": True, "planned_graph": graph}), None)
+    capture = rail._current_capture()
+    assert capture is not None
+    state = rail._state(capture)
+    assert state is not None
+    assert "planned_graph_invalid" not in state.quality_codes
     rail._unsubscribe_capture(capture)
 
 
@@ -715,6 +735,50 @@ async def test_unclaimed_parallel_tool_token_does_not_cross_invoke_cleanup() -> 
     second_capture = rail._current_capture()
     assert second_capture is not None
     rail._unsubscribe_capture(second_capture)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_defers_and_exact_interactive_resume_keeps_original_query() -> None:
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        graph_snapshot_provider=_graph_snapshot,
+        submit_evolution=callback,
+        async_evolution=False,
+    )
+    interrupted = _ctx(result={"result_type": "interrupt", "component_ids": ["ask-user"]})
+    await rail.before_invoke(interrupted)
+    rail.trajectory_span_processor.on_end(_span("llm.first", 1))
+    rail._drain_for_hook(interrupted)
+    await rail.after_invoke(interrupted)
+
+    assert callback.await_count == 0
+    assert len(rail._paused_symphony_states) == 1
+
+    user_input = InteractiveInput()
+    user_input.update("ask-user", "yes")
+    resumed = _ctx(query=user_input, result={"result_type": "answer", "output": "done"})
+    await rail.before_invoke(resumed)
+    resumed_capture = rail._current_capture()
+    assert resumed_capture is not None
+    resumed_state = rail._state(resumed_capture)
+    assert resumed_state is not None
+    assert resumed_state.original_query == "run"
+    await rail.after_invoke(resumed)
+
+    assert callback.await_count == 0
+    assert not rail._paused_symphony_states
+
+
+def test_real_tool_interrupt_result_uses_interrupt_ids_and_conflicting_aliases_fail_closed() -> None:
+    result = ToolInterruptHandler.build_interrupt_result([("tool-call-1", {"question": "continue?"})])
+    assert rail_module._interrupt_component_ids(result) == ("tool-call-1",)
+    assert (
+        rail_module._interrupt_component_ids(
+            {"result_type": "interrupt", "interrupt_ids": ["a"], "component_ids": ["b"]}
+        )
+        == ()
+    )
 
 
 @pytest.mark.asyncio
@@ -1524,6 +1588,474 @@ async def test_background_prepared_input_survives_capture_cleanup() -> None:
     await rail.drain_pending_host_events(wait=True)
     assert len(received) == 1
     assert len(tuple(iter_spans(received[0].trajectory))) == 1
+
+
+def _resume_input(*components: str) -> InteractiveInput:
+    response = InteractiveInput()
+    for component in components:
+        response.update(component, "confirmed")
+    return response
+
+
+def _emit_interrupt_segment(rail: SymphonyGraphEvolutionRail, trace: int) -> None:
+    processor = rail.trajectory_span_processor
+    processor.on_end(_span("agent.root", 1, trace_id=trace))
+    processor.on_end(
+        _span("agent.worker", 2, trace_id=trace, parent_span_id=1, attributes={semconv.AT_MEMBER_ID: "worker"})
+    )
+    processor.on_end(
+        _span(
+            "tool.skill_tool",
+            3,
+            trace_id=trace,
+            parent_span_id=2,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": "alpha", "relative_file_path": "SKILL.md"}),
+                semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True}),
+            },
+        )
+    )
+    processor.on_end(
+        _span("tool.lookup", 4, trace_id=trace, parent_span_id=2, attributes={semconv.GEN_AI_TOOL_NAME: "lookup"})
+    )
+    processor.on_end(_span("llm.call", 5, trace_id=trace, parent_span_id=2))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+@pytest.mark.parametrize("resumes", [1, 2])
+@pytest.mark.parametrize("id_field", ["component_ids", "interrupt_ids"])
+async def test_interrupt_lifecycle_matrix_preserves_complete_input(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+    resumes: int,
+    id_field: str,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    initial_model = SimpleNamespace(invoke=AsyncMock())
+    identity = CapabilityIdentity("skill:alpha", "skill", "alpha", "v1", "sha256:a", ("in",), ("out",))
+    snapshot = _graph_snapshot()
+    received = []
+    callback = AsyncMock()
+    consumer = AsyncMock(side_effect=received.append)
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        capability_snapshot_provider=SimpleNamespace(snapshot_capabilities=lambda: [identity]),
+        graph_snapshot_provider=lambda: snapshot,
+        submit_evolution=callback,
+        input_consumer=consumer,
+        async_evolution=False,
+        edge_evaluator_llm=initial_model,
+        edge_search_max_depth=7,
+    )
+    trigger = AsyncMock(wraps=rail._trigger_evolution)
+    monkeypatch.setattr(rail, "_trigger_evolution", trigger)
+    saved = None
+    for segment in range(resumes + 1):
+        roots["value"] = _root(segment + 1)
+        interrupt = segment < resumes
+        result = (
+            ToolInterruptHandler.build_interrupt_result([("ask-user", {"question": "continue?"})])
+            if interrupt and id_field == "interrupt_ids"
+            else {"result_type": "interrupt", id_field: ["ask-user"]}
+            if interrupt
+            else {"result_type": "answer", "output": "done"}
+        )
+        ctx = _ctx(query="original task" if segment == 0 else _resume_input("ask-user"), result=result)
+        await rail.before_invoke(ctx)
+        state = rail._state(rail._current_capture())
+        assert state is not None
+        if saved is not None:
+            assert state is saved
+            assert len(state.increments) == segment
+            assert state.current_continuity_index == 0
+        _emit_interrupt_segment(rail, segment + 1)
+        await rail._on_after_tool_call(_tool_ctx(ctx, {"planned_graph": _ready_graph(f"plan-{segment}")}), None)
+        if segment == 0:
+            await rail._on_after_tool_call(_tool_ctx(ctx, {"planned_graph": {"graph": {}}}), None)
+            rail.update_edge_evaluator_llm(SimpleNamespace(invoke=AsyncMock()))
+            rail._edge_search_max_depth = 1
+            snapshot["static_revision"] = "changed"
+        saved = state
+        await rail.after_invoke(ctx)
+        if interrupt:
+            trigger.assert_not_awaited()
+            callback.assert_not_awaited()
+            consumer.assert_not_awaited()
+            assert len(rail._paused_symphony_states) == 1
+    assert trigger.await_count == callback.await_count == consumer.await_count == 1
+    prepared = received[0]
+    assert prepared.query == "original task"
+    assert prepared.edge_evaluator_llm is initial_model
+    assert prepared.edge_search_max_depth == 7
+    assert prepared.capability_snapshot == (identity,)
+    assert prepared.graph_snapshot == {**_graph_snapshot(), "merged_revision": None}
+    assert prepared.planned_graph["graph"]["id"] == "plan-0"
+    assert prepared.quality_flags == ("planned_graph_invalid",)
+    assert prepared.trace_ids == tuple(f"{index:032x}" for index in range(1, resumes + 2))
+    assert len(prepared.interrupt_continuations) == resumes
+    assert {fragment.trace_id for fragment in prepared.execution_fragments} == set(prepared.trace_ids)
+    assert {index for index, _ in prepared.execution_continuities} == {0}
+    assert len(list(iter_spans(prepared.trajectory))) == 5 * (resumes + 1)
+    if rail_type is TeamSymphonyGraphEvolutionRail:
+        assert [fragment.capability_name for fragment in prepared.execution_fragments] == ["worker"] * (resumes + 1)
+        assert callback.await_args.kwargs["capture_mode"] == "team"
+    else:
+        assert {fragment.capability_type for fragment in prepared.execution_fragments} >= {"skill", "tool"}
+    assert callback.await_args.args[1]["trace_ids"] == list(prepared.trace_ids)
+    assert not rail._paused_symphony_states and not rail._symphony_states and not rail._active_captures
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+@pytest.mark.parametrize(
+    "case", ["wrong", "multiple", "new_task", "cancel", "error", "conflict", "before", "after", "uninit"]
+)
+async def test_interrupt_lifecycle_invalidations_never_revive(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+    case: str,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    callback = AsyncMock()
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    ctx = _ctx(result={"result_type": "interrupt", "interrupt_ids": ["ask"]})
+    await rail.before_invoke(ctx)
+    _emit_interrupt_segment(rail, 1)
+    await rail.after_invoke(ctx)
+    assert rail._paused_symphony_states
+    roots["value"] = _root(2)
+    if case == "uninit":
+        rail.uninit(SimpleNamespace())
+    else:
+        query = (
+            "new task"
+            if case == "new_task"
+            else _resume_input("wrong")
+            if case == "wrong"
+            else (_resume_input("ask", "other") if case == "multiple" else _resume_input("ask"))
+        )
+        result = {"result_type": "interrupt", "interrupt_ids": ["ask"]}
+        if case == "cancel":
+            result = {"result_type": "cancelled"}
+        elif case == "error":
+            result = {"result_type": "error"}
+        elif case == "conflict":
+            result["success"] = False
+        elif case == "new_task":
+            result = {"result_type": "answer", "output": "new done"}
+        follow = _ctx(query=query, result=result)
+        if case == "before":
+            original = rail._on_before_invoke
+
+            async def broken_before(context):
+                await original(context)
+                raise RuntimeError("before failed")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(rail, "_on_before_invoke", broken_before)
+                with pytest.raises(RuntimeError, match="before failed"):
+                    await rail.before_invoke(follow)
+        else:
+            await rail.before_invoke(follow)
+            _emit_interrupt_segment(rail, 2)
+            if case == "after":
+                with monkeypatch.context() as patch:
+                    patch.setattr(rail, "_on_after_invoke", AsyncMock(side_effect=RuntimeError("after failed")))
+                    with pytest.raises(RuntimeError, match="after failed"):
+                        await rail.after_invoke(follow)
+            else:
+                await rail.after_invoke(follow)
+    assert not rail._paused_symphony_states
+    prior_calls = callback.await_count
+    assert prior_calls == (1 if case == "new_task" else 0)
+    # A rejected restore that itself interrupts must not establish a new chain.
+    roots["value"] = _root(3)
+    final = _ctx(query=_resume_input("ask"))
+    await rail.before_invoke(final)
+    _emit_interrupt_segment(rail, 3)
+    await rail.after_invoke(final)
+    assert callback.await_count == prior_calls
+    assert not rail._paused_symphony_states and not rail._active_captures and not rail._symphony_states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["needs_input", "no_plan"])
+@pytest.mark.parametrize("malformed", ["nodes", "edges", "dangling"])
+async def test_nonready_plan_still_requires_valid_graph(status: str, malformed: str) -> None:
+    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor())
+    ctx = _ctx()
+    await rail.before_invoke(ctx)
+    graph = _ready_graph("nonready")
+    graph["graph"]["metadata"]["status"] = status
+    if malformed == "dangling":
+        graph["graph"]["edges"] = [{"source": "missing", "target": "also-missing"}]
+    else:
+        graph["graph"][malformed] = "invalid"
+    await rail._on_after_tool_call(_tool_ctx(ctx, {"planned_graph": graph}), None)
+    assert "planned_graph_invalid" in rail._state(rail._current_capture()).quality_codes
+    await rail.after_invoke(ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["session", "owner", "capture_mode"])
+async def test_same_component_isolated_by_resume_scope(monkeypatch: pytest.MonkeyPatch, scope: str) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    received = []
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        input_consumer=AsyncMock(side_effect=received.append),
+        async_evolution=False,
+    )
+    contexts = [
+        _ctx(query="first", result={"result_type": "interrupt", "component_ids": ["shared"]}),
+        _ctx(
+            query="second",
+            session_id="other" if scope == "session" else "session-1",
+            member_id="other" if scope == "owner" else "member-1",
+            result={"result_type": "interrupt", "component_ids": ["shared"]},
+        ),
+    ]
+    if scope == "capture_mode":
+        contexts[1].team_id = "member-1"
+    for index, ctx in enumerate(contexts, 1):
+        roots["value"] = _root(index)
+        await rail.before_invoke(ctx)
+        _emit_interrupt_segment(rail, index)
+        await rail.after_invoke(ctx)
+    assert len(rail._paused_symphony_states) == 2
+    for index, ctx in enumerate(contexts, 3):
+        roots["value"] = _root(index)
+        ctx.inputs = InvokeInputs(query=_resume_input("shared"), result={"result_type": "answer", "output": "done"})
+        await rail.before_invoke(ctx)
+        _emit_interrupt_segment(rail, index)
+        await rail.after_invoke(ctx)
+    assert [item.query for item in received] == ["first", "second"]
+    assert received[0].trace_ids == (f"{1:032x}", f"{3:032x}")
+    assert received[1].trace_ids == (f"{2:032x}", f"{4:032x}")
+    assert not rail._paused_symphony_states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+@pytest.mark.parametrize("count", [2, 3])
+async def test_concurrent_same_scope_interrupt_key_never_selects_a_winner(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+    count: int,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    callback = AsyncMock()
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    contexts = [_ctx(result={"result_type": "interrupt", "component_ids": ["shared"]}) for _ in range(count)]
+    for index, ctx in enumerate(contexts, 1):
+        roots["value"] = _root(index)
+        await Context().run(asyncio.create_task, rail.before_invoke(ctx))
+        _emit_interrupt_segment(rail, index)
+    assert len(rail._active_captures) == count
+    for index, ctx in enumerate(contexts, 1):
+        roots["value"] = _root(index)
+        await Context().run(asyncio.create_task, rail.after_invoke(ctx))
+    roots["value"] = _root(count + 1)
+    resume = _ctx(query=_resume_input("shared"))
+    await rail.before_invoke(resume)
+    _emit_interrupt_segment(rail, count + 1)
+    await rail.after_invoke(resume)
+    callback.assert_not_awaited()
+    assert not rail._paused_symphony_states and not rail._active_captures
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+async def test_resume_retains_pending_continuity_gap_and_quality(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    received = []
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        input_consumer=AsyncMock(side_effect=received.append),
+        async_evolution=False,
+    )
+    ctx = _ctx(result={"result_type": "interrupt", "component_ids": ["ask"]})
+    await rail.before_invoke(ctx)
+    _emit_interrupt_segment(rail, 1)
+    rail._drain_for_hook(ctx)
+    # A real malformed tool payload is rejected after an earlier clean drain.
+    rail.trajectory_span_processor.on_end(
+        _span(
+            "tool.bad",
+            6,
+            trace_id=1,
+            parent_span_id=2,
+            attributes={semconv.GEN_AI_TOOL_NAME: "bad", semconv.GEN_AI_TOOL_OUTPUT: "{broken"},
+        )
+    )
+    await rail.after_invoke(ctx)
+    paused = next(iter(rail._paused_symphony_states.values()))
+    assert paused.continuity_break_pending
+    assert "tool_payload_json_error" in paused.quality_codes
+    roots["value"] = _root(2)
+    restored = _ctx(query=_resume_input("ask"))
+    await rail.before_invoke(restored)
+    _emit_interrupt_segment(rail, 2)
+    await rail.after_invoke(restored)
+    assert len(received) == 1
+    prepared = received[0]
+    assert {index for index, _ in prepared.execution_continuities} == {0, 1}
+    assert "tool_payload_json_error" in prepared.quality_flags
+    assert len(list(iter_spans(prepared.trajectory))) == 10
+    assert prepared.interrupt_continuations[0].continuity_index == 0
+
+
+@pytest.mark.asyncio
+async def test_team_member_spans_and_repeated_completion_do_not_duplicate_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: _root(1))
+    callback = AsyncMock()
+    rail = TeamSymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    leader = _ctx(member_id="leader")
+    await rail.before_invoke(leader)
+    _emit_interrupt_segment(rail, 1)
+    for index, member in enumerate(("worker", "reviewer"), 10):
+        rail.trajectory_span_processor.on_end(
+            _span("agent.member", index, trace_id=1, parent_span_id=1, attributes={semconv.AT_MEMBER_ID: member})
+        )
+    callback.assert_not_awaited()
+    await rail.after_invoke(leader)
+    for member in ("worker", "reviewer", "leader"):
+        await rail.after_invoke(_ctx(member_id=member))
+    assert callback.await_count == 1
+    assert callback.await_args.kwargs["capture_mode"] == "team"
+
+
+def test_prepared_input_preserves_legacy_positional_constructor() -> None:
+    trajectory = _trajectory()
+    identity = CapabilityIdentity("skill:a", "skill", "a", "v1", "sha256:a", ("in",), ("out",))
+    # Historical positional order includes inherited skill_name before the
+    # original Symphony fields, with capability_snapshot in position seven.
+    prepared = SymphonyGraphEvolutionInput(
+        trajectory,
+        (),
+        None,
+        _ready_graph("plan"),
+        (),
+        (),
+        (identity,),
+        _graph_snapshot(),
+        "original task",
+        "success",
+        None,
+        "trace",
+        "session",
+        "agent",
+        ("quality",),
+        None,
+        7,
+    )
+    assert prepared.capability_snapshot == (identity,)
+    assert prepared.graph_snapshot == _graph_snapshot()
+    assert prepared.query == "original task"
+    assert prepared.edge_search_max_depth == 7
+    assert prepared.trace_ids == prepared.interrupt_continuations == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+async def test_conflict_invalidates_third_pause_waiting_to_acquire_lock(
+    monkeypatch: pytest.MonkeyPatch, rail_type: type
+) -> None:
+    roots = threading.local()
+    roots.value = _root(1)
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots.value)
+    callback = AsyncMock()
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    contexts = [_ctx(result={"result_type": "interrupt", "component_ids": ["shared"]}) for _ in range(3)]
+    for index, ctx in enumerate(contexts, 1):
+        roots.value = _root(index)
+        await Context().run(asyncio.create_task, rail.before_invoke(ctx))
+        _emit_interrupt_segment(rail, index)
+    roots.value = _root(1)
+    await Context().run(asyncio.create_task, rail.after_invoke(contexts[0]))
+    entered = threading.Event()
+    release = threading.Event()
+    original_lock = rail._symphony_states_lock
+    original_pause = rail._pause_interrupt_state
+    errors = []
+
+    class ControlledLock:
+        def __enter__(self):
+            if getattr(roots, "block_pause", False):
+                roots.block_pause = False
+                entered.set()
+                assert release.wait(5), "conflict thread did not release the waiting pause"
+            original_lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            original_lock.release()
+
+    def pause_after_outer_check(state, inputs):
+        if threading.current_thread().name == "third-pause":
+            roots.block_pause = True
+        original_pause(state, inputs)
+
+    monkeypatch.setattr(rail, "_symphony_states_lock", ControlledLock())
+    monkeypatch.setattr(rail, "_pause_interrupt_state", pause_after_outer_check)
+
+    def third_completion():
+        roots.value = _root(3)
+        try:
+            asyncio.run(rail.after_invoke(contexts[2]))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=third_completion, name="third-pause")
+    worker.start()
+    try:
+        assert await asyncio.to_thread(entered.wait, 5), "third pause did not reach the lock boundary"
+        roots.value = _root(2)
+        await Context().run(asyncio.create_task, rail.after_invoke(contexts[1]))
+        assert not rail._paused_symphony_states
+    finally:
+        release.set()
+        await asyncio.to_thread(worker.join, 5)
+    assert not worker.is_alive() and not errors
+    assert not rail._paused_symphony_states
+    roots.value = _root(4)
+    restored = _ctx(query=_resume_input("shared"))
+    await rail.before_invoke(restored)
+    _emit_interrupt_segment(rail, 4)
+    await rail.after_invoke(restored)
+    callback.assert_not_awaited()
 
 
 def test_public_exports_are_available() -> None:

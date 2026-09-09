@@ -21,6 +21,7 @@ from unicodedata import category as unicode_category
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    _valid_interrupt_continuations,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
@@ -394,20 +395,29 @@ def _is_complete_candidate(candidate: SymphonyEdgeCandidate) -> bool:
         and _is_complete_fragment(source)
         and _is_complete_fragment(target)
         and source.fragment_id != target.fragment_id
-        and source.trace_id == target.trace_id
         and source.continuity_index == target.continuity_index
         and isinstance(candidate.evidence_refs, tuple)
         and candidate.evidence_refs
     ):
         return False
-    allowed_span_ids = set(source.span_ids) | set(target.span_ids)
+    if source.trace_id != target.trace_id:
+        continuation = candidate.interrupt_continuation
+        if (
+            continuation is None
+            or not _valid_interrupt_continuations((continuation,))
+            or continuation.source_trace_id != source.trace_id
+            or continuation.target_trace_id != target.trace_id
+            or continuation.continuity_index != source.continuity_index
+        ):
+            return False
+    allowed_span_ids = {(fragment.trace_id, span_id) for fragment in (source, target) for span_id in fragment.span_ids}
     for evidence_ref in candidate.evidence_refs:
         if not isinstance(evidence_ref, str):
             return False
         match = _EVIDENCE_REF_RE.fullmatch(evidence_ref)
-        if match is None or match.group("trace_id") != source.trace_id:
+        if match is None:
             return False
-        if match.group("span_id") not in allowed_span_ids:
+        if (match.group("trace_id"), match.group("span_id")) not in allowed_span_ids:
             return False
     return _covers_both_endpoints(candidate, candidate.evidence_refs)
 
@@ -432,14 +442,14 @@ def _is_complete_fragment(fragment: object) -> bool:
 
 
 def _covers_both_endpoints(candidate: SymphonyEdgeCandidate, evidence_refs: Sequence[str]) -> bool:
-    source_ids = set(candidate.source_fragment.span_ids)
-    target_ids = set(candidate.target_fragment.span_ids)
-    referenced_ids: set[str] = set()
+    source_ids = {(candidate.source_fragment.trace_id, span_id) for span_id in candidate.source_fragment.span_ids}
+    target_ids = {(candidate.target_fragment.trace_id, span_id) for span_id in candidate.target_fragment.span_ids}
+    referenced_ids: set[tuple[str, str]] = set()
     for evidence_ref in evidence_refs:
         match = _EVIDENCE_REF_RE.fullmatch(evidence_ref)
-        if match is None or match.group("trace_id") != candidate.source_fragment.trace_id:
+        if match is None:
             return False
-        referenced_ids.add(match.group("span_id"))
+        referenced_ids.add((match.group("trace_id"), match.group("span_id")))
     return bool(referenced_ids & source_ids and referenced_ids & target_ids)
 
 
@@ -447,9 +457,10 @@ def _covers_occurrence_anchors(
     candidate: SymphonyEdgeCandidate,
     evidence_refs: Sequence[str],
 ) -> bool:
-    trace_id = candidate.source_fragment.trace_id
-    source_anchor_ref = f"{trace_id}#span={candidate.source_fragment.anchor_span_id}"
-    target_anchor_ref = f"{trace_id}#span={candidate.target_fragment.anchor_span_id}"
+    source = candidate.source_fragment
+    target = candidate.target_fragment
+    source_anchor_ref = f"{source.trace_id}#span={source.anchor_span_id}"
+    target_anchor_ref = f"{target.trace_id}#span={target.anchor_span_id}"
     return (
         source_anchor_ref != target_anchor_ref
         and source_anchor_ref in evidence_refs

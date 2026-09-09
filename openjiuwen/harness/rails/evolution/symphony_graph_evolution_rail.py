@@ -35,6 +35,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
 from openjiuwen.extensions.observability import semconv as observability_semconv
 from openjiuwen.harness.rails.evolution.evolution_rail import (
@@ -51,6 +52,7 @@ from openjiuwen.harness.rails.evolution.symphony_edge_evaluator import (
 )
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
+    SymphonyInterruptContinuation,
     build_model_edge_decisions,
     build_symphony_edge_candidates,
 )
@@ -100,6 +102,8 @@ class SymphonyGraphEvolutionInput(PreparedEvolutionInput):
     planned_graph: dict[str, Any] | None = None
     execution_fragments: tuple[SymphonyExecutionFragment, ...] = ()
     execution_continuities: tuple[tuple[int, Trajectory], ...] = ()
+    interrupt_continuations: tuple[SymphonyInterruptContinuation, ...] = field(default=(), kw_only=True)
+    trace_ids: tuple[str, ...] = field(default=(), kw_only=True)
     capability_snapshot: tuple[CapabilityIdentity, ...] = ()
     graph_snapshot: dict[str, str] | None = None
     query: str = ""
@@ -125,6 +129,16 @@ class _CapturedToolToken:
     tool_name: str
 
 
+@dataclass(frozen=True)
+class _PausedInvokeKey:
+    """Exact resume identity; deliberately excludes query and clock heuristics."""
+
+    session_id: str
+    capture_mode: CaptureMode
+    owner_id: str
+    component_id: str
+
+
 @dataclass
 class _SymphonyInvokeState:
     """State deliberately kept out of the shared EvolutionRail capture."""
@@ -136,6 +150,11 @@ class _SymphonyInvokeState:
     capture_mode: CaptureMode
     edge_evaluator_llm: SymphonyLLM | None
     edge_search_max_depth: int
+    original_query: str = ""
+    active_trace_id: str | None = None
+    trace_ids: list[str] = field(default_factory=list)
+    interrupt_continuations: list[SymphonyInterruptContinuation] = field(default_factory=list)
+    suppress_evolution: bool = False
     capability_snapshot: tuple[CapabilityIdentity, ...] = ()
     graph_snapshot: dict[str, str] | None = None
     planned_graph: dict[str, Any] | None = None
@@ -197,6 +216,34 @@ def _ready_planned_graph(tool_result: Any) -> dict[str, Any] | None:
     return detached
 
 
+def _is_valid_nonready_planned_graph(payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    planned_graph = payload.get("planned_graph")
+    graph = planned_graph.get("graph") if isinstance(planned_graph, Mapping) else None
+    metadata = graph.get("metadata") if isinstance(graph, Mapping) else None
+    status = metadata.get("status") if isinstance(metadata, Mapping) else None
+    if not isinstance(graph, Mapping) or status not in {"needs_input", "no_plan"}:
+        return False
+    try:
+        candidate = deepcopy(planned_graph)
+        candidate["graph"]["metadata"]["status"] = "ready"
+        validation_execution = build_symphony_execution_graph(
+            trace_id="planned-graph-capture-validation",
+            query="",
+            outcome="success",
+            candidates=(),
+            decisions=(),
+            capability_snapshot=(),
+        )
+        _canonical_graph_pair(candidate, validation_execution)
+    except MemoryError:
+        raise
+    except Exception:
+        return False
+    return True
+
+
 class SymphonyGraphEvolutionRail(EvolutionRail):
     """Produce one execution-graph submission per valid Agent invoke."""
 
@@ -247,6 +294,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         self._edge_search_max_depth = max(0, edge_search_max_depth)
         self._symphony_states: dict[object, _SymphonyInvokeState] = {}
         self._symphony_states_lock = threading.RLock()
+        self._paused_symphony_states: dict[_PausedInvokeKey, _SymphonyInvokeState] = {}
 
     @property
     def submit_evolution(self) -> SymphonyEvolutionSubmitCallback | None:
@@ -327,14 +375,18 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             if session_id is not None and state.session_id != str(session_id):
                 continue
             if state.capture_mode == "team":
-                if route_trace is None or state.trace_id != route_trace:
+                if route_trace is None or state.active_trace_id != route_trace:
                     continue
                 if team_id is not None and state.team_id != str(team_id):
                     continue
             else:
                 if member_id is not None and state.member_id != str(member_id):
                     continue
-                if route_trace is not None and state.trace_id is not None and state.trace_id != route_trace:
+                if (
+                    route_trace is not None
+                    and state.active_trace_id is not None
+                    and state.active_trace_id != route_trace
+                ):
                     continue
             matches.append(capture)
         unique: list[_InvokeCapture] = []
@@ -383,14 +435,27 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         if route is None:
             raise RuntimeError("Symphony trajectory capture route is unavailable")
         member_id, team_id, trace_id = route
+        capture_mode: CaptureMode = "team" if team_id is not None else "agent"
+        owner_id = str(team_id if capture_mode == "team" else member_id or capture.member_id or "")
+        resumed = self._claim_paused_state(capture.session_id, capture_mode, owner_id, ctx.inputs)
+        if resumed is not None:
+            self._activate_resumed_state(resumed, trace_id)
+            with self._symphony_states_lock:
+                self._symphony_states[capture.subscription] = resumed
+            return
+        self._clear_paused_scope(capture.session_id, capture_mode, owner_id)
         state = _SymphonyInvokeState(
             session_id=capture.session_id,
             member_id=member_id or capture.member_id,
             team_id=team_id or capture.team_id,
             trace_id=trace_id,
-            capture_mode="team" if team_id is not None else "agent",
+            capture_mode=capture_mode,
             edge_evaluator_llm=self._edge_evaluator_llm,
             edge_search_max_depth=self._edge_search_max_depth,
+            original_query=_query_from_inputs(ctx.inputs),
+            active_trace_id=trace_id,
+            trace_ids=[trace_id] if trace_id else [],
+            suppress_evolution=isinstance(ctx.inputs.query, InteractiveInput),
         )
         with self._symphony_states_lock:
             self._symphony_states[capture.subscription] = state
@@ -418,6 +483,72 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             except Exception:
                 self._remember_quality(state, ({"code": "graph_snapshot_error"},))
 
+    def _claim_paused_state(
+        self,
+        session_id: str,
+        capture_mode: CaptureMode,
+        owner_id: str,
+        inputs: Any,
+    ) -> _SymphonyInvokeState | None:
+        """Claim exactly one component-id matched pause, or fail closed."""
+
+        query = getattr(inputs, "query", None)
+        if not isinstance(query, InteractiveInput):
+            return None
+        component_ids = _interactive_component_ids(query)
+        with self._symphony_states_lock:
+            matches = [
+                (key, state)
+                for key, state in self._paused_symphony_states.items()
+                if key.session_id == session_id
+                and key.capture_mode == capture_mode
+                and key.owner_id == owner_id
+                and key.component_id in component_ids
+            ]
+            if len(component_ids) != 1 or len(matches) != 1:
+                # An invalid or ambiguous response cannot be attached to a
+                # paused task.  Drop same-scope pending state rather than
+                # guessing from session/query/time.
+                self._clear_paused_scope_locked(session_id, capture_mode, owner_id)
+                return None
+            _, state = matches[0]
+            self._remove_paused_state_locked(state)
+            return state
+
+    def _activate_resumed_state(self, state: _SymphonyInvokeState, trace_id: str | None) -> None:
+        with state.lock:
+            previous_trace_id = state.active_trace_id
+            previous_segment_index = len(state.trace_ids) - 1
+            if trace_id and trace_id not in state.trace_ids:
+                state.trace_ids.append(trace_id)
+            if previous_trace_id and trace_id and previous_trace_id != trace_id:
+                state.interrupt_continuations.append(
+                    SymphonyInterruptContinuation(
+                        source_trace_id=previous_trace_id,
+                        target_trace_id=trace_id,
+                        continuity_index=state.current_continuity_index,
+                        source_segment_index=previous_segment_index,
+                        target_segment_index=len(state.trace_ids) - 1,
+                        trace_ids=tuple(state.trace_ids),
+                    )
+                )
+            state.active_trace_id = trace_id
+            state.suppress_evolution = False
+
+    def _clear_paused_scope(self, session_id: str, capture_mode: CaptureMode, owner_id: str) -> None:
+        with self._symphony_states_lock:
+            self._clear_paused_scope_locked(session_id, capture_mode, owner_id)
+
+    def _clear_paused_scope_locked(self, session_id: str, capture_mode: CaptureMode, owner_id: str) -> None:
+        for key in tuple(self._paused_symphony_states):
+            if key.session_id == session_id and key.capture_mode == capture_mode and key.owner_id == owner_id:
+                self._paused_symphony_states.pop(key, None)
+
+    def _remove_paused_state_locked(self, state: _SymphonyInvokeState) -> None:
+        for key, value in tuple(self._paused_symphony_states.items()):
+            if value is state:
+                self._paused_symphony_states.pop(key, None)
+
     def _unsubscribe_capture(self, capture: _InvokeCapture) -> None:
         try:
             super()._unsubscribe_capture(capture)
@@ -431,6 +562,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         finally:
             with self._symphony_states_lock:
                 self._symphony_states.clear()
+                self._paused_symphony_states.clear()
 
     @staticmethod
     def _capture_quality_issues(trajectory: Trajectory | None) -> tuple[Mapping[str, object], ...]:
@@ -716,7 +848,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 self._remember_quality(state, ({"code": "planned_graph_capture_error"},))
                 return
             if has_planned_graph:
-                self._remember_quality(state, ({"code": "planned_graph_invalid"},))
+                if not _is_valid_nonready_planned_graph(payload):
+                    self._remember_quality(state, ({"code": "planned_graph_invalid"},))
             return
         with state.lock:
             if state.planned_graph is None:
@@ -742,6 +875,11 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             state = self._state(lifecycle_capture)
             trajectory = self._project_state_trajectory(lifecycle_capture, state) if state is not None else None
             await self._on_after_invoke(ctx, trajectory)
+            if state is not None and (state.suppress_evolution or _is_cancelled_or_error_result(ctx.inputs)):
+                return
+            if state is not None and _is_interrupt_result(ctx.inputs):
+                self._pause_interrupt_state(state, ctx.inputs)
+                return
             if (
                 trajectory is not None
                 and self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE
@@ -752,6 +890,48 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         finally:
             if cleanup_capture is not None:
                 self._unsubscribe_capture(cleanup_capture)
+
+    def _pause_interrupt_state(self, state: _SymphonyInvokeState, inputs: Any) -> None:
+        """Store a drained invoke only under explicit interrupt component IDs."""
+
+        component_ids = _interrupt_component_ids(getattr(inputs, "result", None))
+        owner_id = state.team_id if state.capture_mode == "team" else state.member_id
+        if not component_ids or not owner_id:
+            return
+        keys = tuple(
+            _PausedInvokeKey(
+                session_id=state.session_id,
+                capture_mode=state.capture_mode,
+                owner_id=str(owner_id),
+                component_id=component_id,
+            )
+            for component_id in component_ids
+        )
+        with self._symphony_states_lock:
+            # A concurrent conflict may invalidate this state after the
+            # lifecycle's outer check but before this lock is acquired.
+            if state.suppress_evolution:
+                return
+            # Do not overwrite an outstanding exact key; it would turn an
+            # otherwise visible conflict into an arbitrary resume target.
+            if any(
+                key in self._paused_symphony_states and self._paused_symphony_states[key] is not state for key in keys
+            ):
+                self._clear_paused_scope_locked(state.session_id, state.capture_mode, str(owner_id))
+                # Invalidate the overlapping invokes too: a third completion
+                # must not recreate the key after the first conflict cleared it.
+                for active in self._symphony_states.values():
+                    active_owner = active.team_id if active.capture_mode == "team" else active.member_id
+                    if (
+                        active.session_id == state.session_id
+                        and active.capture_mode == state.capture_mode
+                        and active_owner == owner_id
+                    ):
+                        active.suppress_evolution = True
+                return
+            self._remove_paused_state_locked(state)
+            for key in keys:
+                self._paused_symphony_states[key] = state
 
     async def _on_after_invoke(
         self,
@@ -818,7 +998,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 )
             )
         )
-        query, outcome, reason = _invoke_result_contract(ctx)
+        _, outcome, reason = _invoke_result_contract(ctx)
         with state.lock:
             planned_graph = deepcopy(state.planned_graph)
             snapshot = tuple(deepcopy(state.capability_snapshot))
@@ -827,12 +1007,17 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             llm = state.edge_evaluator_llm
             depth = state.edge_search_max_depth
             trace_id = state.trace_id
+            interrupt_continuations = tuple(state.interrupt_continuations)
+            trace_ids = tuple(state.trace_ids)
+            query = state.original_query
         return SymphonyGraphEvolutionInput(
             trajectory=Trajectory.from_otlp(invoke_trajectory.to_otlp()),
             messages=messages,
             planned_graph=planned_graph,
             execution_fragments=tuple(fragments),
             execution_continuities=tuple(continuities),
+            interrupt_continuations=interrupt_continuations,
+            trace_ids=trace_ids,
             capability_snapshot=snapshot,
             graph_snapshot=graph_snapshot,
             query=query,
@@ -867,6 +1052,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             edge_search_max_depth=prepared.edge_search_max_depth,
             max_candidates=_CANDIDATE_PROBE_LIMIT,
             include_team_member_pairs=prepared.capture_mode == "team",
+            interrupt_continuations=prepared.interrupt_continuations,
         )
         candidate_truncated = len(candidates_probe) > _MAX_EDGE_CANDIDATES
         candidates = candidates_probe[:_MAX_EDGE_CANDIDATES]
@@ -891,6 +1077,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             capability_snapshot=prepared.capability_snapshot,
             graph_snapshot=prepared.graph_snapshot,
             quality_flags=tuple(sorted(flags)),
+            trace_ids=prepared.trace_ids or tuple(_ordered_trace_ids(prepared.trace_id, prepared.execution_fragments)),
+            interrupt_continuations=prepared.interrupt_continuations,
         )
         planned_graph = prepared.planned_graph
         try:
@@ -979,6 +1167,84 @@ def _invoke_result_contract(ctx: AgentCallbackContext) -> tuple[str, ExecutionOu
     return query_text, "partial", "invoke_result_unverified"
 
 
+def _query_from_inputs(inputs: InvokeInputs) -> str:
+    return inputs.query if isinstance(inputs.query, str) else ""
+
+
+def _is_interrupt_result(inputs: Any) -> bool:
+    result = getattr(inputs, "result", None)
+    return isinstance(result, Mapping) and str(result.get("result_type") or "").lower() == "interrupt"
+
+
+def _interrupt_component_ids(result: Any) -> tuple[str, ...]:
+    if not isinstance(result, Mapping) or str(result.get("result_type") or "").lower() != "interrupt":
+        return ()
+    component_present, component_ids = _normalized_interrupt_ids(result, "component_ids")
+    interrupt_present, interrupt_ids = _normalized_interrupt_ids(result, "interrupt_ids")
+    if not component_present and not interrupt_present:
+        return ()
+    if component_ids is None or interrupt_ids is None:
+        # An explicitly supplied malformed alias must never be masked by the
+        # other field.
+        return ()
+    if component_present and interrupt_present:
+        return component_ids if component_ids == interrupt_ids else ()
+    return component_ids if component_present else interrupt_ids
+
+
+def _normalized_interrupt_ids(result: Mapping[str, Any], field_name: str) -> tuple[bool, tuple[str, ...] | None]:
+    if field_name not in result:
+        return False, ()
+    value = result.get(field_name)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return True, None
+    normalized = tuple(_nonempty_text(item) for item in value)
+    if not normalized or any(item is None for item in normalized):
+        return True, None
+    values = tuple(item for item in normalized if item is not None)
+    return True, values if len(set(values)) == len(values) else None
+
+
+def _interactive_component_ids(inputs: InteractiveInput) -> tuple[str, ...]:
+    try:
+        user_inputs = inputs.user_inputs
+    except MemoryError:
+        raise
+    except Exception:
+        return ()
+    if not isinstance(user_inputs, Mapping):
+        return ()
+    values = tuple(_nonempty_text(key) for key in user_inputs)
+    if not values or any(value is None for value in values):
+        return ()
+    component_ids = tuple(value for value in values if value is not None)
+    return component_ids if len(set(component_ids)) == len(component_ids) else ()
+
+
+def _is_cancelled_or_error_result(inputs: Any) -> bool:
+    result = getattr(inputs, "result", None)
+    if not isinstance(result, Mapping):
+        return False
+    status = str(result.get("status") or "").lower()
+    result_type = str(result.get("result_type") or "").lower()
+    return (
+        result.get("success") is False
+        or status in {"cancelled", "canceled", "error", "failed", "failure"}
+        or result_type in {"cancelled", "canceled", "error"}
+    )
+
+
+def _ordered_trace_ids(
+    first_trace_id: str,
+    fragments: Sequence[SymphonyExecutionFragment],
+) -> tuple[str, ...]:
+    values = [first_trace_id]
+    for fragment in fragments:
+        if fragment.trace_id not in values:
+            values.append(fragment.trace_id)
+    return tuple(values)
+
+
 def _first_fragment_trace(fragments: Sequence[SymphonyExecutionFragment]) -> str | None:
     return next((fragment.trace_id for fragment in fragments if fragment.trace_id), None)
 
@@ -995,6 +1261,8 @@ def _detach_prepared_input(prepared: SymphonyGraphEvolutionInput) -> SymphonyGra
         execution_continuities=tuple(
             (index, Trajectory.from_otlp(trajectory.to_otlp())) for index, trajectory in prepared.execution_continuities
         ),
+        interrupt_continuations=prepared.interrupt_continuations,
+        trace_ids=prepared.trace_ids,
         capability_snapshot=prepared.capability_snapshot,
         graph_snapshot=deepcopy(prepared.graph_snapshot),
         query=prepared.query,

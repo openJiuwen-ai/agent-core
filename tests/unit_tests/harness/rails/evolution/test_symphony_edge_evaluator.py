@@ -17,6 +17,7 @@ from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     EdgeStatus,
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    SymphonyInterruptContinuation,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
@@ -139,6 +140,44 @@ def _response(candidate_payload: dict[str, Any], status: Literal["success", "fai
             ]
         }
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["valid", "missing", "malformed", "wrong_trace", "bool", "source_only_refs"])
+async def test_cross_trace_evaluation_requires_exact_descriptor_and_native_refs(case: str) -> None:
+    original = _candidate(1)
+    source = original.source_fragment
+    target = replace(
+        original.target_fragment,
+        trace_id="2" * 32,
+        anchor_span_id=source.anchor_span_id,
+        span_ids=(source.anchor_span_id,),
+    )
+    boundary = SymphonyInterruptContinuation(
+        source.trace_id, target.trace_id, 0, 0, 1, (source.trace_id, target.trace_id)
+    )
+    refs = (f"{source.trace_id}#span={source.anchor_span_id}", f"{target.trace_id}#span={target.anchor_span_id}")
+    if case == "missing":
+        boundary = None
+    elif case == "malformed":
+        boundary = {"source_trace_id": source.trace_id}
+    elif case == "wrong_trace":
+        boundary = replace(boundary, target_trace_id="foreign")
+    elif case == "bool":
+        boundary = replace(boundary, continuity_index=False)
+    elif case == "source_only_refs":
+        refs = (refs[0],)
+    candidate = replace(original, target_fragment=target, evidence_refs=refs, interrupt_continuation=boundary)
+    llm = _RecordingLLM()
+    decisions = await evaluate_symphony_edge_candidates(
+        llm=llm,
+        query="task",
+        candidates=(candidate,),
+        decisions=(_decision(candidate),),
+        summaries=_summaries(candidate),
+    )
+    assert len(llm.calls) == (1 if case == "valid" else 0)
+    assert decisions[0].status == ("success" if case == "valid" else "insufficient_evidence")
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,10 @@ from unicodedata import category as unicode_category
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    SymphonyInterruptContinuation,
+)
+from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
+    _valid_interrupt_continuations as _unambiguous_interrupt_continuations,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
@@ -77,6 +81,8 @@ def build_symphony_execution_graph(
     reason: str | None = None,
     quality_flags: Sequence[str] = (),
     graph_snapshot: Mapping[str, Any] | None = None,
+    trace_ids: Sequence[str] = (),
+    interrupt_continuations: Sequence[SymphonyInterruptContinuation] = (),
 ) -> dict[str, Any]:
     """Build a deterministic JGF execution graph from observed edge decisions.
 
@@ -94,6 +100,9 @@ def build_symphony_execution_graph(
     normalized_reason = _nonempty_text(reason)
     if outcome in {"failed", "partial"} and normalized_reason is None:
         return {}
+    normalized_trace_ids = _normalized_trace_ids(normalized_trace_id, trace_ids)
+    if normalized_trace_ids is None:
+        return {}
 
     try:
         identity_index = _IdentityIndex(capability_snapshot)
@@ -108,6 +117,12 @@ def build_symphony_execution_graph(
 
     edges: list[dict[str, Any]] = []
     endpoint_identities: dict[str, CapabilityIdentity] = {}
+    valid_trace_ids = frozenset(normalized_trace_ids)
+    valid_continuations = frozenset(
+        item
+        for item in _valid_interrupt_continuations(interrupt_continuations)
+        if item.trace_ids == normalized_trace_ids[: len(item.trace_ids)]
+    )
     for candidate_id in sorted(candidate_index.keys() & decision_index.keys()):
         candidate = candidate_index.get(candidate_id)
         decision = decision_index.get(candidate_id)
@@ -115,6 +130,8 @@ def build_symphony_execution_graph(
             continue
         observation = _safe_validated_observation(
             normalized_trace_id,
+            valid_trace_ids,
+            valid_continuations,
             candidate,
             decision,
             identity_index,
@@ -161,6 +178,8 @@ def build_symphony_execution_graph(
         "outcome": outcome,
         "graph": graph_without_id,
     }
+    if len(normalized_trace_ids) > 1:
+        envelope_for_id["trace_ids"] = list(normalized_trace_ids)
     if outcome in {"failed", "partial"}:
         envelope_for_id["reason"] = normalized_reason
     flags = _normalized_quality_flags(quality_flags)
@@ -328,12 +347,14 @@ def _safe_candidate_id(item: SymphonyEdgeCandidate | SymphonyEdgeDecision) -> st
 
 def _safe_validated_observation(
     trace_id: str,
+    trace_ids: frozenset[str],
+    interrupt_continuations: frozenset[SymphonyInterruptContinuation],
     candidate: SymphonyEdgeCandidate,
     decision: SymphonyEdgeDecision,
     identity_index: _IdentityIndex,
 ) -> tuple[dict[str, Any], CapabilityIdentity, CapabilityIdentity] | None:
     try:
-        return _validated_observation(trace_id, candidate, decision, identity_index)
+        return _validated_observation(trace_id, trace_ids, interrupt_continuations, candidate, decision, identity_index)
     except MemoryError:
         raise
     except Exception:
@@ -342,20 +363,30 @@ def _safe_validated_observation(
 
 def _validated_observation(
     trace_id: str,
+    trace_ids: frozenset[str],
+    interrupt_continuations: frozenset[SymphonyInterruptContinuation],
     candidate: SymphonyEdgeCandidate,
     decision: SymphonyEdgeDecision,
     identity_index: _IdentityIndex,
 ) -> tuple[dict[str, Any], CapabilityIdentity, CapabilityIdentity] | None:
     source = candidate.source_fragment
     target = candidate.target_fragment
-    if not _valid_fragment(source, trace_id) or not _valid_fragment(target, trace_id):
+    if not _valid_fragment(source, trace_ids) or not _valid_fragment(target, trace_ids):
         return None
-    if (
-        source.trace_id != target.trace_id
-        or source.continuity_index != target.continuity_index
-        or _fragment_occurrence_id(source) == _fragment_occurrence_id(target)
+    if source.continuity_index != target.continuity_index or _fragment_occurrence_id(source) == _fragment_occurrence_id(
+        target
     ):
         return None
+    if source.trace_id != target.trace_id:
+        continuation = candidate.interrupt_continuation
+        if (
+            continuation is None
+            or continuation not in interrupt_continuations
+            or continuation.source_trace_id != source.trace_id
+            or continuation.target_trace_id != target.trace_id
+            or continuation.continuity_index != source.continuity_index
+        ):
+            return None
     if _nonempty_text(decision.candidate_id) is None or decision.candidate_id != candidate.candidate_id:
         return None
     if decision.source_fragment_id != source.fragment_id or decision.target_fragment_id != target.fragment_id:
@@ -367,15 +398,20 @@ def _validated_observation(
     if (decision.evidence_method, decision.evidence_strength) not in _METHOD_STRENGTH:
         return None
 
-    allowed_span_ids = frozenset(source.span_ids) | frozenset(target.span_ids)
-    candidate_refs = _validated_evidence_refs(candidate.evidence_refs, trace_id, allowed_span_ids)
-    decision_refs = _validated_evidence_refs(decision.evidence_refs, trace_id, allowed_span_ids)
+    allowed_spans_by_trace = {
+        source.trace_id: frozenset(source.span_ids)
+        | (frozenset(target.span_ids) if source.trace_id == target.trace_id else frozenset()),
+        target.trace_id: frozenset(target.span_ids)
+        | (frozenset(source.span_ids) if source.trace_id == target.trace_id else frozenset()),
+    }
+    candidate_refs = _validated_evidence_refs(candidate.evidence_refs, allowed_spans_by_trace)
+    decision_refs = _validated_evidence_refs(decision.evidence_refs, allowed_spans_by_trace)
     if candidate_refs is None or decision_refs is None:
         return None
     if len(decision_refs) < 2 or not set(decision_refs).issubset(candidate_refs):
         return None
-    decision_span_ids = {_evidence_span_id(ref) for ref in decision_refs}
-    if source.anchor_span_id not in decision_span_ids or target.anchor_span_id not in decision_span_ids:
+    anchor_refs = {f"{fragment.trace_id}#span={fragment.anchor_span_id}" for fragment in (source, target)}
+    if not anchor_refs.issubset(decision_refs):
         return None
     failure_reason = _nonempty_text(decision.reason)
     if decision.status == "failure" and failure_reason is None:
@@ -410,7 +446,7 @@ def _validated_observation(
     return edge, source_identity, target_identity
 
 
-def _valid_fragment(fragment: Any, trace_id: str) -> bool:
+def _valid_fragment(fragment: Any, trace_ids: frozenset[str]) -> bool:
     span_ids = _fragment_span_ids(fragment)
     return (
         isinstance(fragment, SymphonyExecutionFragment)
@@ -423,7 +459,7 @@ def _valid_fragment(fragment: Any, trace_id: str) -> bool:
         and isinstance(fragment.continuity_index, int)
         and not isinstance(fragment.continuity_index, bool)
         and _validated_trace_id(fragment.trace_id) is not None
-        and fragment.trace_id == trace_id
+        and fragment.trace_id in trace_ids
         and span_ids is not None
         and fragment.anchor_span_id in span_ids
     )
@@ -502,15 +538,9 @@ def _fragment_occurrence_id(fragment: SymphonyExecutionFragment) -> tuple[str, i
     return fragment.trace_id, fragment.continuity_index, fragment.anchor_span_id
 
 
-def _evidence_span_id(ref: str) -> str:
-    match = _EVIDENCE_REF_RE.fullmatch(ref)
-    return match.group("span") if match is not None else ""
-
-
 def _validated_evidence_refs(
     refs: Any,
-    trace_id: str,
-    allowed_span_ids: frozenset[str],
+    allowed_spans_by_trace: Mapping[str, frozenset[str]],
 ) -> tuple[str, ...] | None:
     if isinstance(refs, (str, bytes)) or not isinstance(refs, Sequence):
         return None
@@ -522,9 +552,10 @@ def _validated_evidence_refs(
         if match is None:
             return None
         matched_trace_id = match.group("trace")
-        if _validated_trace_id(matched_trace_id) is None or matched_trace_id != trace_id:
+        if _validated_trace_id(matched_trace_id) is None:
             return None
-        if match.group("span") not in allowed_span_ids:
+        allowed_span_ids = allowed_spans_by_trace.get(matched_trace_id)
+        if allowed_span_ids is None or match.group("span") not in allowed_span_ids:
             return None
         normalized.add(ref)
     return tuple(sorted(normalized))
@@ -559,6 +590,61 @@ def _validated_trace_id(value: Any) -> str | None:
     except UnicodeError:
         return None
     return value
+
+
+def _normalized_trace_ids(trace_id: str, trace_ids: Sequence[str]) -> tuple[str, ...] | None:
+    if isinstance(trace_ids, (str, bytes)):
+        return None
+    try:
+        supplied = tuple(trace_ids)
+    except MemoryError:
+        raise
+    except Exception:
+        return None
+    normalized = [trace_id]
+    for value in supplied:
+        valid = _validated_trace_id(value)
+        if valid is None:
+            return None
+        if valid not in normalized:
+            normalized.append(valid)
+    return tuple(normalized)
+
+
+def _valid_interrupt_continuations(
+    continuations: Sequence[SymphonyInterruptContinuation],
+) -> tuple[SymphonyInterruptContinuation, ...]:
+    if isinstance(continuations, (str, bytes)):
+        return ()
+    try:
+        items = _unambiguous_interrupt_continuations(continuations)
+    except MemoryError:
+        raise
+    except Exception:
+        return ()
+    return tuple(
+        item
+        for item in items
+        if isinstance(item, SymphonyInterruptContinuation)
+        and _validated_trace_id(item.source_trace_id) is not None
+        and _validated_trace_id(item.target_trace_id) is not None
+        and item.source_trace_id != item.target_trace_id
+        and isinstance(item.continuity_index, int)
+        and not isinstance(item.continuity_index, bool)
+        and item.continuity_index >= 0
+        and isinstance(item.source_segment_index, int)
+        and not isinstance(item.source_segment_index, bool)
+        and item.source_segment_index >= 0
+        and isinstance(item.target_segment_index, int)
+        and not isinstance(item.target_segment_index, bool)
+        and item.target_segment_index >= 0
+        and item.target_segment_index == item.source_segment_index + 1
+        and isinstance(item.trace_ids, tuple)
+        and len(item.trace_ids) > item.target_segment_index
+        and all(_validated_trace_id(trace_id) is not None for trace_id in item.trace_ids)
+        and item.trace_ids[item.source_segment_index] == item.source_trace_id
+        and item.trace_ids[item.target_segment_index] == item.target_trace_id
+    )
 
 
 def _normalized_graph_snapshot(value: Any) -> dict[str, str] | None:
@@ -692,6 +778,19 @@ def _validate_execution_envelope(envelope: Any) -> None:
             raise ValueError("execution_graph.quality_flags must be sorted unique strings")
     if "graph_snapshot" in envelope and _normalized_graph_snapshot(envelope["graph_snapshot"]) is None:
         raise ValueError("execution_graph.graph_snapshot is invalid")
+    trace_ids = envelope.get("trace_ids")
+    if trace_ids is None:
+        valid_trace_ids = frozenset({trace_id})
+    else:
+        if (
+            not isinstance(trace_ids, list)
+            or len(trace_ids) < 2
+            or trace_ids[0] != trace_id
+            or len(set(trace_ids)) != len(trace_ids)
+            or any(_validated_trace_id(item) is None for item in trace_ids)
+        ):
+            raise ValueError("execution_graph.trace_ids is invalid")
+        valid_trace_ids = frozenset(trace_ids)
 
     graph = envelope.get("graph")
     nodes, edges = _validate_graph_shell(graph, "execution_graph")
@@ -700,7 +799,7 @@ def _validate_execution_envelope(envelope: Any) -> None:
     occurrence_pairs: set[tuple[str, str]] = set()
     for edge in edges:
         metadata = _validate_graph_edge(edge, nodes)
-        _validate_execution_edge_metadata(metadata, trace_id)
+        _validate_execution_edge_metadata(metadata, valid_trace_ids)
         candidate_id = metadata["candidate_id"]
         occurrence_pair = (metadata["source_fragment_id"], metadata["target_fragment_id"])
         if candidate_id in candidate_ids or occurrence_pair in occurrence_pairs:
@@ -793,7 +892,7 @@ def _validate_graph_edge(edge: Any, nodes: Mapping[str, Any]) -> Mapping[str, An
     return metadata
 
 
-def _validate_execution_edge_metadata(metadata: Mapping[str, Any], trace_id: str) -> None:
+def _validate_execution_edge_metadata(metadata: Mapping[str, Any], trace_ids: frozenset[str]) -> None:
     success = metadata.get("success")
     if not isinstance(success, bool):
         raise ValueError("execution edge success must be boolean")
@@ -804,7 +903,7 @@ def _validate_execution_edge_metadata(metadata: Mapping[str, Any], trace_id: str
         if not isinstance(ref, str):
             raise ValueError("execution edge evidence refs must be strings")
         match = _EVIDENCE_REF_RE.fullmatch(ref)
-        if match is None or match.group("trace") != trace_id or _validated_trace_id(match.group("trace")) is None:
+        if match is None or match.group("trace") not in trace_ids or _validated_trace_id(match.group("trace")) is None:
             raise ValueError("execution edge evidence ref is invalid")
     method = metadata.get("evidence_method")
     strength = metadata.get("evidence_strength")

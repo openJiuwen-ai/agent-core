@@ -37,6 +37,7 @@ _SUBAGENT_DISPATCH_REASON = "subagent_dispatch"
 _SUBAGENT_RESULT_REASON = "subagent_result"
 _PLANNED_REASON = "planned"
 _OBSERVED_ORDER_REASON = "observed_order"
+_INTERRUPT_CONTINUATION_REASON = "interrupt_continuation"
 _PROXIMITY_REASON_PREFIX = "proximity:"
 _SKILL_TOOL_NAME = "skill_tool"
 _DISPATCH_TOOL_NAMES = frozenset({"task_tool", "subagent_spawn", "sessions_spawn"})
@@ -67,7 +68,24 @@ _REASON_ORDER = {
     _SUBAGENT_RESULT_REASON: 2,
     _PLANNED_REASON: 3,
     _OBSERVED_ORDER_REASON: 4,
+    _INTERRUPT_CONTINUATION_REASON: 0,
 }
+
+
+@dataclass(frozen=True)
+class SymphonyInterruptContinuation:
+    """One exact, adjacent interrupt-resume boundary.
+
+    This is deliberately narrower than a general cross-trace relation: it is
+    created only by the rail after a component-id matched interactive resume.
+    """
+
+    source_trace_id: str
+    target_trace_id: str
+    continuity_index: int
+    source_segment_index: int
+    target_segment_index: int
+    trace_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -79,6 +97,7 @@ class SymphonyEdgeCandidate:
     target_fragment: SymphonyExecutionFragment
     evidence_refs: tuple[str, ...]
     candidate_reasons: tuple[str, ...]
+    interrupt_continuation: SymphonyInterruptContinuation | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +126,7 @@ class _CandidateParts:
     target: SymphonyExecutionFragment
     reasons: set[str]
     evidence_refs: set[str]
+    interrupt_continuation: SymphonyInterruptContinuation | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +186,7 @@ def build_symphony_edge_candidates(
     edge_search_max_depth: int = 3,
     max_candidates: int | None = 64,
     include_team_member_pairs: bool = False,
+    interrupt_continuations: Sequence[SymphonyInterruptContinuation] = (),
 ) -> tuple[SymphonyEdgeCandidate, ...]:
     """Build exact-reference, planned, observed-order and proximity candidates.
 
@@ -181,6 +202,19 @@ def build_symphony_edge_candidates(
     ordered_fragments = _ordered_valid_fragments(fragments, span_index)
     reference_index = _index_fragment_references(ordered_fragments, span_index)
     parts: dict[tuple[str, str], _CandidateParts] = {}
+
+    # Cross-trace candidates never enter the ordinary exact/planned/proximity
+    # paths.  Only this explicit continuation tier can bridge two traces.
+    _add_interrupt_continuation_candidates(
+        parts,
+        ordered_fragments,
+        planned_graph,
+        span_index,
+        interrupt_continuations,
+        max_candidates=max_candidates,
+    )
+    if max_candidates is not None and len(parts) >= max_candidates:
+        return _finalize_candidates(parts, span_index)
 
     exact_full = _add_exact_candidates(
         parts,
@@ -311,6 +345,7 @@ def _finalize_candidates(
                         key=lambda reason: (_REASON_ORDER.get(reason, 99), reason),
                     )
                 ),
+                interrupt_continuation=getattr(item, "interrupt_continuation", None),
             )
         )
     candidates.sort(
@@ -522,6 +557,7 @@ def _add_candidate(
     *,
     reason: str,
     evidence_refs: set[str] | None = None,
+    interrupt_continuation: SymphonyInterruptContinuation | None = None,
     max_candidates: int | None,
 ) -> bool:
     key = (source.fragment_id, target.fragment_id)
@@ -532,7 +568,136 @@ def _add_candidate(
     item = _candidate_parts(parts, source, target)
     item.reasons.add(reason)
     item.evidence_refs.update(evidence_refs or ())
+    if interrupt_continuation is not None:
+        # Descriptors are made unambiguous before any pair is generated.
+        setattr(item, "interrupt_continuation", interrupt_continuation)
     return max_candidates is not None and len(parts) >= max_candidates
+
+
+def _add_interrupt_continuation_candidates(
+    parts: dict[tuple[str, str], _CandidateParts],
+    fragments: Sequence[SymphonyExecutionFragment],
+    planned_graph: Mapping[str, Any] | None,
+    span_index: _SpanIndex,
+    continuations: Sequence[SymphonyInterruptContinuation],
+    *,
+    max_candidates: int | None,
+) -> None:
+    """Add only exact adjacent resume edges, never cross-trace heuristics."""
+
+    if not _is_ready_directed_plan(planned_graph):
+        return
+    nodes, graph = _planned_parts(planned_graph)
+    edges = graph.get("edges") if graph else None
+    if not isinstance(edges, Sequence) or isinstance(edges, (str, bytes)):
+        return
+    valid_continuations = _valid_interrupt_continuations(continuations)
+    if not valid_continuations:
+        return
+    by_segment: dict[tuple[int, str], list[SymphonyExecutionFragment]] = defaultdict(list)
+    for fragment in fragments:
+        by_segment[(fragment.continuity_index, fragment.trace_id)].append(fragment)
+    for segment in by_segment.values():
+        segment.sort(key=lambda fragment: _fragment_sort_key(fragment, span_index))
+
+    for continuation in valid_continuations:
+        if max_candidates is not None and len(parts) >= max_candidates:
+            return
+        source_items = by_segment.get((continuation.continuity_index, continuation.source_trace_id), ())
+        target_items = by_segment.get((continuation.continuity_index, continuation.target_trace_id), ())
+        if not source_items or not target_items:
+            continue
+        for edge in edges:
+            if not isinstance(edge, Mapping):
+                continue
+            source_id, target_id = edge.get("source"), edge.get("target")
+            if source_id not in nodes or target_id not in nodes:
+                continue
+            source_matches = [
+                fragment for fragment in source_items if _matches_planned_node(fragment, source_id, nodes[source_id])
+            ]
+            target_matches = [
+                fragment for fragment in target_items if _matches_planned_node(fragment, target_id, nodes[target_id])
+            ]
+            # More than one branch on either side makes the cross-trace
+            # relation unknowable.  Do not select an arbitrary branch.
+            if (
+                not source_matches
+                or not target_matches
+                or len({item.branch_span_id for item in source_matches}) != 1
+                or len({item.branch_span_id for item in target_matches}) != 1
+            ):
+                continue
+            source = source_matches[-1]  # repeated occurrence: last before pause
+            target = target_matches[0]  # repeated occurrence: first after resume
+            if _add_candidate(
+                parts,
+                source,
+                target,
+                reason=_INTERRUPT_CONTINUATION_REASON,
+                evidence_refs={
+                    _evidence_ref(source.trace_id, source.anchor_span_id),
+                    _evidence_ref(target.trace_id, target.anchor_span_id),
+                },
+                interrupt_continuation=continuation,
+                max_candidates=max_candidates,
+            ):
+                return
+
+
+def _valid_interrupt_continuations(
+    continuations: Sequence[SymphonyInterruptContinuation],
+) -> tuple[SymphonyInterruptContinuation, ...]:
+    try:
+        items = tuple(continuations)
+    except MemoryError:
+        raise
+    except Exception:
+        return ()
+    valid = [
+        item
+        for item in items
+        if isinstance(item, SymphonyInterruptContinuation)
+        and isinstance(item.source_trace_id, str)
+        and bool(item.source_trace_id.strip())
+        and isinstance(item.target_trace_id, str)
+        and bool(item.target_trace_id.strip())
+        and item.source_trace_id != item.target_trace_id
+        and isinstance(item.continuity_index, int)
+        and not isinstance(item.continuity_index, bool)
+        and item.continuity_index >= 0
+        and isinstance(item.source_segment_index, int)
+        and not isinstance(item.source_segment_index, bool)
+        and item.source_segment_index >= 0
+        and isinstance(item.target_segment_index, int)
+        and not isinstance(item.target_segment_index, bool)
+        and item.target_segment_index >= 0
+        and item.target_segment_index == item.source_segment_index + 1
+        and isinstance(item.trace_ids, tuple)
+        and len(item.trace_ids) > item.target_segment_index
+        and all(isinstance(trace_id, str) and trace_id.strip() for trace_id in item.trace_ids)
+        and item.trace_ids[item.source_segment_index] == item.source_trace_id
+        and item.trace_ids[item.target_segment_index] == item.target_trace_id
+    ]
+    by_boundary: dict[tuple[int, str, str], set[SymphonyInterruptContinuation]] = defaultdict(set)
+    for item in valid:
+        by_boundary[(item.continuity_index, item.source_trace_id, item.target_trace_id)].add(item)
+    # Inspect the complete descriptor collection before a candidate limit can
+    # select an arbitrary winner. A conflicting boundary remains rejected even
+    # if a later duplicate repeats one of its descriptors.
+    return tuple(next(iter(values)) for key, values in sorted(by_boundary.items()) if len(values) == 1)
+
+
+def _is_ready_directed_plan(planned_graph: Mapping[str, Any] | None) -> bool:
+    nodes, graph = _planned_parts(planned_graph)
+    metadata = graph.get("metadata") if graph else None
+    return (
+        bool(nodes)
+        and graph.get("type") == "planned_graph"
+        and graph.get("directed") is True
+        and isinstance(metadata, Mapping)
+        and metadata.get("status") == "ready"
+    )
 
 
 def _add_anchor_refs(item: _CandidateParts, span_index: _SpanIndex) -> None:
