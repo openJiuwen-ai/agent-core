@@ -16,8 +16,7 @@ from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor impo
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import CaseExecutionResult
 from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
-from openjiuwen.rsi.harness_rsi.evaluator.judger import LlmAsJudgeJudger, ScriptBasedJudger, build_judger
-from openjiuwen.rsi.harness_rsi.evaluator.judger import llm_as_judge
+from openjiuwen.rsi.harness_rsi.evaluator.judger import LlmAsJudgeJudger, ScriptBasedJudger, build_judger, llm_as_judge
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import prepare_judge_workspace
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import JudgeBudgetRail, JudgeReadOnlyRail
 from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import parse_judge_output, score_judge_output, scoring_contract
@@ -201,8 +200,26 @@ def test_json_parser_handles_braces_in_strings_and_fences():
     value = _output()
     value["overall_reason"] = 'A literal "{" is not a new object'
     assert parse_judge_output("```json\n" + json.dumps(value) + "\n```") == value
+    assert parse_judge_output("I reviewed the evidence.\n```json\n" + json.dumps(value) + "\n```\nEnd.") == value
     with pytest.raises(ValueError):
         parse_judge_output("Here is my assessment: " + json.dumps(value))
+
+
+@pytest.mark.parametrize("raw", [
+    '```json\n{}\n```\n```json\n{}\n```',
+    'Before {}\n```json\n{}\n```',
+    '```json\n{}\n```\nAfter {}',
+    '```json\n{"status": "completed"',
+    '{"score": 0, "score": 1}',
+    '{"behaviors": [{"score": 0, "score": 1}]}',
+    '{"score": NaN}',
+    '```python\n{}\n```',
+    '[]',
+    '<tool_calls><invoke name="read_file" /></tool_calls>',
+])
+def test_judge_parser_does_not_guess_or_choose_among_ambiguous_verdicts(raw):
+    with pytest.raises(ValueError):
+        parse_judge_output(raw)
 
 
 def test_snapshot_contains_declared_evidence_not_config_or_old_grades(tmp_path):
@@ -323,9 +340,11 @@ async def test_judge_failures_do_not_become_zero_score_tasks(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_one_structural_retry_uses_same_frozen_evidence(tmp_path, monkeypatch):
     workspaces = []
+    prompts = []
 
     async def run(_config, workspace, _prompt, _log):
         workspaces.append(workspace)
+        prompts.append(_prompt)
         return "not JSON" if len(workspaces) == 1 else json.dumps(_output())
 
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", run)
@@ -335,6 +354,40 @@ async def test_one_structural_retry_uses_same_frozen_evidence(tmp_path, monkeypa
     assert workspaces[0] == workspaces[1]
     assert result.metadata["attempt"] == 2
     assert result.score == 0.5
+    assert "not JSON" in prompts[1]
+    assert "prior_output" in prompts[1]
+    errors = list(tmp_path.rglob("validation_error_1.json"))
+    assert len(errors) == 1
+    assert json.loads(errors[0].read_text(encoding="utf-8"))["message"]
+
+
+@pytest.mark.asyncio
+async def test_tool_text_then_prose_wrapped_verdict_is_recovered_without_changing_score(tmp_path, monkeypatch):
+    call = AsyncMock(side_effect=[
+        '<tool_calls><invoke name="read_file" /></tool_calls>',
+        "Evidence reviewed.\n```json\n" + json.dumps(_output((0.0, 0.0))) + "\n```",
+    ])
+    monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
+    result = await LlmAsJudgeJudger(_config()).judge(
+        case=_case(), execution_result=CaseExecutionResult("done", "passed"), output_dir=str(tmp_path)
+    )
+    assert result.score == 0.0
+    assert result.passed is False
+    assert call.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_final_validation_error_remains_actionable(tmp_path, monkeypatch):
+    output = _output()
+    output["behaviors"].pop()
+    call = AsyncMock(return_value=json.dumps(output))
+    monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
+    with pytest.raises(EvaluationInfrastructureError, match="must score every supplied ID"):
+        await LlmAsJudgeJudger(_config()).judge(
+            case=_case(), execution_result=CaseExecutionResult("done", "passed"), output_dir=str(tmp_path)
+        )
+    assert call.await_count == 2
+    assert len(list(tmp_path.rglob("validation_error_*.json"))) == 2
 
 
 @pytest.mark.asyncio

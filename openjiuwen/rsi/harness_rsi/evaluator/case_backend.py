@@ -109,7 +109,7 @@ class SingleHarnessExecutionBackend:
         status = "passed"
         response: Any = None
         error = ""
-        started = False
+        agent = None
         workspace_dir = Path(output_dir).expanduser().resolve() / "workspace"
         role_name = ""
         workspace_before: dict[str, dict[str, Any]] = {}
@@ -190,7 +190,6 @@ class SingleHarnessExecutionBackend:
                 sys_operation=sys_operation,
             )
             await Runner.start()
-            started = True
             # Register through the native API before plugin discovery so the
             # rail has its filesystem operation when reading Skill descriptions.
             for rail in agent_rails:
@@ -246,8 +245,15 @@ class SingleHarnessExecutionBackend:
                     error = f"failed to sync SWE-bench solver workspace: {exc}"
             workspace_after = _snapshot_workspace(workspace_dir)
             try:
-                if started:
-                    await Runner.stop()
+                if agent is not None:
+                    # Runner is process-global: another case or Judge may still
+                    # be using it. Release only this execution's owned resources.
+                    try:
+                        await agent.cleanup_task_resources()
+                    finally:
+                        agent.ability_manager.teardown_tools()
+                        if sys_operation is None:
+                            Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
             finally:
                 if solver_container_name:
                     remove_terminal_bench_container(solver_container_name)
@@ -274,7 +280,7 @@ class SingleHarnessExecutionBackend:
         )
 
     async def cleanup(self, team_name: str, session_id: str) -> None:
-        """No-op cleanup; this backend starts and stops Runner inside execute()."""
+        """No-op; execute releases case resources, not the host-owned Runner."""
 
 
 def _enforce_container_sys_operation_rail(agent: Any) -> None:
