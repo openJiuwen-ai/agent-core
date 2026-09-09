@@ -133,6 +133,7 @@ class CodexHarness(SerializedTurnHarness):
         self._thread: Any = None
         self._thread_id: str | None = None
         self._active_handle: Any = None
+        self._pending_steers: list[str] = []
         self._active_model: CodexModelConfig | None = self._config.model
         self._fallback_activated = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -317,6 +318,11 @@ class CodexHarness(SerializedTurnHarness):
         self._active_handle = handle
         if turn.abort_requested:
             await self._interrupt_handle(handle)
+        # A steer accepted between the external STARTED event and turn/start
+        # returning has no handle yet; deliver it now that the turn exists.
+        pending_steers, self._pending_steers = self._pending_steers, []
+        for steer_text in pending_steers:
+            await self._steer_handle(handle, steer_text)
         will_retry_count = 0
         try:
             stream = handle.stream().__aiter__()
@@ -347,6 +353,7 @@ class CodexHarness(SerializedTurnHarness):
         finally:
             if self._active_handle is handle:
                 self._active_handle = None
+            self._pending_steers.clear()
 
     def _observe(self, notification: Any) -> None:
         observer = self._notification_observer
@@ -358,12 +365,20 @@ class CodexHarness(SerializedTurnHarness):
             logger.exception("[codex] notification observer raised")
 
     async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
-        _ = turn
+        text = harness_input_text(content)
         handle = self._active_handle
         if handle is None:
-            raise HarnessStateError("there is no active Codex turn to steer")
+            if self._active_turn is not turn or turn.abort_requested:
+                raise HarnessStateError("there is no active Codex turn to steer")
+            # ``thread.turn()`` has not returned yet; ``_run_turn`` flushes the
+            # queue as soon as the SDK handle exists.
+            self._pending_steers.append(text)
+            return
+        await self._steer_handle(handle, text)
+
+    async def _steer_handle(self, handle: Any, text: str) -> None:
         try:
-            await handle.steer(harness_input_text(content))
+            await handle.steer(text)
         except Exception as exc:
             if _is_no_active_turn_to_steer(exc):
                 raise HarnessStateError("the Codex turn ended before the steer was accepted") from exc
