@@ -242,10 +242,11 @@ FACT constraints:
 """
     return f"""You are consolidating a cluster of near-duplicate {track_u} rules from an agent experience bank.
 
-Goal: reduce redundancy while preserving distinct conditions. Prefer MERGE or REWRITE when
-rules are paraphrases of the same idea; KEEP_DISTINCT when conditions conflict or cover
-different cases. The count field is only an importance hint — never override "different
-conditions" just because one count is higher.
+These rules already share the same business-scenario category. Goal: reduce redundancy while
+preserving distinct conditions. Prefer MERGE or REWRITE when rules are paraphrases of the
+same idea; KEEP_DISTINCT when conditions conflict or cover different cases. The count field
+is only an importance hint — never override "different conditions" just because one count
+is higher.
 
 Cluster rules (0-based index, text, count):
 {rules_block}

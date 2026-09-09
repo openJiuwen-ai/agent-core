@@ -521,7 +521,8 @@ async def test_run_dream_projects_catalog_after_prune(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_dream_classifies_merged_canonical(tmp_path):
+async def test_dream_merge_skips_cross_category_near_duplicates(tmp_path):
+    """High-similarity facts in different categories must not share a cluster."""
     emb = FakeEmbedding(
         {
             "grader checks case": [1.0, 0.0],
@@ -530,8 +531,121 @@ async def test_run_dream_classifies_merged_canonical(tmp_path):
     )
 
     def handler(prompt: str):
+        raise AssertionError("LLM merge must not run across categories")
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        embedding=emb,
+        embedding_max_rps=0,
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_soft_lo=0.72,
+        dream_max_llm_merges=5,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
+    await rail._ttse_store.add_record_direct(
+        "fact",
+        "grader checks case",
+        count=2,
+        category="documents-office-and-records",
+        save=False,
+    )
+    await rail._ttse_store.add_record_direct(
+        "fact",
+        "grader is case sensitive",
+        count=2,
+        category="software-engineering-devops",
+        save=False,
+    )
+    await rail._ttse_store.save()
+
+    result, _ = await run_dream_pass(
+        rail._ttse_store,
+        cfg,
+        llm=rail._ttse_llm,
+        model=rail._ttse_model,
+        capability_names={"grep"},
+    )
+    assert not result.skipped
+    assert result.merged_clusters == 0
+    assert len(rail._ttse_store.facts) == 2
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_same_category_inherits_category(tmp_path):
+    emb = FakeEmbedding(
+        {
+            "grader checks case": [1.0, 0.0],
+            "grader is case sensitive": [0.99, 0.01],
+            "grader cares about case": [0.98, 0.02],
+        }
+    )
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        embedding=emb,
+        embedding_max_rps=0,
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_soft_lo=0.72,
+        dream_max_llm_merges=5,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+
+    def handler(prompt: str):
+        return (
+            "VERDICT: MERGE\n"
+            "CANONICAL: the grader checks column names case-sensitively\n"
+            "KEEP_INDICES:\n"
+            "REASON: near duplicates\n"
+        )
+
+    rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
+    for text, count in (
+        ("grader checks case", 2),
+        ("grader is case sensitive", 2),
+        ("grader cares about case", 2),
+    ):
+        await rail._ttse_store.add_record_direct(
+            "fact",
+            text,
+            count=count,
+            category="software-engineering-devops",
+            save=False,
+        )
+    await rail._ttse_store.save()
+
+    result, _ = await run_dream_pass(
+        rail._ttse_store,
+        cfg,
+        llm=rail._ttse_llm,
+        model=rail._ttse_model,
+        capability_names={"grep"},
+    )
+    assert not result.skipped
+    assert result.merged_clusters >= 1
+    assert len(rail._ttse_store.facts) == 1
+    assert rail._ttse_store.facts[0]["category"] == "software-engineering-devops"
+
+
+@pytest.mark.asyncio
+async def test_run_dream_inherits_category_on_merge(tmp_path):
+    emb = FakeEmbedding(
+        {
+            "grader checks case": [1.0, 0.0],
+            "grader is case sensitive": [0.99, 0.01],
+        }
+    )
+    classify_calls = []
+
+    def handler(prompt: str):
         if "TTSE category assignment pass" in prompt:
-            return '{"assignments": {"1": "software-engineering-devops"}}'
+            classify_calls.append(prompt)
+            return '{"assignments": {"1": "documents-office-and-records"}}'
         return (
             "VERDICT: MERGE\n"
             "CANONICAL: the grader checks names case-sensitively\n"
@@ -552,13 +666,20 @@ async def test_run_dream_classifies_merged_canonical(tmp_path):
     )
     rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
     for text in ("grader checks case", "grader is case sensitive"):
-        await rail._ttse_store.add_record_direct("fact", text, count=2, save=False)
+        await rail._ttse_store.add_record_direct(
+            "fact",
+            text,
+            count=2,
+            category="software-engineering-devops",
+            save=False,
+        )
     await rail._ttse_store.save()
 
     await rail.run_dream(capabilities="")
 
     assert len(rail._ttse_store.facts) == 1
     assert rail._ttse_store.facts[0]["category"] == "software-engineering-devops"
+    assert classify_calls == []
     catalog = (tmp_path / "CATALOG.md").read_text(encoding="utf-8")
     assert "software-engineering-devops" in catalog
 

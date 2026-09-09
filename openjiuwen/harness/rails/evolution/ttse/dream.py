@@ -3,7 +3,8 @@
 """Auto-dream: TTSE bank hygiene (TTL prune, soft-cluster merge, TIP purge).
 
 Runs offline from the user turn: prune stale rules, LLM-merge near-duplicates
-within each track, then deterministically delete low-quality TIPs.
+within each track (grouped by existing category, then soft-clustered by
+similarity), then deterministically delete low-quality TIPs.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -276,11 +278,13 @@ async def _apply_merge_verdict(
             return "keep_invalid_tip", None
 
     total_count = sum(int(r.get("count", 0)) for r in cluster)
+    category = store.record_category(cluster[0])
     reason = "dream_merge" if verdict.verdict == "MERGE" else "dream_rewrite"
     logger.info(
-        "[TTSERail] dream before_%s track=%s members=%s canonical=%s llm_reason=%s",
+        "[TTSERail] dream before_%s track=%s category=%s members=%s canonical=%s llm_reason=%s",
         verdict.verdict.lower(),
         track,
+        category,
         _format_cluster_members(cluster),
         canonical,
         verdict.reason or "",
@@ -294,11 +298,14 @@ async def _apply_merge_verdict(
         )
         await store.delete_record(record["text"], track, save=False)
     merged_count = max(total_count, 1)
-    await store.add_record_direct(track, canonical, count=merged_count, save=False)
+    await store.add_record_direct(
+        track, canonical, count=merged_count, category=category, save=False
+    )
     logger.info(
-        "[TTSERail] dream after_%s track=%s members=%s canonical=%s count=%s llm_reason=%s",
+        "[TTSERail] dream after_%s track=%s category=%s members=%s canonical=%s count=%s llm_reason=%s",
         verdict.verdict.lower(),
         track,
+        category,
         _format_cluster_members(cluster),
         canonical,
         merged_count,
@@ -318,7 +325,10 @@ async def dream_merge(
     capabilities: str = "",
     capability_names: Optional[Set[str]] = None,
 ) -> Tuple[int, int, List[Tuple[str, str]]]:
-    """Soft-cluster + LLM merge one track. Returns (merged, kept, new rules)."""
+    """Category-bucket then soft-cluster + LLM merge one track.
+
+    Returns (merged, kept, new rules). Clusters never cross category boundaries.
+    """
     records = store.facts if track == "fact" else store.tips
     if len(records) < config.dream_cluster_min_size:
         return 0, 0, []
@@ -326,16 +336,36 @@ async def dream_merge(
         logger.info("[TTSERail] dream merge skipped for %s: no embedding provider", track)
         return 0, 0, []
 
-    clusters = await store.soft_cluster(
-        list(records),
-        soft_lo=config.dream_soft_lo,
-        min_size=config.dream_cluster_min_size,
-    )
+    by_category: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_category[store.record_category(record)].append(record)
+
+    clusters: List[List[Dict[str, Any]]] = []
+    min_size = config.dream_cluster_min_size
+    for cid, group in by_category.items():
+        if len(group) < min_size:
+            continue
+        cat_clusters = await store.soft_cluster(
+            group,
+            soft_lo=config.dream_soft_lo,
+            min_size=min_size,
+        )
+        logger.info(
+            "[TTSERail] dream merge category bucket track=%s category=%s rules=%s clusters=%s",
+            track,
+            cid,
+            len(group),
+            len(cat_clusters),
+        )
+        clusters.extend(cat_clusters)
+    clusters.sort(key=lambda c: -len(c))
+
     if not clusters:
         logger.info(
-            "[TTSERail] dream merge no clusters track=%s rules=%s soft_lo=%s",
+            "[TTSERail] dream merge no clusters track=%s rules=%s categories=%s soft_lo=%s",
             track,
             len(records),
+            len(by_category),
             config.dream_soft_lo,
         )
         return 0, 0, []
@@ -345,9 +375,10 @@ async def dream_merge(
     added_items: List[Tuple[str, str]] = []
     budget = max(0, int(config.dream_max_llm_merges))
     logger.info(
-        "[TTSERail] dream merge start track=%s rules=%s clusters=%s llm_budget=%s",
+        "[TTSERail] dream merge start track=%s rules=%s categories=%s clusters=%s llm_budget=%s",
         track,
         len(records),
+        len(by_category),
         len(clusters),
         budget,
     )

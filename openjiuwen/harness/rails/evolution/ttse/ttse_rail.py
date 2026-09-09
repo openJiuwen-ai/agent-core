@@ -410,6 +410,14 @@ class TTSERail(EvolutionRail):
         except Exception as exc:  # noqa: BLE001 - never roll back bank writes
             logger.warning("[TTSERail] category assignment skipped: %s", exc)
 
+    def _record_needs_category(self, text: str, rtype: str) -> bool:
+        """True when the bank rule still lacks an explicit category field."""
+        store = self._ttse_store.facts if rtype == "fact" else self._ttse_store.tips
+        for record in store:
+            if record.get("text") == text:
+                return "category" not in record
+        return True
+
     async def _maybe_project_catalog(self) -> None:
         try:
             await asyncio.to_thread(project_catalog, self._ttse_store)
@@ -546,8 +554,15 @@ class TTSERail(EvolutionRail):
                     state=state,
                 )
                 if not result.skipped:
-                    if result.added_items:
-                        await self._classify_added_rules(result.added_items)
+                    # Dream MERGE/REWRITE inherits the cluster category; only
+                    # reclassify bank rules that still lack a closed-set id.
+                    need_classify = [
+                        (text, rtype)
+                        for text, rtype in result.added_items
+                        if self._record_needs_category(text, rtype)
+                    ]
+                    if need_classify:
+                        await self._classify_added_rules(need_classify)
                     await self._maybe_project_catalog()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[TTSERail] dream failed: %s", exc)

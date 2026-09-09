@@ -410,12 +410,15 @@ class TTSERecordStore:
         text: str,
         *,
         count: int = 1,
+        category: Optional[str] = None,
         save: bool = True,
     ) -> Dict[str, Any]:
         """Insert a record without online dedup (used by dream MERGE/REWRITE)."""
         store = self.facts if rtype == "fact" else self.tips
         cap = self._config.max_facts if rtype == "fact" else self._config.max_tips
         record = _new_record(text, count=count)
+        if category is not None:
+            record["category"] = normalize_category(category) or OTHER_CATEGORY
         async with self._lock:
             store.append(record)
             store.sort(key=lambda x: -x.get("count", 0))
