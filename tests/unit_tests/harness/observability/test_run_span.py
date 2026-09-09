@@ -8,10 +8,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from opentelemetry.trace import StatusCode, set_span_in_context
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode, set_span_in_context
 
 from openjiuwen.extensions.observability import setup as shared_setup
 from openjiuwen.extensions.observability import span_context as shared_span_context
@@ -40,9 +40,9 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
 )
-from openjiuwen.harness.observability import span_context as agent_span_context
-from openjiuwen.harness.observability import setup as agent_setup
 from openjiuwen.harness.execution_subject import ExecutionSubject
+from openjiuwen.harness.observability import setup as agent_setup
+from openjiuwen.harness.observability import span_context as agent_span_context
 from openjiuwen.harness.observability.run_span import (
     build_run_span_name,
     close_agent_run_span,

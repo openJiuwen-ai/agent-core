@@ -5,29 +5,30 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 import asyncio
+from types import SimpleNamespace
 
 import pytest
-import openjiuwen.harness.observability.rail as rail_module
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
+import openjiuwen.harness.observability.rail as rail_module
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     TaskIterationInputs,
     ToolCallInputs,
 )
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.extensions.observability import span_context as shared_span_context
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.semconv import (
+    AT_SESSION_ID,
     DA_AGENT_NAME,
     DA_TASK_ITERATION,
     GEN_AI_AGENT_DESCRIPTION,
@@ -43,48 +44,47 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_OUTPUT,
-    LANGFUSE_SESSION_ID,
-    AT_SESSION_ID,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
-    OJ_REQUEST_ID,
+    LANGFUSE_SESSION_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
+    OJ_INFERENCE_ID,
+    OJ_REQUEST_ID,
     OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
     OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
-    OJ_INFERENCE_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TOOL_AUTHORITATIVE,
     OJ_TOOL_RESOURCE_ID,
     OJ_TOOL_TYPE,
-    OJ_TRACE_ROOT,
     OJ_TRACE_FORCED_CLOSE,
+    OJ_TRACE_ROOT,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
-)
-from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
-from openjiuwen.harness.observability.rail import (
-    AgentObservabilityRail,
-    AgentSpanDecoration,
-)
-from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.harness.execution_subject import (
-    ExecutionSubject,
-    execution_subject_scope,
 )
 from openjiuwen.extensions.observability.span_context import (
     clear_current_session_id,
     set_current_session_id,
 )
+from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    execution_subject_scope,
+)
+from openjiuwen.harness.observability.rail import (
+    AgentObservabilityRail,
+    AgentSpanDecoration,
+)
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 @pytest.fixture

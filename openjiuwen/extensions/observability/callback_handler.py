@@ -11,16 +11,16 @@ from __future__ import annotations
 
 import json
 import threading
-from collections import OrderedDict
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
 
-from opentelemetry import trace
 from opentelemetry import context as otel_context
+from opentelemetry import trace
 from opentelemetry.trace import (
     Span,
     SpanKind,
@@ -30,14 +30,27 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.call_scope import (
+    expects_unified_llm_completion,
+    get_current_llm_call_id,
+    is_llm_observation_suppressed,
+)
+from openjiuwen.core.foundation.llm.schema.message import (
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+)
+from openjiuwen.extensions.observability import metrics as _metrics
+from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.demand import publish_span_snapshot
 from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_prompt,
     truncate,
 )
-from openjiuwen.extensions.observability.config import ObservabilityConfig
-from openjiuwen.extensions.observability.demand import publish_span_snapshot
-from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_MEMBER_NAME,
@@ -53,10 +66,12 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_PROVIDER_NAME,
+    GEN_AI_REASONING_DURATION_MS,
+    GEN_AI_REASONING_TIMING,
+    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MESSAGE_COUNT,
     GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
-    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_STREAM,
     GEN_AI_REQUEST_TEMPERATURE,
@@ -71,25 +86,22 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
+    GEN_AI_TOOL_CALLS,
+    GEN_AI_TOOL_DEFINITIONS,
+    GEN_AI_TOOL_ID,
     GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_OUTPUT,
-    GEN_AI_TOOL_ID,
     GEN_AI_TOOL_TYPE,
-    GEN_AI_TOOL_CALLS,
-    GEN_AI_TOOL_DEFINITIONS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_TOTAL_TOKENS,
     GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
-    GEN_AI_USAGE_REASONING_TOKENS,
+    GEN_AI_USAGE_PROMPT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-    GEN_AI_REASONING_DURATION_MS,
-    GEN_AI_REASONING_TIMING,
-    REASONING_TIMING_UNMEASURED,
+    GEN_AI_USAGE_REASONING_TOKENS,
+    GEN_AI_USAGE_TOTAL_TOKENS,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
@@ -101,12 +113,12 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
-    OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
+    OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_RESPONSE_LOGPROBS,
     OJ_GEN_AI_RESPONSE_PARSER_RESULT,
-    OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS,
+    OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
     OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_GEN_AI_RESPONSE_TPOT_MS,
@@ -126,19 +138,15 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA,
     OJ_STREAM_TOOL_CALL_ID,
     OJ_STREAM_TOOL_CALL_NAME,
-    OJ_TRACE_SCHEMA_VERSION,
-    OJ_TRAJECTORY_RECORD_KIND,
     OJ_TOOL_AUTHORITATIVE,
     OJ_TOOL_RESOURCE_ID,
     OJ_TOOL_TYPE,
     OJ_TRACE_ROOT,
+    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
-)
-from openjiuwen.extensions.observability.tool_outcome import (
-    TOOL_REPORTED_FAILURE,
-    tool_failure_reason,
-    tool_result_for_exception,
+    REASONING_TIMING_UNMEASURED,
 )
 from openjiuwen.extensions.observability.span_context import (
     LlmSpanState,
@@ -154,22 +162,12 @@ from openjiuwen.extensions.observability.span_context import (
     push_tool_span,
     set_current_session_id,
 )
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm.schema.message import (
-    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
-    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
-    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
-    OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
-    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+from openjiuwen.extensions.observability.tool_outcome import (
+    TOOL_REPORTED_FAILURE,
+    tool_failure_reason,
+    tool_result_for_exception,
 )
-from openjiuwen.core.foundation.llm.call_scope import (
-    expects_unified_llm_completion,
-    get_current_llm_call_id,
-    is_llm_observation_suppressed,
-)
-
-from openjiuwen.extensions.observability import metrics as _metrics
-
+from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 
 _TRACER_NAME = "openjiuwen.extensions.observability"
 _REQUEST_SEQUENCE_LOCK = threading.Lock()
@@ -1195,7 +1193,6 @@ class OtelCallbackHandler:
             self._record_response_details(state, response)
             total_latency_ms = (time.monotonic_ns() - state.start_ns) / 1_000_000.0
             state.span.set_attribute(OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS, total_latency_ms)
-            redacted_compl = redact_completion(completion_text, self._config)
 
             # Build langfuse.observation.output
             choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
