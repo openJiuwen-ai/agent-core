@@ -337,7 +337,11 @@ def _check_skills_manifest(role: str, integration_path: Path) -> list[Verificati
             skills = [skills]
         for index, skill_ref in enumerate(skills):
             try:
-                mount_dir = _resolve_package_dir(integration_path, str(skill_ref))
+                # Native Plugin entries carry mount options alongside the directory.
+                directory = skill_ref.get("dir") if isinstance(skill_ref, dict) else skill_ref
+                if not isinstance(directory, str) or not directory.strip():
+                    raise ValueError("skill entry must be a path string or a mapping with a non-empty 'dir'")
+                mount_dir = _resolve_package_dir(integration_path, directory)
                 if not mount_dir.is_dir():
                     raise FileNotFoundError(mount_dir)
                 skill_dirs = _discover_mounted_skill_dirs(mount_dir)

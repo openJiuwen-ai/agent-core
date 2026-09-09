@@ -536,6 +536,9 @@ class PuctProgramArtifactProvider:
                 )
             prepared_request = self._prepare_request(request)
             spec = self._spec_for(prepared_request, resumed=resumed)
+            # The folder's card may set the run length; the request's number
+            # is then only what the caller had to fill in.
+            state.total_iterations = spec.expansions
             execute = self._execution or self._execution_for(spec, loop)
         except (ModelConfigError, ExecutionUnavailable, ValueError, OSError) as error:
             code = type(error).__name__.replace("Error", "").upper() or "INVALID_REQUEST"
@@ -729,7 +732,7 @@ class PuctProgramArtifactProvider:
         spec = RunSpec(
             search_id=request.task_id,
             algorithm="puct",
-            expansions=int(request.max_iterations),
+            expansions=_iterations_from(card, int(request.max_iterations)),
             workers=_workers_from(card.get("workers")),
             scorecard=card.get("scorecard", card),
             scorecard_hash=str(card.get("hash") or "sha256:inline"),
@@ -822,6 +825,22 @@ def _workers_from(value: Any) -> int:
     except (TypeError, ValueError):
         return DEFAULT_WORKERS
     return max(1, min(workers, MAX_WORKERS))
+
+
+def _iterations_from(card: Mapping[str, Any], default: int) -> int:
+    """How many expansions the run makes: the card's `iterations`, else the request's.
+
+    A task folder is meant to be complete — every number the run needs is
+    written in it, and the caller passes nothing but the folder. The contract's
+    `max_iterations` stays required, so a caller that has no number fills in
+    a placeholder and the card wins over it; a card that says nothing leaves
+    the request's number in force, which is every run before this key.
+    """
+    try:
+        iterations = int(card.get("iterations"))
+    except (TypeError, ValueError):
+        return default
+    return max(1, iterations)
 
 
 def _seed_files(path: Path, entrypoint: str | None = None) -> dict[str, str]:

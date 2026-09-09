@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import (
     EvaluationJudger,
     JudgeResult,
+    _comparable_response,
     _reference_answer,
 )
 
@@ -23,6 +25,15 @@ class ExactMatchJudger(EvaluationJudger):
 
     method = "exact_match"
 
+    def validate_case(self, case: dict[str, Any]) -> None:
+        reference = case.get("reference") or {}
+        if reference.get("rubric") or reference.get("files") or case.get("swebench"):
+            raise EvaluationInfrastructureError(
+                "exact_match only supports reference answers, not rubric or file grading"
+            )
+        if _reference_answer(case) is None:
+            raise EvaluationInfrastructureError("exact_match cannot score this case: a reference answer is required")
+
     async def judge(
         self,
         *,
@@ -32,17 +43,11 @@ class ExactMatchJudger(EvaluationJudger):
     ) -> JudgeResult:
         """Score one response by strict equality."""
         _ = output_dir
+        self.validate_case(case)
+        expected = _reference_answer(case)
         if execution_result.execution_status != "passed":
             return self._failure_result(execution_result.error)
-        expected = _reference_answer(case)
-        if expected is None:
-            return JudgeResult(
-                method=self.method,
-                score=0.0,
-                passed=False,
-                reason="reference.answer is required for exact_match",
-            )
-        passed = execution_result.response == expected
+        passed = _comparable_response(execution_result.response, expected) == expected
         return JudgeResult(
             method=self.method,
             score=1.0 if passed else 0.0,

@@ -1,7 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tests for the shared event projection of single-Harness candidates."""
 
+import pytest
+
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
+    active_epoch_node_event,
     epoch_node_event,
     node_event,
     parent_node_id,
@@ -66,8 +69,8 @@ def test_progress_event_counts_epochs_instead_of_candidates() -> None:
 
 def test_epoch_node_aggregates_changes_and_follows_selected_parent() -> None:
     checkpoints = [
-        {"epoch": 1, "selected_harness_refs_path": "h1.yaml"},
-        {"epoch": 2, "selected_harness_refs_path": "h1.yaml"},
+        {"epoch": 1, "selected_harness_refs_path": "h1.yaml", "promotion_applied": True},
+        {"epoch": 2, "selected_harness_refs_path": "h1.yaml", "promotion_applied": False},
     ]
     current = {
         "epoch": 3,
@@ -89,7 +92,7 @@ def test_epoch_node_aggregates_changes_and_follows_selected_parent() -> None:
         current,
     )
     assert event.node.node_id == "epoch-003"
-    assert event.node.parent_id == "epoch-002"
+    assert event.node.parent_id == "epoch-001"
     assert event.node.score == 0.9
     assert [change.group for change in event.node.changes] == ["SKILL", "TOOL"]
 
@@ -107,3 +110,100 @@ def test_epoch_node_does_not_reuse_score_for_a_different_harness() -> None:
     )
     assert event.node.score is None
     assert event.node.extra["artifact_path"] == "filtered.yaml"
+
+
+def test_rejected_and_unchanged_epochs_do_not_become_h0_parents() -> None:
+    state = {"source_harness_refs_path": "h0.yaml", "baseline_score": 0.6, "epoch_checkpoints": []}
+    for epoch, status in enumerate(("rejected", "verified", "rejected"), 1):
+        checkpoint = {
+            "epoch": epoch,
+            "status": status,
+            "promotion_applied": False,
+            "before_harness_refs_path": "h0.yaml",
+            "selected_harness_refs_path": "h0.yaml",
+            "harness_refs_path": "h0.yaml",
+            "score": 0.6,
+        }
+        state["epoch_checkpoints"].append(checkpoint)
+        event = epoch_node_event(state, checkpoint)
+        assert event.node.parent_id == "h0"
+        assert event.node.score == 0.6
+        assert not event.node.adopted
+    state.update(active_epoch=4, active_epoch_before_harness_refs_path="h0.yaml")
+    active = active_epoch_node_event(state).node
+    assert active.parent_id == "h0"
+    assert active.reason is None
+    assert active.score is None
+    assert set(active.extra) == {"artifact_path", "iteration_unit", "source_evidence"}
+
+
+@pytest.mark.parametrize("score", [0.6, 0.0])
+def test_existing_score_and_adoption_fields_are_preserved(score) -> None:
+    event = epoch_node_event(
+        {"source_harness_refs_path": "h0.yaml", "baseline_score": 0.0},
+        {
+            "epoch": 1,
+            "status": "rejected",
+            "promotion_applied": False,
+            "before_harness_refs_path": "h0.yaml",
+            "selected_harness_refs_path": "h0.yaml",
+            "harness_refs_path": "h0.yaml",
+            "score": score,
+        },
+    )
+    assert event.node.parent_id == "h0"
+    assert event.node.score == score
+    assert not event.node.adopted
+    assert "acceptance checks" in event.node.reason
+    assert "score" not in event.node.reason.lower()
+
+
+@pytest.mark.parametrize("parent_score", [0.8, None])
+def test_parent_is_actual_promoted_version_not_latest_observation(parent_score) -> None:
+    parent = {
+        "epoch": 1,
+        "promotion_applied": True,
+        "before_harness_refs_path": "h0.yaml",
+        "selected_harness_refs_path": "h1.yaml",
+        "harness_refs_path": "h1.yaml",
+        "score": parent_score,
+    }
+    rejected = {**parent, "epoch": 2, "promotion_applied": False, "score": 0.1}
+    current = {
+        "epoch": 3,
+        "before_harness_refs_path": "h1.yaml",
+        "promotion_applied": False,
+        "selected_harness_refs_path": "h1.yaml",
+        "harness_refs_path": "h1.yaml",
+        "score": 0.6,
+    }
+    event = epoch_node_event(
+        {
+            "source_harness_refs_path": "h0.yaml",
+            "baseline_score": 0.0,
+            "epoch_checkpoints": [parent, rejected, current],
+        },
+        current,
+    )
+    assert event.node.parent_id == "epoch-001"
+    assert event.node.score == 0.6
+
+
+def test_parent_follows_selected_filtered_version_not_replayed_version() -> None:
+    parent = {
+        "epoch": 1,
+        "promotion_applied": True,
+        "selected_harness_refs_path": "filtered.yaml",
+        "harness_refs_path": "replayed.yaml",
+        "score": 1.0,
+    }
+    current = {
+        "epoch": 2,
+        "before_harness_refs_path": "filtered.yaml",
+        "selected_harness_refs_path": "filtered.yaml",
+        "harness_refs_path": "filtered.yaml",
+        "score": 0.6,
+    }
+    event = epoch_node_event({"epoch_checkpoints": [parent]}, current)
+    assert event.node.parent_id == "epoch-001"
+    assert event.node.score == 0.6

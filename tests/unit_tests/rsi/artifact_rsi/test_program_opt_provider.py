@@ -4032,3 +4032,102 @@ def test_an_event_consumer_that_never_returns_does_not_stall_the_search(
     result = asyncio.run(drive())
 
     assert result.status in ("completed", "failed"), result
+
+
+def test_a_reply_that_changed_nothing_says_which_way_it_did_that() -> None:
+    """Three failures wear the same symptom and need three different fixes.
+
+    Measured on two AlgoTune runs: nine expansions reported "the reply wrote
+    nothing and left every existing file alone", which reads as a file-naming
+    problem and sent the reader looking for files in replies that had never
+    contained a program.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import _no_edit_reason
+
+    parent = {"solver.py": "def solve(p):\n    return p\n"}
+
+    prose = _no_edit_reason("I would start by profiling the inner loop.", parent, parent,
+                            "solver.py", carries_program=False)
+    assert "carried no program" in prose
+    assert "profiling the inner loop" in prose, "the reader needs to see what came back"
+
+    same = _no_edit_reason("```python\nx\n```", parent, parent, "solver.py", carries_program=True)
+    assert "handed back the previous program unchanged" in same
+
+    beside = _no_edit_reason("```python\nx\n```", {**parent, "helper.py": "x"}, parent,
+                             "solver.py", carries_program=True)
+    assert "wrote helper.py" in beside and "solver.py" in beside
+
+    # The excerpt is bounded: a reply of any length stays one readable line.
+    long_prose = _no_edit_reason("word " * 500, parent, parent, "solver.py", carries_program=False)
+    assert len(long_prose) < 400 and "\n" not in long_prose
+
+def test_a_zero_timeout_tally_is_not_a_timeout(tmp_path: Path) -> None:
+    """A benchmark report says "Timeouts: 0%" whether or not anything timed out.
+
+    The classifier matches its markers against the candidate's whole error
+    text, and a benchmark-shaped evaluator writes a report rather than a
+    sentence. Measured on an AlgoTune `polynomial_real` run: twelve candidates
+    whose answers were wrong (relative error 4e-01 against a 1e-6 tolerance)
+    were every one of them labelled `timeout`, because the report's tally line
+    reads `Timeouts: 0% (0/8)`. The UI showed twelve "执行超时" over text that
+    said the answers were wrong.
+    """
+    from openjiuwen.rsi.artifact_rsi.program_opt.state import classify_failure
+
+    report = (
+        "Speedup: N/A\n"
+        "  Valid Solutions: 0% (0/8)\n"
+        "  Invalid Solutions: 100% (8/8)\n"
+        "  Timeouts: 0% (0/8)\n\n"
+        "Invalid Example #1:\n"
+        "  seed 0: relative error 4.285e-01 exceeds tolerance 1e-6"
+    )
+
+    assert classify_failure(report) == "unclassified"
+
+    # A tally that counted something is still a timeout, and so is a plain one.
+    assert classify_failure(report.replace("Timeouts: 0% (0/8)", "Timeouts: 25% (2/8)")) == "timeout"
+    assert classify_failure("the candidate timed out after 300s") == "timeout"
+    # The zero line alone carries no other cause, so nothing is left to classify.
+    assert classify_failure("Timeouts: 0% (0/8)") is None
+
+def test_the_cards_iterations_set_the_run_length(tmp_path: Path) -> None:
+    """A task folder carries every number the run needs, the run length included.
+
+    The caller passes the folder and nothing else; `max_iterations` on the
+    request is then a placeholder the contract still requires. The card's
+    `iterations` wins over it, and a card without one changes nothing.
+    """
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, max_iterations=3)
+    _scorecard(Path(request.run_dir), iterations=12)
+
+    assert provider._spec_for(request, resumed=False).expansions == 12
+
+    _scorecard(Path(request.run_dir))
+    assert provider._spec_for(request, resumed=False).expansions == 3
+
+    _scorecard(Path(request.run_dir), iterations="lots")
+    assert provider._spec_for(request, resumed=False).expansions == 3
+
+
+def test_the_run_reports_the_cards_iterations_as_its_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`read_state` shows the length the card set, not the caller's placeholder."""
+    _no_probe(monkeypatch)
+    _no_runtime_probe(monkeypatch)
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+    request = _request(tmp_path, max_iterations=1)
+    _scorecard(Path(request.run_dir), iterations=2)
+
+    async def drive() -> object:
+        async def sink(event: object) -> None:
+            pass
+        return await provider.run(request, sink)
+
+    asyncio.run(drive())
+
+    assert provider.read_state(request.task_id).total_iterations == 2
+

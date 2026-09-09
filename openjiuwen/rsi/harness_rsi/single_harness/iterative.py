@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.harness.resources import load_plugin_package
 from openjiuwen.rsi.events import EventStatus, NodeStageEvent, OnEvent, emit
 from openjiuwen.rsi.harness_rsi.config import AutoCoordinatingHarnessConfig
 from openjiuwen.rsi.harness_rsi.data_loader import DataLoader, load_json_cases
@@ -53,6 +54,10 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.loader import load_analysis_ref
 from openjiuwen.rsi.harness_rsi.member_optimizer.path_layout import (
     MemberOptimizerPathLayout,
 )
+from openjiuwen.rsi.harness_rsi.member_optimizer.plugin_manifest import (
+    prepare_plugin_registries,
+    synchronize_plugin_manifest,
+)
 from openjiuwen.rsi.harness_rsi.schema import (
     DatasetArtifact,
     EvaluationResultAnalysisInvocation,
@@ -65,6 +70,13 @@ from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     generate_stage_payload,
     progress_event,
     root_node_event,
+    source_reuse_stage_payload,
+)
+from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import (
+    evaluation_context,
+    matching_cases,
+    materialize_source,
+    stamp_evaluation,
 )
 from openjiuwen.rsi.usage import ModelUsageObserver, bind_model_usage, model_usage_stage, set_usage_node
 
@@ -247,13 +259,17 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "policy_ref": self.config.member_optimizer.improver_policy_ref,
             "explicit": self._explicit_improver_policy,
         }
+        all_cases = load_cases(dataset.dataset_files)
+        protocol_signature = self._evaluation_context(all_cases, source_refs)["signature"]
+        if request.resume and state.get("evaluation_protocol_signature", protocol_signature) != protocol_signature:
+            raise ValueError("run evaluation configuration or initial Harness changed; start a new run")
+        state["evaluation_protocol_signature"] = protocol_signature
         if request.resume and state.get("status") == "completed":
             _ensure_final_publication(state=state, output_dir=output_dir)
             _write_yaml_atomic(state_path, state)
             _write_yaml_atomic(report_path, _build_report(state, dataset))
             return _result_from_state(state, state_path, report_path)
 
-        all_cases = load_cases(dataset.dataset_files)
         total_iterations = max_epochs
         all_case_ids = {str(case.get("case_id", "") or "") for case in all_cases if str(case.get("case_id", "") or "")}
         baseline_before = str(state.get("baseline_eval_ref_path", "") or "")
@@ -365,11 +381,16 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     continue
 
                 batch_dir = output_dir / "evaluations" / f"e{epoch:03d}" / f"b{batch_index:03d}"
-                source_eval_ref = await self._evaluate(
+                source_eval_ref = await self._source_evaluation(
                     cases=batch,
                     harness_refs_path=current_refs,
                     output_dir=batch_dir / "source",
                     dataset=dataset,
+                    prior_eval_refs=[
+                        str(state.get("baseline_eval_ref_path") or ""),
+                        *[str(item["eval_ref_path"]) for item in state["epoch_checkpoints"]],
+                    ],
+                    batch_index=batch_index,
                     node_ref=epoch_node_ref,
                     on_event=on_event,
                 )
@@ -399,6 +420,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 _sync_retained_case_ids(
                     working_retained_case_ids,
                     source_case_scores,
+                    passing_case_ids=_passing_case_ids(source_eval_ref),
                 )
                 active_cases = _cases_with_ids(
                     batch,
@@ -633,10 +655,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         )
                         residual_eval_refs.append(residual_eval_ref)
                         residual_scores = _eval_case_scores(residual_eval_ref)
-                        completed_case_ids = {case_id for case_id, score in residual_scores.items() if score >= 1.0}
+                        completed_case_ids = _passing_case_ids(residual_eval_ref)
                         _sync_retained_case_ids(
                             working_retained_case_ids,
                             residual_scores,
+                            passing_case_ids=completed_case_ids,
                         )
                         residual_case_ids = _nonpassing_case_ids(residual_eval_ref)
                         attempt_record.update(
@@ -686,6 +709,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "epoch": epoch,
                     "batch_index": batch_index,
                     "source_eval_ref_path": source_eval_ref,
+                    "source_evidence": _read_yaml(Path(source_eval_ref)).get("source_evidence", {}),
                     "analysis_ref_path": analysis_ref,
                     "optimization_hypotheses_path": hypotheses_ref,
                     "analysis_ref_paths": analysis_refs,
@@ -741,7 +765,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             }
             best_score = _number(state.get("best_score"))
             full_case_scores = _eval_case_scores(full_eval_ref)
-            full_failed_case_ids = sorted(case_id for case_id, score in full_case_scores.items() if score < 1.0)
+            full_passing_case_ids = _passing_case_ids(full_eval_ref)
+            full_failed_case_ids = sorted(set(full_case_scores) - full_passing_case_ids)
             previous_best_eval_ref = str(state.get("best_eval_ref_path", "") or "")
             previous_best_case_scores = _eval_case_scores(previous_best_eval_ref) if previous_best_eval_ref else {}
             regressed_best_case_ids = []
@@ -751,12 +776,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     regressed_best_case_ids.append(case_id)
             regressed_best_case_ids.sort()
             failed_retention_case_ids = sorted(
-                case_id for case_id in working_retained_case_ids if full_case_scores.get(case_id, 0.0) < 1.0
+                case_id for case_id in working_retained_case_ids if case_id not in full_passing_case_ids
             )
             failed_target_case_ids = sorted(
-                case_id for case_id in provisional_target_case_ids if full_case_scores.get(case_id, 0.0) < 1.0
+                case_id for case_id in provisional_target_case_ids if case_id not in full_passing_case_ids
             )
-            full_passing_case_ids = {case_id for case_id, score in full_case_scores.items() if score >= 1.0}
             full_failed_machine_evidence = _failed_machine_evidence(full_eval_ref)
             full_error_case_ids = _error_case_ids(full_eval_ref)
             gate_selections = [
@@ -879,6 +903,85 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         _write_yaml_atomic(report_path, _build_report(state, dataset))
         return _result_from_state(state, state_path, report_path)
 
+    def _evaluation_context(self, cases: list[dict[str, Any]], harness_refs_path: str) -> dict[str, Any]:
+        return evaluation_context(
+            harness_refs_path=harness_refs_path,
+            evaluator_config={
+                "config": self.config.evaluator,
+                "adapter": f"{type(self.evaluator).__module__}.{type(self.evaluator).__qualname__}",
+                "adapter_config": getattr(self.evaluator, "config", None),
+            },
+            cases=cases,
+        )
+
+    async def _source_evaluation(
+        self,
+        *,
+        cases: list[dict[str, Any]],
+        harness_refs_path: str,
+        output_dir: Path,
+        dataset: DatasetArtifact,
+        prior_eval_refs: list[str],
+        batch_index: int,
+        node_ref: str,
+        on_event: OnEvent | None,
+    ) -> str:
+        context = self._evaluation_context(cases, harness_refs_path)
+        existing = output_dir / "eval_ref.yaml"
+        if _eval_ref_complete(existing):
+            if _read_yaml(existing).get("evaluation_context") != context:
+                raise ValueError("source evaluation inputs changed; start a new run instead of reusing old analysis")
+            result = str(existing)
+        else:
+            selected = matching_cases(prior_eval_refs, context)
+            reused = set(selected)
+            missing = [case for case in cases if str(case["case_id"]) not in selected]
+            if not selected:
+                return await self._evaluate(
+                    cases=cases,
+                    harness_refs_path=harness_refs_path,
+                    output_dir=output_dir,
+                    dataset=dataset,
+                    node_ref=node_ref,
+                    on_event=on_event,
+                )
+            if missing:
+                fresh_ref = await self._evaluate(
+                    cases=missing,
+                    harness_refs_path=harness_refs_path,
+                    output_dir=output_dir / "fresh",
+                    dataset=dataset,
+                    node_ref=node_ref,
+                    on_event=on_event,
+                )
+                # Fresh infra failures are preserved, not replaced with older favorable scores.
+                for case in _read_yaml(Path(fresh_ref)).get("cases", []):
+                    selected[str(case["case_id"])] = (fresh_ref, case)
+            result = await materialize_source(
+                cases=cases,
+                selected=selected,
+                output_dir=output_dir,
+                harness_refs_path=harness_refs_path,
+                context=context,
+                reused_case_ids=reused,
+            )
+        provenance = _read_yaml(Path(result)).get("source_evidence", {})
+        if provenance.get("reused_case_ids"):
+            await emit(
+                on_event,
+                NodeStageEvent(
+                    node_ref=node_ref,
+                    stage=source_reuse_stage_payload(
+                        batch_index=batch_index,
+                        total_cases=len(cases),
+                        score=_eval_score(result),
+                        eval_ref_path=result,
+                        provenance=provenance,
+                    ),
+                ),
+            )
+        return result
+
     @model_usage_stage("evaluate")
     async def _evaluate(
         self,
@@ -890,9 +993,20 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         node_ref: str = "h0",
         on_event: OnEvent | None = None,
     ) -> str:
+        context = self._evaluation_context(cases, harness_refs_path)
         existing = output_dir / "eval_ref.yaml"
         if _eval_ref_complete(existing):
+            if _read_yaml(existing).get("evaluation_context") != context:
+                raise ValueError("evaluation inputs changed; use a new run to preserve existing results")
             return str(existing)
+
+        # Bind partial evaluator resumes to the same model/Judge/Harness too.
+        context_path = output_dir / "evaluation_context.yaml"
+        if context_path.is_file() and _read_yaml(context_path) != context:
+            raise ValueError("partial evaluation inputs changed; use a new run")
+        if not context_path.is_file() and any((output_dir / "cases").glob("*/result.json")):
+            raise ValueError("partial evaluation provenance missing; use a new run")
+        _write_yaml_atomic(context_path, context)
 
         async def emit_case_stage(payload: dict[str, Any]) -> None:
             await emit(
@@ -915,7 +1029,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         stage_kwargs = {"on_case_stage": emit_case_stage} if supports_stages and on_event is not None else {}
-        return await self.evaluator.evaluate_batch(
+        result = await self.evaluator.evaluate_batch(
             cases=cases,
             team_skill_ref_path="",
             harness_refs_path=harness_refs_path,
@@ -923,6 +1037,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
             **stage_kwargs,
         )
+        if context != self._evaluation_context(cases, harness_refs_path):
+            raise ValueError("evaluation inputs changed during execution; results cannot be reused")
+        stamp_evaluation(result, context)
+        return result
 
     @model_usage_stage("analyze")
     async def _analyze(
@@ -1171,9 +1289,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         missing_skills = sorted({item["runtime_name"] for item in missing_skill_invocations})
         failed_machine_evidence = _failed_machine_evidence(candidate_eval_ref)
         min_target_delta = float(self.config.member_optimizer.candidate_min_target_behavior_delta)
-        failing_target_case_ids = sorted(
-            case_id for case_id in target_case_ids if source_case_scores.get(case_id, 0.0) < 1.0
-        )
+        failing_target_case_ids = sorted(set(target_case_ids) - _passing_case_ids(paired_source_eval_ref))
         improved_target_case_ids = sorted(
             case_id
             for case_id in failing_target_case_ids
@@ -1623,9 +1739,7 @@ def _initialize_frozen_baseline(
     if not str(state.get("best_eval_ref_path", "") or ""):
         state["best_eval_ref_path"] = str(baseline_path)
         state["best_score"] = state["baseline_score"]
-        state["retained_case_ids"] = sorted(
-            case_id for case_id, score in _eval_case_scores(baseline_path).items() if score >= 1.0
-        )
+        state["retained_case_ids"] = sorted(_passing_case_ids(baseline_path))
 
 
 def _resume_fingerprint_matches(stored: Any, requested: dict[str, Any]) -> bool:
@@ -1967,10 +2081,14 @@ def _cases_with_ids(cases: list[dict[str, Any]], case_ids: set[str]) -> list[dic
 def _sync_retained_case_ids(
     retained_case_ids: set[str],
     evaluated_case_scores: dict[str, float],
+    *,
+    passing_case_ids: set[str] | None = None,
 ) -> None:
     """Replace retention state for every case observed in a fresh evaluation."""
     retained_case_ids.difference_update(evaluated_case_scores)
-    retained_case_ids.update(case_id for case_id, score in evaluated_case_scores.items() if score >= 1.0)
+    if passing_case_ids is None:
+        passing_case_ids = {case_id for case_id, score in evaluated_case_scores.items() if score >= 1.0}
+    retained_case_ids.update(passing_case_ids & evaluated_case_scores.keys())
 
 
 def _rejected_capability_history(candidate_gates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2838,12 +2956,37 @@ def _nonpassing_case_ids(eval_ref_path: str) -> set[str]:
         if status == "skipped" or metadata.get("infrastructure_skip") is True:
             continue
         status_failed = status in {"failed", "error"}
-        score_failed = score is not None and score < 1.0
+        explicit_passed = _llm_case_passed(case)
+        score_failed = (not explicit_passed) if explicit_passed is not None else (score is not None and score < 1.0)
         if score is None:
             score_failed = _eval_case_explicit_passed(case) is False
         if case_id and (status_failed or score_failed):
             case_ids.add(case_id)
     return case_ids
+
+
+def _llm_case_passed(case: dict[str, Any]) -> bool | None:
+    """LLM graders apply their configured threshold without rewriting numeric scores."""
+    metadata = case.get("metadata", {})
+    if isinstance(metadata, dict) and metadata.get("evaluation_method") == "llm_as_judge":
+        return _eval_case_explicit_passed(case)
+    return None
+
+
+def _passing_case_ids(eval_ref_path: str | Path) -> set[str]:
+    passing: set[str] = set()
+    for case in _read_yaml(eval_ref_path).get("cases", []):
+        if not isinstance(case, dict) or str(case.get("status", "")).lower() in {"failed", "error", "skipped"}:
+            continue
+        metadata = case.get("metadata", {})
+        if isinstance(metadata, dict) and metadata.get("infrastructure_skip") is True:
+            continue
+        explicit = _llm_case_passed(case)
+        score = _number(case.get("score"))
+        passed = explicit if explicit is not None else score is not None and score >= 1.0
+        if passed and case.get("case_id"):
+            passing.add(str(case["case_id"]))
+    return passing
 
 
 def _eval_case_explicit_passed(case: dict[str, Any]) -> bool | None:
@@ -2891,8 +3034,7 @@ def _classify_replay_outcome(
 ) -> dict[str, Any]:
     """Compare a provisional target with the epoch replay trajectory."""
     target_case_ids = {str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)}
-    scores = _eval_case_scores(eval_ref_path)
-    failed_target_case_ids = sorted(case_id for case_id in target_case_ids if scores.get(case_id, 0.0) < 1.0)
+    failed_target_case_ids = sorted(target_case_ids - _passing_case_ids(eval_ref_path))
     _, first_edit_steps = _pre_edit_invoked_names_by_case(
         eval_ref_path,
         action_group="skill",
@@ -2939,8 +3081,7 @@ def _select_gate_from_epoch_checkpoint(
             "missing_runtime_invocations": [],
             "correlated_regression_case_ids": [],
         }
-    scores = _eval_case_scores(full_eval_ref)
-    failed_target_case_ids = sorted(case_id for case_id in target_case_ids if scores.get(case_id, 0.0) < 1.0)
+    failed_target_case_ids = sorted(target_case_ids - _passing_case_ids(full_eval_ref))
     if failed_target_case_ids:
         replay = _classify_replay_outcome(gate, full_eval_ref)
         return {
@@ -3060,6 +3201,9 @@ def _materialize_checkpoint_filtered_harness(
                 )
             role_dir = staging_root / "harnesses" / _checkpoint_role_dir_name(str(role))
             shutil.copytree(source, role_dir)
+            # Seed H0 declarations before composing; syncing a delta-only
+            # registry would otherwise erase the baseline capabilities.
+            prepare_plugin_registries(role_dir)
             staged_roles[str(role)] = role_dir
 
         retained_records: list[dict[str, str]] = []
@@ -3117,6 +3261,12 @@ def _materialize_checkpoint_filtered_harness(
                         "target_path": target_rel,
                     }
                 )
+
+        for role_dir in staged_roles.values():
+            synchronize_plugin_manifest(role_dir)
+            manifest = role_dir / "manifest.json"
+            if manifest.is_file():
+                load_plugin_package(manifest)
 
         if selection_root.exists():
             shutil.rmtree(selection_root)
@@ -3312,10 +3462,17 @@ def _checkpoint_copy_manifest_entries(
     target_rel: str,
     runtime_name: str,
 ) -> None:
-    if not source.is_file():
+    native_manifest = source.parent.parent / "manifest.json"
+    if native_manifest.is_file():
+        # Published native candidates need not carry RSI's editable sidecars.
+        source_data = json.loads(native_manifest.read_text(encoding="utf-8"))
+        native_key = "prompt_sections" if list_key == "sections" else list_key
+        source_entries = source_data.get(native_key, [])
+    elif source.is_file():
+        source_data = yaml.safe_load(source.read_text(encoding="utf-8"))
+        source_entries = source_data.get(list_key, []) if isinstance(source_data, dict) else source_data
+    else:
         return
-    source_data = yaml.safe_load(source.read_text(encoding="utf-8"))
-    source_entries = source_data.get(list_key, []) if isinstance(source_data, dict) else source_data
     if not isinstance(source_entries, list):
         source_entries = [source_entries]
 
@@ -3336,7 +3493,7 @@ def _checkpoint_copy_manifest_entries(
                 target_rel,
                 exact_only=True,
             )
-            for key in ("file", "file_path", "path")
+            for key in ("file", "file_path", "path", "dir")
         )
 
     selected = [entry for entry in source_entries if matches(entry)]
@@ -3360,9 +3517,12 @@ def _checkpoint_copy_manifest_entries(
         destination_data = {list_key: destination_entries}
     if not isinstance(destination_entries, list):
         destination_entries = [destination_entries]
-    for entry in selected:
-        if entry not in destination_entries:
-            destination_entries.append(entry)
+    position = next(
+        (index for index, entry in enumerate(destination_entries) if matches(entry)),
+        len(destination_entries),
+    )
+    destination_entries = [entry for entry in destination_entries if not matches(entry)]
+    destination_entries[position:position] = selected
     destination_data[list_key] = destination_entries
     _write_yaml_atomic(destination, destination_data)
 
@@ -3450,7 +3610,7 @@ def _checkpoint_remove_manifest_entries(
                 target_rel,
                 exact_only=exact_only,
             )
-            for key in ("file", "file_path", "path")
+            for key in ("file", "file_path", "path", "dir")
         )
 
     data[list_key] = [entry for entry in entries if not matches(entry)]
@@ -3632,6 +3792,7 @@ def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, 
 
 def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> None:
     """Copy the best gated harness to the stable standalone publish location."""
+    output_dir = output_dir.expanduser().resolve()
     accepted_gates = [
         gate for gate in state.get("candidate_gates", []) if gate.get("accepted") and gate.get("status") == "accepted"
     ]
@@ -3643,8 +3804,17 @@ def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> Non
     existing_ref = Path(str(state.get("published_harness_refs_path", "") or ""))
     if existing_ref.is_file():
         _validate_single_harness_refs(str(existing_ref))
-        state["publication_status"] = "published"
-        return
+        existing_packages = [
+            (existing_ref.parent / str(raw_path)).expanduser().resolve()
+            for raw_path in _read_yaml(existing_ref).get("harness_refs", {}).values()
+        ]
+        if (
+            existing_ref.resolve().is_relative_to(output_dir)
+            and existing_packages
+            and all(path.is_dir() and path.is_relative_to(output_dir) for path in existing_packages)
+        ):
+            state["publication_status"] = "published"
+            return
 
     best_refs_path = Path(str(state["best_harness_refs_path"])).expanduser().resolve()
     best_payload = _read_yaml(best_refs_path)
@@ -3653,7 +3823,9 @@ def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> Non
         raise RuntimeError("Cannot publish final single harness: best refs contain no harness_refs")
 
     member_output_root = output_dir / "member_optimizations"
-    path_layout = MemberOptimizerPathLayout.from_output_root(member_output_root)
+    # Optimizer worktrees may use a short sibling mh/ directory. Final
+    # packages must stay inside run/ to satisfy the install boundary.
+    path_layout = MemberOptimizerPathLayout(output_root=member_output_root, runtime_root=output_dir / "published")
     published_refs: dict[str, str] = {}
     for role, raw_source in sorted(harness_refs.items()):
         source = Path(str(raw_source)).expanduser().resolve()
@@ -3661,12 +3833,16 @@ def _ensure_final_publication(*, state: dict[str, Any], output_dir: Path) -> Non
             raise RuntimeError(
                 f"Cannot publish final single harness role '{role}': source package does not exist: {source}"
             )
-        path_layout.write_role_mapping(str(role))
         destination = path_layout.current_harness_dir(str(role))
         staging = destination.with_name(f"{destination.name}.publish_tmp")
+        if not all(path.resolve().is_relative_to(output_dir) for path in (destination, staging)):
+            raise RuntimeError("Cannot publish final single harness outside its run directory")
+        path_layout.write_role_mapping(str(role))
         if staging.exists():
             shutil.rmtree(staging)
         shutil.copytree(source, staging)
+        if (staging / "manifest.json").is_file():
+            load_plugin_package(staging / "manifest.json")
         if destination.exists():
             shutil.rmtree(destination)
         staging.replace(destination)

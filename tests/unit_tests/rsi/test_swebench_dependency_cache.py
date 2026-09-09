@@ -7,13 +7,21 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import requests
 
 from openjiuwen.rsi.harness_rsi.evaluator import swebench_runtime as runtime
 from openjiuwen.rsi.harness_rsi.evaluator._swebench_official_support import sitecustomize
 
 
 @pytest.fixture
-def manifests(tmp_path, monkeypatch):
+def clean_download_env(monkeypatch):
+    monkeypatch.delenv("SWEBENCH_DEPENDENCY_CACHE_ROOT", raising=False)
+    monkeypatch.delenv("SWEBENCH_DOWNLOAD_PROXY", raising=False)
+    monkeypatch.setattr(runtime.time, "sleep", Mock())
+
+
+@pytest.fixture
+def manifests(tmp_path, monkeypatch, clean_download_env):
     workspace = tmp_path / "workspace"
     folder = workspace / "requirements"
     folder.mkdir(parents=True)
@@ -41,6 +49,7 @@ def test_setup_revision_is_not_replaced_with_base_revision(manifests, monkeypatc
             status_code=200,
             content=b"dependency==1\n",
             raise_for_status=Mock(),
+            close=Mock(),
         )
     )
     monkeypatch.setattr("requests.get", request)
@@ -56,13 +65,107 @@ def test_setup_revision_is_not_replaced_with_base_revision(manifests, monkeypatc
 
 
 def test_failed_fetch_does_not_publish_a_complete_cache(manifests, monkeypatch):
-    import requests
-
-    monkeypatch.setattr("requests.get", Mock(side_effect=requests.ReadTimeout("stalled")))
+    request = Mock(side_effect=requests.ReadTimeout("stalled"))
+    monkeypatch.setattr("requests.get", request)
     config = {"repo": "org/repo", "base_commit": "base", "environment_setup_commit": "setup"}
     with pytest.raises(requests.ReadTimeout):
         runtime._cache_official_dependency_files(config, manifests)
     assert not (runtime._dependency_cache_dir(config) / "cache.json").exists()
+    assert request.call_count == 3
+
+
+def test_default_cache_does_not_follow_service_working_directory(tmp_path, monkeypatch, clean_download_env):
+    config = {"repo": "org/repo", "base_commit": "abc"}
+    expected = runtime._dependency_cache_dir(config)
+    monkeypatch.chdir(tmp_path)
+    assert runtime._dependency_cache_dir(config) == expected
+    assert runtime._DEPENDENCY_CACHE_ROOT.is_absolute()
+
+
+def test_explicit_cache_survives_cwd_change_without_downloading(manifests, tmp_path, monkeypatch):
+    config = {"repo": "org/repo", "base_commit": "base", "environment_setup_commit": "setup"}
+    root = tmp_path / "service-cache"
+    monkeypatch.setenv("SWEBENCH_DEPENDENCY_CACHE_ROOT", str(root))
+    response = Mock(status_code=200, content=b"dependency==1\n")
+    request = Mock(return_value=response)
+    monkeypatch.setattr("requests.get", request)
+    cache = runtime._cache_official_dependency_files(config, manifests)
+    assert cache == root / "org-repo/setup"
+    request.reset_mock()
+    monkeypatch.chdir(tmp_path)
+    assert runtime._cache_official_dependency_files(config, manifests) == cache
+    assert runtime._available_dependency_cache(config) == cache
+    request.assert_not_called()
+    assert (cache / "requirements/base.txt").read_bytes() == b"dependency==1\n"
+
+
+def test_relative_cache_override_is_rejected(monkeypatch):
+    monkeypatch.setenv("SWEBENCH_DEPENDENCY_CACHE_ROOT", "relative/cache")
+    with pytest.raises(ValueError, match="absolute path"):
+        runtime._dependency_cache_dir({"repo": "org/repo", "base_commit": "abc"})
+
+
+@pytest.mark.parametrize("failure", [requests.ReadTimeout, requests.ConnectTimeout, requests.ConnectionError])
+def test_manifest_download_recovers_from_transient_transport(failure, monkeypatch, clean_download_env):
+    response = Mock(status_code=200, content=b"manifest")
+    request = Mock(side_effect=[failure("interrupted"), response])
+    monkeypatch.setattr("requests.get", request)
+    assert runtime._download_dependency_manifest("https://example.com/manifest") == b"manifest"
+    assert request.call_count == 2
+    runtime.time.sleep.assert_called_once_with(1)
+    response.close.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_manifest_download_bounds_transient_http_retries(status, monkeypatch, clean_download_env):
+    response = Mock(status_code=status)
+    response.raise_for_status.side_effect = requests.HTTPError("unavailable", response=response)
+    request = Mock(return_value=response)
+    monkeypatch.setattr("requests.get", request)
+    with pytest.raises(requests.HTTPError):
+        runtime._download_dependency_manifest("https://example.com/manifest")
+    assert request.call_count == 3
+    assert response.close.call_count == 3
+    assert [call.args[0] for call in runtime.time.sleep.call_args_list] == [1, 2]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_manifest_download_does_not_retry_permanent_http_errors(status, monkeypatch, clean_download_env):
+    response = Mock(status_code=status)
+    response.raise_for_status.side_effect = requests.HTTPError("rejected", response=response)
+    request = Mock(return_value=response)
+    monkeypatch.setattr("requests.get", request)
+    with pytest.raises(requests.HTTPError):
+        runtime._download_dependency_manifest("https://example.com/manifest")
+    request.assert_called_once()
+    response.close.assert_called_once()
+    runtime.time.sleep.assert_not_called()
+
+
+def test_missing_revision_file_does_not_fall_back_to_base(manifests, monkeypatch):
+    request = Mock(return_value=Mock(status_code=404))
+    monkeypatch.setattr("requests.get", request)
+    config = {"repo": "org/repo", "base_commit": "base", "environment_setup_commit": "setup"}
+    assert runtime._cache_official_dependency_files(config, manifests) is None
+    assert not (runtime._dependency_cache_dir(config) / "cache.json").exists()
+    assert request.call_count == 2
+    runtime.time.sleep.assert_not_called()
+
+
+def test_download_proxy_is_scoped_to_manifest_requests(monkeypatch, clean_download_env):
+    monkeypatch.setenv("HTTPS_PROXY", "http://default.example:8080")
+    monkeypatch.setenv("SWEBENCH_DOWNLOAD_PROXY", "http://downloads.example:8080")
+    request = Mock(return_value=Mock(status_code=200, content=b"manifest"))
+    monkeypatch.setattr("requests.get", request)
+    assert runtime._download_dependency_manifest("https://example.com/manifest") == b"manifest"
+    assert request.call_args.kwargs == {
+        "timeout": (10, 60),
+        "proxies": {"http": "http://downloads.example:8080", "https": "http://downloads.example:8080"},
+    }
+    assert runtime.os.environ["HTTPS_PROXY"] == "http://default.example:8080"
+    monkeypatch.delenv("SWEBENCH_DOWNLOAD_PROXY")
+    runtime._download_dependency_manifest("https://example.com/manifest")
+    assert "proxies" not in request.call_args.kwargs
 
 
 def test_official_request_timeout_is_local_and_preserves_explicit_values():

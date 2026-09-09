@@ -30,6 +30,9 @@ class EvaluationJudger(ABC):
 
     method: str
 
+    def validate_case(self, case: dict[str, Any]) -> None:
+        """Optional verifier preflight; custom backends retain their own contract."""
+
     @abstractmethod
     async def judge(
         self,
@@ -50,6 +53,15 @@ class EvaluationJudger(ABC):
         )
 
 
+def _comparable_response(response: Any, expected: Any) -> Any:
+    """Unwrap only the native final-answer envelope, not arbitrary task JSON."""
+    if not isinstance(expected, str) or not isinstance(response, dict):
+        return response
+    if response.get("result_type") == "answer" and isinstance(response.get("output"), str):
+        return response["output"]
+    return response
+
+
 def _reference_answer(case: dict[str, Any]) -> Any:
     """Return the case reference answer with backward-compatible aliases."""
     reference = case.get("reference")
@@ -63,6 +75,14 @@ def _reference_answer(case: dict[str, Any]) -> Any:
     if "expected_output" in case:
         return case["expected_output"]
     return None
+
+
+def _is_execution_only_evaluation(evaluation: dict[str, Any]) -> bool:
+    """Recognize legacy completion-only grades, which must not be reused as evidence."""
+    metadata = evaluation.get("metadata")
+    return evaluation.get("method") == "none" or (
+        isinstance(metadata, dict) and metadata.get("rule_engine_status") == "backend_completed"
+    )
 
 
 __all__ = [

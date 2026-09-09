@@ -24,11 +24,12 @@ from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger import (
     ExactMatchJudger,
+    JudgeResult,
     ScriptBasedJudger,
     build_judger,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.metrics_collector import MetricsCollector
-from openjiuwen.rsi.harness_rsi.evaluator.team_evaluator import TeamEvaluator
+from openjiuwen.rsi.harness_rsi.evaluator.team_evaluator import TeamEvaluator, _load_completed_case_ref
 from openjiuwen.rsi.harness_rsi.schema import EvaluationCaseTraceRef
 
 
@@ -113,7 +114,7 @@ def test_build_judger_supports_deterministic_methods() -> None:
         ExactMatchJudger,
     )
     with pytest.raises(ValueError, match="unsupported evaluation_method"):
-        build_judger(EvaluatorConfig(evaluation_method="llm-as-judge"))
+        build_judger(EvaluatorConfig(evaluation_method="unknown-judge"))
 
 
 @pytest.mark.asyncio
@@ -128,13 +129,140 @@ async def test_exact_match_judger_scores_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_script_judger_trusts_completed_backend_without_reference() -> None:
-    result = await ScriptBasedJudger().judge(
-        case={},
-        execution_result=CaseExecutionResult(response="done", execution_status="passed"),
+@pytest.mark.parametrize("judger", [ScriptBasedJudger(), ExactMatchJudger()])
+@pytest.mark.parametrize("case", [{}, {"reference": {}}, {"reference": {"expected_files": ["answer.md"]}}])
+@pytest.mark.parametrize("status", ["passed", "error"])
+async def test_missing_grading_evidence_is_not_a_task_score(judger, case, status) -> None:
+    with pytest.raises(EvaluationInfrastructureError, match="cannot score this case"):
+        await judger.judge(
+            case=case,
+            execution_result=CaseExecutionResult(response="done", execution_status=status),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judger", [ScriptBasedJudger(), ExactMatchJudger()])
+async def test_execution_error_with_explicit_reference_is_not_passing(judger) -> None:
+    grade = await judger.judge(
+        case={"reference": {"answer": "ok"}},
+        execution_result=CaseExecutionResult(response="ok", execution_status="error", error="task aborted"),
     )
-    assert result.passed is True
-    assert result.metadata["rule_engine_status"] == "backend_completed"
+    assert not grade.passed and grade.score == 0.0
+    assert grade.reason == "task aborted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["script_based", "rule_based", "default", "pass_through", ""])
+async def test_default_judge_aliases_cannot_award_completion_credit(method: str) -> None:
+    with pytest.raises(EvaluationInfrastructureError, match="no backend JudgeResult or reference answer"):
+        await build_judger(EvaluatorConfig(evaluation_method=method)).judge(
+            case={}, execution_result=CaseExecutionResult(response="done", execution_status="passed")
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judger", [ScriptBasedJudger(), ExactMatchJudger()])
+@pytest.mark.parametrize("answer", ["expected answer", "", 0, False])
+@pytest.mark.parametrize("alias", ["answer", "nested_output", "reference_answer", "expected_output"])
+async def test_explicit_reference_aliases_and_falsy_answers_are_evaluated(judger, answer, alias) -> None:
+    if alias == "answer":
+        case = {"reference": {"answer": answer}}
+    elif alias == "nested_output":
+        case = {"reference": {"expected_output": answer}}
+    else:
+        case = {alias: answer}
+    for response, expected_score in ((answer, 1.0), ("wrong answer", 0.0)):
+        result = await judger.judge(
+            case=case, execution_result=CaseExecutionResult(response=response, execution_status="passed")
+        )
+        assert result.score == expected_score
+        assert result.passed is (expected_score == 1.0)
+
+
+@pytest.mark.asyncio
+async def test_backend_grader_result_is_preserved_without_reference() -> None:
+    grade = JudgeResult(method="custom_verifier", score=0.4, passed=False, reason="two checks failed")
+    execution = CaseExecutionResult(response="done", execution_status="passed", judge_result=grade)
+    assert await ScriptBasedJudger().judge(case={}, execution_result=execution) is grade
+    for judger in (None, ScriptBasedJudger()):
+        runner = CaseRunner(backend=_Backend("done"), judger=judger)
+        assert await runner._judge(case={}, execution_result=execution, output_dir="") is grade
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judger", [None, ScriptBasedJudger(), ExactMatchJudger()])
+async def test_case_runner_retains_evidence_but_does_not_publish_ungraded_score(tmp_path, judger) -> None:
+    backend = _Backend("done")
+    directory = tmp_path / "case"
+    with pytest.raises(EvaluationInfrastructureError):
+        await CaseRunner(backend=backend, judger=judger).execute(
+            case={"case_id": "ungraded", "input": "write an answer"}, output_dir=str(directory)
+        )
+    error = json.loads((directory / "evaluation_error.json").read_text(encoding="utf-8"))
+    assert error["score"] is None
+    assert error["case_id"] == "ungraded"
+    assert (directory / "tr" / "trajectory_events.jsonl").is_file()
+    assert (directory / "artifacts" / "answer.txt").is_file()
+    assert not (directory / "result.json").exists()
+    assert backend.cleaned
+
+
+@pytest.mark.asyncio
+async def test_batch_cannot_summarize_or_retry_ungraded_case(tmp_path) -> None:
+    evaluator = TeamEvaluator(EvaluatorConfig(transient_case_retry_limit=3))
+    backend = _Backend("done")
+    evaluator.case_runner = CaseRunner(backend=backend, judger=ScriptBasedJudger())
+    stages = []
+
+    async def sink(stage):
+        stages.append(stage)
+
+    directory = tmp_path / "evaluation"
+    with pytest.raises(EvaluationInfrastructureError, match="no backend JudgeResult"):
+        await evaluator.evaluate_batch(
+            cases=[{"case_id": "ungraded"}],
+            team_skill_ref_path="",
+            harness_refs_path="",
+            output_dir=str(directory),
+            on_case_stage=sink,
+        )
+    assert len(backend.cleaned) == 1
+    assert len(stages) == 1 and stages[0]["score"] is None
+    assert not (directory / "summary.json").exists()
+    assert not (directory / "eval_ref.yaml").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,metadata",
+    [
+        ("none", {}),
+        ("script_based", {"rule_engine_status": "backend_completed"}),
+    ],
+)
+async def test_legacy_completion_grade_cannot_reenter_scoring_or_reuse(tmp_path, method, metadata) -> None:
+    grade = JudgeResult(method=method, score=1.0, passed=True, metadata=metadata)
+    runner = CaseRunner(backend=_Backend("done"))
+    with pytest.raises(EvaluationInfrastructureError, match="Completion-only"):
+        await runner._judge(
+            case={},
+            output_dir="",
+            execution_result=CaseExecutionResult(response="done", execution_status="passed", judge_result=grade),
+        )
+    directory = tmp_path / "cases" / "case1"
+    directory.mkdir(parents=True)
+    result = {
+        "case_id": "case1",
+        "status": "passed",
+        "score": 1.0,
+        "evaluation": {"method": method, "passed": True, "metadata": metadata},
+    }
+    (directory / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    (directory / "trace.json").write_text(json.dumps({"case_id": "case1"}), encoding="utf-8")
+    assert _load_completed_case_ref(directory, case_id="case1") is None
+    with pytest.raises(EvaluationInfrastructureError, match="legacy completion-only"):
+        await MetricsCollector().collect(str(directory.parent), str(tmp_path / "summary.json"))
+    assert not (tmp_path / "summary.json").exists()
 
 
 @pytest.mark.asyncio

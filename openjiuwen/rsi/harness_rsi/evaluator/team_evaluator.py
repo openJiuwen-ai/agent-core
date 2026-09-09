@@ -17,12 +17,15 @@ import yaml
 
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.data_loader import load_json_cases
+from openjiuwen.rsi.harness_rsi.data_loader.case_files import file_fingerprint, validate_case_fields
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
+    SingleHarnessExecutionBackend,
     build_backend,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.case_runner import CaseRunner
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger import build_judger
+from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _is_execution_only_evaluation
 from openjiuwen.rsi.harness_rsi.evaluator.metrics_collector import MetricsCollector
 from openjiuwen.rsi.harness_rsi.schema import (
     DatasetArtifact,
@@ -94,6 +97,12 @@ class TeamEvaluator:
         on_case_stage: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> str:
         """Run one batch of cases with fresh Team runtimes and persist artifacts."""
+        if (isinstance(self.case_runner, CaseRunner)
+                and isinstance(self.case_runner.backend, SingleHarnessExecutionBackend)
+                and self.case_runner.judger is not None):
+            for case in cases:
+                validate_case_fields(case)
+                self.case_runner.judger.validate_case(case)
         eval_dir = _prepare_eval_dir(output_dir)
         case_results_dir = eval_dir / CASE_RESULTS_DIR_NAME
         case_refs: list[EvaluationCaseTraceRef] = []
@@ -102,6 +111,7 @@ class TeamEvaluator:
             cases=cases,
             team_skill_ref_path=team_skill_ref_path,
             harness_refs_path=harness_refs_path,
+            evaluator_config=self.config,
         )
         manifest_path = eval_dir / _EVALUATION_INPUT_FILE
         can_resume_cases = _stored_evaluation_fingerprint(manifest_path) == input_fingerprint
@@ -224,12 +234,18 @@ def _evaluation_input_fingerprint(
     cases: list[dict[str, Any]],
     team_skill_ref_path: str,
     harness_refs_path: str,
+    evaluator_config: EvaluatorConfig | None = None,
 ) -> str:
     payload = {
         "cases": cases,
+        "dataset_files": [file_fingerprint(case) for case in cases],
         "team_skill": _path_identity(team_skill_ref_path),
         "harness_refs": _path_identity(harness_refs_path),
     }
+    if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
+        from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
+
+        payload["evaluator"] = _material_identity(evaluator_config, Path.cwd())
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -278,6 +294,8 @@ def _load_completed_case_ref(
     if not status:
         return None
     evaluation = result.get("evaluation") if isinstance(result.get("evaluation"), dict) else {}
+    if _is_execution_only_evaluation(evaluation):
+        return None
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     return EvaluationCaseTraceRef(
         case_id=case_id,

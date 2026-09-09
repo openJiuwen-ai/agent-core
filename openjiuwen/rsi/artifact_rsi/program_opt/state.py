@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -693,8 +694,20 @@ _FAILURE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+#: A tally line an evaluator prints whether or not anything timed out.
+#:
+#: The markers are matched against the candidate's whole error text, which for
+#: a benchmark-shaped evaluator is a report rather than a sentence. AlgoTune's
+#: report always carries ``Timeouts: 0% (0/8)``, so every wrong-answer failure
+#: on that task was labelled `timeout` — twelve of them in one measured run,
+#: shown in the UI as "执行超时" while the text under it said the answers were
+#: wrong. A zero tally is not a timeout; a non-zero one is left to match.
+_ZERO_TALLY = re.compile(r"^[^\S\n]*timeouts?[^\S\n]*:[^\S\n]*0(?:\.0+)?[^\S\n]*%.*$",
+                         re.IGNORECASE | re.MULTILINE)
+
+
 def classify_failure(error: Any) -> Optional[str]:
-    text = str(error or "").lower()
+    text = _ZERO_TALLY.sub("", str(error or "")).lower()
     if not text.strip():
         return None
     for label, markers in _FAILURE_MARKERS:
