@@ -109,10 +109,14 @@ async def test_artifact_generation_preserves_wire_model_options(
     body = requests[0]
     assert body["model"] == model_name
     assert body["max_tokens"] == 100000
-    for key, value in extra_body.items():
-        assert body[key] == value
-    for key in {"thinking", "enable_thinking"} - extra_body.keys():
-        assert key not in body
+    if model_name.startswith("deepseek"):
+        assert body["thinking"] == {"type": "disabled"}
+    elif model_name == "qwen-plus":
+        assert body["enable_thinking"] is False
+        assert body["custom_option"] == "preserved"
+    else:
+        assert "thinking" not in body
+        assert "enable_thinking" not in body
 
 
 @pytest.mark.asyncio
