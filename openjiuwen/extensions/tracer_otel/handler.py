@@ -575,7 +575,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         )
         if trace_id and trace_id != self._trace_id:
             # New conversation round: clear cached context and stale spans
-            session_logger.debug("otel: NEW ROUND - clearing cache (cached_trace_id=%s != new_trace_id=%s)", self._cached_trace_id, trace_id)
+            session_logger.debug(
+                "otel: NEW ROUND - clearing cache (cached_trace_id=%s != new_trace_id=%s)",
+                self._cached_trace_id, trace_id,
+            )
             self._cached_root_ctx = None
             self._cached_trace_id = None
             self._cleanup_stale_spans()
@@ -617,8 +620,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             # Check if there is already a root workflow
             existing_root = self._layer_root_spans.get("")
             session_logger.debug(
-                "otel: _resolve_parent_context: trace_id=%s, cached_trace_id=%s, "
-                "cached_ctx=%s, layer_root_spans=%s, existing_root=%s",
+                "otel: _resolve_parent_context: trace_id=%s, cached_trace_id=%s, cached_ctx=%s, layer_root_spans=%s, existing_root=%s",
                 self._trace_id, self._cached_trace_id,
                 self._cached_root_ctx is not None,
                 list(self._layer_root_spans.keys()),
@@ -628,24 +630,24 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 # This is the first root span for this execution
                 # But we might have a cached context from a previous execution
                 if self._cached_root_ctx is not None:
-                    session_logger.debug("otel: REUSING cached context for trace_id=%s", self._trace_id)
+                    session_logger.debug(f"otel: REUSING cached context for trace_id={self._trace_id}")
                     return self._cached_root_ctx
-                session_logger.debug("otel: NO CACHED CONTEXT, creating new trace for trace_id=%s", self._trace_id)
+                session_logger.debug(f"otel: NO CACHED CONTEXT, creating new trace for trace_id={self._trace_id}")
                 return None
             # Isolate different workflows: clean stale context from another workflow
             current_workflow_id = metadata.get("workflow_id") if metadata else None
             if current_workflow_id and existing_root.workflow_id != current_workflow_id:
+                self._cached_root_ctx = None
                 self._layer_root_spans.clear()
                 self._component_spans.clear()
                 return None
-            else:
-                # This is a sub-workflow triggered in a new conversation round
-                # Find the last component span as parent
-                if self._component_spans:
-                    last_comp = list(self._component_spans.values())[-1]
-                    return _get_parent_context(last_comp)
-                # Fallback to the existing root
-                return _get_parent_context(existing_root)
+            # Same workflow_id: reuse cached OTel context to keep all spans
+            # in one trace, even across multiple stream calls.
+            if self._cached_root_ctx is not None:
+                return self._cached_root_ctx
+            # Fallback: clean up stale spans from the previous round
+            self._cleanup_stale_spans()
+            return None
         if parent_node_id == "" and not is_workflow_root:
             # Component in root workflow → parent = root workflow root
             return _get_parent_context(self._layer_root_spans.get(""))
