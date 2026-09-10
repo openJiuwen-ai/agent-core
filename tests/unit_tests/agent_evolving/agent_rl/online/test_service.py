@@ -16,11 +16,21 @@ class _TrajectoryAPI:
     def __init__(self, store: InMemoryTrajectoryStore) -> None:
         self.store = store
         self.uploads: list[dict] = []
+        self.rail_uploads: list[dict] = []
         self.rail_ingestor = self
 
     async def ingest_rail_batch(self, payload: dict) -> dict:
+        self.rail_uploads.append(payload)
+        return {"accepted": 1, "rejected": 0, "source": "rail_ingestor"}
+
+    async def batch_create_trajectories(self, payload: dict) -> dict:
         self.uploads.append(payload)
-        return {"accepted": 1, "rejected": 0}
+        return {
+            "accepted": 1,
+            "rejected": 0,
+            "duplicate": 0,
+            "protocol_version": payload["protocol_version"],
+        }
 
     async def trajectory_management_stats(self, **kwargs) -> dict:
         del kwargs
@@ -444,7 +454,7 @@ async def test_unknown_task_completion_and_terminal_routes_return_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_errors_use_stable_envelope_and_rail_query_routes_are_mapped() -> None:
+async def test_errors_use_stable_envelope_and_upload_protocol_routes_are_mapped() -> None:
     app, store, trajectory_api = _app()
     await store.save_sample({"sample_id": "sample-1"}, user_id="model-1")
 
@@ -462,7 +472,9 @@ async def test_errors_use_stable_envelope_and_rail_query_routes_are_mapped() -> 
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "missing_session_id"
     assert upload.status_code == 200
-    assert trajectory_api.uploads[0]["protocol_version"] == "rail-v1"
+    assert trajectory_api.rail_uploads == [{"protocol_version": "rail-v1", "samples": []}]
+    assert trajectory_api.uploads == []
+    assert upload.json() == {"ok": True, "result": {"accepted": 1, "rejected": 0, "source": "rail_ingestor"}}
     assert stats.json()["total"] == 1
     assert len(listed.json()["items"]) == 1
     assert fetched.json()["sample_id"] == "sample-1"
