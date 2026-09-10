@@ -16,6 +16,13 @@ from openjiuwen.harness.tools.web import _http
 from openjiuwen.harness.tools.web._common import _REQUEST_HEADERS, _domain_allowed
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import to_project_relative
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.citations import (
+    normalize_doi,
+    normalize_year,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
+    CitationMetadata,
+)
 
 _TIMEOUT_SECONDS = 60
 _MAX_PDF_CANDIDATES = 12
@@ -115,6 +122,7 @@ class DownloadSurveySourceTool(Tool):
         attempted request failed.
         """
 
+        citation = self._normalize_fallback_citation(fallback)
         evidence_parts = [
             str(fallback.get("abstract") or "").strip(),
             str(fallback.get("search_snippet") or "").strip(),
@@ -126,9 +134,6 @@ class DownloadSurveySourceTool(Tool):
 
         source_id = hashlib.sha256(url.strip().lower().encode("utf-8")).hexdigest()[:12]
         target = self._download_dir / f"source-{source_id}.metadata.md"
-        authors = fallback.get("authors") or []
-        if not isinstance(authors, list):
-            authors = [str(authors)]
         findings = fallback.get("key_findings") or []
         if not isinstance(findings, list):
             findings = [str(findings)]
@@ -148,10 +153,10 @@ class DownloadSurveySourceTool(Tool):
             f"- Source type: {str(fallback.get('source_type') or 'paper').strip()}",
             "- Retrieval mode: metadata_only",
             f"- Download failure: {error}",
-            f"- Authors: {', '.join(str(item).strip() for item in authors if str(item).strip()) or '(unknown)' }",
-            f"- Year: {str(fallback.get('year') or '').strip() or '(unknown)' }",
-            f"- Venue: {str(fallback.get('venue') or '').strip() or '(unknown)' }",
-            f"- DOI: {str(fallback.get('doi') or '').strip() or '(unknown)' }",
+            f"- Authors: {', '.join(citation.authors) or '(unknown)'}",
+            f"- Year: {citation.year or '(unknown)'}",
+            f"- Venue: {citation.venue or '(unknown)'}",
+            f"- DOI: {citation.doi or '(unknown)'}",
             "",
             _section("Abstract", str(fallback.get("abstract") or "")),
             _section("Search Snippet", str(fallback.get("search_snippet") or "")),
@@ -159,8 +164,7 @@ class DownloadSurveySourceTool(Tool):
             _section("Summary", str(fallback.get("summary") or "")),
             "## Key Findings",
             "",
-            "".join(f"- {str(item).strip()}\n" for item in findings if str(item).strip())
-            or "- (not available)\n",
+            "".join(f"- {str(item).strip()}\n" for item in findings if str(item).strip()) or "- (not available)\n",
             "## Limitations",
             "",
             "".join(f"- {str(item).strip()}\n" for item in limitations if str(item).strip())
@@ -169,6 +173,19 @@ class DownloadSurveySourceTool(Tool):
         self._download_dir.mkdir(parents=True, exist_ok=True)
         target.write_text("\n".join(lines), encoding="utf-8")
         return target
+
+    @staticmethod
+    def _normalize_fallback_citation(fallback: dict[str, Any]) -> CitationMetadata:
+        authors = fallback.get("authors") or []
+        if not isinstance(authors, list):
+            authors = [authors]
+        venue = fallback.get("venue")
+        return CitationMetadata(
+            authors=[str(item) for item in authors if item is not None],
+            year=normalize_year(fallback.get("year")),
+            venue=str(venue) if venue is not None else None,
+            doi=normalize_doi(fallback.get("doi")),
+        )
 
     def _failure_result(
         self,
@@ -183,12 +200,7 @@ class DownloadSurveySourceTool(Tool):
                 source_type = str(fallback.get("source_type") or "paper").strip()
                 if source_type not in {"paper", "web_page"}:
                     source_type = "paper"
-                citation_metadata = {
-                    "authors": fallback.get("authors") or [],
-                    "year": fallback.get("year"),
-                    "venue": fallback.get("venue"),
-                    "doi": fallback.get("doi"),
-                }
+                citation_metadata = self._normalize_fallback_citation(fallback).model_dump(mode="json")
                 result: dict[str, Any] = {
                     "success": True,
                     "url": url,
@@ -298,9 +310,7 @@ class DownloadSurveySourceTool(Tool):
             candidates = self._pdf_candidates(body, base_url=final_url)
             if self._allowed_domains:
                 candidates = [
-                    candidate
-                    for candidate in candidates
-                    if _domain_allowed(candidate, self._allowed_domains)
+                    candidate for candidate in candidates if _domain_allowed(candidate, self._allowed_domains)
                 ]
             result["pdf_candidates"] = candidates
         return result

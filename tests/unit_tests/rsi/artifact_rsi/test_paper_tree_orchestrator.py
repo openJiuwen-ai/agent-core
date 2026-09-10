@@ -12,6 +12,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.schemas i
     PaperNodeExtra,
     RsiTreeNode,
 )
+from openjiuwen.rsi.usage import record_model_usage
 
 
 @pytest.mark.parametrize(
@@ -99,6 +100,55 @@ async def test_uploaded_latex_baseline_score_is_persisted_and_projected(tmp_path
     assert projected_state.baseline == 7.25
     assert projected_report.best_score == 7.25
     assert projected_report.baseline == 7.25
+
+
+@pytest.mark.asyncio
+async def test_paper_usage_is_persisted_and_emitted_for_baseline_scoring(tmp_path, monkeypatch):
+    source = tmp_path / "uploaded-paper"
+    source.mkdir()
+    (source / "main.tex").write_text(
+        r"\documentclass{article}\begin{document}baseline\end{document}",
+        encoding="utf-8",
+    )
+    events = []
+
+    async def fake_score_paper(*, tex_path, output_dir, config, model):
+        del tex_path, output_dir, config, model
+        await record_model_usage(
+            model="paper-scorer",
+            call_id="baseline-score-call",
+            usage={"input_tokens": 12, "output_tokens": 7, "cache_read_tokens": 3},
+        )
+        return module.PaperScore(overall=8.0, breakdown={"clarity": 8.0})
+
+    async def on_event(event):
+        events.append(event)
+
+    monkeypatch.setattr(module, "score_paper", fake_score_paper)
+    run_dir = tmp_path / "task"
+    orchestrator = module.PaperTreeOrchestrator(
+        task_id="usage-baseline",
+        run_dir=str(run_dir),
+        max_iterations=0,
+        optimization_instruction="improve the paper",
+        artifact_path=str(source),
+        on_event=on_event,
+    )
+
+    await orchestrator.start()
+    await orchestrator._task  # noqa: SLF001 - await the provider loop
+
+    state = orchestrator.storage.load_task_state()
+    assert state is not None
+    assert state.usage is not None
+    assert state.usage.tokens.input == 12
+    assert state.usage.tokens.output == 7
+    assert state.usage.tokens.cache_hit == 3
+    assert state.usage.call_count == 1
+    assert project_engine_state(state).usage == state.usage
+    assert (run_dir / "model_calls.jsonl").is_file()
+    progress = [event for event in events if isinstance(event, module.EventProgress)]
+    assert progress and progress[-1].usage == state.usage
 
 
 @pytest.mark.asyncio

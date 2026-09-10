@@ -18,6 +18,9 @@ from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import progress_event
 from openjiuwen.rsi.schema import RsiUsageTokens
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
+    _token_usage,
+)
 from openjiuwen.rsi.usage import (
     ModelUsageObserver,
     model_usage_stage,
@@ -231,6 +234,25 @@ async def test_sink_model_work_is_not_charged_to_engine_or_deadlocked(tmp_path, 
 )
 def test_unknown_counters_and_cache_writes_are_not_fabricated_as_hits(raw, expected):
     assert usage_tokens(raw) == expected
+
+
+def test_paper_trace_reads_standard_usage_metadata():
+    message = AssistantMessage(
+        content="reply",
+        usage_metadata=UsageMetadata(
+            input_tokens=11,
+            output_tokens=5,
+            total_tokens=16,
+            cache_read_tokens=2,
+        ),
+    )
+
+    assert _token_usage(SimpleNamespace(response=message)) == {
+        "input_tokens": 11,
+        "output_tokens": 5,
+        "total_tokens": 16,
+        "cache_read_tokens": 2,
+    }
 
 
 @pytest.mark.asyncio

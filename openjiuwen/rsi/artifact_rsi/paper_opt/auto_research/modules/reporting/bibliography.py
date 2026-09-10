@@ -39,7 +39,6 @@ source, not reconstructed from a summary.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -53,6 +52,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.citations import (
     citation_exclusion_reasons,
     citation_key,
+    doi_from_url,
     merge_citation_metadata,
     normalize_doi,
     resolve_citation,
@@ -118,7 +118,7 @@ def parse_survey_sources(summary_path: Path) -> list[ParsedSource]:
                 )
             if parsed:
                 return parsed
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError):
         pass
 
     try:
@@ -196,13 +196,17 @@ class _CitationMetaParser(HTMLParser):
             self.authors.append(content)
         elif key == "citation_title" and self.title is None:
             self.title = content
-        elif key in (
-            "citation_publication_date",
-            "citation_date",
-            "citation_online_date",
-            "dc.date",
-            "date",
-        ) and self.year is None:
+        elif (
+            key
+            in (
+                "citation_publication_date",
+                "citation_date",
+                "citation_online_date",
+                "dc.date",
+                "date",
+            )
+            and self.year is None
+        ):
             match = re.search(r"\b\d{4}\b", content)
             if match:
                 self.year = match.group(0)
@@ -251,21 +255,7 @@ def _extract_pdf_metadata(path: Path) -> CitationMetadata:
     return CitationMetadata(authors=authors, year=year)
 
 
-def _slug(text: str, length: int = 16) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "", text.lower())
-    return slug[:length] or "source"
-
-
-def _bib_key(title: str, url: str, authors: list[str], year: str | None) -> str:
-    if authors and year:
-        last_name = authors[0].split()[-1] if authors[0].split() else authors[0]
-        return f"{_slug(last_name)}{year}"
-    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
-    return f"{_slug(title)}{digest}"
-
-
 _ARXIV_URL_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})(?:v\d+)?", re.IGNORECASE)
-_DOI_URL_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"'<>]+?)(?:[.)\]]*)(?:[\s\"'<>]|$)")
 
 
 @dataclass
@@ -282,9 +272,7 @@ def _urlopen(request, *, timeout: float, proxy_url: str | None = None):
     import urllib.request
 
     if proxy_url:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
         return opener.open(request, timeout=timeout)
     return urllib.request.urlopen(request, timeout=timeout)  # noqa: S310 - fixed metadata hosts
 
@@ -346,9 +334,7 @@ def _fetch_arxiv(
 
 def _message_to_metadata(message: dict) -> _EnrichedMetadata:
     authors = [
-        f"{a.get('given', '')} {a.get('family', '')}".strip()
-        for a in message.get("author", [])
-        if a.get("family")
+        f"{a.get('given', '')} {a.get('family', '')}".strip() for a in message.get("author", []) if a.get("family")
     ]
     date_parts = (message.get("issued") or {}).get("date-parts") or [[None]]
     year = str(date_parts[0][0]) if date_parts and date_parts[0] and date_parts[0][0] else None
@@ -375,15 +361,16 @@ def try_enrich_from_network(
     if not network_enabled:
         return None
     arxiv_match = _ARXIV_URL_RE.search(url)
-    doi_match = None if arxiv_match else _DOI_URL_RE.search(url)
-    if not arxiv_match and not doi_match:
+    doi = None if arxiv_match else doi_from_url(url)
+    if not arxiv_match and not doi:
         return None
     try:
-        message = (
-            _fetch_arxiv(arxiv_match.group(1), timeout=timeout, proxy_url=proxy_url)
-            if arxiv_match
-            else _fetch_crossref(doi_match.group(1), timeout=timeout, proxy_url=proxy_url)
-        )
+        if arxiv_match:
+            message = _fetch_arxiv(arxiv_match.group(1), timeout=timeout, proxy_url=proxy_url)
+        else:
+            if doi is None:
+                return None
+            message = _fetch_crossref(doi, timeout=timeout, proxy_url=proxy_url)
     except Exception:  # noqa: BLE001 - best-effort network call, never fatal
         return None
     if message is None:

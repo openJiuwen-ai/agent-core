@@ -271,6 +271,7 @@ class PaperTaskState(BaseModel):
     # the baseline by design.
     score: float | None = None
     baseline: float | None = None
+    usage: RsiUsage | None = None
     # Internal-only: root or the most recently adopted reporting node --
     # the parent/comparison baseline _frontier_node() resolves for the
     # *next* round. Starts at root (see _ensure_root_node) and is what lets

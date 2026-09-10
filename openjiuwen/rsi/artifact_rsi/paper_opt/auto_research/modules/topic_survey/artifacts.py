@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
@@ -39,9 +41,7 @@ def _relative_source_link(source_path: Path, report_path: Path) -> str:
     return source_path.relative_to(report_path.parent).as_posix()
 
 
-def _validate_source_paths(
-    draft: TopicSurveyDraft, *, directory: Path
-) -> list[tuple[SurveySource, Path]]:
+def _validate_source_paths(draft: TopicSurveyDraft, *, directory: Path) -> list[tuple[SurveySource, Path]]:
     """Resolve each source's reported local_path. A source whose path
     escapes the download directory, or that the model claimed was
     downloaded but isn't actually on disk, is dropped (logged, not raised)
@@ -54,14 +54,10 @@ def _validate_source_paths(
         try:
             path.relative_to(directory)
         except ValueError:
-            _LOGGER.warning(
-                "dropping survey source outside its download directory: %s", source.local_path
-            )
+            _LOGGER.warning("dropping survey source outside its download directory: %s", source.local_path)
             continue
         if not path.is_file():
-            _LOGGER.warning(
-                "dropping survey source that was not actually downloaded: %s", source.local_path
-            )
+            _LOGGER.warning("dropping survey source that was not actually downloaded: %s", source.local_path)
             continue
         kept.append((source, path))
     return kept
@@ -78,8 +74,6 @@ def _normalize_source(source: SurveySource, source_path: Path) -> SurveySource:
     if source_path.suffix.lower() == ".pdf":
         retrieval_mode = "downloaded_pdf"
     elif source_path.name.endswith(".metadata.md"):
-        retrieval_mode = "metadata_only"
-    elif retrieval_mode == "metadata_only":
         retrieval_mode = "metadata_only"
     else:
         retrieval_mode = "downloaded_html"
@@ -113,13 +107,35 @@ def _write_manifest(directory: Path, sources: list[SurveySource]) -> Path:
             for source in sources
         ],
     }
-    temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
-    temporary.write_text(
+    _atomic_write_text(
+        manifest_path,
         json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
-    temporary.replace(manifest_path)
     return manifest_path
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace a text artifact atomically, even when writes overlap."""
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, path)
+    except Exception:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def write_survey_artifacts(topic: str, draft: TopicSurveyDraft) -> TopicSurveyOutput:
@@ -133,10 +149,7 @@ def write_survey_artifacts(topic: str, draft: TopicSurveyDraft) -> TopicSurveyOu
             f"topic survey produced no sources that were actually downloaded "
             f"(all {len(draft.sources)} reported source(s) failed path validation)"
         )
-    normalized = [
-        (_normalize_source(source, source_path), source_path)
-        for source, source_path in kept
-    ]
+    normalized = [(_normalize_source(source, source_path), source_path) for source, source_path in kept]
 
     reference_lines: list[str] = []
     source_sections: list[str] = []
@@ -179,12 +192,9 @@ def write_survey_artifacts(topic: str, draft: TopicSurveyDraft) -> TopicSurveyOu
         f"{_bullets(draft.key_findings)}\n"
         "## Open Problems\n\n"
         f"{_bullets(draft.open_problems)}\n"
-        "## Sources\n\n"
-        + "\n".join(source_sections)
+        "## Sources\n\n" + "\n".join(source_sections)
     )
-    temporary = report_path.with_suffix(report_path.suffix + ".tmp")
-    temporary.write_text(report, encoding="utf-8")
-    temporary.replace(report_path)
+    _atomic_write_text(report_path, report)
     _write_manifest(directory, [source for source, _path in normalized])
 
     return TopicSurveyOutput(

@@ -385,23 +385,33 @@ def _response_preview(inputs: Any) -> Any:
 
 def _token_usage(inputs: Any) -> dict[str, Any]:
     response = getattr(inputs, "response", None)
-    usage = getattr(response, "usage", None)
-    if usage is None and isinstance(response, dict):
-        usage = response.get("usage")
-    if usage is None:
-        return {}
-    if isinstance(usage, dict):
-        return {
-            key: usage.get(key)
-            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens")
-            if usage.get(key) is not None
-        }
-    payload = {}
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"):
-        value = getattr(usage, key, None)
+    candidates: list[Any] = []
+    for name in ("usage_metadata", "usage"):
+        value = response.get(name) if isinstance(response, dict) else getattr(response, name, None)
         if value is not None:
-            payload[key] = value
-    return payload
+            candidates.append(value)
+    keys = (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "prompt_cache_hit_tokens",
+        "cache_hit",
+    )
+    for usage in candidates:
+        if isinstance(usage, dict):
+            payload = {key: usage.get(key) for key in keys if usage.get(key) is not None}
+        else:
+            payload = {
+                key: getattr(usage, key, None)
+                for key in keys
+                if getattr(usage, key, None) is not None
+            }
+        if payload:
+            return payload
+    return {}
 
 
 def _accumulate_usage(totals: dict[str, int], usage: dict[str, Any]) -> None:

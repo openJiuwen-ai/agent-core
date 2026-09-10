@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,10 +42,15 @@ class LatexRuntime:
                 return executable.parent
         return None
 
-    def with_environment(self, environ: MutableMapping[str, str] | None = None) -> MutableMapping[str, str]:
-        """Put the resolved tool directories first in a child environment."""
+    def with_environment(self, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+        """Return a child environment with the resolved tool directories first.
 
-        target = os.environ if environ is None else environ
+        A copy is always returned. In particular, the default call must not
+        mutate ``os.environ`` because reporting tasks may run concurrently in
+        the same long-lived worker process.
+        """
+
+        target = dict(os.environ if environ is None else environ)
         current_path = target.get("PATH", "")
         prefixes = [str(path) for path in self.search_dirs if path.is_dir()]
         if self.bin_dir is not None and self.bin_dir.is_dir():
@@ -203,13 +208,15 @@ def preflight_latex_runtime(
 def configure_latex_environment(
     runtime: LatexRuntime | None = None,
     *,
-    environ: MutableMapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> LatexRuntime | None:
-    """Apply a discovered runtime to the current process or a child env."""
+    """Resolve a runtime without changing the current process environment.
+
+    Call ``runtime.with_environment()`` at the subprocess boundary when the
+    returned environment is needed.
+    """
 
     resolved = runtime or discover_latex_runtime(environ=environ)
-    if resolved.available:
-        resolved.with_environment(environ)
     return resolved
 
 

@@ -4,21 +4,15 @@ sections/*.tex and compile it, run by the reporting agent via its own
 shell tool. Thin argv/stdout glue around latex.py's already-tested
 functions — see docs/paper_writing_design.md.
 
-Usage: python compile.py <workspace>   (<workspace> is the paper workspace's
+Usage: python compile.py <workspace> [latex-bin-dir]   (<workspace> is the paper workspace's
 absolute path, i.e. {PAPER_WORKSPACE} — reads title.txt and sections/*.tex
 from it, writes main.tex/main.pdf there. Falls back to the current
 directory if omitted, for direct/manual invocation only.)
 
-If latexmk/pdflatex aren't already on PATH for whatever process runs the
-pipeline, set LATEX_BIN_DIR (in .env, or reporting.latex_bin_dir in
-configs/pipeline.default.yaml — agent.py copies the config value into this
-env var before invoking the reporting agent) to your TeX distribution's bin
-directory. Do not hardcode a machine-specific path here directly — a live
-run once did exactly that (the agent has write access to this file, since
-skill discovery needs project_root in its sandbox) after latexmk/pdflatex
-were missing from PATH, baking one developer's local install path into
-tracked source. That's the actual bug this env var exists to make
-impossible to repeat: there is no path here for it to "helpfully" hardcode.
+If latexmk/pdflatex aren't already on PATH, pass the TeX distribution's bin
+directory as the optional second argument. The reporting host also writes
+that value to the private ``.latex-runtime.json`` file in the workspace, so
+the normal skill command does not need to mutate the parent process environment.
 """
 
 from __future__ import annotations
@@ -46,9 +40,6 @@ _NEURIPS_STY = Path(__file__).parent.parent / "assets" / "neurips_2025.sty"
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
-    latex_bin_dir = os.environ.get("LATEX_BIN_DIR", "").strip()
-    if latex_bin_dir and os.path.isdir(latex_bin_dir):
-        os.environ["PATH"] = latex_bin_dir + os.pathsep + os.environ.get("PATH", "")
     # Takes the workspace as an explicit argument rather than trusting
     # Path.cwd() — the agent's shell tool tracks one mutable cwd shared
     # across every tool call in the session, and a single stray `cd`
@@ -60,6 +51,17 @@ def main() -> None:
     # human running this script by hand) — every skill instruction passes
     # {PAPER_WORKSPACE} explicitly.
     workspace = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+    latex_bin_dir = os.environ.get("LATEX_BIN_DIR", "").strip() or None
+    if len(sys.argv) > 2 and sys.argv[2].strip():
+        latex_bin_dir = sys.argv[2].strip()
+    if latex_bin_dir is None:
+        runtime_config = workspace / ".latex-runtime.json"
+        try:
+            configured = json.loads(runtime_config.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            configured = {}
+        if isinstance(configured, dict):
+            latex_bin_dir = str(configured.get("latex_bin_dir") or "").strip() or None
     title_path = workspace / "title.txt"
     if not title_path.is_file():
         logging.info(json.dumps({"success": False, "error": "title.txt not found — run ts-plan first."}))
@@ -90,13 +92,11 @@ def main() -> None:
 
     tex_path = workspace / "main.tex"
     tex_path.write_text(
-        assemble_document(
-            title=title, section_bodies=section_bodies, document_order=DOCUMENT_ORDER, keywords=keywords
-        ),
+        assemble_document(title=title, section_bodies=section_bodies, document_order=DOCUMENT_ORDER, keywords=keywords),
         encoding="utf-8",
     )
 
-    result = compile_document(tex_path)
+    result = compile_document(tex_path, latex_bin_dir=latex_bin_dir)
     logging.info(
         json.dumps(
             {

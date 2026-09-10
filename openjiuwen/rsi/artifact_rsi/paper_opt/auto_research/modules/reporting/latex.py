@@ -176,7 +176,7 @@ def move_table_captions_above(latex: str) -> str:
         ce = _brace_end(content, cb)
         if ce == -1:
             return m.group(0)
-        cap = content[cm.start(): ce]
+        cap = content[cm.start() : ce]
         lab = re.search(r"\\label\{[^}]*\}", content)
         lab_t = lab.group(0) if lab else ""
         body = content[: cm.start()] + content[ce:]
@@ -187,9 +187,7 @@ def move_table_captions_above(latex: str) -> str:
         new = "\n".join(parts)
         return m.group(0) if new.strip() == content.strip() else f"{begin}\n{new}\n\\end{{{ttype}}}"
 
-    latex = re.sub(
-        r"(\\begin\{(table\*?)\}(?:\[[^\]]*\])?)(.*?)\\end\{\2\}", fix_float, latex, flags=re.DOTALL
-    )
+    latex = re.sub(r"(\\begin\{(table\*?)\}(?:\[[^\]]*\])?)(.*?)\\end\{\2\}", fix_float, latex, flags=re.DOTALL)
 
     def fix_inline(m: re.Match[str]) -> str:
         block = m.group(0)
@@ -220,9 +218,7 @@ def move_table_captions_above(latex: str) -> str:
         nb = nb[:ci2] + "\n" + cap + nb[ci2:]
         return re.sub(r"\n\s*\n\s*\n+", "\n\n", nb)
 
-    latex = re.sub(
-        r"\\begin\{minipage\}\{\\columnwidth\}.*?\\end\{minipage\}", fix_inline, latex, flags=re.DOTALL
-    )
+    latex = re.sub(r"\\begin\{minipage\}\{\\columnwidth\}.*?\\end\{minipage\}", fix_inline, latex, flags=re.DOTALL)
     return latex
 
 
@@ -364,14 +360,19 @@ _COMPILE_COMMANDS: tuple[tuple[str, ...], ...] = (
 )
 
 
-def compile_document(tex_path: Path, *, timeout_seconds: int = 300) -> CompileResult:
+def compile_document(
+    tex_path: Path,
+    *,
+    timeout_seconds: int = 300,
+    latex_bin_dir: str | Path | None = None,
+) -> CompileResult:
     """Run latexmk (falling back to pdflatex) as a bounded, host-controlled
     subprocess. Never raises for a missing toolchain or a compile error —
     both are reported in ``CompileResult`` for the caller's bounded repair
     loop (docs/paper_writing_design.md §8) to act on.
     """
     workdir = tex_path.parent
-    runtime = discover_latex_runtime()
+    runtime = discover_latex_runtime(latex_bin_dir)
     child_env = runtime.with_environment()
     toolchain_missing = True
     for command in _COMPILE_COMMANDS:

@@ -7,14 +7,14 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
     CitationMetadata,
 )
 
 _YEAR_RE = re.compile(r"\b(\d{4})\b")
-_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"'<>]+", re.IGNORECASE)
+_DOI_RE = re.compile(r"(?:^|/)\b(10\.\d{4,9}/[^\s\"'<>?#]+)", re.IGNORECASE)
 _DOI_PREFIX_RE = re.compile(r"^https?://(?:dx\.)?doi\.org/", re.IGNORECASE)
 _EVIDENCE_FIELD_RE = re.compile(
     r"^-\s*\*{0,2}(Authors|Year|Venue|DOI)\*{0,2}:\s*(.*?)\s*$",
@@ -26,6 +26,7 @@ def normalize_doi(value: str | None) -> str | None:
     if not value:
         return None
     cleaned = _DOI_PREFIX_RE.sub("", str(value).strip())
+    cleaned = cleaned.split("?", 1)[0].split("#", 1)[0]
     cleaned = cleaned.strip().rstrip(".,;:)]}>")
     return cleaned.lower() or None
 
@@ -39,8 +40,18 @@ def normalize_year(value: str | int | None) -> str | None:
 
 def doi_from_url(url: str) -> str | None:
     decoded = unquote(str(url or ""))
-    match = _DOI_RE.search(decoded)
-    return normalize_doi(match.group(0)) if match else None
+    try:
+        parsed = urlsplit(decoded)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.scheme and parsed.netloc:
+        searchable = parsed.path
+    else:
+        searchable = decoded.split("?", 1)[0].split("#", 1)[0]
+    match = _DOI_RE.search(searchable)
+    if not match:
+        return None
+    return normalize_doi(match.group(1).split("?", 1)[0].split("#", 1)[0])
 
 
 class _CitationMetaParser(HTMLParser):
@@ -63,20 +74,28 @@ class _CitationMetaParser(HTMLParser):
         key = name or property_name
         if key in {"citation_author", "dc.creator", "author"}:
             self.authors.append(content)
-        elif key in {
-            "citation_publication_date",
-            "citation_date",
-            "citation_online_date",
-            "dc.date",
-            "date",
-        } and self.year is None:
+        elif (
+            key
+            in {
+                "citation_publication_date",
+                "citation_date",
+                "citation_online_date",
+                "dc.date",
+                "date",
+            }
+            and self.year is None
+        ):
             self.year = normalize_year(content)
-        elif key in {
-            "citation_journal_title",
-            "citation_conference_title",
-            "citation_inbook_title",
-            "dc.source",
-        } and self.venue is None:
+        elif (
+            key
+            in {
+                "citation_journal_title",
+                "citation_conference_title",
+                "citation_inbook_title",
+                "dc.source",
+            }
+            and self.venue is None
+        ):
             self.venue = content
         elif key in {"citation_doi", "dc.identifier", "doi"} and self.doi is None:
             self.doi = normalize_doi(content)
@@ -107,15 +126,15 @@ def extract_metadata_evidence(path: Path) -> CitationMetadata:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return CitationMetadata()
-    values = {
-        match.group(1).lower(): match.group(2).strip()
-        for match in _EVIDENCE_FIELD_RE.finditer(text)
-    }
+    values = {match.group(1).lower(): match.group(2).strip() for match in _EVIDENCE_FIELD_RE.finditer(text)}
 
     authors_value = values.get("authors", "")
-    authors = [] if not authors_value or authors_value.lower() == "(unknown)" else [
-        item.strip() for item in authors_value.split(",") if item.strip()
-    ]
+    authors = (
+        []
+        if not authors_value or authors_value.lower() == "(unknown)"
+        else [item.strip() for item in authors_value.split(",") if item.strip()]
+    )
+
     def _known(value: str | None) -> str | None:
         if not value or value.lower() == "(unknown)":
             return None
@@ -168,9 +187,7 @@ def citation_key(title: str, url: str, metadata: CitationMetadata) -> str | None
         return None
     author = metadata.authors[0].split()[-1] if metadata.authors else "source"
     author_slug = re.sub(r"[^a-z0-9]+", "", author.lower())[:20] or "source"
-    suffix = hashlib.sha256(
-        (normalize_doi(metadata.doi) or str(url) or title).encode("utf-8")
-    ).hexdigest()[:8]
+    suffix = hashlib.sha256((normalize_doi(metadata.doi) or str(url) or title).encode("utf-8")).hexdigest()[:8]
     return f"{author_slug}{metadata.year}{suffix}"
 
 

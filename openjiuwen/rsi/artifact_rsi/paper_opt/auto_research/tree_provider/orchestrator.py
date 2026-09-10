@@ -48,11 +48,14 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.schemas i
     PaperNodeExtra,
     PaperTaskState,
     RsiChange,
+    RsiUsage,
+    RsiUsageTokens,
     RsiTreeNode,
     friendly_failure_reason,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.seed import NodeSeed, build_node_seed
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.tree_provider.storage import TaskStorage
+from openjiuwen.rsi.usage import ModelUsageObserver, set_usage_node
 
 # Anchored to the paper_opt package dir (two levels up from this file:
 # tree_provider -> auto_research -> paper_opt), not the process's current
@@ -64,6 +67,15 @@ DEFAULT_CONFIG_PATH = str(_PAPER_OPT_ROOT / "configs" / "pipeline.default.yaml")
 _MISSING = object()
 _MODEL_ENV_LOCK = asyncio.Lock()
 logger = logging.getLogger(__name__)
+
+
+def _usage_counter(value: Any) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _model_value(value: Any, name: str) -> Any:
@@ -112,15 +124,10 @@ async def _temporary_model_environment(
         "MODEL_NAME": _model_value(request_config, "model_name"),
         "MODEL_TIMEOUT": _model_value(client, "timeout"),
     }
-    values = {
-        key: str(value)
-        for key, value in values.items()
-        if value not in (None, "")
-    }
+    values = {key: str(value) for key, value in values.items() if value not in (None, "")}
     if _MODEL_ENV_LOCK.locked():
         logger.warning(
-            "[RSI] paper orchestrator waiting for the process-level model "
-            "environment lock: task=%s",
+            "[RSI] paper orchestrator waiting for the process-level model environment lock: task=%s",
             task_id or "<unknown>",
         )
     await _MODEL_ENV_LOCK.acquire()
@@ -170,51 +177,52 @@ def _friendly_pruned_reason(
     if phase == "scoring" or failure_class == "scoring_error":
         return "评估结果未达到预期，已剪枝。"
 
-    context = " ".join(
-        value
-        for value in (
-            failure_class,
-            terminal.status if terminal is not None else None,
-            terminal.abort_reason if terminal is not None else None,
-            terminal.failure_reason if terminal is not None else None,
-            terminal.summary if terminal is not None else None,
-        )
-        if value
-    ).lower()
+    context_parts: list[str] = []
+    for value in (
+        failure_class,
+        terminal.status if terminal is not None else None,
+        terminal.abort_reason if terminal is not None else None,
+        terminal.failure_reason if terminal is not None else None,
+        terminal.summary if terminal is not None else None,
+    ):
+        if value:
+            context_parts.append(value)
+    context = " ".join(context_parts).lower()
 
-    if any(
-        marker in context
-        for marker in (
-            "topic_survey",
-            "survey",
-            "research",
-            "source",
-            "download",
-            "fetch",
-            "retriev",
-            "文献",
-            "资料",
-        )
-    ):
-        return "资料获取质量不佳，已剪枝。"
-    if any(
-        marker in context
-        for marker in (
-            "experiment_execution",
-            "execution",
-            "experiment",
-            "code_implementation",
-            "smoke",
-            "dataset",
-            "run.py",
-        )
-    ):
-        return "实验验证效果不佳，已剪枝。"
-    if phase == "paper_generation" or any(
-        marker in context
-        for marker in ("reporting", "latex", "paper", "report", "pdf", "tex")
-    ):
+    source_markers = (
+        "topic_survey",
+        "survey",
+        "research",
+        "source",
+        "download",
+        "fetch",
+        "retriev",
+        "文献",
+        "资料",
+    )
+    for marker in source_markers:
+        if marker in context:
+            return "资料获取质量不佳，已剪枝。"
+
+    execution_markers = (
+        "experiment_execution",
+        "execution",
+        "experiment",
+        "code_implementation",
+        "smoke",
+        "dataset",
+        "run.py",
+    )
+    for marker in execution_markers:
+        if marker in context:
+            return "实验验证效果不佳，已剪枝。"
+
+    paper_markers = ("reporting", "latex", "paper", "report", "pdf", "tex")
+    if phase == "paper_generation":
         return "论文内容质量未达到要求，已剪枝。"
+    for marker in paper_markers:
+        if marker in context:
+            return "论文内容质量未达到要求，已剪枝。"
     return "当前方案效果未达到要求，已剪枝。"
 
 
@@ -315,6 +323,34 @@ class PaperTreeOrchestrator:
         self._task: asyncio.Task | None = None
         self._cancelled = False
         self._pause_requested = False
+        self._usage_observer: ModelUsageObserver | None = None
+
+    def _current_usage(self) -> RsiUsage | None:
+        """Return the public paper-provider usage projection for this run."""
+        observer = self._usage_observer
+        if observer is None or observer.totals.call_count <= 0:
+            return None
+        tokens = observer.totals.tokens
+        return RsiUsage(
+            tokens=RsiUsageTokens(
+                input=_usage_counter(tokens.input),
+                output=_usage_counter(tokens.output),
+                cache_hit=_usage_counter(tokens.cache_hit),
+            ),
+            cost_estimate=observer.totals.cost_estimate or 0.0,
+            call_count=observer.totals.call_count,
+        )
+
+    async def _on_usage_event(self, event: Any) -> None:
+        """Persist each call's cumulative usage before forwarding the event."""
+        if getattr(event, "event_type", None) == "progress.usage":
+            state = self.storage.load_task_state()
+            usage = self._current_usage()
+            if state is not None and usage is not None:
+                state.usage = usage
+                self.storage.save_task_state(state)
+        if self.on_event is not None:
+            await self.on_event(event)
 
     def _stage_input_artifact(self, artifact_path: str | None) -> str | None:
         """Copy the caller's input into this task's durable workspace.
@@ -386,9 +422,7 @@ class PaperTreeOrchestrator:
         if main_tex is not None and main_tex.is_file():
             main_relative = to_project_relative(main_tex, root=run_dir)
             try:
-                processed = PaperPreprocessAgent().run(
-                    PaperPreprocessInput(paper_dir=str(snapshot))
-                ).initial_prompt
+                processed = PaperPreprocessAgent().run(PaperPreprocessInput(paper_dir=str(snapshot))).initial_prompt
             except LatexValidationError as exc:
                 processed = (
                     "TASK MODE: modify_paper\n\n"
@@ -407,9 +441,7 @@ class PaperTreeOrchestrator:
         elif snapshot.is_dir():
             # Directory expansion can still expose supported resources (for
             # example an uploaded PDF plus sidecar notes).
-            initial_prompt += (
-                f" The directory contains the uploaded paper resources; inspect `{relative_snapshot}`."
-            )
+            initial_prompt += f" The directory contains the uploaded paper resources; inspect `{relative_snapshot}`."
             research_paths.append(relative_snapshot)
         else:
             research_paths.append(relative_snapshot)
@@ -530,6 +562,7 @@ class PaperTreeOrchestrator:
             return
 
         try:
+            set_usage_node(_root_node_id(self.task_id))
             baseline_score = await score_paper(
                 tex_path=str(tex_path),
                 output_dir=str(self.storage.run_dir / "baseline_scoring"),
@@ -547,6 +580,7 @@ class PaperTreeOrchestrator:
 
         state.baseline = baseline_score.overall
         state.score = baseline_score.overall
+        state.usage = self._current_usage()
         root = next(
             (node for node in self.storage.load_tree() if node.node_id == _root_node_id(self.task_id)),
             None,
@@ -575,7 +609,7 @@ class PaperTreeOrchestrator:
                 total_iterations=self.max_iterations,
                 score=state.score,
                 baseline=state.baseline,
-                usage=None,
+                usage=self._current_usage(),
             )
         )
 
@@ -643,13 +677,39 @@ class PaperTreeOrchestrator:
         state = self.storage.load_task_state()
         if state is None:
             raise RuntimeError("_run_loop started with no persisted task state")
+        observer = ModelUsageObserver(self._on_usage_event)
+        self._usage_observer = observer
+        try:
+            async with observer.observe():
+                await observer.bind(state.model_dump(mode="python"), self.storage.run_dir)
+                restored_usage = self._current_usage()
+                if restored_usage is not None:
+                    state.usage = restored_usage
+                    self.storage.save_task_state(state)
+                await self._run_loop_body(state)
+                await observer.finish_pending()
+        except Exception as exc:  # noqa: BLE001 -- observation must terminalize the task
+            logger.exception("paper usage observation failed task=%s", self.task_id)
+            state = self.storage.load_task_state() or state
+            if state.status not in {"completed", "failed", "paused", "terminated"}:
+                state.status = "failed"
+                state.error_message = str(exc)
+                self.storage.save_task_state(state)
+                await self._emit(EventStatus(status="failed"))
+        finally:
+            with contextlib.suppress(Exception):
+                await observer.finish_pending()
+            state = self.storage.load_task_state() or state
+            usage = self._current_usage()
+            if usage is not None:
+                state.usage = usage
+            self.storage.save_task_state(state)
+            self._usage_observer = None
+
+    async def _run_loop_body(self, state: PaperTaskState) -> None:
         try:
             await self._ensure_baseline_score(state)
-            while (
-                state.node_count < self.max_iterations
-                and not self._cancelled
-                and not self._pause_requested
-            ):
+            while state.node_count < self.max_iterations and not self._cancelled and not self._pause_requested:
                 await self._run_one_node(state)
             if not self._cancelled and not self._pause_requested:
                 # Reaching the outer iteration budget is only a successful
@@ -669,8 +729,6 @@ class PaperTreeOrchestrator:
             elif self._pause_requested and not self._cancelled:
                 state.status = "paused"
                 self.storage.save_task_state(state)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001 -- must not crash the loop silently
             if self._pause_requested and not self._cancelled:
                 state.status = "paused"
@@ -823,7 +881,7 @@ class PaperTreeOrchestrator:
                 total_iterations=self.max_iterations,
                 score=state.score,
                 baseline=state.baseline,
-                usage=None,
+                usage=self._current_usage(),
             )
         )
 
@@ -834,6 +892,8 @@ class PaperTreeOrchestrator:
 
     async def _run_manager(self, seed: NodeSeed) -> TerminalReport:
         try:
+            set_usage_node(seed.run_id)
+
             async def on_stage(module: str) -> None:
                 labels = {
                     "manager": "正在规划下一阶段",
@@ -849,10 +909,12 @@ class PaperTreeOrchestrator:
                     None,
                 )
                 if node is not None:
-                    await self._emit(NodeStageEvent(
-                        node_ref=node.node_id,
-                        stage={"id": module, "name": labels.get(module, module)},
-                    ))
+                    await self._emit(
+                        NodeStageEvent(
+                            node_ref=node.node_id,
+                            stage={"id": module, "name": labels.get(module, module)},
+                        )
+                    )
 
             async with _temporary_model_environment(self.model, task_id=self.task_id):
                 # Every workspace_dir(run_id)-derived path the six-module
@@ -958,6 +1020,7 @@ class PaperTreeOrchestrator:
         # node's score as its own comparison baseline once/if this node
         # gets adopted.
         try:
+            set_usage_node(node_id)
             candidate_score = await score_paper(
                 tex_path=str(paper_tex_path(node_run_id)),
                 output_dir=str(paper_scoring_dir(node_run_id)),
@@ -1005,8 +1068,7 @@ class PaperTreeOrchestrator:
             # exists and score deltas are meaningful.
             adopted = True
             reason = (
-                f"score {candidate_score.overall:g} > "
-                f"parent score {parent_score.overall:g}. {candidate_score.reason}"
+                f"score {candidate_score.overall:g} > parent score {parent_score.overall:g}. {candidate_score.reason}"
             ).strip()
             failure_class = None
         else:
@@ -1045,8 +1107,8 @@ class PaperTreeOrchestrator:
             },
         )
 
+    @staticmethod
     def _pruned_node(
-        self,
         *,
         node_id: str,
         round_index: int,
@@ -1144,10 +1206,14 @@ class PaperTreeOrchestrator:
         if isinstance(event, NodeStageEvent):
             for node in self.storage.load_tree():
                 if node.node_id == event.node_ref:
-                    self.storage.append_node(node.model_copy(update={
-                        "summary": event.stage.get("name"),
-                        "extra": {**node.extra, "stage": dict(event.stage)},
-                    }))
+                    self.storage.append_node(
+                        node.model_copy(
+                            update={
+                                "summary": event.stage.get("name"),
+                                "extra": {**node.extra, "stage": dict(event.stage)},
+                            }
+                        )
+                    )
                     break
         if self.on_event is not None:
             await self.on_event(event)

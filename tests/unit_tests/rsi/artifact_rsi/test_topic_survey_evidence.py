@@ -24,6 +24,9 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.ar
     survey_directory,
     write_survey_artifacts,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.citations import (
+    doi_from_url,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import (
     CitationMetadata,
     SurveySource,
@@ -182,10 +185,10 @@ async def test_metadata_fallback_preserves_citation_fields_for_host_resolution(t
                 "title": "Blocked paper",
                 "source_type": "paper",
                 "abstract": "Usable abstract.",
-                "authors": ["Ada Lovelace"],
-                "year": "1843",
-                "venue": "Journal of Examples",
-                "doi": "10.1234/example",
+                "authors": [" Ada Lovelace "],
+                "year": "published in 1843",
+                "venue": " Journal of Examples ",
+                "doi": "https://doi.org/10.1234/example?utm_source=test#abstract",
             },
         }
     )
@@ -207,9 +210,21 @@ async def test_metadata_fallback_preserves_citation_fields_for_host_resolution(t
         )
         output = write_survey_artifacts(topic, draft)
         assert output.sources[0].citation_eligible is True
+        assert output.sources[0].citation.year == "1843"
+        assert output.sources[0].citation.venue == "Journal of Examples"
         assert output.sources[0].citation.doi == "10.1234/example"
+        assert "- DOI: 10.1234/example" in (tmp_path / downloaded["local_path"]).read_text(encoding="utf-8")
     finally:
         set_project_root(None)
+
+
+def test_doi_from_url_ignores_query_and_fragment():
+    url = "https://doi.org/10.1038/s41586-020-2649-2?utm_source=newsletter#abstract"
+
+    assert doi_from_url(url) == "10.1038/s41586-020-2649-2"
+    assert doi_from_url("https://example.test/article/10.1234/example#details") == ("10.1234/example")
+    assert doi_from_url("https://example.test/volume10.1234/example") is None
+    assert doi_from_url("https://[invalid") is None
 
 
 def _write_source_case(tmp_path: Path, *, complete: bool):
@@ -320,3 +335,24 @@ def test_reporting_receives_downloaded_html_as_evidence(tmp_path):
         assert "evidence" in evidence
     finally:
         set_project_root(None)
+
+
+def test_reporting_bounds_large_html_evidence(tmp_path):
+    set_project_root(tmp_path)
+    summary_path = tmp_path / "research_summary.md"
+    source_path = tmp_path / "source.html"
+    summary_path.write_text("summary", encoding="utf-8")
+    source_path.write_text(
+        "<html><head><title>source</title></head><body>" + ("visible text " * 10_000) + "</body></html>",
+        encoding="utf-8",
+    )
+    brief = ResearchBrief(resource_paths=["research_summary.md", "source.html"])
+
+    try:
+        evidence = ReportingAgent._read_survey_summary(brief)
+    finally:
+        set_project_root(None)
+
+    assert evidence is not None
+    assert "Detailed source evidence: source.html" in evidence
+    assert evidence.count("visible text") <= 600

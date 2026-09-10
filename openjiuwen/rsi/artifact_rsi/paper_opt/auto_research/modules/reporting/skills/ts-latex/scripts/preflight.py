@@ -10,10 +10,17 @@ Usage: python preflight.py [latex-bin-dir]
 
 from __future__ import annotations
 
-import json
 import contextlib
 import io
+import json
 import sys
+
+
+def _write_json(payload: dict[str, object]) -> None:
+    """Keep the CLI stdout contract machine-readable without using print."""
+
+    json.dump(payload, sys.stdout)
+    sys.stdout.write("\n")
 
 
 def main() -> int:
@@ -30,18 +37,16 @@ def main() -> int:
     try:
         runtime = preflight_latex_runtime(latex_bin_dir)
     except LatexRuntimeError as exc:
-        print(json.dumps({"ready": False, "error": str(exc)}))
+        _write_json({"ready": False, "error": str(exc)})
         return 1
 
-    print(
-        json.dumps(
-            {
-                "ready": True,
-                "latexmk": str(runtime.latexmk) if runtime.latexmk else None,
-                "pdflatex": str(runtime.pdflatex) if runtime.pdflatex else None,
-                "bin_dir": str(runtime.bin_dir) if runtime.bin_dir else None,
-            }
-        )
+    _write_json(
+        {
+            "ready": True,
+            "latexmk": str(runtime.latexmk) if runtime.latexmk else None,
+            "pdflatex": str(runtime.pdflatex) if runtime.pdflatex else None,
+            "bin_dir": str(runtime.bin_dir) if runtime.bin_dir else None,
+        }
     )
     return 0
 
