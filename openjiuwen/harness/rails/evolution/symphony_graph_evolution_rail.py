@@ -73,6 +73,9 @@ from openjiuwen.symphony.observation import GraphSnapshotRef
 _COMPOSE_TOOL_NAME = "symphony_compose_graph"
 _MAX_EDGE_CANDIDATES = 64
 _CANDIDATE_PROBE_LIMIT = _MAX_EDGE_CANDIDATES + 1
+_SUMMARY_EDGE_EVENT_COUNT = 5
+_SUMMARY_EVENT_MAX_BYTES = 3 * 1024
+_SUMMARY_VALUE_MAX_BYTES = 2 * 1024
 _OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
 
 CaptureMode: TypeAlias = Literal["agent", "team"]
@@ -1293,7 +1296,7 @@ def _build_edge_summaries(
             if identity is not None:
                 span_map[identity] = span
 
-    def endpoint(fragment: SymphonyExecutionFragment, *, keep_last: bool) -> SymphonyEdgeEndpointSummary:
+    def endpoint(fragment: SymphonyExecutionFragment) -> SymphonyEdgeEndpointSummary:
         events: list[str] = []
         errors: list[str] = []
         for span_id in fragment.span_ids:
@@ -1311,22 +1314,27 @@ def _build_edge_summaries(
                     if key in call
                 }
                 if safe:
-                    events.append(_truncate_trace_text(json.dumps(safe, ensure_ascii=False, sort_keys=True), 384))
-        selected = events[-3:] if keep_last else events[:3]
-        slots = [*selected, "", "", ""][:3]
-        error_text = errors[-1] if keep_last and errors else errors[0] if errors else ""
+                    events.append(
+                        _truncate_trace_text(
+                            json.dumps(safe, ensure_ascii=False, sort_keys=True),
+                            _SUMMARY_EVENT_MAX_BYTES,
+                        )
+                    )
+        head = events[:_SUMMARY_EDGE_EVENT_COUNT]
+        tail = events[max(_SUMMARY_EDGE_EVENT_COUNT, len(events) - _SUMMARY_EDGE_EVENT_COUNT) :]
+        error_text = errors[-1] if errors else ""
         return SymphonyEdgeEndpointSummary(
-            fragment=slots[0],
+            fragment=head[0] if head else "",
             capability=f"{fragment.capability_type}:{fragment.capability_name or ''}",
-            input=slots[1],
-            output=slots[2],
+            input="\n".join(head[1:]),
+            output="\n".join(tail),
             error=error_text,
         )
 
     return {
         candidate.candidate_id: SymphonyEdgeEvaluationSummary(
-            endpoint_a=endpoint(candidate.source_fragment, keep_last=True),
-            endpoint_b=endpoint(candidate.target_fragment, keep_last=False),
+            endpoint_a=endpoint(candidate.source_fragment),
+            endpoint_b=endpoint(candidate.target_fragment),
         )
         for candidate in candidates
     }
@@ -1351,10 +1359,10 @@ def _compact_trace_value(value: Any) -> Any:
     if isinstance(value, str):
         if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value[:128]):
             return "<redacted>"
-        return _truncate_trace_text(value, 256)
+        return _truncate_trace_text(value, _SUMMARY_VALUE_MAX_BYTES)
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return _truncate_trace_text(str(value), 256)
+    return _truncate_trace_text(str(value), _SUMMARY_VALUE_MAX_BYTES)
 
 
 class TeamSymphonyGraphEvolutionRail(_TeamTrajectoryCaptureMixin, SymphonyGraphEvolutionRail):

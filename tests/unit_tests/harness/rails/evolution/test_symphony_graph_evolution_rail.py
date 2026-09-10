@@ -1580,7 +1580,65 @@ def test_summary_redacts_binary_and_bounds_values() -> None:
     compact = rail_module._compact_trace_value(value)
     assert compact["base64_blob"] == "<redacted>"
     assert compact["raw"] == "<redacted>"
-    assert len(compact["normal"].encode()) <= 256
+    assert len(compact["normal"].encode()) <= 2048
+
+
+def test_edge_summary_covers_expanded_fragment_head_and_tail() -> None:
+    trace_id = "1" * 32
+
+    def tool_span(span_id: int, name: str, content: str) -> dict:
+        return {
+            "traceId": trace_id,
+            "spanId": f"{span_id:016x}",
+            "name": f"tool.{name}",
+            "startTimeUnixNano": str(span_id),
+            "endTimeUnixNano": str(span_id + 1),
+            "attributes": attributes_from_map(
+                {
+                    semconv.GEN_AI_TOOL_NAME: name,
+                    semconv.GEN_AI_TOOL_INPUT: json.dumps({"content": content}),
+                    semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True}),
+                }
+            ),
+        }
+
+    source_ids = tuple(f"{index:016x}" for index in range(1, 4))
+    target_ids = tuple(f"{index:016x}" for index in range(10, 25))
+    spans = [tool_span(index, f"source-{index}", "source") for index in range(1, 4)]
+    for position, span_id in enumerate(range(10, 25), start=1):
+        marker = f"target-{position}"
+        content = marker
+        if position == 5:
+            content = f'{{"guide":"{"x" * 1500} weather-consumed-18-31C"}}'
+        spans.append(tool_span(span_id, marker, content))
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": spans}],
+                }
+            ]
+        }
+    )
+    source = SymphonyExecutionFragment("source", "skill", "weather", trace_id, source_ids[0], "branch", source_ids, 0)
+    target = SymphonyExecutionFragment(
+        "target", "skill", "travel-guide-generator", trace_id, target_ids[0], "branch", target_ids, 0
+    )
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        source,
+        target,
+        (f"{trace_id}#span={source.anchor_span_id}", f"{trace_id}#span={target.anchor_span_id}"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_b
+
+    assert "target-1" in summary.fragment
+    assert "weather-consumed-18-31C" in summary.input
+    assert "target-15" in summary.output
+    assert "target-8" not in f"{summary.fragment}{summary.input}{summary.output}"
 
 
 @pytest.mark.asyncio
