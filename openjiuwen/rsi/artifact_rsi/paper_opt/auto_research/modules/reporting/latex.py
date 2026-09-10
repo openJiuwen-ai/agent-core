@@ -176,7 +176,7 @@ def move_table_captions_above(latex: str) -> str:
         ce = _brace_end(content, cb)
         if ce == -1:
             return m.group(0)
-        cap = content[cm.start() : ce]
+        cap = content[cm.start():ce]
         lab = re.search(r"\\label\{[^}]*\}", content)
         lab_t = lab.group(0) if lab else ""
         body = content[: cm.start()] + content[ce:]

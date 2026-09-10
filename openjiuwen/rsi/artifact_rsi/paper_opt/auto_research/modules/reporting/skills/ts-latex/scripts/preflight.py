@@ -13,14 +13,14 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
 import sys
 
 
 def _write_json(payload: dict[str, object]) -> None:
-    """Keep the CLI stdout contract machine-readable without using print."""
+    """Keep the CLI stdout contract machine-readable through logging."""
 
-    json.dump(payload, sys.stdout)
-    sys.stdout.write("\n")
+    logging.info(json.dumps(payload))
 
 
 def main() -> int:
@@ -32,6 +32,13 @@ def main() -> int:
             LatexRuntimeError,
             preflight_latex_runtime,
         )
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
 
     latex_bin_dir = sys.argv[1] if len(sys.argv) > 1 else None
     try:

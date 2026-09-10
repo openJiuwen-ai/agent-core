@@ -110,7 +110,7 @@ def test_project_tree_response_translates_rejected_nodes_only():
     assert "提前终止" in by_id["n1"].reason
 
 
-# -- end-to-end: stored/last_reason stay raw, emitted EventNode is friendly --
+# -- end-to-end: stored/last_reason and emitted EventNode stay friendly ------
 
 
 @pytest.fixture(autouse=True)
@@ -152,13 +152,14 @@ async def test_emitted_node_is_friendly_but_stored_state_stays_raw(tmp_path: Pat
     assert round_one_events
     emitted_node = round_one_events[-1].node
     assert emitted_node.reason is not None
-    assert "manager_blocked" in emitted_node.reason
     assert "提前终止" in emitted_node.reason
+    assert "当前方案效果未达到要求，已剪枝。" in emitted_node.reason
+    assert "manager_blocked" not in emitted_node.reason
 
     stored_node = next(
         n for n in orchestrator.storage.load_tree() if n.node_id == emitted_node.node_id
     )
-    assert stored_node.reason == "manager_blocked"  # raw, unmodified on disk
+    assert stored_node.reason == "当前方案效果未达到要求，已剪枝。"
 
     state = orchestrator.storage.load_task_state()
-    assert state.last_reason == "manager_blocked"  # raw, what the next round's seed will see
+    assert state.last_reason == "当前方案效果未达到要求，已剪枝。"
