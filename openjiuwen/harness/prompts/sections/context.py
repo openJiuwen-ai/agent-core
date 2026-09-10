@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Iterable, Optional
 import re
 import threading
 
@@ -353,12 +353,16 @@ def _extract_task_tool_agent_lines(
 def build_tools_content(
         ability_manager,
         language: str = "cn",
+        hidden_tools: Optional[Iterable[str]] = None,
 ) -> Optional[str]:
     """Build tools list content string.
 
     Args:
         ability_manager: AbilityManager instance (or None).
         language: 'cn' or 'en'.
+        hidden_tools: Extra tool names to omit from the tools prompt section.
+            Merged with the built-in cron_* hide set. Callers supply this list
+            explicitly (product adapters / config); it is not read from rails.
 
     Returns:
         Formatted tools content string, or None if no tools available.
@@ -374,7 +378,7 @@ def build_tools_content(
     if not tool_descriptions:
         return None
 
-    hidden_tools = {
+    hidden: set[str] = {
         "cron_list_jobs",
         "cron_get_job",
         "cron_create_job",
@@ -383,6 +387,12 @@ def build_tools_content(
         "cron_toggle_job",
         "cron_preview_job",
     }
+    if hidden_tools:
+        hidden.update(
+            name.strip()
+            for name in hidden_tools
+            if isinstance(name, str) and name.strip()
+        )
 
     grouped_labels = [
         (
@@ -467,12 +477,12 @@ def build_tools_content(
     ]
 
     for name in preferred_order:
-        if name in tool_descriptions and name not in hidden_tools:
+        if name in tool_descriptions and name not in hidden:
             lines.append(f"- {name}: {_tool_summary(name)}")
             rendered_names.add(name)
 
     for group_names, label, summary in grouped_labels:
-        existing = [name for name in group_names if name in tool_descriptions and name not in hidden_tools]
+        existing = [name for name in group_names if name in tool_descriptions and name not in hidden]
         if len(existing) == len(group_names):
             lines.append(f"- {label}: {summary}")
             rendered_names.update(existing)
@@ -482,16 +492,20 @@ def build_tools_content(
                 rendered_names.add(name)
 
     for name in ("bash", "code"):
-        if name in tool_descriptions and name not in hidden_tools and name not in rendered_names:
+        if name in tool_descriptions and name not in hidden and name not in rendered_names:
             lines.append(f"- {name}: {_tool_summary(name)}")
             rendered_names.add(name)
 
-    if "list_skill" in tool_descriptions and "list_skill" not in rendered_names:
+    if (
+        "list_skill" in tool_descriptions
+        and "list_skill" not in rendered_names
+        and "list_skill" not in hidden
+    ):
         lines.append(f"- list_skill: {_tool_summary('list_skill')}")
         rendered_names.add("list_skill")
 
     group_names, label, summary = memory_group
-    existing = [name for name in group_names if name in tool_descriptions and name not in hidden_tools]
+    existing = [name for name in group_names if name in tool_descriptions and name not in hidden]
     if len(existing) == len(group_names):
         lines.append(f"- {label}: {summary}")
         rendered_names.update(existing)
@@ -500,7 +514,11 @@ def build_tools_content(
             lines.append(f"- {name}: {_tool_summary(name)}")
             rendered_names.add(name)
 
-    if "task_tool" in tool_descriptions and "task_tool" not in rendered_names:
+    if (
+        "task_tool" in tool_descriptions
+        and "task_tool" not in rendered_names
+        and "task_tool" not in hidden
+    ):
         lines.append(f"- task_tool: {_tool_summary('task_tool')}")
         rendered_names.add("task_tool")
 
@@ -602,7 +620,7 @@ def build_tools_content(
                 lines.extend(["", "Available agent types:", *agent_lines])
 
     for name, desc in tool_descriptions.items():
-        if name in rendered_names or name in hidden_tools:
+        if name in rendered_names or name in hidden:
             continue
         compact_desc = desc.strip().splitlines()[0]
         lines.append(f"- {name}: {summary_overrides.get(name, compact_desc)}")
@@ -613,19 +631,24 @@ def build_tools_content(
 def build_tools_section(
         ability_manager,
         language: str = "cn",
+        hidden_tools: Optional[Iterable[str]] = None,
 ) -> Optional["PromptSection"]:
     """Build an independent PromptSection for tools (P:30).
 
     Args:
         ability_manager: AbilityManager instance (or None).
         language: 'cn' or 'en'.
+        hidden_tools: Extra tool names to omit from the tools prompt section.
+            Callers supply this list explicitly.
 
     Returns:
         A PromptSection instance, or None if no tools available.
     """
     from openjiuwen.harness.prompts.builder import PromptSection
 
-    content = build_tools_content(ability_manager, language)
+    content = build_tools_content(
+        ability_manager, language, hidden_tools=hidden_tools
+    )
     if not content:
         return None
 
