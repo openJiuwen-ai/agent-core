@@ -373,7 +373,8 @@ async def test_requests_are_bounded_data_without_execution_control_fields() -> N
     assert all(token not in serialized for token in ("candidate-1", "fragment-2", "#span="))
     assert len(json.dumps(call["messages"], ensure_ascii=False, separators=(",", ":")).encode()) <= 12 * 1024
     assert call["temperature"] == 0
-    assert call["max_tokens"] == 256
+    assert call["max_tokens"] == 1024
+    assert call["reasoning"] == {"mode": "disabled"}
     assert "timeout" not in call
     system_prompt = call["messages"][0]["content"].casefold()
     assert "names" in system_prompt and "order" in system_prompt and "planned" in system_prompt
