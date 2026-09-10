@@ -12,6 +12,7 @@ from typing import Callable
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness.rails.evolution.ttse import TTSEConfig, TTSERail, TTSERecordStore
 from openjiuwen.harness.rails.evolution.ttse.dream import (
     DreamState,
@@ -67,6 +68,7 @@ def _make_rail(tmp_path, llm, *, cfg=None, embedding=None) -> TTSERail:
         ttse_config=config,
         embedding=embedding,
         success_detector=TrajectoryErrorSuccessDetector(),
+        trajectory_span_processor=TrajectorySpanProcessor(),
     )
 
 

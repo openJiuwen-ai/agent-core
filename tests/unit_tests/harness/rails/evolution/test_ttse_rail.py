@@ -20,17 +20,15 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import 
     GENERATE_RECORDS_LLM_POLICY,
 )
 from openjiuwen.agent_evolving.signal import detect_tool_error_signals
-from openjiuwen.agent_evolving.trajectory import (
-    ToolCallDetail,
-    TrajectoryBuilder,
-    TrajectoryStep,
-    trajectory_from_steps,
-)
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint, PreparedEvolutionInput
 from openjiuwen.harness.rails.evolution.ttse import (
     TTSEConfig,
     TTSERail,
@@ -65,9 +63,27 @@ from openjiuwen.harness.rails.evolution.ttse.induction import (
     parse_verdict,
     synthesize,
 )
+from openjiuwen.harness.rails.evolution.ttse.ttse_rail import _TTSEPreparedEvolutionInput
 
 _POLICY = GENERATE_RECORDS_LLM_POLICY
+_PROCESSOR = TrajectorySpanProcessor()
 
+
+def _empty_trajectory(*, execution_id: str = "e1", session_id: str = "s1") -> Trajectory:
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {TRAJECTORY_ID: execution_id, SESSION_ID: session_id}
+                        )
+                    },
+                    "scopeSpans": [{"scope": {"name": "test"}, "spans": []}],
+                }
+            ]
+        }
+    )
 
 class ScriptedLLM:
     """LLM whose ``invoke`` dispatches on the prompt via a handler callable."""
@@ -98,6 +114,7 @@ def _make_rail(tmp_path, llm, *, cfg=None, success_detector=None) -> TTSERail:
         success_detector=success_detector
         if success_detector is not None
         else TrajectoryErrorSuccessDetector(),
+        trajectory_span_processor=_PROCESSOR,
     )
 
 
@@ -286,9 +303,19 @@ async def test_two_rails_same_path_do_not_wipe_each_others_rules(tmp_path):
     reset_shared_stores()
     path = str(tmp_path / "bank.json")
     cfg = TTSEConfig(store_path=path)
-    rail_a = TTSERail(llm=ScriptedLLM(lambda p: "NONE"), model="m", ttse_config=cfg)
+    rail_a = TTSERail(
+        llm=ScriptedLLM(lambda p: "NONE"),
+        model="m",
+        ttse_config=cfg,
+        trajectory_span_processor=_PROCESSOR,
+    )
     await rail_a._ttse_store.add_fact("chinese excel fact")
-    rail_b = TTSERail(llm=ScriptedLLM(lambda p: "NONE"), model="m", ttse_config=TTSEConfig(store_path=path))
+    rail_b = TTSERail(
+        llm=ScriptedLLM(lambda p: "NONE"),
+        model="m",
+        ttse_config=TTSEConfig(store_path=path),
+        trajectory_span_processor=_PROCESSOR,
+    )
     assert rail_b._ttse_store is rail_a._ttse_store
     await rail_b._ttse_store.add_tip("chinese csv tip")
     assert "chinese excel fact" in rail_b._ttse_store.facts_texts()
@@ -406,6 +433,7 @@ async def test_constructor_embedding_syncs_to_config(tmp_path):
         model="m",
         ttse_config=cfg,
         embedding=provider,
+        trajectory_span_processor=_PROCESSOR,
     )
     assert rail._ttse_config.embedding is provider
     assert rail._ttse_store.has_embedding_provider()
@@ -456,11 +484,17 @@ async def test_configure_and_unconfigure_ttse_evolution(tmp_path):
     agent = _FakeAgent()
     llm = ScriptedLLM(lambda p: "NONE")
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"))
-    configure_ttse_evolution(agent, llm=llm, model="m", ttse_config=cfg)
+    configure_ttse_evolution(
+        agent,
+        llm=llm,
+        model="m",
+        ttse_config=cfg,
+        trajectory_span_processor=_PROCESSOR,
+    )
     ttse = [r for r in agent.rails if isinstance(r, TTSERail)]
     assert len(ttse) == 1
 
-    configure_ttse_evolution(agent, llm=llm, model="m")
+    configure_ttse_evolution(agent, llm=llm, model="m", trajectory_span_processor=_PROCESSOR)
     assert len([r for r in agent.rails if isinstance(r, TTSERail)]) == 1
 
     removed = unconfigure_ttse_evolution(agent)
@@ -719,54 +753,57 @@ async def test_signal_detector_gate_passes_when_invoke_tool_calls_meet_min(tmp_p
     assert llm.calls == []
 
 
-def _tool_step(name: str = "bash") -> TrajectoryStep:
-    return TrajectoryStep(
-        kind="tool",
-        detail=ToolCallDetail(tool_name=name, call_args={}, call_result="ok"),
-    )
-
-
 @pytest.mark.asyncio
-async def test_snapshot_ttse_invoke_tool_calls_is_per_invoke(tmp_path):
+async def test_prepare_evolution_input_counts_tool_calls_from_messages(tmp_path, monkeypatch):
     llm = ScriptedLLM(lambda p: "NONE")
     rail = _make_rail(tmp_path, llm)
-    builder = TrajectoryBuilder(session_id="s1", source="online")
-    for _ in range(4):
-        builder.record_step(_tool_step())
-    rail._builder = builder
-    rail._invoke_step_start = len(builder.steps)
-    for _ in range(2):
-        builder.record_step(_tool_step())
-
-    traj = trajectory_from_steps(
-        execution_id="e1",
-        session_id="s1",
-        steps=list(builder.steps),
-    )
+    messages = _n_tool_messages(2)
+    traj = _empty_trajectory()
     ctx = AgentCallbackContext(
         agent=None,
         inputs=InvokeInputs(query="round-2", conversation_id="s1"),
     )
-    snap = await rail._snapshot_for_evolution(traj, ctx)
-    assert snap is not None
+
+    async def _parent_prepare(self, trajectory, ctx):
+        return PreparedEvolutionInput(trajectory=trajectory, messages=tuple(messages))
+
+    monkeypatch.setattr(EvolutionRail, "_prepare_evolution_input", _parent_prepare)
+    prepared = await rail._prepare_evolution_input(traj, ctx)
+
+    assert prepared is not None
+    assert prepared.ttse_invoke_tool_calls == 2
+    assert prepared.ttse_task_query == "round-2"
+    snap = rail._snapshot_from_prepared(prepared)
     assert snap["ttse_invoke_tool_calls"] == 2
     assert snap["ttse_task_query"] == "round-2"
 
 
 @pytest.mark.asyncio
-async def test_on_before_invoke_marks_step_start(tmp_path):
+async def test_run_evolution_uses_prepared_messages(tmp_path):
+    calls: list[dict] = []
     llm = ScriptedLLM(lambda p: "NONE")
     rail = _make_rail(tmp_path, llm)
-    builder = TrajectoryBuilder(session_id="s1", source="online")
-    builder.record_step(_tool_step())
-    builder.record_step(_tool_step())
-    rail._builder = builder
-    ctx = AgentCallbackContext(
-        agent=None,
-        inputs=InvokeInputs(query="next", conversation_id="s1"),
+    messages = _n_tool_messages(2)
+    traj = _empty_trajectory()
+
+    async def _capture(trajectory, ctx=None, *, snapshot=None):
+        calls.append(snapshot or {})
+
+    rail._run_ttse_induction = _capture  # type: ignore[method-assign]
+    prepared = _TTSEPreparedEvolutionInput(
+        trajectory=traj,
+        messages=tuple(messages),
+        skill_name="ttse",
+        ttse_capabilities="bash",
+        ttse_task_query="round-2",
+        ttse_invoke_tool_calls=2,
     )
-    await rail._on_before_invoke(ctx)
-    assert rail._invoke_step_start == 2
+    await rail.run_evolution(prepared)
+    assert len(calls) == 1
+    assert calls[0]["ttse_task_query"] == "round-2"
+    assert calls[0]["ttse_invoke_tool_calls"] == 2
+    assert calls[0]["ttse_capabilities"] == "bash"
+    assert len(calls[0]["messages"]) == len(messages)
 
 
 @pytest.mark.asyncio
@@ -1009,7 +1046,13 @@ async def test_rail_skip_does_not_induce(tmp_path):
         config=cfg,
         signal_detector=_FakeSignalDetector([]),
     )
-    rail = TTSERail(llm=llm, model="m", ttse_config=cfg, success_detector=det)
+    rail = TTSERail(
+        llm=llm,
+        model="m",
+        ttse_config=cfg,
+        success_detector=det,
+        trajectory_span_processor=_PROCESSOR,
+    )
     snap = {
         "messages": _n_tool_messages(2),
         "ttse_capabilities": "- grep",
@@ -1031,7 +1074,12 @@ async def test_rail_partial_from_failure_induces_without_blame(tmp_path):
 
     llm = ScriptedLLM(handler)
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
-    rail = TTSERail(llm=llm, model="m", ttse_config=cfg)
+    rail = TTSERail(
+        llm=llm,
+        model="m",
+        ttse_config=cfg,
+        trajectory_span_processor=_PROCESSOR,
+    )
     await rail._ttse_store.add_fact("existing")
     messages = _n_tool_messages(5)
     messages[2] = {

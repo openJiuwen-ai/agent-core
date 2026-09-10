@@ -21,9 +21,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
 
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
@@ -31,7 +34,10 @@ from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail
+from openjiuwen.harness.rails.evolution.evolution_rail import (
+    EvolutionRail,
+    PreparedEvolutionInput,
+)
 
 from .capabilities import list_capability_names, parse_capability_names_from_text, render_capabilities
 from .catalog import project_catalog, render_catalog_markdown
@@ -50,7 +56,16 @@ _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
 from .stores import shared_store
 from .success import SignalBasedSuccessDetector, SuccessDetector, SuccessOutcome
-from .trajectory_adapter import messages_to_trajectory_text
+from .trajectory_adapter import count_tool_calls, messages_to_trajectory_text
+
+
+@dataclass(frozen=True)
+class _TTSEPreparedEvolutionInput(PreparedEvolutionInput):
+    """Detached TTSE evolution input with rail-local induction state."""
+
+    ttse_capabilities: str = ""
+    ttse_task_query: str = ""
+    ttse_invoke_tool_calls: int = 0
 
 
 class TTSERail(EvolutionRail):
@@ -95,9 +110,6 @@ class TTSERail(EvolutionRail):
         # Auto-dream: count non-follow-up task iterations between silent runs.
         self._dream_non_followup_count: int = 0
         self._dream_task: Optional[asyncio.Task] = None
-        # Index into the session-cumulative builder at the start of this invoke;
-        # used so detect_min_tool_calls gates on this round only.
-        self._invoke_step_start: int = 0
         super().__init__(**kwargs)
 
     def init(self, agent) -> None:
@@ -141,37 +153,6 @@ class TTSERail(EvolutionRail):
         logger.info("[TTSERail] unregistered %s", TTSE_CONSULT_TOOL_NAME)
 
     # ------------------------------------------------------------------
-    # Snapshot enrichment: capture agent state while ctx is still alive
-    # (async mode runs run_evolution in a background task with ctx=None).
-    # ------------------------------------------------------------------
-
-    async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Mark the builder step index at the start of this invoke."""
-        if self._builder is not None:
-            self._invoke_step_start = len(self._builder.steps)
-        else:
-            self._invoke_step_start = 0
-
-    async def _snapshot_for_evolution(self, trajectory, ctx: AgentCallbackContext):
-        snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
-        if snapshot is None:
-            return None
-        agent = getattr(ctx, "agent", None)
-        try:
-            snapshot["ttse_capabilities"] = await render_capabilities(agent)
-        except Exception as exc:  # noqa: BLE001 - never block snapshot capture
-            logger.warning("[TTSERail] capability enumeration failed: %s", exc)
-        snapshot["ttse_task_query"] = self._extract_query(ctx)
-        # Count tools recorded since this invoke started (builder window, not
-        # OTLP step indices) so the detect gate is per-invoke, not session-wide.
-        if self._builder is not None:
-            invoke_steps = self._builder.steps[self._invoke_step_start :]
-            snapshot["ttse_invoke_tool_calls"] = sum(1 for s in invoke_steps if s.kind == "tool")
-        else:
-            snapshot["ttse_invoke_tool_calls"] = 0
-        return snapshot
-
-    # ------------------------------------------------------------------
     # Evolution: FACT/meta-TIP induction
     # ------------------------------------------------------------------
 
@@ -205,16 +186,71 @@ class TTSERail(EvolutionRail):
         conversation_id = getattr(inputs, "conversation_id", None)
         return isinstance(conversation_id, str) and conversation_id.startswith(("heartbeat", "cron"))
 
-    async def run_evolution(self, trajectory, ctx: Optional[AgentCallbackContext] = None, *, snapshot=None):
+    async def _prepare_evolution_input(
+        self,
+        trajectory: Trajectory,
+        ctx: AgentCallbackContext,
+    ) -> Optional[_TTSEPreparedEvolutionInput]:
+        """Capture messages and TTSE-local fields while ctx is alive."""
+        if not self._ttse_config.evolve_enabled:
+            return None
+
+        prepared = await super()._prepare_evolution_input(trajectory, ctx)
+        if prepared is None:
+            return None
+
+        messages = list(prepared.messages)
+        capabilities = ""
+        agent = getattr(ctx, "agent", None)
+        try:
+            capabilities = await render_capabilities(agent)
+        except Exception as exc:  # noqa: BLE001 - never block prepare
+            logger.warning("[TTSERail] capability enumeration failed: %s", exc)
+
+        task_query = self._extract_query(ctx)
+        return _TTSEPreparedEvolutionInput(
+            trajectory=prepared.trajectory,
+            messages=tuple(deepcopy(messages)),
+            skill_name="ttse",
+            ttse_capabilities=capabilities,
+            ttse_task_query=task_query,
+            ttse_invoke_tool_calls=count_tool_calls(messages),
+        )
+
+    @staticmethod
+    def _snapshot_from_prepared(prepared: _TTSEPreparedEvolutionInput) -> dict[str, Any]:
+        """Build the dict shape expected by success detectors / induction."""
+        return {
+            "messages": [deepcopy(message) for message in prepared.messages],
+            "ttse_capabilities": prepared.ttse_capabilities,
+            "ttse_task_query": prepared.ttse_task_query,
+            "ttse_invoke_tool_calls": prepared.ttse_invoke_tool_calls,
+        }
+
+    async def run_evolution(self, prepared: _TTSEPreparedEvolutionInput) -> None:
+        """Run TTSE induction from one detached, immutable input."""
         if not self._ttse_config.evolve_enabled:
             logger.debug("[TTSERail] run_evolution skipped: evolve_enabled=False")
             return
-        if trajectory is None:
+        if not isinstance(prepared, PreparedEvolutionInput):
+            raise TypeError("prepared must be a PreparedEvolutionInput")
+        if prepared.trajectory is None:
             logger.debug("[TTSERail] run_evolution skipped: trajectory is None")
             return
         logger.info("[TTSERail] run_evolution started")
         try:
-            await self._run_ttse_induction(trajectory, ctx, snapshot=snapshot)
+            snapshot = (
+                self._snapshot_from_prepared(prepared)
+                if isinstance(prepared, _TTSEPreparedEvolutionInput)
+                else {
+                    "messages": [deepcopy(message) for message in prepared.messages],
+                }
+            )
+            await self._run_ttse_induction(
+                prepared.trajectory,
+                ctx=None,
+                snapshot=snapshot,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[TTSERail] induction failed: %s", exc)
 
@@ -228,7 +264,7 @@ class TTSERail(EvolutionRail):
         snapshot = snapshot or {}
         messages = snapshot.get("messages")
         if messages is None:
-            messages = self._collect_messages_from_trajectory(trajectory)
+            messages = self._trajectory_to_messages(trajectory)
 
         capabilities = snapshot.get("ttse_capabilities")
         if capabilities is None:
@@ -692,25 +728,30 @@ class TTSERail(EvolutionRail):
     # Need to be deleted before merge into main branch
     # ------------------------------------------------------------------
 
-    async def _on_after_invoke(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_invoke(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Export a JSON snapshot for WorkBuddy Bench post-score TTSE.
 
         ``evolve_enabled=False`` still finalizes the trajectory in the base
         rail; this hook writes messages/query so a later ``ttse-post-score``
         step can call ``_run_ttse_induction`` with grader scores.
         """
-        await super()._on_after_invoke(ctx)
-        await self._export_trajectory_for_bench(ctx)
+        await super()._on_after_invoke(ctx, trajectory)
+        await self._export_trajectory_for_bench(ctx, trajectory)
 
-    async def _export_trajectory_for_bench(self, ctx: AgentCallbackContext) -> None:
+    async def _export_trajectory_for_bench(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None = None,
+    ) -> None:
         export_path = (os.environ.get("TTSE_TRAJECTORY_EXPORT_PATH") or "").strip()
         if not export_path:
             return
         try:
-            trajectory = None
-            if self._builder is not None:
-                trajectory = self._build_trajectory(ctx, finalize=False)
-            messages = self._collect_messages_from_trajectory(trajectory) if trajectory else None
+            messages = self._trajectory_to_messages(trajectory) if trajectory is not None else []
             if not messages:
                 inputs = getattr(ctx, "inputs", None)
                 raw = getattr(inputs, "messages", None) if inputs is not None else None
