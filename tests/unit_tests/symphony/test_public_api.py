@@ -13,6 +13,8 @@ def test_public_import_paths() -> None:
     assert symphony.CombinationCandidate("recipe-1", 1).version == 1
     assert symphony.EvolutionSubmitResult(None).new_candidates == ()
     assert symphony.LLMPackageReviewAgent is not None
+    assert not hasattr(symphony, "CapabilityEvidence")
+    assert not hasattr(symphony, "PortMapping")
     assert rails.GraphSnapshotProvider is not None
     assert rails.SymphonyEvolutionSubmitCallback is not None
 

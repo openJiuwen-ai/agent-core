@@ -2,18 +2,16 @@
 
 from openjiuwen.symphony.observation.contracts import (
     GRAPH_EVOLUTION_INPUT_SCHEMA,
-    CapabilityEvidence,
     EvidenceStrength,
+    EvolutionEdgeMetadata,
     EvolutionGraph,
     EvolutionGraphEdge,
     EvolutionGraphNode,
-    EvolutionEdgeMetadata,
     FailureDomain,
     GraphEvolutionInput,
     GraphSnapshot,
     GraphSnapshotRef,
     ObservationReceipt,
-    PortMapping,
     TaskEvidence,
     TaskOutcome,
     TaskOutcomeLabel,
@@ -22,7 +20,6 @@ from openjiuwen.symphony.observation.contracts import (
 
 __all__ = [
     "GRAPH_EVOLUTION_INPUT_SCHEMA",
-    "CapabilityEvidence",
     "EvidenceStrength",
     "EvolutionGraph",
     "EvolutionGraphEdge",
@@ -33,7 +30,6 @@ __all__ = [
     "GraphSnapshot",
     "GraphSnapshotRef",
     "ObservationReceipt",
-    "PortMapping",
     "TaskEvidence",
     "TaskOutcome",
     "TaskOutcomeLabel",

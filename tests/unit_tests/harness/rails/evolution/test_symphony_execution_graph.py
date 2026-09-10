@@ -83,13 +83,6 @@ class _ExplodingObservationCandidate(SymphonyEdgeCandidate):
         return super().__getattribute__(name)
 
 
-class _ExplodingPortsIdentity(CapabilityIdentity):
-    def __getattribute__(self, name: str) -> Any:
-        if name == "output_ports":
-            raise RuntimeError("ports unavailable")
-        return super().__getattribute__(name)
-
-
 class _ExplodingAliasIdentity(CapabilityIdentity):
     def __getattribute__(self, name: str) -> Any:
         if name == "capability_name":
@@ -162,14 +155,11 @@ def _identity(
     input_ports: tuple[str, ...] = ("default_input",),
     output_ports: tuple[str, ...] = ("default_output",),
 ) -> CapabilityIdentity:
+    del version, content_hash, input_ports, output_ports
     return CapabilityIdentity(
         capability_id=capability_id,
         capability_type=capability_type,  # type: ignore[arg-type]
         capability_name=capability_name,
-        version=version,
-        content_hash=content_hash or f"sha256:{capability_id}",
-        input_ports=input_ports,
-        output_ports=output_ports,
     )
 
 
@@ -236,23 +226,10 @@ def test_builds_required_jgf_and_keeps_only_supported_example_edges() -> None:
     ]
     assert _edges(result)[0]["relation"] == "can_feed"
     assert _edges(result)[0]["metadata"]["success"] is False
-    assert _edges(result)[0]["metadata"]["reason"] == "skill3 rejected the artifact"
+    assert _edges(result)[0]["metadata"] == {"success": False}
     assert _edges(result)[1]["metadata"]["success"] is True
-    assert "reason" not in _edges(result)[1]["metadata"]
     assert set(result["graph"]["nodes"]) == {"skill-2", "skill-3", "skill-5"}
-    assert result["graph"]["nodes"]["skill-2"] == {
-        "label": "skill",
-        "metadata": {
-            "capability_type": "skill",
-            "version": "1.0.0",
-            "content_hash": "sha256:skill-2",
-            "input_ports": ["default_input"],
-            "output_ports": ["artifact_uri"],
-        },
-    }
-    assert _edges(result)[0]["metadata"]["port_mappings"] == [
-        {"source_output": "artifact_uri", "target_input": "source_uri"}
-    ]
+    assert result["graph"]["nodes"]["skill-2"] == {"label": "skill"}
 
 
 def test_failed_and_partial_outcomes_require_outer_reason_while_success_omits_it() -> None:
@@ -322,8 +299,6 @@ def test_same_name_across_types_resolves_by_type() -> None:
         ("capability_id", ""),
         ("capability_type", "plugin"),
         ("capability_name", ""),
-        ("version", ""),
-        ("content_hash", ""),
     ],
 )
 def test_missing_or_invalid_identity_field_drops_related_edge(field: str, value: str) -> None:
@@ -358,7 +333,7 @@ def test_ambiguous_name_or_name_id_collision_drops_edge() -> None:
     assert _edges(result) == []
 
 
-def test_conflicting_metadata_for_same_capability_id_drops_related_edges() -> None:
+def test_duplicate_capability_id_drops_related_edges() -> None:
     source = _fragment(1, "skill", "source")
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
@@ -367,8 +342,8 @@ def test_conflicting_metadata_for_same_capability_id_drops_related_edges() -> No
         [candidate],
         [_decision(candidate)],
         [
-            _identity("source-id", "skill", "source", version="1"),
-            _identity("source-id", "skill", "source", version="2"),
+            _identity("source-id", "skill", "source"),
+            _identity("source-id", "skill", "source"),
             _identity("target-id", "tool", "target"),
         ],
     )
@@ -381,7 +356,7 @@ def test_valid_and_invalid_records_with_same_capability_id_block_the_id() -> Non
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
     valid_source = _identity("source-id", "skill", "source")
-    invalid_source = replace(valid_source, content_hash="")
+    invalid_source = replace(valid_source, capability_name="")
 
     result = _build(
         [candidate],
@@ -397,7 +372,7 @@ def test_invalid_record_blocks_a_type_name_alias_shared_with_valid_record() -> N
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
     valid_source = _identity("source-id", "skill", "shared-name")
-    invalid_alias = replace(valid_source, capability_id="", version="")
+    invalid_alias = replace(valid_source, capability_id="")
 
     result = _build(
         [candidate],
@@ -457,8 +432,7 @@ def test_model_assisted_low_is_valid_and_evidence_must_be_candidate_allowlisted(
         identities,
     )
 
-    assert _edges(valid)[0]["metadata"]["evidence_method"] == "model_assisted"
-    assert _edges(valid)[0]["metadata"]["evidence_strength"] == "low"
+    assert _edges(valid)[0]["metadata"] == {"success": True}
     assert _edges(invalid) == []
 
 
@@ -476,7 +450,7 @@ def test_deterministic_decision_is_not_execution_evidence() -> None:
     assert _edges(result) == []
 
 
-def test_port_mapping_comes_from_the_frozen_capability_snapshot() -> None:
+def test_multiple_ports_do_not_block_a_valid_execution_edge() -> None:
     source = _fragment(1, "skill", "source")
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
@@ -490,9 +464,7 @@ def test_port_mapping_comes_from_the_frozen_capability_snapshot() -> None:
         ],
     )
 
-    assert _edges(result)[0]["metadata"]["port_mappings"] == [
-        {"source_output": "report_uri", "target_input": "document_uri"}
-    ]
+    assert _edges(result)[0]["metadata"] == {"success": True}
 
 
 @pytest.mark.parametrize(
@@ -507,7 +479,7 @@ def test_port_mapping_comes_from_the_frozen_capability_snapshot() -> None:
         (("",), ("document_uri",)),
     ],
 )
-def test_missing_ambiguous_or_invalid_ports_fail_closed(
+def test_ports_are_not_part_of_execution_identity(
     source_ports: tuple[str, ...],
     target_ports: tuple[str, ...],
 ) -> None:
@@ -524,26 +496,7 @@ def test_missing_ambiguous_or_invalid_ports_fail_closed(
         ],
     )
 
-    assert _edges(result) == []
-
-
-@pytest.mark.parametrize(
-    ("field_name", "value"),
-    [
-        ("input_ports", ["input"]),
-        ("output_ports", ["output"]),
-        ("input_ports", (" spaced ",)),
-        ("output_ports", (42,)),
-    ],
-)
-def test_capability_port_collections_are_strict_immutable_tuples(field_name: str, value: Any) -> None:
-    source = replace(_identity("source-id", "skill", "source"), **{field_name: value})
-    target = _identity("target-id", "tool", "target")
-    candidate = _candidate(1, _fragment(1, "skill", "source"), _fragment(2, "tool", "target"))
-
-    result = _build([candidate], [_decision(candidate)], [source, target])
-
-    assert _edges(result) == []
+    assert len(_edges(result)) == 1
 
 
 @pytest.mark.parametrize(
@@ -551,10 +504,6 @@ def test_capability_port_collections_are_strict_immutable_tuples(field_name: str
     [
         ("capability_id", "bad\ud800id"),
         ("capability_name", "bad\u200bname"),
-        ("version", "1.0\ninvalid"),
-        ("content_hash", "sha256:\ud800"),
-        ("input_ports", ("bad\u200binput",)),
-        ("output_ports", ("bad\x00output",)),
     ],
 )
 def test_capability_identity_text_rejects_invalid_utf8_and_control_characters(
@@ -570,7 +519,7 @@ def test_capability_identity_text_rejects_invalid_utf8_and_control_characters(
     assert _edges(result) == []
 
 
-def test_surrogate_port_observation_does_not_clear_an_independent_valid_edge() -> None:
+def test_invalid_identity_does_not_clear_an_independent_valid_edge() -> None:
     valid = _candidate(1, _fragment(1, "skill", "source"), _fragment(2, "tool", "target"))
     invalid = _candidate(2, _fragment(3, "skill", "bad-source"), _fragment(4, "tool", "bad-target"))
 
@@ -580,39 +529,12 @@ def test_surrogate_port_observation_does_not_clear_an_independent_valid_edge() -
         [
             _identity("source-id", "skill", "source"),
             _identity("target-id", "tool", "target"),
-            _identity("bad-source-id", "skill", "bad-source", output_ports=("\ud800",)),
+            _identity("bad-source-id", "skill", "bad\ud800source"),
             _identity("bad-target-id", "tool", "bad-target"),
         ],
     )
 
-    assert [edge["metadata"]["candidate_id"] for edge in _edges(result)] == [valid.candidate_id]
-
-
-def test_exploding_ports_still_poison_the_same_readable_alias() -> None:
-    source = _fragment(1, "skill", "shared")
-    target = _fragment(2, "tool", "target")
-    candidate = _candidate(1, source, target)
-    exploding = _ExplodingPortsIdentity(
-        capability_id="bad-source-id",
-        capability_type="skill",
-        capability_name="shared",
-        version="1",
-        content_hash="sha256:bad",
-        input_ports=("input",),
-        output_ports=("output",),
-    )
-
-    result = _build(
-        [candidate],
-        [_decision(candidate)],
-        [
-            _identity("source-id", "skill", "shared"),
-            exploding,
-            _identity("target-id", "tool", "target"),
-        ],
-    )
-
-    assert _edges(result) == []
+    assert [(edge["source"], edge["target"]) for edge in _edges(result)] == [("source-id", "target-id")]
 
 
 def test_unreadable_alias_invalidates_the_whole_snapshot_without_escaping() -> None:
@@ -623,10 +545,6 @@ def test_unreadable_alias_invalidates_the_whole_snapshot_without_escaping() -> N
         capability_id="unreadable-id",
         capability_type="skill",
         capability_name="unreadable",
-        version="1",
-        content_hash="sha256:unreadable",
-        input_ports=("input",),
-        output_ports=("output",),
     )
 
     result = _build(
@@ -766,7 +684,7 @@ def test_malformed_candidate_does_not_clear_an_independent_valid_observation() -
         [_identity("source-id", "skill", "source"), _identity("target-id", "tool", "target")],
     )
 
-    assert [edge["metadata"]["candidate_id"] for edge in _edges(result)] == [valid.candidate_id]
+    assert [(edge["source"], edge["target"]) for edge in _edges(result)] == [("source-id", "target-id")]
 
 
 @pytest.mark.parametrize("failing_input", ["candidates", "decisions", "snapshot"])
@@ -917,8 +835,7 @@ def test_same_capability_pair_success_and_failure_observations_are_both_retained
     )
 
     assert len(_edges(result)) == 2
-    assert [edge["metadata"]["candidate_id"] for edge in _edges(result)] == ["candidate-1", "candidate-2"]
-    assert [edge["metadata"]["success"] for edge in _edges(result)] == [True, False]
+    assert [edge["metadata"]["success"] for edge in _edges(result)] == [False, True]
 
 
 def test_parallel_branch_observations_are_retained_independently() -> None:
@@ -1272,7 +1189,6 @@ def _native_cross_trace_input():
 async def test_native_cross_trace_candidates_through_model_and_graph(status: str) -> None:
     plan, continuation, candidates = _native_cross_trace_input()
     candidate = candidates[0]
-    native_refs = candidate.evidence_refs
 
     async def judge(messages, **kwargs):
         del kwargs
@@ -1315,16 +1231,11 @@ async def test_native_cross_trace_candidates_through_model_and_graph(status: str
     assert len(graph["graph"]["edges"]) == (1 if status in {"success", "failure"} else 0)
     if status in {"success", "failure"}:
         edge = graph["graph"]["edges"][0]["metadata"]
-        assert edge["success"] is (status == "success")
-        assert set(edge["evidence_refs"]) == set(native_refs)
-        assert edge["source_fragment_id"] == candidate.source_fragment.fragment_id
-        assert edge["target_fragment_id"] == candidate.target_fragment.fragment_id
-        for tamper in ("id", "ref", "trace_ids"):
+        assert edge == {"success": status == "success"}
+        for tamper in ("id", "trace_ids"):
             altered = deepcopy(graph)
             if tamper == "id":
                 altered["graph"]["id"] = "forged"
-            elif tamper == "ref":
-                altered["graph"]["edges"][0]["metadata"]["evidence_refs"][0] = "foreign#span=0000000000000002"
             else:
                 altered["trace_ids"] = ["2" * 32, _TRACE_ID]
             if tamper != "id":
