@@ -16,7 +16,6 @@ Keeping all attribute keys here avoids typo drift between handlers.
 
 from __future__ import annotations
 
-
 # ---------------------------------------------------------------------------
 # OpenLLMetry / GenAI standard attributes
 # ---------------------------------------------------------------------------

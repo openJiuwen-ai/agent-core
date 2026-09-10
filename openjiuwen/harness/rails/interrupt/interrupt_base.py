@@ -14,7 +14,7 @@ from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY, INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY, RESUME_USER_INPUT_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -29,17 +29,20 @@ class InterruptDecision(BaseModel):
 
 class ApproveResult(InterruptDecision):
     """Decision to continue tool execution."""
+
     new_args: Optional[str] = None
 
 
 class RejectResult(InterruptDecision):
     """Decision to reject tool execution."""
+
     tool_result: object = None
     tool_message: Optional[ToolMessage] = None
 
 
 class InterruptResult(InterruptDecision):
     """Decision to interrupt and wait for user input."""
+
     request: InterruptRequest
 
 
@@ -55,11 +58,12 @@ class BaseInterruptRail(AgentRail):
     Subclasses must implement resolve_interrupt() to define
     the specific interruption logic.
     """
+
     priority: int = 90
 
     def __init__(
-            self,
-            tool_names: Optional[Iterable[str]] = None,
+        self,
+        tool_names: Optional[Iterable[str]] = None,
     ):
         self._tool_names: Set[str] = set(tool_names or [])
 
@@ -117,10 +121,10 @@ class BaseInterruptRail(AgentRail):
 
     @staticmethod
     def _record_ask_user_event(
-            ctx: AgentCallbackContext,
-            tool_call: ToolCall | None,
-            user_input: UserInput | None,
-            decision: InterruptDecision,
+        ctx: AgentCallbackContext,
+        tool_call: ToolCall | None,
+        user_input: UserInput | None,
+        decision: InterruptDecision,
     ) -> None:
         requested = isinstance(decision, InterruptResult) and user_input is None
         resolved = isinstance(decision, RejectResult) and user_input is not None
@@ -128,6 +132,7 @@ class BaseInterruptRail(AgentRail):
             return
         try:
             import json
+
             from openjiuwen.extensions.observability.span_context import (
                 get_current_agent_span,
                 get_root_span,
@@ -163,27 +168,33 @@ class BaseInterruptRail(AgentRail):
                 parameters = getattr(card, "input_params", {})
                 if isinstance(parameters, type) and issubclass(parameters, BaseModel):
                     parameters = parameters.model_json_schema()
-                payload.update({
-                    "arguments": arguments,
-                    "schema": {
-                        "name": "ask_user",
-                        "description": str(getattr(card, "description", "")),
-                        "parameters": parameters,
-                    },
-                    "status": "pending",
-                })
+                payload.update(
+                    {
+                        "arguments": arguments,
+                        "schema": {
+                            "name": "ask_user",
+                            "description": str(getattr(card, "description", "")),
+                            "parameters": parameters,
+                        },
+                        "status": "pending",
+                    }
+                )
                 event_kind = "ask_user.requested"
             else:
                 model_answers = getattr(user_input, "answers", None)
-                answers = model_answers if isinstance(model_answers, dict) else (
-                    user_input.model_dump() if isinstance(user_input, BaseModel) else user_input
+                answers = (
+                    model_answers
+                    if isinstance(model_answers, dict)
+                    else (user_input.model_dump() if isinstance(user_input, BaseModel) else user_input)
                 )
-                payload.update({
-                    "answers": answers,
-                    "outcome": "answered",
-                    "result": decision.tool_result,
-                    "status": "completed",
-                })
+                payload.update(
+                    {
+                        "answers": answers,
+                        "outcome": "answered",
+                        "result": decision.tool_result,
+                        "status": "completed",
+                    }
+                )
                 event_kind = "ask_user.resolved"
             record_native_trajectory_log_event(
                 parent_span=parent_span,
@@ -195,11 +206,11 @@ class BaseInterruptRail(AgentRail):
             logger.debug("failed to record ask_user trajectory event: {}", e)
 
     async def resolve_interrupt(
-            self,
-            ctx: AgentCallbackContext,
-            tool_call: Optional[ToolCall],
-            user_input: Optional[UserInput],
-            auto_confirm_config: Optional[dict] = None,
+        self,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        user_input: Optional[UserInput],
+        auto_confirm_config: Optional[dict] = None,
     ) -> InterruptDecision:
         """Override to handle resume and return decision.
 
@@ -215,11 +226,11 @@ class BaseInterruptRail(AgentRail):
         raise NotImplementedError
 
     def _apply_decision(
-            self,
-            ctx: AgentCallbackContext,
-            tool_call: Optional[ToolCall],
-            tool_name: str,
-            decision: InterruptDecision,
+        self,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        tool_name: str,
+        decision: InterruptDecision,
     ) -> None:
         if isinstance(decision, ApproveResult):
             if decision.new_args is not None:
@@ -235,22 +246,22 @@ class BaseInterruptRail(AgentRail):
             return
 
     def _raise_interrupt(
-            self,
-            tool_name: str,
-            tool_call: Optional[ToolCall],
-            request: InterruptRequest,
+        self,
+        tool_name: str,
+        tool_call: Optional[ToolCall],
+        request: InterruptRequest,
     ) -> None:
         raise AbortError(
             reason=f"Tool execution interrupted: {tool_name}",
-            cause=ToolInterruptException(request=request, tool_call=tool_call)
+            cause=ToolInterruptException(request=request, tool_call=tool_call),
         )
 
     def _skip_tool(
-            self,
-            ctx: AgentCallbackContext,
-            tool_call: Optional[ToolCall],
-            tool_result: object,
-            tool_message: Optional[ToolMessage] = None,
+        self,
+        ctx: AgentCallbackContext,
+        tool_call: Optional[ToolCall],
+        tool_result: object,
+        tool_message: Optional[ToolMessage] = None,
     ) -> None:
         tool_call_id = tool_call.id if tool_call is not None else ""
         msg = tool_message or ToolMessage(
@@ -268,14 +279,15 @@ class BaseInterruptRail(AgentRail):
 
     def _get_user_input(self, ctx: AgentCallbackContext, tool_call_id: str) -> Optional[UserInput]:
         """Get user input from ctx.extra (passed by handler) or session global state.
-        
+
         For subagent internal rail: tool_call_id is inner_id, can directly match user_inputs key.
         No alias mapping needed - rail only cares if current tool_call has corresponding user input.
         """
         raw_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
         logger.info(
             "[_get_user_input] tool_call_id=%r raw_input_type=%s",
-            tool_call_id, type(raw_input).__name__ if raw_input is not None else "None",
+            tool_call_id,
+            type(raw_input).__name__ if raw_input is not None else "None",
         )
         if raw_input is None:
             return None
@@ -289,12 +301,14 @@ class BaseInterruptRail(AgentRail):
                 matched_value = raw_input.user_inputs[tool_call_id]
                 logger.info(
                     "[_get_user_input] MATCHED! tool_call_id=%r value=%r",
-                    tool_call_id, repr(matched_value)[:200],
+                    tool_call_id,
+                    repr(matched_value)[:200],
                 )
                 return raw_input.user_inputs[tool_call_id]
             logger.warning(
                 "[_get_user_input] NO MATCH! tool_call_id=%r not in keys=%r",
-                tool_call_id, list(raw_input.user_inputs.keys()),
+                tool_call_id,
+                list(raw_input.user_inputs.keys()),
             )
             return None
 

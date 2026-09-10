@@ -3,14 +3,14 @@
 
 from __future__ import annotations
 
-import unittest
 import asyncio
+import re
+import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-import re
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
-from openjiuwen.core.foundation.tool import ToolCard, McpServerConfig
+from openjiuwen.core.foundation.tool import McpServerConfig, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -79,7 +79,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(result.data, {"output": "done", 'agent_id': 'test_id'})
+        self.assertEqual(result.data, {"output": "done", "agent_id": "test_id"})
         self.assertIsNone(result.error)
         self.assertEqual(called_inputs["query"], "run task")
         # task_tool: f"{parent_session_id}_sub_{subagent_type}_{uuid.uuid4().hex[:8]}"
@@ -311,9 +311,7 @@ class TestTaskToolSync(unittest.TestCase):
                 description="custom general subagent",
             ),
             system_prompt="custom prompt",
-            tools=[
-                ToolCard(id="custom_tool", name="custom_tool", description="custom tool")
-            ],
+            tools=[ToolCard(id="custom_tool", name="custom_tool", description="custom tool")],
             mcps=[
                 McpServerConfig(
                     server_name="custom_mcp",

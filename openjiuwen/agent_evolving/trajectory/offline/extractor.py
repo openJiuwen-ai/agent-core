@@ -5,15 +5,12 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime
-from collections.abc import Mapping
 from typing import Any
 
-from openjiuwen.core.common.logging import logger
-
-from openjiuwen.extensions.observability import semconv
-
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.offline.builder import TrajectoryBuilder
 from openjiuwen.agent_evolving.trajectory.schema import (
     RL_COMPLETION_TOKEN_IDS,
@@ -26,7 +23,8 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     normalize_span,
     write_llm_exchange,
 )
-from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.core.common.logging import logger
+from openjiuwen.extensions.observability import semconv
 
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
@@ -195,10 +193,7 @@ class TrajectoryExtractor:
             messages = params.get("messages") or []
             if isinstance(messages, Mapping):
                 messages = [messages]
-            prompts = [
-                message for message in (_message(value, "user") for value in messages)
-                if message is not None
-            ]
+            prompts = [message for message in (_message(value, "user") for value in messages) if message is not None]
             response = _extract_outputs(span)
             response_message = _message(response)
             completions = [] if response_message is None else [response_message]

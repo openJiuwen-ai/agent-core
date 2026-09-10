@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from contextvars import Context
+
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -17,17 +18,17 @@ from openjiuwen.extensions.observability.semconv import (
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
     cascade_close_children,
-    clear_root_span,
     clear_current_session_id,
+    clear_root_span,
     flush_child_spans,
     get_current_tool_span,
     get_root_span,
+    push_tool_span,
     reset_state,
     set_active_span_tracker,
     set_current_agent_span,
     set_current_session_id,
     set_root_span,
-    push_tool_span,
 )
 
 
@@ -145,9 +146,7 @@ def test_cascade_marks_abandoned_llm_unset_and_surfaces_forced_root() -> None:
         llm_record = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
         assert llm_record.status.status_code is StatusCode.UNSET
         assert llm_record.attributes[OJ_SPAN_FORCED_CLOSE] is True
-        assert llm_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == (
-            "missing_llm_terminal_callback"
-        )
+        assert llm_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == ("missing_llm_terminal_callback")
         assert root.attributes[OJ_TRACE_FORCED_CLOSE] is True
     finally:
         if agent.is_recording():
@@ -180,12 +179,8 @@ def test_subagent_cascade_preserves_dispatching_parent_tool() -> None:
         assert dispatch_tool.is_recording()
         assert not leaked_child.is_recording()
         assert get_current_tool_span() is dispatch_tool
-        leaked_record = next(
-            span for span in exporter.get_finished_spans() if span.name == "tool.bash"
-        )
-        assert leaked_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == (
-            "missing_tool_terminal_callback"
-        )
+        leaked_record = next(span for span in exporter.get_finished_spans() if span.name == "tool.bash")
+        assert leaked_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == ("missing_tool_terminal_callback")
     finally:
         if subagent.is_recording():
             subagent.end()

@@ -6,10 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from openjiuwen.agent_evolving.protocols import EVOLUTION_TARGET_VALUES, SIMPLIFY_ACTION_VALUES, VALID_SECTIONS
 from openjiuwen.agent_evolving.prompts.tools import (
     ListSkillExperiencesMetadataProvider,
     SimplifySkillExperiencesMetadataProvider,
+)
+from openjiuwen.agent_evolving.protocols import EVOLUTION_TARGET_VALUES, SIMPLIFY_ACTION_VALUES, VALID_SECTIONS
+from openjiuwen.agent_evolving.tools import (
+    EvolutionReviewListSkillExperiencesTool,
+    EvolutionReviewListTrajectorySpansTool,
+    EvolutionReviewReadSkillExperiencesTool,
+    EvolutionReviewReadTrajectorySpansTool,
+    SubmitEvolutionReviewResultTool,
+    create_evolution_review_tools,
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
@@ -20,14 +28,6 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
-from openjiuwen.agent_evolving.tools import (
-    EvolutionReviewListSkillExperiencesTool,
-    EvolutionReviewListTrajectorySpansTool,
-    EvolutionReviewReadSkillExperiencesTool,
-    EvolutionReviewReadTrajectorySpansTool,
-    SubmitEvolutionReviewResultTool,
-    create_evolution_review_tools,
-)
 
 
 class DummyStore:
@@ -482,16 +482,18 @@ async def test_read_trajectory_spans_projects_llm_and_context_allowlists():
                 attributes={
                     semconv.GEN_AI_REQUEST_MODEL: "model-a",
                     **write_llm_exchange(
-                        [{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "review this"},
-                                {
-                                    "type": "image_url",
-                                    "image_url": "data:image/png;base64,secret",
-                                },
-                            ],
-                        }],
+                        [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "review this"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": "data:image/png;base64,secret",
+                                    },
+                                ],
+                            }
+                        ],
                         [{"role": "assistant", "content": "done"}],
                     ),
                     semconv.GEN_AI_USAGE_TOTAL_TOKENS: 42,

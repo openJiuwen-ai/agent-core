@@ -139,9 +139,7 @@ def open_agent_run_span(
             OJ_TRAJECTORY_RECORD_KIND: "turn",
             LANGFUSE_OBSERVATION_TYPE: "agent",
             OJ_EXECUTION_SUBJECT_ID: subject.subject_id if subject is not None else "main",
-            OJ_EXECUTION_SUBJECT_DISPLAY_NAME: (
-                subject.display_name if subject is not None else "Main Agent"
-            ),
+            OJ_EXECUTION_SUBJECT_DISPLAY_NAME: (subject.display_name if subject is not None else "Main Agent"),
             OJ_EXECUTION_SUBJECT_KIND: subject.kind if subject is not None else "main_agent",
             OJ_EXECUTION_SUBJECT_SESSION_ID: (
                 subject.session_id if subject is not None and subject.session_id else session_id or ""

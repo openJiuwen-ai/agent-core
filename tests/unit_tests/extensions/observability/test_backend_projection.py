@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import SpanContext, TraceFlags
@@ -30,18 +29,18 @@ def _span(**attributes) -> ReadableSpan:
 def _standard_span() -> ReadableSpan:
     return _span(
         **{
-            "gen_ai.system_instructions": json.dumps(
-                [{"type": "text", "content": "FIXED PROMPT"}]
+            "gen_ai.system_instructions": json.dumps([{"type": "text", "content": "FIXED PROMPT"}]),
+            "gen_ai.input.messages": json.dumps(
+                [
+                    {"role": "user", "parts": [{"type": "text", "content": "hi"}]},
+                    {
+                        "role": "assistant",
+                        "parts": [{"type": "text", "content": ""}],
+                        "tool_calls": [{"id": "t1", "name": "bash"}],
+                    },
+                    {"role": "system", "parts": [{"type": "text", "content": "DELTA-1"}]},
+                ]
             ),
-            "gen_ai.input.messages": json.dumps([
-                {"role": "user", "parts": [{"type": "text", "content": "hi"}]},
-                {
-                    "role": "assistant",
-                    "parts": [{"type": "text", "content": ""}],
-                    "tool_calls": [{"id": "t1", "name": "bash"}],
-                },
-                {"role": "system", "parts": [{"type": "text", "content": "DELTA-1"}]},
-            ]),
             "gen_ai.output.messages": json.dumps(
                 [{"role": "assistant", "parts": [{"type": "text", "content": "done"}]}]
             ),
@@ -162,9 +161,7 @@ def test_a_span_without_standard_message_attributes_is_returned_unchanged():
 
 def test_a_message_carrying_plain_content_is_read_too():
     """Older records store content directly rather than as structured parts."""
-    span = _span(
-        **{"gen_ai.input.messages": json.dumps([{"role": "user", "content": "plain"}])}
-    )
+    span = _span(**{"gen_ai.input.messages": json.dumps([{"role": "user", "content": "plain"}])})
 
     projected = project_span_for_langfuse(span)
 

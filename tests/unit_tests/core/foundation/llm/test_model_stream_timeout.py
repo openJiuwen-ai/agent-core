@@ -20,10 +20,10 @@ from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
 def _build_model_with_stream(
-        stream_fn,
-        *,
-        first_timeout: float = 10.0,
-        idle_timeout: float = 10.0,
+    stream_fn,
+    *,
+    first_timeout: float = 10.0,
+    idle_timeout: float = 10.0,
 ) -> Model:
     model = Model(
         model_client_config=ModelClientConfig(
@@ -83,9 +83,7 @@ async def test_timeout_retains_call_id_without_emitting_success(monkeypatch):
         finally:
             closed.append(True)
 
-    monkeypatch.setattr(
-        "openjiuwen.core.foundation.llm.model.trigger", AsyncMock(side_effect=capture)
-    )
+    monkeypatch.setattr("openjiuwen.core.foundation.llm.model.trigger", AsyncMock(side_effect=capture))
     model = _build_model_with_stream(slow_stream, idle_timeout=0.01)
     previous_id = get_current_llm_call_id()
     received = []

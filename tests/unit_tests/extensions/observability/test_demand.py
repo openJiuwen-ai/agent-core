@@ -49,12 +49,8 @@ def provider(monkeypatch) -> _FakeProvider:
         "openjiuwen.extensions.observability.setup.shutdown_observability",
         fake.finalizer,
     )
-    monkeypatch.setattr(
-        demand_module, "get_trajectory_span_processor", lambda: object()
-    )
-    monkeypatch.setattr(
-        demand_module, "get_span_record_processor", lambda: object()
-    )
+    monkeypatch.setattr(demand_module, "get_trajectory_span_processor", lambda: object())
+    monkeypatch.setattr(demand_module, "get_span_record_processor", lambda: object())
     reset_observability_demands()
     yield fake
     reset_observability_demands()
@@ -65,9 +61,7 @@ def _config() -> ObservabilityConfig:
 
 
 def test_first_acquire_initializes_and_reports_no_existing_provider(provider) -> None:
-    existed = acquire_observability_demand(
-        "agent", observability_config=_config(), initializer=provider.initializer
-    )
+    existed = acquire_observability_demand("agent", observability_config=_config(), initializer=provider.initializer)
 
     assert existed is False
     assert provider.init_calls == 1
@@ -75,24 +69,16 @@ def test_first_acquire_initializes_and_reports_no_existing_provider(provider) ->
 
 def test_second_runtime_reuses_the_provider_the_first_created(provider) -> None:
     """OTel keeps the first provider, so the second runtime is told it reused one."""
-    acquire_observability_demand(
-        "agent", observability_config=_config(), initializer=provider.initializer
-    )
-    existed = acquire_observability_demand(
-        "team", observability_config=_config(), initializer=provider.initializer
-    )
+    acquire_observability_demand("agent", observability_config=_config(), initializer=provider.initializer)
+    existed = acquire_observability_demand("team", observability_config=_config(), initializer=provider.initializer)
 
     assert existed is True
 
 
 def test_release_keeps_the_provider_while_another_runtime_holds_it(provider) -> None:
     """A single-agent shutdown must not blind a Team run in the same process."""
-    acquire_observability_demand(
-        "agent", observability_config=_config(), initializer=provider.initializer
-    )
-    acquire_observability_demand(
-        "team", observability_config=_config(), initializer=provider.initializer
-    )
+    acquire_observability_demand("agent", observability_config=_config(), initializer=provider.initializer)
+    acquire_observability_demand("team", observability_config=_config(), initializer=provider.initializer)
 
     release_observability_demand("agent", finalizer=provider.finalizer)
 
@@ -108,9 +94,7 @@ def test_a_provider_this_coordinator_did_not_create_is_never_shut_down(provider)
     """An RL collector may own the provider; releasing a demand must not kill it."""
     provider.initialized = True
 
-    acquire_observability_demand(
-        "agent", observability_config=_config(), initializer=provider.initializer
-    )
+    acquire_observability_demand("agent", observability_config=_config(), initializer=provider.initializer)
     release_observability_demand("agent", finalizer=provider.finalizer)
 
     assert provider.shutdown_calls == 0
@@ -130,9 +114,7 @@ def test_initialization_that_creates_no_provider_is_an_error(provider) -> None:
 def test_unknown_runtime_is_rejected_on_both_sides(provider) -> None:
     """A typo would otherwise pin the provider for the life of the process."""
     with pytest.raises(ValueError):
-        acquire_observability_demand(
-            "agnet", observability_config=_config(), initializer=provider.initializer
-        )
+        acquire_observability_demand("agnet", observability_config=_config(), initializer=provider.initializer)
     with pytest.raises(ValueError):
         release_observability_demand("agnet")
 

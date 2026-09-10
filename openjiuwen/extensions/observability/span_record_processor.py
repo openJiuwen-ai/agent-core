@@ -219,9 +219,7 @@ class SpanRecordProcessor(SpanProcessor):
             owns_target_callback = current_registration is registration
             same_thread_leases = registration.lease_threads.get(thread_id, 0)
             if same_thread_leases and not owns_target_callback:
-                raise RuntimeError(
-                    "cannot unregister another consumer leased by the current on_end call"
-                )
+                raise RuntimeError("cannot unregister another consumer leased by the current on_end call")
             registration.accepting = False
             excluded_leases = same_thread_leases if owns_target_callback else 0
             registration.unregister_waiters += 1
@@ -229,9 +227,7 @@ class SpanRecordProcessor(SpanProcessor):
                 while registration.in_flight > excluded_leases:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise TimeoutError(
-                            "timed out waiting for span record consumer callbacks"
-                        )
+                        raise TimeoutError("timed out waiting for span record consumer callbacks")
                     self._condition.wait(timeout=remaining)
             finally:
                 registration.unregister_waiters -= 1
@@ -318,7 +314,7 @@ class SpanRecordProcessor(SpanProcessor):
                     exc,
                 )
             except BaseException:
-                for pending_registration in registrations[index + 1:]:
+                for pending_registration in registrations[index + 1 :]:
                     self._release_lease(pending_registration)
                 raise
             finally:
@@ -348,7 +344,7 @@ class SpanRecordProcessor(SpanProcessor):
                     exc,
                 )
             except BaseException:
-                for pending_registration in registrations[index + 1:]:
+                for pending_registration in registrations[index + 1 :]:
                     self._release_lease(pending_registration)
                 raise
             finally:
@@ -365,40 +361,26 @@ class SpanRecordProcessor(SpanProcessor):
         return None
 
     def _discard_registration(self, registration: _ConsumerRegistration) -> None:
-        self._registrations = [
-            existing
-            for existing in self._registrations
-            if existing is not registration
-        ]
+        self._registrations = [existing for existing in self._registrations if existing is not registration]
 
     def _acquire_leases(self) -> tuple[_ConsumerRegistration, ...]:
         thread_id = threading.get_ident()
         with self._lock:
-            registrations = tuple(
-                registration
-                for registration in self._registrations
-                if registration.accepting
-            )
+            registrations = tuple(registration for registration in self._registrations if registration.accepting)
             for registration in registrations:
                 registration.in_flight += 1
-                registration.lease_threads[thread_id] = (
-                    registration.lease_threads.get(thread_id, 0) + 1
-                )
+                registration.lease_threads[thread_id] = registration.lease_threads.get(thread_id, 0) + 1
             return registrations
 
     def _acquire_snapshot_leases(self) -> tuple[_ConsumerRegistration, ...]:
         thread_id = threading.get_ident()
         with self._lock:
             registrations = tuple(
-                registration
-                for registration in self._registrations
-                if _accepts_snapshots(registration)
+                registration for registration in self._registrations if _accepts_snapshots(registration)
             )
             for registration in registrations:
                 registration.in_flight += 1
-                registration.lease_threads[thread_id] = (
-                    registration.lease_threads.get(thread_id, 0) + 1
-                )
+                registration.lease_threads[thread_id] = registration.lease_threads.get(thread_id, 0) + 1
             return registrations
 
     def _next_revision(self, identity: tuple[str, str]) -> int:
@@ -416,11 +398,7 @@ class SpanRecordProcessor(SpanProcessor):
                 registration.lease_threads[thread_id] = thread_leases
             else:
                 registration.lease_threads.pop(thread_id, None)
-            if (
-                registration.in_flight == 0
-                and not registration.accepting
-                and registration.unregister_waiters == 0
-            ):
+            if registration.in_flight == 0 and not registration.accepting and registration.unregister_waiters == 0:
                 self._discard_registration(registration)
             self._condition.notify_all()
 

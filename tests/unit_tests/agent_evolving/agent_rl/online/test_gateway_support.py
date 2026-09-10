@@ -136,7 +136,7 @@ class _FakeRedis:
         members = [member for member, _ in sorted(bucket.items(), key=lambda item: item[1])]
         if end == -1:
             end = len(members) - 1
-        return members[start:end + 1]
+        return members[start : end + 1]
 
     async def mget(self, keys: list[str]) -> list[str | None]:
         return [self._kv.get(key) for key in keys]
@@ -253,18 +253,26 @@ async def test_inference_notifier_uses_async_client():
 async def test_judge_scorer_retries_length_and_sanitizes_prompt():
     from openjiuwen.agent_evolving.agent_rl.online.judge.judge_scorer import JudgeScorer
 
-    first = _FakeResponse(payload={
-        "choices": [{
-            "finish_reason": "length",
-            "message": {"content": "<tag>bad</tag>"},
-        }],
-    })
-    second = _FakeResponse(payload={
-        "choices": [{
-            "finish_reason": "stop",
-            "message": {"content": '{"overall": 8, "reason": "ok"}'},
-        }],
-    })
+    first = _FakeResponse(
+        payload={
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "<tag>bad</tag>"},
+                }
+            ],
+        }
+    )
+    second = _FakeResponse(
+        payload={
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": '{"overall": 8, "reason": "ok"}'},
+                }
+            ],
+        }
+    )
     client = _FakeAsyncClient(response=first)
     client.response = None
 
@@ -420,13 +428,15 @@ async def test_stream_chat_response_preserves_runtime_token_fields():
         "model": "m1",
         "prompt_token_ids": [1, 2, 3],
         "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
-        "choices": [{
-            "index": 0,
-            "finish_reason": "stop",
-            "token_ids": [4, 5],
-            "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-            "message": {"role": "assistant", "content": "pong"},
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "token_ids": [4, 5],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                "message": {"role": "assistant", "content": "pong"},
+            }
+        ],
     }
 
     chunks = []

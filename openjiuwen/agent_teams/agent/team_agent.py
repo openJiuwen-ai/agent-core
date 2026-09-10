@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
+    from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -192,9 +193,7 @@ class TeamAgent(BaseAgent):
             try:
                 await agent.aclose()
             except Exception:
-                team_logger.debug(
-                    "[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True
-                )
+                team_logger.debug("[{}] tiny agent dispose failed", self._member_name() or "?", exc_info=True)
         infra.tiny_agents.clear()
 
     @property

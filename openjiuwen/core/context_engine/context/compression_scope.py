@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterator
 
-
 _current_operation_id: ContextVar[str] = ContextVar(
     "context_compression_operation_id",
     default="",

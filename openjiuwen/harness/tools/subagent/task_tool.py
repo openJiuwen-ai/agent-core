@@ -8,7 +8,6 @@ import hashlib
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
 
-
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
@@ -23,8 +22,9 @@ from openjiuwen.harness.execution_subject import (
     execution_subject_scope,
 )
 from openjiuwen.harness.kv_cache import kv_cache_hooks
-from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.tools.base_tool import ToolOutput
+
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -37,9 +37,7 @@ def _summarize_task_description(task_description: Any) -> dict[str, Any]:
     task_text = str(task_description or "")
     task_hash = ""
     if task_text:
-        task_hash = hashlib.sha256(
-            task_text.encode("utf-8", errors="ignore")
-        ).hexdigest()[:12]
+        task_hash = hashlib.sha256(task_text.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
     return {
         "redacted": True,
@@ -68,9 +66,7 @@ def resolve_task_tool_model(
         return None
     resolver = getattr(parent_agent, "resolve_subagent_model", None)
     if not callable(resolver):
-        logger.debug(
-            "[TaskTool] model_name/model_tier ignored: resolve_subagent_model not bound"
-        )
+        logger.debug("[TaskTool] model_name/model_tier ignored: resolve_subagent_model not bound")
         return None
     try:
         result = resolver(model_name=name, model_tier=tier)
@@ -242,25 +238,18 @@ class TaskTool(Tool):
             )
 
         query_summary = _summarize_task_description(task_description)
-        invoke_log = (
-            "[TaskTool] Invoking subagent with isolated session: %s, "
-            "subagent_type=%s, query_summary=%s"
-        )
+        invoke_log = "[TaskTool] Invoking subagent with isolated session: %s, subagent_type=%s, query_summary=%s"
         if str(subagent_type) == "browser_agent" and browser_agent_log_info is not None:
             browser_agent_log_info(invoke_log, sub_session_id, subagent_type, query_summary)
         else:
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
-        interrupted = False
         parent_subject = current_execution_subject()
         parent_subject_id = parent_subject.subject_id if parent_subject else "main"
         subject = ExecutionSubject(
             subject_id=f"subagent:{uuid.uuid4().hex}",
-            display_name=str(
-                getattr(getattr(subagent, "card", None), "name", None)
-                or subagent_type
-            ),
+            display_name=str(getattr(getattr(subagent, "card", None), "name", None) or subagent_type),
             kind="subagent",
             parent_subject_id=parent_subject_id,
             session_id=sub_session_id,
@@ -287,12 +276,7 @@ class TaskTool(Tool):
                     subagent_inputs["parent_session_id"] = parent_session_id
                 result = await subagent.invoke(subagent_inputs)
                 succeeded = True
-                if (
-                    isinstance(result, dict)
-                    and result.get("result_type") == "interrupt"
-                    and "interrupt_ids" in result
-                ):
-                    interrupted = True
+                if isinstance(result, dict) and result.get("result_type") == "interrupt" and "interrupt_ids" in result:
                     self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
                     return result
                 output = result.get("output", "")

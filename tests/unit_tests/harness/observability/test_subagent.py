@@ -36,9 +36,7 @@ def test_subagent_hook_traces_every_dispatch_path(monkeypatch) -> None:
     leaves every other path untraced.
     """
     created = _Subagent()
-    monkeypatch.setattr(
-        DeepAgent, "create_subagent", lambda self, *args, **kwargs: created, raising=False
-    )
+    monkeypatch.setattr(DeepAgent, "create_subagent", lambda self, *args, **kwargs: created, raising=False)
     monkeypatch.setattr(
         "openjiuwen.harness.observability.rail.maybe_agent_observability_rail",
         AgentObservabilityRail,
@@ -65,9 +63,7 @@ def test_subagent_gets_no_rail_while_observability_is_off(monkeypatch) -> None:
         lambda: None,
     )
     created = _Subagent()
-    monkeypatch.setattr(
-        DeepAgent, "create_subagent", lambda self, *args, **kwargs: created, raising=False
-    )
+    monkeypatch.setattr(DeepAgent, "create_subagent", lambda self, *args, **kwargs: created, raising=False)
 
     install_subagent_observability_hook()
     DeepAgent.create_subagent(object(), "explore_agent", "sess-1")

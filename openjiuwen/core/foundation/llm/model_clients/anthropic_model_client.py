@@ -22,7 +22,7 @@ import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.headers_helper import (
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
 # Shape converters: openJiuwen BaseMessage list  <->  Anthropic Messages API payload
 # ---------------------------------------------------------------------------
 
+
 def _content_to_blocks(content: Any) -> List[dict]:
     """Normalize OJ ``content`` (str | list[str|dict]) to Anthropic block list."""
     if content is None:
@@ -97,7 +98,7 @@ def _mark_cache_control(blocks: List[dict], ttl: str) -> None:
 
 
 def _convert_message_schemas(
-        messages: List[dict],
+    messages: List[dict],
 ) -> tuple[Optional[List[dict]], List[dict]]:
     """Split an OpenAI-shape message list into (system_blocks, anthropic_messages).
 
@@ -130,11 +131,13 @@ def _convert_message_schemas(
             if not result_blocks:
                 # Anthropic requires non-empty content for tool_result; pad.
                 result_blocks = [{"type": "text", "text": ""}]
-            pending_tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_call_id,
-                "content": result_blocks,
-            })
+            pending_tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": result_blocks,
+                }
+            )
             continue
 
         _flush_tool_results()
@@ -147,15 +150,19 @@ def _convert_message_schemas(
                 args_str = fn.get("arguments", "{}") or "{}"
                 try:
                     import json
+
                     args_obj = json.loads(args_str) if isinstance(args_str, str) else args_str
-                except Exception:
+                except Exception as exc:
+                    llm_logger.debug("Anthropic tool arguments are not valid JSON, kept raw - {}", exc)
                     args_obj = {"_raw_arguments": args_str}
-                blocks.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", ""),
-                    "name": fn.get("name", ""),
-                    "input": args_obj,
-                })
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": args_obj,
+                    }
+                )
             if not blocks:
                 blocks = [{"type": "text", "text": ""}]
             out.append({"role": "assistant", "content": blocks})
@@ -181,17 +188,21 @@ def _convert_tool_schemas(tools: Optional[List[dict]]) -> Optional[List[dict]]:
         if not isinstance(tool, dict):
             continue
         fn = tool.get("function") or {}
-        out.append({
-            "name": fn.get("name") or tool.get("name", ""),
-            "description": fn.get("description") or tool.get("description", ""),
-            "input_schema": fn.get("parameters") or tool.get("input_schema") or {"type": "object", "properties": {}},
-        })
+        out.append(
+            {
+                "name": fn.get("name") or tool.get("name", ""),
+                "description": fn.get("description") or tool.get("description", ""),
+                "input_schema": fn.get("parameters")
+                or tool.get("input_schema")
+                or {"type": "object", "properties": {}},
+            }
+        )
     return out
 
 
 def _apply_static_cache_breakpoints(
-        system_blocks: Optional[List[dict]],
-        tools: Optional[List[dict]],
+    system_blocks: Optional[List[dict]],
+    tools: Optional[List[dict]],
 ) -> None:
     if tools:
         tools[-1]["cache_control"] = {"type": "ephemeral"}
@@ -219,9 +230,9 @@ def _last_input_is_transient(messages: Any) -> bool:
 
 
 def _apply_messages_cache_breakpoint(
-        anthropic_messages: List[dict],
-        *,
-        exclude_tail: bool,
+    anthropic_messages: List[dict],
+    *,
+    exclude_tail: bool,
 ) -> None:
     """Anchor the conversation cache prefix on the last *stable* message.
 
@@ -243,6 +254,7 @@ def _apply_messages_cache_breakpoint(
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
+
 
 class AnthropicModelClient(BaseModelClient):
     """Anthropic Messages API client."""
@@ -296,9 +308,9 @@ class AnthropicModelClient(BaseModelClient):
 
     @classmethod
     def _build_request_headers(
-            cls,
-            base_headers: Optional[Mapping[str, Any]],
-            request_headers: Optional[Mapping[str, Any]],
+        cls,
+        base_headers: Optional[Mapping[str, Any]],
+        request_headers: Optional[Mapping[str, Any]],
     ) -> dict[str, str]:
         return merge_request_headers(base_headers, request_headers)
 
@@ -436,17 +448,17 @@ class AnthropicModelClient(BaseModelClient):
             logger.info(f"Closed {closed} AsyncAnthropic client(s) for removed/updated model config")
 
     def _build_anthropic_params(
-            self,
-            *,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            tools: Union[List[ToolInfo], List[dict], None],
-            temperature: Optional[float],
-            top_p: Optional[float],
-            model: Optional[str],
-            stop: Union[Optional[str], None],
-            max_tokens: Optional[int],
-            stream: bool,
-            **kwargs,
+        self,
+        *,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        tools: Union[List[ToolInfo], List[dict], None],
+        temperature: Optional[float],
+        top_p: Optional[float],
+        model: Optional[str],
+        stop: Union[Optional[str], None],
+        max_tokens: Optional[int],
+        stream: bool,
+        **kwargs,
     ) -> dict:
         openai_params = super()._build_request_params(
             messages=messages,
@@ -500,18 +512,18 @@ class AnthropicModelClient(BaseModelClient):
         return params
 
     async def invoke(
-            self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs,
+        self,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs,
     ) -> AssistantMessage:
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
@@ -608,18 +620,18 @@ class AnthropicModelClient(BaseModelClient):
                 await async_client.close()
 
     async def stream(
-            self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs,
+        self,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs,
     ) -> AsyncIterator[AssistantMessageChunk]:
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
@@ -666,7 +678,7 @@ class AnthropicModelClient(BaseModelClient):
 
             # Accumulator state across the stream
             current_text = ""
-            tool_use_acc: dict[int, dict] = {}      # index -> {id, name, args_str}
+            tool_use_acc: dict[int, dict] = {}  # index -> {id, name, args_str}
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
 
@@ -730,9 +742,9 @@ class AnthropicModelClient(BaseModelClient):
     # ------------------------------------------------------------------
 
     async def _parse_response(
-            self,
-            response: Any,
-            parser: Optional[BaseOutputParser] = None,
+        self,
+        response: Any,
+        parser: Optional[BaseOutputParser] = None,
     ) -> AssistantMessage:
         """Convert an Anthropic ``Message`` response into ``AssistantMessage``."""
         content_blocks = list(getattr(response, "content", []) or [])
@@ -744,15 +756,18 @@ class AnthropicModelClient(BaseModelClient):
                 text_parts.append(getattr(block, "text", "") or "")
             elif btype == "tool_use":
                 import json
+
                 input_obj = getattr(block, "input", None) or {}
                 args_str = json.dumps(input_obj) if not isinstance(input_obj, str) else input_obj
-                tool_calls.append(ToolCall(
-                    id=getattr(block, "id", "") or "",
-                    type="function",
-                    name=getattr(block, "name", "") or "",
-                    arguments=args_str,
-                    index=idx,
-                ))
+                tool_calls.append(
+                    ToolCall(
+                        id=getattr(block, "id", "") or "",
+                        type="function",
+                        name=getattr(block, "name", "") or "",
+                        arguments=args_str,
+                        index=idx,
+                    )
+                )
             # thinking / redacted_thinking blocks: ignored for now -- could be
             # surfaced as reasoning_content if/when OJ wants to display them.
 
@@ -775,8 +790,10 @@ class AnthropicModelClient(BaseModelClient):
                 )
 
         stop_reason = getattr(response, "stop_reason", None) or ""
-        finish_reason = "tool_calls" if tool_calls else (
-            "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
+        finish_reason = (
+            "tool_calls"
+            if tool_calls
+            else ("stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop"))
         )
 
         provider_metadata = {
@@ -845,9 +862,9 @@ class AnthropicModelClient(BaseModelClient):
     # ------------------------------------------------------------------
 
     def _event_to_chunk(
-            self,
-            event: Any,
-            tool_use_acc: dict[int, dict],
+        self,
+        event: Any,
+        tool_use_acc: dict[int, dict],
     ) -> Optional[AssistantMessageChunk]:
         """Map an Anthropic SSE event to ``AssistantMessageChunk``.
 
@@ -913,13 +930,15 @@ class AnthropicModelClient(BaseModelClient):
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
-                tool_calls=[ToolCall(
-                    id=tu["id"],
-                    type="function",
-                    name=tu["name"],
-                    arguments=tu["args_str"] or "{}",
-                    index=idx,
-                )],
+                tool_calls=[
+                    ToolCall(
+                        id=tu["id"],
+                        type="function",
+                        name=tu["name"],
+                        arguments=tu["args_str"] or "{}",
+                        index=idx,
+                    )
+                ],
                 usage_metadata=None,
                 finish_reason="null",
             )
@@ -942,9 +961,7 @@ class AnthropicModelClient(BaseModelClient):
                 tool_calls=None,
                 usage_metadata=usage_metadata,
                 finish_reason=finish_reason,
-                provider_metadata=(
-                    {"stop_reason": str(stop_reason)} if stop_reason else {}
-                ),
+                provider_metadata=({"stop_reason": str(stop_reason)} if stop_reason else {}),
             )
 
         if etype == "message_stop":

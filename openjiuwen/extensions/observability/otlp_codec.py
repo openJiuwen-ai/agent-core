@@ -14,6 +14,7 @@ from google.protobuf import json_format
 from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import encode_spans
 from opentelemetry.sdk.trace import ReadableSpan
 
+from openjiuwen.core.common.logging import logger
 
 _HEX_ID_KEYS = frozenset({"traceId", "spanId", "parentSpanId"})
 
@@ -22,7 +23,9 @@ def _b64_to_hex(value: str) -> str:
     """Convert a protobuf-JSON base64 identifier to lower-case hex."""
     try:
         return binascii.hexlify(base64.b64decode(value)).decode()
-    except Exception:
+    except Exception as exc:
+        # Not a valid base64 identifier; keep the raw value as-is.
+        logger.debug("otel: identifier is not base64, kept as-is: {!r} - {}", value, exc)
         return value
 
 

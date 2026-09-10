@@ -30,13 +30,12 @@ from openjiuwen.agent_teams.observability import (
     shutdown_observability,
 )
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.runner import Runner
 from tests.unit_tests.fixtures.mock_llm import (
     create_reasoning_response,
     mock_llm_context,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -126,12 +125,14 @@ async def test_leader_single_iteration_trace_via_runner(
     answers: list[str] = []
 
     with mock_llm_context(mock_memory=False) as mock_llm:
-        mock_llm.set_responses([
-            create_reasoning_response(
-                content="Hello! I'm ready to help.",
-                reasoning_content="The user is saying hello. I should respond briefly.",
-            ),
-        ])
+        mock_llm.set_responses(
+            [
+                create_reasoning_response(
+                    content="Hello! I'm ready to help.",
+                    reasoning_content="The user is saying hello. I should respond briefly.",
+                ),
+            ]
+        )
 
         async def _consume() -> None:
             nonlocal completed
@@ -164,8 +165,7 @@ async def test_leader_single_iteration_trace_via_runner(
         except asyncio.TimeoutError:
             team_logger.info("[UT] stream timed out (expected)")
 
-    team_logger.info("[UT] completed={} answers={} llm_calls={}",
-                     completed, len(answers), mock_llm.call_count)
+    team_logger.info("[UT] completed={} answers={} llm_calls={}", completed, len(answers), mock_llm.call_count)
 
     await Runner.stop()
 
@@ -175,9 +175,13 @@ async def test_leader_single_iteration_trace_via_runner(
     all_spans = in_memory_exporter.get_finished_spans()
     team_logger.info("[UT] total spans exported: {}", len(all_spans))
     for s in all_spans:
-        team_logger.info("[UT]   span: name={} trace_id={:032x} span_id={:016x} parent={:016x}",
-                         s.name, s.context.trace_id, s.context.span_id,
-                         s.parent.span_id if s.parent else 0)
+        team_logger.info(
+            "[UT]   span: name={} trace_id={:032x} span_id={:016x} parent={:016x}",
+            s.name,
+            s.context.trace_id,
+            s.context.span_id,
+            s.parent.span_id if s.parent else 0,
+        )
 
     # --- 1. Team span is ROOT ---
     team_spans = _spans_by_name(in_memory_exporter, f"team.{team_name}")
@@ -200,13 +204,12 @@ async def test_leader_single_iteration_trace_via_runner(
         ancestor = a
         while ancestor.parent is not None and ancestor.parent.span_id not in team_ids:
             parent = spans_by_id.get(ancestor.parent.span_id)
-            assert parent is not None, \
-                f"agent span {a.name} has an orphaned ancestor {ancestor.name}"
-            assert parent.name.startswith("agent."), \
-                f"agent span {a.name} nests under non-agent span {parent.name}"
+            assert parent is not None, f"agent span {a.name} has an orphaned ancestor {ancestor.name}"
+            assert parent.name.startswith("agent."), f"agent span {a.name} nests under non-agent span {parent.name}"
             ancestor = parent
-        assert ancestor.parent is not None and ancestor.parent.span_id in team_ids, \
+        assert ancestor.parent is not None and ancestor.parent.span_id in team_ids, (
             f"agent span {a.name} does not descend from a team span"
+        )
 
     # --- 3. LLM spans (if any) are children of agent spans ---
     # NOTE: LLM spans may be absent when mock_llm_context is used
@@ -217,8 +220,7 @@ async def test_leader_single_iteration_trace_via_runner(
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     for llm in llm_spans:
         assert llm.parent is not None, "llm.call needs a parent"
-        assert llm.parent.span_id in agent_ids, \
-            "llm.call parent not an agent span"
+        assert llm.parent.span_id in agent_ids, "llm.call parent not an agent span"
 
     # --- 4. No orphan spans ---
     span_ids = {s.context.span_id for s in all_spans}
@@ -227,22 +229,22 @@ async def test_leader_single_iteration_trace_via_runner(
 
     # --- 5. Agent spans have type AGENT ---
     for a in agent_spans:
-        assert _attr(a, "langfuse.observation.type") == "agent", \
-            f"{a.name} must have type=agent"
+        assert _attr(a, "langfuse.observation.type") == "agent", f"{a.name} must have type=agent"
 
     # --- 6. LLM spans have input/output (if present) ---
     for llm in llm_spans:
-        has_io = (_attr(llm, "gen_ai.prompt.0.content")
-                  or _attr(llm, "gen_ai.completion.0.content")
-                  or _attr(llm, "langfuse.observation.output"))
+        has_io = (
+            _attr(llm, "gen_ai.prompt.0.content")
+            or _attr(llm, "gen_ai.completion.0.content")
+            or _attr(llm, "langfuse.observation.output")
+        )
         assert has_io, f"LLM span {llm.name} needs prompt or completion"
 
     # --- 7. Reasoning spans (if present) have content ---
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
     for rs in reasoning_spans:
         assert rs.parent is not None, "reasoning span needs parent"
-        has_io = (_attr(rs, "gen_ai.completion.0.content")
-                  or _attr(rs, "langfuse.observation.output"))
+        has_io = _attr(rs, "gen_ai.completion.0.content") or _attr(rs, "langfuse.observation.output")
         assert has_io, "reasoning span needs completion or output"
 
 

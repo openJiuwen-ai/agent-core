@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from copy import deepcopy
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -23,6 +23,11 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_SPAN_FORCED_CLOSE_REASON,
     OJ_TRACE_FORCED_CLOSE,
 )
+
+# Attribute attached to SDK span objects to carry per-call LLM state across
+# callbacks. Namespaced because the span object belongs to the OpenTelemetry
+# SDK, not to this module.
+OTEL_LLM_STATE_ATTR = "otel_llm_state"
 
 
 def _is_root_span(span: Span, root_span: Span | None) -> bool:
@@ -68,11 +73,7 @@ def mark_span_forced_close(span: Span, reason: str) -> None:
     span.set_attribute(OJ_SPAN_FORCED_CLOSE, True)
     span.set_attribute(OJ_SPAN_FORCED_CLOSE_REASON, reason)
     root_span = _resolve_root_span()
-    if (
-        root_span is not None
-        and root_span.is_recording()
-        and root_span.context.trace_id == span.context.trace_id
-    ):
+    if root_span is not None and root_span.is_recording() and root_span.context.trace_id == span.context.trace_id:
         root_span.set_attribute(OJ_TRACE_FORCED_CLOSE, True)
 
 
@@ -105,15 +106,16 @@ class ActiveSpanTracker(SpanProcessor):
             for s_set in self._spans_by_trace.values():
                 total_spans += len(s_set)
             logger.debug(
-                "ActiveSpanTracker state: traces={} total_spans={} "
-                "start_calls={} end_calls={}",
-                len(self._spans_by_trace), total_spans,
-                self._on_start_count, self._on_end_count,
+                "ActiveSpanTracker state: traces={} total_spans={} start_calls={} end_calls={}",
+                len(self._spans_by_trace),
+                total_spans,
+                self._on_start_count,
+                self._on_end_count,
             )
 
     def on_start(self, span: Span, parent_context: Any = None) -> None:
         try:
-            if hasattr(span, 'context') and span.context:
+            if hasattr(span, "context") and span.context:
                 trace_id = span.context.trace_id
                 with self._lock:
                     self._spans_by_trace.setdefault(trace_id, set()).add(span)
@@ -125,9 +127,9 @@ class ActiveSpanTracker(SpanProcessor):
     def on_end(self, span: ReadableSpan) -> None:
         """Remove properly ended spans so they don't accumulate."""
         try:
-            if hasattr(span, 'context') and span.context:
+            if hasattr(span, "context") and span.context:
                 trace_id = span.context.trace_id
-                state = getattr(span, "otel_llm_state", None)
+                state = getattr(span, OTEL_LLM_STATE_ATTR, None)
                 call_id = getattr(state, "call_id", "") if state is not None else ""
                 with self._lock:
                     trace_set = self._spans_by_trace.get(trace_id)
@@ -148,7 +150,7 @@ class ActiveSpanTracker(SpanProcessor):
         Args:
             call_id: Id of the LLM request, from the call scope in effect when
                 the span was opened. Empty when the caller reached the callback
-                framework without going through ``Model`` — nothing is indexed
+                framework without going through ``Model`` 鈥?nothing is indexed
                 then and lookups fall back to parent matching.
             span: The freshly opened ``llm.call`` span.
         """
@@ -187,17 +189,17 @@ class ActiveSpanTracker(SpanProcessor):
             try:
                 logger.warning(
                     "ORPHAN LLM span in cascade-close: span_id={:016x} "
-                    "parent_span_id={:016x} — close callback did not fire",
-                    span.context.span_id, parent_span_id,
+                    "parent_span_id={:016x} 鈥?close callback did not fire",
+                    span.context.span_id,
+                    parent_span_id,
                 )
                 mark_span_forced_close(span, "missing_llm_terminal_callback")
                 span.end()
                 closed += 1
             except Exception as exc:
                 logger.warning(
-                    "ActiveSpanTracker: failed to cascade-close llm span "
-                    "span_id={:016x}: {}",
-                    span.context.span_id if hasattr(span, 'context') and span.context else 0,
+                    "ActiveSpanTracker: failed to cascade-close llm span span_id={:016x}: {}",
+                    span.context.span_id if hasattr(span, "context") and span.context else 0,
                     exc,
                 )
         return closed
@@ -221,7 +223,7 @@ class ActiveSpanTracker(SpanProcessor):
 
         Resolution is by request identity first: the LLM call scope in effect
         names the request whose callback is firing, and the span it opened is
-        indexed under that id.  That is what keeps concurrent requests apart —
+        indexed under that id.  That is what keeps concurrent requests apart 鈥?
         a member's streaming call, another member's call, and a detached
         background request such as the image-modality probe each resolve to
         their own span no matter which task the callback runs in.
@@ -287,9 +289,10 @@ class ActiveSpanTracker(SpanProcessor):
         if len(exact) > 1:
             logger.warning(
                 "ActiveSpanTracker: {} open llm.call spans share parent_span_id={:016x} "
-                "and the callback carries no LLM call id — skipping rather than "
+                "and the callback carries no LLM call id 鈥?skipping rather than "
                 "guessing which one it belongs to",
-                len(exact), parent_id,
+                len(exact),
+                parent_id,
             )
         return None
 
@@ -300,7 +303,7 @@ class ActiveSpanTracker(SpanProcessor):
         self.flush_all_spans()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        # Do NOT call flush_all_spans here — force_flush is called by
+        # Do NOT call flush_all_spans here 鈥?force_flush is called by
         # TracerProvider after a caller has closed its child spans. Closing
         # spans here would steal them from the operation that owns the trace.
         return True
@@ -315,7 +318,7 @@ class ActiveSpanTracker(SpanProcessor):
         """Close all active spans for a specific trace.
 
         Spans that carry ``otel_llm_state`` are leaked LLM spans whose normal
-        close callback never fired — logged at error level.  Other spans
+        close callback never fired 鈥?logged at error level.  Other spans
         (tool / task / event) reaching this path are also unexpected and
         logged as errors.
 
@@ -335,10 +338,7 @@ class ActiveSpanTracker(SpanProcessor):
                     continue
 
                 span_context = getattr(span, "context", None)
-                if (
-                    exclude_span_id is not None
-                    and getattr(span_context, "span_id", None) == exclude_span_id
-                ):
+                if exclude_span_id is not None and getattr(span_context, "span_id", None) == exclude_span_id:
                     continue
 
                 if exclude_root_span and _is_root_span(span, root_span):
@@ -346,15 +346,14 @@ class ActiveSpanTracker(SpanProcessor):
 
                 # Spans with _llm_state are leaked LLM spans. Log and stamp an
                 # explicit forced-close fact; never manufacture normal output.
-                state = getattr(span, "otel_llm_state", None)
+                state = getattr(span, OTEL_LLM_STATE_ATTR, None)
                 if state is not None:
                     _log_orphan_llm_span(span, state)
                 else:
                     logger.warning(
-                        "ORPHAN non-LLM span at flush: name={} span_id={:016x} "
-                        "— span was never properly closed",
-                        span.name if hasattr(span, 'name') else '<no-name>',
-                        span.context.span_id if hasattr(span, 'context') and span.context else 0,
+                        "ORPHAN non-LLM span at flush: name={} span_id={:016x} 鈥?span was never properly closed",
+                        span.name if hasattr(span, "name") else "<no-name>",
+                        span.context.span_id if hasattr(span, "context") and span.context else 0,
                     )
                 mark_span_forced_close(span, "trace_safety_flush")
                 span.end()
@@ -377,8 +376,7 @@ class ActiveSpanTracker(SpanProcessor):
             self._spans_by_trace.clear()
             if all_traces:
                 logger.info(
-                    "ActiveSpanTracker.flush_all_spans BEFORE: traces={} "
-                    "trace_ids=[{}]",
+                    "ActiveSpanTracker.flush_all_spans BEFORE: traces={} trace_ids=[{}]",
                     len(all_traces),
                     ", ".join("{:032x}".format(tid) for tid, _ in all_traces),
                 )
@@ -392,15 +390,14 @@ class ActiveSpanTracker(SpanProcessor):
                     if exclude_root_span and _is_root_span(span, root_span):
                         continue
 
-                    state = getattr(span, "otel_llm_state", None)
+                    state = getattr(span, OTEL_LLM_STATE_ATTR, None)
                     if state is not None:
                         _log_orphan_llm_span(span, state)
                     else:
                         logger.warning(
-                            "ORPHAN non-LLM span at flush: name={} span_id={:016x} "
-                            "— span was never properly closed",
-                            span.name if hasattr(span, 'name') else '<no-name>',
-                            span.context.span_id if hasattr(span, 'context') and span.context else 0,
+                            "ORPHAN non-LLM span at flush: name={} span_id={:016x} 鈥?span was never properly closed",
+                            span.name if hasattr(span, "name") else "<no-name>",
+                            span.context.span_id if hasattr(span, "context") and span.context else 0,
                         )
                     mark_span_forced_close(span, "provider_shutdown_flush")
                     span.end()
@@ -409,8 +406,9 @@ class ActiveSpanTracker(SpanProcessor):
                     logger.warning("ActiveSpanTracker: failed to close span: {}", exc)
 
         if closed_count > 0:
-            logger.info("ActiveSpanTracker.flush_all_spans: closed {} spans across {} traces",
-                           closed_count, len(all_traces))
+            logger.info(
+                "ActiveSpanTracker.flush_all_spans: closed {} spans across {} traces", closed_count, len(all_traces)
+            )
 
         return closed_count
 
@@ -585,10 +583,7 @@ def _context_window_transition_key(
     request_id: str,
     step_id: str,
 ) -> tuple[str, str, str, str] | None:
-    values = tuple(
-        str(value or "").strip()
-        for value in (session_id, subject_id, request_id, step_id)
-    )
+    values = tuple(str(value or "").strip() for value in (session_id, subject_id, request_id, step_id))
     if any(not value for value in values):
         return None
     return cast(tuple[str, str, str, str], values)
@@ -622,13 +617,9 @@ def advance_context_window(
         base_window_id = previous[0] if previous is not None else None
         before = previous[1] if previous is not None else ()
 
-        before_by_id = {
-            message_id: (index, fingerprint)
-            for index, (message_id, fingerprint) in enumerate(before)
-        }
+        before_by_id = {message_id: (index, fingerprint) for index, (message_id, fingerprint) in enumerate(before)}
         current_by_id = {
-            message_id: (index, fingerprint, messages[index])
-            for index, (message_id, fingerprint) in enumerate(current)
+            message_id: (index, fingerprint, messages[index]) for index, (message_id, fingerprint) in enumerate(current)
         }
         delta: list[dict[str, Any]] = []
 
@@ -640,28 +631,34 @@ def advance_context_window(
             for message_id, (index, fingerprint, message) in current_by_id.items():
                 prior = before_by_id.get(message_id)
                 if prior is None:
-                    delta.append({
-                        "op": "insert",
-                        "message_id": message_id,
-                        "index": index,
-                        "message": deepcopy(message),
-                    })
+                    delta.append(
+                        {
+                            "op": "insert",
+                            "message_id": message_id,
+                            "index": index,
+                            "message": deepcopy(message),
+                        }
+                    )
                     continue
                 prior_index, prior_fingerprint = prior
                 if prior_index != index:
-                    delta.append({
-                        "op": "move",
-                        "message_id": message_id,
-                        "from_index": prior_index,
-                        "index": index,
-                    })
+                    delta.append(
+                        {
+                            "op": "move",
+                            "message_id": message_id,
+                            "from_index": prior_index,
+                            "index": index,
+                        }
+                    )
                 if prior_fingerprint != fingerprint:
-                    delta.append({
-                        "op": "replace",
-                        "message_id": message_id,
-                        "index": index,
-                        "message": deepcopy(message),
-                    })
+                    delta.append(
+                        {
+                            "op": "replace",
+                            "message_id": message_id,
+                            "index": index,
+                            "message": deepcopy(message),
+                        }
+                    )
 
         _trajectory_subject_states[key] = (str(window_id), current)
         return sequence_epoch, sequence, base_window_id, delta, is_epoch_baseline
@@ -805,7 +802,7 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
     A span with ``otel_llm_state`` reaching ``flush_spans_for_trace`` or
     ``flush_all_spans`` means it was opened normally but its close
     callback (on_llm_output / on_llm_invoke_output) never fired AND
-    cascade-close missed it.  This is a real bug — log at error level
+    cascade-close missed it.  This is a real bug 鈥?log at error level
     so the root cause can be investigated.
 
     Unlike the old ``_finalize_llm_span_from_state``, this does NOT set a
@@ -814,9 +811,9 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
     """
     logger.warning(
         "ORPHAN LLM span at flush: span_id={:016x} streaming={} "
-        "recording={} first_chunk_ns={} — span was opened but never "
+        "recording={} first_chunk_ns={} 鈥?span was opened but never "
         "properly closed; its normal close callback did not fire",
-        span.context.span_id if hasattr(span, 'context') and span.context else 0,
+        span.context.span_id if hasattr(span, "context") and span.context else 0,
         getattr(state, "is_streaming", None),
         span.is_recording(),
         getattr(state, "first_chunk_ns", None),
@@ -826,7 +823,7 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
 def cascade_close_children() -> int:
     """End all open child llm/tool spans on the current context.
 
-    The single source of truth for cascade-close — called from
+    The single source of truth for cascade-close 鈥?called from
     ``AgentSpanScope.close`` (rail) and ``close_current_agent_span`` below.
     Spans reaching this path had their normal close callback fail to fire.
     They retain UNSET status, receive an explicit forced-close marker, and
@@ -838,25 +835,19 @@ def cascade_close_children() -> int:
     """
     closed_count = 0
     agent_span = _current_agent_span.get()
-    agent_span_id = (
-        agent_span.context.span_id
-        if agent_span is not None and agent_span.context is not None
-        else None
-    )
+    agent_span_id = agent_span.context.span_id if agent_span is not None and agent_span.context is not None else None
     remaining_tool_spans: dict[str, list[Span]] = {}
     for tool_name, bucket in _tool_span_map.get().items():
         remaining_bucket: list[Span] = []
         for ts in bucket:
             parent_span_id = getattr(getattr(ts, "parent", None), "span_id", None)
-            belongs_to_current_agent = (
-                agent_span_id is None or parent_span_id == agent_span_id
-            )
+            belongs_to_current_agent = agent_span_id is None or parent_span_id == agent_span_id
             if ts.is_recording() and belongs_to_current_agent:
                 logger.warning(
-                    "ORPHAN tool span in cascade-close: name={} span_id={:016x} — "
+                    "ORPHAN tool span in cascade-close: name={} span_id={:016x} 鈥?"
                     "on_tool_call_finished/on_tool_call_error did not fire",
-                    ts.name if hasattr(ts, 'name') else '<no-name>',
-                    ts.context.span_id if hasattr(ts, 'context') and ts.context else 0,
+                    ts.name if hasattr(ts, "name") else "<no-name>",
+                    ts.context.span_id if hasattr(ts, "context") and ts.context else 0,
                 )
                 mark_span_forced_close(ts, "missing_tool_terminal_callback")
                 ts.end()
@@ -884,8 +875,8 @@ def close_current_agent_span() -> None:
     if current is not None and current.is_recording():
         logger.warning(
             "otel: close_current_agent_span - closing name={}, span_id={:016x}",
-            current.name if hasattr(current, 'name') else 'unknown',
-            current.context.span_id if hasattr(current, 'context') else 0,
+            current.name if hasattr(current, "name") else "unknown",
+            current.context.span_id if hasattr(current, "context") else 0,
         )
         current.set_status(Status(StatusCode.OK))
         current.end()
@@ -936,7 +927,7 @@ def get_current_tool_span() -> Span | None:
     under that tool span rather than beside it.
 
     Tool spans are keyed by name with no cross-key ordering, so the innermost
-    one is the latest-started still-recording span — tool calls are sequential
+    one is the latest-started still-recording span 鈥?tool calls are sequential
     within an agent loop, which makes start time an unambiguous order.
 
     Returns:
@@ -1012,12 +1003,12 @@ def flush_child_spans(*, trace_id: int | None = None) -> int:
     closed; unrelated traces are never touched.
 
     When *trace_id* is ``None``, the call site must be operating while the
-    trace's root span is still resolvable — its ContextVar binding, or the
+    trace's root span is still resolvable 鈥?its ContextVar binding, or the
     ambient registration (e.g. ``cascade_close_children`` during an
     agent-span close).  In that case the trace_id is discovered from it.
 
     The previous ``flush_all_spans`` fallback (when the root ContextVar
-    was ``None``) has been **removed** — it could steal spans belonging to
+    was ``None``) has been **removed** 鈥?it could steal spans belonging to
     other still-running traces.
     """
     tracker = get_active_span_tracker()
@@ -1028,7 +1019,7 @@ def flush_child_spans(*, trace_id: int | None = None) -> int:
         effective_trace_id: int | None = trace_id
         if effective_trace_id is None:
             root_span = _resolve_root_span()
-            if root_span is not None and hasattr(root_span, 'context') and root_span.context:
+            if root_span is not None and hasattr(root_span, "context") and root_span.context:
                 effective_trace_id = root_span.context.trace_id
 
         if effective_trace_id is not None:
@@ -1044,12 +1035,13 @@ def flush_child_spans(*, trace_id: int | None = None) -> int:
             if closed > 0:
                 logger.info(
                     "flush_child_spans: closed {} spans for trace {:032x}",
-                    closed, effective_trace_id,
+                    closed,
+                    effective_trace_id,
                 )
             return closed
         else:
             logger.warning(
-                "flush_child_spans: cannot determine trace_id — no root span in "
+                "flush_child_spans: cannot determine trace_id 鈥?no root span in "
                 "ContextVar and no explicit trace_id provided; skipping flush"
             )
             return 0

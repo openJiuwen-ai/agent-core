@@ -60,11 +60,10 @@ from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
     _FUZZY_REVIEW_PROMPT_CN,
     _FUZZY_REVIEW_PROMPT_EN,
     _MAX_PROCESSED_SIGNAL_KEYS,
-    _SkillPreparedEvolutionInput,
     SkillEvolutionRail,
+    _SkillPreparedEvolutionInput,
 )
 from openjiuwen.harness.rails.subagent import SubagentRail
-
 
 _REAL_SKILL_EVOLUTION_RAIL = SkillEvolutionRail
 
@@ -264,7 +263,9 @@ def _trajectory_from_steps(
                     completions.append(flat)
                 else:
                     prompts.append(flat)
-                tool_calls = getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
+                tool_calls = (
+                    getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
+                )
                 if tool_calls:
                     all_tool_calls.extend(tool_calls)
             attrs.update(write_llm_exchange(prompts, completions))
@@ -273,9 +274,7 @@ def _trajectory_from_steps(
                 for call in all_tool_calls:
                     item = dict(call) if isinstance(call, dict) else {"arguments": str(call)}
                     normalized_tool_calls.append(item)
-                attrs[semconv.GEN_AI_TOOL_CALLS] = json.dumps(
-                    normalized_tool_calls, ensure_ascii=False, default=str
-                )
+                attrs[semconv.GEN_AI_TOOL_CALLS] = json.dumps(normalized_tool_calls, ensure_ascii=False, default=str)
             name = "llm.call"
         else:
             detail = step.detail
@@ -298,9 +297,16 @@ def _trajectory_from_steps(
         if step.error:
             span["status"] = {"code": "ERROR", "message": str(step.error.get("message", "error"))}
         spans.append(span)
-    return Trajectory.from_otlp({
-        "resourceSpans": [{"resource": {"attributes": attributes_from_map(resource_attrs)}, "scopeSpans": [{"scope": {}, "spans": spans}]}]
-    })
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map(resource_attrs)},
+                    "scopeSpans": [{"scope": {}, "spans": spans}],
+                }
+            ]
+        }
+    )
 
 
 def _trajectory_with_messages(messages: list[dict]) -> Trajectory:
@@ -1776,9 +1782,7 @@ async def test_run_evolution_filters_empty_skill_name_and_swallow_exceptions(tmp
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
     rail._evolution_store.append_record = AsyncMock()
 
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
     rail._stage_evolution_from_signals.assert_awaited_once()
     assert rail._stage_evolution_from_signals.await_args.kwargs["skill_name"] == "skill-a"
 
@@ -2262,9 +2266,7 @@ async def test_run_evolution_zero_signals_skips_conversation_review(tmp_path):
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
     rail._evolution_store.append_record = AsyncMock()
 
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
 
     rail._stage_evolution_from_signals.assert_not_awaited()
 
@@ -2295,9 +2297,7 @@ async def test_run_evolution_uses_normalized_messages_for_signal_detection(tmp_p
         "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
         return_value=detector,
     ):
-        await rail.run_evolution(
-            _prepared_input(trajectory, messages=[{"role": "system", "content": "system prompt"}])
-        )
+        await rail.run_evolution(_prepared_input(trajectory, messages=[{"role": "system", "content": "system prompt"}]))
 
     detector.detect_trajectory_signals.assert_called_once_with(
         trajectory,
@@ -2329,15 +2329,11 @@ async def test_run_evolution_uses_llm_for_passive_user_feedback(tmp_path):
         return_value={"content": '{"is_feedback": true, "excerpt": "不对，你应该先检查文件是否存在"}'}
     )
     rail._evolver.model = "dummy-model"
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
 
     rail._stage_evolution_from_signals.assert_awaited_once()
     signals = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
-    assert [(signal.signal_type, signal.skill_name) for signal in signals] == [
-        ("user_intent", "skill-a")
-    ]
+    assert [(signal.signal_type, signal.skill_name) for signal in signals] == [("user_intent", "skill-a")]
     rail._evolver.llm.invoke.assert_awaited_once()
 
 
@@ -2387,9 +2383,7 @@ async def test_run_evolution_signal_trigger_consumes_script_artifact_rule_signal
     rail._infer_primary_skill = Mock(return_value="skill-a")
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
 
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
 
     rail._stage_evolution_from_signals.assert_awaited_once()
     signals_passed = rail._stage_evolution_from_signals.await_args.kwargs["signals"]
@@ -2453,9 +2447,7 @@ async def test_run_evolution_zero_signals_no_primary_skill_returns(tmp_path):
     rail._infer_primary_skill = Mock(return_value=None)
     rail._stage_evolution_from_signals = AsyncMock()
 
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
 
     rail._stage_evolution_from_signals.assert_not_awaited()
 
@@ -2553,9 +2545,7 @@ async def test_run_evolution_filters_team_and_swarm_skills_from_detection(tmp_pa
     rail._infer_primary_skill = Mock(return_value=None)
     rail._stage_evolution_from_signals = AsyncMock()
 
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
 
     rail._infer_primary_skill.assert_not_called()
 
@@ -2575,9 +2565,7 @@ async def test_run_evolution_unattributed_signals_get_fallback_skill(tmp_path):
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
     rail._evolution_store.append_record = AsyncMock()
 
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
 
     rail._stage_evolution_from_signals.assert_awaited_once()
     call_args = rail._stage_evolution_from_signals.await_args
@@ -2600,9 +2588,7 @@ async def test_run_evolution_multiple_attributed_skills_no_fallback(tmp_path):
     rail._stage_evolution_from_signals = AsyncMock(return_value=_no_records_result())
     rail._evolution_store.append_record = AsyncMock()
 
-    await rail.run_evolution(
-        _prepared_input(_trajectory_with_messages(messages), messages=messages)
-    )
+    await rail.run_evolution(_prepared_input(_trajectory_with_messages(messages), messages=messages))
 
     assert rail._stage_evolution_from_signals.await_count == 2
 

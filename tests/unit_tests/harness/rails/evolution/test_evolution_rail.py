@@ -18,7 +18,6 @@ from openjiuwen.agent_evolving.trajectory.store import InMemoryTrajectoryStore
 from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, PreparedEvolutionInput
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
-from openjiuwen.extensions.observability import semconv
 
 
 def _trajectory() -> Trajectory:
@@ -27,9 +26,7 @@ def _trajectory() -> Trajectory:
             "resourceSpans": [
                 {
                     "resource": {
-                        "attributes": attributes_from_map(
-                            {TRAJECTORY_ID: "trajectory-1", SESSION_ID: "session-1"}
-                        )
+                        "attributes": attributes_from_map({TRAJECTORY_ID: "trajectory-1", SESSION_ID: "session-1"})
                     },
                     "scopeSpans": [{"scope": {"name": "test"}, "spans": []}],
                 }

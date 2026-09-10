@@ -25,6 +25,7 @@ cached. State that must survive a rebuild lives in a reused object injected on
 the build context (e.g. ``reliability_components``) and passed into the fresh
 rail's constructor. Returning ``None`` gates the rail out for this member.
 """
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -35,10 +36,6 @@ from openjiuwen.agent_teams.harness.manifest import (
     context_field,
     harness_element,
     param_field,
-)
-from openjiuwen.harness.manifest.builtin_elements import (
-    OBSERVABILITY,
-    observability_dependency_installed,
 )
 from openjiuwen.agent_teams.rails.team_context import (
     get_messager,
@@ -52,6 +49,10 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_swarmflow_worker_base_spec,
     get_team_backend,
     get_workspace_manager,
+)
+from openjiuwen.harness.manifest.builtin_elements import (
+    OBSERVABILITY,
+    observability_dependency_installed,
 )
 
 # Element names (the RailSpec ``type`` values). The team rails live under the

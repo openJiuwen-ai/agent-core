@@ -327,10 +327,10 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
+        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import (
             WorktreeManager,
         )
-        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import WorktreeRemovedEvent as HarnessWorktreeRemovedEvent
 
         ws_mgr = self.workspace_manager
@@ -501,8 +501,8 @@ class AgentConfigurator:
         # here; "can it build" gates (a missing handle) live in the factories.
         from openjiuwen.agent_teams.rails.elements import (
             OBSERVABILITY,
-            TEAM_OBSERVABILITY,
             TEAM_DEBATE_ROUND_CAP,
+            TEAM_OBSERVABILITY,
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,

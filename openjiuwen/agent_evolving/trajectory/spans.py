@@ -16,14 +16,13 @@ from __future__ import annotations
 
 import json
 import re
-from copy import deepcopy
 from collections.abc import Iterable, Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Iterator, TypeAlias
 
 from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.extensions.observability import semconv
-
 
 JSONValue: TypeAlias = Any
 Span: TypeAlias = dict[str, Any]
@@ -510,10 +509,9 @@ def _indexed_messages(attributes: Mapping[str, Any], base: str) -> list[dict[str
         if not match or match.group("base") != base:
             continue
         index = int(match.group("index"))
-        indexed.setdefault(index, {})[match.group("field")] = _decode_structured_attribute(
-            value
-        )
+        indexed.setdefault(index, {})[match.group("field")] = _decode_structured_attribute(value)
     return [indexed[index] for index in sorted(indexed)]
+
 
 def _message_list(value: Any) -> list[dict[str, Any]]:
     decoded = _decode_structured_attribute(value)
@@ -557,9 +555,7 @@ def _tool_calls_from_parts(parts: Any) -> list[dict[str, Any]]:
         if isinstance(nested, Mapping):
             tool_calls.append(deepcopy(dict(nested)))
             continue
-        tool_calls.append(
-            {key: deepcopy(value) for key, value in part.items() if key != "type"}
-        )
+        tool_calls.append({key: deepcopy(value) for key, value in part.items() if key != "type"})
     return tool_calls
 
 
@@ -574,10 +570,11 @@ def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
     flat = {key: deepcopy(value) for key, value in message.items() if key != "parts"}
     if not isinstance(flat.get("content"), str):
         parts = message.get("parts")
-        contents = [
-            part["content"] for part in parts
-            if isinstance(part, Mapping) and "content" in part
-        ] if isinstance(parts, list) else []
+        contents = (
+            [part["content"] for part in parts if isinstance(part, Mapping) and "content" in part]
+            if isinstance(parts, list)
+            else []
+        )
         if len(contents) == 1 and not isinstance(contents[0], str):
             # Multimodal content rides in one part and comes back whole.
             flat["content"] = deepcopy(contents[0])
@@ -656,11 +653,7 @@ def write_llm_exchange(
                 system_parts.append({"type": "text", "content": deepcopy(content)})
             continue
         input_messages.append(_structure_message(message))
-    output_messages = [
-        _structure_message(message)
-        for message in completions or []
-        if isinstance(message, Mapping)
-    ]
+    output_messages = [_structure_message(message) for message in completions or [] if isinstance(message, Mapping)]
 
     def encode(value: Any) -> str:
         return json.dumps(to_json_compatible(value), ensure_ascii=False, default=str)
@@ -683,14 +676,11 @@ def _standard_prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
     """
 
     messages: list[dict[str, Any]] = []
-    system_text = _structured_parts_text(
-        _decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS))
-    )
+    system_text = _structured_parts_text(_decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS)))
     if system_text:
         messages.append({"role": "system", "content": system_text})
     messages.extend(
-        _flatten_structured_message(message)
-        for message in _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
+        _flatten_structured_message(message) for message in _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
     )
     return messages
 
@@ -701,8 +691,7 @@ def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], li
     attrs = span_attributes(span)
     prompts = _standard_prompt_messages(attrs)
     completions = [
-        _flatten_structured_message(message)
-        for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
+        _flatten_structured_message(message) for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
     ]
     if not prompts:
         prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)

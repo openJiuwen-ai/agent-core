@@ -608,6 +608,7 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
+        from openjiuwen.agent_teams.observability.setup import get_tracer
         from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
@@ -636,7 +637,6 @@ class CodexSpanBridge:
             LANGFUSE_OBSERVATION_TYPE,
             LANGFUSE_SESSION_ID,
         )
-        from openjiuwen.agent_teams.observability.setup import get_tracer
 
         messages = _request_messages(request_payload)
         completion, reasoning, tool_calls = _response_parts(response_payload)
@@ -696,10 +696,12 @@ class CodexSpanBridge:
             if role == "system":
                 system_parts.append({"type": "text", "content": content})
                 continue
-            input_messages.append({
-                "role": role or "user",
-                "parts": [{"type": "text", "content": content}],
-            })
+            input_messages.append(
+                {
+                    "role": role or "user",
+                    "parts": [{"type": "text", "content": content}],
+                }
+            )
         if system_parts:
             span.set_attribute(GEN_AI_SYSTEM_INSTRUCTIONS, _json_text(system_parts))
         if input_messages:
@@ -713,10 +715,14 @@ class CodexSpanBridge:
         safe_completion = redact_completion(completion, config)
         span.set_attribute(
             GEN_AI_OUTPUT_MESSAGES,
-            _json_text([{
-                "role": "assistant",
-                "parts": [{"type": "text", "content": safe_completion}],
-            }]),
+            _json_text(
+                [
+                    {
+                        "role": "assistant",
+                        "parts": [{"type": "text", "content": safe_completion}],
+                    }
+                ]
+            ),
         )
         if tool_calls:
             span.set_attribute(
@@ -769,10 +775,14 @@ class CodexSpanBridge:
             reasoning_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, safe_reasoning)
             reasoning_span.set_attribute(
                 GEN_AI_OUTPUT_MESSAGES,
-                _json_text([{
-                    "role": "reasoning",
-                    "parts": [{"type": "text", "content": safe_reasoning}],
-                }]),
+                _json_text(
+                    [
+                        {
+                            "role": "reasoning",
+                            "parts": [{"type": "text", "content": safe_reasoning}],
+                        }
+                    ]
+                ),
             )
             if usage["reasoning_output_tokens"]:
                 reasoning_span.set_attribute(
@@ -910,6 +920,7 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
+        from openjiuwen.agent_teams.observability.setup import get_tracer
         from openjiuwen.extensions.observability.semconv import (
             AT_MEMBER_NAME,
             AT_SESSION_ID,
@@ -921,7 +932,6 @@ class CodexSpanBridge:
             LANGFUSE_OBSERVATION_TYPE,
             LANGFUSE_SESSION_ID,
         )
-        from openjiuwen.agent_teams.observability.setup import get_tracer
 
         self._llm_index += 1
         span = get_tracer(_TRACER_NAME).start_span(
@@ -1067,6 +1077,7 @@ class CodexSpanBridge:
             set_span_in_context,
         )
 
+        from openjiuwen.agent_teams.observability.setup import get_tracer
         from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
@@ -1084,7 +1095,6 @@ class CodexSpanBridge:
             LANGFUSE_OBSERVATION_TYPE,
             LANGFUSE_SESSION_ID,
         )
-        from openjiuwen.agent_teams.observability.setup import get_tracer
 
         tracer = get_tracer(_TRACER_NAME)
         now_ns = time.time_ns()
@@ -1092,12 +1102,7 @@ class CodexSpanBridge:
             tool_name = str(record.get("tool_name") or "")
             item_type = str(record.get("item_type") or "")
             explicit_display_name = str(record.get("display_name") or "")
-            display_name = (
-                explicit_display_name
-                or tool_name.rsplit(".", maxsplit=1)[-1]
-                or item_type
-                or "unknown"
-            )
+            display_name = explicit_display_name or tool_name.rsplit(".", maxsplit=1)[-1] or item_type or "unknown"
             observation_tool_name = explicit_display_name or tool_name
             start_ns = int(record.get("start_ns") or now_ns)
             end_ns = max(start_ns, int(record.get("end_ns") or now_ns))
@@ -1225,6 +1230,7 @@ class CodexSpanBridge:
         from opentelemetry import context as otel_context
         from opentelemetry.trace import Status, StatusCode, set_span_in_context
 
+        from openjiuwen.agent_teams.observability.setup import get_tracer
         from openjiuwen.extensions.observability.redaction import (
             redact_completion,
             redact_prompt,
@@ -1237,7 +1243,6 @@ class CodexSpanBridge:
             LANGFUSE_OBSERVATION_OUTPUT,
             LANGFUSE_OBSERVATION_TYPE,
         )
-        from openjiuwen.agent_teams.observability.setup import get_tracer
 
         tracer = get_tracer(_TRACER_NAME)
         summary = tracer.start_span(

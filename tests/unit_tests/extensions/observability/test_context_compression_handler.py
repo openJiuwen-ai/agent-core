@@ -58,16 +58,8 @@ def _state(status: str) -> ContextCompressionState:
         processor="DialogueCompressor",
         model="model-1",
         before=ContextCompressionMetric(messages=12, tokens=1200),
-        after=(
-            ContextCompressionMetric(messages=4, tokens=300)
-            if status == "completed"
-            else None
-        ),
-        saved=(
-            ContextCompressionSaved(messages=8, tokens=900, percent=75.0)
-            if status == "completed"
-            else None
-        ),
+        after=(ContextCompressionMetric(messages=4, tokens=300) if status == "completed" else None),
+        saved=(ContextCompressionSaved(messages=8, tokens=900, percent=75.0) if status == "completed" else None),
         summary="compressed 12 messages into 4",
         compact_summary="durable compacted context",
     )
@@ -133,11 +125,13 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
                 emit_context_window_commit(
                     tracer=tracer,
                     llm_span=baseline_llm_span,
-                    messages=[{
-                        "message_id": "message-before-compaction",
-                        "role": "user",
-                        "content": "before",
-                    }],
+                    messages=[
+                        {
+                            "message_id": "message-before-compaction",
+                            "role": "user",
+                            "content": "before",
+                        }
+                    ],
                     request_purpose="assistant",
                 )
             await recorder.emit(object(), _state("started"))
@@ -149,11 +143,13 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
                 emit_context_window_commit(
                     tracer=tracer,
                     llm_span=next_llm_span,
-                    messages=[{
-                        "message_id": "message-after-compaction",
-                        "role": "user",
-                        "content": "continue",
-                    }],
+                    messages=[
+                        {
+                            "message_id": "message-after-compaction",
+                            "role": "user",
+                            "content": "continue",
+                        }
+                    ],
                     request_purpose="assistant",
                 )
             with tracer.start_as_current_span(
@@ -163,11 +159,13 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
                 emit_context_window_commit(
                     tracer=tracer,
                     llm_span=later_llm_span,
-                    messages=[{
-                        "message_id": "message-after-compaction",
-                        "role": "user",
-                        "content": "continue",
-                    }],
+                    messages=[
+                        {
+                            "message_id": "message-after-compaction",
+                            "role": "user",
+                            "content": "continue",
+                        }
+                    ],
                     request_purpose="assistant",
                 )
 
@@ -197,18 +195,16 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
         assert payload["compact_summary"] == "durable compacted context"
         assert payload["before"]["messages"] == 12
         assert payload["after"]["messages"] == 4
-        assert payload["model_requests"] == [{
-            "request_id": "compaction-request-1",
-            "inference_id": "compaction-inference-1",
-        }]
+        assert payload["model_requests"] == [
+            {
+                "request_id": "compaction-request-1",
+                "inference_id": "compaction-inference-1",
+            }
+        ]
         context_events = [span for span in spans if span.name == "context.window.commit"]
         assert len(context_events) == 3
-        baseline_payload = json.loads(
-            context_events[0].attributes[OJ_TRAJECTORY_PAYLOAD]
-        )
-        transition_payload = json.loads(
-            context_events[1].attributes[OJ_TRAJECTORY_PAYLOAD]
-        )
+        baseline_payload = json.loads(context_events[0].attributes[OJ_TRAJECTORY_PAYLOAD])
+        transition_payload = json.loads(context_events[1].attributes[OJ_TRAJECTORY_PAYLOAD])
         assert transition_payload["transition_kind"] == "compaction"
         assert transition_payload["caused_by_operation_id"] == "compression-operation-1"
         assert transition_payload["input_window_id"] == baseline_payload["window_id"]

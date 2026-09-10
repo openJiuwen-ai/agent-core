@@ -69,9 +69,7 @@ def test_known_session_without_registered_root_never_adopts_another_run(monkeypa
     )
     try:
         assert agent_span_context.resolve_run_root_span() is None
-        assert agent_span_context.resolve_run_root_span(
-            session_id="sess-A-sub-worker"
-        ) is None
+        assert agent_span_context.resolve_run_root_span(session_id="sess-A-sub-worker") is None
     finally:
         agent_span_context.reset_run_root_spans()
 
@@ -139,6 +137,7 @@ def test_early_binding_module_gets_its_accessor_refreshed(monkeypatch) -> None:
     this refresh the LLM/tool parent lookup would keep calling the unwrapped
     one and never see the single-agent root.
     """
+
     def plain_get_root_span(*, session_id: str | None = None):
         """Stand in for the unwrapped shared accessor."""
         del session_id
@@ -147,9 +146,7 @@ def test_early_binding_module_gets_its_accessor_refreshed(monkeypatch) -> None:
     monkeypatch.setattr(shared_span_context, "get_root_span", plain_get_root_span)
     early = SimpleNamespace(get_root_span=plain_get_root_span)
     monkeypatch.setitem(sys.modules, "early-binding-probe", early)
-    monkeypatch.setattr(
-        agent_span_context, "_EARLY_BINDING_MODULES", ("early-binding-probe",)
-    )
+    monkeypatch.setattr(agent_span_context, "_EARLY_BINDING_MODULES", ("early-binding-probe",))
 
     agent_span_context.install_root_span_fallback()
 

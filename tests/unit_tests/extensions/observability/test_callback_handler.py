@@ -13,7 +13,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import Span, StatusCode, set_span_in_context
 from pydantic import BaseModel
 
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.foundation.llm import (
     OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
     AssistantMessage,
@@ -22,18 +21,19 @@ from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
-    UserMessage,
     UsageMetadata,
+    UserMessage,
 )
 from openjiuwen.core.foundation.llm.call_scope import (
     LlmCallScope,
     LlmObservationSuppression,
 )
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import AgentEvents, LLMCallEvents, ToolCallEvents
-from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability import demand as demand_module
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
+from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
     GEN_AI_INPUT_MESSAGES,
@@ -52,11 +52,11 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_TOKENS,
+    GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
-    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
     GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
+    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_TYPE,
     OJ_EVENT_SEQUENCE,
@@ -64,9 +64,9 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
     OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
+    OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS,
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
-    OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS,
     OJ_INFERENCE_ID,
     OJ_REQUEST_ID,
     OJ_REQUEST_NUMBER,
@@ -373,9 +373,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
                 {
                     "role": "assistant",
                     "content": "",
-                    "tool_calls": [
-                        {"id": "call-0", "name": "lookup", "arguments": '{"q":"x"}'}
-                    ],
+                    "tool_calls": [{"id": "call-0", "name": "lookup", "arguments": '{"q":"x"}'}],
                 },
                 {
                     "role": "tool",
@@ -401,9 +399,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
                 {
                     "role": "assistant",
                     "content": "",
-                    "tool_calls": [
-                        {"id": "call-0", "name": "lookup", "arguments": '{"q":"x"}'}
-                    ],
+                    "tool_calls": [{"id": "call-0", "name": "lookup", "arguments": '{"q":"x"}'}],
                 },
                 {
                     "role": "tool",
@@ -448,9 +444,9 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
                 response="hello",
                 usage=usage,
             )
-        assert not [
-            span for span in exporter.get_finished_spans() if span.name == "llm.call"
-        ], "provider enrichment must not close a streaming span"
+        assert not [span for span in exporter.get_finished_spans() if span.name == "llm.call"], (
+            "provider enrichment must not close a streaming span"
+        )
 
         await framework.trigger(
             LLMCallEvents.LLM_STREAM_COMPLETED,
@@ -529,21 +525,15 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     assert attrs[GEN_AI_RESPONSE_FINISH_REASON] == "stop"
     assert list(attrs[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
     assert attrs[GEN_AI_RESPONSE_ID] == "resp-1"
-    assert attrs[GEN_AI_RESPONSE_TTFC] == pytest.approx(
-        attrs[GEN_AI_RESPONSE_TTFT_MS] / 1000.0
-    )
+    assert attrs[GEN_AI_RESPONSE_TTFC] == pytest.approx(attrs[GEN_AI_RESPONSE_TTFT_MS] / 1000.0)
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS]) == [1, 2]
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS]) == [3, 4]
-    assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROVIDER_METADATA]) == {
-        "system_fingerprint": "fp"
-    }
+    assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROVIDER_METADATA]) == {"system_fingerprint": "fp"}
     assert attrs[OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT] == "raw provider answer"
     assert attrs[OJ_REQUEST_ID] == "request-1"
     assert attrs[OJ_RUN_ID] == "run-1"
 
-    stream_events = [
-        event for event in llm_span.events if event.name == "openjiuwen.stream.chunk"
-    ]
+    stream_events = [event for event in llm_span.events if event.name == "openjiuwen.stream.chunk"]
     assert [event.attributes[OJ_EVENT_SEQUENCE] for event in stream_events] == [0, 1]
     assert [event.attributes[OJ_STREAM_KIND] for event in stream_events] == [
         "text-delta",
@@ -808,13 +798,9 @@ async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> Non
         span_exporter_override=exporter,
     )
     framework = Runner.callback_framework
-    root = runtime.get_tracer("semantic-identity-pressure-test").start_span(
-        "agent.root"
-    )
+    root = runtime.get_tracer("semantic-identity-pressure-test").start_span("agent.root")
     set_root_span(root, session_id="semantic-identity-pressure-session")
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": "system baseline"}
-    ]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": "system baseline"}]
     for index in range(12):
         messages.extend(
             [
@@ -972,7 +958,6 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
     }
 
 
-
 @pytest.mark.asyncio
 async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
     exporter = InMemorySpanExporter()
@@ -1040,10 +1025,10 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
 
     llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
     assert len(llm_spans) == 2
-    assert {
-        json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
-        for span in llm_spans
-    } == {"unified answer", "legacy answer"}
+    assert {json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"] for span in llm_spans} == {
+        "unified answer",
+        "legacy answer",
+    }
 
 
 @pytest.mark.asyncio
@@ -1060,14 +1045,15 @@ async def test_internal_probe_callback_flow_does_not_create_trajectory_span() ->
         span_exporter_override=exporter,
     )
     framework = Runner.callback_framework
-    root = runtime.get_tracer("internal-probe-suppression-test").start_span(
-        "agent.root"
-    )
+    root = runtime.get_tracer("internal-probe-suppression-test").start_span("agent.root")
     set_root_span(root, session_id="probe-session")
     try:
-        with LlmObservationSuppression(), LlmCallScope(
-            "probe-call",
-            unified_completion=True,
+        with (
+            LlmObservationSuppression(),
+            LlmCallScope(
+                "probe-call",
+                unified_completion=True,
+            ),
         ):
             await framework.trigger(
                 LLMCallEvents.LLM_INVOKE_INPUT,
@@ -1085,9 +1071,7 @@ async def test_internal_probe_callback_flow_does_not_create_trajectory_span() ->
         runtime.shutdown()
         reset_state()
 
-    assert not [
-        span for span in exporter.get_finished_spans() if span.name == "llm.call"
-    ]
+    assert not [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
 
 
 @pytest.mark.asyncio
@@ -1367,7 +1351,6 @@ async def test_stream_callbacks_publish_recoverable_live_snapshots(
     ]
 
 
-
 def test_request_numbers_are_allocated_without_a_root_span() -> None:
     """A call made while no root span is registered still gets numbered.
 
@@ -1379,9 +1362,7 @@ def test_request_numbers_are_allocated_without_a_root_span() -> None:
     reset_state()
     handler_module._FALLBACK_REQUEST_SEQUENCES.clear()
     try:
-        allocated = [
-            OtelCallbackHandler._next_request_number() for _ in range(3)
-        ]
+        allocated = [OtelCallbackHandler._next_request_number() for _ in range(3)]
     finally:
         handler_module._FALLBACK_REQUEST_SEQUENCES.clear()
         reset_state()

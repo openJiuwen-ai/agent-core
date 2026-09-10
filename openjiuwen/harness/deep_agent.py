@@ -1,17 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """DeepAgent implementation."""
+
 from __future__ import annotations
 
 import asyncio
 import copy
 import dataclasses
-import importlib
 import os
 import sys
 import uuid
-from contextlib import suppress
 import warnings
+from contextlib import suppress
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -58,6 +58,8 @@ from openjiuwen.core.single_agent.rail.base import (
     log_rail_init_breakdown,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.goal.manager import GoalManager
+from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
 from openjiuwen.harness.image_modality_probe import (
     get_cached_image_support,
     schedule_image_support_probe,
@@ -68,12 +70,25 @@ from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
 from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.schema.interaction import (
+    ActiveInteractionRound,
+    InputDispatchMode,
+    InteractionEvent,
+    InteractionOutputStream,
+    InteractionPhase,
+    OutputLease,
+    OutputLeaseManager,
+    RoundOutcome,
+    RoundWorkItem,
+    SendInputRequest,
+)
 from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
     DeepAgentState,
 )
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
+from openjiuwen.harness.task_loop.event_manager import EventManager
 from openjiuwen.harness.task_loop.loop_coordinator import (
     LoopCoordinator,
 )
@@ -91,21 +106,6 @@ from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
 from openjiuwen.harness.tools import SessionToolkit, is_free_search_enabled, is_paid_search_enabled
-from openjiuwen.harness.goal.manager import GoalManager
-from openjiuwen.harness.goal.schema import GoalRecord, GoalStatus
-from openjiuwen.harness.schema.interaction import (
-    ActiveInteractionRound,
-    InteractionEvent,
-    InteractionPhase,
-    InteractionOutputStream,
-    OutputLease,
-    OutputLeaseManager,
-    InputDispatchMode,
-    RoundOutcome,
-    RoundWorkItem,
-    SendInputRequest,
-)
-from openjiuwen.harness.task_loop.event_manager import EventManager
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -277,8 +277,7 @@ class DeepAgent(BaseAgent):
         if not disabled_tool_names:
             return
         config.tools = [
-            card for card in config.tools
-            if not (isinstance(card, ToolCard) and card.name in disabled_tool_names)
+            card for card in config.tools if not (isinstance(card, ToolCard) and card.name in disabled_tool_names)
         ]
 
     def _unregister_tool_resource(self, card: ToolCard) -> None:
@@ -386,10 +385,7 @@ class DeepAgent(BaseAgent):
                 else:
                     retained.append(rail)
             self._registered_rails = retained
-            self._pending_rails = [
-                rail for rail in self._pending_rails
-                if type(rail) not in replacing_types
-            ]
+            self._pending_rails = [rail for rail in self._pending_rails if type(rail) not in replacing_types]
         else:
             # Full replacement: all existing rails become stale.
             self._stale_rails.extend(self._registered_rails)
@@ -421,9 +417,7 @@ class DeepAgent(BaseAgent):
                     if hasattr(client_cfg.client_provider, "value")
                     else client_cfg.client_provider
                 )
-        new_react_config.max_iterations = (
-            sys.maxsize if config.enable_task_loop else config.max_iterations
-        )
+        new_react_config.max_iterations = sys.maxsize if config.enable_task_loop else config.max_iterations
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
@@ -447,9 +441,7 @@ class DeepAgent(BaseAgent):
         MCP server registrations and other ability types are not affected.
         """
         new_by_name = {card.name: card for card in (config.tools or [])}
-        previous_by_name = {
-            card.name: card for card in (previous_tools or []) if isinstance(card, ToolCard)
-        }
+        previous_by_name = {card.name: card for card in (previous_tools or []) if isinstance(card, ToolCard)}
 
         # Only remove tools that were previously managed by config.tools.
         # Rail-registered tools such as task_tool must survive hot reload.
@@ -489,11 +481,13 @@ class DeepAgent(BaseAgent):
         mode = resolve_mode(config.prompt_mode)
         prompt_builder = SystemPromptBuilder(language=language, mode=mode)
         if config.system_prompt:
-            prompt_builder.add_section(PromptSection(
-                name=SectionName.IDENTITY,
-                content={"cn": config.system_prompt, "en": config.system_prompt},
-                priority=10,
-            ))
+            prompt_builder.add_section(
+                PromptSection(
+                    name=SectionName.IDENTITY,
+                    content={"cn": config.system_prompt, "en": config.system_prompt},
+                    priority=10,
+                )
+            )
         else:
             prompt_builder.add_section(build_identity_section(language))
         new_react_config = self._react_agent.config.model_copy()
@@ -544,13 +538,9 @@ class DeepAgent(BaseAgent):
         builder = self.system_prompt_builder
         if builder is None or self._react_agent is None:
             return
-        language = resolve_language(
-            self._deep_config.language if self._deep_config is not None else None
-        )
+        language = resolve_language(self._deep_config.language if self._deep_config is not None else None)
         new_react_config = self._react_agent.config.model_copy()
-        new_react_config.prompt_template = [
-            {"role": "system", "content": _render_identity_prompt(builder, language)}
-        ]
+        new_react_config.prompt_template = [{"role": "system", "content": _render_identity_prompt(builder, language)}]
         self._react_agent.configure(new_react_config)
         self._sync_prompt_builder_references()
 
@@ -562,9 +552,7 @@ class DeepAgent(BaseAgent):
         self._task_completion_rail = None
 
         if config.progressive_tool_enabled:
-            self._pending_rails.append(
-                ProgressiveToolRail(config=config)
-            )
+            self._pending_rails.append(ProgressiveToolRail(config=config))
 
         # Auto-inject a default TaskCompletionRail when the outer
         # task loop is enabled.  Users can override it by passing
@@ -634,11 +622,7 @@ class DeepAgent(BaseAgent):
         resolved = (
             session_id
             or self._bound_session_id
-            or (
-                self._loop_session.get_session_id()
-                if self._loop_session is not None
-                else None
-            )
+            or (self._loop_session.get_session_id() if self._loop_session is not None else None)
         )
         if not resolved:
             raise build_error(
@@ -667,11 +651,8 @@ class DeepAgent(BaseAgent):
         if context is None:
             raise build_error(
                 StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
-                error_msg=(
-                    f"cannot find context '{context_id}' "
-                    f"in session '{resolved_session_id}'"
-                ),
-        )
+                error_msg=(f"cannot find context '{context_id}' in session '{resolved_session_id}'"),
+            )
         return context
 
     def _get_react_config(self) -> ReActAgentConfig:
@@ -704,12 +685,8 @@ class DeepAgent(BaseAgent):
 
         return ContextUtils.resolve_context_max(
             model_name=model_name,
-            fallback_context_window_tokens=(
-                config.context_window_tokens if config is not None else None
-            ),
-            model_context_window_tokens=(
-                config.model_context_window_tokens if config is not None else None
-            ),
+            fallback_context_window_tokens=(config.context_window_tokens if config is not None else None),
+            model_context_window_tokens=(config.model_context_window_tokens if config is not None else None),
         )
 
     def get_context_usage(
@@ -727,11 +704,7 @@ class DeepAgent(BaseAgent):
         resolved_session_id = self._resolve_context_session_id(session_id)
         stats = context.statistic()
         context_window_tokens = self._resolve_context_window_tokens()
-        usage_ratio = (
-            stats.total_tokens / context_window_tokens
-            if context_window_tokens > 0
-            else 0.0
-        )
+        usage_ratio = stats.total_tokens / context_window_tokens if context_window_tokens > 0 else 0.0
         return {
             "session_id": resolved_session_id,
             "context_id": context.context_id(),
@@ -766,11 +739,7 @@ class DeepAgent(BaseAgent):
         """Normalize initial message inputs for a fresh context."""
         if messages is None:
             return []
-        raw_messages = (
-            messages
-            if isinstance(messages, list)
-            else [messages]
-        )
+        raw_messages = messages if isinstance(messages, list) else [messages]
         normalized: List[BaseMessage] = []
         for message in raw_messages:
             if isinstance(message, BaseMessage):
@@ -782,10 +751,7 @@ class DeepAgent(BaseAgent):
             else:
                 raise build_error(
                     StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
-                    error_msg=(
-                        "messages must be a string, dict, "
-                        "BaseMessage, or a list of those values."
-                    ),
+                    error_msg=("messages must be a string, dict, BaseMessage, or a list of those values."),
                 )
         return normalized
 
@@ -802,9 +768,7 @@ class DeepAgent(BaseAgent):
             )
 
         new_session_id = session_id or str(uuid.uuid4())
-        normalized_messages = self._normalize_context_messages(
-            messages
-        )
+        normalized_messages = self._normalize_context_messages(messages)
         await self._react_agent.context_engine.create_context(
             session=Session(session_id=new_session_id, card=self.card),
             history_messages=normalized_messages,
@@ -865,11 +829,7 @@ class DeepAgent(BaseAgent):
         )
 
         react_config = ReActAgentConfig()
-        react_config.max_iterations = (
-            sys.maxsize
-            if cfg.enable_task_loop
-            else cfg.max_iterations
-        )
+        react_config.max_iterations = sys.maxsize if cfg.enable_task_loop else cfg.max_iterations
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
         if cfg.kv_cache_affinity_config is not None:
@@ -886,11 +846,13 @@ class DeepAgent(BaseAgent):
         if cfg.system_prompt:
             # Wrap the provided prompt as the identity section so all
             # rails can consistently operate on prompt_builder.
-            prompt_builder.add_section(PromptSection(
-                name=SectionName.IDENTITY,
-                content={"cn": cfg.system_prompt, "en": cfg.system_prompt},
-                priority=10,
-            ))
+            prompt_builder.add_section(
+                PromptSection(
+                    name=SectionName.IDENTITY,
+                    content={"cn": cfg.system_prompt, "en": cfg.system_prompt},
+                    priority=10,
+                )
+            )
         else:
             prompt_builder.add_section(build_identity_section(language))
         react_config.prompt_template = [
@@ -948,10 +910,7 @@ class DeepAgent(BaseAgent):
                     raise build_error(
                         StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR,
                         server_config=mcp_config,
-                        reason=(
-                            f"server_id '{mcp_config.server_id}' is already registered "
-                            "with a different config"
-                        ),
+                        reason=(f"server_id '{mcp_config.server_id}' is already registered with a different config"),
                     )
 
                 tag_result = Runner.resource_mgr.add_resource_tag(
@@ -1059,7 +1018,7 @@ class DeepAgent(BaseAgent):
             await self.init_workspace()
 
         await self._resolve_read_image_multimodal()
-        
+
         self._sync_prompt_builder_references()
 
         # Unregister stale rails left over from a previous configure() cycle.
@@ -1083,9 +1042,7 @@ class DeepAgent(BaseAgent):
             if isinstance(rail_inst, DeepAgentRail):
                 rail_inst.set_sys_operation(self._deep_config.sys_operation)
                 rail_inst.set_workspace(self._deep_config.workspace)
-            rail_init_timings.append(
-                (type(rail_inst).__name__, init_rail(rail_inst, self))
-            )
+            rail_init_timings.append((type(rail_inst).__name__, init_rail(rail_inst, self)))
             await self._register_rail_selective(rail_inst)
         log_rail_init_breakdown(rail_init_timings)
         self._pending_rails.clear()
@@ -1096,11 +1053,7 @@ class DeepAgent(BaseAgent):
         """Check if workspace initialization is needed."""
         config = self._deep_config
         if config:
-            return (
-                    config.workspace is not None
-                    and config.sys_operation is not None
-                    and config.auto_create_workspace
-            )
+            return config.workspace is not None and config.sys_operation is not None and config.auto_create_workspace
         return False
 
     async def ensure_initialized(self) -> None:
@@ -1195,14 +1148,11 @@ class DeepAgent(BaseAgent):
                 if self._deep_config.workspace
                 else str(Path(".") / _SUB_AGENTS_DIR / subsession_id)
             )
-            workspace = Workspace(
-                root_path=workspace_path,
-                language=self._deep_config.language
-            )
+            workspace = Workspace(root_path=workspace_path, language=self._deep_config.language)
         else:
             workspace = Workspace(
                 root_path=Path(self._deep_config.workspace.root_path) / _SUB_AGENTS_DIR / subsession_id,
-                language=self._deep_config.language
+                language=self._deep_config.language,
             )
 
         subagent_rails = None
@@ -1210,9 +1160,7 @@ class DeepAgent(BaseAgent):
             subagent_rails = []
             for rail in spec.rails:
                 fork_for_agent = getattr(rail, "fork_for_agent", None)
-                subagent_rails.append(
-                    fork_for_agent() if callable(fork_for_agent) else rail
-                )
+                subagent_rails.append(fork_for_agent() if callable(fork_for_agent) else rail)
 
         create_kwargs = {
             "model": model or spec.model or self._deep_config.model,
@@ -1223,36 +1171,16 @@ class DeepAgent(BaseAgent):
             "rails": subagent_rails,
             "enable_task_loop": spec.enable_task_loop,
             "max_iterations": (
-                spec.max_iterations
-                if spec.max_iterations is not None
-                else self._deep_config.max_iterations
+                spec.max_iterations if spec.max_iterations is not None else self._deep_config.max_iterations
             ),
-            "workspace": (
-                spec.workspace
-                if spec.workspace is not None
-                else workspace
-            ),
+            "workspace": (spec.workspace if spec.workspace is not None else workspace),
             "skills": spec.skills,
-            "backend": (
-                spec.backend
-                if spec.backend is not None
-                else self._deep_config.backend
-            ),
+            "backend": (spec.backend if spec.backend is not None else self._deep_config.backend),
             "sys_operation": (
-                spec.sys_operation
-                if spec.sys_operation is not None and spec.workspace is not None
-                else None
+                spec.sys_operation if spec.sys_operation is not None and spec.workspace is not None else None
             ),
-            "language": (
-                spec.language
-                if spec.language is not None
-                else self._deep_config.language
-            ),
-            "prompt_mode": (
-                spec.prompt_mode
-                if spec.prompt_mode is not None
-                else self._deep_config.prompt_mode
-            ),
+            "language": (spec.language if spec.language is not None else self._deep_config.language),
+            "prompt_mode": (spec.prompt_mode if spec.prompt_mode is not None else self._deep_config.prompt_mode),
             "subagents": None,
             "enable_async_subagent": False,
             "add_general_purpose_agent": False,
@@ -1276,9 +1204,7 @@ class DeepAgent(BaseAgent):
         if spec.enable_read_image_multimodal is not None:
             create_kwargs["enable_read_image_multimodal"] = spec.enable_read_image_multimodal
         elif shares_parent_model:
-            create_kwargs["enable_read_image_multimodal"] = (
-                self._deep_config.enable_read_image_multimodal
-            )
+            create_kwargs["enable_read_image_multimodal"] = self._deep_config.enable_read_image_multimodal
 
         if spec.factory_name:
             normalized_factory = (spec.factory_name or "").strip().lower()
@@ -1337,9 +1263,7 @@ class DeepAgent(BaseAgent):
 
         from openjiuwen.harness.factory import create_deep_agent
 
-        return self._bind_inherited_artifact_root(
-            create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {}))
-        )
+        return self._bind_inherited_artifact_root(create_deep_agent(**create_kwargs, **dict(spec.factory_kwargs or {})))
 
     def _find_subagent_spec(self, subagent_type: str) -> Optional["SubAgentConfig | DeepAgent"]:
         """Find SubAgentConfig matching subagent_type.
@@ -1384,10 +1308,7 @@ class DeepAgent(BaseAgent):
                     for k, v in context_data.items():
                         if k not in _rc_fields:
                             extra[k] = v
-                    rc_kwargs = {
-                        k: v for k, v in context_data.items()
-                        if k in _rc_fields
-                    }
+                    rc_kwargs = {k: v for k, v in context_data.items() if k in _rc_fields}
                     rc_kwargs["extra"] = extra
                     run_context = RunContext(**rc_kwargs)
             # Merge raw_query into RunContext.extra
@@ -1518,10 +1439,7 @@ class DeepAgent(BaseAgent):
         if isinstance(rail, TaskCompletionRail):
             # Remove any existing TaskCompletionRail (auto-default
             # or a previously queued user rail).
-            self._pending_rails = [
-                r for r in self._pending_rails
-                if not isinstance(r, TaskCompletionRail)
-            ]
+            self._pending_rails = [r for r in self._pending_rails if not isinstance(r, TaskCompletionRail)]
         self._pending_rails.append(rail)
         return self
 
@@ -1547,11 +1465,7 @@ class DeepAgent(BaseAgent):
     def find_rail_by_name(self, name: str) -> Optional[AgentRail]:
         """Return a pending or registered rail by its materialized class name."""
         return next(
-            (
-                rail
-                for rail in (*self._pending_rails, *self._registered_rails)
-                if type(rail).__name__ == name
-            ),
+            (rail for rail in (*self._pending_rails, *self._registered_rails) if type(rail).__name__ == name),
             None,
         )
 
@@ -1620,9 +1534,7 @@ class DeepAgent(BaseAgent):
 
         # Remove bridged callbacks from inner agent.
         if self._react_agent is not None:
-            await self._react_agent.agent_callback_manager.unregister_rail(
-                rail, self._react_agent
-            )
+            await self._react_agent.agent_callback_manager.unregister_rail(rail, self._react_agent)
         cancel_pending = getattr(rail, "cancel_pending_evolution", None)
         if callable(cancel_pending):
             await cancel_pending()
@@ -1673,10 +1585,10 @@ class DeepAgent(BaseAgent):
             )
             ctx.extras["_parent_model"] = self.deep_config.model
 
+            from openjiuwen.harness.expert_harness_runtime import apply_expert_harness_hot
             from openjiuwen.harness.resources.expert_harness_parts import (
                 resolve_expert_harness_parts,
             )
-            from openjiuwen.harness.expert_harness_runtime import apply_expert_harness_hot
 
             parts = resolve_expert_harness_parts(spec, ctx)
             source_uri = None
@@ -1768,8 +1680,7 @@ class DeepAgent(BaseAgent):
             implementation returned).
         """
         warnings.warn(
-            "DeepAgent.load_harness_config is deprecated; "
-            "use load_expert_harness instead.",
+            "DeepAgent.load_harness_config is deprecated; use load_expert_harness instead.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -1788,8 +1699,7 @@ class DeepAgent(BaseAgent):
             config_path: Path originally passed to ``load_harness_config``.
         """
         warnings.warn(
-            "DeepAgent.unload_harness_config is deprecated; "
-            "use unload_expert_harness instead.",
+            "DeepAgent.unload_harness_config is deprecated; use unload_expert_harness instead.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -1812,15 +1722,11 @@ class DeepAgent(BaseAgent):
 
     def _runtime_extension_session_id(self) -> str:
         """Return a stable namespace key for runtime extension imports."""
-        return (
-            self._bound_session_id
-            or self.card.id
-            or self.card.name
-            or "deep_agent"
-        )
+        return self._bound_session_id or self.card.id or self.card.name or "deep_agent"
 
     def enqueue_harness_config(
-        self, config_path: str,
+        self,
+        config_path: str,
     ) -> None:
         """Schedule a harness_config.yaml for loading on next stream() call."""
         self._pending_harness_configs.append(config_path)
@@ -1858,9 +1764,7 @@ class DeepAgent(BaseAgent):
                 await self.register_callback(event, callback, rail.priority)
                 continue
 
-            logger.warning(
-                f"Unknown rail event {event}, registering on outer DeepAgent"
-            )
+            logger.warning(f"Unknown rail event {event}, registering on outer DeepAgent")
             await self.register_callback(event, callback, rail.priority)
 
         self._registered_rails.append(rail)
@@ -1922,16 +1826,11 @@ class DeepAgent(BaseAgent):
         session_id = session.get_session_id()
 
         # Reuse existing controller if session_id matches
-        if (
-            self._loop_controller is not None
-            and self._bound_session_id == session_id
-        ):
+        if self._loop_controller is not None and self._bound_session_id == session_id:
             coordinator = self._loop_coordinator
             if coordinator is None:
                 evaluators = (
-                    self._task_completion_rail.build_evaluators()
-                    if self._task_completion_rail is not None
-                    else []
+                    self._task_completion_rail.build_evaluators() if self._task_completion_rail is not None else []
                 )
                 coordinator = LoopCoordinator(evaluators=evaluators)
                 self._loop_coordinator = coordinator
@@ -1942,11 +1841,7 @@ class DeepAgent(BaseAgent):
         if self._loop_controller is not None:
             await self._force_cleanup_controller()
 
-        evaluators = (
-            self._task_completion_rail.build_evaluators()
-            if self._task_completion_rail is not None
-            else []
-        )
+        evaluators = self._task_completion_rail.build_evaluators() if self._task_completion_rail is not None else []
         coordinator = LoopCoordinator(evaluators=evaluators)
         coordinator.reset()
 
@@ -1967,12 +1862,12 @@ class DeepAgent(BaseAgent):
             SESSION_SPAWN_TASK_TYPE,
             build_session_spawn_executor,
         )
+
         # Register DEEP_TASK_TYPE and SESSION_SPAWN_TASK_TYPE executors
         controller.add_task_executor(
-            DEEP_TASK_TYPE, build_deep_executor(self),
-        ).add_task_executor(
-            SESSION_SPAWN_TASK_TYPE, build_session_spawn_executor(self)
-        )
+            DEEP_TASK_TYPE,
+            build_deep_executor(self),
+        ).add_task_executor(SESSION_SPAWN_TASK_TYPE, build_session_spawn_executor(self))
 
         handler = TaskLoopEventHandler(self)
         handler.interaction_queues = queues
@@ -2004,10 +1899,7 @@ class DeepAgent(BaseAgent):
         if not isinstance(state, DeepAgentState):
             raise build_error(
                 StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
-                error_msg=(
-                    "Invalid deepagent runtime state "
-                    "type on session."
-                ),
+                error_msg=("Invalid deepagent runtime state type on session."),
             )
         return state
 
@@ -2042,11 +1934,7 @@ class DeepAgent(BaseAgent):
         if state is not None:
             return state
         data = session.get_state(_SESSION_STATE_KEY)
-        loaded = (
-            DeepAgentState.from_session_dict(data)
-            if isinstance(data, dict)
-            else DeepAgentState()
-        )
+        loaded = DeepAgentState.from_session_dict(data) if isinstance(data, dict) else DeepAgentState()
         self._write_runtime_state(session, loaded)
         return loaded
 
@@ -2066,17 +1954,11 @@ class DeepAgent(BaseAgent):
             state: State to save; if None the cached
                 state is used.
         """
-        target = (
-            state
-            if state is not None
-            else self._read_runtime_state(session)
-        )
+        target = state if state is not None else self._read_runtime_state(session)
         if target is None:
             return
         self._write_runtime_state(session, target)
-        session.update_state(
-            {_SESSION_STATE_KEY: target.to_session_dict()}
-        )
+        session.update_state({_SESSION_STATE_KEY: target.to_session_dict()})
 
     def clear_state(
         self,
@@ -2140,9 +2022,7 @@ class DeepAgent(BaseAgent):
         slug = state.plan_mode.plan_slug
         if not slug or not self._deep_config or not self._deep_config.workspace:
             return None
-        return resolve_plan_file_path(
-            self._deep_config.workspace.root_path, slug
-        )
+        return resolve_plan_file_path(self._deep_config.workspace.root_path, slug)
 
     def _has_remaining_tasks(self, session: Session) -> bool:
         """Check whether the task plan still has pending tasks."""
@@ -2227,7 +2107,9 @@ class DeepAgent(BaseAgent):
             logger.error(f"[AutoInvoke] auto-invoke failed: {e}", exc_info=True)
 
     async def _run_task_loop(
-        self, ctx: AgentCallbackContext, session: Session,
+        self,
+        ctx: AgentCallbackContext,
+        session: Session,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Async generator for the outer task loop. Shared by invoke and stream.
 
@@ -2264,17 +2146,11 @@ class DeepAgent(BaseAgent):
                 new_follow_ups = controller.drain_follow_up()
                 _state = self.load_state(session)
                 if new_follow_ups:
-                    _state.pending_follow_ups.extend(
-                        new_follow_ups
-                    )
+                    _state.pending_follow_ups.extend(new_follow_ups)
                 # Pop first buffered follow-up as query
-                is_follow_up = bool(
-                    _state.pending_follow_ups
-                )
+                is_follow_up = bool(_state.pending_follow_ups)
                 if _state.pending_follow_ups:
-                    current_query = (
-                        _state.pending_follow_ups.pop(0)
-                    )
+                    current_query = _state.pending_follow_ups.pop(0)
                     self.save_state(session, _state)
                 round_run_context = self._run_context_for_task_loop_round(
                     modified.run_context,
@@ -2289,7 +2165,8 @@ class DeepAgent(BaseAgent):
                 )
 
                 await controller.submit_round(
-                    session, current_query,
+                    session,
+                    current_query,
                     is_follow_up=is_follow_up,
                     run_kind=modified.run_kind,
                     run_context=round_run_context,
@@ -2312,17 +2189,12 @@ class DeepAgent(BaseAgent):
                 self.save_state(session, _state)
 
                 if result.get("result_type") == "interrupt":
-                    self._log_loop(
-                        f"round={outer_round} interrupted"
-                    )
+                    self._log_loop(f"round={outer_round} interrupted")
                     break
                 if coordinator.is_aborted:
                     self._log_loop(f"round={outer_round} aborted")
                     break
-                if (
-                    controller.has_follow_up()
-                    or _state.pending_follow_ups
-                ):
+                if controller.has_follow_up() or _state.pending_follow_ups:
                     continue
                 if not self._has_remaining_tasks(session):
                     self._log_loop("no remaining tasks, loop finished")
@@ -2332,9 +2204,7 @@ class DeepAgent(BaseAgent):
 
             stop_reason = coordinator.stop_reason
             if stop_reason:
-                self._log_loop(
-                    f"loop stopped by: {stop_reason}"
-                )
+                self._log_loop(f"loop stopped by: {stop_reason}")
         finally:
             # Clear stop_condition_state so the next invoke starts fresh.
             _state = self.load_state(session)
@@ -2369,17 +2239,12 @@ class DeepAgent(BaseAgent):
         if session is None:
             raise build_error(
                 StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                error_msg=(
-                    "session is required for "
-                    "task-loop mode."
-                ),
+                error_msg=("session is required for task-loop mode."),
             )
 
         last_result: Dict[str, Any] = {}
         try:
-            async for result in self._run_task_loop(
-                ctx, session
-            ):
+            async for result in self._run_task_loop(ctx, session):
                 last_result = result
         except Exception as e:
             logger.error(f"Task loop invoke error: {e}", exc_info=True)
@@ -2416,10 +2281,7 @@ class DeepAgent(BaseAgent):
         if session is None:
             raise build_error(
                 StatusCode.DEEPAGENT_RUNTIME_ERROR,
-                error_msg=(
-                    "session is required for "
-                    "task-loop mode."
-                ),
+                error_msg=("session is required for task-loop mode."),
             )
 
         async def _stream_process() -> None:
@@ -2471,9 +2333,7 @@ class DeepAgent(BaseAgent):
             session: Current session to write into.
         """
         if self._react_agent is not None:
-            await self._react_agent.write_invoke_result_to_stream(
-                result, session
-            )
+            await self._react_agent.write_invoke_result_to_stream(result, session)
 
     async def _run_single_round_stream(
         self,
@@ -2575,22 +2435,14 @@ class DeepAgent(BaseAgent):
                     and self._deep_config.enable_task_loop
                     and not self._is_resume_input(invoke_inputs)
                 ):
-                    async for chunk in self._run_task_loop_stream(
-                        ctx, session, stream_modes
-                    ):
-                        chunk_result = self._result_from_stream_chunk(
-                            chunk, stream_output_parts
-                        )
+                    async for chunk in self._run_task_loop_stream(ctx, session, stream_modes):
+                        chunk_result = self._result_from_stream_chunk(chunk, stream_output_parts)
                         if chunk_result is not None:
                             stream_result = chunk_result
                         yield chunk
                 else:
-                    async for chunk in self._run_single_round_stream(
-                        ctx, session, stream_modes
-                    ):
-                        chunk_result = self._result_from_stream_chunk(
-                            chunk, stream_output_parts
-                        )
+                    async for chunk in self._run_single_round_stream(ctx, session, stream_modes):
+                        chunk_result = self._result_from_stream_chunk(chunk, stream_output_parts)
                         if chunk_result is not None:
                             stream_result = chunk_result
                         yield chunk
@@ -2637,9 +2489,7 @@ class DeepAgent(BaseAgent):
         event = FollowUpEvent.from_text(msg)
         if task_id:
             event.metadata = {"task_id": task_id}
-        await controller.event_queue.publish_event_async(
-            self.card.id, sess, event
-        )
+        await controller.event_queue.publish_event_async(self.card.id, sess, event)
 
     async def steer(
         self,
@@ -2666,12 +2516,9 @@ class DeepAgent(BaseAgent):
         from openjiuwen.core.controller.schema.dataframe import (
             TextDataFrame,
         )
-        event = TaskInteractionEvent(
-            interaction=[TextDataFrame(text=msg)]
-        )
-        await controller.event_queue.publish_event_async(
-            self.card.id, sess, event
-        )
+
+        event = TaskInteractionEvent(interaction=[TextDataFrame(text=msg)])
+        await controller.event_queue.publish_event_async(self.card.id, sess, event)
 
     async def _cancel_stream_process_task(self) -> None:
         """Cancel the in-flight task-loop stream background task, if any."""
@@ -2703,9 +2550,7 @@ class DeepAgent(BaseAgent):
             return
 
         try:
-            tasks = await scheduler.task_manager.get_task(
-                task_filter=TaskFilter(session_id=session_id)
-            )
+            tasks = await scheduler.task_manager.get_task(task_filter=TaskFilter(session_id=session_id))
         except Exception as e:
             logger.warning(
                 "Failed to list session tasks during stream cancel: %s",
@@ -2799,9 +2644,7 @@ class DeepAgent(BaseAgent):
                 }
             invoke_inputs = self._normalize_inputs(inputs)
             is_resume_input = self._is_resume_input(invoke_inputs)
-            ctx = AgentCallbackContext(
-                agent=self, inputs=invoke_inputs, session=session
-            )
+            ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
             async with ctx.lifecycle(
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
@@ -2821,11 +2664,7 @@ class DeepAgent(BaseAgent):
                         run_context=invoke_inputs.run_context,
                         task_id=task_id,
                     )
-                    timeout = (
-                        self._deep_config.completion_timeout
-                        if self._deep_config
-                        else 600.0
-                    )
+                    timeout = self._deep_config.completion_timeout if self._deep_config else 600.0
                     result = await controller.wait_round_completion(timeout=timeout)
                 await self._write_round_result_to_stream(result, session)
                 invoke_inputs.result = result
@@ -2942,8 +2781,7 @@ class DeepAgent(BaseAgent):
                 if self._bound_session_id == sid:
                     return
                 raise RuntimeError(
-                    f"Interaction loop already bound to session {self._bound_session_id}; "
-                    f"cannot bind {sid}."
+                    f"Interaction loop already bound to session {self._bound_session_id}; cannot bind {sid}."
                 )
 
             self._interaction_session = session
@@ -3058,19 +2896,11 @@ class DeepAgent(BaseAgent):
     async def _send_user(self, request: SendInputRequest) -> None:
         inputs = request.inputs
         if not isinstance(inputs, dict):
-            raise ValueError(
-                "send_input requires inputs['query'] to be a non-empty string "
-                "or InteractiveInput"
-            )
+            raise ValueError("send_input requires inputs['query'] to be a non-empty string or InteractiveInput")
         query = inputs.get("query")
         is_resume_input = isinstance(query, InteractiveInput)
-        if not is_resume_input and (
-            not isinstance(query, str) or not query.strip()
-        ):
-            raise ValueError(
-                "send_input requires inputs['query'] to be a non-empty string "
-                "or InteractiveInput"
-            )
+        if not is_resume_input and (not isinstance(query, str) or not query.strip()):
+            raise ValueError("send_input requires inputs['query'] to be a non-empty string or InteractiveInput")
 
         async with self._interaction_control_lock:
             if is_resume_input:
@@ -3086,11 +2916,7 @@ class DeepAgent(BaseAgent):
 
             loop = self.loop_controller
             try:
-                mode = (
-                    InputDispatchMode.FOLLOW_UP
-                    if request.mode is None
-                    else InputDispatchMode(request.mode)
-                )
+                mode = InputDispatchMode.FOLLOW_UP if request.mode is None else InputDispatchMode(request.mode)
             except ValueError as exc:
                 raise ValueError(f"unsupported input dispatch mode: {request.mode}") from exc
 
@@ -3116,9 +2942,7 @@ class DeepAgent(BaseAgent):
 
             # Fresh user turn.  Output lease ownership stays with the host via
             # ``attach_output``; send_input never steals or creates a stream.
-            self._event_manager.push_user(
-                RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
-            )
+            self._event_manager.push_user(RoundWorkItem.user(request_id=request.request_id, inputs=inputs))
             self._notify_work()
 
     async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
@@ -3154,9 +2978,7 @@ class DeepAgent(BaseAgent):
         # stop() can cancel outstanding emits instead of leaking them.
         token = self._interaction_output.current_token()
         if token is not None:
-            task = asyncio.create_task(
-                self._interaction_output.emit(event.to_output_schema(), expected_token=token)
-            )
+            task = asyncio.create_task(self._interaction_output.emit(event.to_output_schema(), expected_token=token))
             self._interaction_emit_tasks.add(task)
             task.add_done_callback(self._interaction_emit_tasks.discard)
 
@@ -3222,11 +3044,7 @@ class DeepAgent(BaseAgent):
 
         # 2) Unblock supervisor / wait_round_completion promptly.
         round_task = self._interaction_round_task
-        if (
-            round_task is not None
-            and round_task is not asyncio.current_task()
-            and not round_task.done()
-        ):
+        if round_task is not None and round_task is not asyncio.current_task() and not round_task.done():
             round_task.cancel()
 
         # 3) Bound the wait for the scheduler exec task (often stuck in LLM I/O).
@@ -3248,8 +3066,7 @@ class DeepAgent(BaseAgent):
                 )
             except Exception:
                 logger.debug(
-                    "[DeepAgent] cancel_task raised during round cancel "
-                    "(reason=%s task_id=%s)",
+                    "[DeepAgent] cancel_task raised during round cancel (reason=%s task_id=%s)",
                     reason,
                     task_id,
                     exc_info=True,
@@ -3357,9 +3174,7 @@ class DeepAgent(BaseAgent):
         except Exception:
             logger.exception("[DeepAgent] output forwarder failed")
             self._emit_interaction_event(
-                InteractionEvent.execution_error(
-                    code="forwarder_crashed", message="output forwarder crashed"
-                )
+                InteractionEvent.execution_error(code="forwarder_crashed", message="output forwarder crashed")
             )
 
     async def _emit_round_boundary(self, session: "Session") -> bool:
@@ -3399,9 +3214,7 @@ class DeepAgent(BaseAgent):
                 if started is None:
                     return
 
-            outcome: RoundOutcome = await self.run_one_round(
-                work, task_id, session
-            )
+            outcome: RoundOutcome = await self.run_one_round(work, task_id, session)
             if outcome.next_work is not None:
                 self._event_manager.push_user(outcome.next_work)
                 self._notify_work()
@@ -3436,7 +3249,6 @@ class DeepAgent(BaseAgent):
         if self.goal_manager is None:
             return None
         return self.goal_manager.get_store().load()
-
 
 
 __all__ = [

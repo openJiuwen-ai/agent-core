@@ -13,8 +13,8 @@ from openjiuwen.core.foundation.llm.model_clients.openai_account_model_client im
     DEFAULT_OPENAI_ACCOUNT_BASE_URL,
     OpenAIAccountModelClient,
 )
-from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
+from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 
 
 class _FakeOpenAIAccountAuthManager:

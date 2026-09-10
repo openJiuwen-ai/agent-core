@@ -19,8 +19,8 @@ intentionally never attached here.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 import threading
+from collections.abc import Sequence
 
 from opentelemetry.sdk.trace import SpanProcessor
 
@@ -31,8 +31,14 @@ from openjiuwen.extensions.observability.demand import (
 )
 from openjiuwen.extensions.observability.setup import (
     get_config as get_shared_config,
+)
+from openjiuwen.extensions.observability.setup import (
     init_observability as init_shared_observability,
+)
+from openjiuwen.extensions.observability.setup import (
     is_initialized as is_shared_observability_initialized,
+)
+from openjiuwen.extensions.observability.setup import (
     shutdown_observability as shutdown_shared_observability,
 )
 from openjiuwen.extensions.observability.span_context import reset_state

@@ -20,6 +20,9 @@ from __future__ import annotations
 from importlib.util import find_spec
 from typing import Any
 
+from openjiuwen.harness.cli.rails.token_tracker import TokenTrackingRail
+from openjiuwen.harness.cli.rails.tool_tracker import ToolTrackingRail
+from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.manifest import (
     ConstructionInput,
     ElementKind,
@@ -27,9 +30,6 @@ from openjiuwen.harness.manifest import (
     harness_element,
     param_field,
 )
-from openjiuwen.harness.cli.rails.token_tracker import TokenTrackingRail
-from openjiuwen.harness.cli.rails.tool_tracker import ToolTrackingRail
-from openjiuwen.harness.lsp import InitializeOptions
 from openjiuwen.harness.rails import (
     HeartbeatRail,
     LspRail,
@@ -105,10 +105,12 @@ def _build_skill_use_rail(params: dict[str, Any], context: Any) -> SkillUseRail:
             skills_base = workspace.get_node_path("skills")
             if skills_base:
                 dirs.append(str(skills_base))
-        dirs.extend([
-            "~/.openjiuwen/workspace/skills",
-            "~/.claude/skills",
-        ])
+        dirs.extend(
+            [
+                "~/.openjiuwen/workspace/skills",
+                "~/.claude/skills",
+            ]
+        )
         kwargs["skills_dir"] = dirs
     return SkillUseRail(**kwargs)
 
@@ -199,9 +201,7 @@ class WebToolInput(ConstructionInput):
     ``agent_id`` is supplied.
     """
 
-    language: str = context_field(
-        attr="language", default="cn", description="Member language code."
-    )
+    language: str = context_field(attr="language", default="cn", description="Member language code.")
     agent_id: str | None = context_field(
         attr="member_card_id",
         default=None,
@@ -256,9 +256,7 @@ def _build_web_paid_search(params: dict[str, Any], context: Any) -> list[Any]:
 class VisionToolsInput(ConstructionInput):
     """Construction inputs for the vision tool group."""
 
-    language: str = context_field(
-        attr="language", default="cn", description="Member language code."
-    )
+    language: str = context_field(attr="language", default="cn", description="Member language code.")
     agent_id: str | None = context_field(
         attr="member_card_id",
         default=None,
@@ -298,9 +296,7 @@ def _build_vision_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
 class AudioToolsInput(ConstructionInput):
     """Construction inputs for the audio tool group."""
 
-    language: str = context_field(
-        attr="language", default="cn", description="Member language code."
-    )
+    language: str = context_field(attr="language", default="cn", description="Member language code.")
     agent_id: str | None = context_field(
         attr="member_card_id",
         default=None,

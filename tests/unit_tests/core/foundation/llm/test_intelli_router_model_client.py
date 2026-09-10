@@ -3,6 +3,7 @@
 """
 Unit tests for IntelliRouterModelClient — wraps intelli_router.ReliableRouter.
 """
+
 import importlib.util
 import os
 from dataclasses import dataclass
@@ -16,15 +17,15 @@ from openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client im
     _router_cache,
     _web_servers,
 )
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
-from openjiuwen.core.foundation.llm.schema.message import UserMessage, AssistantMessage
-from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
-
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def model_request_config():
@@ -76,6 +77,7 @@ def clear_router_cache():
 @dataclass
 class FakeDeployment:
     """Minimal fake Deployment for router construction tests."""
+
     id: str
     model_name: str
     api_key: str
@@ -91,6 +93,7 @@ class FakeDeployment:
 @dataclass
 class FakeToolCall:
     """Fake intelli_router ToolCall for testing type conversion."""
+
     id: str
     type: str
     name: str
@@ -100,6 +103,7 @@ class FakeToolCall:
 
 class FakeReliableRouter:
     """Minimal fake ReliableRouter for testing cache / construction logic."""
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
@@ -107,6 +111,7 @@ class FakeReliableRouter:
 # ---------------------------------------------------------------------------
 # TestIntelliRouterClientConfig
 # ---------------------------------------------------------------------------
+
 
 class TestIntelliRouterClientConfig:
     """Test IntelliRouterClientConfig extraction from ModelClientConfig."""
@@ -173,6 +178,7 @@ class TestIntelliRouterClientConfig:
 # TestRouterCache
 # ---------------------------------------------------------------------------
 
+
 class TestRouterCache:
     """Test router cache key generation and instance sharing."""
 
@@ -186,8 +192,9 @@ class TestRouterCache:
             deployments=[{"model_name": "m", "api_key": "k", "api_base": "b", "id": "d1"}],
             strategy="simple-shuffle",
         )
-        assert IntelliRouterModelClient._make_router_key(config_a) == \
-               IntelliRouterModelClient._make_router_key(config_b)
+        assert IntelliRouterModelClient._make_router_key(config_a) == IntelliRouterModelClient._make_router_key(
+            config_b
+        )
 
     def test_make_router_key_different(self):
         """Different configs should produce different cache keys."""
@@ -199,8 +206,9 @@ class TestRouterCache:
             deployments=[{"model_name": "m2", "api_key": "k", "api_base": "b", "id": "d1"}],
             strategy="simple-shuffle",
         )
-        assert IntelliRouterModelClient._make_router_key(config_a) != \
-               IntelliRouterModelClient._make_router_key(config_b)
+        assert IntelliRouterModelClient._make_router_key(config_a) != IntelliRouterModelClient._make_router_key(
+            config_b
+        )
 
     def test_get_or_create_router_same_instance(self):
         """Same config should return the same router instance (cache hit)."""
@@ -209,8 +217,13 @@ class TestRouterCache:
             strategy="simple-shuffle",
         )
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             router1 = IntelliRouterModelClient._get_or_create_router(config)
             router2 = IntelliRouterModelClient._get_or_create_router(config)
@@ -227,8 +240,13 @@ class TestRouterCache:
             strategy="simple-shuffle",
         )
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             router1 = IntelliRouterModelClient._get_or_create_router(config_a)
             router2 = IntelliRouterModelClient._get_or_create_router(config_b)
@@ -240,9 +258,12 @@ class TestRouterCache:
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", None),
             patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", None),
         ):
-            config = IntelliRouterClientConfig(deployments=[{"id": "d1", "model_name": "m", "api_key": "k", "api_base": "b"}])
+            config = IntelliRouterClientConfig(
+                deployments=[{"id": "d1", "model_name": "m", "api_key": "k", "api_base": "b"}]
+            )
             from openjiuwen.core.common.exception.codes import StatusCode
             from openjiuwen.core.common.exception.errors import BaseError
+
             with pytest.raises(BaseError) as exc_info:
                 IntelliRouterModelClient._create_router(config)
             assert exc_info.value.status.code == StatusCode.MODEL_SERVICE_CONFIG_ERROR.code
@@ -265,8 +286,13 @@ class TestRouterCache:
 
         with (
             patch.dict("sys.modules", {"intelli_router": fake_intelli_router}),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             router = IntelliRouterModelClient._create_router(config)
 
@@ -282,8 +308,13 @@ class TestRouterCache:
             enable_observability=False,
         )
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             router = IntelliRouterModelClient._create_router(config)
 
@@ -300,8 +331,9 @@ class TestRouterCache:
             deployments=[{"model_name": "m", "api_key": "k", "api_base": "b", "id": "d1"}],
             enable_observability=True,
         )
-        assert IntelliRouterModelClient._make_router_key(config_off) != \
-               IntelliRouterModelClient._make_router_key(config_on)
+        assert IntelliRouterModelClient._make_router_key(config_off) != IntelliRouterModelClient._make_router_key(
+            config_on
+        )
 
     def test_make_router_key_differs_with_web_dashboard_port(self):
         """web_dashboard_port changes the cache key."""
@@ -313,8 +345,9 @@ class TestRouterCache:
             deployments=[{"model_name": "m", "api_key": "k", "api_base": "b", "id": "d1"}],
             web_dashboard_port=8080,
         )
-        assert IntelliRouterModelClient._make_router_key(config_no_port) != \
-               IntelliRouterModelClient._make_router_key(config_with_port)
+        assert IntelliRouterModelClient._make_router_key(config_no_port) != IntelliRouterModelClient._make_router_key(
+            config_with_port
+        )
 
     def test_create_router_with_web_dashboard(self):
         """When enable_observability=True and web_dashboard_port > 0, MetricsWebServer is created and started."""
@@ -340,8 +373,13 @@ class TestRouterCache:
         cache_key = "test-key-dashboard"
         with (
             patch.dict("sys.modules", {"intelli_router": fake_intelli_router}),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             router = IntelliRouterModelClient._create_router(config, cache_key=cache_key)
 
@@ -362,8 +400,13 @@ class TestRouterCache:
 
         cache_key = "test-key-no-obs"
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             router = IntelliRouterModelClient._create_router(config, cache_key=cache_key)
 
@@ -389,8 +432,13 @@ class TestRouterCache:
         cache_key = "test-key-port-zero"
         with (
             patch.dict("sys.modules", {"intelli_router": fake_intelli_router}),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             router = IntelliRouterModelClient._create_router(config, cache_key=cache_key)
 
@@ -402,14 +450,20 @@ class TestRouterCache:
 # TestIntelliRouterModelClientInit
 # ---------------------------------------------------------------------------
 
+
 class TestIntelliRouterModelClientInit:
     """Test IntelliRouterModelClient initialization."""
 
     def test_init_with_router_config(self, model_request_config, intelli_router_client_config):
         """Normal init: router is created from config extra fields."""
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
             assert client._router is not None
@@ -419,7 +473,9 @@ class TestIntelliRouterModelClientInit:
         """External router passed in: should be used directly (skip cache)."""
         external_router = MagicMock()
         client = IntelliRouterModelClient(
-            model_request_config, intelli_router_client_config, router=external_router,
+            model_request_config,
+            intelli_router_client_config,
+            router=external_router,
         )
         assert client._router is external_router
 
@@ -431,8 +487,13 @@ class TestIntelliRouterModelClientInit:
         )
         request_config = ModelRequestConfig(model="test")
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(request_config, config)
             assert client is not None
@@ -441,6 +502,7 @@ class TestIntelliRouterModelClientInit:
 # ---------------------------------------------------------------------------
 # TestIntelliRouterModelClientInvoke
 # ---------------------------------------------------------------------------
+
 
 class TestIntelliRouterModelClientInvoke:
     """Test IntelliRouterModelClient.invoke()."""
@@ -454,10 +516,16 @@ class TestIntelliRouterModelClientInvoke:
     @pytest.mark.asyncio
     async def test_invoke_basic(self, client):
         """Basic invoke returns AssistantMessage with correct content."""
-        client._router.invoke = AsyncMock(return_value=MagicMock(
-            content="Hello world!", tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content=None, spec=[],
-        ))
+        client._router.invoke = AsyncMock(
+            return_value=MagicMock(
+                content="Hello world!",
+                tool_calls=None,
+                usage_metadata=None,
+                finish_reason="stop",
+                reasoning_content=None,
+                spec=[],
+            )
+        )
 
         messages = [UserMessage(content="Hi")]
         result = await client.invoke(messages)
@@ -468,10 +536,16 @@ class TestIntelliRouterModelClientInvoke:
     @pytest.mark.asyncio
     async def test_invoke_with_output_parser(self, client):
         """Output parser is applied to the response content."""
-        client._router.invoke = AsyncMock(return_value=MagicMock(
-            content='{"output": "parsed"}', tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content=None, spec=[],
-        ))
+        client._router.invoke = AsyncMock(
+            return_value=MagicMock(
+                content='{"output": "parsed"}',
+                tool_calls=None,
+                usage_metadata=None,
+                finish_reason="stop",
+                reasoning_content=None,
+                spec=[],
+            )
+        )
 
         async def fake_parse(content):
             return "parsed_result"
@@ -487,10 +561,16 @@ class TestIntelliRouterModelClientInvoke:
     @pytest.mark.asyncio
     async def test_invoke_model_override(self, client):
         """Model name override is passed through to router.invoke."""
-        client._router.invoke = AsyncMock(return_value=MagicMock(
-            content="ok", tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content=None, spec=[],
-        ))
+        client._router.invoke = AsyncMock(
+            return_value=MagicMock(
+                content="ok",
+                tool_calls=None,
+                usage_metadata=None,
+                finish_reason="stop",
+                reasoning_content=None,
+                spec=[],
+            )
+        )
 
         messages = [UserMessage(content="Hi")]
         await client.invoke(messages, model="override-model")
@@ -502,10 +582,16 @@ class TestIntelliRouterModelClientInvoke:
     @pytest.mark.asyncio
     async def test_invoke_empty_content(self, client):
         """Response with empty content results in empty content."""
-        client._router.invoke = AsyncMock(return_value=MagicMock(
-            content="", tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content=None, spec=[],
-        ))
+        client._router.invoke = AsyncMock(
+            return_value=MagicMock(
+                content="",
+                tool_calls=None,
+                usage_metadata=None,
+                finish_reason="stop",
+                reasoning_content=None,
+                spec=[],
+            )
+        )
 
         messages = [UserMessage(content="Hi")]
         result = await client.invoke(messages)
@@ -515,10 +601,16 @@ class TestIntelliRouterModelClientInvoke:
     @pytest.mark.asyncio
     async def test_invoke_output_parser_not_passed_to_router(self, client):
         """output_parser should NOT be forwarded to router.invoke."""
-        client._router.invoke = AsyncMock(return_value=MagicMock(
-            content="raw", tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content=None, spec=[],
-        ))
+        client._router.invoke = AsyncMock(
+            return_value=MagicMock(
+                content="raw",
+                tool_calls=None,
+                usage_metadata=None,
+                finish_reason="stop",
+                reasoning_content=None,
+                spec=[],
+            )
+        )
 
         async def fake_parse(content):
             return "parsed"
@@ -537,6 +629,7 @@ class TestIntelliRouterModelClientInvoke:
 # TestIntelliRouterModelClientStream
 # ---------------------------------------------------------------------------
 
+
 class TestIntelliRouterModelClientStream:
     """Test IntelliRouterModelClient.stream()."""
 
@@ -549,6 +642,7 @@ class TestIntelliRouterModelClientStream:
     @pytest.mark.asyncio
     async def test_stream_basic(self, client):
         """Stream returns a single chunk with correct content."""
+
         async def fake_stream():
             yield MagicMock(content="Hello", finish_reason="stop", tool_calls=None, reasoning_content=None, spec=[])
 
@@ -566,6 +660,7 @@ class TestIntelliRouterModelClientStream:
     @pytest.mark.asyncio
     async def test_stream_multiple_chunks(self, client):
         """Multiple chunks are yielded in order."""
+
         async def fake_stream():
             yield MagicMock(content="Hello ", finish_reason="null", tool_calls=None, reasoning_content=None, spec=[])
             yield MagicMock(content="world", finish_reason="null", tool_calls=None, reasoning_content=None, spec=[])
@@ -583,6 +678,7 @@ class TestIntelliRouterModelClientStream:
     @pytest.mark.asyncio
     async def test_stream_empty_content(self, client):
         """Chunk with empty content yields empty content."""
+
         async def fake_stream():
             yield MagicMock(content="", finish_reason="null", tool_calls=None, reasoning_content=None, spec=[])
 
@@ -600,6 +696,7 @@ class TestIntelliRouterModelClientStream:
 # ---------------------------------------------------------------------------
 # TestIntelliRouterModelClientMultimodal
 # ---------------------------------------------------------------------------
+
 
 class TestIntelliRouterModelClientMultimodal:
     """Test that multimodal methods raise errors for unsupported providers."""
@@ -635,6 +732,7 @@ class TestIntelliRouterModelClientMultimodal:
 # TestIntelliRouterDashScopeGeneration — mock DashScope API calls
 # ---------------------------------------------------------------------------
 
+
 class TestIntelliRouterDashScopeGeneration:
     """Test DashScope generation methods with mocked API calls."""
 
@@ -658,9 +756,7 @@ class TestIntelliRouterDashScopeGeneration:
         """UserMessage with string content is correctly parsed for image generation."""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.output = {
-            "choices": [{"message": {"content": [{"image": "https://img.example.com/cat.png"}]}}]
-        }
+        mock_response.output = {"choices": [{"message": {"content": [{"image": "https://img.example.com/cat.png"}]}}]}
 
         with patch("dashscope.MultiModalConversation.call", return_value=mock_response) as mock_call:
             result = await dashscope_client.generate_image([UserMessage(content="draw a cat")])
@@ -678,10 +774,12 @@ class TestIntelliRouterDashScopeGeneration:
             "choices": [{"message": {"content": [{"image": "https://img.example.com/result.png"}]}}]
         }
 
-        msg = UserMessage(content=[
-            {"text": "generate something similar based on this image"},
-            {"image": "https://example.com/ref.jpg"},
-        ])
+        msg = UserMessage(
+            content=[
+                {"text": "generate something similar based on this image"},
+                {"image": "https://example.com/ref.jpg"},
+            ]
+        )
 
         with patch("dashscope.MultiModalConversation.call", return_value=mock_response) as mock_call:
             result = await dashscope_client.generate_image([msg])
@@ -698,6 +796,7 @@ class TestIntelliRouterDashScopeGeneration:
     async def test_generate_image_empty_messages_raises(self, dashscope_client):
         """Empty messages list raises ValidationError."""
         from openjiuwen.core.common.exception.errors import BaseError
+
         with pytest.raises(BaseError):
             await dashscope_client.generate_image([])
 
@@ -705,6 +804,7 @@ class TestIntelliRouterDashScopeGeneration:
     async def test_generate_image_api_failure_raises_model_error(self, dashscope_client):
         """API failure raises ModelError, not RuntimeError."""
         from openjiuwen.core.common.exception.errors import BaseError
+
         mock_response = MagicMock()
         mock_response.status_code = 400
         mock_response.code = "InvalidParameter"
@@ -722,9 +822,7 @@ class TestIntelliRouterDashScopeGeneration:
         """UserMessage with string content is correctly parsed for speech generation."""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.output = {
-            "audio": {"url": "https://audio.example.com/speech.mp3", "data": None}
-        }
+        mock_response.output = {"audio": {"url": "https://audio.example.com/speech.mp3", "data": None}}
 
         with patch("dashscope.MultiModalConversation.call", return_value=mock_response) as mock_call:
             result = await dashscope_client.generate_speech([UserMessage(content="hello world")])
@@ -739,6 +837,7 @@ class TestIntelliRouterDashScopeGeneration:
     async def test_generate_speech_empty_text_raises(self, dashscope_client):
         """Empty text content raises ValidationError."""
         from openjiuwen.core.common.exception.errors import BaseError
+
         with pytest.raises(BaseError):
             await dashscope_client.generate_speech([UserMessage(content="")])
 
@@ -787,6 +886,7 @@ class TestIntelliRouterDashScopeGeneration:
     async def test_generate_video_empty_prompt_raises(self, dashscope_client):
         """Empty prompt raises ValidationError."""
         from openjiuwen.core.common.exception.errors import BaseError
+
         with pytest.raises(BaseError):
             await dashscope_client.generate_video([UserMessage(content="")])
 
@@ -795,20 +895,30 @@ class TestIntelliRouterDashScopeGeneration:
 # TestIntelliRouterConvertResponse
 # ---------------------------------------------------------------------------
 
+
 class TestIntelliRouterConvertResponse:
     """Test _to_ow_assistant_message and _to_ow_chunk utility methods."""
 
     @pytest.mark.asyncio
     async def test_to_ow_assistant_message_with_content(self, model_request_config, intelli_router_client_config):
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
         ir_msg = MagicMock(
-            content="Hello", tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content=None, spec=[],
+            content="Hello",
+            tool_calls=None,
+            usage_metadata=None,
+            finish_reason="stop",
+            reasoning_content=None,
+            spec=[],
         )
         result = await client._to_ow_assistant_message(ir_msg)
         assert isinstance(result, AssistantMessage)
@@ -817,34 +927,55 @@ class TestIntelliRouterConvertResponse:
     @pytest.mark.asyncio
     async def test_to_ow_assistant_message_empty(self, model_request_config, intelli_router_client_config):
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
         ir_msg = MagicMock(
-            content="", tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content=None, spec=[],
+            content="",
+            tool_calls=None,
+            usage_metadata=None,
+            finish_reason="stop",
+            reasoning_content=None,
+            spec=[],
         )
         result = await client._to_ow_assistant_message(ir_msg)
         assert result.content == ""
 
     def test_to_ow_chunk_with_content(self, model_request_config, intelli_router_client_config):
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
-        ir_chunk = MagicMock(content="Hello chunk", finish_reason="stop", tool_calls=None, reasoning_content=None, spec=[])
+        ir_chunk = MagicMock(
+            content="Hello chunk", finish_reason="stop", tool_calls=None, reasoning_content=None, spec=[]
+        )
         result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
         assert isinstance(result, AssistantMessageChunk)
         assert result.content == "Hello chunk"
 
     def test_to_ow_chunk_empty(self, model_request_config, intelli_router_client_config):
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
@@ -856,15 +987,26 @@ class TestIntelliRouterConvertResponse:
     async def test_to_ow_assistant_message_with_tool_calls(self, model_request_config, intelli_router_client_config):
         """tool_calls should be mapped to openjiuwen ToolCall objects."""
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
-        fake_tc = FakeToolCall(id="call_1", type="function", name="get_weather", arguments='{"city":"Beijing"}', index=0)
+        fake_tc = FakeToolCall(
+            id="call_1", type="function", name="get_weather", arguments='{"city":"Beijing"}', index=0
+        )
         ir_msg = MagicMock(
-            content="", tool_calls=[fake_tc], usage_metadata=None,
-            finish_reason="tool_calls", reasoning_content=None, spec=[],
+            content="",
+            tool_calls=[fake_tc],
+            usage_metadata=None,
+            finish_reason="tool_calls",
+            reasoning_content=None,
+            spec=[],
         )
         result = await client._to_ow_assistant_message(ir_msg)
         assert result.tool_calls is not None
@@ -877,15 +1019,24 @@ class TestIntelliRouterConvertResponse:
     async def test_to_ow_assistant_message_with_usage(self, model_request_config, intelli_router_client_config):
         """usage_metadata should be mapped."""
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
         fake_usage = MagicMock(input_tokens=10, output_tokens=20, total_tokens=30, cache_tokens=5, model_name="gpt-4")
         ir_msg = MagicMock(
-            content="hi", tool_calls=None, usage_metadata=fake_usage,
-            finish_reason="stop", reasoning_content=None, spec=[],
+            content="hi",
+            tool_calls=None,
+            usage_metadata=fake_usage,
+            finish_reason="stop",
+            reasoning_content=None,
+            spec=[],
         )
         result = await client._to_ow_assistant_message(ir_msg)
         assert result.usage_metadata is not None
@@ -899,27 +1050,51 @@ class TestIntelliRouterConvertResponse:
         self, model_request_config, intelli_router_client_config
     ):
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
         usage = MagicMock(
-            input_tokens=10, output_tokens=2, total_tokens=12, cache_tokens=3,
-            cache_read_tokens=3, cache_miss_tokens=7, cache_write_tokens=1,
-            cache_creation_input_tokens=1, cache_status="observed",
-            cache_source="provider_usage", cache_authoritative=True,
-            reasoning_tokens=0, model_name="routed-model", input_cost=0.1,
-            output_cost=0.2, total_cost=0.3, spec=[],
+            input_tokens=10,
+            output_tokens=2,
+            total_tokens=12,
+            cache_tokens=3,
+            cache_read_tokens=3,
+            cache_miss_tokens=7,
+            cache_write_tokens=1,
+            cache_creation_input_tokens=1,
+            cache_status="observed",
+            cache_source="provider_usage",
+            cache_authoritative=True,
+            reasoning_tokens=0,
+            model_name="routed-model",
+            input_cost=0.1,
+            output_cost=0.2,
+            total_cost=0.3,
+            spec=[],
         )
         message = MagicMock(
-            content="answer", tool_calls=None, usage_metadata=usage,
-            finish_reason="stop", reasoning_content=None,
-            response_id="resp-1", response_model="actual-model",
+            content="answer",
+            tool_calls=None,
+            usage_metadata=usage,
+            finish_reason="stop",
+            reasoning_content=None,
+            response_id="resp-1",
+            response_model="actual-model",
             provider_metadata={"service_tier": "priority", "api_key": "secret"},
-            metadata={"local": "kept"}, prompt_token_ids=[1],
-            completion_token_ids=[2], logprobs={"ok": True},
-            parser_content=None, provider_content=None, spec=[],
+            metadata={"local": "kept"},
+            prompt_token_ids=[1],
+            completion_token_ids=[2],
+            logprobs={"ok": True},
+            parser_content=None,
+            provider_content=None,
+            spec=[],
         )
 
         result = await client._to_ow_assistant_message(message)
@@ -935,14 +1110,23 @@ class TestIntelliRouterConvertResponse:
     async def test_to_ow_assistant_message_with_reasoning(self, model_request_config, intelli_router_client_config):
         """reasoning_content should be passed through."""
         with (
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
-            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter",
+                FakeReliableRouter,
+            ),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment
+            ),
         ):
             client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
 
         ir_msg = MagicMock(
-            content="answer", tool_calls=None, usage_metadata=None,
-            finish_reason="stop", reasoning_content="let me think...", spec=[],
+            content="answer",
+            tool_calls=None,
+            usage_metadata=None,
+            finish_reason="stop",
+            reasoning_content="let me think...",
+            spec=[],
         )
         result = await client._to_ow_assistant_message(ir_msg)
         assert result.reasoning_content == "let me think..."
@@ -951,7 +1135,11 @@ class TestIntelliRouterConvertResponse:
         """Chunk tool_calls should be mapped."""
         fake_tc = FakeToolCall(id="call_1", type="function", name="search", arguments='{"q":"hi"}', index=0)
         ir_chunk = MagicMock(
-            content="", tool_calls=[fake_tc], finish_reason="null", reasoning_content=None, spec=[],
+            content="",
+            tool_calls=[fake_tc],
+            finish_reason="null",
+            reasoning_content=None,
+            spec=[],
         )
         result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
         assert result.tool_calls is not None
@@ -960,7 +1148,11 @@ class TestIntelliRouterConvertResponse:
     def test_to_ow_chunk_with_reasoning(self, model_request_config, intelli_router_client_config):
         """Chunk reasoning_content should be passed through."""
         ir_chunk = MagicMock(
-            content="", tool_calls=None, finish_reason="null", reasoning_content="thinking...", spec=[],
+            content="",
+            tool_calls=None,
+            finish_reason="null",
+            reasoning_content="thinking...",
+            spec=[],
         )
         result = IntelliRouterModelClient._to_ow_chunk(ir_chunk)
         assert result.reasoning_content == "thinking..."
@@ -1011,7 +1203,8 @@ class TestIntelliRouterIntegrationDashScope:
     @staticmethod
     def _build_real_router(deployments_cfg):
         """Build a real ReliableRouter directly (bypasses any class-level mocks)."""
-        from intelli_router import ReliableRouter, Deployment
+        from intelli_router import Deployment, ReliableRouter
+
         deployments = [
             Deployment(
                 id=d.get("id"),

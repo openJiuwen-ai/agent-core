@@ -12,39 +12,41 @@ import pytest
 from openjiuwen.core.application.llm_agent.rails.memory_rail import MemoryRail
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.memory.config.config import AgentMemoryConfig
-from openjiuwen.core.single_agent import (
-    AgentCard, ReActAgentConfig, ReActAgent,
-)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
-    ModelRequestConfig,
     ModelClientConfig,
+    ModelRequestConfig,
     ToolCall,
     ToolMessage,
 )
 from openjiuwen.core.foundation.tool import (
-    LocalFunction, ToolCard,
+    LocalFunction,
+    ToolCard,
+)
+from openjiuwen.core.memory.config.config import AgentMemoryConfig
+from openjiuwen.core.single_agent import (
+    AgentCard,
+    ReActAgent,
+    ReActAgentConfig,
 )
 from openjiuwen.core.single_agent.rail.base import (
-    AgentRail,
     AgentCallbackContext,
     AgentCallbackEvent,
+    AgentRail,
     InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
 )
-
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
     create_text_response,
     create_tool_call_response,
 )
 
-
 # ============================================================
 # Test Rails
 # ============================================================
+
 
 class TestModelCallInputs:
     """Trace metadata must remain optional for existing Rail callers."""
@@ -100,6 +102,7 @@ class LogRail(AgentRail):
 
 class HighPriorityRail(AgentRail):
     """Rail with high priority."""
+
     priority = 90
 
     def __init__(self, order_list):
@@ -112,6 +115,7 @@ class HighPriorityRail(AgentRail):
 
 class LowPriorityRail(AgentRail):
     """Rail with low priority."""
+
     priority = 10
 
     def __init__(self, order_list):
@@ -137,13 +141,12 @@ class ExtraReaderRail(AgentRail):
         self.saw_writer = False
 
     async def before_model_call(self, ctx):
-        self.saw_writer = ctx.extra.get(
-            "writer_was_here", False
-        )
+        self.saw_writer = ctx.extra.get("writer_was_here", False)
 
 
 class ToolCarryingRail(AgentRail):
     """Rail that carries tools."""
+
     def init(self, agent):
         tool_card = ToolCard(
             id="rail_tool",
@@ -167,12 +170,9 @@ class ToolCarryingRail(AgentRail):
 # Helper functions
 # ============================================================
 
+
 def _create_model_config():
-    return ModelRequestConfig(
-        model="gpt-3.5-turbo",
-        temperature=0.8,
-        top_p=0.9
-    )
+    return ModelRequestConfig(model="gpt-3.5-turbo", temperature=0.8, top_p=0.9)
 
 
 def _create_client_config():
@@ -211,12 +211,7 @@ def _create_add_tool():
 
 
 def _create_prompt_template():
-    return [
-        dict(
-            role="system",
-            content="你是一个数学计算助手。"
-        )
-    ]
+    return [dict(role="system", content="你是一个数学计算助手。")]
 
 
 def _make_agent():
@@ -232,6 +227,7 @@ def _make_agent():
     tool = _create_add_tool()
     agent.ability_manager.add(tool.card)
     from openjiuwen.core.runner import Runner
+
     if Runner.resource_mgr.get_tool(tool.card.id) is None:
         Runner.resource_mgr.add_tool(tool)
     return agent, tool
@@ -240,6 +236,7 @@ def _make_agent():
 # ============================================================
 # Test Cases
 # ============================================================
+
 
 class TestRailRegistration(unittest.IsolatedAsyncioTestCase):
     """test_agent_rail_registration"""
@@ -251,15 +248,9 @@ class TestRailRegistration(unittest.IsolatedAsyncioTestCase):
         await agent.register_rail(log_rail)
 
         mgr = agent.agent_callback_manager
-        assert mgr.has_hooks(
-            AgentCallbackEvent.BEFORE_INVOKE
-        )
-        assert mgr.has_hooks(
-            AgentCallbackEvent.AFTER_INVOKE
-        )
-        assert mgr.has_hooks(
-            AgentCallbackEvent.BEFORE_MODEL_CALL
-        )
+        assert mgr.has_hooks(AgentCallbackEvent.BEFORE_INVOKE)
+        assert mgr.has_hooks(AgentCallbackEvent.AFTER_INVOKE)
+        assert mgr.has_hooks(AgentCallbackEvent.BEFORE_MODEL_CALL)
 
     async def test_agent_rail_8_events(self):
         """Core invoke/model/tool events can be triggered."""
@@ -268,18 +259,14 @@ class TestRailRegistration(unittest.IsolatedAsyncioTestCase):
         await agent.register_rail(log_rail)
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response(
-                "add", '{"a": 1, "b": 2}'
-            ),
-            create_text_response("1+2=3"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
-            await agent.invoke(
-                {"query": "计算1+2"}
-            )
+        mock_llm.set_responses(
+            [
+                create_tool_call_response("add", '{"a": 1, "b": 2}'),
+                create_text_response("1+2=3"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            await agent.invoke({"query": "计算1+2"})
 
         assert "before_invoke" in log_rail.events
         assert "after_invoke" in log_rail.events
@@ -304,12 +291,12 @@ class TestRailPriority(unittest.IsolatedAsyncioTestCase):
         await agent.register_rail(high)
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
         assert order == ["high", "low"]
@@ -327,12 +314,12 @@ class TestRailExtra(unittest.IsolatedAsyncioTestCase):
         await agent.register_rail(reader)
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
         # reader should have seen writer's data
@@ -352,9 +339,7 @@ class TestRailExtra(unittest.IsolatedAsyncioTestCase):
         assert writer  # rail registered successfully
 
 
-class TestRailExceptionEvents(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestRailExceptionEvents(unittest.IsolatedAsyncioTestCase):
     """test_rail_exception_events"""
 
     async def test_rail_exception_events(self):
@@ -371,9 +356,7 @@ class TestRailExceptionEvents(
 
         mock_llm.invoke = raise_on_invoke
 
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             with pytest.raises(RuntimeError):
                 await agent.invoke({"query": "test"})
 
@@ -381,9 +364,7 @@ class TestRailExceptionEvents(
         assert "after_model_call" in log_rail.events
 
 
-class TestRailExceptionRetry(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestRailExceptionRetry(unittest.IsolatedAsyncioTestCase):
     """Retry behavior driven by on_exception rails."""
 
     async def test_on_model_exception_can_request_retry(
@@ -396,19 +377,13 @@ class TestRailExceptionRetry(
 
         class RetryRail(AgentRail):
             async def before_model_call(self, ctx):
-                events.append(
-                    ("before", ctx.retry_attempt)
-                )
+                events.append(("before", ctx.retry_attempt))
 
             async def after_model_call(self, ctx):
-                events.append(
-                    ("after", ctx.retry_attempt)
-                )
+                events.append(("after", ctx.retry_attempt))
 
             async def on_model_exception(self, ctx):
-                events.append(
-                    ("exception", ctx.retry_attempt)
-                )
+                events.append(("exception", ctx.retry_attempt))
                 if ctx.retry_attempt < 1:
                     ctx.request_retry()
 
@@ -427,9 +402,7 @@ class TestRailExceptionRetry(
 
         mock_llm.invoke = flaky_invoke
 
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke({"query": "retry model"})
 
         assert result["result_type"] == "answer"
@@ -483,14 +456,16 @@ class TestRailExceptionRetry(
         await agent.register_rail(RetryRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response(
-                "add",
-                '{"a": 1, "b": 2}',
-                tool_call_id="mock_retry_tool",
-            ),
-            create_text_response("done"),
-        ])
+        mock_llm.set_responses(
+            [
+                create_tool_call_response(
+                    "add",
+                    '{"a": 1, "b": 2}',
+                    tool_call_id="mock_retry_tool",
+                ),
+                create_text_response("done"),
+            ]
+        )
 
         async def flaky_execute(*args, **kwargs):
             execute_count["count"] += 1
@@ -508,12 +483,13 @@ class TestRailExceptionRetry(
                 ),
             )
 
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ), patch.object(
-            agent.ability_manager,
-            "_execute_single_tool_call",
-            side_effect=flaky_execute,
+        with (
+            patch.object(agent, "_get_llm", return_value=mock_llm),
+            patch.object(
+                agent.ability_manager,
+                "_execute_single_tool_call",
+                side_effect=flaky_execute,
+            ),
         ):
             result = await agent.invoke({"query": "retry tool"})
 
@@ -530,9 +506,7 @@ class TestRailExceptionRetry(
         ]
 
 
-class TestRailToolsRegistration(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestRailToolsRegistration(unittest.IsolatedAsyncioTestCase):
     """test_rail_tools_auto_registration"""
 
     async def test_rail_tools_auto_registration(self):
@@ -567,9 +541,7 @@ class TestRailToolsRegistration(
         assert "rail_tool" not in names_after
 
 
-class TestRailDecorator(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestRailDecorator(unittest.IsolatedAsyncioTestCase):
     """test_rail_decorator_before_after"""
 
     async def test_rail_decorator_before_after(self):
@@ -579,12 +551,12 @@ class TestRailDecorator(
         await agent.register_rail(log_rail)
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
         assert "before_model_call" in log_rail.events
@@ -609,9 +581,7 @@ class TestRailDecorator(
 
         mock_llm.invoke = raise_on_invoke
 
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             with pytest.raises(RuntimeError):
                 await agent.invoke({"query": "test"})
 
@@ -620,9 +590,7 @@ class TestRailDecorator(
         assert "after_model_call" in log_rail.events
 
 
-class TestCtxLifecycle(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestCtxLifecycle(unittest.IsolatedAsyncioTestCase):
     """test_ctx_lifecycle_normal / exception"""
 
     async def test_ctx_lifecycle_normal(self):
@@ -632,15 +600,13 @@ class TestCtxLifecycle(
         await agent.register_rail(log_rail)
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("ok"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
-            result = await agent.invoke(
-                {"query": "hello"}
-            )
+        mock_llm.set_responses(
+            [
+                create_text_response("ok"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
+            result = await agent.invoke({"query": "hello"})
 
         assert result["result_type"] == "answer"
         assert "before_invoke" in log_rail.events
@@ -659,9 +625,7 @@ class TestCtxLifecycle(
 
         mock_llm.invoke = raise_on_invoke
 
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             with pytest.raises(RuntimeError):
                 await agent.invoke({"query": "test"})
 
@@ -691,9 +655,7 @@ class TestCtxFire(unittest.IsolatedAsyncioTestCase):
         assert "manual_before" in fired
 
 
-class TestMethodSplitDataVisibility(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestMethodSplitDataVisibility(unittest.IsolatedAsyncioTestCase):
     """test_method_split_data_visibility"""
 
     async def test_method_split_data_visibility(self):
@@ -703,19 +665,17 @@ class TestMethodSplitDataVisibility(
 
         class InspectRail(AgentRail):
             async def before_model_call(self, ctx):
-                seen_messages.append(
-                    ctx.inputs.messages
-                )
+                seen_messages.append(ctx.inputs.messages)
 
         await agent.register_rail(InspectRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
         # before_model_call should have seen messages
@@ -723,9 +683,7 @@ class TestMethodSplitDataVisibility(
         assert seen_messages[0] is not None
 
 
-class TestReActAgentEvolveRegression(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestReActAgentEvolveRegression(unittest.IsolatedAsyncioTestCase):
     """test_react_agent_evolve_regression"""
 
     async def test_react_agent_evolve_import(self):
@@ -733,12 +691,11 @@ class TestReActAgentEvolveRegression(
         from openjiuwen.core.single_agent.agents.react_agent_evolve import (
             ReActAgentEvolve,
         )
+
         assert ReActAgentEvolve is not None
 
 
-class TestTypedEventInputs(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestTypedEventInputs(unittest.IsolatedAsyncioTestCase):
     """test_typed_event_inputs"""
 
     async def test_before_invoke_receives_invoke_inputs(
@@ -755,12 +712,12 @@ class TestTypedEventInputs(
         await agent.register_rail(CaptureRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("ok"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("ok"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "hello"})
 
         assert len(captured) == 1
@@ -781,12 +738,12 @@ class TestTypedEventInputs(
         await agent.register_rail(CaptureRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
         assert len(captured) == 1
@@ -809,12 +766,12 @@ class TestTypedEventInputs(
         await agent.register_rail(CaptureRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("ok"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("ok"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
         assert len(captured) == 1
@@ -842,19 +799,15 @@ class TestTypedEventInputs(
         await agent.register_rail(RewriteRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("ok"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("ok"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
-        system_contents = [
-            msg.content
-            for msg in mock_llm.call_history[0]
-            if getattr(msg, "role", None) == "system"
-        ]
+        system_contents = [msg.content for msg in mock_llm.call_history[0] if getattr(msg, "role", None) == "system"]
         assert system_contents == ["builder final"]
 
     async def test_before_tool_call_receives_tool_call_inputs(
@@ -871,15 +824,13 @@ class TestTypedEventInputs(
         await agent.register_rail(CaptureRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response(
-                "add", '{"a": 1, "b": 2}'
-            ),
-            create_text_response("3"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_tool_call_response("add", '{"a": 1, "b": 2}'),
+                create_text_response("3"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "1+2"})
 
         assert len(captured) == 1
@@ -900,9 +851,7 @@ class TestTypedEventInputs(
                 before_calls.append(ctx.inputs.tool_call.id)
 
             async def after_tool_call(self, ctx):
-                after_calls.append(
-                    (ctx.inputs.tool_call.id, ctx.inputs.tool_result)
-                )
+                after_calls.append((ctx.inputs.tool_call.id, ctx.inputs.tool_result))
 
         await agent.register_rail(CaptureRail())
 
@@ -925,13 +874,13 @@ class TestTypedEventInputs(
         )
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            multi_tool_response,
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                multi_tool_response,
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "run two tools"})
 
         assert len(before_calls) == 2
@@ -963,15 +912,13 @@ class TestTypedEventInputs(
         await agent.register_rail(RewriteRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response(
-                "add", '{"a": 1, "b": 1}'
-            ),
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_tool_call_response("add", '{"a": 1, "b": 1}'),
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "rewrite args"})
 
         assert captured_result == [7]
@@ -1008,21 +955,19 @@ class TestTypedEventInputs(
         )
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            mixed_tool_response,
-            create_text_response("done"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                mixed_tool_response,
+                create_text_response("done"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "mix tool calls"})
 
         assert failed_calls == ["mock_call_missing"]
 
 
-class TestForceFinish(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestForceFinish(unittest.IsolatedAsyncioTestCase):
     """Tests for request_force_finish / consume_force_finish."""
 
     async def test_before_model_call_force_finish(self):
@@ -1037,12 +982,12 @@ class TestForceFinish(
         await agent.register_rail(ForceRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("should not reach"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("should not reach"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke({"query": "test"})
 
         assert result == expected
@@ -1065,13 +1010,13 @@ class TestForceFinish(
         await agent.register_rail(ForceRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response("add", '{"a": 1, "b": 2}'),
-            create_text_response("should not reach"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_tool_call_response("add", '{"a": 1, "b": 2}'),
+                create_text_response("should not reach"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke({"query": "test"})
 
         assert result == expected
@@ -1089,13 +1034,13 @@ class TestForceFinish(
         await agent.register_rail(ForceRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response("add", '{"a": 1, "b": 2}'),
-            create_text_response("should not reach"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_tool_call_response("add", '{"a": 1, "b": 2}'),
+                create_text_response("should not reach"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke({"query": "test"})
 
         assert result == expected
@@ -1114,13 +1059,13 @@ class TestForceFinish(
         await agent.register_rail(ForceRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response("add", '{"a": 1, "b": 2}'),
-            create_text_response("should not reach"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_tool_call_response("add", '{"a": 1, "b": 2}'),
+                create_text_response("should not reach"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke({"query": "test"})
 
         assert result == expected
@@ -1143,12 +1088,12 @@ class TestForceFinish(
         await agent.register_rail(ForceRail())
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_text_response("nope"),
-        ])
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ):
+        mock_llm.set_responses(
+            [
+                create_text_response("nope"),
+            ]
+        )
+        with patch.object(agent, "_get_llm", return_value=mock_llm):
             await agent.invoke({"query": "test"})
 
         assert len(captured_result) == 1
@@ -1169,7 +1114,7 @@ class TestForceFinish(
 
     async def test_rail_decorator_returns_force_finish_payload(self):
         """@rail decorator returns the force_finish payload instead of None."""
-        from openjiuwen.core.single_agent.rail.base import rail, AgentCallbackEvent
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent, rail
 
         class Dummy:
             def __init__(self):
@@ -1197,7 +1142,7 @@ class TestForceFinish(
 
     async def test_rail_decorator_force_finish_dict_not_subscriptable(self):
         """force_finish payload (dict) is returned directly, not None causing subscript errors."""
-        from openjiuwen.core.single_agent.rail.base import rail, AgentCallbackEvent
+        from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent, rail
 
         class Dummy:
             @rail(
@@ -1221,9 +1166,7 @@ class TestForceFinish(
         assert result["result_type"] == "answer"
 
 
-class TestMemoryRailPromptAssembly(
-    unittest.IsolatedAsyncioTestCase
-):
+class TestMemoryRailPromptAssembly(unittest.IsolatedAsyncioTestCase):
     """Tests for memory-variable rendering under the builder-based prompt flow."""
 
     async def test_memory_rail_rendered_prompt_survives_multiple_iterations(
@@ -1245,48 +1188,51 @@ class TestMemoryRailPromptAssembly(
         tool = _create_add_tool()
         agent.ability_manager.add(tool.card)
         from openjiuwen.core.runner import Runner
+
         if Runner.resource_mgr.get_tool(tool.card.id) is None:
             Runner.resource_mgr.add_tool(tool)
 
-        await agent.register_rail(MemoryRail(
-            mem_scope_id="scope_001",
-            agent_memory_config=AgentMemoryConfig(
-                enable_long_term_mem=True,
-                enable_user_profile=True,
-                enable_semantic_memory=False,
-                enable_episodic_memory=False,
-                enable_summary_memory=False,
-            ),
-        ))
+        await agent.register_rail(
+            MemoryRail(
+                mem_scope_id="scope_001",
+                agent_memory_config=AgentMemoryConfig(
+                    enable_long_term_mem=True,
+                    enable_user_profile=True,
+                    enable_semantic_memory=False,
+                    enable_episodic_memory=False,
+                    enable_summary_memory=False,
+                ),
+            )
+        )
 
         memory_item = MagicMock()
         memory_item.mem_info.content = "偏好：数学"
 
         mock_llm = MockLLMModel()
-        mock_llm.set_responses([
-            create_tool_call_response("add", '{"a": 1, "b": 2}'),
-            create_text_response("done"),
-        ])
+        mock_llm.set_responses(
+            [
+                create_tool_call_response("add", '{"a": 1, "b": 2}'),
+                create_text_response("done"),
+            ]
+        )
 
-        with patch.object(
-            agent, "_get_llm", return_value=mock_llm
-        ), patch(
-            "openjiuwen.core.memory.long_term_memory.LongTermMemory.search_user_mem",
-            AsyncMock(return_value=[memory_item]),
-        ), patch(
-            "openjiuwen.core.memory.long_term_memory.LongTermMemory.add_messages",
-            AsyncMock(return_value=None),
+        with (
+            patch.object(agent, "_get_llm", return_value=mock_llm),
+            patch(
+                "openjiuwen.core.memory.long_term_memory.LongTermMemory.search_user_mem",
+                AsyncMock(return_value=[memory_item]),
+            ),
+            patch(
+                "openjiuwen.core.memory.long_term_memory.LongTermMemory.add_messages",
+                AsyncMock(return_value=None),
+            ),
         ):
             await agent.invoke({"query": "1+2", "user_id": "user_001"})
             await asyncio.sleep(0)
 
         assert len(mock_llm.call_history) == 2
         for call in mock_llm.call_history:
-            system_contents = [
-                msg.content
-                for msg in call
-                if getattr(msg, "role", None) == "system"
-            ]
+            system_contents = [msg.content for msg in call if getattr(msg, "role", None) == "system"]
             assert len(system_contents) == 1
             assert "偏好：数学" in system_contents[0]
             assert "{{sys_long_term_memory}}" not in system_contents[0]

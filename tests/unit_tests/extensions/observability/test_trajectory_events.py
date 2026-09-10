@@ -19,12 +19,12 @@ from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
-    GEN_AI_INPUT_MESSAGES,
-    GEN_AI_SYSTEM_INSTRUCTIONS,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
@@ -45,15 +45,15 @@ from openjiuwen.extensions.observability.span_context import (
     clear_root_span,
     queue_context_window_compaction,
     reset_state,
-    set_root_span,
     set_current_agent_span,
+    set_root_span,
 )
-from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload, AskUserRail
-from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.extensions.observability.trajectory_events import (
     emit_context_window_commit,
     emit_native_trajectory_event,
 )
+from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload, AskUserRail
+from openjiuwen.harness.tools.ask_user import AskUserTool
 
 
 def _attrs(span) -> dict:
@@ -176,8 +176,7 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
         )
         await framework.trigger(LLMCallEvents.LLM_INPUT, messages=messages)
         events_before_llm_close = [
-            span for span in exporter.get_finished_spans()
-            if span.name == "context.window.commit"
+            span for span in exporter.get_finished_spans() if span.name == "context.window.commit"
         ]
         assert len(events_before_llm_close) == 1
         await framework.trigger(
@@ -197,10 +196,7 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
     assert len(instructions) + len(history) == 111
     assert not any(key.startswith("gen_ai.prompt.") for key in _attrs(llm_span))
 
-    event_span = next(
-        span for span in exporter.get_finished_spans()
-        if span.name == "context.window.commit"
-    )
+    event_span = next(span for span in exporter.get_finished_spans() if span.name == "context.window.commit")
     attrs = _attrs(event_span)
     payload = _payload(event_span)
     assert attrs[OJ_TRACE_SCHEMA_VERSION] == "2"
@@ -285,10 +281,7 @@ async def test_core_occurrence_ids_and_request_system_slot_survive_provider_norm
         "context-a",
         "context-b",
     ]
-    system_ops = [
-        item for item in second["delta"]
-        if item["message_id"] == "openjiuwen:request-system-slot:0"
-    ]
+    system_ops = [item for item in second["delta"] if item["message_id"] == "openjiuwen:request-system-slot:0"]
     assert [item["op"] for item in system_ops] == ["replace"]
 
 
@@ -320,15 +313,9 @@ def test_context_window_delta_uses_occurrence_identity_and_preserves_history() -
             {"message_id": "c", "role": "tool", "content": "new"},
             {"message_id": "d", "role": "assistant", "content": "added"},
         ]
-        emit_context_window_commit(
-            tracer=tracer, llm_span=parent, messages=first, request_purpose="assistant"
-        )
-        emit_context_window_commit(
-            tracer=tracer, llm_span=parent, messages=second, request_purpose="assistant"
-        )
-        emit_context_window_commit(
-            tracer=tracer, llm_span=parent, messages=third, request_purpose="assistant"
-        )
+        emit_context_window_commit(tracer=tracer, llm_span=parent, messages=first, request_purpose="assistant")
+        emit_context_window_commit(tracer=tracer, llm_span=parent, messages=second, request_purpose="assistant")
+        emit_context_window_commit(tracer=tracer, llm_span=parent, messages=third, request_purpose="assistant")
     finally:
         parent.end()
         provider.shutdown()
@@ -364,11 +351,13 @@ def test_context_window_first_commit_after_epoch_rotation_is_a_full_baseline() -
             OJ_EXECUTION_SUBJECT_ID: "baseline-subject",
         },
     )
-    messages = [{
-        "message_id": "stable-system",
-        "role": "system",
-        "content": "unchanged",
-    }]
+    messages = [
+        {
+            "message_id": "stable-system",
+            "role": "system",
+            "content": "unchanged",
+        }
+    ]
     try:
         emit_context_window_commit(
             tracer=tracer,
@@ -526,9 +515,7 @@ def test_reset_state_rotates_epoch_and_restarts_subject_sequence() -> None:
         provider.shutdown()
         reset_state()
 
-    before, after = [
-        span for span in exporter.get_finished_spans() if span.name.startswith("test.")
-    ]
+    before, after = [span for span in exporter.get_finished_spans() if span.name.startswith("test.")]
     before_attrs = _attrs(before)
     after_attrs = _attrs(after)
     assert before_attrs[OJ_TRAJECTORY_SEQUENCE_EPOCH] != after_attrs[OJ_TRAJECTORY_SEQUENCE_EPOCH]
@@ -558,11 +545,13 @@ async def test_concurrent_subjects_have_independent_sequence_and_window_state() 
             emit_context_window_commit(
                 tracer=tracer,
                 llm_span=parents[subject],
-                messages=[{
-                    "message_id": f"{subject}-{index}",
-                    "role": "user",
-                    "content": subject,
-                }],
+                messages=[
+                    {
+                        "message_id": f"{subject}-{index}",
+                        "role": "user",
+                        "content": subject,
+                    }
+                ],
                 request_purpose="assistant",
             )
             await asyncio.sleep(0)

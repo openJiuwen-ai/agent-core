@@ -22,7 +22,7 @@ Quickstart::
         open_agent_run_span,
     )
 
-    install_subagent_observability_hook()          # once per process
+    install_subagent_observability_hook()  # once per process
     acquire_observability(ObservabilityConfig(endpoint="http://localhost:4317"))
     handle = open_agent_run_span(session_id=session_id, mode="agent.fast")
     try:

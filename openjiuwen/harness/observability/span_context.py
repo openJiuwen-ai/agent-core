@@ -47,7 +47,9 @@ def _is_recording(span: Any) -> bool:
     """Report whether *span* is still open, tolerating stubs without the API."""
     try:
         return bool(span is not None and span.is_recording())
-    except Exception:
+    except Exception as exc:
+        # Test stubs may raise from is_recording; treat as not recording.
+        logger.debug("otel: span is_recording() raised - {}", exc)
         return False
 
 

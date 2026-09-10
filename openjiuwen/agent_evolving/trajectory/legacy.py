@@ -14,11 +14,10 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
-from openjiuwen.extensions.observability import semconv
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (
-    MEMBER_ID,
     CASE_ID,
+    MEMBER_ID,
     RL_COMPLETION_TOKEN_IDS,
     RL_LOGPROBS,
     RL_PROMPT_TOKEN_IDS,
@@ -35,7 +34,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     attributes_to_map,
     write_llm_exchange,
 )
-
+from openjiuwen.extensions.observability import semconv
 
 _LEGACY_TRAJECTORY_ID = "openjiuwen.trajectory.id"
 _LEGACY_SESSION_ID = "openjiuwen.session.id"
@@ -136,10 +135,7 @@ def _as_message_list(value: Any) -> list[dict[str, Any]]:
     if value is None:
         return []
     values = value if isinstance(value, list) else [value]
-    return [
-        dict(item) if isinstance(item, Mapping) else {"content": str(item)}
-        for item in values
-    ]
+    return [dict(item) if isinstance(item, Mapping) else {"content": str(item)} for item in values]
 
 
 def _llm_exchange_attributes(detail: Mapping[str, Any]) -> dict[str, Any]:

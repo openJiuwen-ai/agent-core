@@ -1,11 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-from typing import Union, List, Optional, Any, Dict
+from typing import Any, Dict, List, Optional, Union
+
 from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-
 
 OPENJIUWEN_MESSAGE_PROVENANCE_METADATA = "_openjiuwen_message_provenance"
 OPENJIUWEN_MESSAGE_ORIGIN_METADATA = "_openjiuwen_message_origin"
@@ -20,7 +20,7 @@ class UsageMetadata(BaseModel):
     prompt: str = ""
     task_id: str = ""
     model_name: str = ""
-    total_latency: float = 0.
+    total_latency: float = 0.0
     first_token_time: str = ""
     request_start_time: str = ""
     input_tokens: int = 0
@@ -35,9 +35,9 @@ class UsageMetadata(BaseModel):
     cache_authoritative: bool = False
     cache_creation_input_tokens: Optional[int] = None
     reasoning_tokens: int = 0
-    input_cost: float = 0.
-    output_cost: float = 0.
-    total_cost: float = 0.
+    input_cost: float = 0.0
+    output_cost: float = 0.0
+    total_cost: float = 0.0
 
 
 class BaseMessage(BaseModel):
@@ -65,7 +65,7 @@ class AssistantMessage(BaseMessage):
     provider_metadata: Dict[str, Any] = Field(default_factory=dict)
     provider_content: Optional[Any] = None
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
     def convert_openai_tool_calls_format(cls, data: Any) -> Any:
         """Convert OpenAI API format tool_calls to flat ToolCall format.
@@ -76,24 +76,24 @@ class AssistantMessage(BaseMessage):
         ToolCall model expects flat format:
         {"id": "xxx", "type": "function", "name": "...", "arguments": "..."}
         """
-        if isinstance(data, dict) and 'tool_calls' in data and data['tool_calls']:
+        if isinstance(data, dict) and "tool_calls" in data and data["tool_calls"]:
             converted_tool_calls = []
-            for tc in data['tool_calls']:
-                if isinstance(tc, dict) and 'function' in tc and isinstance(tc['function'], dict):
+            for tc in data["tool_calls"]:
+                if isinstance(tc, dict) and "function" in tc and isinstance(tc["function"], dict):
                     # OpenAI format - convert to flat format
                     converted_tc = {
-                        'id': tc.get('id'),
-                        'type': tc.get('type', 'function'),
-                        'name': tc['function'].get('name', ''),
-                        'arguments': tc['function'].get('arguments', ''),
-                        'index': tc.get('index'),
-                        'response_item_id': tc.get('response_item_id'),
+                        "id": tc.get("id"),
+                        "type": tc.get("type", "function"),
+                        "name": tc["function"].get("name", ""),
+                        "arguments": tc["function"].get("arguments", ""),
+                        "index": tc.get("index"),
+                        "response_item_id": tc.get("response_item_id"),
                     }
                     converted_tool_calls.append(converted_tc)
                 else:
                     # Already flat format or ToolCall instance
                     converted_tool_calls.append(tc)
-            data['tool_calls'] = converted_tool_calls
+            data["tool_calls"] = converted_tool_calls
         return data
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
@@ -108,14 +108,9 @@ class AssistantMessage(BaseMessage):
         if self.tool_calls:
             tool_calls = []
             for call in self.tool_calls:
-                tool_calls.append({
-                    "id": call.id,
-                    "type": call.type,
-                    "function": {
-                        "name": call.name,
-                        "arguments": call.arguments
-                    }
-                })
+                tool_calls.append(
+                    {"id": call.id, "type": call.type, "function": {"name": call.name, "arguments": call.arguments}}
+                )
                 if call.response_item_id is not None:
                     tool_calls[-1]["response_item_id"] = call.response_item_id
             result["tool_calls"] = tool_calls
@@ -146,6 +141,7 @@ class AssistantMessage(BaseMessage):
 
 class UserMessage(BaseMessage):
     role: str = "user"
+
 
 class SystemMessage(BaseMessage):
     role: str = "system"

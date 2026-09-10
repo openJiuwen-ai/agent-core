@@ -19,8 +19,8 @@ keeps owning its own lifecycle.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
 import threading
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from opentelemetry.sdk.trace import SpanProcessor
@@ -144,9 +144,7 @@ def acquire_observability_demand(
             (get_trajectory_span_processor(), get_span_record_processor()),
         )
         if not is_initialized():
-            raise RuntimeError(
-                f"{runtime} observability initialization did not create a provider"
-            )
+            raise RuntimeError(f"{runtime} observability initialization did not create a provider")
         if not provider_existed:
             _PROVIDER_OWNED = True
         _ACTIVE_RUNTIMES.add(runtime)

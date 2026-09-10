@@ -533,21 +533,13 @@ def _terminal_stream_chunk(
         content="",
         usage_metadata=_usage_from_payload(usage, model_name=model_name),
         finish_reason=finish_reason,
-        response_id=(
-            str(response_payload.get("id") or "") or None
-            if isinstance(response_payload, dict)
-            else None
-        ),
+        response_id=(str(response_payload.get("id") or "") or None if isinstance(response_payload, dict) else None),
         response_model=(
             str(response_payload.get("model") or model_name or "") or None
             if isinstance(response_payload, dict)
             else (model_name or None)
         ),
-        provider_metadata=(
-            _response_provider_metadata(response_payload)
-            if isinstance(response_payload, dict)
-            else {}
-        ),
+        provider_metadata=(_response_provider_metadata(response_payload) if isinstance(response_payload, dict) else {}),
     )
 
 

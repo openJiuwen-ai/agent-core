@@ -14,17 +14,23 @@ from opentelemetry import context as otel_context
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer, set_span_in_context
 
 from openjiuwen.extensions.observability.semconv import (
+    OJ_AGENT_MODE,
+    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+    OJ_EXECUTION_SUBJECT_ID,
+    OJ_EXECUTION_SUBJECT_KIND,
+    OJ_EXECUTION_SUBJECT_PARENT_ID,
+    OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
     OJ_SESSION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
-    OJ_AGENT_MODE,
+    OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_EVENT_ID,
     OJ_TRAJECTORY_EVENT_KIND,
     OJ_TRAJECTORY_PAYLOAD,
-    OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO,
     OJ_TRAJECTORY_RECORD_KIND,
+    OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO,
     OJ_TRAJECTORY_REQUEST_ID,
     OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TRAJECTORY_SEQUENCE_EPOCH,
@@ -33,14 +39,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_SUBJECT_ID,
     OJ_TRAJECTORY_SUBJECT_SEQUENCE,
     OJ_TRAJECTORY_TURN_ID,
-    OJ_TRACE_SCHEMA_VERSION,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
-    OJ_EXECUTION_SUBJECT_ID,
-    OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
-    OJ_EXECUTION_SUBJECT_KIND,
-    OJ_EXECUTION_SUBJECT_PARENT_ID,
-    OJ_EXECUTION_SUBJECT_SESSION_ID,
 )
 from openjiuwen.extensions.observability.span_context import (
     advance_context_window,
@@ -186,10 +186,12 @@ def emit_context_window_commit(
         "request_purpose": request_purpose,
     }
     if is_epoch_baseline:
-        payload.update({
-            "transition_kind": "epoch_baseline",
-            "baseline_reason": "runtime_epoch_start",
-        })
+        payload.update(
+            {
+                "transition_kind": "epoch_baseline",
+                "baseline_reason": "runtime_epoch_start",
+            }
+        )
     caused_by_operation_id = consume_context_window_compaction(
         session_id=session_id,
         subject_id=subject_id,
@@ -197,11 +199,13 @@ def emit_context_window_commit(
         step_id=str(llm_span.attributes.get(OJ_STEP_ID) or ""),
     )
     if caused_by_operation_id is not None:
-        payload.update({
-            "caused_by_operation_id": caused_by_operation_id,
-            "input_window_id": base_window_id,
-            "output_window_id": window_id,
-        })
+        payload.update(
+            {
+                "caused_by_operation_id": caused_by_operation_id,
+                "input_window_id": base_window_id,
+                "output_window_id": window_id,
+            }
+        )
         if is_epoch_baseline:
             payload["correlation_kind"] = "compaction"
         else:

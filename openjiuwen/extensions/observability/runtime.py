@@ -14,7 +14,6 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
-
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -192,26 +191,14 @@ class ObservabilityRuntime:
             if self._initializing:
                 raise RuntimeError("observability initialization is already in progress")
             if tracer_provider_override is not None and span_exporter_override is not None:
-                raise ValueError(
-                    "tracer_provider_override and span_exporter_override are mutually exclusive"
-                )
+                raise ValueError("tracer_provider_override and span_exporter_override are mutually exclusive")
             if tracer_provider_override is not None and not isinstance(tracer_provider_override, TracerProvider):
                 raise TypeError("tracer_provider_override must be a TracerProvider")
             if self._provider is not None:
-                if (
-                    tracer_provider_override is not None
-                    and tracer_provider_override is not self._provider
-                ):
-                    raise RuntimeError(
-                        "observability is already initialized with a different tracer provider"
-                    )
-                if (
-                    tracer_provider_override is not None
-                    and owns_provider is not self._owns_provider
-                ):
-                    raise RuntimeError(
-                        "observability provider ownership differs from the active configuration"
-                    )
+                if tracer_provider_override is not None and tracer_provider_override is not self._provider:
+                    raise RuntimeError("observability is already initialized with a different tracer provider")
+                if tracer_provider_override is not None and owns_provider is not self._owns_provider:
+                    raise RuntimeError("observability provider ownership differs from the active configuration")
                 self.add_span_processors(additional_span_processors)
                 return
             effective_owns_provider = tracer_provider_override is None or owns_provider
@@ -267,9 +254,7 @@ class ObservabilityRuntime:
                 )
                 self._callback_handler = callback_handler
                 self._context_compression_handler = context_compression_handler
-                self._register_callbacks(
-                    self._callback_pairs(callback_handler, context_compression_handler)
-                )
+                self._register_callbacks(self._callback_pairs(callback_handler, context_compression_handler))
                 if tracer_provider_override is None:
                     try:
                         trace.set_tracer_provider(provider)
@@ -493,11 +478,7 @@ class ObservabilityRuntime:
         tracked_adapters: list[SafeSpanProcessor] | None = None,
     ) -> None:
         registered = self._additional_processors if tracked_processors is None else tracked_processors
-        adapters = (
-            self._additional_processor_adapters
-            if tracked_adapters is None
-            else tracked_adapters
-        )
+        adapters = self._additional_processor_adapters if tracked_adapters is None else tracked_adapters
         for processor in processors:
             if any(existing is processor for existing in registered):
                 continue

@@ -8,7 +8,6 @@ from copy import deepcopy
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import (
-    write_llm_exchange,
     attributes_to_map,
     decode_json_attribute,
     iter_spans,
@@ -22,6 +21,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_usage,
     span_identity,
     trim_trajectory,
+    write_llm_exchange,
 )
 from openjiuwen.extensions.observability import semconv
 
@@ -249,18 +249,18 @@ def test_llm_exchange_reads_the_standard_structured_attributes() -> None:
     span = _span(
         "llm",
         attrs={
-            semconv.GEN_AI_SYSTEM_INSTRUCTIONS: json.dumps(
-                [{"type": "text", "content": "FIXED"}]
+            semconv.GEN_AI_SYSTEM_INSTRUCTIONS: json.dumps([{"type": "text", "content": "FIXED"}]),
+            semconv.GEN_AI_INPUT_MESSAGES: json.dumps(
+                [
+                    {"role": "user", "parts": [{"type": "text", "content": "hi"}]},
+                    {
+                        "role": "assistant",
+                        "parts": [{"type": "text", "content": ""}],
+                        "tool_calls": [{"id": "t1"}],
+                    },
+                    {"role": "system", "parts": [{"type": "text", "content": "DELTA"}]},
+                ]
             ),
-            semconv.GEN_AI_INPUT_MESSAGES: json.dumps([
-                {"role": "user", "parts": [{"type": "text", "content": "hi"}]},
-                {
-                    "role": "assistant",
-                    "parts": [{"type": "text", "content": ""}],
-                    "tool_calls": [{"id": "t1"}],
-                },
-                {"role": "system", "parts": [{"type": "text", "content": "DELTA"}]},
-            ]),
             semconv.GEN_AI_OUTPUT_MESSAGES: json.dumps(
                 [{"role": "assistant", "parts": [{"type": "text", "content": "done"}]}]
             ),
