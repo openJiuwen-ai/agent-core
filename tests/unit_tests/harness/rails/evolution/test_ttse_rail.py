@@ -1134,6 +1134,11 @@ def test_detect_tool_error_signals_skips_data_fetch_tools():
     messages = [
         {"role": "tool", "name": "read_file", "content": "Error: file not found"},
         {"role": "tool", "name": "web_search", "content": "request failed"},
+        {
+            "role": "tool",
+            "name": "ttse_consult",
+            "content": "[FACT] rustc 编译失败时检查编码；[TIP] When 日志很大: 用 grep 提取错误",
+        },
     ]
     assert detect_tool_error_signals(messages) == []
 

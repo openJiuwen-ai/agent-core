@@ -396,6 +396,9 @@ def _normalize_feedback_items(
     return [(name, excerpt[:600]) for name in candidate_skills]
 
 # Tools whose output is fetched content (web pages, files, search results).
+# ``ttse_consult`` returns FACT/TIP text that often mentions 失败/错误 as
+# historical heuristics; keyword-scanning it as a live tool crash is a
+# false positive for both skill evolution and TTSE detect.
 _DATA_FETCH_TOOLS = frozenset(
     {
         "mcp_fetch_webpage",
@@ -413,6 +416,7 @@ _DATA_FETCH_TOOLS = frozenset(
         "get_url",
         "curl",
         "wget",
+        "ttse_consult",
     }
 )
 
