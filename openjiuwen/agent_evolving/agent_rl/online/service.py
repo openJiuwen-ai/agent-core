@@ -282,11 +282,16 @@ def build_rl_service_app(  # pylint: disable=too-many-arguments,too-many-locals,
             raise _task_error(exc, "task_conflict") from exc
 
     @app.post("/v1/gateway/upload/batch")
-    async def upload_rail(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    async def upload_trajectory_batch(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        protocol_version = str(payload.get("protocol_version") or "")
         try:
-            result = await trajectory_api.rail_ingestor.ingest_rail_batch(payload)
+            if protocol_version == "rail-v1":
+                result = await trajectory_api.rail_ingestor.ingest_rail_batch(payload)
+            else:
+                result = await trajectory_api.batch_create_trajectories(payload)
         except ValueError as exc:
-            raise _error(400, "invalid_rail_batch", str(exc)) from exc
+            error_code = "invalid_rail_batch" if protocol_version == "rail-v1" else "invalid_trajectory_batch"
+            raise _error(400, error_code, str(exc)) from exc
         return {"ok": True, "result": result}
 
     @app.get("/v1/rl/trajectories/stats")
@@ -372,6 +377,7 @@ def build_app_from_config(config: Any) -> FastAPI:  # pylint: disable=too-many-l
             fixed_user_id=config.model_id,
             fixed_model_id=config.model_id,
         ),
+        redis=redis,
         trajectory_store=trajectory_store,
         pending_judge_store=pending_judge_store,
     )
