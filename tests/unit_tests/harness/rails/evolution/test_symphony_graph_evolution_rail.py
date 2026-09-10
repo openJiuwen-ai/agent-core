@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags, TraceState
 
 import openjiuwen.harness.rails.evolution.evolution_rail as evolution_rail_module
@@ -45,6 +46,7 @@ def _span(
     trace_id: int = 1,
     parent_span_id: int | None = None,
     attributes: dict | None = None,
+    scope_name: str = "test",
 ) -> ReadableSpan:
     parent = None
     if parent_span_id is not None:
@@ -57,6 +59,7 @@ def _span(
         )
     return ReadableSpan(
         name=name,
+        instrumentation_scope=InstrumentationScope(scope_name),
         context=SpanContext(
             trace_id=trace_id,
             span_id=span_id,
@@ -831,19 +834,26 @@ async def test_private_history_partially_trims_the_oldest_increment() -> None:
     assert capture is not None
 
     for span_id in (1, 2, 3):
-        rail.trajectory_span_processor.on_end(_span("llm.call", span_id))
+        rail.trajectory_span_processor.on_end(
+            _span("llm.call", span_id, scope_name="bridge" if span_id == 3 else "native")
+        )
     rail._drain_for_hook(ctx)
     for span_id in (4, 5):
-        rail.trajectory_span_processor.on_end(_span("llm.call", span_id))
+        rail.trajectory_span_processor.on_end(_span("llm.call", span_id, scope_name="native"))
     rail._drain_for_hook(ctx)
 
     state = rail._state(capture)
     assert state is not None
     assert state.span_count == 3
     assert state.increment_span_counts == [1, 2]
+    scopes = state.increments[0].to_otlp()["resourceSpans"][0]["scopeSpans"]
+    assert [(group["scope"]["name"], [span["spanId"] for span in group["spans"]]) for group in scopes] == [
+        ("native", []),
+        ("bridge", [f"{3:016x}"]),
+    ]
     projected = rail._project_state_trajectory(capture, state)
     assert projected is not None
-    assert [span["spanId"] for span in iter_spans(projected)] == [f"{span_id:016x}" for span_id in (3, 4, 5)]
+    assert sorted(span["spanId"] for span in iter_spans(projected)) == [f"{span_id:016x}" for span_id in (3, 4, 5)]
     rail._unsubscribe_capture(capture)
 
 
