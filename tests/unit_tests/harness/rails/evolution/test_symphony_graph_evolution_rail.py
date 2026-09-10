@@ -1597,7 +1597,7 @@ def test_summary_redacts_binary_and_bounds_values() -> None:
     assert compact["base64_blob"] == "<redacted>"
     assert compact["password"] == "<redacted>"
     assert compact["raw"] == "<redacted>"
-    assert len(compact["normal"].encode()) <= 256
+    assert len(compact["normal"].encode()) <= 512
     assert "...<truncated>..." in compact["normal"]
 
 
@@ -1627,12 +1627,82 @@ def test_summary_recovers_representative_branches_from_truncated_nested_json() -
     assert event_text is not None
     event = json.loads(event_text)
     serialized = json.dumps(event, ensure_ascii=False)
-    assert event["input"]["truncated"] is True
+    assert event["input"]["structured"] is True
+    assert event["input"]["partial"] is True
     assert "weather" in event["input"]["keys"]
-    assert "content.weather.date" in serialized
+    assert '"branch": "weather"' in serialized
+    assert '"date"' in serialized
     assert "2026-09-11" in serialized
     assert "private-session" not in serialized
-    assert len(event_text.encode()) <= 512
+    assert len(event_text.encode()) <= 1024
+
+
+def test_summary_preserves_short_complete_json_and_structures_long_complete_json() -> None:
+    short = '{"city":"北京","days":1}'
+    assert rail_module._compact_trace_value(short, max_bytes=128) == short
+    event_sized_json = json.dumps({"payload": "x" * 700})
+    event_text = rail_module._bounded_summary_event({"tool": "write_file", "ok": True, "input": event_sized_json})
+    assert json.loads(event_text)["input"] == event_sized_json
+
+    content = json.dumps(
+        {
+            "meta": {"title": "北京一日游"},
+            "preferences": {"pace": "relaxed"},
+            "sources": [{"title": "wttr.in 实时天气预报（北京）", "url": "https://wttr.in/Beijing"}],
+            "weather": [
+                {
+                    "date": "2026-09-12",
+                    "condition": "晴转多云，18–29°C，降水概率低",
+                }
+            ],
+            "schedule": [{"place": "故宫", "source_ids": ["weather-wttr"]}],
+            "notes": "x" * 4000,
+        },
+        ensure_ascii=False,
+    )
+    wrapped = json.dumps(
+        [[{"file_path": "/tmp/guide.json", "content": content}], {"session_id": "private-session"}],
+        ensure_ascii=False,
+    )
+
+    event_text = rail_module._summary_tool_event(
+        {"name": "write_file", "input": wrapped, "output": {"success": True}},
+        None,
+    )
+
+    assert event_text is not None
+    event = json.loads(event_text)
+    structured = event["input"]["content"]
+    serialized = json.dumps(structured, ensure_ascii=False)
+    assert structured["structured"] is True
+    assert structured["partial"] is False
+    assert structured["keys"] == ["meta", "preferences", "sources", "weather", "schedule", "notes"]
+    assert '"branch": "sources"' in serialized
+    assert "wttr.in 实时天气预报（北京）" in serialized
+    assert '"branch": "weather"' in serialized
+    assert "2026-09-12" in serialized
+    assert "晴转多云" in serialized
+    assert "private-session" not in serialized
+    assert len(event_text.encode()) <= 1024
+
+
+def test_summary_structures_top_level_array_and_redacts_sensitive_values() -> None:
+    content = json.dumps(
+        [
+            {"name": "first", "api_key": "private-key", "payload": "x" * 800},
+            {"name": "second", "value": 2},
+        ]
+    )
+
+    compact = rail_module._compact_trace_value(content, max_bytes=512)
+
+    assert compact["structured"] is True
+    assert compact["partial"] is False
+    assert compact["keys"] == ["0", "1"]
+    serialized = json.dumps(compact)
+    assert "private-key" not in serialized
+    assert "<redacted>" in serialized
+    assert '"branch": "1"' in serialized
 
 
 def test_summary_recovers_complete_nested_json_when_envelope_tail_is_truncated() -> None:
@@ -1650,7 +1720,8 @@ def test_summary_recovers_complete_nested_json_when_envelope_tail_is_truncated()
 
     assert summary is not None
     serialized = json.dumps(summary, ensure_ascii=False)
-    assert "content.middle.value" in serialized
+    assert '"branch": "middle"' in serialized
+    assert '["value", "保留内容"]' in serialized
     assert "保留内容" in serialized
     assert "private-session" not in serialized
 
@@ -1667,7 +1738,7 @@ def test_summary_keeps_utf8_valid_when_unicode_escape_is_truncated() -> None:
     )
 
     assert event_text is not None
-    assert len(event_text.encode("utf-8")) <= 512
+    assert len(event_text.encode("utf-8")) <= 1024
     assert "\\ud83d" not in event_text
 
 
@@ -1868,7 +1939,7 @@ def test_edge_summary_covers_expanded_fragment_head_and_tail() -> None:
                 {
                     semconv.GEN_AI_TOOL_NAME: name,
                     semconv.GEN_AI_TOOL_INPUT: json.dumps({"content": content}),
-                    semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True}),
+                    semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True}),
                 }
             ),
         }
@@ -1926,7 +1997,7 @@ def test_edge_summary_omits_framework_ids_and_read_bodies() -> None:
                 {
                     semconv.GEN_AI_TOOL_NAME: name,
                     semconv.GEN_AI_TOOL_INPUT: input_value,
-                    semconv.GEN_AI_TOOL_OUTPUT: output_value,
+                    semconv.GEN_AI_TOOL_CALL_RESULT: output_value,
                     semconv.GEN_AI_TOOL_CALL_ID: "private-call-id",
                 }
             ),
@@ -2173,7 +2244,7 @@ async def test_edge_summary_preserves_diverse_middle_tool_and_tail_command() -> 
                 {
                     semconv.GEN_AI_TOOL_NAME: name,
                     semconv.GEN_AI_TOOL_INPUT: json.dumps(input_value),
-                    semconv.GEN_AI_TOOL_OUTPUT: json.dumps(output_value),
+                    semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps(output_value),
                 }
             ),
         }
@@ -2271,7 +2342,7 @@ async def test_edge_summary_preserves_diverse_middle_tool_and_tail_command() -> 
     assert "framework-session" not in serialized
     assert "SKILL.md" not in serialized
     assert "#span=" not in serialized
-    assert len(serialized.encode()) <= 12 * 1024
+    assert len(serialized.encode()) <= 24 * 1024
 
 
 @pytest.mark.asyncio
@@ -2321,7 +2392,7 @@ def _emit_interrupt_segment(rail: SymphonyGraphEvolutionRail, trace: int) -> Non
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "skill_tool",
                 semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": "alpha", "relative_file_path": "SKILL.md"}),
-                semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True}),
+                semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True}),
             },
         )
     )
@@ -2614,7 +2685,7 @@ async def test_resume_retains_pending_continuity_gap_and_quality(
             6,
             trace_id=1,
             parent_span_id=2,
-            attributes={semconv.GEN_AI_TOOL_NAME: "bad", semconv.GEN_AI_TOOL_OUTPUT: "{broken"},
+            attributes={semconv.GEN_AI_TOOL_NAME: "bad", semconv.GEN_AI_TOOL_CALL_RESULT: "{broken"},
         )
     )
     await rail.after_invoke(ctx)

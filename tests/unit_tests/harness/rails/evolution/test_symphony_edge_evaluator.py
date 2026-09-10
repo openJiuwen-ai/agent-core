@@ -371,7 +371,7 @@ async def test_requests_are_bounded_data_without_execution_control_fields() -> N
     assert set(payload["source"]) == {"skill", "events"}
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     assert all(token not in serialized for token in ("candidate-1", "fragment-2", "#span="))
-    assert len(json.dumps(call["messages"], ensure_ascii=False, separators=(",", ":")).encode()) <= 12 * 1024
+    assert len(json.dumps(call["messages"], ensure_ascii=False, separators=(",", ":")).encode()) <= 24 * 1024
     assert call["temperature"] == 0
     assert call["max_tokens"] == 1024
     assert call["reasoning"] == {"mode": "disabled"}
@@ -379,6 +379,27 @@ async def test_requests_are_bounded_data_without_execution_control_fields() -> N
     system_prompt = call["messages"][0]["content"].casefold()
     assert "names" in system_prompt and "order" in system_prompt and "planned" in system_prompt
     assert "do not infer" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_single_candidate_can_use_more_than_legacy_twelve_kib_budget() -> None:
+    candidate = _candidate(1)
+    summary = SymphonyEdgeEvaluationSummary(
+        endpoint_a=SymphonyEdgeEndpointSummary(input="a" * 20_000, output="b" * 20_000),
+        endpoint_b=SymphonyEdgeEndpointSummary(input="c" * 20_000, output="d" * 20_000),
+    )
+    llm = _RecordingLLM()
+
+    await evaluate_symphony_edge_candidates(
+        llm=llm,
+        query="query",
+        candidates=(candidate,),
+        decisions=(_decision(candidate),),
+        summaries={candidate.candidate_id: summary},
+    )
+
+    message_bytes = len(json.dumps(llm.calls[0]["messages"], ensure_ascii=False, separators=(",", ":")).encode())
+    assert 12 * 1024 < message_bytes <= 24 * 1024
 
 
 @pytest.mark.asyncio
@@ -599,6 +620,31 @@ async def test_all_sixty_four_valid_candidates_are_evaluated() -> None:
 
     assert len(llm.calls) == 64
     assert all(decision.status == "success" for decision in result)
+
+
+@pytest.mark.asyncio
+async def test_sixty_four_candidates_share_the_legacy_total_input_budget() -> None:
+    candidates = tuple(_candidate(index) for index in range(1, 65))
+    large_summary = SymphonyEdgeEvaluationSummary(
+        endpoint_a=SymphonyEdgeEndpointSummary(input="a" * 20_000, output="b" * 20_000),
+        endpoint_b=SymphonyEdgeEndpointSummary(input="c" * 20_000, output="d" * 20_000),
+    )
+    llm = _RecordingLLM()
+
+    await evaluate_symphony_edge_candidates(
+        llm=llm,
+        query="query",
+        candidates=candidates,
+        decisions=tuple(_decision(candidate) for candidate in candidates),
+        summaries={candidate.candidate_id: large_summary for candidate in candidates},
+    )
+
+    message_sizes = [
+        len(json.dumps(call["messages"], ensure_ascii=False, separators=(",", ":")).encode()) for call in llm.calls
+    ]
+    assert len(message_sizes) == 64
+    assert max(message_sizes) <= 12 * 1024
+    assert sum(message_sizes) <= 768 * 1024
 
 
 @pytest.mark.asyncio

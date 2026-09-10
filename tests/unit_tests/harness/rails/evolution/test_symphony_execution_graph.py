@@ -1143,7 +1143,7 @@ def _native_cross_trace_input():
                     {
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
                         semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": name, "relative_file_path": "SKILL.md"}),
-                        semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True, "artifact_id": "artifact"}),
+                        semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True, "artifact_id": "artifact"}),
                     }
                 ),
             },

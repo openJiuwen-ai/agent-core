@@ -31,12 +31,12 @@ _MAX_CONCURRENT_CANDIDATE_CALLS = 8
 _MAX_RESPONSE_TOKENS = 1024
 _MAX_RESPONSE_BYTES = 16 * 1024
 _MAX_REASON_BYTES = 512
-_MAX_SUMMARY_FIELD_BYTES = 3 * 1024
+_MAX_SUMMARY_FIELD_BYTES = 6 * 1024
 _MAX_QUERY_BYTES = 256
-_MAX_CANDIDATE_PAYLOAD_BYTES = 11 * 1024
-_MAX_CANDIDATE_MESSAGE_BYTES = 12 * 1024
+_MAX_CANDIDATE_PAYLOAD_BYTES = 23 * 1024
+_MAX_CANDIDATE_MESSAGE_BYTES = 24 * 1024
 _MAX_EVALUATED_CANDIDATES = 64
-_MAX_TOTAL_INPUT_BYTES = _MAX_EVALUATED_CANDIDATES * _MAX_CANDIDATE_MESSAGE_BYTES
+_MAX_TOTAL_INPUT_BYTES = _MAX_EVALUATED_CANDIDATES * 12 * 1024
 _EVIDENCE_REF_RE = re.compile(r"^(?P<trace_id>[^#\s]+)#span=(?P<span_id>[^#\s]+)$")
 _CAPABILITY_TYPES = frozenset({"skill", "tool", "subagent"})
 _SUMMARY_FIELDS = ("fragment", "capability", "input", "output", "error", "artifact")
@@ -166,6 +166,10 @@ def _build_candidate_requests(
     bounded_query = _truncate_utf8(_safe_query(query), _MAX_QUERY_BYTES)
     requests: list[tuple[SymphonyEdgeCandidate, SymphonyMessages]] = []
     total_bytes = 0
+    candidate_message_budget = min(
+        _MAX_CANDIDATE_MESSAGE_BYTES,
+        _MAX_TOTAL_INPUT_BYTES // max(1, len(candidates)),
+    )
     for candidate in candidates:
         if not _is_complete_candidate(candidate):
             return None
@@ -173,7 +177,12 @@ def _build_candidate_requests(
             summary = summaries.get(candidate.candidate_id)
         except Exception:
             return None
-        request = _bounded_candidate_request(bounded_query, candidate, summary)
+        request = _bounded_candidate_request(
+            bounded_query,
+            candidate,
+            summary,
+            message_budget=candidate_message_budget,
+        )
         if request is None:
             return None
         messages, message_bytes = request
@@ -188,6 +197,8 @@ def _bounded_candidate_request(
     query: str,
     candidate: SymphonyEdgeCandidate,
     summary: SymphonyEdgeEvaluationSummary | None,
+    *,
+    message_budget: int = _MAX_CANDIDATE_MESSAGE_BYTES,
 ) -> tuple[SymphonyMessages, int] | None:
     """Build the largest summary that fits the bounded model request."""
 
@@ -202,7 +213,7 @@ def _bounded_candidate_request(
             continue
         messages = _messages(query, payload)
         message_bytes = _json_size(messages)
-        if _json_size(payload) <= _MAX_CANDIDATE_PAYLOAD_BYTES and message_bytes <= _MAX_CANDIDATE_MESSAGE_BYTES:
+        if _json_size(payload) <= _MAX_CANDIDATE_PAYLOAD_BYTES and message_bytes <= message_budget:
             best = messages, message_bytes
             lower = field_bytes + 1
         else:
