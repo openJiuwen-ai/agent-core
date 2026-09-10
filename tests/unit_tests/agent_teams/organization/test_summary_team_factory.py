@@ -69,16 +69,21 @@ async def test_default_summary_team_factory_provision_forwards_context():
 async def test_default_summary_team_factory_release_stops_team():
     stopped = []
 
-    async def stopper(execution_id, session_id):
-        stopped.append((execution_id, session_id))
+    async def stopper(summary_team_id, session_id):
+        stopped.append((summary_team_id, session_id))
 
     factory = DefaultSummaryTeamFactory(
         summary_team_builder=lambda *args: None,
         summary_team_stopper=stopper,
     )
-    await factory.release(execution_id="exec-1", session_id="session-1")
+    await factory.release(
+        execution_id="exec-1",
+        summary_team_id="org-summary-abc",
+        session_id="session-1",
+    )
 
-    assert stopped == [("exec-1", "session-1")]
+    # The stopper receives the team id, not the execution id.
+    assert stopped == [("org-summary-abc", "session-1")]
 
 
 @pytest.mark.asyncio

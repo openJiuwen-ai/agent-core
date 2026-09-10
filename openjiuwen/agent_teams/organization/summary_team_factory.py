@@ -14,8 +14,8 @@ by delegating the two lifecycle actions to host-supplied callables:
   The host owns ``TeamRuntimeManager.activate``, ``TeamAgentSpec`` construction,
   and unique ``team_id`` generation; the factory never inspects packages or
   templates.
-* ``summary_team_stopper`` -- stop and reclaim the Team that backs a given
-  ``SummaryExecution``.
+* ``summary_team_stopper`` -- stop and reclaim the Team identified by a
+  ``summary_team_id``.
 
 The factory deliberately does not decide summary sources, mutate task state, or
 run the aggregation business. Those are owned by the runtime and task pool
@@ -50,7 +50,7 @@ SummaryTeamRecoverer = Callable[
     Awaitable[LaunchedSummaryTeam],
 ]
 
-#: Stop and reclaim a previously provisioned Summary Team by execution id.
+#: Stop and reclaim a previously provisioned Summary Team by team id.
 SummaryTeamStopper = Callable[[str, str], Awaitable[None]]
 
 
@@ -64,8 +64,8 @@ class DefaultSummaryTeamFactory:
     Args:
         summary_team_builder: Receives ``(spec, organization_id, root_task_id,
             summary_task_id, session_id)`` and returns the running Team.
-        summary_team_stopper: Receives ``(execution_id, session_id)`` and stops /
-            reclaims the Team recorded for that execution.
+        summary_team_stopper: Receives ``(summary_team_id, session_id)`` and
+            stops / reclaims that Team.
         summary_team_recoverer: Receives ``(spec, execution_id, organization_id,
             root_task_id, summary_task_id, session_id)`` and returns the running
             Team for an interrupted execution.  Defaults to the builder, which
@@ -139,9 +139,20 @@ class DefaultSummaryTeamFactory:
             session_id,
         )
 
-    async def release(self, *, execution_id: str, session_id: str) -> None:
-        """Stop and reclaim a previously provisioned Summary Team."""
-        await self._summary_team_stopper(execution_id, session_id)
+    async def release(
+        self,
+        *,
+        execution_id: str,
+        summary_team_id: str,
+        session_id: str,
+    ) -> None:
+        """Stop and reclaim a previously provisioned Summary Team.
+
+        Only ``summary_team_id`` and ``session_id`` reach the stopper;
+        ``execution_id`` is accepted for contract symmetry with ``provision`` /
+        ``recover`` and is otherwise unused here.
+        """
+        await self._summary_team_stopper(summary_team_id, session_id)
 
 
 __all__ = [

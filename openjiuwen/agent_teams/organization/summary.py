@@ -95,8 +95,20 @@ class SummaryTeamFactory(Protocol):
         team that should now back the execution.
         """
 
-    async def release(self, *, execution_id: str, session_id: str) -> None:
-        """Stop and reclaim a previously provisioned Summary Team instance."""
+    async def release(
+        self,
+        *,
+        execution_id: str,
+        summary_team_id: str,
+        session_id: str,
+    ) -> None:
+        """Stop and reclaim a previously provisioned Summary Team instance.
+
+        ``summary_team_id`` is the Team to stop (the id returned by ``provision``
+        / ``recover``).  ``execution_id`` identifies the ``SummaryExecution`` row
+        being released, for hosts that want to correlate the stop with their own
+        bookkeeping.
+        """
 
 
 __all__ = [

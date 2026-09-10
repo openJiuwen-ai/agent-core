@@ -163,8 +163,8 @@ class FakeSummaryFactory:
             spec=SummaryTeamSpec(),
         )
 
-    async def release(self, *, execution_id, session_id):
-        self.release_calls.append((execution_id, session_id))
+    async def release(self, *, execution_id, summary_team_id, session_id):
+        self.release_calls.append((execution_id, summary_team_id, session_id))
 
 
 @pytest_asyncio.fixture
@@ -3285,6 +3285,11 @@ async def test_summary_completed_releases_execution_and_wakes_root(active_organi
 
     # The dynamic team is released (factory.release called) and execution is RELEASED.
     assert factory.release_calls, "factory.release must be called on summary completion"
+    # release must receive the team id (not the execution id) so the host can
+    # actually stop the dynamic team.
+    _exec_id, released_team_id, _session = factory.release_calls[0]
+    assert released_team_id == "team-summary"
+    assert released_team_id != _exec_id
     released = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
     assert released.status is OrgSummaryExecutionStatus.RELEASED
 
@@ -3621,7 +3626,9 @@ async def test_summary_task_failed_releases_team_and_wakes_root(active_organizat
 
     # The dynamic team is released and the execution is no longer stuck in RUNNING.
     assert factory.release_calls, "factory.release must be called on summary task failure"
-    assert factory.release_calls[0][0] == execution.execution_id
+    _exec_id, released_team_id, _session = factory.release_calls[0]
+    assert released_team_id == "team-summary"
+    assert released_team_id != execution.execution_id
     released = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
     assert released.status is OrgSummaryExecutionStatus.RELEASED
 

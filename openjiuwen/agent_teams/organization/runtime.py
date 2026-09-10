@@ -1487,7 +1487,11 @@ class OrganizationRuntimeManager:
             return
         if execution.summary_team_id:
             try:
-                await summary_factory.release(execution_id=execution.execution_id, session_id=session_id)
+                await summary_factory.release(
+                    execution_id=execution.execution_id,
+                    summary_team_id=execution.summary_team_id,
+                    session_id=session_id,
+                )
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to release summary execution %s", execution.execution_id, exc_info=True)
         await manager.task_pool.update_summary_execution(
