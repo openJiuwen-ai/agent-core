@@ -11,12 +11,26 @@ from openjiuwen.core.foundation.llm.reasoning import (
     get_reasoning_capability_catalog,
 )
 from openjiuwen.core.foundation.llm.reasoning_profiles import ReasoningCapability
+from openjiuwen.core.foundation.llm.routing import (
+    CompiledModelSelection,
+    ModelGroupModelCandidate,
+    ModelSelection,
+    ResolvedRoutingConfig,
+    ResolvedModel,
+    ResolvedModelGroup,
+    ResolvedRoute,
+    RoutingStrategyName,
+    compile_model_selection,
+    get_model_group_models,
+)
 
 # Configuration
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMApiMode,
     LLMAuthMode,
     LLMExtensionsConfig,
+    IntelliRouterConfig,
+    IntelliRouterDeploymentConfig,
     KVCacheExtensionConfig,
     ReasoningConfig,
     ModelRequestConfig,
@@ -70,6 +84,8 @@ _CONFIG_CLASSES = [
     "LLMApiMode",
     "LLMAuthMode",
     "LLMExtensionsConfig",
+    "IntelliRouterConfig",
+    "IntelliRouterDeploymentConfig",
     "KVCacheExtensionConfig",
     "ReasoningConfig",
     "BaseModelInfo",
@@ -81,6 +97,19 @@ _REASONING_APIS = [
     "get_provider_reasoning_rules",
     "get_reasoning_capability",
     "get_reasoning_capability_catalog",
+]
+
+_ROUTING_APIS = [
+    "CompiledModelSelection",
+    "ModelGroupModelCandidate",
+    "ModelSelection",
+    "ResolvedModel",
+    "ResolvedModelGroup",
+    "ResolvedRoutingConfig",
+    "ResolvedRoute",
+    "RoutingStrategyName",
+    "compile_model_selection",
+    "get_model_group_models",
 ]
 
 # Message classes
@@ -128,6 +157,7 @@ __all__ = (
     _CORE_CLASSES
     + _CONFIG_CLASSES
     + _REASONING_APIS
+    + _ROUTING_APIS
     + _MESSAGE_CLASSES
     + _MESSAGE_METADATA_CONSTANTS
     + _MESSAGE_CHUNK_CLASSES
