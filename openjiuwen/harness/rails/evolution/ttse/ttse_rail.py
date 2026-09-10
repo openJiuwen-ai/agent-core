@@ -51,12 +51,12 @@ from .render import (
     DISK_CATALOG_GUIDANCE_EN,
     rules_numbered,
 )
+from .stores import shared_store
+from .success import SignalBasedSuccessDetector, SuccessDetector
+from .trajectory_adapter import count_tool_calls, messages_to_trajectory_text
 
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
-from .stores import shared_store
-from .success import SignalBasedSuccessDetector, SuccessDetector, SuccessOutcome
-from .trajectory_adapter import count_tool_calls, messages_to_trajectory_text
 
 
 @dataclass(frozen=True)
@@ -124,6 +124,32 @@ class TTSERail(EvolutionRail):
         self._agent = None
         self._attachment_manager = None
         super().uninit(agent)
+
+    def update_llm(self, llm: Model, model: str) -> None:
+        """Hot-update induction and success-detection LLM clients."""
+        self._ttse_llm = llm
+        self._ttse_model = model
+        detector = self._success_detector
+        update = getattr(detector, "update_llm", None)
+        if callable(update):
+            update(llm, model)
+
+    def apply_runtime_config(
+        self,
+        *,
+        store_path: str,
+        evolve_enabled: bool,
+        inject_enabled: bool,
+    ) -> None:
+        """Update live store path and evolve/inject flags without remounting."""
+        cfg = self._ttse_config
+        old_path = str(getattr(cfg, "store_path", "") or "")
+        cfg.store_path = store_path
+        cfg.evolve_enabled = evolve_enabled
+        cfg.inject_enabled = inject_enabled
+        if old_path != store_path:
+            self._ttse_store.reload()
+        self.sync_inject_mode()
 
     def sync_inject_mode(self) -> None:
         """Register or drop ``ttse_consult`` after a live ``inject_enabled`` change."""
@@ -364,8 +390,7 @@ class TTSERail(EvolutionRail):
                     "task_prompt": task_query,
                     "traj_text": (
                         traj_text
-                        if not self._ttse_config.batch_traj_budget
-                        or self._ttse_config.batch_traj_budget <= 0
+                        if not self._ttse_config.batch_traj_budget or self._ttse_config.batch_traj_budget <= 0
                         else traj_text[: self._ttse_config.batch_traj_budget]
                     ),
                     "outcome": outcome,
@@ -585,9 +610,7 @@ class TTSERail(EvolutionRail):
         caps = capabilities if capabilities is not None else (self._last_capabilities or "")
         names = parse_capability_names_from_text(caps) if caps else set()
         if not names:
-            logger.warning(
-                "[TTSERail] dream capabilities empty; falling back to list_capability_names(None)"
-            )
+            logger.warning("[TTSERail] dream capabilities empty; falling back to list_capability_names(None)")
             try:
                 names = await list_capability_names(None)
             except Exception as exc:  # noqa: BLE001
@@ -617,9 +640,7 @@ class TTSERail(EvolutionRail):
                     # Dream MERGE/REWRITE inherits the cluster category; only
                     # reclassify bank rules that still lack a closed-set id.
                     need_classify = [
-                        (text, rtype)
-                        for text, rtype in result.added_items
-                        if self._record_needs_category(text, rtype)
+                        (text, rtype) for text, rtype in result.added_items if self._record_needs_category(text, rtype)
                     ]
                     if need_classify:
                         await self._classify_added_rules(need_classify)

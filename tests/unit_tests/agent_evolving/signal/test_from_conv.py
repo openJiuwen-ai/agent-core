@@ -606,9 +606,7 @@ class TestConversationSignalDetector:
             {"role": "user", "content": "不要叫我boss了，叫我master"},
         ]
         llm = MagicMock()
-        llm.invoke = AsyncMock(
-            return_value={"content": '{"is_feedback": true, "excerpt": "叫我master"}'}
-        )
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": true, "excerpt": "叫我master"}'})
         detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
 
         signals = await detector.detect_user_intent(messages)
@@ -627,9 +625,7 @@ class TestConversationSignalDetector:
             {"role": "user", "content": "不对，变量名错了"},
         ]
         llm = MagicMock()
-        llm.invoke = AsyncMock(
-            return_value={"content": '{"is_feedback": true, "excerpt": "变量名错了"}'}
-        )
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": true, "excerpt": "变量名错了"}'})
         detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
 
         signals = await detector.detect_user_intent(messages)
@@ -677,8 +673,7 @@ class TestCollectSkillsFromMessages:
                 "tool_call_id": "tc_skill",
                 "name": "skill_tool",
                 "content": (
-                    "success=True data={'skill_directory': "
-                    "'/workspace/skills/tianqi-weather', 'skill_content': 'body'}"
+                    "success=True data={'skill_directory': '/workspace/skills/tianqi-weather', 'skill_content': 'body'}"
                 ),
             },
         ]

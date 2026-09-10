@@ -101,9 +101,7 @@ async def _office_store(tmp_path, texts, *, embedding=None, rtype="fact"):
 @pytest.mark.asyncio
 async def test_bm25_ranks_keyword_hit_without_embedding(tmp_path):
     store = await _office_store(tmp_path, [HIT, *NOISE])
-    result = await retrieve_rules(
-        store, category=OFFICE, query="PresentBench slides.md", top_k=2
-    )
+    result = await retrieve_rules(store, category=OFFICE, query="PresentBench slides.md", top_k=2)
     assert result.mode == "bm25"
     assert [r["text"] for r in result.facts] == [HIT]
     assert CPP not in {r["text"] for r in result.facts}
@@ -112,9 +110,7 @@ async def test_bm25_ranks_keyword_hit_without_embedding(tmp_path):
 @pytest.mark.asyncio
 async def test_tiny_class_dumps_without_scoring(tmp_path):
     store = await _office_store(tmp_path, [HIT, CPP])
-    result = await retrieve_rules(
-        store, category=OFFICE, query="PresentBench slides.md", top_k=8
-    )
+    result = await retrieve_rules(store, category=OFFICE, query="PresentBench slides.md", top_k=8)
     assert result.mode == "dump"
     assert {r["text"] for r in result.facts} == {HIT, CPP}
 
@@ -128,9 +124,7 @@ async def test_embed_only_when_bm25_has_no_overlap(tmp_path):
         HIT: [0.0, 1.0],
         **{text: [0.0, 1.0] for text in NOISE},
     }
-    store = await _office_store(
-        tmp_path, [SEMANTIC, HIT, *NOISE], embedding=DictEmbedding(table)
-    )
+    store = await _office_store(tmp_path, [SEMANTIC, HIT, *NOISE], embedding=DictEmbedding(table))
     result = await retrieve_rules(store, category=OFFICE, query=query, top_k=2)
     assert result.mode == "embed"
     assert result.facts[0]["text"] == SEMANTIC
@@ -145,9 +139,7 @@ async def test_hybrid_keeps_lexical_and_semantic_hits(tmp_path):
         HIT: [0.2, 0.8],
         **{text: [0.0, 1.0] for text in NOISE},
     }
-    store = await _office_store(
-        tmp_path, [HIT, SEMANTIC, *NOISE], embedding=DictEmbedding(table)
-    )
+    store = await _office_store(tmp_path, [HIT, SEMANTIC, *NOISE], embedding=DictEmbedding(table))
     result = await retrieve_rules(store, category=OFFICE, query=query, top_k=2)
     assert result.mode == "hybrid"
     texts = {r["text"] for r in result.facts}
@@ -158,9 +150,7 @@ async def test_hybrid_keeps_lexical_and_semantic_hits(tmp_path):
 @pytest.mark.asyncio
 async def test_embed_failure_falls_back_to_bm25(tmp_path):
     store = await _office_store(tmp_path, [HIT, *NOISE], embedding=BoomEmbedding())
-    result = await retrieve_rules(
-        store, category=OFFICE, query="PresentBench slides.md", top_k=2
-    )
+    result = await retrieve_rules(store, category=OFFICE, query="PresentBench slides.md", top_k=2)
     assert result.mode == "bm25"
     assert result.facts[0]["text"] == HIT
 
@@ -168,9 +158,7 @@ async def test_embed_failure_falls_back_to_bm25(tmp_path):
 @pytest.mark.asyncio
 async def test_consult_query_without_category_errors(tmp_path):
     store = await _office_store(tmp_path, [HIT, *NOISE])
-    text = await render_consult_result_async(
-        store, query="PresentBench slides.md", top_k=2
-    )
+    text = await render_consult_result_async(store, query="PresentBench slides.md", top_k=2)
     assert "query requires category" in text
     assert HIT not in text
 

@@ -39,9 +39,7 @@ _CONSULT_DESCRIPTION = (
 
 _SPLIT_IDS = re.compile(r"[,;|\s]+")
 
-_QUERY_NEEDS_CATEGORY = (
-    "query requires category. Use an id from the trailing catalog attachment."
-)
+_QUERY_NEEDS_CATEGORY = "query requires category. Use an id from the trailing catalog attachment."
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -152,15 +150,9 @@ async def _render_one_category_async(
 
 def _unknown_message(unknown: Sequence[str]) -> str:
     if len(unknown) == 1:
-        return (
-            f"Unknown category `{unknown[0]}`. "
-            "Use an id from the trailing catalog attachment."
-        )
+        return f"Unknown category `{unknown[0]}`. Use an id from the trailing catalog attachment."
     listed = ", ".join(f"`{u}`" for u in unknown)
-    return (
-        f"Unknown category {listed}. "
-        "Use an id from the trailing catalog attachment."
-    )
+    return f"Unknown category {listed}. Use an id from the trailing catalog attachment."
 
 
 def _resolve_categories(category: Any) -> tuple[List[str], List[str], List[str]]:

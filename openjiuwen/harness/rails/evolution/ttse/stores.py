@@ -119,8 +119,8 @@ def shared_store(
             store = TTSERecordStore(config, embedding=embedding)
             _SHARED_STORES[key] = store
             logger.info("[TTSERail] shared bank attached path=%s", key)
-        elif embedding is not None and store._embedding is None:
-            store._embedding = embedding
+        elif embedding is not None:
+            store.attach_embedding(embedding)
         return store
 
 
@@ -153,6 +153,11 @@ class TTSERecordStore:
         self._emb_last_call_at: float = 0.0
         self._load_sync()
 
+    def attach_embedding(self, embedding: EmbeddingProvider) -> None:
+        """Bind an embedding provider if this bank was created without one."""
+        if self._embedding is None:
+            self._embedding = embedding
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -184,13 +189,17 @@ class TTSERecordStore:
         except (OSError, ValueError) as exc:
             logger.warning("[TTSERail] bank load failed at %s: %s", path, exc)
 
+    def reload(self) -> None:
+        """Reload ``bank.json`` from the current ``store_path``."""
+        self._load_sync()
+
     def reload_if_disk_newer(self) -> bool:
         """Reload when another process wrote ``bank.json`` (mtime moved)."""
         mtime = self._disk_mtime()
         if mtime <= 0 or mtime <= float(self._loaded_mtime or 0.0):
             return False
         logger.info("[TTSERail] reloading bank from disk mtime=%s path=%s", mtime, self._config.store_path)
-        self._load_sync()
+        self.reload()
         return True
 
     async def save(self) -> None:
@@ -427,7 +436,8 @@ class TTSERecordStore:
             await self.save()
         return record
 
-    def mark_injected(self, records: Sequence[Dict[str, Any]], *, now: Optional[float] = None) -> int:
+    @staticmethod
+    def mark_injected(records: Sequence[Dict[str, Any]], *, now: Optional[float] = None) -> int:
         """Refresh display clock on records that actually entered the prompt.
 
         Mutates the shared dict objects in the bank. Returns how many records

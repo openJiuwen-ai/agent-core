@@ -83,9 +83,7 @@ def test_parse_tip_happy_path():
 
 
 def test_parse_tip_strips_backticks_and_takes_first_token():
-    parsed = parse_tip(
-        "When a PDF file must be read: use `code` with pdfplumber to parse and extract the content"
-    )
+    parsed = parse_tip("When a PDF file must be read: use `code` with pdfplumber to parse and extract the content")
     assert parsed is not None
     assert parsed[1] == "code"
 
@@ -97,9 +95,7 @@ def test_parse_tip_skips_filler_words():
 
 
 def test_parse_tip_accepts_fullwidth_colon():
-    parsed = parse_tip(
-        "When 估值请求只包含公司名而缺少上市状态、行业或财务数据：use ask_user to 先向用户收集这些信息"
-    )
+    parsed = parse_tip("When 估值请求只包含公司名而缺少上市状态、行业或财务数据：use ask_user to 先向用户收集这些信息")
     assert parsed == (
         "估值请求只包含公司名而缺少上市状态、行业或财务数据",
         "ask_user",
@@ -171,7 +167,9 @@ async def test_store_new_record_has_metadata(tmp_path):
 @pytest.mark.asyncio
 async def test_legacy_bank_migration_sets_last_injected(tmp_path):
     path = tmp_path / "bank.json"
-    path.write_text(json.dumps({"facts": [{"text": "legacy", "count": 2}], "tips": [], "retired": []}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"facts": [{"text": "legacy", "count": 2}], "tips": [], "retired": []}), encoding="utf-8"
+    )
     store = TTSERecordStore(TTSEConfig(store_path=str(path)))
     rec = store.facts[0]
     assert rec["count"] == 2
@@ -198,7 +196,9 @@ async def test_prune_stale_ttl(tmp_path):
 @pytest.mark.asyncio
 async def test_legacy_migrated_not_immediately_pruned(tmp_path):
     path = tmp_path / "bank.json"
-    path.write_text(json.dumps({"facts": [{"text": "legacy", "count": 1}], "tips": [], "retired": []}), encoding="utf-8")
+    path.write_text(
+        json.dumps({"facts": [{"text": "legacy", "count": 1}], "tips": [], "retired": []}), encoding="utf-8"
+    )
     cfg = TTSEConfig(store_path=str(path), dream_ttl_days=90)
     store = TTSERecordStore(cfg)
     pf, _ = await prune_stale(store, cfg, now=time.time())
@@ -343,12 +343,8 @@ async def test_dream_keep_distinct_tips(tmp_path):
         )
 
     rail = _make_rail(tmp_path, ScriptedLLM(handler), cfg=cfg, embedding=emb)
-    await rail._ttse_store.add_record_direct(
-        "tip", "When csv needs counts: use python_exec to group rows", save=False
-    )
-    await rail._ttse_store.add_record_direct(
-        "tip", "When logs are huge: use grep to extract matches", save=False
-    )
+    await rail._ttse_store.add_record_direct("tip", "When csv needs counts: use python_exec to group rows", save=False)
+    await rail._ttse_store.add_record_direct("tip", "When logs are huge: use grep to extract matches", save=False)
     await rail._ttse_store.save()
     before = list(rail._ttse_store.tips_texts())
     result, _ = await run_dream_pass(

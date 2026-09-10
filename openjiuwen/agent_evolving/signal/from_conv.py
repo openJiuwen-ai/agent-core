@@ -315,8 +315,7 @@ def _build_user_feedback_prompt_inputs(
                 break
 
     context_lines = [
-        _format_feedback_dialog_line(role, content, language=language)
-        for role, content in dialog[start:last_user_idx]
+        _format_feedback_dialog_line(role, content, language=language) for role, content in dialog[start:last_user_idx]
     ]
     conversation_context = "\n".join(context_lines)[:_USER_FEEDBACK_CONTEXT_CHAR_LIMIT]
     if not conversation_context:
@@ -394,6 +393,7 @@ def _normalize_feedback_items(
     if len(candidate_skills) == 1:
         return [(default_skill, excerpt[:600])]
     return [(name, excerpt[:600]) for name in candidate_skills]
+
 
 # Tools whose output is fetched content (web pages, files, search results).
 # ``ttse_consult`` returns FACT/TIP text that often mentions 失败/错误 as
@@ -539,11 +539,7 @@ class ConversationSignalDetector:
         signal_types: Optional[Set[str]] = None,
     ) -> List[EvolutionSignal]:
         try:
-            messages = (
-                list(input_data)
-                if isinstance(input_data, list)
-                else trajectory_to_messages(input_data)
-            )
+            messages = list(input_data) if isinstance(input_data, list) else trajectory_to_messages(input_data)
             signals = self._detect_from_messages(messages)
         except Exception as exc:
             logger.warning(
@@ -624,9 +620,7 @@ class ConversationSignalDetector:
                 contains skill_tool / skill_complete records).
         """
         if hasattr(messages, "to_otlp") or hasattr(messages, "otlp_trace"):
-            raise TypeError(
-                "detect_user_intent() expects normalized messages; call trajectory_to_messages() first."
-            )
+            raise TypeError("detect_user_intent() expects normalized messages; call trajectory_to_messages() first.")
         prompt_inputs = _build_user_feedback_prompt_inputs(
             messages,
             language=self._language,
@@ -640,9 +634,7 @@ class ConversationSignalDetector:
         )
 
         traj_skills = self.collect_skills_from_messages(messages)
-        session_used_skills = [
-            str(s).strip() for s in (extra_skills or []) if str(s).strip()
-        ]
+        session_used_skills = [str(s).strip() for s in (extra_skills or []) if str(s).strip()]
         skill_names = list(dict.fromkeys(session_used_skills or traj_skills))
         logger.info(
             "[detect_user_intent] session used skills=%s (traj=%s)",
@@ -718,9 +710,7 @@ class ConversationSignalDetector:
             return self._skillless_pattern_fallback(text)
 
         prompt_template = (
-            _USER_FEEDBACK_SKILLESS_PROMPT_CN
-            if self._language == "cn"
-            else _USER_FEEDBACK_SKILLESS_PROMPT_EN
+            _USER_FEEDBACK_SKILLESS_PROMPT_CN if self._language == "cn" else _USER_FEEDBACK_SKILLESS_PROMPT_EN
         )
         prompt = prompt_template.format(
             conversation_context=conversation_context,
@@ -947,10 +937,7 @@ class ConversationSignalDetector:
         if not names or not text:
             return []
         if _CORRECTION_PATTERN.search(text):
-            return [
-                self._make_user_feedback_signal(text, name, user_message=text)
-                for name in names
-            ]
+            return [self._make_user_feedback_signal(text, name, user_message=text) for name in names]
         return []
 
     @staticmethod

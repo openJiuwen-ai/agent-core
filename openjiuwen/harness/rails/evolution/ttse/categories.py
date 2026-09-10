@@ -46,8 +46,7 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
         "id": "data-analytics-and-visualization",
         "name": "Data analytics, BI and visualization",
         "description": (
-            "Analyze structured data to compute metrics, patterns, features, models, "
-            "charts or business conclusions."
+            "Analyze structured data to compute metrics, patterns, features, models, charts or business conclusions."
         ),
         "select_when": (
             "Route here when the primary object is a dataset or table and the goal is "
@@ -62,8 +61,7 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
         "id": "software-engineering-devops",
         "name": "Software engineering and DevOps",
         "description": (
-            "Modify, test, build, migrate, review or operate software projects and "
-            "developer infrastructure."
+            "Modify, test, build, migrate, review or operate software projects and developer infrastructure."
         ),
         "select_when": (
             "Route here when the primary object is source code, a repository, build "
@@ -79,8 +77,7 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
         "id": "security-privacy-and-risk",
         "name": "Security, privacy and risk analysis",
         "description": (
-            "Investigate or reduce security, privacy, vulnerability, network, identity "
-            "or operational risk."
+            "Investigate or reduce security, privacy, vulnerability, network, identity or operational risk."
         ),
         "select_when": (
             "Route here when the primary goal is security assessment, threat detection, "
@@ -95,8 +92,7 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
         "id": "media-multimodal-and-creative",
         "name": "Media, multimodal and creative processing",
         "description": (
-            "Transform or understand audio, video, images, graphics, 3D assets or "
-            "multimodal creative content."
+            "Transform or understand audio, video, images, graphics, 3D assets or multimodal creative content."
         ),
         "select_when": (
             "Route here when the primary object is media content rather than a document "
@@ -111,8 +107,7 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
         "id": "science-engineering-modeling",
         "name": "Science, engineering and mathematical modeling",
         "description": (
-            "Solve domain equations, simulations or analyses in science, engineering, "
-            "math or physical systems."
+            "Solve domain equations, simulations or analyses in science, engineering, math or physical systems."
         ),
         "select_when": (
             "Route here when scientific or engineering domain semantics are primary, "
@@ -126,10 +121,7 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
     {
         "id": "search-research-and-knowledge",
         "name": "Search, research and knowledge work",
-        "description": (
-            "Find, retrieve, verify, cite or organize information from sources or "
-            "reference datasets."
-        ),
+        "description": ("Find, retrieve, verify, cite or organize information from sources or reference datasets."),
         "select_when": (
             "Route here when the primary goal is evidence gathering, lookup, literature "
             "work, knowledge retrieval or information organization."
@@ -143,8 +135,7 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
         "id": "embodied-simulation-and-interactive-tasks",
         "name": "Embodied, simulated and interactive tasks",
         "description": (
-            "Act inside simulated, embodied, game-like or interactive environments "
-            "with state and actions."
+            "Act inside simulated, embodied, game-like or interactive environments with state and actions."
         ),
         "select_when": (
             "Route here when the primary task is navigation, object manipulation, "
@@ -159,16 +150,14 @@ DEFAULT_CATEGORIES: Tuple[Dict[str, str], ...] = (
         "id": "skill-agent-meta-workflows",
         "name": "Agent, skill and workflow meta tasks",
         "description": (
-            "Work on skills, agents, prompts, memory, retrieval, benchmarks, plans "
-            "or orchestration itself."
+            "Work on skills, agents, prompts, memory, retrieval, benchmarks, plans or orchestration itself."
         ),
         "select_when": (
             "Route here only when the task is about building, testing, evaluating or "
             "coordinating the agent/skill system."
         ),
         "dont_select_when": (
-            "Do not route normal domain tasks here just because they may use a skill "
-            "or agent internally."
+            "Do not route normal domain tasks here just because they may use a skill or agent internally."
         ),
     },
     {

@@ -127,9 +127,7 @@ def induce_batch_prompt(group, capabilities: str, existing_facts: str, existing_
     n = len(group)
     blocks = []
     for i, (tid, _prompt, traj, lbl) in enumerate(group, 1):
-        blocks.append(
-            f"=== Task {i}/{n} [{tid}] — {lbl} ===\nTrajectory excerpt:\n{traj}"
-        )
+        blocks.append(f"=== Task {i}/{n} [{tid}] — {lbl} ===\nTrajectory excerpt:\n{traj}")
     tasks_block = "\n\n".join(blocks)
     return f"""You are extracting reusable knowledge from a BATCH of {n} agent tasks.
 

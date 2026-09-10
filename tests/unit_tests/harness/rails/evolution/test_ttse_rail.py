@@ -28,7 +28,11 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeI
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint, PreparedEvolutionInput
+from openjiuwen.harness.rails.evolution.evolution_rail import (
+    EvolutionRail,
+    EvolutionTriggerPoint,
+    PreparedEvolutionInput,
+)
 from openjiuwen.harness.rails.evolution.ttse import (
     TTSEConfig,
     TTSERail,
@@ -75,15 +79,14 @@ def _empty_trajectory(*, execution_id: str = "e1", session_id: str = "s1") -> Tr
             "resourceSpans": [
                 {
                     "resource": {
-                        "attributes": attributes_from_map(
-                            {TRAJECTORY_ID: execution_id, SESSION_ID: session_id}
-                        )
+                        "attributes": attributes_from_map({TRAJECTORY_ID: execution_id, SESSION_ID: session_id})
                     },
                     "scopeSpans": [{"scope": {"name": "test"}, "spans": []}],
                 }
             ]
         }
     )
+
 
 class ScriptedLLM:
     """LLM whose ``invoke`` dispatches on the prompt via a handler callable."""
@@ -111,9 +114,7 @@ def _make_rail(tmp_path, llm, *, cfg=None, success_detector=None) -> TTSERail:
         llm=llm,
         model="dummy-model",
         ttse_config=cfg or TTSEConfig(store_path=str(tmp_path / "bank.json")),
-        success_detector=success_detector
-        if success_detector is not None
-        else TrajectoryErrorSuccessDetector(),
+        success_detector=success_detector if success_detector is not None else TrajectoryErrorSuccessDetector(),
         trajectory_span_processor=_PROCESSOR,
     )
 
@@ -336,6 +337,50 @@ def test_rail_inherits_evolution_rail_and_triggers_when_enabled(tmp_path):
     assert rail._allow_evolution_trigger(EvolutionTriggerPoint.AFTER_INVOKE, ctx=None) is True
     rail._ttse_config.evolve_enabled = False
     assert rail._allow_evolution_trigger(EvolutionTriggerPoint.AFTER_INVOKE, ctx=None) is False
+
+
+def test_update_llm_replaces_induction_and_detector_clients(tmp_path):
+    old_llm = ScriptedLLM(lambda p: "NONE")
+    detector = SignalBasedSuccessDetector(llm=old_llm, model="old")
+    rail = TTSERail(
+        llm=old_llm,
+        model="old",
+        ttse_config=TTSEConfig(store_path=str(tmp_path / "bank.json")),
+        success_detector=detector,
+        trajectory_span_processor=_PROCESSOR,
+    )
+    new_llm = ScriptedLLM(lambda p: "NONE")
+    rail.update_llm(new_llm, "new")
+    assert rail._ttse_llm is new_llm
+    assert rail._ttse_model == "new"
+    assert detector._llm is new_llm
+    assert detector._model == "new"
+
+
+@pytest.mark.asyncio
+async def test_apply_runtime_config_reloads_when_store_path_changes(tmp_path):
+    reset_shared_stores()
+    old_path = str(tmp_path / "old.json")
+    new_path = str(tmp_path / "new.json")
+    source = TTSERecordStore(TTSEConfig(store_path=new_path))
+    await source.add_fact("from new bank")
+    rail = TTSERail(
+        llm=ScriptedLLM(lambda p: "NONE"),
+        model="m",
+        ttse_config=TTSEConfig(store_path=old_path, evolve_enabled=True, inject_enabled=True),
+        trajectory_span_processor=_PROCESSOR,
+    )
+    assert rail._ttse_store.facts_texts() == []
+    rail.apply_runtime_config(
+        store_path=new_path,
+        evolve_enabled=False,
+        inject_enabled=False,
+    )
+    assert rail._ttse_config.store_path == new_path
+    assert rail._ttse_config.evolve_enabled is False
+    assert rail._ttse_config.inject_enabled is False
+    assert "from new bank" in rail._ttse_store.facts_texts()
+    reset_shared_stores()
 
 
 @pytest.mark.asyncio
@@ -842,9 +887,7 @@ async def test_signal_detector_reads_real_failure_from_messages(tmp_path):
 
 @pytest.mark.asyncio
 async def test_signal_detector_script_artifact_alone_does_not_fast_path(tmp_path):
-    llm = ScriptedLLM(
-        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
-    )
+    llm = ScriptedLLM(lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}')
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     det = SignalBasedSuccessDetector(
         llm=llm,
@@ -910,9 +953,7 @@ async def test_signal_detector_reply_judge_once(tmp_path):
 
 @pytest.mark.asyncio
 async def test_signal_detector_honors_ttse_score(tmp_path):
-    llm = ScriptedLLM(
-        lambda p: '{"goals":[],"delivery":"answer","outcome":"partial","reason":"incomplete"}'
-    )
+    llm = ScriptedLLM(lambda p: '{"goals":[],"delivery":"answer","outcome":"partial","reason":"incomplete"}')
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
 
@@ -956,9 +997,7 @@ async def test_signal_detector_bad_json_skips(tmp_path):
 @pytest.mark.asyncio
 async def test_signal_detector_user_intent_partial_no_judge(tmp_path):
     """Secondary corrective user turn -> partial; Judge LLM is not called."""
-    llm = ScriptedLLM(
-        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
-    )
+    llm = ScriptedLLM(lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}')
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     fake = _FakeSignalDetector([], user_intent_signals=[SimpleNamespace(signal_type="user_intent")])
     det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg, signal_detector=fake)
@@ -1005,9 +1044,7 @@ async def test_signal_detector_user_intent_beats_artifact_skip(tmp_path):
 
 @pytest.mark.asyncio
 async def test_signal_detector_mock_user_intent_empty_continues_to_judge(tmp_path):
-    llm = ScriptedLLM(
-        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
-    )
+    llm = ScriptedLLM(lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}')
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     fake = _FakeSignalDetector([], user_intent_signals=[])
     det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg, signal_detector=fake)
@@ -1240,18 +1277,19 @@ async def test_consult_lists_catalog_and_opens_category(tmp_path):
 
 
 def test_parse_consult_categories_splits_comma_list_and_json():
-    assert parse_consult_categories("documents-office-and-records") == [
-        "documents-office-and-records"
+    assert parse_consult_categories("documents-office-and-records") == ["documents-office-and-records"]
+    assert parse_consult_categories("documents-office-and-records, software-engineering-devops") == [
+        "documents-office-and-records",
+        "software-engineering-devops",
     ]
-    assert parse_consult_categories(
-        "documents-office-and-records, software-engineering-devops"
-    ) == ["documents-office-and-records", "software-engineering-devops"]
-    assert parse_consult_categories(
-        ["documents-office-and-records", "software-engineering-devops"]
-    ) == ["documents-office-and-records", "software-engineering-devops"]
-    assert parse_consult_categories(
-        '["documents-office-and-records","other"]'
-    ) == ["documents-office-and-records", "other"]
+    assert parse_consult_categories(["documents-office-and-records", "software-engineering-devops"]) == [
+        "documents-office-and-records",
+        "software-engineering-devops",
+    ]
+    assert parse_consult_categories('["documents-office-and-records","other"]') == [
+        "documents-office-and-records",
+        "other",
+    ]
     assert parse_consult_categories("") == []
 
 
@@ -1314,9 +1352,7 @@ async def test_consult_caps_categories_and_skips_unknown(tmp_path):
 async def test_disk_catalog_trails_listing_not_rule_body(tmp_path):
     rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
     await rail._ttse_store.add_fact("PresentBench grades slides.md")
-    await rail._ttse_store.set_categories(
-        [("PresentBench grades slides.md", "fact", "documents-office-and-records")]
-    )
+    await rail._ttse_store.set_categories([("PresentBench grades slides.md", "fact", "documents-office-and-records")])
     manager = PromptAttachmentManager()
     builder = SystemPromptBuilder()
     ctx = SimpleNamespace(

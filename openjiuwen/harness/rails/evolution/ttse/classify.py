@@ -72,7 +72,8 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
         start = raw.find("{")
         end = raw.rfind("}")
         if start >= 0 and end > start:
-            raw = raw[start : end + 1]
+            stop = end + 1
+            raw = raw[start:stop]
     try:
         payload = json.loads(raw)
     except (ValueError, TypeError):
@@ -125,9 +126,7 @@ async def classify_rules(
         other=OTHER_CATEGORY,
     )
     try:
-        out = await invoke_text_with_retry(
-            llm, model, prompt, policy=policy, temperature=0.0
-        )
+        out = await invoke_text_with_retry(llm, model, prompt, policy=policy, temperature=0.0)
     except Exception as exc:  # noqa: BLE001 - never block induction
         logger.warning("[TTSERail] category assignment failed: %s", exc)
         return [(text, rtype, OTHER_CATEGORY) for text, rtype in pending]

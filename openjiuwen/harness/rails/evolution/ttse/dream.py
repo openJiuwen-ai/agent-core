@@ -286,9 +286,7 @@ async def _llm_merge_cluster(
     sims: Sequence[Tuple[int, int, float]],
     capabilities: str,
 ) -> Optional[MergeVerdict]:
-    rules_block = "\n".join(
-        f"{i}. count={int(r.get('count', 0))} | {r.get('text', '')}" for i, r in enumerate(cluster)
-    )
+    rules_block = "\n".join(f"{i}. count={int(r.get('count', 0))} | {r.get('text', '')}" for i, r in enumerate(cluster))
     sim_table = "\n".join(f"{i},{j},{sim:.3f}" for i, j, sim in sims) if sims else "(none)"
     prompt = f"{DREAM_MERGE_SYSTEM}\n\n{dream_merge_prompt(track, rules_block, sim_table, capabilities=capabilities)}"
     try:
@@ -351,9 +349,7 @@ async def _apply_merge_verdict(
         )
         await store.delete_record(record["text"], track, save=False)
     merged_count = max(total_count, 1)
-    await store.add_record_direct(
-        track, canonical, count=merged_count, category=category, save=False
-    )
+    await store.add_record_direct(track, canonical, count=merged_count, category=category, save=False)
     logger.info(
         "[TTSERail] dream after_%s track=%s category=%s members=%s canonical=%s count=%s llm_reason=%s thinking=%s",
         verdict.verdict.lower(),
@@ -460,14 +456,14 @@ async def dream_merge(
             capabilities=capabilities,
         )
         if verdict is None:
-            logger.info("[TTSERail] dream merge cluster skipped (LLM/parse failure) track=%s size=%s", track, len(cluster))
+            logger.info(
+                "[TTSERail] dream merge cluster skipped (LLM/parse failure) track=%s size=%s", track, len(cluster)
+            )
             continue
 
         # TIP: one rewrite retry when MERGE/REWRITE yields invalid shape.
         effective = verdict
-        action, added = await _apply_merge_verdict(
-            store, track, cluster, verdict, capability_names=capability_names
-        )
+        action, added = await _apply_merge_verdict(store, track, cluster, verdict, capability_names=capability_names)
         if action == "keep_invalid_tip" and verdict.verdict in ("MERGE", "REWRITE"):
             retry = await _llm_merge_cluster(
                 llm=llm,
@@ -476,7 +472,8 @@ async def dream_merge(
                 track=track,
                 cluster=cluster,
                 sims=sims,
-                capabilities=capabilities + "\n\nPrevious CANONICAL was invalid; rewrite as a valid TIP or KEEP_DISTINCT.",
+                capabilities=capabilities
+                + "\n\nPrevious CANONICAL was invalid; rewrite as a valid TIP or KEEP_DISTINCT.",
             )
             if retry is not None:
                 effective = retry

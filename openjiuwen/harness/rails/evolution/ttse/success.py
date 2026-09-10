@@ -291,6 +291,11 @@ class SignalBasedSuccessDetector(SuccessDetector):
         self._policy = detect_llm_policy or self._config.detect_llm_policy
         self._language = language
 
+    def update_llm(self, llm: Model, model: str) -> None:
+        """Hot-update the Judge LLM client and model name."""
+        self._llm = llm
+        self._model = model
+
     async def detect(
         self,
         trajectory: Any,
@@ -306,13 +311,7 @@ class SignalBasedSuccessDetector(SuccessDetector):
                 "[TTSERail] detect branch=explicit_score score=%s threshold=%s outcome=%s",
                 score,
                 self._config.success_threshold,
-                (
-                    "success"
-                    if score >= self._config.success_threshold
-                    else "partial"
-                    if score > 0
-                    else "fail"
-                ),
+                ("success" if score >= self._config.success_threshold else "partial" if score > 0 else "fail"),
             )
             return _outcome_from_explicit_score(score, self._config.success_threshold)
 

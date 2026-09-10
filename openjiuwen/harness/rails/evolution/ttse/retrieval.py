@@ -202,12 +202,8 @@ async def retrieve_rules(
     if not cleaned:
         return RetrieveRulesResult(facts=facts, tips=tips, fact_mode="dump", tip_mode="dump")
 
-    fact_hits, fact_mode = await retrieve_track(
-        store, facts, cleaned, top_k=top_k, rrf_k=rrf_k
-    )
-    tip_hits, tip_mode = await retrieve_track(
-        store, tips, cleaned, top_k=top_k, rrf_k=rrf_k
-    )
+    fact_hits, fact_mode = await retrieve_track(store, facts, cleaned, top_k=top_k, rrf_k=rrf_k)
+    tip_hits, tip_mode = await retrieve_track(store, tips, cleaned, top_k=top_k, rrf_k=rrf_k)
     return RetrieveRulesResult(
         facts=fact_hits,
         tips=tip_hits,
