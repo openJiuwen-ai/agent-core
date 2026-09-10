@@ -422,7 +422,16 @@ def _emit_agent_failed(
 #: Engine-owned ``options`` keys. A backend may widen this via its
 #: ``KNOWN_OPTIONS``; anything outside the union is a typo and fails fast.
 _ENGINE_OPTIONS = frozenset(
-    {"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"}
+    {
+        "label",
+        "phase",
+        "schema",
+        "model",
+        "timeout",
+        "retries",
+        "isolation",
+        "agent_type",
+    }
 )
 
 
@@ -459,7 +468,22 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
         raise EngineError(
             f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
         )
+    retries = merged.get("retries")
+    if retries is not None:
+        if isinstance(retries, bool) or not isinstance(retries, int):
+            raise WorkflowError(
+                "options.retries must be an integer between 0 and 10"
+            )
+        if not 0 <= retries <= 10:
+            raise WorkflowError(
+                "options.retries must be an integer between 0 and 10"
+            )
     return merged
+
+
+def _attempt_count(rt, opts: dict) -> int:
+    """Resolve the per-call retry override, falling back to the run default."""
+    return int(opts.get("retries", rt.retries)) + 1
 
 
 def _resolve_agent_gate(rt):
@@ -571,7 +595,7 @@ async def agent(
         )
 
     if not call_result.succeeded:
-        attempts = rt.retries + 1
+        attempts = _attempt_count(rt, opts)
         label = opts.get("label") or "agent"
         msg = f"agent {label!r} failed after {attempts} attempts"
         if call_result.error_detail:
@@ -626,7 +650,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     non-success with no retry.
     """
     timeout = opts.get("timeout")
-    attempts = rt.retries + 1
+    attempts = _attempt_count(rt, opts)
     last_err: Exception | None = None
     label = opts.get("label") or "agent"
     # Accumulate tokens burned across every retry attempt: each failed call
@@ -1065,7 +1089,7 @@ class AgentSession:
             )
             call_result = await self._drive(rt, req)
             if not call_result.succeeded:
-                attempts = rt.retries + 1
+                attempts = _attempt_count(rt, opts)
                 who = "human" if self._human else "agent"
                 label = opts.get("label") or who
                 msg = f"{who} session {label!r} failed after {attempts} attempts"

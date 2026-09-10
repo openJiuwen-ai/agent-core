@@ -113,6 +113,88 @@ def test_run_with_mock_backend_and_progress_events(tmp_path):
     assert started and started[0].phase == "Greet" and started[0].prompt == "say hi"
 
 
+def test_per_call_retries_zero_disables_default_replay(tmp_path):
+    """A call can opt out of the runtime's default retry attempts."""
+    script = _write(
+        tmp_path,
+        "no_retry.py",
+        '''
+from swarmflow import agent
+
+META = {"name": "no-retry", "description": "per-call retries", "phases": []}
+
+async def run(args):
+    return await agent("fail once", options={"retries": 0})
+''',
+    )
+    calls = 0
+
+    class _FailingBackend(AgentBackend):
+        async def run(self, prompt, opts, schema_json):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("expected failure")
+
+    result = asyncio.run(run_workflow(script, backend=_FailingBackend()))
+
+    assert result is None
+    assert calls == 1
+
+
+def test_per_call_retries_can_request_additional_attempts(tmp_path):
+    """A call can retry even when a backend succeeds only on a later attempt."""
+    script = _write(
+        tmp_path,
+        "retry_three_times.py",
+        '''
+from swarmflow import agent
+
+META = {"name": "retry-three-times", "description": "per-call retries", "phases": []}
+
+async def run(args):
+    return await agent("eventually succeeds", options={"retries": 3})
+''',
+    )
+
+    class _EventuallySuccessfulBackend(AgentBackend):
+        def __init__(self):
+            self.calls = 0
+
+        async def run(self, prompt, opts, schema_json):
+            self.calls += 1
+            if self.calls < 4:
+                raise RuntimeError("transient failure")
+            return AgentResult(text="done")
+
+    backend = _EventuallySuccessfulBackend()
+    result = asyncio.run(run_workflow(script, backend=backend))
+
+    assert result == "done"
+    assert backend.calls == 4
+
+
+@pytest.mark.parametrize("retries", [True, -1, 11, 1.5])
+def test_per_call_retries_rejects_invalid_values(tmp_path, retries):
+    """Retry overrides fail fast instead of silently changing call cost."""
+    from openjiuwen.agent_teams.workflow.engine.errors import WorkflowError
+
+    script = _write(
+        tmp_path,
+        "invalid_retries.py",
+        f'''
+from swarmflow import agent
+
+META = {{"name": "invalid-retries", "description": "invalid retry", "phases": []}}
+
+async def run(args):
+    return await agent("never starts", options={{"retries": {retries!r}}})
+''',
+    )
+
+    with pytest.raises(WorkflowError, match="options.retries"):
+        asyncio.run(run_workflow(script, backend=MockBackend()))
+
+
 _FOR_LOOP_SAME_LABEL_SCRIPT = '''
 from swarmflow import agent, parallel
 
