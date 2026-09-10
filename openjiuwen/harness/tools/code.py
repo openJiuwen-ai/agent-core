@@ -8,6 +8,7 @@ from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import OperationMode, SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd
 from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.security.permission_engine.access_extra import with_access_extra
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
@@ -31,6 +32,7 @@ class CodeTool(Tool):
         max_timeout = max(1, max_timeout)
         return max(1, min(timeout, max_timeout))
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         code = inputs.get("code")
         language = inputs.get("language", "python")

@@ -12,8 +12,9 @@
 
     result_A = evaluate_tiered_policy(...)          # 工具权限（始终）
     result_B = FileGuardChecker.evaluate(...)       # 路径防护（file_guard.enabled）
+    result_B2 = extra.paths HITL（声明路径；defaults-allow 不跳过）
     result_C = NetGuardChecker.evaluate(...)        # 网络防护（net_guard.enabled）
-    return strictest(result_A, result_B, result_C)
+    return strictest(result_A, result_B, result_B2, result_C)
 
 旧宿主（未 compose）传入的 raw YAML 在 ingest 时补包内命令规则 / 敏感路径 / net_urls；
 判定函数本身不 load YAML。
@@ -26,6 +27,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 
+from openjiuwen.harness.security.permission_engine.access_extra import (
+    extra_paths_ask_result,
+    extract_extra_paths,
+)
 from openjiuwen.harness.security.permission_engine.fileguard.file_guard import (
     FileGuardChecker,
     build_file_guard_checker,
@@ -351,6 +356,42 @@ class PermissionEngine:
         else:
             logger.info(
                 "[PermissionEngine] permission.file_guard.result tool=%s checked=false reason=disabled",
+                tool_name,
+            )
+
+        extra_result = None
+        if self._file_guard is not None:
+            extra_result = self._file_guard.evaluate_extra_paths(tool_name, tool_args)
+        else:
+            declared = extract_extra_paths(tool_args)
+            if declared:
+                extra_result = extra_paths_ask_result(declared)
+        if extra_result is not None:
+            extra_rule = extra_result.matched_rule or "extra.paths"
+            logger.info(
+                "[PermissionEngine] permission.extra_paths.result tool=%s checked=true permission=%s "
+                "matched_rule=%s extra_paths=%s",
+                tool_name,
+                extra_result.permission.value,
+                extra_rule,
+                extra_result.external_paths,
+            )
+            permission = tiered_policy_strictest(permission, extra_result.permission)
+            matched_rule = f"{matched_rule}|{extra_rule}"
+            extra_ext = extra_result.external_paths or []
+            if extra_ext:
+                merged_ext = list(external_paths or [])
+                seen = {item.replace("\\", "/").rstrip("/").lower() for item in merged_ext}
+                for item in extra_ext:
+                    key = item.replace("\\", "/").rstrip("/").lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged_ext.append(item)
+                external_paths = merged_ext
+        else:
+            logger.info(
+                "[PermissionEngine] permission.extra_paths.result tool=%s checked=true permission=none",
                 tool_name,
             )
 
