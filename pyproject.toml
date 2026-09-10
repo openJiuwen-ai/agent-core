@@ -37,6 +37,7 @@ dependencies = [
     "transformers>=4.52.4",
     "tiktoken>=0.12.0",
     "dashscope>=1.25.6",
+    "intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter#subdirectory=intelli_router",
     # Vector database (2.6.10 changed interface)
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
@@ -165,9 +166,6 @@ docs = [
 ]
 
 dev = [{ include-group = "test" }, { include-group = "lint" }, { include-group = "docs" }]
-
-# IntelliRouter
-intelli-router = ["intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter#subdirectory=intelli_router"]
 
 [project.entry-points."openjiuwen.remote_clients"]
 A2A = "openjiuwen.extensions.a2a.a2a_remote_client:A2ARemoteClient"
