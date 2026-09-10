@@ -765,11 +765,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             state.span.set_attribute(OJ_STATUS, NodeStatus.FINISH.value)
             state.span.set_status(Status(StatusCode.OK))
             state.span.end()
-
-            # Clean up component mappings only (preserve _layer_root_spans for multi-round)
-            for key, val in list(self._component_spans.items()):
-                if val.invoke_id == invoke_id:
-                    self._component_spans.pop(key, None)
+            
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_call_done failed: %s", exc)
 
