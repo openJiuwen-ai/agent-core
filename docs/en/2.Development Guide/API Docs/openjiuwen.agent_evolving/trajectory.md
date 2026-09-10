@@ -132,6 +132,11 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 The module also provides normalization, merge, crop, and trim helpers. These helpers return detached canonical values
 and do not mutate the input trajectory.
 
+`trim_trajectory()` and its alias `crop_trajectory()` apply time filtering and the span limit globally, retaining
+the newest selected spans in their original resource and instrumentation-scope groups. Group order, empty groups,
+and group metadata are preserved. Spans are sorted within each group; consumers needing a global chronological
+sequence must sort across groups. Cropping does not deduplicate spans.
+
 ## Conversation messages
 
 Use `trajectory_to_messages()` when a consumer needs ordered conversation messages:
