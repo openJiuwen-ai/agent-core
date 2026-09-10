@@ -191,6 +191,100 @@ def test_new_harness_from_previous_batch_requires_new_source_and_candidate_retes
     assert Path(calls[-1]["output_dir"]).name == "full"
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_replay_regression_reenters_analysis_without_changing_promotion(setup, tmp_path, resume):
+    controller, refs, cases, file = setup
+    cases.append({"case_id": "c", "input": "keep c correct"})
+    file.write_text(json.dumps({"cases": cases}))
+
+    class ReplayEvaluator(Evaluator):
+        async def evaluate_batch(self, **kwargs):
+            ref = await super().evaluate_batch(**kwargs)
+            payload = read_mapping(ref)
+            directory = Path(kwargs["output_dir"])
+            for case in payload["cases"]:
+                passed = case["case_id"] == "c" or (
+                    case["case_id"] == "b" and directory.parent.name != "e001"
+                )
+                case.update(score=float(passed), status="passed" if passed else "failed")
+                result = read_mapping(case["result_path"])
+                result.update(score=case["score"], status=case["status"])
+                result["evaluation"]["passed"] = passed
+                Path(case["result_path"]).write_text(json.dumps(result))
+            _write_yaml(Path(ref), payload)
+            return ref
+
+    controller.evaluator = ReplayEvaluator()
+    request = IterativeSingleHarnessRequest(
+        dataset_files=[str(file)], harness_refs_path=str(refs),
+        output_dir=str(tmp_path / "run"), auto_full_baseline=True,
+    )
+    events = []
+
+    async def sink(event):
+        events.append(event)
+        if resume and isinstance(event, EventNode) and event.node.node_id == "epoch-001":
+            if event.node.type != "RUNNING":
+                raise asyncio.CancelledError
+
+    if resume:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(controller.run(request, on_event=sink))
+        controller.analyzer = NoIssueAnalyzer()
+        result = asyncio.run(controller.run(replace(request, resume=True), on_event=sink))
+    else:
+        result = asyncio.run(controller.run(request, on_event=sink))
+
+    state = read_mapping(result.state_path)
+    batches = state["completed_batches"]
+    assert batches["epoch_001:batch_002"]["candidate_gate_reason"] == "no_active_cases"
+    regression = batches["epoch_002:batch_002"]
+    assert regression["analysis_ref_path"]
+    assert regression["source_evidence"]["reused_case_ids"] == ["b"]
+    assert regression["source_evidence"]["evaluated_case_ids"] == []
+    assert Path(regression["source_evidence"]["evaluations"][0]["eval_ref_path"]).parent.parent.name == "e001"
+    assert batches["epoch_003:batch_002"]["candidate_gate_reason"] == "no_active_cases"
+    assert all(batches[f"epoch_{epoch:03d}:batch_003"]["candidate_gate_reason"] == "no_active_cases"
+               for epoch in range(1, 4))
+    assert [Path(call["output_dir"]).name for call in controller.evaluator.calls] == [
+        "frozen_baseline", "full", "full", "full",
+    ]
+    assert state["baseline_score"] == state["best_score"] == 2 / 3
+    assert state["current_harness_refs_path"] == str(refs)
+    assert state["retained_case_ids"] == ["b", "c"]
+    assert not state["candidate_gates"]
+    assert all(not item["promotion_applied"] for item in state["epoch_checkpoints"])
+    reused = [event for event in events if isinstance(event, NodeStageEvent)
+              and event.node_ref == "epoch-002" and event.stage["id"] == "source.reuse"]
+    assert len(reused) == 2
+
+
+@pytest.mark.parametrize("change", ["harness", "judge", "infra"])
+def test_historical_pass_cannot_skip_case_without_current_valid_evidence(setup, tmp_path, change):
+    controller, refs, cases, file = setup
+    _, baseline = asyncio.run(_baseline(controller, refs, cases, file, tmp_path / "baseline"))
+    payload = read_mapping(baseline)
+    for case in payload["cases"]:
+        case.update(score=1.0, status="passed")
+    _write_yaml(Path(baseline), payload)
+    assert controller._source_passing_case_ids(cases, str(refs), [baseline]) == {"a", "b"}
+    if change == "harness":
+        (tmp_path / "h0" / "new_skill.md").write_text("Changed behavior")
+    elif change == "judge":
+        controller.config = replace(
+            controller.config, evaluator=replace(controller.config.evaluator, evaluation_method="exact-match")
+        )
+    else:
+        _, latest = asyncio.run(_baseline(controller, refs, cases, file, tmp_path / "full"))
+        payload = read_mapping(latest)
+        for case in payload["cases"]:
+            case.update(score=None, status="skipped", metadata={"infrastructure_skip": True})
+        _write_yaml(Path(latest), payload)
+        assert not controller._source_passing_case_ids(cases, str(refs), [baseline, latest])
+        return
+    assert not controller._source_passing_case_ids(cases, str(refs), [baseline])
+
+
 async def _baseline(controller, refs, cases, file, directory):
     dataset = DatasetArtifact(dataset_id="test", dataset_dir=str(file.parent), dataset_files=[str(file)])
     baseline = await controller._evaluate(

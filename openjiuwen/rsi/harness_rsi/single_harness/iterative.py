@@ -325,7 +325,15 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             epoch_start_refs = current_refs
             epoch_start_score = _number(state.get("best_score"))
             epoch_start_retained_case_ids = set(working_retained_case_ids)
-            if all_case_ids <= working_retained_case_ids:
+            prior_eval_refs = [
+                str(state.get("baseline_eval_ref_path") or ""),
+                *[str(item["eval_ref_path"]) for item in state["epoch_checkpoints"]],
+            ]
+            # Retention protects historical successes at promotion; it is not a
+            # permanent exemption from analysis after a matching replay fails.
+            source_selection_refs = current_refs
+            source_passing_case_ids = self._source_passing_case_ids(all_cases, current_refs, prior_eval_refs)
+            if all_case_ids <= source_passing_case_ids:
                 break
             epoch_node_ref = f"epoch-{epoch:03d}"
             set_usage_node(epoch_node_ref)
@@ -359,10 +367,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     state["working_harness_refs_path"] = current_refs
                     continue
 
+                if current_refs != source_selection_refs:
+                    source_selection_refs = current_refs
+                    source_passing_case_ids = self._source_passing_case_ids(all_cases, current_refs, prior_eval_refs)
                 batch = [
                     case
                     for case in planned_batch
-                    if str(case.get("case_id", "") or "") not in working_retained_case_ids
+                    if str(case.get("case_id", "") or "") not in source_passing_case_ids
                 ]
                 if not batch:
                     state["completed_batches"][batch_key] = {
@@ -388,10 +399,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     harness_refs_path=current_refs,
                     output_dir=batch_dir / "source",
                     dataset=dataset,
-                    prior_eval_refs=[
-                        str(state.get("baseline_eval_ref_path") or ""),
-                        *[str(item["eval_ref_path"]) for item in state["epoch_checkpoints"]],
-                    ],
+                    prior_eval_refs=prior_eval_refs,
                     batch_index=batch_index,
                     node_ref=epoch_node_ref,
                     on_event=on_event,
@@ -418,6 +426,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 analysis_round_index = 0
                 repair_stop_reason = "repair_round_limit_reached"
                 attempt_source_eval_ref = source_eval_ref
+                repair_refs = current_refs
+                repair_capabilities: list[dict[str, Any]] = []
                 source_case_scores = _eval_case_scores(source_eval_ref)
                 _sync_retained_case_ids(
                     working_retained_case_ids,
@@ -439,7 +449,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     )
                     analysis_ref = await self._analyze(
                         eval_ref_path=attempt_source_eval_ref,
-                        harness_refs_path=current_refs,
+                        harness_refs_path=repair_refs,
                         output_dir=analysis_dir,
                         node_ref=epoch_node_ref,
                         source_stage=(
@@ -499,7 +509,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             attempted_issue_ids.add(issue_id)
                         attempted_issue_signatures.add(issue_signature)
                         attempt_dir = batch_dir / "attempts" / f"a{attempt_index:03d}"
-                        before_attempt_refs = current_refs
+                        before_attempt_refs = repair_refs
                         rejected_capabilities = _rejected_capabilities(state)
                         await emit(
                             on_event,
@@ -559,6 +569,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         )
                         candidate_refs = str(member_info.get("optimized_harness_refs_path", "") or before_attempt_refs)
                         capabilities = _candidate_capabilities(member_info)
+                        capabilities = _merge_repair_capabilities(repair_capabilities, capabilities)
                         gate = await self._candidate_gate(
                             cases=active_cases,
                             source_eval_ref=attempt_source_eval_ref,
@@ -597,6 +608,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             }
                         )
                         if primary_accepted:
+                            # The complete repair chain is one provisional change.
+                            gate["before_harness_refs_path"] = current_refs
                             gate["status"] = "provisional"
                             gate["reason"] = "candidate_passed_batch_gate_pending_epoch_checkpoint"
                             current_refs = candidate_refs
@@ -634,6 +647,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         last_member_ref = member_ref
                         last_gate = gate
                         if not primary_accepted:
+                            if _candidate_can_continue_locally(gate, active_cases):
+                                repair_refs = candidate_refs
+                                repair_capabilities = capabilities
+                                attempt_source_eval_ref = str(gate["candidate_eval_ref_path"])
                             if _candidate_failure_supports_repair(gate):
                                 # A completed candidate evaluation is new causal
                                 # evidence. Re-open this issue inside the bounded
@@ -678,6 +695,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             residual_case_ids,
                         )
                         attempt_source_eval_ref = residual_eval_ref
+                        repair_refs = current_refs
+                        repair_capabilities = []
                         refresh_residual_analysis = True
                         if not active_cases:
                             repair_stop_reason = "all_batch_cases_completed"
@@ -921,6 +940,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             },
             cases=cases,
         )
+
+    def _source_passing_case_ids(
+        self, cases: list[dict[str, Any]], harness_refs_path: str, prior_eval_refs: list[str],
+    ) -> set[str]:
+        selected = matching_cases(prior_eval_refs, self._evaluation_context(cases, harness_refs_path))
+        passing_by_ref = {path: _passing_case_ids(path) for path in {path for path, _ in selected.values()}}
+        return {case_id for case_id, (path, _) in selected.items() if case_id in passing_by_ref[path]}
 
     async def _source_evaluation(
         self,
@@ -1394,6 +1420,26 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         )
         candidate_failure_analysis_ref = ""
         candidate_failure_diagnoses: dict[str, list[dict[str, Any]]] = {}
+        candidate_behavior_by_case = {
+            case_id: {
+                "gate_reason": reason,
+                "failure_class": failure_class,
+                "capabilities": [
+                    {key: capability.get(key) for key in ("action_group", "runtime_name", "target_path")}
+                    for capability in capabilities
+                    if case_id in (capability.get("target_case_ids") or target_case_ids)
+                ],
+                "invoked_skill_names": sorted(invoked_skills_by_case.get(case_id, set())),
+                "invoked_tool_names": sorted(invoked_tools_by_case.get(case_id, set())),
+                "missing_skill_invocations": [
+                    dict(item) for item in missing_skill_invocations if item.get("target_case_id") == case_id
+                ],
+                "missing_tool_invocations": [
+                    dict(item) for item in missing_tool_invocations if item.get("target_case_id") == case_id
+                ],
+            }
+            for case_id in target_case_ids
+        }
         if not accepted and not _eval_has_errors(candidate_eval_ref):
             paired_feedback = {
                 "by_case": {
@@ -1402,20 +1448,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             "kind": "paired_source_candidate_delta",
                             "verifier_delta": dict(delta),
                             "candidate_patch_excerpt": str(candidate_patch_excerpts_by_case.get(case_id, "")),
-                            "candidate_behavior": {
-                                "gate_reason": reason,
-                                "failure_class": failure_class,
-                                "missing_skill_invocations": [
-                                    dict(item)
-                                    for item in missing_skill_invocations
-                                    if str(item.get("target_case_id", "")) == case_id
-                                ],
-                                "missing_tool_invocations": [
-                                    dict(item)
-                                    for item in missing_tool_invocations
-                                    if str(item.get("target_case_id", "")) == case_id
-                                ],
-                            },
+                            "candidate_behavior": candidate_behavior_by_case.get(case_id, {}),
                         }
                     ]
                     for case_id, delta in verifier_deltas_by_case.items()
@@ -1466,6 +1499,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "candidate_patch_excerpts_by_case": candidate_patch_excerpts_by_case,
             "candidate_failure_analysis_ref_path": (candidate_failure_analysis_ref),
             "candidate_failure_diagnoses": candidate_failure_diagnoses,
+            "candidate_behavior_by_case": candidate_behavior_by_case,
             "task_acceptance_contracts": task_acceptance_contracts,
             "non_target_case_ids": sorted(non_target_case_ids),
             "source_non_target_score": source_non_target_score,
@@ -1600,7 +1634,7 @@ def _request_fingerprint(
     improver_policy_digest: str,
 ) -> dict[str, Any]:
     return {
-        "optimization_chain_version": 19,
+        "optimization_chain_version": 20,
         "dataset_files": [str(Path(path).expanduser().resolve()) for path in request.dataset_files],
         "dataset_sha256": [_file_sha256(path) for path in request.dataset_files],
         "source_harness_refs_path": source_harness_refs_path,
@@ -1839,6 +1873,7 @@ def _refresh_optimization_experience(
                         if isinstance(gate.get("candidate_failure_diagnoses"), dict)
                         else {}
                     ),
+                    "candidate_behavior_by_case": dict(gate.get("candidate_behavior_by_case", {})),
                     "epoch_checkpoint": {
                         "status": str(epoch_checkpoint.get("status", "") or ""),
                         "eval_ref_path": str(epoch_checkpoint.get("eval_ref_path", "") or ""),
@@ -2264,6 +2299,7 @@ def _prior_candidate_feedback(
                     # plural field carries every independent diagnosis.
                     "candidate_failure_diagnosis": (dict(case_diagnoses[0]) if case_diagnoses else {}),
                     "candidate_failure_diagnoses": case_diagnoses,
+                    "candidate_behavior": dict(record.get("candidate_behavior_by_case", {}).get(case_id, {})),
                 }
             )
     return {"by_case": {case_id: records[-3:] for case_id, records in by_case.items() if records}}
@@ -3955,6 +3991,46 @@ __all__ = [
     "SingleHarnessIterativeOptimizationOrchestrator",
     "load_cases",
 ]
+
+
+def _merge_repair_capabilities(
+    previous: list[dict[str, Any]], current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep the whole local patch accountable to activation and epoch retention."""
+    merged = {(item.get("role"), item.get("target_path")): dict(item) for item in previous}
+    for item in current:
+        key = (item.get("role"), item.get("target_path"))
+        value = dict(item)
+        if merged.get(key, {}).get("operation") == "add" and value.get("operation") == "modify":
+            value["operation"] = "add"
+        merged[key] = value
+    return list(merged.values())
+
+
+def _candidate_can_continue_locally(gate: dict[str, Any], cases: list[dict[str, Any]]) -> bool:
+    """Retain measured partial progress only inside the existing batch budget."""
+    if gate.get("status") != "rejected" or gate.get("reason") != "candidate_made_partial_verifier_progress":
+        return False
+    if set(gate.get("target_case_ids", [])) != {str(case.get("case_id", "")) for case in cases}:
+        return False  # No mixed-Harness evidence for the remaining active cases.
+    if any(gate.get(key) for key in (
+        "failed_machine_evidence", "missing_expected_skill_invocations", "missing_expected_tool_invocations",
+        "regressed_target_case_ids", "regressed_non_target_case_ids",
+    )):
+        return False
+    deltas = gate.get("verifier_deltas_by_case", {})
+    if not deltas or not any(delta.get("partial_progress") for delta in deltas.values()):
+        return False
+    if any(delta.get(key) for delta in deltas.values() for key in (
+        "regressed_requirements", "regressed_fail_to_pass", "regressed_pass_to_pass", "regressed_atomic_checks",
+    )):
+        return False
+    eval_ref = str(gate.get("candidate_eval_ref_path", ""))
+    return bool(
+        eval_ref and _eval_ref_complete(Path(eval_ref))
+        and set(_eval_case_scores(eval_ref)) == set(gate.get("target_case_ids", []))
+        and not _eval_has_errors(eval_ref) and not _skipped_case_ids(eval_ref)
+    )
 
 
 def _candidate_failure_supports_repair(gate: dict[str, Any]) -> bool:

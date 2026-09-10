@@ -692,11 +692,10 @@ def _failure_signatures(
         for event in events
     ):
         signatures.append("tool_execution_failure")
-    has_workspace_change = any(event.get("event_type") == "workspace_change" for event in events)
-    if has_workspace_change:
-        signatures.append("patch_quality_gap")
-    else:
-        signatures.append("workspace_edit_gap")
+    # Only the patch evaluator establishes that a workspace edit is required.
+    if judge_result.method == "swebench_official":
+        has_workspace_change = any(event.get("event_type") == "workspace_change" for event in events)
+        signatures.append("patch_quality_gap" if has_workspace_change else "workspace_edit_gap")
     return signatures
 
 

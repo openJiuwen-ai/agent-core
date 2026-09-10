@@ -46,11 +46,12 @@ loading before applying the candidate.
   discriminated. Do not turn implementation syntax from a failed patch into a
   reusable rule, and do not prescribe a literal training-task patch recipe, even when
   that recipe was verified on the training example. The
-  acceptance probe must assert the causal observable against both the positive
-  case and its nearest boundary; self-equality, membership in a singleton made
-  from the same value, or merely avoiding an exception is not an acceptance
-  probe. Once that observable is established, state the smallest justified
-  action and stop investigating so the solver can edit.
+  acceptance probe must inspect the next task's actual answer, artifact, or
+  execution result against expectations derived independently from its contract.
+  Do not substitute a hardcoded sample answer, identical expected/actual sets,
+  or an unexecuted code example for that observation. Illustrative examples are
+  not validation results. Check a positive case and its nearest failing boundary.
+  Once established, perform the required task action and deliver the result.
   In executable Python probes, assert boolean expressions directly (for example,
   `assert item in container`). Do not append `is True` or `is False` to an
   unparenthesized comparison or membership expression because Python parses that

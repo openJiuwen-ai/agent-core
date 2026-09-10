@@ -166,6 +166,9 @@ not additions to the original task requirements.
   the actual failed observable. A test name alone does not establish its
   semantics. A passing self-authored probe proves only the behavior it tested.
 - prior_candidate_feedback compares the same case's Source and Candidate.
+  candidate_behavior identifies the actual intervention and runtime access:
+  Prompt context is not a callable Skill; Skill access does not prove its
+  procedure was followed. Check the answer/tool results for execution evidence.
   Preserve newly passing checks, inspect regressions and still-failing checks,
   and revise a mechanism contradicted by this experiment. Do not re-diagnose
   checks that remain passing in the current evaluation or claim a zero task
@@ -285,7 +288,7 @@ Per-case schema (one wrapper containing 1-3 diagnoses):
         "contradiction_explanation": "<why local project tests and verifier differ, or empty>"
       },
       "verifier_observations": {
-        "patch_successfully_applied": true,
+        "patch_successfully_applied": null,
         "failed_fail_to_pass_tests": ["<authoritative failed test id>"],
         "failed_pass_to_pass_tests": ["<authoritative regression test id>"]
       },
